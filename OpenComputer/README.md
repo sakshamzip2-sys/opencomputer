@@ -10,20 +10,26 @@ A synthesis of the best ideas from [Claude Code](https://github.com/anthropics/c
 - **Three-pillar persistent memory:** declarative (MEMORY.md), procedural (skills/), episodic (SQLite + FTS5 full-text search).
 - **Self-improvement loop:** the agent saves complex workflows as skills that auto-activate next time.
 - **Strict plugin SDK boundary:** third-party plugins never import core internals, so the core can evolve without breaking plugins.
-- **Multi-channel gateway:** run as a daemon; chat via Telegram today, Discord/Slack coming.
+- **Multi-channel gateway:** run as a daemon; chat via Telegram and Discord today, Slack coming.
 - **Multiple providers:** Anthropic (native + proxy-compatible), OpenAI, any OpenAI-compatible endpoint (OpenRouter, Ollama, etc.).
 - **MCP integration:** plug in any [Model Context Protocol](https://modelcontextprotocol.io) server — its tools become native tools.
 
 ## Status
 
-Pre-alpha (0.0.1). Core architecture stable. ~50 tests passing. Adding features incrementally.
+Pre-alpha (0.1.0). Core architecture stable. 114 tests passing. Adding features incrementally.
 
 ## Install
 
 Requires **Python 3.12+**.
 
 ```bash
-git clone https://github.com/YOUR_FORK/opencomputer.git
+pip install opencomputer
+```
+
+### For development
+
+```bash
+git clone https://github.com/sakshamzip2-sys/opencomputer.git
 cd opencomputer
 python3 -m venv .venv
 source .venv/bin/activate
@@ -120,7 +126,7 @@ The server's tools become available to the agent on next run (namespaced `my-ser
 ```
 opencomputer/   (core — agent loop, state, memory, tools, hooks, gateway, plugin discovery)
 plugin_sdk/     (public contract — stable types plugins import)
-extensions/     (bundled plugins — telegram, anthropic-provider, openai-provider)
+extensions/     (bundled plugins — telegram, discord, anthropic-provider, openai-provider, coding-harness)
 ```
 
 **Key design rule:** extensions import only from `plugin_sdk/*`, never from `opencomputer/*`. The core can be refactored freely without breaking plugins.

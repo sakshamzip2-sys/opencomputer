@@ -90,7 +90,7 @@ OpenComputer/
 │   │   ├── protocol.py              ← WireRequest/Response/Event (pydantic)
 │   │   └── wire_server.py           ← WebSocket JSON-RPC for TUI/IDE clients
 │   ├── hooks/
-│   │   ├── engine.py                ← Hook dispatcher (9 events possible)
+│   │   ├── engine.py                ← Hook dispatcher (6 events)
 │   │   └── runner.py                ← fire-and-forget async runner (kimi pattern)
 │   ├── plugins/                     ← plugin system (not plugins themselves!)
 │   │   ├── discovery.py             ← scans manifests → PluginCandidates (cheap)
@@ -109,7 +109,7 @@ OpenComputer/
 │   ├── tool_contract.py             ← BaseTool, ToolSchema
 │   ├── provider_contract.py         ← BaseProvider, ProviderResponse, StreamEvent, Usage
 │   ├── channel_contract.py          ← BaseChannelAdapter
-│   ├── hooks.py                     ← HookSpec, HookContext, HookDecision (9 events)
+│   ├── hooks.py                     ← HookSpec, HookContext, HookDecision (6 events)
 │   ├── injection.py                 ← DynamicInjectionProvider ABC, InjectionContext
 │   └── runtime_context.py           ← RuntimeContext (plan_mode, yolo_mode, custom)
 │
