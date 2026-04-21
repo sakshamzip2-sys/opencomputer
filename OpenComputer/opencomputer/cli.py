@@ -249,6 +249,44 @@ def sessions(limit: int = typer.Option(10, "--limit", "-n")) -> None:
 
 
 @app.command()
+def wire(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(18789, "--port"),
+) -> None:
+    """Run the wire server — JSON-over-WebSocket API for TUI / IDE / web clients."""
+    from opencomputer.gateway.wire_server import WireServer
+
+    cfg = load_config()
+    _check_provider_key(cfg.model.provider)
+
+    _register_builtin_tools()
+    _discover_plugins()
+
+    provider = _resolve_provider(cfg.model.provider)
+    loop = AgentLoop(provider=provider, config=cfg)
+    DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
+
+    server = WireServer(loop=loop, host=host, port=port)
+    console.print(
+        f"[bold cyan]OpenComputer wire server[/bold cyan] — ws://{host}:{port}"
+    )
+    console.print(f"[dim]model: {cfg.model.model} ({cfg.model.provider})[/dim]")
+    console.print("[dim]ctrl+c to stop[/dim]\n")
+
+    async def _run():
+        await server.start()
+        try:
+            await asyncio.Future()  # run forever
+        finally:
+            await server.stop()
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        console.print("\n[dim]wire server stopped[/dim]")
+
+
+@app.command()
 def gateway() -> None:
     """Run the gateway daemon — connects all configured channel adapters.
 
