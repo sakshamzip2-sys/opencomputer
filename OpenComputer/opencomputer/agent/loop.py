@@ -149,10 +149,11 @@ class AgentLoop:
             self._last_input_tokens = step.input_tokens
             total_input += step.input_tokens
             total_output += step.output_tokens
-            messages.append(step.assistant_message)
-            self.db.append_message(sid, step.assistant_message)
 
             if not step.should_continue:
+                # No tool calls — safe to persist the assistant message alone.
+                messages.append(step.assistant_message)
+                self.db.append_message(sid, step.assistant_message)
                 self.db.end_session(sid)
                 return ConversationResult(
                     final_message=step.assistant_message,
@@ -171,14 +172,17 @@ class AgentLoop:
             except Exception:
                 pass  # delegate tool may not be registered yet in some contexts
 
-            # Dispatch all tool calls from this step (runtime flows into hooks via sid)
+            # Dispatch tools BEFORE persisting the assistant message. If we saved
+            # it first and then got cancelled mid-dispatch, the DB would hold a
+            # tool_use with no matching tool_result — Anthropic 400s on resume.
+            # Atomic batch persist below restores the invariant.
             tool_results = await self._dispatch_tool_calls(
                 step.assistant_message.tool_calls or [],
                 session_id=sid,
             )
-            for tr_msg in tool_results:
-                messages.append(tr_msg)
-                self.db.append_message(sid, tr_msg)
+            turn_messages: list[Message] = [step.assistant_message, *tool_results]
+            messages.extend(turn_messages)
+            self.db.append_messages_batch(sid, turn_messages)
 
         # Budget exhausted
         final = Message(

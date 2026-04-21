@@ -166,7 +166,8 @@ class SessionDB:
 
     # ─── messages ─────────────────────────────────────────────────
 
-    def append_message(self, session_id: str, msg: Message) -> int:
+    @staticmethod
+    def _msg_row(session_id: str, msg: Message) -> tuple:
         tool_calls_json = (
             json.dumps(
                 [
@@ -177,27 +178,56 @@ class SessionDB:
             if msg.tool_calls
             else None
         )
+        return (
+            session_id,
+            msg.role,
+            msg.content,
+            msg.tool_call_id,
+            tool_calls_json,
+            msg.name,
+            msg.reasoning,
+            time.time(),
+        )
+
+    def append_message(self, session_id: str, msg: Message) -> int:
         with self._txn() as conn:
             cur = conn.execute(
                 "INSERT INTO messages "
                 "(session_id, role, content, tool_call_id, tool_calls, name, reasoning, timestamp) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    session_id,
-                    msg.role,
-                    msg.content,
-                    msg.tool_call_id,
-                    tool_calls_json,
-                    msg.name,
-                    msg.reasoning,
-                    time.time(),
-                ),
+                self._msg_row(session_id, msg),
             )
             conn.execute(
                 "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
                 (session_id,),
             )
             return int(cur.lastrowid or 0)
+
+    def append_messages_batch(self, session_id: str, msgs: list[Message]) -> list[int]:
+        """Insert multiple messages atomically in a single transaction.
+
+        Used by the agent loop to persist an assistant message together with its
+        tool_result messages so a cancellation between writes cannot leave the DB
+        with a dangling tool_use that has no matching tool_result (which causes
+        Anthropic to 400 on resume).
+        """
+        if not msgs:
+            return []
+        with self._txn() as conn:
+            ids: list[int] = []
+            for msg in msgs:
+                cur = conn.execute(
+                    "INSERT INTO messages "
+                    "(session_id, role, content, tool_call_id, tool_calls, name, reasoning, timestamp) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    self._msg_row(session_id, msg),
+                )
+                ids.append(int(cur.lastrowid or 0))
+            conn.execute(
+                "UPDATE sessions SET message_count = message_count + ? WHERE id = ?",
+                (len(msgs), session_id),
+            )
+            return ids
 
     def get_messages(self, session_id: str) -> list[Message]:
         with self._connect() as conn:
