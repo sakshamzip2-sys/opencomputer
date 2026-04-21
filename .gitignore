@@ -1,0 +1,19 @@
+# Reference repos cloned for study — not part of OpenComputer
+claude-code/
+hermes-agent/
+kimi-cli/
+openclaw/
+
+# OS
+.DS_Store
+
+# Python virtualenvs within subprojects
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/*.egg-info/
+**/dist/
+**/build/
