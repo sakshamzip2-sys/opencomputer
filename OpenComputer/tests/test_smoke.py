@@ -9,7 +9,7 @@ from pathlib import Path
 def test_package_imports() -> None:
     import opencomputer
 
-    assert opencomputer.__version__ == "0.0.1"
+    assert opencomputer.__version__ == "0.1.0"
 
 
 def test_cli_module_imports() -> None:
