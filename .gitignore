@@ -1,8 +1,5 @@
 # Reference repos cloned for study — not part of OpenComputer
-claude-code/
-hermes-agent/
-kimi-cli/
-openclaw/
+sources/
 
 # OS
 .DS_Store

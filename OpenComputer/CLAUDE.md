@@ -28,21 +28,27 @@ Identity is user-configurable, not locked:
 
 ## 2. Repository layout
 
-The parent git repo is at `/Users/saksham/Vscode/claude/` and contains the OpenComputer project plus four reference repos (cloned for study; gitignored so they don't pollute our commits):
+The parent git repo is at `/Users/saksham/Vscode/claude/` and contains the OpenComputer project plus four reference repos consolidated under `sources/` (gitignored so they don't pollute our commits):
 
 ```
 /Users/saksham/Vscode/claude/
 ├── .git/                            ← parent repo — GitHub sakshamzip2-sys/opencomputer
-├── .gitignore                       ← excludes the four reference repos + build artifacts
+├── .gitignore                       ← ignores sources/ + build artifacts
 ├── .github/workflows/
 │   ├── test.yml                     ← pytest on Python 3.12 + 3.13 on every push/PR
 │   ├── lint.yml                     ← ruff check
 │   └── release.yml                  ← triggered on v* tags, publishes to PyPI (OIDC)
 ├── OpenComputer/                    ← THE PROJECT. cd here for anything code-related.
-├── claude-code/                     ← reference (gitignored)
-├── hermes-agent/                    ← reference (gitignored)
-├── openclaw/                        ← reference (gitignored)
-└── kimi-cli/                        ← reference (gitignored)
+│   └── docs/refs/                   ← reference-extraction notes by repo
+│       ├── claude-code/
+│       ├── hermes-agent/
+│       ├── openclaw/
+│       └── kimi-cli/
+└── sources/                         ← reference repos (gitignored — not in commits)
+    ├── claude-code/
+    ├── hermes-agent/
+    ├── openclaw/
+    └── kimi-cli/
 ```
 
 ### OpenComputer/ structure
@@ -315,11 +321,13 @@ See `RELEASE.md` — basically bump version in two places, tag `vX.Y.Z`, push. C
 ## 9. If you need to dig deeper
 
 - **Full plan with rationale + critique:** `~/.claude/plans/delightful-sauteeing-sutherland.md`
-- **Reference implementations still cloned locally:**
-  - `/Users/saksham/Vscode/claude/claude-code/` (plugin shapes)
-  - `/Users/saksham/Vscode/claude/hermes-agent/` (Python patterns, loop, channels)
-  - `/Users/saksham/Vscode/claude/openclaw/` (plugin SDK boundary, discovery)
-  - `/Users/saksham/Vscode/claude/kimi-cli/` (dynamic injection, compaction, wire)
+- **Reference implementations cloned locally at `../sources/`:**
+  - `/Users/saksham/Vscode/claude/sources/claude-code/` (plugin shapes)
+  - `/Users/saksham/Vscode/claude/sources/hermes-agent/` (Python patterns, loop, channels)
+  - `/Users/saksham/Vscode/claude/sources/openclaw/` (plugin SDK boundary, discovery)
+  - `/Users/saksham/Vscode/claude/sources/kimi-cli/` (dynamic injection, compaction, wire)
+- **Per-repo extraction notes:** `OpenComputer/docs/refs/<repo-name>/` — take notes
+  about each reference project here as you study it.
 - **GitHub:** https://github.com/sakshamzip2-sys/opencomputer
 
 ---
