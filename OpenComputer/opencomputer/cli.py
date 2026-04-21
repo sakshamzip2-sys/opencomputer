@@ -307,6 +307,24 @@ def plugins() -> None:
 
 
 @app.command()
+def setup() -> None:
+    """Interactive first-run wizard — pick provider, enter key, test."""
+    from opencomputer.setup_wizard import run_setup
+
+    run_setup()
+
+
+@app.command()
+def doctor() -> None:
+    """Diagnose common config/env issues."""
+    from opencomputer.doctor import run_doctor
+
+    failures = run_doctor()
+    if failures:
+        raise typer.Exit(1)
+
+
+@app.command()
 def skills() -> None:
     """List available skills."""
     from opencomputer.agent.memory import MemoryManager

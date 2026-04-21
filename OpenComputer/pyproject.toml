@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [
-  { name = "Saksham", email = "sakriarchit@gmail.com" },
+  { name = "OpenComputer Contributors" },
 ]
 keywords = ["ai", "agent", "llm", "claude", "anthropic", "openai", "chatbot"]
 classifiers = [
