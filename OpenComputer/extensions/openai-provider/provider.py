@@ -19,7 +19,12 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
 
 from plugin_sdk.core import Message, ToolCall
-from plugin_sdk.provider_contract import BaseProvider, ProviderResponse, Usage
+from plugin_sdk.provider_contract import (
+    BaseProvider,
+    ProviderResponse,
+    StreamEvent,
+    Usage,
+)
 from plugin_sdk.tool_contract import ToolSchema
 
 
@@ -159,18 +164,84 @@ class OpenAIProvider(BaseProvider):
         tools: list[ToolSchema] | None = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
-    ) -> AsyncIterator[str]:
-        # Phase 3 uses non-streaming; streaming in a later phase
-        resp = await self.complete(
-            model=model,
-            messages=messages,
-            system=system,
-            tools=tools,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stream=False,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream via OpenAI's chat.completions.create(stream=True)."""
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": self._to_openai_messages(messages, system),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
+        if tools:
+            kwargs["tools"] = [t.to_openai_format() for t in tools]
+
+        # Aggregate state while streaming — used to build the final ProviderResponse
+        content_parts: list[str] = []
+        tool_calls_accum: dict[int, dict[str, Any]] = {}
+        finish_reason = "stop"
+        usage: Usage = Usage()
+
+        stream = await self.client.chat.completions.create(**kwargs)
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            delta = choice.delta
+            if delta is None:
+                continue
+            if delta.content:
+                content_parts.append(delta.content)
+                yield StreamEvent(kind="text_delta", text=delta.content)
+            # Accumulate tool calls by index
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    slot = tool_calls_accum.setdefault(
+                        idx, {"id": "", "name": "", "arguments": ""}
+                    )
+                    if tc.id:
+                        slot["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            slot["name"] = tc.function.name
+                        if tc.function.arguments:
+                            slot["arguments"] += tc.function.arguments
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+            if getattr(chunk, "usage", None):
+                usage = Usage(
+                    input_tokens=chunk.usage.prompt_tokens or 0,
+                    output_tokens=chunk.usage.completion_tokens or 0,
+                )
+
+        # Reconstruct the final ProviderResponse
+        tool_calls: list[ToolCall] = []
+        for slot in tool_calls_accum.values():
+            try:
+                args = json.loads(slot["arguments"]) if slot["arguments"] else {}
+            except json.JSONDecodeError:
+                args = {}
+            tool_calls.append(ToolCall(id=slot["id"], name=slot["name"], arguments=args))
+
+        msg = Message(
+            role="assistant",
+            content="".join(content_parts),
+            tool_calls=tool_calls if tool_calls else None,
         )
-        yield resp.message.content
+        stop_map = {
+            "stop": "end_turn",
+            "length": "max_tokens",
+            "tool_calls": "tool_use",
+            "function_call": "tool_use",
+            "content_filter": "end_turn",
+        }
+        final = ProviderResponse(
+            message=msg,
+            stop_reason=stop_map.get(finish_reason, "end_turn"),
+            usage=usage,
+        )
+        yield StreamEvent(kind="done", response=final)
 
 
 __all__ = ["OpenAIProvider"]

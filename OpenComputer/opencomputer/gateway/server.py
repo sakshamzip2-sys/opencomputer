@@ -36,6 +36,8 @@ class Gateway:
         """Register a channel adapter (usually from a loaded plugin)."""
         adapter.set_message_handler(self.dispatch.handle_message)
         self._adapters.append(adapter)
+        # Give Dispatch a handle so it can send typing indicators back out.
+        self.dispatch.register_adapter(adapter.platform.value, adapter)
 
     async def start(self) -> None:
         """Connect all adapters. Returns once they're all running."""

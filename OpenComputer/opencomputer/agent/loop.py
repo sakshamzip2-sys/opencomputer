@@ -81,6 +81,7 @@ class AgentLoop:
         session_id: str | None = None,
         system_override: str | None = None,
         runtime: RuntimeContext | None = None,
+        stream_callback=None,
     ) -> ConversationResult:
         sid = session_id or str(uuid.uuid4())
         self._runtime = runtime or DEFAULT_RUNTIME_CONTEXT
@@ -142,7 +143,9 @@ class AgentLoop:
                     injected = injection_engine.compose(inj_ctx)
                     system = base_system + ("\n\n" + injected if injected else "")
 
-            step = await self._run_one_step(messages=messages, system=system)
+            step = await self._run_one_step(
+                messages=messages, system=system, stream_callback=stream_callback
+            )
             self._last_input_tokens = step.input_tokens
             total_input += step.input_tokens
             total_output += step.output_tokens
@@ -197,17 +200,43 @@ class AgentLoop:
     # ─── one step ──────────────────────────────────────────────────
 
     async def _run_one_step(
-        self, *, messages: list[Message], system: str
+        self,
+        *,
+        messages: list[Message],
+        system: str,
+        stream_callback=None,
     ) -> StepOutcome:
-        """One LLM call + classification of the result."""
-        resp = await self.provider.complete(
-            model=self.config.model.model,
-            messages=messages,
-            system=system,
-            tools=registry.schemas(),
-            max_tokens=self.config.model.max_tokens,
-            temperature=self.config.model.temperature,
-        )
+        """One LLM call + classification of the result.
+
+        If `stream_callback` is provided, stream_complete is used and each
+        text chunk is passed to the callback synchronously.
+        """
+        if stream_callback is not None:
+            final_response = None
+            async for event in self.provider.stream_complete(
+                model=self.config.model.model,
+                messages=messages,
+                system=system,
+                tools=registry.schemas(),
+                max_tokens=self.config.model.max_tokens,
+                temperature=self.config.model.temperature,
+            ):
+                if event.kind == "text_delta":
+                    stream_callback(event.text)
+                elif event.kind == "done":
+                    final_response = event.response
+            if final_response is None:
+                raise RuntimeError("stream ended without a 'done' event")
+            resp = final_response
+        else:
+            resp = await self.provider.complete(
+                model=self.config.model.model,
+                messages=messages,
+                system=system,
+                tools=registry.schemas(),
+                max_tokens=self.config.model.max_tokens,
+                temperature=self.config.model.temperature,
+            )
 
         stop_reason_map = {
             "end_turn": StopReason.END_TURN,

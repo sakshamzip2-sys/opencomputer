@@ -165,10 +165,29 @@ def chat(
     console.print("[dim]Type 'exit' to quit. Ctrl+C to interrupt.[/dim]\n")
 
     async def _run_turn(user_input: str) -> None:
+        # Stream tokens to the terminal as they arrive
+        printed_header = {"val": False}
+
+        def on_chunk(text: str) -> None:
+            if not printed_header["val"]:
+                console.print("[bold magenta]oc ›[/bold magenta] ", end="")
+                printed_header["val"] = True
+            # Print raw text (not markdown) so streaming is smooth;
+            # final full message is re-rendered as Markdown below.
+            console.print(text, end="", markup=False, highlight=False)
+
         result = await loop.run_conversation(
-            user_message=user_input, session_id=session_id, runtime=runtime
+            user_message=user_input,
+            session_id=session_id,
+            runtime=runtime,
+            stream_callback=on_chunk,
         )
-        if result.final_message.content.strip():
+        # Newline after streaming content (if any)
+        if printed_header["val"]:
+            console.print()
+        # Re-render as Markdown for code fences / lists if content is present
+        # and wasn't already streamed as text (prevents double output).
+        if result.final_message.content.strip() and not printed_header["val"]:
             console.print("[bold magenta]oc ›[/bold magenta]")
             console.print(Markdown(result.final_message.content))
         console.print(

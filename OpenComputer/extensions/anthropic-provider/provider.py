@@ -17,7 +17,12 @@ from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
 
 from plugin_sdk.core import Message, ToolCall
-from plugin_sdk.provider_contract import BaseProvider, ProviderResponse, Usage
+from plugin_sdk.provider_contract import (
+    BaseProvider,
+    ProviderResponse,
+    StreamEvent,
+    Usage,
+)
 from plugin_sdk.tool_contract import ToolSchema
 
 
@@ -183,18 +188,30 @@ class AnthropicProvider(BaseProvider):
         tools: list[ToolSchema] | None = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
-    ) -> AsyncIterator[str]:
-        # Phase 1 uses non-streaming for simplicity; streaming in Phase 1.5
-        resp = await self.complete(
-            model=model,
-            messages=messages,
-            system=system,
-            tools=tools,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stream=False,
-        )
-        yield resp.message.content
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream response events via Anthropic's `messages.stream()` context.
+
+        Yields text_delta events as tokens arrive, then a single "done" event
+        with the final ProviderResponse (including tool calls if any).
+        """
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": self._to_anthropic_messages(messages),
+        }
+        if system:
+            kwargs["system"] = system
+        if tools:
+            kwargs["tools"] = [t.to_anthropic_format() for t in tools]
+
+        async with self.client.messages.stream(**kwargs) as stream:
+            async for text in stream.text_stream:
+                if text:
+                    yield StreamEvent(kind="text_delta", text=text)
+            final = await stream.get_final_message()
+
+        yield StreamEvent(kind="done", response=self._parse_response(final))
 
 
 __all__ = ["AnthropicProvider"]

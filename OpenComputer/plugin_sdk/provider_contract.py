@@ -10,10 +10,20 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
 
 from plugin_sdk.core import Message
 from plugin_sdk.tool_contract import ToolSchema
+
+
+@dataclass(frozen=True, slots=True)
+class Usage:
+    """Token counts from a single LLM call."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,13 +36,18 @@ class ProviderResponse:
 
 
 @dataclass(frozen=True, slots=True)
-class Usage:
-    """Token counts from a single LLM call."""
+class StreamEvent:
+    """One event emitted by `provider.stream_complete()`.
 
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
+    Types:
+      - "text_delta": incremental text chunk (`text` field)
+      - "tool_call": full tool call has been assembled (`tool_call` field)
+      - "done": streaming finished (`response` field carries the final ProviderResponse)
+    """
+
+    kind: Literal["text_delta", "tool_call", "done"]
+    text: str = ""
+    response: ProviderResponse | None = None
 
 
 class BaseProvider(ABC):
@@ -66,9 +81,14 @@ class BaseProvider(ABC):
         tools: list[ToolSchema] | None = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
-    ) -> AsyncIterator[str]:
-        """Stream the response as text deltas. Final ProviderResponse available via `.final`."""
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream the response.
+
+        Yields StreamEvent objects in order. Final event has kind="done"
+        and carries the complete ProviderResponse (including aggregated text
+        and any tool calls). Text chunks arrive as kind="text_delta".
+        """
         ...
 
 
-__all__ = ["BaseProvider", "ProviderResponse", "Usage"]
+__all__ = ["BaseProvider", "ProviderResponse", "Usage", "StreamEvent"]
