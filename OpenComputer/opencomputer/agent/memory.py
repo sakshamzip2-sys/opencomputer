@@ -29,12 +29,29 @@ class SkillMeta:
 
 
 class MemoryManager:
-    """Reads declarative memory and lists procedural (skill) memory."""
+    """Reads declarative memory and lists procedural (skill) memory.
 
-    def __init__(self, declarative_path: Path, skills_path: Path) -> None:
+    Skills are searched across multiple roots (kimi-cli pattern):
+      1. User skills: ~/.opencomputer/skills/   (write target for new skills)
+      2. Bundled skills: <repo>/opencomputer/skills/ (read-only, shipped defaults)
+
+    Higher-priority roots shadow lower-priority ones by skill id.
+    """
+
+    def __init__(
+        self,
+        declarative_path: Path,
+        skills_path: Path,
+        bundled_skills_paths: list[Path] | None = None,
+    ) -> None:
         self.declarative_path = declarative_path
         self.skills_path = skills_path
         self.skills_path.mkdir(parents=True, exist_ok=True)
+        # Always include bundled skills shipped with core at the lowest priority
+        if bundled_skills_paths is None:
+            bundled = Path(__file__).resolve().parent.parent / "skills"
+            bundled_skills_paths = [bundled] if bundled.exists() else []
+        self.bundled_skills_paths = bundled_skills_paths
 
     # ─── declarative ──────────────────────────────────────────────
 
@@ -57,30 +74,34 @@ class MemoryManager:
     # ─── procedural (skills) ─────────────────────────────────────
 
     def list_skills(self) -> list[SkillMeta]:
-        """Scan the skills directory for SKILL.md files, return metadata only."""
+        """Scan all skill roots for SKILL.md files. User skills shadow bundled ones."""
+        roots = [self.skills_path, *self.bundled_skills_paths]
+        seen_ids: set[str] = set()
         out: list[SkillMeta] = []
-        if not self.skills_path.exists():
-            return out
-        for skill_dir in self.skills_path.iterdir():
-            if not skill_dir.is_dir():
+        for root in roots:
+            if not root.exists():
                 continue
-            skill_md = skill_dir / "SKILL.md"
-            if not skill_md.exists():
-                continue
-            try:
-                post = frontmatter.load(skill_md)
-            except Exception:
-                continue
-            meta = post.metadata
-            out.append(
-                SkillMeta(
-                    id=skill_dir.name,
-                    name=str(meta.get("name", skill_dir.name)),
-                    description=str(meta.get("description", "")),
-                    path=skill_md,
-                    version=str(meta.get("version", "0.1.0")),
+            for skill_dir in root.iterdir():
+                if not skill_dir.is_dir() or skill_dir.name in seen_ids:
+                    continue
+                skill_md = skill_dir / "SKILL.md"
+                if not skill_md.exists():
+                    continue
+                try:
+                    post = frontmatter.load(skill_md)
+                except Exception:
+                    continue
+                meta = post.metadata
+                seen_ids.add(skill_dir.name)
+                out.append(
+                    SkillMeta(
+                        id=skill_dir.name,
+                        name=str(meta.get("name", skill_dir.name)),
+                        description=str(meta.get("description", "")),
+                        path=skill_md,
+                        version=str(meta.get("version", "0.1.0")),
+                    )
                 )
-            )
         return out
 
     def load_skill_body(self, skill_id: str) -> str:

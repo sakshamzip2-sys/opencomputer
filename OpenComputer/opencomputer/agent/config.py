@@ -58,6 +58,28 @@ class MemoryConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MCPServerConfig:
+    """One MCP server the agent should connect to."""
+
+    name: str = ""
+    transport: str = "stdio"  # "stdio" or "http"
+    command: str = ""  # for stdio: the executable (e.g. "python3")
+    args: tuple[str, ...] = ()  # for stdio: argv (use tuple for hashability)
+    url: str = ""  # for http: endpoint URL
+    env: dict[str, str] = field(default_factory=dict)  # optional env vars
+    enabled: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class MCPConfig:
+    """MCP integration — list of servers + global toggles."""
+
+    servers: tuple[MCPServerConfig, ...] = ()
+    # Connect servers in the background after startup (kimi-cli pattern).
+    deferred: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Root configuration — composed of small focused configs."""
 
@@ -65,6 +87,7 @@ class Config:
     loop: LoopConfig = field(default_factory=LoopConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    mcp: MCPConfig = field(default_factory=MCPConfig)
     home: Path = field(default_factory=_home)
 
 
@@ -79,5 +102,7 @@ __all__ = [
     "LoopConfig",
     "SessionConfig",
     "MemoryConfig",
+    "MCPConfig",
+    "MCPServerConfig",
     "default_config",
 ]

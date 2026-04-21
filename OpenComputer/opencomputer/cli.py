@@ -123,13 +123,21 @@ def chat(
     cfg = load_config()
     _check_provider_key(cfg.model.provider)
 
+    from opencomputer.mcp.client import MCPManager
+
     _register_builtin_tools()
     n_plugins = _discover_plugins()
     provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
+    mcp_mgr = MCPManager(tool_registry=registry)
 
     # Wire the delegate factory so the model can spawn subagents
     DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
+
+    # Connect MCP servers synchronously in chat mode (simpler — no event loop yet)
+    n_mcp_tools = 0
+    if cfg.mcp.servers:
+        n_mcp_tools = asyncio.run(mcp_mgr.connect_all(list(cfg.mcp.servers)))
 
     session_id = resume or str(uuid.uuid4())
     console.print(f"[bold cyan]OpenComputer v{__version__}[/bold cyan]")
@@ -137,6 +145,8 @@ def chat(
     console.print(f"[dim]model:   {cfg.model.model} ({cfg.model.provider})[/dim]")
     console.print(f"[dim]tools:   {', '.join(sorted(registry.names()))}[/dim]")
     console.print(f"[dim]plugins: {n_plugins} loaded[/dim]")
+    if cfg.mcp.servers:
+        console.print(f"[dim]mcp:     {n_mcp_tools} tool(s) from {len(cfg.mcp.servers)} server(s)[/dim]")
     console.print("[dim]Type 'exit' to quit. Ctrl+C to interrupt.[/dim]\n")
 
     async def _run_turn(user_input: str) -> None:
@@ -213,6 +223,7 @@ def gateway() -> None:
     but input comes from channels instead of the terminal.
     """
     from opencomputer.gateway.server import Gateway
+    from opencomputer.mcp.client import MCPManager
 
     cfg = load_config()
     _check_provider_key(cfg.model.provider)
@@ -223,6 +234,13 @@ def gateway() -> None:
     provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
     DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
+
+    # Connect to MCP servers in the background (kimi-cli deferred pattern)
+    mcp_mgr = MCPManager(tool_registry=registry)
+    if cfg.mcp.servers:
+        console.print(
+            f"[dim]mcp: deferring connection to {len(cfg.mcp.servers)} server(s)[/dim]"
+        )
 
     gw = Gateway(loop=loop)
     for platform_name, adapter in plugin_registry.channels.items():
@@ -243,8 +261,19 @@ def gateway() -> None:
         f"{len(gw.adapters)} channel(s), model={cfg.model.model}"
     )
     console.print("[dim]ctrl+c to stop[/dim]\n")
+
+    async def _run():
+        if cfg.mcp.servers:
+            asyncio.create_task(
+                mcp_mgr.connect_all(list(cfg.mcp.servers))
+            )
+        try:
+            await gw.serve_forever()
+        finally:
+            await mcp_mgr.shutdown()
+
     try:
-        asyncio.run(gw.serve_forever())
+        asyncio.run(_run())
     except KeyboardInterrupt:
         console.print("\n[dim]gateway stopped[/dim]")
 

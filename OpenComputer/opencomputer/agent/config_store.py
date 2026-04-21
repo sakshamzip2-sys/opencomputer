@@ -17,6 +17,8 @@ import yaml
 from opencomputer.agent.config import (
     Config,
     LoopConfig,
+    MCPConfig,
+    MCPServerConfig,
     MemoryConfig,
     ModelConfig,
     SessionConfig,
@@ -41,12 +43,33 @@ def _apply_overrides(base: Any, overrides: dict[str, Any]) -> Any:
     for name, current in asdict(base).items():
         if name in overrides:
             new = overrides[name]
-            # Recurse into nested dataclasses
             nested = getattr(base, name)
+
             if is_dataclass(nested) and isinstance(new, dict):
+                # Nested dataclass (e.g. model, loop, mcp)
                 kwargs[name] = _apply_overrides(nested, new)
+            elif isinstance(nested, tuple) and isinstance(new, list):
+                # Tuple-of-dataclasses field (e.g. mcp.servers = [MCPServerConfig, ...])
+                inner_type = _extract_tuple_inner_type(type(base), name, nested)
+                if inner_type is not None:
+                    built = []
+                    for item in new:
+                        if isinstance(item, dict):
+                            # build a default instance then apply overrides
+                            try:
+                                default_instance = inner_type()
+                            except TypeError:
+                                default_instance = None
+                            if default_instance is not None:
+                                built.append(_apply_overrides(default_instance, item))
+                            else:
+                                built.append(item)
+                        else:
+                            built.append(item)
+                    kwargs[name] = tuple(built)
+                else:
+                    kwargs[name] = tuple(new)
             else:
-                # Cast Path strings back to Path
                 field_type = field_map[name].type
                 if "Path" in str(field_type) and isinstance(new, str):
                     kwargs[name] = Path(new)
@@ -55,6 +78,33 @@ def _apply_overrides(base: Any, overrides: dict[str, Any]) -> Any:
         else:
             kwargs[name] = getattr(base, name)
     return type(base)(**kwargs)
+
+
+def _extract_tuple_inner_type(
+    base_cls: type, field_name: str, existing_tuple: tuple
+) -> type | None:
+    """Best-effort: figure out the dataclass type stored in a tuple field.
+
+    Uses typing.get_type_hints so 'from __future__ import annotations'
+    string annotations are resolved to real types.
+    """
+    if existing_tuple and is_dataclass(existing_tuple[0]):
+        return type(existing_tuple[0])
+    import typing
+
+    try:
+        hints = typing.get_type_hints(base_cls)
+    except Exception:
+        return None
+    annotation = hints.get(field_name)
+    if annotation is None:
+        return None
+    origin = typing.get_origin(annotation)
+    if origin is tuple:
+        args = typing.get_args(annotation)
+        if args and is_dataclass(args[0]):
+            return args[0]
+    return None
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -86,6 +136,8 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
             return str(v)
         if is_dataclass(v):
             return {k: _encode(getattr(v, k)) for k in [f.name for f in fields(v)]}
+        if isinstance(v, tuple):
+            return [_encode(item) for item in v]
         return v
 
     return {
@@ -93,6 +145,7 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
         "loop": _encode(cfg.loop),
         "session": _encode(cfg.session),
         "memory": _encode(cfg.memory),
+        "mcp": _encode(cfg.mcp),
     }
 
 
