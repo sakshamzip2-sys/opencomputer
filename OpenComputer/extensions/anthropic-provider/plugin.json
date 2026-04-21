@@ -1,0 +1,10 @@
+{
+  "id": "anthropic-provider",
+  "name": "Anthropic Provider",
+  "version": "0.1.0",
+  "description": "Anthropic Claude models — supports native x-api-key and Bearer-auth proxies (Claude Router etc.)",
+  "author": "Saksham",
+  "license": "MIT",
+  "kind": "provider",
+  "entry": "plugin"
+}

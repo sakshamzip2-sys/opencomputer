@@ -1,43 +1,61 @@
-"""Tests for Anthropic provider auth modes — covers the Claude Router bug fix."""
+"""Tests for Anthropic provider auth modes — covers the Claude Router bug fix.
+
+The Anthropic provider lives in extensions/anthropic-provider/. Folder has
+a dash so we can't use 'from extensions.anthropic-provider.provider import X'.
+Instead, use sys.path manipulation like test_phase3.py does for openai.
+"""
 
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 from unittest.mock import patch
 
 
-def test_default_uses_x_api_key_header() -> None:
-    from opencomputer.providers.anthropic_provider import AnthropicProvider
+def _import_anthropic_provider():
+    """Load the provider module directly from its path, bypassing sys.modules cache.
 
+    Why not a plain import? The openai-provider plugin also has a module named
+    `provider`; Python's module cache would return whichever was loaded first.
+    """
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parent.parent
+    provider_path = repo_root / "extensions" / "anthropic-provider" / "provider.py"
+    spec = importlib.util.spec_from_file_location(
+        "anthropic_provider_test_only", provider_path
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["anthropic_provider_test_only"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_default_uses_x_api_key_header() -> None:
+    mod = _import_anthropic_provider()
     with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
-        # Make sure mode env is unset for this test
         os.environ.pop("ANTHROPIC_AUTH_MODE", None)
-        p = AnthropicProvider()
-        # Native Anthropic auth — SDK handles x-api-key internally via api_key.
-        # We assert the client was constructed; auth headers are added by the SDK.
+        p = mod.AnthropicProvider()
         assert p.client is not None
 
 
 def test_bearer_mode_sets_authorization_header() -> None:
-    from opencomputer.providers.anthropic_provider import AnthropicProvider
-
+    mod = _import_anthropic_provider()
     with patch.dict(
         os.environ,
         {"ANTHROPIC_API_KEY": "proxy-key-xyz", "ANTHROPIC_AUTH_MODE": "bearer"},
         clear=False,
     ):
-        p = AnthropicProvider()
-        # Inspect the AsyncAnthropic client to confirm Authorization header set.
-        # The SDK stores default_headers internally; verify via _custom_headers
-        # or the internal client's default_headers attribute.
+        p = mod.AnthropicProvider()
         headers = p.client.default_headers
-        assert "Authorization" in headers, f"expected Authorization in {list(headers)}"
+        assert "Authorization" in headers
         assert headers["Authorization"] == "Bearer proxy-key-xyz"
 
 
 def test_base_url_from_env() -> None:
-    from opencomputer.providers.anthropic_provider import AnthropicProvider
-
+    mod = _import_anthropic_provider()
     with patch.dict(
         os.environ,
         {
@@ -47,33 +65,31 @@ def test_base_url_from_env() -> None:
         clear=False,
     ):
         os.environ.pop("ANTHROPIC_AUTH_MODE", None)
-        p = AnthropicProvider()
+        p = mod.AnthropicProvider()
         assert "claude-router.vercel.app" in str(p.client.base_url)
 
 
 def test_unknown_auth_mode_raises() -> None:
-    from opencomputer.providers.anthropic_provider import AnthropicProvider
-
     import pytest
 
+    mod = _import_anthropic_provider()
     with patch.dict(
         os.environ,
         {"ANTHROPIC_API_KEY": "k", "ANTHROPIC_AUTH_MODE": "garbage"},
         clear=False,
     ):
         with pytest.raises(RuntimeError, match="Unknown ANTHROPIC_AUTH_MODE"):
-            AnthropicProvider()
+            mod.AnthropicProvider()
 
 
 def test_missing_api_key_raises() -> None:
-    from opencomputer.providers.anthropic_provider import AnthropicProvider
-
     import pytest
 
+    mod = _import_anthropic_provider()
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("ANTHROPIC_API_KEY", None)
         with pytest.raises(RuntimeError, match="API key not set"):
-            AnthropicProvider()
+            mod.AnthropicProvider()
 
 
 def test_bearer_mode_strips_x_api_key_header() -> None:
@@ -82,9 +98,8 @@ def test_bearer_mode_strips_x_api_key_header() -> None:
 
     import httpx
 
-    from opencomputer.providers.anthropic_provider import _strip_x_api_key
+    mod = _import_anthropic_provider()
 
-    # Build a request as the Anthropic SDK would (with x-api-key AND Authorization)
     req = httpx.Request(
         "POST",
         "https://claude-router.vercel.app/v1/messages",
@@ -95,9 +110,9 @@ def test_bearer_mode_strips_x_api_key_header() -> None:
         },
         json={"model": "claude-opus-4-7", "max_tokens": 10, "messages": []},
     )
-    assert "x-api-key" in req.headers  # confirm starting state
+    assert "x-api-key" in req.headers
 
-    asyncio.run(_strip_x_api_key(req))
+    asyncio.run(mod._strip_x_api_key(req))
 
-    assert "x-api-key" not in req.headers, "x-api-key was not stripped"
-    assert req.headers["Authorization"] == "Bearer proxy-key-123", "Authorization was damaged"
+    assert "x-api-key" not in req.headers
+    assert req.headers["Authorization"] == "Bearer proxy-key-123"

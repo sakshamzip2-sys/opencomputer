@@ -12,9 +12,15 @@ from rich.markdown import Markdown
 
 from opencomputer import __version__
 from opencomputer.agent.config import default_config
+from opencomputer.agent.config_store import (
+    config_file_path,
+    get_value,
+    load_config,
+    save_config,
+    set_value,
+)
 from opencomputer.agent.loop import AgentLoop
 from opencomputer.plugins.registry import registry as plugin_registry
-from opencomputer.providers.anthropic_provider import AnthropicProvider
 from opencomputer.tools.bash import BashTool
 from opencomputer.tools.delegate import DelegateTool
 from opencomputer.tools.glob import GlobTool
@@ -64,22 +70,21 @@ def _discover_plugins() -> int:
 
 
 def _resolve_provider(provider_name: str):
-    """Resolve a provider by name: plugin registry first, then in-tree fallback."""
-    # 1. Check plugin registry (e.g. "openai" from openai-provider extension)
+    """Resolve a provider by name from the plugin registry.
+
+    Providers are plugins — discovered via plugin.json + activated on demand.
+    There is no in-tree fallback: if a provider isn't registered, the user
+    needs to install (or enable) the corresponding plugin.
+    """
     registered = plugin_registry.providers.get(provider_name)
-    if registered is not None:
-        # Plugins register the CLASS — instantiate with defaults (reads env vars)
-        return registered() if isinstance(registered, type) else registered
-
-    # 2. In-tree fallback for anthropic (still bundled for convenience)
-    if provider_name == "anthropic":
-        return AnthropicProvider()
-
-    raise RuntimeError(
-        f"Provider '{provider_name}' is not available. "
-        f"Installed plugins: {list(plugin_registry.providers.keys())}. "
-        f"Built-in: anthropic."
-    )
+    if registered is None:
+        raise RuntimeError(
+            f"Provider '{provider_name}' is not available. "
+            f"Installed providers: {list(plugin_registry.providers.keys()) or 'none'}. "
+            f"Ensure the relevant plugin is in extensions/ or ~/.opencomputer/plugins/."
+        )
+    # Plugins register the CLASS — instantiate with defaults (reads env vars)
+    return registered() if isinstance(registered, type) else registered
 
 
 @app.callback(invoke_without_command=True)
@@ -115,7 +120,7 @@ def chat(
     ),
 ) -> None:
     """Start an interactive chat session."""
-    cfg = default_config()
+    cfg = load_config()
     _check_provider_key(cfg.model.provider)
 
     _register_builtin_tools()
@@ -209,7 +214,7 @@ def gateway() -> None:
     """
     from opencomputer.gateway.server import Gateway
 
-    cfg = default_config()
+    cfg = load_config()
     _check_provider_key(cfg.model.provider)
 
     _register_builtin_tools()
@@ -285,6 +290,70 @@ def skills() -> None:
         return
     for s in found:
         console.print(f"[cyan]{s.name}[/cyan] — {s.description}")
+
+
+config_app = typer.Typer(
+    name="config", help="Manage OpenComputer config (~/.opencomputer/config.yaml)"
+)
+app.add_typer(config_app, name="config")
+
+
+@config_app.command("show")
+def config_show() -> None:
+    """Print current effective config (defaults + overrides from disk)."""
+    import yaml
+
+    from opencomputer.agent.config_store import _to_yaml_dict
+
+    cfg = load_config()
+    console.print(yaml.safe_dump(_to_yaml_dict(cfg), default_flow_style=False, sort_keys=False))
+
+
+@config_app.command("get")
+def config_get(key: str = typer.Argument(..., help="Dotted key, e.g. model.provider")) -> None:
+    """Get a single config value by dotted key."""
+    cfg = load_config()
+    try:
+        value = get_value(cfg, key)
+    except KeyError as e:
+        console.print(f"[bold red]error:[/bold red] {e}")
+        raise typer.Exit(1) from None
+    console.print(str(value))
+
+
+@config_app.command("set")
+def config_set(
+    key: str = typer.Argument(..., help="Dotted key, e.g. model.provider"),
+    value: str = typer.Argument(..., help="New value"),
+) -> None:
+    """Set a config value and persist to ~/.opencomputer/config.yaml."""
+    cfg = load_config()
+    # Attempt to coerce numeric / bool / path values sensibly
+    coerced: object = value
+    if value.lower() in {"true", "false"}:
+        coerced = value.lower() == "true"
+    else:
+        try:
+            coerced = int(value)
+        except ValueError:
+            try:
+                coerced = float(value)
+            except ValueError:
+                coerced = value
+    try:
+        new_cfg = set_value(cfg, key, coerced)
+    except KeyError as e:
+        console.print(f"[bold red]error:[/bold red] {e}")
+        raise typer.Exit(1) from None
+    save_config(new_cfg)
+    console.print(f"[green]✓[/green] {key} = {coerced!r}")
+    console.print(f"[dim]saved to {config_file_path()}[/dim]")
+
+
+@config_app.command("path")
+def config_path() -> None:
+    """Print the path to the config file."""
+    console.print(str(config_file_path()))
 
 
 def main() -> None:
