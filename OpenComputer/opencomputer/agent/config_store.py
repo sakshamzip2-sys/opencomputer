@@ -16,12 +16,6 @@ import yaml
 
 from opencomputer.agent.config import (
     Config,
-    LoopConfig,
-    MCPConfig,
-    MCPServerConfig,
-    MemoryConfig,
-    ModelConfig,
-    SessionConfig,
     _home,
     default_config,
 )
@@ -182,7 +176,7 @@ def set_value(cfg: Config, key: str, value: Any) -> Config:
     """Return a NEW Config with `key` set to `value`. Dotted key supported."""
     parts = key.split(".")
     if len(parts) == 1:
-        raise KeyError(f"Top-level set not supported: use e.g. 'model.provider'")
+        raise KeyError("Top-level set not supported: use e.g. 'model.provider'")
     section_name, *rest = parts
     if not hasattr(cfg, section_name):
         raise KeyError(f"Unknown section: {section_name}")

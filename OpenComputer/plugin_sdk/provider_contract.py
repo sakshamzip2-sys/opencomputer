@@ -9,8 +9,9 @@ anthropic/openai SDKs directly — it only uses BaseProvider.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Literal
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Literal
 
 from plugin_sdk.core import Message
 from plugin_sdk.tool_contract import ToolSchema

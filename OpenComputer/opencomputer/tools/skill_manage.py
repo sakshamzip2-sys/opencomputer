@@ -13,14 +13,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
 
 import frontmatter
 
 from opencomputer.agent.config import default_config
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
-
 
 _VALID_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 

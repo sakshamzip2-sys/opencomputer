@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from plugin_sdk.core import ToolCall
 from plugin_sdk.hooks import HookContext, HookDecision, HookEvent, HookSpec
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
-
 
 PLAN_MODE_TEXT = (
     "## PLAN MODE ACTIVE\n\n"

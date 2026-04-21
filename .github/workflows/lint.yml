@@ -1,0 +1,30 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ruff:
+    name: ruff check
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: OpenComputer
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install ruff
+        run: pip install "ruff>=0.7"
+
+      - name: Run ruff
+        run: ruff check opencomputer/ plugin_sdk/ extensions/ tests/

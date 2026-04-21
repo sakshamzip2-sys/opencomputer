@@ -7,9 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from plugin_sdk.core import Message, MessageEvent, Platform
+from plugin_sdk.core import Message, Platform
 from plugin_sdk.provider_contract import ProviderResponse, StreamEvent, Usage
-
 
 # ─── StreamEvent dataclass ─────────────────────────────────────
 
@@ -169,7 +168,6 @@ def test_typing_heartbeat_noop_if_adapter_unknown() -> None:
 
 
 def test_dispatch_registers_adapters_by_platform() -> None:
-    from opencomputer.gateway.dispatch import Dispatch
     from opencomputer.gateway.server import Gateway
 
     adapter = MagicMock()

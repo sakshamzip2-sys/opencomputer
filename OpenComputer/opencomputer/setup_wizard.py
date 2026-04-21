@@ -84,7 +84,7 @@ def _prompt_model(default_model: str) -> str:
 
 
 def _prompt_api_key(env_key: str, signup_url: str) -> None:
-    console.print(f"\n[bold]Step 3 — API key[/bold]")
+    console.print("\n[bold]Step 3 — API key[/bold]")
     console.print(f"[dim]Get one at {signup_url} if you don't have it yet.[/dim]")
 
     current = os.environ.get(env_key, "")
@@ -162,7 +162,6 @@ async def _test_provider(provider_id: str, env_key: str) -> bool:
         return False
 
     from opencomputer.agent.config import default_config
-    from opencomputer.plugins.discovery import discover
     from opencomputer.plugins.registry import registry as plugin_registry
     from plugin_sdk.core import Message
 

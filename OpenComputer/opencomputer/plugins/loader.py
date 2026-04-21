@@ -17,7 +17,6 @@ import importlib.util
 import logging
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from opencomputer.plugins.discovery import PluginCandidate

@@ -16,9 +16,10 @@ Available events:
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Awaitable, Literal
+from typing import Literal
 
 from plugin_sdk.core import Message, ToolCall, ToolResult
 from plugin_sdk.runtime_context import RuntimeContext

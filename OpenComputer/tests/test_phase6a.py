@@ -12,7 +12,6 @@ from plugin_sdk.core import Message, ToolCall
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
 from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
 
-
 # ─── InjectionEngine ────────────────────────────────────────────
 
 

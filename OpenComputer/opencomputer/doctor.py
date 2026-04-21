@@ -71,7 +71,6 @@ def _check_config() -> tuple[Check, object]:
 
 
 def _check_provider_plugin(cfg) -> Check:
-    from opencomputer.plugins.discovery import discover
     from opencomputer.plugins.registry import registry as plugin_registry
 
     repo_root = Path(__file__).resolve().parent.parent

@@ -7,9 +7,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
-
 # ─── Config: MCP section ────────────────────────────────────────
 
 
@@ -55,13 +52,14 @@ mcp:
 
 
 def test_mcp_config_roundtrip_yaml(tmp_path: Path) -> None:
+    from dataclasses import replace
+
     from opencomputer.agent.config import (
         MCPConfig,
         MCPServerConfig,
         default_config,
     )
     from opencomputer.agent.config_store import load_config, save_config
-    from dataclasses import replace
 
     cfg = default_config()
     new_mcp = MCPConfig(

@@ -58,7 +58,19 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
-ignore = ["E501"]
+ignore = [
+  "E501",    # line too long — we use 100 chars, line length handled by formatter
+  "SIM105",  # prefer contextlib.suppress — stylistic; try/except/pass is clearer in some cases
+  "SIM117",  # combine nested `with` — readability preference, not a bug
+  "B904",    # raise ... from err — often more noise than signal in simple re-raises
+  "B007",    # unused loop control variable — fine when iteration is the point
+  "B008",    # function call in default argument — common in Typer and pydantic
+  "N806",    # variable in function should be lowercase — conflicts with Message dataclass fields
+  "UP042",   # str + Enum is fine; StrEnum changes serialization semantics we depend on
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F841", "F401", "B017", "N801"]  # tests may have unused imports, broad assertions, helper classes
 
 [tool.black]
 line-length = 100

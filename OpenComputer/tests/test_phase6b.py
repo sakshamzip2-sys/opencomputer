@@ -4,18 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
-from plugin_sdk.core import Message, ToolCall
+from plugin_sdk.core import ToolCall
 from plugin_sdk.hooks import HookContext, HookEvent
 from plugin_sdk.injection import InjectionContext
 from plugin_sdk.runtime_context import RuntimeContext
-
 
 # ─── Helpers ────────────────────────────────────────────────────
 

@@ -6,7 +6,6 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 import websockets
 
 
@@ -36,8 +35,9 @@ def _build_fake_loop():
         return_value=[{"session_id": "s1", "role": "user", "snippet": "test"}]
     )
     # memory — used by skills.list
-    from opencomputer.agent.memory import SkillMeta
     from pathlib import Path
+
+    from opencomputer.agent.memory import SkillMeta
 
     loop.memory.list_skills = MagicMock(
         return_value=[

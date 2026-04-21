@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
 
 from opencomputer.agent.loop import AgentLoop
 from opencomputer.gateway.dispatch import Dispatch

@@ -15,12 +15,12 @@ import json
 import random
 import sqlite3
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from plugin_sdk.core import Message, ToolCall
-
 
 SCHEMA_VERSION = 1
 

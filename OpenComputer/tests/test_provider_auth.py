@@ -77,9 +77,8 @@ def test_unknown_auth_mode_raises() -> None:
         os.environ,
         {"ANTHROPIC_API_KEY": "k", "ANTHROPIC_AUTH_MODE": "garbage"},
         clear=False,
-    ):
-        with pytest.raises(RuntimeError, match="Unknown ANTHROPIC_AUTH_MODE"):
-            mod.AnthropicProvider()
+    ), pytest.raises(RuntimeError, match="Unknown ANTHROPIC_AUTH_MODE"):
+        mod.AnthropicProvider()
 
 
 def test_missing_api_key_raises() -> None:

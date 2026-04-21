@@ -15,7 +15,6 @@ import opencomputer.agent.config as _cfg_mod
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
-
 DDL = """
 CREATE TABLE IF NOT EXISTS session_state (
     session_id TEXT NOT NULL,
