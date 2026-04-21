@@ -40,7 +40,7 @@ def _call(tool_name: str, **args):
 
 
 def test_edit_replaces_unique_string(tmp_path: Path) -> None:
-    mod = _load_module("edit", "edit.py")
+    mod = _load_module("edit", "tools/edit.py")
     f = tmp_path / "code.py"
     f.write_text("def foo():\n    return 1\n")
     tool = mod.EditTool()
@@ -59,7 +59,7 @@ def test_edit_replaces_unique_string(tmp_path: Path) -> None:
 
 
 def test_edit_errors_on_non_unique_without_replace_all(tmp_path: Path) -> None:
-    mod = _load_module("edit2", "edit.py")
+    mod = _load_module("edit2", "tools/edit.py")
     f = tmp_path / "code.py"
     f.write_text("x = 1\ny = 1\n")
     tool = mod.EditTool()
@@ -76,7 +76,7 @@ def test_edit_errors_on_non_unique_without_replace_all(tmp_path: Path) -> None:
 
 
 def test_edit_replace_all(tmp_path: Path) -> None:
-    mod = _load_module("edit3", "edit.py")
+    mod = _load_module("edit3", "tools/edit.py")
     f = tmp_path / "code.py"
     f.write_text("x = 1\ny = 1\n")
     tool = mod.EditTool()
@@ -100,7 +100,7 @@ def test_edit_replace_all(tmp_path: Path) -> None:
 
 def test_multi_edit_atomic_rollback_on_mid_failure(tmp_path: Path) -> None:
     """If the 2nd of 3 edits fails, file must be UNCHANGED from original."""
-    mod = _load_module("medit", "multi_edit.py")
+    mod = _load_module("medit", "tools/multi_edit.py")
     f = tmp_path / "c.py"
     original = "a = 1\nb = 2\nc = 3\n"
     f.write_text(original)
@@ -125,7 +125,7 @@ def test_multi_edit_atomic_rollback_on_mid_failure(tmp_path: Path) -> None:
 
 
 def test_multi_edit_all_succeed(tmp_path: Path) -> None:
-    mod = _load_module("medit2", "multi_edit.py")
+    mod = _load_module("medit2", "tools/multi_edit.py")
     f = tmp_path / "c.py"
     f.write_text("a = 1\nb = 2\n")
     tool = mod.MultiEditTool()
@@ -154,7 +154,7 @@ def test_todo_write_persists_to_sqlite(tmp_path: Path) -> None:
 
     from opencomputer.agent.config import default_config
 
-    mod = _load_module("tw", "todo_write.py")
+    mod = _load_module("tw", "tools/todo_write.py")
 
     # Redirect DB to tmp for isolation. The module imports `_cfg_mod` and
     # calls `_cfg_mod.default_config()` dynamically, so patching works.
@@ -186,7 +186,7 @@ def test_todo_write_rejects_multiple_in_progress(tmp_path: Path) -> None:
 
     from opencomputer.agent.config import default_config
 
-    mod = _load_module("tw2", "todo_write.py")
+    mod = _load_module("tw2", "tools/todo_write.py")
     cfg = default_config()
     cfg = replace(cfg, session=replace(cfg.session, db_path=tmp_path / "t.db"))
     with patch.object(mod._cfg_mod, "default_config", return_value=cfg):
@@ -211,7 +211,7 @@ def test_todo_write_rejects_multiple_in_progress(tmp_path: Path) -> None:
 
 def test_background_process_lifecycle() -> None:
     """Full lifecycle in a SINGLE event loop — asyncio processes can't cross loops."""
-    mod = _load_module("bg", "background.py")
+    mod = _load_module("bg", "tools/background.py")
 
     start = mod.StartProcessTool()
     check = mod.CheckOutputTool()
@@ -238,7 +238,7 @@ def test_background_process_lifecycle() -> None:
 
 
 def test_background_check_output_unknown_pid() -> None:
-    mod = _load_module("bg2", "background.py")
+    mod = _load_module("bg2", "tools/background.py")
     check = mod.CheckOutputTool()
     r = asyncio.run(check.execute(_call("check_output", pid=999999)))
     assert r.is_error
