@@ -51,7 +51,7 @@ def _discover_plugins() -> int:
 
     # In-tree extensions + user plugin dir
     search_paths: list[Path] = []
-    repo_root = Path(__file__).resolve().parent.parent.parent
+    repo_root = Path(__file__).resolve().parent.parent
     ext_dir = repo_root / "extensions"
     if ext_dir.exists():
         search_paths.append(ext_dir)
@@ -172,11 +172,61 @@ def sessions(limit: int = typer.Option(10, "--limit", "-n")) -> None:
 
 
 @app.command()
+def gateway() -> None:
+    """Run the gateway daemon — connects all configured channel adapters.
+
+    Requires provider API key + at least one channel token (TELEGRAM_BOT_TOKEN,
+    DISCORD_BOT_TOKEN, etc.) in the environment. The same agent loop runs,
+    but input comes from channels instead of the terminal.
+    """
+    from opencomputer.gateway.server import Gateway
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        console.print(
+            "[bold red]error:[/bold red] ANTHROPIC_API_KEY not set.\n"
+            "[dim]export ANTHROPIC_API_KEY=your-key to continue.[/dim]"
+        )
+        raise typer.Exit(1)
+
+    _register_builtin_tools()
+    n_plugins = _discover_plugins()
+
+    cfg = default_config()
+    provider = AnthropicProvider()
+    loop = AgentLoop(provider=provider, config=cfg)
+    DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
+
+    gw = Gateway(loop=loop)
+    for platform_name, adapter in plugin_registry.channels.items():
+        console.print(f"[dim]registering channel:[/dim] [cyan]{platform_name}[/cyan]")
+        gw.register_adapter(adapter)
+
+    if not gw.adapters:
+        console.print(
+            "[bold yellow]warning:[/bold yellow] no channel adapters registered. "
+            "Set TELEGRAM_BOT_TOKEN (or another channel token) and ensure the "
+            "channel plugin is discovered."
+        )
+        console.print(f"[dim]plugins loaded: {n_plugins}[/dim]")
+        raise typer.Exit(1)
+
+    console.print(
+        f"[bold cyan]OpenComputer gateway[/bold cyan] — "
+        f"{len(gw.adapters)} channel(s), model={cfg.model.model}"
+    )
+    console.print("[dim]ctrl+c to stop[/dim]\n")
+    try:
+        asyncio.run(gw.serve_forever())
+    except KeyboardInterrupt:
+        console.print("\n[dim]gateway stopped[/dim]")
+
+
+@app.command()
 def plugins() -> None:
     """List discovered plugins (metadata only — no activation)."""
     from pathlib import Path
 
-    repo_root = Path(__file__).resolve().parent.parent.parent
+    repo_root = Path(__file__).resolve().parent.parent
     search_paths: list[Path] = []
     ext_dir = repo_root / "extensions"
     if ext_dir.exists():

@@ -1,0 +1,10 @@
+{
+  "id": "telegram",
+  "name": "Telegram Channel",
+  "version": "0.1.0",
+  "description": "Telegram Bot API channel — chat with your agent via Telegram",
+  "author": "Saksham",
+  "license": "MIT",
+  "kind": "channel",
+  "entry": "src"
+}
