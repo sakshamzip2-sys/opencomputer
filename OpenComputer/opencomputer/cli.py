@@ -63,6 +63,25 @@ def _discover_plugins() -> int:
     return len(loaded)
 
 
+def _resolve_provider(provider_name: str):
+    """Resolve a provider by name: plugin registry first, then in-tree fallback."""
+    # 1. Check plugin registry (e.g. "openai" from openai-provider extension)
+    registered = plugin_registry.providers.get(provider_name)
+    if registered is not None:
+        # Plugins register the CLASS — instantiate with defaults (reads env vars)
+        return registered() if isinstance(registered, type) else registered
+
+    # 2. In-tree fallback for anthropic (still bundled for convenience)
+    if provider_name == "anthropic":
+        return AnthropicProvider()
+
+    raise RuntimeError(
+        f"Provider '{provider_name}' is not available. "
+        f"Installed plugins: {list(plugin_registry.providers.keys())}. "
+        f"Built-in: anthropic."
+    )
+
+
 @app.callback(invoke_without_command=True)
 def default(
     ctx: typer.Context,
@@ -75,6 +94,20 @@ def default(
         chat()
 
 
+def _check_provider_key(provider_name: str) -> None:
+    """Verify the right env var is set for the configured provider."""
+    key_env = {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+    }.get(provider_name)
+    if key_env and not os.environ.get(key_env):
+        console.print(
+            f"[bold red]error:[/bold red] {key_env} not set.\n"
+            f"[dim]export {key_env}=your-key to continue.[/dim]"
+        )
+        raise typer.Exit(1)
+
+
 @app.command()
 def chat(
     resume: str = typer.Option(
@@ -82,17 +115,12 @@ def chat(
     ),
 ) -> None:
     """Start an interactive chat session."""
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        console.print(
-            "[bold red]error:[/bold red] ANTHROPIC_API_KEY not set.\n"
-            "[dim]export ANTHROPIC_API_KEY=your-key to continue.[/dim]"
-        )
-        raise typer.Exit(1)
+    cfg = default_config()
+    _check_provider_key(cfg.model.provider)
 
     _register_builtin_tools()
     n_plugins = _discover_plugins()
-    cfg = default_config()
-    provider = AnthropicProvider()
+    provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
 
     # Wire the delegate factory so the model can spawn subagents
@@ -181,18 +209,13 @@ def gateway() -> None:
     """
     from opencomputer.gateway.server import Gateway
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        console.print(
-            "[bold red]error:[/bold red] ANTHROPIC_API_KEY not set.\n"
-            "[dim]export ANTHROPIC_API_KEY=your-key to continue.[/dim]"
-        )
-        raise typer.Exit(1)
+    cfg = default_config()
+    _check_provider_key(cfg.model.provider)
 
     _register_builtin_tools()
     n_plugins = _discover_plugins()
 
-    cfg = default_config()
-    provider = AnthropicProvider()
+    provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
     DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
 

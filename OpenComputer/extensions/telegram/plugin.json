@@ -6,5 +6,5 @@
   "author": "Saksham",
   "license": "MIT",
   "kind": "channel",
-  "entry": "src"
+  "entry": "plugin"
 }

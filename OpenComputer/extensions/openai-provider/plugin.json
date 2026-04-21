@@ -1,0 +1,10 @@
+{
+  "id": "openai-provider",
+  "name": "OpenAI Provider",
+  "version": "0.1.0",
+  "description": "OpenAI Chat Completions — GPT-5, GPT-4o, o1, o3, etc.",
+  "author": "Saksham",
+  "license": "MIT",
+  "kind": "provider",
+  "entry": "plugin"
+}

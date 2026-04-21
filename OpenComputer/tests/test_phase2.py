@@ -78,7 +78,7 @@ def test_dispatch_routes_to_agent_loop() -> None:
 
 
 def test_telegram_escape_and_chunk() -> None:
-    from extensions.telegram.src.adapter import _chunk_for_telegram, _escape_mdv2, _utf16_len
+    from extensions.telegram.adapter import _chunk_for_telegram, _escape_mdv2, _utf16_len
 
     # Escaping
     assert _escape_mdv2("hello_world") == "hello\\_world"
@@ -108,4 +108,4 @@ def test_telegram_plugin_manifest_discoverable(tmp_path) -> None:
     assert "telegram" in ids
     tg = next(c for c in candidates if c.manifest.id == "telegram")
     assert tg.manifest.kind == "channel"
-    assert tg.manifest.entry == "src"
+    assert tg.manifest.entry == "plugin"
