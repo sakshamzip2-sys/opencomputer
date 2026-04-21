@@ -13,10 +13,15 @@ from rich.markdown import Markdown
 from opencomputer import __version__
 from opencomputer.agent.config import default_config
 from opencomputer.agent.loop import AgentLoop
+from opencomputer.plugins.registry import registry as plugin_registry
 from opencomputer.providers.anthropic_provider import AnthropicProvider
 from opencomputer.tools.bash import BashTool
+from opencomputer.tools.delegate import DelegateTool
+from opencomputer.tools.glob import GlobTool
+from opencomputer.tools.grep import GrepTool
 from opencomputer.tools.read import ReadTool
 from opencomputer.tools.registry import registry
+from opencomputer.tools.skill_manage import SkillManageTool
 from opencomputer.tools.write import WriteTool
 
 app = typer.Typer(
@@ -34,6 +39,28 @@ def _register_builtin_tools() -> None:
     registry.register(ReadTool())
     registry.register(WriteTool())
     registry.register(BashTool())
+    registry.register(GrepTool())
+    registry.register(GlobTool())
+    registry.register(SkillManageTool())
+    registry.register(DelegateTool())
+
+
+def _discover_plugins() -> int:
+    """Discover + load plugins from known search paths. Returns count loaded."""
+    from pathlib import Path
+
+    # In-tree extensions + user plugin dir
+    search_paths: list[Path] = []
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    ext_dir = repo_root / "extensions"
+    if ext_dir.exists():
+        search_paths.append(ext_dir)
+    user_dir = Path.home() / ".opencomputer" / "plugins"
+    if user_dir.exists():
+        search_paths.append(user_dir)
+
+    loaded = plugin_registry.load_all(search_paths)
+    return len(loaded)
 
 
 @app.callback(invoke_without_command=True)
@@ -63,15 +90,20 @@ def chat(
         raise typer.Exit(1)
 
     _register_builtin_tools()
+    n_plugins = _discover_plugins()
     cfg = default_config()
     provider = AnthropicProvider()
     loop = AgentLoop(provider=provider, config=cfg)
+
+    # Wire the delegate factory so the model can spawn subagents
+    DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
 
     session_id = resume or str(uuid.uuid4())
     console.print(f"[bold cyan]OpenComputer v{__version__}[/bold cyan]")
     console.print(f"[dim]session: {session_id}[/dim]")
     console.print(f"[dim]model:   {cfg.model.model} ({cfg.model.provider})[/dim]")
     console.print(f"[dim]tools:   {', '.join(sorted(registry.names()))}[/dim]")
+    console.print(f"[dim]plugins: {n_plugins} loaded[/dim]")
     console.print("[dim]Type 'exit' to quit. Ctrl+C to interrupt.[/dim]\n")
 
     async def _run_turn(user_input: str) -> None:
@@ -141,8 +173,30 @@ def sessions(limit: int = typer.Option(10, "--limit", "-n")) -> None:
 
 @app.command()
 def plugins() -> None:
-    """List available plugins (Phase 1)."""
-    console.print("[dim]Plugin discovery is not yet implemented (Phase 1 late).[/dim]")
+    """List discovered plugins (metadata only — no activation)."""
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    search_paths: list[Path] = []
+    ext_dir = repo_root / "extensions"
+    if ext_dir.exists():
+        search_paths.append(ext_dir)
+    user_dir = Path.home() / ".opencomputer" / "plugins"
+    if user_dir.exists():
+        search_paths.append(user_dir)
+
+    candidates = plugin_registry.list_candidates(search_paths)
+    if not candidates:
+        console.print("[dim]no plugins found in:[/dim]")
+        for p in search_paths:
+            console.print(f"[dim]  {p}[/dim]")
+        return
+    for c in candidates:
+        m = c.manifest
+        console.print(
+            f"[cyan]{m.id}[/cyan] v{m.version} — {m.description or '[no description]'}"
+        )
+        console.print(f"[dim]  kind: {m.kind}  root: {c.root_dir}[/dim]")
 
 
 @app.command()
