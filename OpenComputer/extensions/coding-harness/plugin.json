@@ -1,0 +1,10 @@
+{
+  "id": "coding-harness",
+  "name": "Coding Harness",
+  "version": "0.1.0",
+  "description": "Coding agent toolkit — Edit, MultiEdit, TodoWrite, background process tools, plan mode. Install this to turn OpenComputer into a coding agent.",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "mixed",
+  "entry": "plugin"
+}

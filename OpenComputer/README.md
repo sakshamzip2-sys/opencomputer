@@ -64,6 +64,31 @@ opencomputer config get KEY  # read one config value (e.g. model.provider)
 opencomputer config set KEY VALUE
 ```
 
+## Coding mode
+
+OpenComputer ships with a `coding-harness` plugin that adds Claude-Code-style
+coding tools (Edit, MultiEdit, TodoWrite, background process management) plus
+a formal "plan mode" that refuses destructive tools while you review the plan.
+
+```bash
+# Normal mode — Edit/Write/Bash work, agent can modify files directly
+opencomputer
+
+# Plan mode — agent describes what it would do, Edit/Write/Bash are refused
+# Useful for big refactors where you want to review before committing
+opencomputer chat --plan
+
+# Disable automatic context compaction (debugging long sessions)
+opencomputer chat --no-compact
+```
+
+In plan mode, plan-mode guidance is injected into the system prompt AND a
+PreToolUse hook hard-blocks destructive tools — belt + suspenders. Subagents
+spawned via the `delegate` tool inherit plan mode automatically.
+
+Remove the coding harness any time by removing or renaming
+`extensions/coding-harness/`. The core agent stays fully functional.
+
 ## Messaging channels
 
 ### Telegram
