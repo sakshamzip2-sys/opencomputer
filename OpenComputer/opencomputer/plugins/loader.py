@@ -13,6 +13,7 @@ a `register(api)` function where `api` exposes the plugin-facing registries.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import logging
 import sys
 from dataclasses import dataclass
@@ -22,6 +23,17 @@ from typing import Any
 from opencomputer.plugins.discovery import PluginCandidate
 
 logger = logging.getLogger("opencomputer.plugins.loader")
+
+
+# Common short names plugins use for their sibling files. Clearing these
+# between plugin loads prevents two plugins (both with a top-level
+# `provider.py`, say) from sharing the first-loaded module.
+_PLUGIN_LOCAL_NAMES = ("provider", "adapter", "plugin", "handlers", "hooks")
+
+
+def _clear_plugin_local_cache() -> None:
+    for name in _PLUGIN_LOCAL_NAMES:
+        sys.modules.pop(name, None)
 
 
 @dataclass(slots=True)
@@ -61,21 +73,53 @@ class PluginAPI:
 
 
 def load_plugin(candidate: PluginCandidate, api: PluginAPI) -> LoadedPlugin | None:
-    """Import a candidate's entry module and call its register(api) function."""
+    """Import a candidate's entry module and call its register(api) function.
+
+    Uses importlib.util.spec_from_file_location with a unique synthetic module
+    name per plugin (based on plugin id). This avoids Python's module cache
+    returning the same module for multiple plugins that happen to share an
+    `entry` value (e.g. all three plugins use "plugin" as their entry).
+
+    Also adds the plugin root to sys.path so the entry module's own sibling
+    imports (e.g. `from adapter import X`) resolve correctly.
+    """
     manifest = candidate.manifest
     entry = manifest.entry.strip()
     if not entry:
         logger.warning("plugin '%s' has no 'entry' field in manifest", manifest.id)
         return None
 
-    # Add the plugin root to sys.path so relative imports work,
-    # then import the entry module by name.
-    plugin_root = str(candidate.root_dir.resolve())
-    if plugin_root not in sys.path:
-        sys.path.insert(0, plugin_root)
+    plugin_root = candidate.root_dir.resolve()
+    plugin_root_str = str(plugin_root)
+    if plugin_root_str not in sys.path:
+        sys.path.insert(0, plugin_root_str)
+
+    entry_path = plugin_root / f"{entry}.py"
+    if not entry_path.exists():
+        logger.warning(
+            "plugin '%s' entry file not found: %s (expected at %s)",
+            manifest.id,
+            entry,
+            entry_path,
+        )
+        return None
+
+    # Clear common sibling module names from sys.modules so this plugin sees
+    # its OWN siblings (not another plugin's cached 'provider' or 'adapter').
+    # Without this, two plugins that both have a top-level 'provider' module
+    # would share the one that loaded first.
+    _clear_plugin_local_cache()
+
+    # Unique module name so sys.modules doesn't collide between plugins
+    synthetic_name = f"_opencomputer_plugin_{manifest.id.replace('-', '_')}_{entry}"
 
     try:
-        module = importlib.import_module(entry)
+        spec = importlib.util.spec_from_file_location(synthetic_name, entry_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"no spec for {entry_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[synthetic_name] = module
+        spec.loader.exec_module(module)
     except Exception as e:  # noqa: BLE001
         logger.exception("failed to import plugin '%s' (entry=%s): %s", manifest.id, entry, e)
         return None
