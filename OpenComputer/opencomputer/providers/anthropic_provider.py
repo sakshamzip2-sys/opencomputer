@@ -12,6 +12,7 @@ import os
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
 
@@ -20,17 +21,62 @@ from plugin_sdk.provider_contract import BaseProvider, ProviderResponse, Usage
 from plugin_sdk.tool_contract import ToolSchema
 
 
+async def _strip_x_api_key(request: httpx.Request) -> None:
+    """httpx event hook: remove x-api-key header before sending.
+
+    Used when talking to proxies that authenticate via Bearer tokens and
+    forward x-api-key unchanged to the upstream Anthropic API (which then
+    rejects it as invalid). Must run at the last moment so the Anthropic
+    SDK's own auth path is undisturbed.
+    """
+    request.headers.pop("x-api-key", None)
+
+
 class AnthropicProvider(BaseProvider):
     name = "anthropic"
     default_model = "claude-opus-4-7"
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        auth_mode: str | None = None,
+    ) -> None:
+        """
+        Args:
+            api_key: API key / proxy key. Defaults to $ANTHROPIC_API_KEY.
+            base_url: Override the API endpoint (for proxies like Claude Router).
+                      Defaults to $ANTHROPIC_BASE_URL, or None (direct Anthropic).
+            auth_mode: "x-api-key" (Anthropic native) or "bearer"
+                      (Authorization: Bearer header — for proxies that require it).
+                      Defaults to $ANTHROPIC_AUTH_MODE, or "x-api-key".
+        """
         key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
             raise RuntimeError(
                 "Anthropic API key not set. Export ANTHROPIC_API_KEY or pass api_key."
             )
-        self.client = AsyncAnthropic(api_key=key)
+        base = base_url or os.environ.get("ANTHROPIC_BASE_URL") or None
+        mode = (auth_mode or os.environ.get("ANTHROPIC_AUTH_MODE") or "x-api-key").lower()
+
+        kwargs: dict[str, Any] = {"api_key": key}
+        if base:
+            kwargs["base_url"] = base
+        if mode == "bearer":
+            # For proxies like Claude Router: add Authorization: Bearer AND
+            # strip x-api-key on the way out (the SDK adds it automatically
+            # from api_key, and some proxies forward it to upstream Anthropic
+            # which then rejects the proxy key as "invalid x-api-key").
+            kwargs["default_headers"] = {"Authorization": f"Bearer {key}"}
+            kwargs["http_client"] = httpx.AsyncClient(
+                event_hooks={"request": [_strip_x_api_key]},
+                timeout=httpx.Timeout(60.0, connect=10.0),
+            )
+        elif mode != "x-api-key":
+            raise RuntimeError(
+                f"Unknown ANTHROPIC_AUTH_MODE: {mode!r} (expected 'x-api-key' or 'bearer')"
+            )
+        self.client = AsyncAnthropic(**kwargs)
 
     # ─── message conversion ─────────────────────────────────────────
 
