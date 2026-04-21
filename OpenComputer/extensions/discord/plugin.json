@@ -1,0 +1,10 @@
+{
+  "id": "discord",
+  "name": "Discord Channel",
+  "version": "0.1.0",
+  "description": "Discord channel — chat with your agent via a Discord bot in DMs or servers",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "channel",
+  "entry": "plugin"
+}
