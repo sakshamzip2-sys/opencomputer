@@ -72,6 +72,13 @@ class AgentLoop:
             disabled=compaction_disabled,
         )
         self._last_input_tokens = 0
+        # Per-session frozen system prompt. Populated on the first turn of each
+        # session so subsequent turns reuse the exact same prefix (→ prompt-cache
+        # hits on turn 2+). Memory edits mid-session go to disk immediately but
+        # do NOT mutate this snapshot. Compaction invalidates only the suffix,
+        # never the system-prompt prefix. Source: hermes-agent
+        # tools/memory_tool.py:_system_prompt_snapshot.
+        self._prompt_snapshots: dict[str, str] = {}
 
     # ─── the loop ──────────────────────────────────────────────────
 
@@ -98,12 +105,20 @@ class AgentLoop:
         else:
             messages = self.db.get_messages(sid)
 
-        # Build system prompt fresh every turn (cheap, keeps skill list up to date)
+        # System prompt is frozen per session: built once on the first turn,
+        # then reused verbatim so the prefix cache hits on turn 2+. Memory
+        # edits during a session do NOT retrigger a rebuild — that's the
+        # invariant that makes hermes's prompt_cache ~10× cheaper than
+        # per-turn rebuilds.
         if system_override is not None:
             base_system = system_override
         else:
-            skills = self.memory.list_skills()
-            base_system = self.prompt_builder.build(skills=skills)
+            snapshot = self._prompt_snapshots.get(sid)
+            if snapshot is None:
+                skills = self.memory.list_skills()
+                snapshot = self.prompt_builder.build(skills=skills)
+                self._prompt_snapshots[sid] = snapshot
+            base_system = snapshot
 
         # Collect dynamic injections (plan_mode, yolo_mode, etc. from plugins)
         inj_ctx = InjectionContext(
