@@ -21,14 +21,18 @@ import asyncio
 import uuid
 from dataclasses import dataclass
 
+from opencomputer.agent.compaction import CompactionEngine
 from opencomputer.agent.config import Config
+from opencomputer.agent.injection import engine as injection_engine
 from opencomputer.agent.memory import MemoryManager
 from opencomputer.agent.prompt_builder import PromptBuilder
 from opencomputer.agent.state import SessionDB
 from opencomputer.agent.step import StepOutcome
 from opencomputer.tools.registry import registry
 from plugin_sdk.core import Message, StopReason, ToolCall
+from plugin_sdk.injection import InjectionContext
 from plugin_sdk.provider_contract import BaseProvider
+from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
 
 
 @dataclass(slots=True)
@@ -53,6 +57,7 @@ class AgentLoop:
         db: SessionDB | None = None,
         memory: MemoryManager | None = None,
         prompt_builder: PromptBuilder | None = None,
+        compaction_disabled: bool = False,
     ) -> None:
         self.provider = provider
         self.config = config
@@ -61,6 +66,12 @@ class AgentLoop:
             config.memory.declarative_path, config.memory.skills_path
         )
         self.prompt_builder = prompt_builder or PromptBuilder()
+        self.compaction = CompactionEngine(
+            provider=provider,
+            model=config.model.model,
+            disabled=compaction_disabled,
+        )
+        self._last_input_tokens = 0
 
     # ─── the loop ──────────────────────────────────────────────────
 
@@ -69,8 +80,10 @@ class AgentLoop:
         user_message: str,
         session_id: str | None = None,
         system_override: str | None = None,
+        runtime: RuntimeContext | None = None,
     ) -> ConversationResult:
         sid = session_id or str(uuid.uuid4())
+        self._runtime = runtime or DEFAULT_RUNTIME_CONTEXT
 
         # If this is a fresh session, create it in the DB and seed history from disk.
         existing = self.db.get_session(sid) if session_id else None
@@ -86,10 +99,19 @@ class AgentLoop:
 
         # Build system prompt fresh every turn (cheap, keeps skill list up to date)
         if system_override is not None:
-            system = system_override
+            base_system = system_override
         else:
             skills = self.memory.list_skills()
-            system = self.prompt_builder.build(skills=skills)
+            base_system = self.prompt_builder.build(skills=skills)
+
+        # Collect dynamic injections (plan_mode, yolo_mode, etc. from plugins)
+        inj_ctx = InjectionContext(
+            messages=tuple(messages),
+            runtime=self._runtime,
+            session_id=sid,
+        )
+        injected = injection_engine.compose(inj_ctx)
+        system = base_system + ("\n\n" + injected if injected else "")
 
         # Append user message + persist
         user_msg = Message(role="user", content=user_message)
@@ -102,7 +124,26 @@ class AgentLoop:
 
         for _iter in range(self.config.loop.max_iterations):
             iterations += 1
+
+            # Compaction check — uses REAL measured tokens from prior turn.
+            # First iteration (no prior measurement) skips the check.
+            if self._last_input_tokens > 0:
+                result = await self.compaction.maybe_run(
+                    messages, self._last_input_tokens
+                )
+                if result.did_compact:
+                    messages = result.messages
+                    # Re-collect injections with the new message list
+                    inj_ctx = InjectionContext(
+                        messages=tuple(messages),
+                        runtime=self._runtime,
+                        session_id=sid,
+                    )
+                    injected = injection_engine.compose(inj_ctx)
+                    system = base_system + ("\n\n" + injected if injected else "")
+
             step = await self._run_one_step(messages=messages, system=system)
+            self._last_input_tokens = step.input_tokens
             total_input += step.input_tokens
             total_output += step.output_tokens
             messages.append(step.assistant_message)
@@ -119,9 +160,18 @@ class AgentLoop:
                     output_tokens=total_output,
                 )
 
-            # Dispatch all tool calls from this step
+            # Push the current runtime to DelegateTool so subagents inherit it
+            try:
+                from opencomputer.tools.delegate import DelegateTool
+
+                DelegateTool.set_runtime(self._runtime)
+            except Exception:
+                pass  # delegate tool may not be registered yet in some contexts
+
+            # Dispatch all tool calls from this step (runtime flows into hooks via sid)
             tool_results = await self._dispatch_tool_calls(
-                step.assistant_message.tool_calls or []
+                step.assistant_message.tool_calls or [],
+                session_id=sid,
             )
             for tr_msg in tool_results:
                 messages.append(tr_msg)
@@ -182,16 +232,48 @@ class AgentLoop:
 
     # ─── tool dispatch ─────────────────────────────────────────────
 
-    async def _dispatch_tool_calls(self, calls: list[ToolCall]) -> list[Message]:
-        """Run all tool calls — in parallel where safe — and return result Messages."""
+    async def _dispatch_tool_calls(
+        self, calls: list[ToolCall], session_id: str = ""
+    ) -> list[Message]:
+        """Run all tool calls — in parallel where safe — and return result Messages.
+
+        Fires PreToolUse hooks before each tool runs. If a hook blocks, the tool
+        is skipped and an error ToolResult is synthesized. Runtime context flows
+        to hooks so plan_mode_block etc. can read it.
+        """
         if not calls:
             return []
-        if self.config.loop.parallel_tools and self._all_parallel_safe(calls):
-            results = await asyncio.gather(
-                *(registry.dispatch(c) for c in calls), return_exceptions=False
+
+        # Fire PreToolUse hooks first (blocking). Determine which calls are blocked.
+        from opencomputer.hooks.engine import engine as hook_engine
+        from plugin_sdk.core import ToolResult
+        from plugin_sdk.hooks import HookContext, HookEvent
+
+        blocked: dict[str, str] = {}  # call.id → block reason
+        for c in calls:
+            ctx = HookContext(
+                event=HookEvent.PRE_TOOL_USE,
+                session_id=session_id,
+                tool_call=c,
+                runtime=self._runtime,
             )
+            decision = await hook_engine.fire_blocking(ctx)
+            if decision is not None and decision.decision == "block":
+                blocked[c.id] = decision.reason or "blocked by hook"
+
+        async def _run_one(c: ToolCall):
+            if c.id in blocked:
+                return ToolResult(
+                    tool_call_id=c.id,
+                    content=f"[blocked by PreToolUse hook: {blocked[c.id]}]",
+                    is_error=True,
+                )
+            return await registry.dispatch(c)
+
+        if self.config.loop.parallel_tools and self._all_parallel_safe(calls):
+            results = await asyncio.gather(*(_run_one(c) for c in calls))
         else:
-            results = [await registry.dispatch(c) for c in calls]
+            results = [await _run_one(c) for c in calls]
 
         return [
             Message(

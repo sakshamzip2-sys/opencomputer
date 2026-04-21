@@ -53,11 +53,13 @@ class PluginAPI:
         hook_engine: Any,
         provider_registry: dict[str, Any],
         channel_registry: dict[str, Any],
+        injection_engine: Any = None,
     ) -> None:
         self.tools = tool_registry
         self.hooks = hook_engine
         self.providers = provider_registry
         self.channels = channel_registry
+        self.injection = injection_engine
 
     def register_tool(self, tool: Any) -> None:
         self.tools.register(tool)
@@ -70,6 +72,14 @@ class PluginAPI:
 
     def register_channel(self, name: str, adapter: Any) -> None:
         self.channels[name] = adapter
+
+    def register_injection_provider(self, provider: Any) -> None:
+        """Register a DynamicInjectionProvider (plan mode, yolo mode, etc.)."""
+        if self.injection is None:
+            raise RuntimeError(
+                "Injection engine unavailable — plugin-SDK version mismatch?"
+            )
+        self.injection.register(provider)
 
 
 def load_plugin(candidate: PluginCandidate, api: PluginAPI) -> LoadedPlugin | None:

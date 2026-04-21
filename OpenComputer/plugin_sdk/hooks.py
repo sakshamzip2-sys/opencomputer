@@ -21,6 +21,7 @@ from enum import Enum
 from typing import Any, Callable, Awaitable, Literal
 
 from plugin_sdk.core import Message, ToolCall, ToolResult
+from plugin_sdk.runtime_context import RuntimeContext
 
 
 class HookEvent(str, Enum):
@@ -41,6 +42,9 @@ class HookContext:
     tool_call: ToolCall | None = None
     tool_result: ToolResult | None = None
     message: Message | None = None
+    #: Runtime flags for this invocation (plan_mode, yolo_mode, custom).
+    #: None for backwards compatibility with hooks written before this field.
+    runtime: RuntimeContext | None = None
 
 
 @dataclass(frozen=True, slots=True)

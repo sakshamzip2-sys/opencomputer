@@ -22,7 +22,9 @@ from plugin_sdk.core import (
     ToolResult,
 )
 from plugin_sdk.hooks import HookContext, HookDecision, HookEvent, HookHandler, HookSpec
+from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
 from plugin_sdk.provider_contract import BaseProvider, ProviderResponse, Usage
+from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 __all__ = [
@@ -50,4 +52,9 @@ __all__ = [
     "HookDecision",
     "HookHandler",
     "HookSpec",
+    # runtime + injection
+    "RuntimeContext",
+    "DEFAULT_RUNTIME_CONTEXT",
+    "DynamicInjectionProvider",
+    "InjectionContext",
 ]

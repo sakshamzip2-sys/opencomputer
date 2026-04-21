@@ -14,6 +14,7 @@ Later phases can add context isolation, tool restrictions, etc.
 from __future__ import annotations
 
 from plugin_sdk.core import ToolCall, ToolResult
+from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 
@@ -22,11 +23,22 @@ class DelegateTool(BaseTool):
 
     # Lazy-import a factory the CLI can inject; until then raise a clear error
     _factory = None
+    #: Class-level "current runtime" set by the parent loop before dispatching
+    #: tool calls. Ensures subagent loops inherit plan_mode / yolo_mode, etc.
+    _current_runtime: RuntimeContext = DEFAULT_RUNTIME_CONTEXT
 
     @classmethod
     def set_factory(cls, factory) -> None:
         """Inject a callable that returns a fresh AgentLoop. Called once at CLI startup."""
-        cls._factory = factory
+        # staticmethod wrap prevents Python from binding `self` when we later do
+        # `self._factory()` on an instance — lambdas and plain functions would
+        # otherwise get `self` auto-injected.
+        cls._factory = staticmethod(factory)
+
+    @classmethod
+    def set_runtime(cls, runtime: RuntimeContext) -> None:
+        """Set the runtime context to propagate into subagents. Called by AgentLoop."""
+        cls._current_runtime = runtime
 
     @property
     def schema(self) -> ToolSchema:
@@ -71,7 +83,12 @@ class DelegateTool(BaseTool):
                 is_error=True,
             )
         subagent_loop = self._factory()
-        result = await subagent_loop.run_conversation(user_message=task)
+        # Propagate the parent's runtime context — plan mode, yolo mode, etc.
+        # must apply to subagents too, otherwise delegating becomes an escape hatch.
+        result = await subagent_loop.run_conversation(
+            user_message=task,
+            runtime=self._current_runtime,
+        )
         return ToolResult(
             tool_call_id=call.id,
             content=result.final_message.content,

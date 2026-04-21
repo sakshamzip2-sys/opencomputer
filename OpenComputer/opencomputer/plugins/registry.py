@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from opencomputer.agent.injection import engine as injection_engine
 from opencomputer.hooks.engine import engine as hook_engine
 from opencomputer.plugins.discovery import PluginCandidate, discover
 from opencomputer.plugins.loader import LoadedPlugin, PluginAPI, load_plugin
@@ -31,6 +32,7 @@ class PluginRegistry:
             hook_engine=hook_engine,
             provider_registry=self.providers,
             channel_registry=self.channels,
+            injection_engine=injection_engine,
         )
 
     def load_all(self, search_paths: list[Path]) -> list[LoadedPlugin]:

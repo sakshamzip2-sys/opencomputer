@@ -29,6 +29,7 @@ from opencomputer.tools.read import ReadTool
 from opencomputer.tools.registry import registry
 from opencomputer.tools.skill_manage import SkillManageTool
 from opencomputer.tools.write import WriteTool
+from plugin_sdk.runtime_context import RuntimeContext
 
 app = typer.Typer(
     name="opencomputer",
@@ -118,6 +119,12 @@ def chat(
     resume: str = typer.Option(
         "", "--resume", "-r", help="Resume a session by id (latest if empty)."
     ),
+    plan: bool = typer.Option(
+        False, "--plan", help="Plan mode — agent describes actions, refuses destructive tools."
+    ),
+    no_compact: bool = typer.Option(
+        False, "--no-compact", help="Disable automatic context compaction (debugging)."
+    ),
 ) -> None:
     """Start an interactive chat session."""
     cfg = load_config()
@@ -128,11 +135,15 @@ def chat(
     _register_builtin_tools()
     n_plugins = _discover_plugins()
     provider = _resolve_provider(cfg.model.provider)
-    loop = AgentLoop(provider=provider, config=cfg)
+    runtime = RuntimeContext(plan_mode=plan)
+    loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
     mcp_mgr = MCPManager(tool_registry=registry)
 
     # Wire the delegate factory so the model can spawn subagents
-    DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
+    DelegateTool.set_factory(
+        lambda: AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
+    )
+    DelegateTool.set_runtime(runtime)
 
     # Connect MCP servers synchronously in chat mode (simpler — no event loop yet)
     n_mcp_tools = 0
@@ -145,13 +156,17 @@ def chat(
     console.print(f"[dim]model:   {cfg.model.model} ({cfg.model.provider})[/dim]")
     console.print(f"[dim]tools:   {', '.join(sorted(registry.names()))}[/dim]")
     console.print(f"[dim]plugins: {n_plugins} loaded[/dim]")
+    if plan:
+        console.print("[bold yellow]plan mode ON[/bold yellow] — destructive tools will be refused")
+    if no_compact:
+        console.print("[dim]compaction disabled[/dim]")
     if cfg.mcp.servers:
         console.print(f"[dim]mcp:     {n_mcp_tools} tool(s) from {len(cfg.mcp.servers)} server(s)[/dim]")
     console.print("[dim]Type 'exit' to quit. Ctrl+C to interrupt.[/dim]\n")
 
     async def _run_turn(user_input: str) -> None:
         result = await loop.run_conversation(
-            user_message=user_input, session_id=session_id
+            user_message=user_input, session_id=session_id, runtime=runtime
         )
         if result.final_message.content.strip():
             console.print("[bold magenta]oc ›[/bold magenta]")
