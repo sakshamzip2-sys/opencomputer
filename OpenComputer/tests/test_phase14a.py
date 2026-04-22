@@ -22,6 +22,7 @@ class TestProfileValidation:
 
     def test_validate_profile_name_rejects_uppercase(self):
         import pytest
+
         from opencomputer.profiles import ProfileNameError, validate_profile_name
 
         with pytest.raises(ProfileNameError):
@@ -29,6 +30,7 @@ class TestProfileValidation:
 
     def test_validate_profile_name_rejects_spaces(self):
         import pytest
+
         from opencomputer.profiles import ProfileNameError, validate_profile_name
 
         with pytest.raises(ProfileNameError):
@@ -36,6 +38,7 @@ class TestProfileValidation:
 
     def test_validate_profile_name_rejects_empty(self):
         import pytest
+
         from opencomputer.profiles import ProfileNameError, validate_profile_name
 
         with pytest.raises(ProfileNameError):
@@ -43,6 +46,7 @@ class TestProfileValidation:
 
     def test_validate_profile_name_rejects_dots(self):
         import pytest
+
         from opencomputer.profiles import ProfileNameError, validate_profile_name
 
         with pytest.raises(ProfileNameError):
@@ -50,6 +54,7 @@ class TestProfileValidation:
 
     def test_validate_profile_name_rejects_reserved(self):
         import pytest
+
         from opencomputer.profiles import ProfileNameError, validate_profile_name
 
         for name in ["default", "presets", "wrappers", "plugins", "profiles", "skills"]:
@@ -118,8 +123,7 @@ class TestProfileFlagRouting:
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
         monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", ["opencomputer", "-p", "coder", "chat"])
-        cli_mod = self._reload_cli()
-        cli_mod._apply_profile_override()
+        self._reload_cli()
         import os
 
         assert os.environ["OPENCOMPUTER_HOME"] == str(tmp_path / "profiles" / "coder")
@@ -130,8 +134,7 @@ class TestProfileFlagRouting:
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
         monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", ["opencomputer", "--profile=stocks", "chat"])
-        cli_mod = self._reload_cli()
-        cli_mod._apply_profile_override()
+        self._reload_cli()
         import os
 
         assert os.environ["OPENCOMPUTER_HOME"] == str(tmp_path / "profiles" / "stocks")
@@ -142,8 +145,7 @@ class TestProfileFlagRouting:
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
         monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", ["opencomputer", "--profile", "stocks", "chat"])
-        cli_mod = self._reload_cli()
-        cli_mod._apply_profile_override()
+        self._reload_cli()
         import os
 
         assert os.environ["OPENCOMPUTER_HOME"] == str(tmp_path / "profiles" / "stocks")
@@ -156,8 +158,7 @@ class TestProfileFlagRouting:
         tmp_path.mkdir(exist_ok=True)
         (tmp_path / "active_profile").write_text("coder\n")
         monkeypatch.setattr(sys, "argv", ["opencomputer", "chat"])
-        cli_mod = self._reload_cli()
-        cli_mod._apply_profile_override()
+        self._reload_cli()
         import os
 
         assert os.environ["OPENCOMPUTER_HOME"] == str(tmp_path / "profiles" / "coder")
@@ -170,8 +171,7 @@ class TestProfileFlagRouting:
         tmp_path.mkdir(exist_ok=True)
         (tmp_path / "active_profile").write_text("coder\n")
         monkeypatch.setattr(sys, "argv", ["opencomputer", "-p", "personal", "chat"])
-        cli_mod = self._reload_cli()
-        cli_mod._apply_profile_override()
+        self._reload_cli()
         import os
 
         assert os.environ["OPENCOMPUTER_HOME"] == str(tmp_path / "profiles" / "personal")
@@ -182,8 +182,7 @@ class TestProfileFlagRouting:
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
         monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", ["opencomputer", "-p", "coder", "chat", "--plan"])
-        cli_mod = self._reload_cli()
-        cli_mod._apply_profile_override()
+        self._reload_cli()
         assert sys.argv == ["opencomputer", "chat", "--plan"]
 
     def test_invalid_profile_name_falls_back_to_default(self, tmp_path, monkeypatch):
@@ -192,11 +191,50 @@ class TestProfileFlagRouting:
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
         monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", ["opencomputer", "-p", "BAD NAME", "chat"])
-        cli_mod = self._reload_cli()
-        cli_mod._apply_profile_override()
+        self._reload_cli()
         import os
 
         # Bad name = fallback to default = no OPENCOMPUTER_HOME set (or unchanged)
         assert "OPENCOMPUTER_HOME" not in os.environ or os.environ["OPENCOMPUTER_HOME"] == str(
             tmp_path
         )
+
+    def test_p_flag_missing_value_strips_flag(self, tmp_path, monkeypatch):
+        """Issue 2 regression: -p as last arg must strip flag, not leak to Typer."""
+        import sys
+
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
+        monkeypatch.setattr(sys, "argv", ["opencomputer", "-p"])
+        self._reload_cli()
+        import os
+
+        assert "-p" not in sys.argv
+        assert "OPENCOMPUTER_HOME" not in os.environ
+
+    def test_explicit_flag_beats_parent_env_var(self, tmp_path, monkeypatch):
+        """Issue 5 regression: -p flag must override OPENCOMPUTER_HOME pre-set by parent."""
+        import sys
+
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        # Simulate parent process having OPENCOMPUTER_HOME set to something unrelated
+        monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path / "some-other-place"))
+        monkeypatch.setattr(sys, "argv", ["opencomputer", "-p", "coder", "chat"])
+        self._reload_cli()
+        import os
+
+        # Flag must win, even though OPENCOMPUTER_HOME was pre-set
+        assert os.environ["OPENCOMPUTER_HOME"] == str(tmp_path / "profiles" / "coder")
+
+    def test_profile_empty_value_is_treated_as_default(self, tmp_path, monkeypatch):
+        """Issue 3 regression: --profile= (empty value) must not leak as falsy profile."""
+        import sys
+
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
+        monkeypatch.setattr(sys, "argv", ["opencomputer", "--profile=", "chat"])
+        self._reload_cli()
+        import os
+
+        # Empty value → fallback to default → no OPENCOMPUTER_HOME set
+        assert "OPENCOMPUTER_HOME" not in os.environ
