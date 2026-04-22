@@ -44,6 +44,12 @@ dev = [
   "black>=24.0",
   "mypy>=1.11",
 ]
+# Optional: self-hosted Honcho memory provider (Phase 10f.K–N). Install with
+#   pip install opencomputer[honcho]
+# plus Docker on the user's machine. See extensions/memory-honcho/README.md.
+honcho = [
+  "httpx>=0.27",
+]
 
 [project.scripts]
 opencomputer = "opencomputer.cli:main"
