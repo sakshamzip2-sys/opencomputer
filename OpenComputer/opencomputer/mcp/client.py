@@ -16,7 +16,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
+from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamablehttp_client
 
 from opencomputer.agent.config import MCPServerConfig
 from opencomputer.tools.registry import ToolRegistry
@@ -61,13 +63,11 @@ class MCPTool(BaseTool):
 
     async def execute(self, call: ToolCall) -> ToolResult:
         try:
-            result = await self.session.call_tool(
-                name=self.tool_name, arguments=call.arguments
-            )
+            result = await self.session.call_tool(name=self.tool_name, arguments=call.arguments)
             # Convert MCP result to our string format — concatenate text blocks
             parts: list[str] = []
             is_error = bool(getattr(result, "isError", False))
-            for block in (result.content or []):
+            for block in result.content or []:
                 if hasattr(block, "text") and block.text:
                     parts.append(block.text)
                 elif hasattr(block, "type") and block.type == "image":
@@ -114,11 +114,29 @@ class MCPConnection:
                 stdio_ctx = stdio_client(params)
                 streams = await self.exit_stack.enter_async_context(stdio_ctx)
                 read_stream, write_stream = streams
+            elif self.config.transport == "sse":
+                # Legacy MCP HTTP transport — Server-Sent Events.
+                # Use for older MCP servers that haven't migrated to streamable HTTP.
+                if not self.config.url:
+                    raise ValueError(f"MCP server '{self.config.name}' transport=sse requires url")
+                sse_ctx = sse_client(self.config.url, headers=self.config.headers or None)
+                streams = await self.exit_stack.enter_async_context(sse_ctx)
+                read_stream, write_stream = streams
             elif self.config.transport == "http":
-                # HTTP (SSE) transport kept minimal — just an example hook
-                raise NotImplementedError("http MCP transport — Phase 4.1")
+                # Modern MCP transport — streamable HTTP per spec rev 2025-03+.
+                # Returns (read, write, get_session_id); ignore the third element.
+                if not self.config.url:
+                    raise ValueError(f"MCP server '{self.config.name}' transport=http requires url")
+                http_ctx = streamablehttp_client(
+                    self.config.url, headers=self.config.headers or None
+                )
+                streams = await self.exit_stack.enter_async_context(http_ctx)
+                read_stream, write_stream, _get_sid = streams
             else:
-                raise ValueError(f"unknown MCP transport: {self.config.transport}")
+                raise ValueError(
+                    f"unknown MCP transport: {self.config.transport!r} "
+                    f"(supported: stdio, sse, http)"
+                )
 
             session = await self.exit_stack.enter_async_context(
                 ClientSession(read_stream, write_stream)
@@ -185,9 +203,7 @@ class MCPManager:
                     self.tool_registry.register(tool)
                     total += 1
                 except ValueError:
-                    logger.warning(
-                        "MCP tool name collision (skipped): %s", tool.schema.name
-                    )
+                    logger.warning("MCP tool name collision (skipped): %s", tool.schema.name)
         return total
 
     async def shutdown(self) -> None:
@@ -198,9 +214,7 @@ class MCPManager:
             await conn.disconnect()
         self.connections.clear()
 
-    def schedule_deferred_connect(
-        self, servers: list[MCPServerConfig]
-    ) -> asyncio.Task[int]:
+    def schedule_deferred_connect(self, servers: list[MCPServerConfig]) -> asyncio.Task[int]:
         """Start connecting in the background (kimi-cli pattern) — returns the Task."""
         return asyncio.create_task(self.connect_all(servers))
 

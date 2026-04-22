@@ -59,14 +59,21 @@ class MemoryConfig:
 
 @dataclass(frozen=True, slots=True)
 class MCPServerConfig:
-    """One MCP server the agent should connect to."""
+    """One MCP server the agent should connect to.
+
+    Three transports are supported:
+    - "stdio"   — local subprocess with command + args + env
+    - "sse"     — legacy MCP HTTP transport (Server-Sent Events)
+    - "http"    — modern MCP transport (Streamable HTTP, spec rev 2025-03+)
+    """
 
     name: str = ""
-    transport: str = "stdio"  # "stdio" or "http"
+    transport: str = "stdio"  # "stdio" | "sse" | "http"
     command: str = ""  # for stdio: the executable (e.g. "python3")
     args: tuple[str, ...] = ()  # for stdio: argv (use tuple for hashability)
-    url: str = ""  # for http: endpoint URL
-    env: dict[str, str] = field(default_factory=dict)  # optional env vars
+    url: str = ""  # for sse/http: endpoint URL
+    env: dict[str, str] = field(default_factory=dict)  # for stdio: env vars
+    headers: dict[str, str] = field(default_factory=dict)  # for sse/http: HTTP headers (auth)
     enabled: bool = True
 
 
