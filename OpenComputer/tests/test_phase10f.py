@@ -583,3 +583,144 @@ class TestPluginAPIMemoryProvider:
         api = self._make_api()
         with pytest.raises(TypeError, match="MemoryProvider"):
             api.register_memory_provider("not a provider")  # type: ignore[arg-type]
+
+
+# ─── 10f.D — Memory tool ────────────────────────────────────────────────
+
+
+class TestMemoryTool:
+    @pytest.fixture
+    def ctx(self, tmp_path):
+        from opencomputer.agent.memory import MemoryManager
+        from opencomputer.agent.memory_context import MemoryContext
+        from opencomputer.agent.state import SessionDB
+
+        mm = MemoryManager(
+            declarative_path=tmp_path / "MEMORY.md",
+            user_path=tmp_path / "USER.md",
+            skills_path=tmp_path / "skills",
+            memory_char_limit=2000,
+            user_char_limit=1000,
+        )
+        return MemoryContext(
+            manager=mm,
+            db=SessionDB(tmp_path / "sessions.db"),
+            session_id_provider=lambda: "test",
+        )
+
+    def _call(self, tool, **args):
+        from plugin_sdk.core import ToolCall
+
+        return asyncio.run(
+            tool.execute(ToolCall(id="tc-1", name="Memory", arguments=args))
+        )
+
+    def test_schema_exposes_name_and_enums(self, ctx):
+        from opencomputer.tools.memory_tool import MemoryTool
+
+        s = MemoryTool(ctx).schema
+        assert s.name == "Memory"
+        props = s.parameters["properties"]
+        assert set(props["action"]["enum"]) == {"add", "replace", "remove", "read"}
+        assert set(props["target"]["enum"]) == {"memory", "user"}
+
+    def test_add_memory(self, ctx):
+        from opencomputer.tools.memory_tool import MemoryTool
+
+        r = self._call(
+            MemoryTool(ctx),
+            action="add",
+            target="memory",
+            content="Saksham prefers concise output",
+        )
+        assert r.is_error is False
+        assert "Saksham prefers concise output" in ctx.manager.read_declarative()
+
+    def test_add_user(self, ctx):
+        from opencomputer.tools.memory_tool import MemoryTool
+
+        r = self._call(
+            MemoryTool(ctx),
+            action="add",
+            target="user",
+            content="user's timezone is Asia/Kolkata",
+        )
+        assert r.is_error is False
+        assert "Asia/Kolkata" in ctx.manager.read_user()
+
+    def test_replace_memory(self, ctx):
+        from opencomputer.tools.memory_tool import MemoryTool
+
+        ctx.manager.append_declarative("the moon is cheese")
+        r = self._call(
+            MemoryTool(ctx),
+            action="replace",
+            target="memory",
+            old="cheese",
+            new="rock",
+        )
+        assert r.is_error is False
+        assert "rock" in ctx.manager.read_declarative()
+
+    def test_replace_returns_error_when_not_found(self, ctx):
+        from opencomputer.tools.memory_tool import MemoryTool
+
+        r = self._call(
+            MemoryTool(ctx),
+            action="replace",
+            target="memory",
+            old="nonexistent",
+            new="z",
+        )
+        assert r.is_error is True
+        assert "not found" in r.content.lower()
+
+    def test_remove_memory(self, ctx):
+        from opencomputer.tools.memory_tool import MemoryTool
+
+        ctx.manager.append_declarative("temporary note")
+        r = self._call(
+            MemoryTool(ctx),
+            action="remove",
+            target="memory",
+            content="temporary note",
+        )
+        assert r.is_error is False
+        assert "temporary note" not in ctx.manager.read_declarative()
+
+    def test_read_memory(self, ctx):
+        from opencomputer.tools.memory_tool import MemoryTool
+
+        ctx.manager.append_declarative("entry-one")
+        ctx.manager.append_user("pref-one")
+        r_mem = self._call(MemoryTool(ctx), action="read", target="memory")
+        r_usr = self._call(MemoryTool(ctx), action="read", target="user")
+        assert r_mem.is_error is False and "entry-one" in r_mem.content
+        assert r_usr.is_error is False and "pref-one" in r_usr.content
+
+    def test_over_limit_returns_error_not_exception(self, ctx):
+        from opencomputer.tools.memory_tool import MemoryTool
+
+        r = self._call(
+            MemoryTool(ctx),
+            action="add",
+            target="memory",
+            content="x" * 5000,
+        )
+        assert r.is_error is True
+        assert "limit" in r.content.lower() or "too large" in r.content.lower()
+
+    def test_invalid_action_returns_error(self, ctx):
+        from opencomputer.tools.memory_tool import MemoryTool
+
+        r = self._call(MemoryTool(ctx), action="nuke", target="memory")
+        assert r.is_error is True
+        assert "nuke" in r.content or "unknown" in r.content.lower()
+
+    def test_invalid_target_returns_error(self, ctx):
+        from opencomputer.tools.memory_tool import MemoryTool
+
+        r = self._call(
+            MemoryTool(ctx), action="add", target="wrong", content="x"
+        )
+        assert r.is_error is True
