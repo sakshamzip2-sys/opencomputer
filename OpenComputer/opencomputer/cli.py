@@ -387,11 +387,20 @@ def setup() -> None:
 
 
 @app.command()
-def doctor() -> None:
-    """Diagnose common config/env issues."""
+def doctor(
+    fix: bool = typer.Option(
+        False, "--fix", help="Invoke plugin-contributed repairs in place."
+    ),
+) -> None:
+    """Diagnose common config/env issues.
+
+    With --fix, every plugin-registered HealthContribution is invoked with
+    fix=True and is expected to repair state (e.g. migrate a legacy config
+    shape, rewrite broken skill frontmatter) rather than merely report.
+    """
     from opencomputer.doctor import run_doctor
 
-    failures = run_doctor()
+    failures = run_doctor(fix=fix)
     if failures:
         raise typer.Exit(1)
 

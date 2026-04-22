@@ -170,9 +170,54 @@ async def _check_mcp(cfg) -> list[Check]:
     return out
 
 
-def run_doctor() -> int:
-    """Run all checks and print a report. Returns the number of failed checks."""
+async def _run_contributions(fix: bool) -> list[Check]:
+    """Run all plugin-contributed health contributions. See plugin_sdk/doctor.py.
+
+    Each contribution is `async (fix: bool) -> RepairResult`. When `fix=True`
+    a contribution is expected to mutate state in place and set `repaired=True`
+    on its result. Contributions raise-safe: any exception becomes a `fail`
+    Check so one broken plugin can't crash the whole doctor run.
+    """
+    from opencomputer.plugins.registry import registry as plugin_registry
+
+    # Ensure plugins are loaded so contributions are populated.
+    repo_root = Path(__file__).resolve().parent.parent
+    ext_dir = repo_root / "extensions"
+    search_paths: list[Path] = []
+    if ext_dir.exists():
+        search_paths.append(ext_dir)
+    user_dir = Path.home() / ".opencomputer" / "plugins"
+    if user_dir.exists():
+        search_paths.append(user_dir)
+    if search_paths and not plugin_registry.loaded:
+        plugin_registry.load_all(search_paths)
+
+    out: list[Check] = []
+    for c in plugin_registry.doctor_contributions:
+        try:
+            result = await c.run(fix)
+        except Exception as e:  # noqa: BLE001 — any plugin error becomes a fail
+            out.append(Check(c.id, "fail", f"{type(e).__name__}: {e}"))
+            continue
+        detail = result.detail
+        if result.repaired:
+            detail = f"[repaired] {detail}" if detail else "[repaired]"
+        out.append(Check(c.id, result.status, detail))
+    return out
+
+
+def run_doctor(fix: bool = False) -> int:
+    """Run all checks and print a report. Returns the number of failed checks.
+
+    When `fix=True`, every plugin-contributed HealthContribution is invoked
+    with `fix=True`, giving it the chance to repair state in place rather
+    than merely reporting the problem. Built-in checks are read-only either
+    way; repair belongs to plugins (the core doesn't know which legacy
+    config shape each plugin owns).
+    """
     console.print("\n[bold cyan]OpenComputer — Doctor[/bold cyan]\n")
+    if fix:
+        console.print("[dim]--fix mode: contributions may repair state in place.[/dim]\n")
 
     checks: list[Check] = [_check_python()]
     cfg_check, cfg = _check_config()
@@ -189,6 +234,14 @@ def run_doctor() -> int:
     except RuntimeError:
         mcp_checks = []
     checks.extend(mcp_checks)
+
+    # Plugin-contributed checks + repairs (run last so plugins see a fully-
+    # loaded registry, config, and DB-writable environment).
+    try:
+        contrib_checks = asyncio.run(_run_contributions(fix=fix))
+    except RuntimeError:
+        contrib_checks = []
+    checks.extend(contrib_checks)
 
     # Print
     max_name = max(len(c.name) for c in checks)

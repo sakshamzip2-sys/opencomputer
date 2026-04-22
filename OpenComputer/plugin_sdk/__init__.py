@@ -21,6 +21,12 @@ from plugin_sdk.core import (
     ToolCall,
     ToolResult,
 )
+from plugin_sdk.doctor import (
+    HealthContribution,
+    HealthRunFn,
+    HealthStatus,
+    RepairResult,
+)
 from plugin_sdk.hooks import HookContext, HookDecision, HookEvent, HookHandler, HookSpec
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
 from plugin_sdk.provider_contract import (
@@ -63,4 +69,9 @@ __all__ = [
     "DEFAULT_RUNTIME_CONTEXT",
     "DynamicInjectionProvider",
     "InjectionContext",
+    # doctor
+    "HealthContribution",
+    "HealthRunFn",
+    "HealthStatus",
+    "RepairResult",
 ]

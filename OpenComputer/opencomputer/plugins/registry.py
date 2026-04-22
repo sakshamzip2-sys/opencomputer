@@ -15,6 +15,7 @@ from opencomputer.hooks.engine import engine as hook_engine
 from opencomputer.plugins.discovery import PluginCandidate, discover
 from opencomputer.plugins.loader import LoadedPlugin, PluginAPI, load_plugin
 from opencomputer.tools.registry import registry as tool_registry
+from plugin_sdk.doctor import HealthContribution
 from plugin_sdk.provider_contract import BaseProvider
 
 
@@ -25,6 +26,7 @@ class PluginRegistry:
     providers: dict[str, BaseProvider] = field(default_factory=dict)
     channels: dict[str, object] = field(default_factory=dict)
     loaded: list[LoadedPlugin] = field(default_factory=list)
+    doctor_contributions: list[HealthContribution] = field(default_factory=list)
 
     def api(self) -> PluginAPI:
         return PluginAPI(
@@ -33,6 +35,7 @@ class PluginRegistry:
             provider_registry=self.providers,
             channel_registry=self.channels,
             injection_engine=injection_engine,
+            doctor_contributions=self.doctor_contributions,
         )
 
     def load_all(self, search_paths: list[Path]) -> list[LoadedPlugin]:

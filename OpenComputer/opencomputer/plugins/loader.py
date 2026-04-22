@@ -53,12 +53,18 @@ class PluginAPI:
         provider_registry: dict[str, Any],
         channel_registry: dict[str, Any],
         injection_engine: Any = None,
+        doctor_contributions: list[Any] | None = None,
     ) -> None:
         self.tools = tool_registry
         self.hooks = hook_engine
         self.providers = provider_registry
         self.channels = channel_registry
         self.injection = injection_engine
+        # Plugins append to this list via register_doctor_contribution. The core
+        # doctor runs every registered contribution after the built-in checks.
+        self.doctor_contributions = (
+            doctor_contributions if doctor_contributions is not None else []
+        )
 
     def register_tool(self, tool: Any) -> None:
         self.tools.register(tool)
@@ -79,6 +85,16 @@ class PluginAPI:
                 "Injection engine unavailable — plugin-SDK version mismatch?"
             )
         self.injection.register(provider)
+
+    def register_doctor_contribution(self, contribution: Any) -> None:
+        """Register a HealthContribution — runs on `opencomputer doctor [--fix]`.
+
+        Each contribution is an async (fix: bool) -> RepairResult callable
+        wrapped in a HealthContribution(id, description, run). When the user
+        passes --fix, the contribution is expected to repair in place.
+        Source: openclaw DoctorHealthContribution.
+        """
+        self.doctor_contributions.append(contribution)
 
 
 def load_plugin(candidate: PluginCandidate, api: PluginAPI) -> LoadedPlugin | None:
