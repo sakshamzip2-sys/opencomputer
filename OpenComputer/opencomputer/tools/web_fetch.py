@@ -83,9 +83,7 @@ class WebFetchTool(BaseTool):
         timeout_s = float(args.get("timeout_s", DEFAULT_TIMEOUT_S))
 
         if not url:
-            return ToolResult(
-                tool_call_id=call.id, content="Error: url is required", is_error=True
-            )
+            return ToolResult(tool_call_id=call.id, content="Error: url is required", is_error=True)
         if not url.startswith(("http://", "https://")):
             return ToolResult(
                 tool_call_id=call.id,
@@ -122,10 +120,7 @@ class WebFetchTool(BaseTool):
 
         ct = resp.headers.get("content-type", "").lower()
         # Plain text / JSON: return as-is. HTML: strip first.
-        if "html" in ct:
-            body = _html_to_text(resp.text)
-        else:
-            body = resp.text
+        body = _html_to_text(resp.text) if "html" in ct else resp.text
 
         if len(body) > max_chars:
             body = body[:max_chars] + (
