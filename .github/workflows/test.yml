@@ -3,8 +3,12 @@ name: Tests
 on:
   push:
     branches: [main]
+  # Fire on PRs targeting any branch so cross-branch / stacked PRs
+  # (e.g. phase-12a → phase-11d → main) get checked too. Without this,
+  # the workflow only ran on PRs against main and stacked PRs landed
+  # untested.
   pull_request:
-    branches: [main]
+    branches: ["**"]
 
 jobs:
   test:

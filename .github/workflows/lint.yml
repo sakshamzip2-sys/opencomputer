@@ -3,8 +3,9 @@ name: Lint
 on:
   push:
     branches: [main]
+  # Fire on PRs targeting any branch so stacked PRs get linted too.
   pull_request:
-    branches: [main]
+    branches: ["**"]
 
 jobs:
   ruff:
