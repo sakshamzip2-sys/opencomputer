@@ -1,0 +1,133 @@
+"""RunTests tool — auto-detect project type and invoke the matching runner.
+
+Supports pytest (Python), vitest / jest (Node), cargo test (Rust), go test.
+Detection is by file-marker; explicit `runner` argument overrides.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Optional
+
+from plugin_sdk.core import ToolCall, ToolResult
+from plugin_sdk.tool_contract import BaseTool, ToolSchema
+
+_MARKERS = [
+    ("pytest", ("pyproject.toml", "pytest.ini", "setup.cfg", "tests")),
+    ("vitest", ("vitest.config.ts", "vitest.config.js")),
+    ("jest", ("jest.config.ts", "jest.config.js")),
+    ("cargo", ("Cargo.toml",)),
+    ("go", ("go.mod",)),
+]
+
+_COMMANDS: dict[str, list[str]] = {
+    "pytest": ["pytest", "-q"],
+    "vitest": ["npx", "vitest", "run"],
+    "jest": ["npx", "jest"],
+    "cargo": ["cargo", "test"],
+    "go": ["go", "test", "./..."],
+}
+
+
+def _detect(root: Path) -> Optional[str]:
+    for runner, markers in _MARKERS:
+        for m in markers:
+            if (root / m).exists():
+                return runner
+    return None
+
+
+class RunTestsTool(BaseTool):
+    def __init__(self, ctx):
+        self._ctx = ctx
+
+    @property
+    def schema(self) -> ToolSchema:
+        return ToolSchema(
+            name="RunTests",
+            description=(
+                "Run the project's test suite. Auto-detects pytest / vitest / "
+                "jest / cargo test / go test based on project markers. Pass "
+                "`runner` to force a specific one, `filter` to narrow."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "runner": {
+                        "type": "string",
+                        "enum": list(_COMMANDS.keys()),
+                        "description": "Force a specific test runner.",
+                    },
+                    "filter": {
+                        "type": "string",
+                        "description": "Test selector passed to the runner.",
+                    },
+                    "timeout_s": {
+                        "type": "integer",
+                        "default": 120,
+                        "minimum": 5,
+                        "maximum": 600,
+                    },
+                },
+            },
+        )
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        args = dict(call.arguments)
+        root = self._ctx.rewind_store.workspace_root
+        runner = args.get("runner") or _detect(root)
+        if runner is None:
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    "Could not detect a test runner. Pass `runner` explicitly "
+                    f"(options: {', '.join(_COMMANDS)})."
+                ),
+                is_error=True,
+            )
+
+        cmd = list(_COMMANDS[runner])
+        if args.get("filter"):
+            cmd.append(str(args["filter"]))
+        timeout = int(args.get("timeout_s") or 120)
+
+        self._ctx.emit_progress(
+            {"msg": f"running {runner}", "pct": 0, "cmd": cmd}
+        )
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(root),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return ToolResult(
+                    tool_call_id=call.id,
+                    content=f"{runner} timed out after {timeout}s",
+                    is_error=True,
+                )
+        except FileNotFoundError:
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"{runner} not found on PATH. Install it or pass `runner`.",
+                is_error=True,
+            )
+
+        text = stdout.decode("utf-8", errors="replace")
+        self._ctx.emit_progress({"msg": f"{runner} done", "pct": 100})
+
+        is_error = proc.returncode != 0
+        suffix = f"\n\n({runner} exited with code {proc.returncode})"
+        return ToolResult(
+            tool_call_id=call.id, content=text + suffix, is_error=is_error
+        )
+
+
+__all__ = ["RunTestsTool", "_detect"]
