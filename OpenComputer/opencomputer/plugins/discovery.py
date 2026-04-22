@@ -47,19 +47,26 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
     except Exception as e:  # noqa: BLE001
         logger.warning("failed to parse manifest %s: %s", manifest_path, e)
         return None
-    if "id" not in data or "name" not in data or "version" not in data:
-        logger.warning("manifest %s missing required fields (id, name, version)", manifest_path)
+    # Phase 12g: typed pydantic validation runs first so wrong types,
+    # unknown kinds, malformed ids etc. fail with a useful message before
+    # we ever construct the dataclass. One bad plugin shouldn't break
+    # the rest — log + return None.
+    from opencomputer.plugins.manifest_validator import validate_manifest
+
+    schema, err = validate_manifest(data)
+    if schema is None:
+        logger.warning("invalid manifest %s — %s", manifest_path, err)
         return None
     return PluginManifest(
-        id=str(data["id"]),
-        name=str(data["name"]),
-        version=str(data["version"]),
-        description=str(data.get("description", "")),
-        author=str(data.get("author", "")),
-        homepage=str(data.get("homepage", "")),
-        license=str(data.get("license", "MIT")),
-        kind=data.get("kind", "mixed"),
-        entry=str(data.get("entry", "")),
+        id=schema.id,
+        name=schema.name,
+        version=schema.version,
+        description=schema.description,
+        author=schema.author,
+        homepage=schema.homepage,
+        license=schema.license,
+        kind=schema.kind,
+        entry=schema.entry,
     )
 
 
