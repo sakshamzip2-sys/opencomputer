@@ -28,6 +28,7 @@ from opencomputer.agent.memory import MemoryManager
 from opencomputer.agent.prompt_builder import PromptBuilder
 from opencomputer.agent.state import SessionDB
 from opencomputer.agent.step import StepOutcome
+from opencomputer.agent.tool_ordering import sort_tools_for_request
 from opencomputer.tools.registry import registry
 from plugin_sdk.core import Message, StopReason, ToolCall
 from plugin_sdk.injection import InjectionContext
@@ -236,7 +237,7 @@ class AgentLoop:
                 model=self.config.model.model,
                 messages=messages,
                 system=system,
-                tools=registry.schemas(),
+                tools=sort_tools_for_request(registry.schemas()),
                 max_tokens=self.config.model.max_tokens,
                 temperature=self.config.model.temperature,
             ):
@@ -252,7 +253,7 @@ class AgentLoop:
                 model=self.config.model.model,
                 messages=messages,
                 system=system,
-                tools=registry.schemas(),
+                tools=sort_tools_for_request(registry.schemas()),
                 max_tokens=self.config.model.max_tokens,
                 temperature=self.config.model.temperature,
             )
