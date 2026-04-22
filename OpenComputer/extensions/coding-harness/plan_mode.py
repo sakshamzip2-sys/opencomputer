@@ -10,12 +10,21 @@ working without change. New code should import from the canonical locations.
 
 from __future__ import annotations
 
-from hooks.plan_block import (  # type: ignore[import-not-found]
+import sys as _sys
+from pathlib import Path as _Path
+
+# Ensure this plugin's root is on sys.path so nested imports (hooks.*, modes.*)
+# resolve even when the module is loaded directly (not via the plugin loader).
+_PLUGIN_ROOT = _Path(__file__).resolve().parent
+if str(_PLUGIN_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_PLUGIN_ROOT))
+
+from hooks.plan_block import (  # type: ignore[import-not-found]  # noqa: E402
     DESTRUCTIVE_TOOLS,
     build_plan_mode_hook_spec,
     plan_mode_block_hook,
 )
-from modes.plan_mode import PlanModeInjectionProvider  # type: ignore[import-not-found]
+from modes.plan_mode import PlanModeInjectionProvider  # type: ignore[import-not-found]  # noqa: E402
 
 PLAN_MODE_TEXT = (
     "## PLAN MODE ACTIVE\n\n"
