@@ -12,6 +12,9 @@ Available events:
     SessionStart     — fires once when a new conversation begins
     SessionEnd       — fires when conversation ends
     UserPromptSubmit — fires when the user submits a message
+    PreCompact       — fires immediately before CompactionEngine summarises
+    SubagentStop     — fires when a delegated subagent finishes its run
+    Notification     — fires when PushNotification is dispatched (one per channel)
 """
 
 from __future__ import annotations
@@ -32,6 +35,9 @@ class HookEvent(str, Enum):
     SESSION_START = "SessionStart"
     SESSION_END = "SessionEnd"
     USER_PROMPT_SUBMIT = "UserPromptSubmit"
+    PRE_COMPACT = "PreCompact"
+    SUBAGENT_STOP = "SubagentStop"
+    NOTIFICATION = "Notification"
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,3 +84,17 @@ __all__ = [
     "HookHandler",
     "HookSpec",
 ]
+
+#: All HookEvent values, in declaration order. Useful for plugins that want to
+#: register a single handler against every lifecycle event (audit logging etc.).
+ALL_HOOK_EVENTS: tuple[HookEvent, ...] = (
+    HookEvent.PRE_TOOL_USE,
+    HookEvent.POST_TOOL_USE,
+    HookEvent.STOP,
+    HookEvent.SESSION_START,
+    HookEvent.SESSION_END,
+    HookEvent.USER_PROMPT_SUBMIT,
+    HookEvent.PRE_COMPACT,
+    HookEvent.SUBAGENT_STOP,
+    HookEvent.NOTIFICATION,
+)

@@ -27,8 +27,16 @@ from plugin_sdk.doctor import (
     HealthStatus,
     RepairResult,
 )
-from plugin_sdk.hooks import HookContext, HookDecision, HookEvent, HookHandler, HookSpec
+from plugin_sdk.hooks import (
+    ALL_HOOK_EVENTS,
+    HookContext,
+    HookDecision,
+    HookEvent,
+    HookHandler,
+    HookSpec,
+)
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
+from plugin_sdk.interaction import InteractionRequest, InteractionResponse
 from plugin_sdk.provider_contract import (
     BaseProvider,
     ProviderResponse,
@@ -64,6 +72,7 @@ __all__ = [
     "HookDecision",
     "HookHandler",
     "HookSpec",
+    "ALL_HOOK_EVENTS",
     # runtime + injection
     "RuntimeContext",
     "DEFAULT_RUNTIME_CONTEXT",
@@ -74,4 +83,7 @@ __all__ = [
     "HealthRunFn",
     "HealthStatus",
     "RepairResult",
+    # interaction (Phase 11b)
+    "InteractionRequest",
+    "InteractionResponse",
 ]
