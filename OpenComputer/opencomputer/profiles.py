@@ -5,9 +5,14 @@ separate MEMORY.md/USER.md/config.yaml set at ~/.opencomputer/profiles/coder/.
 The default profile lives at the root (~/.opencomputer/) for zero-migration
 of existing users.
 
-Paired with the _apply_profile_override() in opencomputer/cli.py which sets
-OPENCOMPUTER_HOME before any opencomputer.* import, so _home() resolves to
-the correct profile directory everywhere downstream.
+Paired with :func:`opencomputer.cli._apply_profile_override`, which runs
+inside ``main()`` to strip the ``-p`` / ``--profile`` flag from argv and
+set ``OPENCOMPUTER_HOME``. That env var is consulted lazily by
+:func:`opencomputer.agent.config._home` on every call (no module-level
+caching), so any code path that resolves paths AFTER ``main()`` has
+called the override sees the correct profile directory — whether it
+runs during Typer command dispatch, inside an agent loop, or from a
+subprocess that inherits the env.
 """
 
 from __future__ import annotations

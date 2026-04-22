@@ -108,14 +108,18 @@ class TestProfileValidation:
 
 
 class TestProfileFlagRouting:
-    """Tests for _apply_profile_override. Each test must import fresh to avoid module caching."""
+    """Tests for ``_apply_profile_override``.
 
-    def _reload_cli(self):
-        import importlib
+    Phase 14.A originally ran this function as a module-level side effect
+    at import time, so tests reloaded ``opencomputer.cli`` to re-run it.
+    After the Phase 14-followup refactor, the function runs inside
+    ``main()`` and is a normal callable — tests just invoke it directly.
+    """
 
-        import opencomputer.cli as cli_mod
+    def _run_override(self):
+        from opencomputer.cli import _apply_profile_override
 
-        return importlib.reload(cli_mod)
+        _apply_profile_override()
 
     def test_p_flag_sets_opencomputer_home(self, tmp_path, monkeypatch):
         import sys
@@ -123,7 +127,7 @@ class TestProfileFlagRouting:
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
         monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", ["opencomputer", "-p", "coder", "chat"])
-        self._reload_cli()
+        self._run_override()
         import os
 
         assert os.environ["OPENCOMPUTER_HOME"] == str(tmp_path / "profiles" / "coder")
@@ -134,7 +138,7 @@ class TestProfileFlagRouting:
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
         monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", ["opencomputer", "--profile=stocks", "chat"])
-        self._reload_cli()
+        self._run_override()
         import os
 
         assert os.environ["OPENCOMPUTER_HOME"] == str(tmp_path / "profiles" / "stocks")
@@ -145,7 +149,7 @@ class TestProfileFlagRouting:
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
         monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", ["opencomputer", "--profile", "stocks", "chat"])
-        self._reload_cli()
+        self._run_override()
         import os
 
         assert os.environ["OPENCOMPUTER_HOME"] == str(tmp_path / "profiles" / "stocks")
@@ -158,7 +162,7 @@ class TestProfileFlagRouting:
         tmp_path.mkdir(exist_ok=True)
         (tmp_path / "active_profile").write_text("coder\n")
         monkeypatch.setattr(sys, "argv", ["opencomputer", "chat"])
-        self._reload_cli()
+        self._run_override()
         import os
 
         assert os.environ["OPENCOMPUTER_HOME"] == str(tmp_path / "profiles" / "coder")
@@ -171,7 +175,7 @@ class TestProfileFlagRouting:
         tmp_path.mkdir(exist_ok=True)
         (tmp_path / "active_profile").write_text("coder\n")
         monkeypatch.setattr(sys, "argv", ["opencomputer", "-p", "personal", "chat"])
-        self._reload_cli()
+        self._run_override()
         import os
 
         assert os.environ["OPENCOMPUTER_HOME"] == str(tmp_path / "profiles" / "personal")
@@ -182,7 +186,7 @@ class TestProfileFlagRouting:
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
         monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", ["opencomputer", "-p", "coder", "chat", "--plan"])
-        self._reload_cli()
+        self._run_override()
         assert sys.argv == ["opencomputer", "chat", "--plan"]
 
     def test_invalid_profile_name_falls_back_to_default(self, tmp_path, monkeypatch):
@@ -191,7 +195,7 @@ class TestProfileFlagRouting:
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
         monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", ["opencomputer", "-p", "BAD NAME", "chat"])
-        self._reload_cli()
+        self._run_override()
         import os
 
         # Bad name = fallback to default = no OPENCOMPUTER_HOME set (or unchanged)
@@ -206,7 +210,7 @@ class TestProfileFlagRouting:
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
         monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", ["opencomputer", "-p"])
-        self._reload_cli()
+        self._run_override()
         import os
 
         assert "-p" not in sys.argv
@@ -220,7 +224,7 @@ class TestProfileFlagRouting:
         # Simulate parent process having OPENCOMPUTER_HOME set to something unrelated
         monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path / "some-other-place"))
         monkeypatch.setattr(sys, "argv", ["opencomputer", "-p", "coder", "chat"])
-        self._reload_cli()
+        self._run_override()
         import os
 
         # Flag must win, even though OPENCOMPUTER_HOME was pre-set
@@ -233,8 +237,118 @@ class TestProfileFlagRouting:
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
         monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", ["opencomputer", "--profile=", "chat"])
-        self._reload_cli()
+        self._run_override()
         import os
 
         # Empty value → fallback to default → no OPENCOMPUTER_HOME set
         assert "OPENCOMPUTER_HOME" not in os.environ
+
+
+class TestProfileRoutingLazyInvariant:
+    """Guard the invariant the Phase 14-followup refactor depends on.
+
+    The pre-import ``_apply_profile_override()`` block was removed from
+    the top of ``opencomputer/cli.py`` and moved into ``main()``. That
+    move is only safe as long as NO module captures ``OPENCOMPUTER_HOME``
+    at import time (which would freeze a stale path before ``main()``
+    ever runs). If someone ever writes::
+
+        HOME = _home()                    # at module top
+        DEFAULT_DB_PATH = HOME / "sessions.db"
+        class Tool: config_path = _home() / "tool.yaml"   # class-body
+
+    the refactor silently breaks: ``opencomputer -p coder`` sets the
+    env var correctly inside ``main()`` but the frozen constant still
+    points at ``~/.opencomputer/``. These two tests catch that pattern
+    — the static one at write-time, the runtime one end-to-end.
+    """
+
+    def test_no_module_level_home_capture(self):
+        """Static AST scan — no module-top assignment calls ``_home()``.
+
+        Scans every .py file under ``opencomputer/`` and asserts no
+        *module-level* assignment statement has ``_home()`` or
+        ``environ[...OPENCOMPUTER_HOME...]`` on the RHS. Assignments
+        inside functions, class bodies, and ``default_factory=lambda:``
+        closures are fine — this deliberately only catches code that
+        runs at import.
+        """
+        import ast
+
+        pkg_root = Path(__file__).resolve().parent.parent / "opencomputer"
+        offenders: list[str] = []
+        for py_file in pkg_root.rglob("*.py"):
+            if "__pycache__" in py_file.parts:
+                continue
+            try:
+                tree = ast.parse(py_file.read_text())
+            except SyntaxError:
+                continue
+            # tree.body only contains module-level statements — exactly
+            # what we want; nested assignments are skipped by design.
+            for node in tree.body:
+                if not isinstance(node, ast.Assign | ast.AnnAssign):
+                    continue
+                rhs = node.value
+                if rhs is None:
+                    continue  # bare annotation with no value
+                rhs_src = ast.unparse(rhs)
+                if (
+                    "_home()" in rhs_src
+                    or 'environ.get("OPENCOMPUTER_HOME"' in rhs_src
+                    or 'environ["OPENCOMPUTER_HOME"]' in rhs_src
+                ):
+                    rel = py_file.relative_to(pkg_root.parent)
+                    offenders.append(f"{rel}:{node.lineno}: {ast.unparse(node)}")
+
+        assert not offenders, (
+            "Module-level code captures OPENCOMPUTER_HOME / _home() at import. "
+            "This breaks profile routing: `opencomputer -p coder` sets the env "
+            "inside main(), but your frozen constant stays pointing at the old "
+            "HOME. Use `field(default_factory=lambda: _home() / ...)` on a "
+            "dataclass, or call `_home()` inside a function/method instead.\n"
+            "Offenders:\n  " + "\n  ".join(offenders)
+        )
+
+    def test_override_after_full_import_updates_paths(self, tmp_path, monkeypatch):
+        """End-to-end: import everything first, THEN route, verify paths.
+
+        Simulates the real main()-time ordering. If any module silently
+        froze HOME during imports (something the AST check missed), the
+        post-override ``default_config()`` produces stale paths and
+        this assertion fires.
+        """
+        import importlib
+        import sys
+
+        monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+
+        # Force a fresh import of cli.py (which pulls in default_config,
+        # agent/state, agent/memory, plugins/*, tools/*, plugin_sdk/*).
+        # This is the WORST CASE for the lazy-invariant: every module is
+        # loaded BEFORE _apply_profile_override() ever runs.
+        import opencomputer.cli as cli_module
+
+        importlib.reload(cli_module)
+
+        # Now route to a named profile (as main() would).
+        monkeypatch.setattr(sys, "argv", ["opencomputer", "-p", "coder", "chat"])
+        cli_module._apply_profile_override()
+
+        # Every path-bearing field in default_config() must reflect the
+        # new HOME. If any is still pointing at tmp_path (the root) or
+        # ~/.opencomputer/, some module froze it at import time.
+        from opencomputer.agent.config import default_config
+        from opencomputer.agent.config_store import config_file_path
+
+        cfg = default_config()
+        expected_home = tmp_path / "profiles" / "coder"
+        assert cfg.home == expected_home, (
+            f"cfg.home frozen at import — got {cfg.home}, want {expected_home}"
+        )
+        assert cfg.session.db_path == expected_home / "sessions.db"
+        assert cfg.memory.declarative_path == expected_home / "MEMORY.md"
+        assert cfg.memory.user_path == expected_home / "USER.md"
+        assert cfg.memory.skills_path == expected_home / "skills"
+        assert config_file_path() == expected_home / "config.yaml"

@@ -2,77 +2,9 @@
 
 from __future__ import annotations
 
-# ─── Pre-import profile routing (Phase 14.A) ──────────────────────────
-# Intercept -p / --profile from sys.argv BEFORE any opencomputer.* import,
-# because downstream modules read OPENCOMPUTER_HOME at import time via _home().
-# Flag > sticky active_profile file > default (root).
+import asyncio
 import os
 import sys
-
-
-def _apply_profile_override() -> None:
-    argv = sys.argv
-    profile_name: str | None = None
-    # Strip -p/--profile flag from argv so Typer doesn't see it as unknown option
-    new_argv: list[str] = [argv[0]] if argv else []
-    i = 1
-    while i < len(argv):
-        arg = argv[i]
-        if arg in ("-p", "--profile"):
-            if i + 1 < len(argv):
-                profile_name = argv[i + 1]
-                i += 2
-            else:
-                # -p with no following value: strip the flag, fall back to
-                # default. Don't crash — let Typer report any downstream issue
-                # cleanly (in practice there's nothing after -p to confuse it).
-                i += 1
-            continue
-        if arg.startswith("--profile="):
-            profile_name = arg.split("=", 1)[1]
-            i += 1
-            continue
-        new_argv.append(arg)
-        i += 1
-    sys.argv = new_argv
-
-    # Normalise empty-string profile (e.g. `--profile=`) to None so the
-    # fallback path is explicit rather than a silent falsy pass-through.
-    profile_name = profile_name or None
-
-    if profile_name is None:
-        # No flag. Only consult the sticky file if OPENCOMPUTER_HOME is not
-        # already set — this keeps the function idempotent across multiple
-        # calls (e.g. module reload + explicit call in tests) and means
-        # a parent-process env var wins when no flag was given.
-        if "OPENCOMPUTER_HOME" not in os.environ:
-            try:
-                from opencomputer.profiles import read_active_profile
-
-                profile_name = read_active_profile()
-            except Exception:
-                profile_name = None
-
-    # Explicit flag always wins — even if OPENCOMPUTER_HOME was pre-set in
-    # the parent process. Without this, `opencomputer -p coder` would be
-    # silently suppressed whenever a parent had OPENCOMPUTER_HOME exported.
-    if profile_name and profile_name != "default":
-        try:
-            from opencomputer.profiles import get_profile_dir
-
-            os.environ["OPENCOMPUTER_HOME"] = str(get_profile_dir(profile_name))
-        except Exception:
-            # Invalid profile name (from argv or sticky file) — silently fall
-            # back to default. _apply_profile_override MUST NOT crash the CLI.
-            pass
-
-
-# Apply profile override BEFORE any opencomputer.* module import
-_apply_profile_override()
-
-# ─── Regular imports follow ────────────────────────────────────────────
-
-import asyncio
 import uuid
 
 import typer
@@ -105,6 +37,78 @@ from opencomputer.tools.web_fetch import WebFetchTool
 from opencomputer.tools.web_search import WebSearchTool
 from opencomputer.tools.write import WriteTool
 from plugin_sdk.runtime_context import RuntimeContext
+
+
+def _apply_profile_override() -> None:
+    """Intercept ``-p`` / ``--profile`` from sys.argv and set OPENCOMPUTER_HOME.
+
+    Called from :func:`main` before ``app()`` runs. Stripping must happen
+    before Typer parses argv (otherwise Typer flags ``-p`` as an unknown
+    option on subcommands). Setting ``OPENCOMPUTER_HOME`` must happen
+    before any code calls :func:`opencomputer.agent.config._home` — today
+    that's always deferred until a Typer command body runs (module-level
+    callers use ``default_factory=lambda: _home() / ...``), so calling
+    from ``main()`` is sufficient. Flag beats sticky ``active_profile``
+    file beats default root.
+
+    Safe to call multiple times: each call re-derives argv from the
+    current ``sys.argv`` and overwrites it in place. Exception handling
+    is intentionally narrow — this function MUST NOT crash the CLI; a
+    bad profile name falls back to default and the user gets a normal
+    error downstream.
+    """
+    argv = sys.argv
+    profile_name: str | None = None
+    # Strip -p/--profile flag from argv so Typer doesn't see it as unknown option
+    new_argv: list[str] = [argv[0]] if argv else []
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("-p", "--profile"):
+            if i + 1 < len(argv):
+                profile_name = argv[i + 1]
+                i += 2
+            else:
+                # -p with no following value: strip the flag, fall back to
+                # default. Don't crash — let Typer report any downstream issue
+                # cleanly (in practice there's nothing after -p to confuse it).
+                i += 1
+            continue
+        if arg.startswith("--profile="):
+            profile_name = arg.split("=", 1)[1]
+            i += 1
+            continue
+        new_argv.append(arg)
+        i += 1
+    sys.argv = new_argv
+
+    # Normalise empty-string profile (e.g. `--profile=`) to None so the
+    # fallback path is explicit rather than a silent falsy pass-through.
+    profile_name = profile_name or None
+
+    # No flag + OPENCOMPUTER_HOME unset = consult the sticky active-profile
+    # file. Parent-process env var wins when no flag was given.
+    if profile_name is None and "OPENCOMPUTER_HOME" not in os.environ:
+        try:
+            from opencomputer.profiles import read_active_profile
+
+            profile_name = read_active_profile()
+        except Exception:
+            profile_name = None
+
+    # Explicit flag always wins — even if OPENCOMPUTER_HOME was pre-set in
+    # the parent process. Without this, `opencomputer -p coder` would be
+    # silently suppressed whenever a parent had OPENCOMPUTER_HOME exported.
+    if profile_name and profile_name != "default":
+        try:
+            from opencomputer.profiles import get_profile_dir
+
+            os.environ["OPENCOMPUTER_HOME"] = str(get_profile_dir(profile_name))
+        except Exception:
+            # Invalid profile name (from argv or sticky file) — silently fall
+            # back to default. _apply_profile_override MUST NOT crash the CLI.
+            pass
+
 
 app = typer.Typer(
     name="opencomputer",
@@ -750,6 +754,9 @@ def batch(
 
 
 def main() -> None:
+    # Profile routing runs here (not at import time) so tests and library
+    # consumers can import this module without their argv being mutated.
+    _apply_profile_override()
     app()
 
 

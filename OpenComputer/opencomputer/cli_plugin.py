@@ -185,9 +185,9 @@ def where(
 
     active = read_active_profile()
     if active is not None:
-        # Don't rely on _home() here — it reads OPENCOMPUTER_HOME which is set
-        # by _apply_profile_override at CLI entry; we might be invoked in a
-        # context where that hasn't run (tests, programmatic).
+        # Don't rely on _home() here — it reads OPENCOMPUTER_HOME which is
+        # set by _apply_profile_override inside main(); we might be invoked
+        # in a context where main() hasn't run (tests, programmatic).
         search.append(get_profile_dir(active) / "plugins")
     search.append(get_default_root() / "plugins")
     repo_root = Path(__file__).resolve().parent.parent

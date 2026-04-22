@@ -207,14 +207,13 @@ def _load_honcho_bootstrap():
     """
     import importlib.util
     import sys
-    from pathlib import Path as _P
 
     mod_name = "_memory_honcho_bootstrap"
     # Cache: return already-loaded module (avoids double-exec side effects
     # AND fixes the dataclass(slots=True) module-registration requirement).
     if mod_name in sys.modules:
         return sys.modules[mod_name]
-    repo_root = _P(__file__).resolve().parent.parent
+    repo_root = Path(__file__).resolve().parent.parent
     bootstrap_py = repo_root / "extensions" / "memory-honcho" / "bootstrap.py"
     if not bootstrap_py.exists():
         return None
