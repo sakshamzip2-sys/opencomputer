@@ -718,3 +718,79 @@ class TestCLAUDEmdUpdated:
         # The follow-up paragraph should document the move.
         assert "Honcho" in content
         assert "Phase 10f.K–N" in content or "memory-honcho" in content
+
+
+# ─── Phase 14.J — Honcho host key per active profile ───────────────────
+
+
+def _load_plugin_entry_module():
+    """Load extensions/memory-honcho/plugin.py with its .provider sibling
+    resolvable — same trick as _load_plugin_module in TestHonchoSkeleton.
+    """
+    import sys
+
+    parent = str(_EXT_DIR)
+    if parent not in sys.path:
+        sys.path.insert(0, parent)
+    pkg_name = "_honcho_14j_pkg"
+    pkg_spec = importlib.machinery.ModuleSpec(
+        pkg_name, loader=None, origin=str(_EXT_DIR), is_package=True
+    )
+    pkg_spec.submodule_search_locations = [str(_EXT_DIR)]
+    pkg = importlib.util.module_from_spec(pkg_spec)
+    sys.modules[pkg_name] = pkg
+    prov_spec = importlib.util.spec_from_file_location(
+        f"{pkg_name}.provider", _EXT_DIR / "provider.py"
+    )
+    prov_mod = importlib.util.module_from_spec(prov_spec)
+    sys.modules[f"{pkg_name}.provider"] = prov_mod
+    prov_spec.loader.exec_module(prov_mod)
+    plug_spec = importlib.util.spec_from_file_location(
+        f"{pkg_name}.plugin", _EXT_DIR / "plugin.py"
+    )
+    plug_mod = importlib.util.module_from_spec(plug_spec)
+    sys.modules[f"{pkg_name}.plugin"] = plug_mod
+    plug_spec.loader.exec_module(plug_mod)
+    return plug_mod
+
+
+class TestHonchoHostKey:
+    """14.J — host_key derived from active profile."""
+
+    def test_default_profile_uses_bare_host_key(self, tmp_path, monkeypatch):
+        """With no sticky profile, host_key is 'opencomputer'."""
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.delenv("HONCHO_HOST_KEY", raising=False)
+        mod = _load_plugin_entry_module()
+        cfg = mod._config_from_env()
+        assert cfg.host_key == "opencomputer"
+
+    def test_named_profile_uses_suffixed_host_key(self, tmp_path, monkeypatch):
+        """Sticky 'coder' profile → host_key 'opencomputer.coder'."""
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.delenv("HONCHO_HOST_KEY", raising=False)
+        tmp_path.mkdir(exist_ok=True)
+        (tmp_path / "active_profile").write_text("coder\n")
+        mod = _load_plugin_entry_module()
+        cfg = mod._config_from_env()
+        assert cfg.host_key == "opencomputer.coder"
+
+    def test_explicit_env_var_wins(self, tmp_path, monkeypatch):
+        """HONCHO_HOST_KEY overrides any profile derivation."""
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.setenv("HONCHO_HOST_KEY", "custom-key")
+        tmp_path.mkdir(exist_ok=True)
+        (tmp_path / "active_profile").write_text("coder\n")
+        mod = _load_plugin_entry_module()
+        cfg = mod._config_from_env()
+        assert cfg.host_key == "custom-key"
+
+    def test_corrupt_active_profile_falls_back_to_default(self, tmp_path, monkeypatch):
+        """Invalid name in active_profile file → fall back to 'opencomputer'."""
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.delenv("HONCHO_HOST_KEY", raising=False)
+        tmp_path.mkdir(exist_ok=True)
+        (tmp_path / "active_profile").write_text("BAD NAME WITH SPACES\n")
+        mod = _load_plugin_entry_module()
+        cfg = mod._config_from_env()
+        assert cfg.host_key == "opencomputer"

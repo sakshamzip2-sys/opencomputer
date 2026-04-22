@@ -47,14 +47,38 @@ def _config_from_env():
         except ValueError:
             return default
 
+    # Phase 14.J — host key derives from the active profile unless
+    # HONCHO_HOST_KEY is explicitly set. This gives each OpenComputer
+    # profile its own Honcho AI peer model; without it, enabling Honcho
+    # across profiles muxes all observations into ONE peer and the
+    # per-profile-persona promise breaks.
+    explicit_host_key = os.environ.get("HONCHO_HOST_KEY", "").strip()
+    host_key = explicit_host_key or _derive_host_key_from_profile()
+
     return HonchoConfig(
         base_url=os.environ.get("HONCHO_BASE_URL", "http://localhost:8000"),
         api_key=os.environ.get("HONCHO_API_KEY", ""),
         workspace=os.environ.get("HONCHO_WORKSPACE", "opencomputer"),
-        host_key=os.environ.get("HONCHO_HOST_KEY", "opencomputer"),
+        host_key=host_key,
         context_cadence=_int("HONCHO_CONTEXT_CADENCE", 1),
         dialectic_cadence=_int("HONCHO_DIALECTIC_CADENCE", 3),
     )
+
+
+def _derive_host_key_from_profile() -> str:
+    """Return ``"opencomputer"`` for the default profile, ``"opencomputer.<name>"``
+    for a named profile. Falls back to ``"opencomputer"`` on any error so a
+    broken sticky file or missing opencomputer package never kills the plugin.
+    """
+    try:
+        from opencomputer.profiles import read_active_profile
+
+        active = read_active_profile()
+    except Exception:
+        return "opencomputer"
+    if active is None or active == "default":
+        return "opencomputer"
+    return f"opencomputer.{active}"
 
 
 def register(api: Any) -> None:
