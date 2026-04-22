@@ -177,20 +177,12 @@ async def _run_contributions(fix: bool) -> list[Check]:
     a contribution is expected to mutate state in place and set `repaired=True`
     on its result. Contributions raise-safe: any exception becomes a `fail`
     Check so one broken plugin can't crash the whole doctor run.
+
+    Assumes plugins are already loaded — `_check_provider_plugin` runs earlier
+    in `run_doctor` and does the `load_all` call. Reloading here would
+    double-register tools (ValueError) and produce spurious failures.
     """
     from opencomputer.plugins.registry import registry as plugin_registry
-
-    # Ensure plugins are loaded so contributions are populated.
-    repo_root = Path(__file__).resolve().parent.parent
-    ext_dir = repo_root / "extensions"
-    search_paths: list[Path] = []
-    if ext_dir.exists():
-        search_paths.append(ext_dir)
-    user_dir = Path.home() / ".opencomputer" / "plugins"
-    if user_dir.exists():
-        search_paths.append(user_dir)
-    if search_paths and not plugin_registry.loaded:
-        plugin_registry.load_all(search_paths)
 
     out: list[Check] = []
     for c in plugin_registry.doctor_contributions:
