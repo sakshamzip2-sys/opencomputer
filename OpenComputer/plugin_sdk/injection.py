@@ -29,6 +29,9 @@ class InjectionContext:
     runtime: RuntimeContext
     #: Session id — useful for session-scoped caches or per-chat behaviors.
     session_id: str = ""
+    #: Which turn number we're on in the session (0-indexed). Cadence-aware
+    #: providers (Honcho, etc.) use this to return content only every N turns.
+    turn_index: int = 0
 
 
 class DynamicInjectionProvider(ABC):

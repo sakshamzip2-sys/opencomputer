@@ -400,3 +400,113 @@ class TestPromptBuilderMemoryInjection:
 
         out = PromptBuilder().build()  # no args at all
         assert "OpenComputer" in out  # the base template content still renders
+
+
+# ─── 10f.F — MemoryProvider ABC + InjectionContext.turn_index ──────────
+
+
+class TestMemoryProviderABC:
+    def test_imports_from_public_sdk(self):
+        from plugin_sdk import MemoryProvider
+
+        assert MemoryProvider is not None
+
+    def test_minimal_subclass_instantiates(self):
+        from plugin_sdk.core import ToolCall, ToolResult
+        from plugin_sdk.memory import MemoryProvider
+
+        class _Stub(MemoryProvider):
+            provider_id = "stub:test"
+
+            def tool_schemas(self):
+                return []
+
+            async def handle_tool_call(self, call: ToolCall) -> ToolResult:
+                return ToolResult(tool_call_id=call.id, content="ok", is_error=False)
+
+            async def prefetch(self, query: str, turn_index: int) -> str | None:
+                return None
+
+            async def sync_turn(self, user: str, assistant: str, turn_index: int):
+                return None
+
+            async def health_check(self) -> bool:
+                return True
+
+        s = _Stub()
+        assert s.provider_id == "stub:test"
+        assert s.tool_schemas() == []
+        assert asyncio.run(s.health_check()) is True
+
+    def test_default_lifecycle_methods_are_no_op(self):
+        from plugin_sdk.memory import MemoryProvider
+
+        class _Stub(MemoryProvider):
+            provider_id = "stub:test"
+
+            def tool_schemas(self):
+                return []
+
+            async def handle_tool_call(self, call):
+                pass
+
+            async def prefetch(self, query, turn_index):
+                return None
+
+            async def sync_turn(self, user, assistant, turn_index):
+                pass
+
+            async def health_check(self):
+                return True
+
+        # on_session_start and on_session_end have default no-op implementations
+        asyncio.run(_Stub().on_session_start("s1"))
+        asyncio.run(_Stub().on_session_end("s1"))
+
+    def test_provider_priority_default(self):
+        from plugin_sdk.memory import MemoryProvider
+
+        class _Stub(MemoryProvider):
+            provider_id = "stub:test"
+
+            def tool_schemas(self):
+                return []
+
+            async def handle_tool_call(self, call):
+                pass
+
+            async def prefetch(self, q, t):
+                return None
+
+            async def sync_turn(self, u, a, t):
+                pass
+
+            async def health_check(self):
+                return True
+
+        assert _Stub().provider_priority == 100
+
+
+class TestInjectionContextTurnIndex:
+    def test_turn_index_default_zero(self):
+        from plugin_sdk.injection import InjectionContext
+        from plugin_sdk.runtime_context import RuntimeContext
+
+        ctx = InjectionContext(
+            messages=(),
+            runtime=RuntimeContext(plan_mode=False, yolo_mode=False),
+            session_id="s",
+        )
+        assert ctx.turn_index == 0
+
+    def test_turn_index_settable(self):
+        from plugin_sdk.injection import InjectionContext
+        from plugin_sdk.runtime_context import RuntimeContext
+
+        ctx = InjectionContext(
+            messages=(),
+            runtime=RuntimeContext(plan_mode=False, yolo_mode=False),
+            session_id="s",
+            turn_index=7,
+        )
+        assert ctx.turn_index == 7
