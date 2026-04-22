@@ -2,8 +2,64 @@
 
 from __future__ import annotations
 
-import asyncio
+# ─── Pre-import profile routing (Phase 14.A) ──────────────────────────
+# Intercept -p / --profile from sys.argv BEFORE any opencomputer.* import,
+# because downstream modules read OPENCOMPUTER_HOME at import time via _home().
+# Flag > sticky active_profile file > default (root).
 import os
+import sys
+
+
+def _apply_profile_override() -> None:
+    argv = sys.argv
+    profile_name: str | None = None
+    # Strip -p/--profile flag from argv so Typer doesn't see it as unknown option
+    new_argv: list[str] = [argv[0]] if argv else []
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("-p", "--profile") and i + 1 < len(argv):
+            profile_name = argv[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--profile="):
+            profile_name = arg.split("=", 1)[1]
+            i += 1
+            continue
+        new_argv.append(arg)
+        i += 1
+    sys.argv = new_argv
+
+    if profile_name is None:
+        # No flag in (possibly already-stripped) argv. Only consult the sticky
+        # file if OPENCOMPUTER_HOME is not already set — this keeps the
+        # function idempotent across multiple calls (e.g. module reload +
+        # explicit call in tests) and ensures a consumed flag beats a sticky.
+        if "OPENCOMPUTER_HOME" not in os.environ:
+            try:
+                from opencomputer.profiles import read_active_profile
+
+                profile_name = read_active_profile()
+            except Exception:
+                profile_name = None
+
+    if profile_name and profile_name != "default":
+        try:
+            from opencomputer.profiles import get_profile_dir
+
+            os.environ["OPENCOMPUTER_HOME"] = str(get_profile_dir(profile_name))
+        except Exception:
+            # Invalid profile name (from argv or sticky file) — silently fall
+            # back to default. _apply_profile_override MUST NOT crash the CLI.
+            pass
+
+
+# Apply profile override BEFORE any opencomputer.* module import
+_apply_profile_override()
+
+# ─── Regular imports follow ────────────────────────────────────────────
+
+import asyncio
 import uuid
 
 import typer
