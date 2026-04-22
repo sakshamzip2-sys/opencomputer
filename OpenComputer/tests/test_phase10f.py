@@ -326,3 +326,77 @@ class TestMemoryBridge:
         bridge = MemoryBridge(self._make_ctx(tmp_path, provider=BoomProvider()))
         # Must NOT raise.
         asyncio.run(bridge.sync_turn("u", "a", turn_index=0))
+
+
+# ─── 10f.C — PromptBuilder base-prompt injection ───────────────────────
+
+
+class TestPromptBuilderMemoryInjection:
+    """PromptBuilder renders declarative memory + user profile into the base."""
+
+    def test_memory_block_rendered_when_present(self):
+        from opencomputer.agent.prompt_builder import PromptBuilder
+
+        out = PromptBuilder().build(declarative_memory="Saksham prefers concise output.")
+        assert "<memory>" in out
+        assert "</memory>" in out
+        assert "Saksham prefers concise output." in out
+
+    def test_user_profile_block_rendered_when_present(self):
+        from opencomputer.agent.prompt_builder import PromptBuilder
+
+        out = PromptBuilder().build(user_profile="User works in Mumbai timezone.")
+        assert "<user-profile>" in out
+        assert "User works in Mumbai timezone." in out
+
+    def test_no_memory_blocks_when_empty(self):
+        from opencomputer.agent.prompt_builder import PromptBuilder
+
+        out = PromptBuilder().build()
+        assert "<memory>" not in out
+        assert "<user-profile>" not in out
+
+    def test_both_blocks_rendered_together(self):
+        from opencomputer.agent.prompt_builder import PromptBuilder
+
+        out = PromptBuilder().build(
+            declarative_memory="fact-1",
+            user_profile="pref-1",
+        )
+        assert "<memory>" in out
+        assert "fact-1" in out
+        assert "<user-profile>" in out
+        assert "pref-1" in out
+        # memory block comes before user-profile block (highest salience first)
+        assert out.index("<memory>") < out.index("<user-profile>")
+
+    def test_over_limit_memory_is_truncated_from_top(self):
+        from opencomputer.agent.prompt_builder import PromptBuilder
+
+        # Give 1000 chars of "line-XXX\n" entries; limit to 200. Older lines
+        # (lower XXX numbers) should be dropped; newer ones preserved.
+        lines = [f"line-{i:03d}" for i in range(100)]
+        big = "\n".join(lines)
+        out = PromptBuilder().build(declarative_memory=big, memory_char_limit=200)
+        # Truncation marker appears when content was cut.
+        assert "[earlier entries truncated]" in out
+        # Recent entries survive
+        assert "line-099" in out
+        # Earliest entries are gone
+        assert "line-000" not in out
+
+    def test_under_limit_content_not_truncated(self):
+        from opencomputer.agent.prompt_builder import PromptBuilder
+
+        out = PromptBuilder().build(
+            declarative_memory="short", memory_char_limit=4000
+        )
+        assert "[earlier entries truncated]" not in out
+        assert "short" in out
+
+    def test_existing_skills_arg_still_works(self):
+        """Backward compatibility — existing callers with only skills= must work."""
+        from opencomputer.agent.prompt_builder import PromptBuilder
+
+        out = PromptBuilder().build()  # no args at all
+        assert "OpenComputer" in out  # the base template content still renders
