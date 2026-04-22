@@ -62,9 +62,10 @@ class PluginAPI:
         self.injection = injection_engine
         # Plugins append to this list via register_doctor_contribution. The core
         # doctor runs every registered contribution after the built-in checks.
-        self.doctor_contributions = (
-            doctor_contributions if doctor_contributions is not None else []
-        )
+        self.doctor_contributions = doctor_contributions if doctor_contributions is not None else []
+        # At most one external memory provider can be active at a time
+        # (Phase 10f.G). None = built-in memory only.
+        self.memory_provider: Any = None
 
     def register_tool(self, tool: Any) -> None:
         self.tools.register(tool)
@@ -81,10 +82,30 @@ class PluginAPI:
     def register_injection_provider(self, provider: Any) -> None:
         """Register a DynamicInjectionProvider (plan mode, yolo mode, etc.)."""
         if self.injection is None:
-            raise RuntimeError(
-                "Injection engine unavailable — plugin-SDK version mismatch?"
-            )
+            raise RuntimeError("Injection engine unavailable — plugin-SDK version mismatch?")
         self.injection.register(provider)
+
+    def register_memory_provider(self, provider: Any) -> None:
+        """Register an external MemoryProvider (Honcho, Mem0, etc.).
+
+        Only ONE external provider may be active at a time. Registering a
+        second one raises ValueError. The built-in MEMORY.md + USER.md
+        + FTS5 baseline is always on and unaffected by this call.
+        """
+        from plugin_sdk.memory import MemoryProvider
+
+        if not isinstance(provider, MemoryProvider):
+            raise TypeError(
+                f"register_memory_provider requires a MemoryProvider instance; "
+                f"got {type(provider).__name__}"
+            )
+        if self.memory_provider is not None:
+            existing_id = getattr(self.memory_provider, "provider_id", "<unknown>")
+            raise ValueError(
+                f"a memory provider is already registered: {existing_id!r} — "
+                "only one external provider is allowed at a time"
+            )
+        self.memory_provider = provider
 
     def register_doctor_contribution(self, contribution: Any) -> None:
         """Register a HealthContribution — runs on `opencomputer doctor [--fix]`.

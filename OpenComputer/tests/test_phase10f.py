@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -388,9 +389,7 @@ class TestPromptBuilderMemoryInjection:
     def test_under_limit_content_not_truncated(self):
         from opencomputer.agent.prompt_builder import PromptBuilder
 
-        out = PromptBuilder().build(
-            declarative_memory="short", memory_char_limit=4000
-        )
+        out = PromptBuilder().build(declarative_memory="short", memory_char_limit=4000)
         assert "[earlier entries truncated]" not in out
         assert "short" in out
 
@@ -510,3 +509,77 @@ class TestInjectionContextTurnIndex:
             turn_index=7,
         )
         assert ctx.turn_index == 7
+
+
+# ─── 10f.G — PluginAPI.register_memory_provider ────────────────────────
+
+
+class TestPluginAPIMemoryProvider:
+    def _make_api(self):
+        from opencomputer.plugins.loader import PluginAPI
+
+        return PluginAPI(
+            tool_registry=MagicMock(),
+            hook_engine=MagicMock(),
+            provider_registry={},
+            channel_registry={},
+            injection_engine=MagicMock(),
+        )
+
+    def test_register_stores_provider(self):
+        from plugin_sdk.memory import MemoryProvider
+
+        class _Stub(MemoryProvider):
+            provider_id = "stub:one"
+
+            def tool_schemas(self):
+                return []
+
+            async def handle_tool_call(self, call):
+                pass
+
+            async def prefetch(self, q, t):
+                return None
+
+            async def sync_turn(self, u, a, t):
+                pass
+
+            async def health_check(self):
+                return True
+
+        api = self._make_api()
+        assert api.memory_provider is None
+        p = _Stub()
+        api.register_memory_provider(p)
+        assert api.memory_provider is p
+
+    def test_second_registration_raises(self):
+        from plugin_sdk.memory import MemoryProvider
+
+        class _Stub(MemoryProvider):
+            provider_id = "stub:two"
+
+            def tool_schemas(self):
+                return []
+
+            async def handle_tool_call(self, call):
+                pass
+
+            async def prefetch(self, q, t):
+                return None
+
+            async def sync_turn(self, u, a, t):
+                pass
+
+            async def health_check(self):
+                return True
+
+        api = self._make_api()
+        api.register_memory_provider(_Stub())
+        with pytest.raises(ValueError, match="already registered"):
+            api.register_memory_provider(_Stub())
+
+    def test_non_memory_provider_rejected(self):
+        api = self._make_api()
+        with pytest.raises(TypeError, match="MemoryProvider"):
+            api.register_memory_provider("not a provider")  # type: ignore[arg-type]
