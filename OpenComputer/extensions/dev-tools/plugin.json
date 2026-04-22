@@ -1,0 +1,10 @@
+{
+  "id": "dev-tools",
+  "name": "Developer Tools",
+  "version": "0.1.0",
+  "description": "Developer-workflow tools — git diff, headless browser, fal.ai image gen",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "tool",
+  "entry": "plugin"
+}
