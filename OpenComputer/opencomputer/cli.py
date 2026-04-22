@@ -21,12 +21,16 @@ from opencomputer.agent.config_store import (
 )
 from opencomputer.agent.loop import AgentLoop
 from opencomputer.plugins.registry import registry as plugin_registry
+from opencomputer.tools.ask_user_question import AskUserQuestionTool
 from opencomputer.tools.bash import BashTool
 from opencomputer.tools.delegate import DelegateTool
 from opencomputer.tools.glob import GlobTool
 from opencomputer.tools.grep import GrepTool
+from opencomputer.tools.notebook_edit import NotebookEditTool
+from opencomputer.tools.push_notification import PushNotificationTool
 from opencomputer.tools.read import ReadTool
 from opencomputer.tools.registry import registry
+from opencomputer.tools.skill import SkillTool
 from opencomputer.tools.skill_manage import SkillManageTool
 from opencomputer.tools.write import WriteTool
 from plugin_sdk.runtime_context import RuntimeContext
@@ -50,6 +54,11 @@ def _register_builtin_tools() -> None:
     registry.register(GlobTool())
     registry.register(SkillManageTool())
     registry.register(DelegateTool())
+    # Phase 11b — Claude Code parity (core slice)
+    registry.register(NotebookEditTool())
+    registry.register(SkillTool())
+    registry.register(PushNotificationTool())  # CLI mode by default
+    registry.register(AskUserQuestionTool())
 
 
 def _discover_plugins() -> int:

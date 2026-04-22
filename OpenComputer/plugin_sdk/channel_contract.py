@@ -70,5 +70,19 @@ class BaseChannelAdapter(ABC):
         """Send an image. Optional — default raises NotImplementedError."""
         raise NotImplementedError(f"{self.platform} adapter has no image support")
 
+    async def send_notification(
+        self, chat_id: str, text: str, *, urgent: bool = False
+    ) -> SendResult:
+        """Send a push notification.
+
+        Default: same as `send()` — works on every platform but uses the same
+        delivery mechanism as a regular message. Adapters that have a richer
+        notification API (Telegram silent vs loud, Discord push) override this
+        to use the platform's actual push-notification path.
+
+        `urgent=True` is a hint adapters MAY honour by overriding silent-mode.
+        """
+        return await self.send(chat_id, text)
+
 
 __all__ = ["BaseChannelAdapter"]
