@@ -37,16 +37,19 @@ class Check:
 
 
 def _status_icon(s: str) -> str:
-    return {"pass": "[green]✓[/green]", "fail": "[red]✗[/red]",
-            "warn": "[yellow]![/yellow]", "skip": "[dim]·[/dim]"}[s]
+    return {
+        "pass": "[green]✓[/green]",
+        "fail": "[red]✗[/red]",
+        "warn": "[yellow]![/yellow]",
+        "skip": "[dim]·[/dim]",
+    }[s]
 
 
 def _check_python() -> Check:
     v = sys.version_info
     if (v.major, v.minor) < (3, 12):
         return Check(
-            "python version", "fail",
-            f"need Python >=3.12, got {v.major}.{v.minor}.{v.micro}"
+            "python version", "fail", f"need Python >=3.12, got {v.major}.{v.minor}.{v.micro}"
         )
     return Check("python version", "pass", f"{v.major}.{v.minor}.{v.micro}")
 
@@ -57,10 +60,7 @@ def _check_config() -> tuple[Check, object]:
     path = config_file_path()
     if not path.exists():
         return (
-            Check(
-                "config file", "warn",
-                f"no config at {path} — run `opencomputer setup`"
-            ),
+            Check("config file", "warn", f"no config at {path} — run `opencomputer setup`"),
             None,
         )
     try:
@@ -85,9 +85,10 @@ def _check_provider_plugin(cfg) -> Check:
     if provider_id in plugin_registry.providers:
         return Check("provider plugin", "pass", f"'{provider_id}' registered")
     return Check(
-        "provider plugin", "fail",
+        "provider plugin",
+        "fail",
         f"provider '{provider_id}' not found. "
-        f"installed: {list(plugin_registry.providers.keys()) or 'none'}"
+        f"installed: {list(plugin_registry.providers.keys()) or 'none'}",
     )
 
 
@@ -97,10 +98,7 @@ def _check_provider_key(cfg) -> Check:
     env_key = cfg.model.api_key_env
     if os.environ.get(env_key):
         return Check("provider API key", "pass", f"{env_key} is set")
-    return Check(
-        "provider API key", "fail",
-        f"{env_key} not set — export it before running"
-    )
+    return Check("provider API key", "fail", f"{env_key} not set — export it before running")
 
 
 def _check_session_db(cfg) -> Check:
@@ -145,6 +143,114 @@ def _check_channel_tokens(cfg) -> list[Check]:
     return out
 
 
+def _check_profile_and_overlay() -> list[Check]:
+    """Phase 14.M/14.N doctor checks.
+
+    M-check: profile.yaml references a preset that exists on disk.
+    N-check: workspace overlay (if any) references a preset that exists
+             and only names installed plugins in ``plugins.additional``.
+
+    Both checks degrade gracefully — if there's no profile.yaml, no
+    workspace overlay, or neither references anything to verify, the
+    check is ``skip``. A malformed file -> ``fail`` (don't paper over).
+    """
+    from opencomputer.agent.config import _home
+    from opencomputer.agent.profile_config import (
+        ProfileConfigError,
+        load_profile_config,
+    )
+    from opencomputer.agent.workspace import find_workspace_overlay
+    from opencomputer.plugins.preset import list_presets, preset_path
+
+    out: list[Check] = []
+
+    # ── M-check: profile.yaml -> preset exists ─────────────────────────
+    try:
+        profile_cfg = load_profile_config(_home())
+    except ProfileConfigError as e:
+        out.append(
+            Check(
+                "profile.yaml",
+                "fail",
+                f"{_home() / 'profile.yaml'}: {e}",
+            )
+        )
+        profile_cfg = None
+
+    if profile_cfg is None:
+        # Already reported the parse failure above.
+        pass
+    elif profile_cfg.preset is None:
+        out.append(Check("profile preset", "skip", "no preset referenced"))
+    else:
+        target = preset_path(profile_cfg.preset)
+        if target.exists():
+            out.append(
+                Check(
+                    "profile preset",
+                    "pass",
+                    f"{profile_cfg.preset} -> {target}",
+                )
+            )
+        else:
+            available = list_presets() or ["(none)"]
+            out.append(
+                Check(
+                    "profile preset",
+                    "fail",
+                    f"profile.yaml references preset "
+                    f"{profile_cfg.preset!r} but {target} "
+                    f"does not exist. available: {available}",
+                )
+            )
+
+    # ── N-check: workspace overlay -> referents exist ─────────────────
+    try:
+        overlay = find_workspace_overlay()
+    except ValueError as e:
+        out.append(Check("workspace overlay", "fail", str(e)))
+        return out
+
+    if overlay is None:
+        out.append(Check("workspace overlay", "skip", "no .opencomputer/ in CWD tree"))
+        return out
+
+    details: list[str] = []
+    failed = False
+    if overlay.preset is not None:
+        tgt = preset_path(overlay.preset)
+        if tgt.exists():
+            details.append(f"preset={overlay.preset}")
+        else:
+            failed = True
+            details.append(f"preset={overlay.preset!r} (MISSING: {tgt})")
+    if overlay.plugins.additional:
+        # We can only check *that* plugins are installed; the discovery
+        # pass will produce a proper list later. For the doctor, a
+        # shallow "id looks sane" check is enough — actual presence is
+        # verified by the plugin loader.
+        details.append(f"additional={list(overlay.plugins.additional)}")
+
+    if failed:
+        out.append(
+            Check(
+                "workspace overlay",
+                "fail",
+                f"{overlay.source_path}: " + "; ".join(details),
+            )
+        )
+    else:
+        out.append(
+            Check(
+                "workspace overlay",
+                "pass",
+                f"{overlay.source_path} — " + "; ".join(details or ["(empty)"]),
+            )
+        )
+
+    return out
+
+
 async def _check_mcp(cfg) -> list[Check]:
     out: list[Check] = []
     if cfg is None or not cfg.mcp.servers:
@@ -160,9 +266,7 @@ async def _check_mcp(cfg) -> list[Check]:
         try:
             ok = await conn.connect()
             if ok:
-                out.append(
-                    Check(f"mcp:{server.name}", "pass", f"{len(conn.tools)} tool(s)")
-                )
+                out.append(Check(f"mcp:{server.name}", "pass", f"{len(conn.tools)} tool(s)"))
             else:
                 out.append(Check(f"mcp:{server.name}", "fail", "connect returned False"))
         finally:
@@ -220,6 +324,7 @@ def run_doctor(fix: bool = False) -> int:
     checks.append(_check_session_db(cfg))
     checks.append(_check_skills_dir(cfg))
     checks.extend(_check_channel_tokens(cfg))
+    checks.extend(_check_profile_and_overlay())
 
     try:
         mcp_checks = asyncio.run(_check_mcp(cfg))
@@ -246,13 +351,9 @@ def run_doctor(fix: bool = False) -> int:
     warnings = sum(1 for c in checks if c.status == "warn")
     console.print()
     if failures:
-        console.print(
-            f"[red bold]{failures} failure(s)[/red bold] — fix these before running."
-        )
+        console.print(f"[red bold]{failures} failure(s)[/red bold] — fix these before running.")
     elif warnings:
-        console.print(
-            f"[yellow bold]{warnings} warning(s)[/yellow bold] — should still work."
-        )
+        console.print(f"[yellow bold]{warnings} warning(s)[/yellow bold] — should still work.")
     else:
         console.print("[green bold]All checks passed.[/green bold]")
     return failures

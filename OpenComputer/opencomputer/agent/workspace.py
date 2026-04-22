@@ -57,11 +57,20 @@ def find_workspace_overlay(*, start: Path | None = None) -> WorkspaceOverlay | N
     First match wins. Returns ``None`` if no ancestor has one. Raises
     ``ValueError`` if a match is found but its contents are malformed —
     do not silently ignore a bad overlay, surface it.
+
+    ``$HOME/.opencomputer/config.yaml`` is NEVER treated as a workspace
+    overlay — that path is the user's main OpenComputer config (model /
+    loop / session / memory / mcp). Workspace overlays are per-project
+    files that override a narrow subset; they live inside projects, not
+    in ``$HOME``. Without this guard, walking up from any subdir of
+    ``$HOME`` would misparse the main config and fail on strict
+    ``extra=forbid`` validation.
     """
     cursor = (start if start is not None else Path.cwd()).resolve()
+    home = Path.home().resolve()
     while True:
         candidate = cursor / OVERLAY_DIRNAME / OVERLAY_FILENAME
-        if candidate.exists():
+        if cursor != home and candidate.exists():
             raw = yaml.safe_load(candidate.read_text()) or {}
             if not isinstance(raw, dict):
                 raise ValueError(
