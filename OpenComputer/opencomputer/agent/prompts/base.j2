@@ -5,6 +5,18 @@ Current time: {{ now }}
 
 You have tools available. Use them to accomplish what the user asks.
 
+{% if memory -%}
+<memory>
+{{ memory }}
+</memory>
+
+{% endif %}
+{% if user_profile -%}
+<user-profile>
+{{ user_profile }}
+</user-profile>
+
+{% endif %}
 {% if skills -%}
 ## Skills available
 

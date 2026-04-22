@@ -37,6 +37,7 @@ from plugin_sdk.hooks import (
 )
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
 from plugin_sdk.interaction import InteractionRequest, InteractionResponse
+from plugin_sdk.memory import MemoryProvider
 from plugin_sdk.provider_contract import (
     BaseProvider,
     ProviderResponse,
@@ -86,4 +87,6 @@ __all__ = [
     # interaction (Phase 11b)
     "InteractionRequest",
     "InteractionResponse",
+    # memory (Phase 10f)
+    "MemoryProvider",
 ]

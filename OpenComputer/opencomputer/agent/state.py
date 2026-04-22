@@ -373,5 +373,26 @@ class SessionDB:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def search_messages(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Full-text search returning FULL message content (not snippet).
+
+        Used by the SessionSearch agent tool. Differs from search() in that
+        it returns the entire message text, letting the agent see the full
+        surrounding context rather than a highlighted fragment.
+        """
+        safe_q = query.replace('"', '""').strip()
+        if not safe_q:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT m.session_id, m.role, m.timestamp, m.content "
+                "FROM messages_fts "
+                "JOIN messages m ON m.id = messages_fts.rowid "
+                "WHERE messages_fts MATCH ? "
+                "ORDER BY m.timestamp DESC LIMIT ?",
+                (safe_q, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
 
 __all__ = ["SessionDB"]

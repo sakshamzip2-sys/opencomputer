@@ -61,6 +61,63 @@ def _register_builtin_tools() -> None:
     registry.register(AskUserQuestionTool())
 
 
+def _resolve_plugin_filter():
+    """Resolve the active ``enabled_ids`` filter for plugin loading.
+
+    Reads ``profile.yaml`` in the active profile dir (``_home()``),
+    walks CWD for a workspace overlay, expands any presets, and returns
+    the resulting ``enabled_ids`` argument for ``load_all``. Returns
+    ``None`` if anything upstream is missing or malformed, which means
+    "load everything" — the safe pre-Phase-14 default.
+
+    Malformed configuration is logged as a warning but never crashes
+    startup: a user with a broken ``profile.yaml`` still gets a working
+    agent, just without the filtering they asked for.
+    """
+    import logging
+
+    from opencomputer.agent.config import _home
+    from opencomputer.agent.profile_config import (
+        ProfileConfigError,
+        load_profile_config,
+        resolve_enabled_plugins,
+    )
+    from opencomputer.agent.workspace import find_workspace_overlay
+
+    log = logging.getLogger("opencomputer.cli")
+
+    try:
+        profile_cfg = load_profile_config(_home())
+    except ProfileConfigError as e:
+        log.warning("profile.yaml is malformed — loading all plugins: %s", e)
+        return None
+
+    try:
+        overlay = find_workspace_overlay()
+    except ValueError as e:
+        log.warning(
+            "workspace .opencomputer/config.yaml is malformed — ignoring overlay: %s",
+            e,
+        )
+        overlay = None
+
+    try:
+        resolved = resolve_enabled_plugins(profile_cfg, overlay)
+    except FileNotFoundError as e:
+        log.warning(
+            "profile/overlay references a missing preset — loading all plugins: %s",
+            e,
+        )
+        return None
+
+    if resolved.source:
+        log.info("plugin filter: %s", resolved.source)
+    if overlay is not None and overlay.source_path is not None:
+        log.info("workspace overlay active: %s", overlay.source_path)
+
+    return resolved.enabled
+
+
 def _discover_plugins() -> int:
     """Discover + load plugins from known search paths. Returns count loaded."""
     from pathlib import Path
@@ -75,7 +132,8 @@ def _discover_plugins() -> int:
     if user_dir.exists():
         search_paths.append(user_dir)
 
-    loaded = plugin_registry.load_all(search_paths)
+    enabled = _resolve_plugin_filter()
+    loaded = plugin_registry.load_all(search_paths, enabled_ids=enabled)
     return len(loaded)
 
 
@@ -388,9 +446,7 @@ def setup() -> None:
 
 @app.command()
 def doctor(
-    fix: bool = typer.Option(
-        False, "--fix", help="Invoke plugin-contributed repairs in place."
-    ),
+    fix: bool = typer.Option(False, "--fix", help="Invoke plugin-contributed repairs in place."),
 ) -> None:
     """Diagnose common config/env issues.
 
@@ -430,6 +486,16 @@ app.add_typer(config_app, name="config")
 from opencomputer.cli_mcp import mcp_app  # noqa: E402
 
 app.add_typer(mcp_app, name="mcp")
+
+# Phase 10f.I — memory CLI subcommand group
+from opencomputer.cli_memory import memory_app  # noqa: E402
+
+app.add_typer(memory_app, name="memory")
+
+# Phase 14.M — named plugin-activation presets
+from opencomputer.cli_preset import preset_app  # noqa: E402
+
+app.add_typer(preset_app, name="preset")
 
 
 @config_app.command("show")
