@@ -1,0 +1,65 @@
+# Self-hosted Honcho bundle for OpenComputer.
+#
+# Pulls the official plastic-labs/honcho image — IMAGE_VERSION lives in
+# the sibling file of the same name (read at bootstrap time).
+#
+# Everything is bound to 127.0.0.1 — NEVER expose to 0.0.0.0. Honcho's
+# self-hosted no-auth mode is fine for a local personal agent but MUST
+# NOT be reachable from the network.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: opencomputer-honcho-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: honcho
+      POSTGRES_PASSWORD: honcho
+      POSTGRES_DB: honcho
+    volumes:
+      - honcho-pg-data:/var/lib/postgresql/data
+    # No port exposure — the API container talks to it internally.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U honcho -d honcho"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: opencomputer-honcho-redis
+    restart: unless-stopped
+    volumes:
+      - honcho-redis-data:/data
+    # No port exposure.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  honcho:
+    # NOTE: image tag is read from IMAGE_VERSION by bootstrap.py, which
+    # uses `docker compose -f docker-compose.yml --env-file .env.resolved`
+    # so the HONCHO_IMAGE_TAG env var resolves here.
+    image: "ghcr.io/plastic-labs/honcho:${HONCHO_IMAGE_TAG:-latest}"
+    container_name: opencomputer-honcho-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://honcho:honcho@postgres:5432/honcho
+      REDIS_URL: redis://redis:6379
+      HONCHO_HTTP_HOST: 0.0.0.0       # inside the container
+      HONCHO_HTTP_PORT: 8000
+    ports:
+      # Bind to 127.0.0.1 only — local personal agent, not a network service.
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 1g
+
+volumes:
+  honcho-pg-data:
+  honcho-redis-data:

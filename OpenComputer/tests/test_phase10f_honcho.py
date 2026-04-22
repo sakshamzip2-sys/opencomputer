@@ -423,3 +423,195 @@ class TestHonchoProvider:
 
         # Must not raise
         asyncio.run(prov.sync_turn("u", "a", turn_index=0))
+
+
+# ─── Phase 10f.M — docker-compose + setup/status/reset CLI ──────────────
+
+
+def _load_bootstrap():
+    """Load extensions/memory-honcho/bootstrap.py directly.
+
+    Must register in sys.modules BEFORE exec_module so that dataclasses
+    with slots=True can find their module via cls.__module__ lookup.
+    """
+    import importlib.util
+    import sys
+
+    mod_name = "_honcho_bootstrap_test"
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    spec = importlib.util.spec_from_file_location(mod_name, _EXT_DIR / "bootstrap.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestDockerComposeFile:
+    def test_compose_file_exists_and_binds_to_localhost(self):
+        """Honcho MUST NOT be exposed to 0.0.0.0 — personal agent only."""
+        compose = _EXT_DIR / "docker-compose.yml"
+        assert compose.exists(), f"missing: {compose}"
+        content = compose.read_text(encoding="utf-8")
+        # Must bind API port to 127.0.0.1 only
+        assert "127.0.0.1:8000:8000" in content
+        # Postgres and Redis must NOT expose ports at all (the API talks to
+        # them inside the compose network)
+        assert "5432:5432" not in content, "postgres should not expose its port"
+        assert "6379:6379" not in content, "redis should not expose its port"
+        # Must include mem_limit
+        assert "mem_limit" in content
+
+
+class TestBootstrapHelpers:
+    def test_detect_docker_when_missing(self, monkeypatch):
+        bootstrap = _load_bootstrap()
+
+        # shutil.which returns None for missing binary
+        import shutil
+
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        docker, compose_v2 = bootstrap.detect_docker()
+        assert docker is False
+        assert compose_v2 is False
+
+    def test_detect_docker_when_present(self, monkeypatch):
+        bootstrap = _load_bootstrap()
+        import shutil
+        import subprocess
+
+        monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
+
+        def _fake_run(args, **kwargs):
+            class _R:
+                returncode = 0
+
+            return _R()
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        docker, compose_v2 = bootstrap.detect_docker()
+        assert docker is True
+        assert compose_v2 is True
+
+    def test_honcho_up_refuses_without_docker(self, monkeypatch):
+        bootstrap = _load_bootstrap()
+        import shutil
+
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        ok, msg = bootstrap.honcho_up()
+        assert ok is False
+        assert "not installed" in msg.lower()
+
+    def test_honcho_up_invokes_docker_compose(self, monkeypatch):
+        bootstrap = _load_bootstrap()
+        import shutil
+        import subprocess
+
+        monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
+
+        called = []
+
+        def _fake_run(args, **kwargs):
+            called.append(args)
+
+            class _R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return _R()
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+
+        ok, msg = bootstrap.honcho_up()
+        assert ok is True
+        # First call was `docker compose version`, second was `docker compose -f ... up -d`
+        compose_ups = [c for c in called if "up" in c and "-d" in c]
+        assert len(compose_ups) >= 1
+        # Must target our docker-compose.yml
+        assert any(str(bootstrap.COMPOSE_FILE) in c for c in compose_ups)
+
+    def test_honcho_reset_uses_down_v(self, monkeypatch):
+        bootstrap = _load_bootstrap()
+        import shutil
+        import subprocess
+
+        monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
+
+        called = []
+
+        def _fake_run(args, **kwargs):
+            called.append(args)
+
+            class _R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return _R()
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+
+        ok, _ = bootstrap.honcho_reset()
+        assert ok is True
+        # Must include -v to wipe volumes
+        resets = [c for c in called if "down" in c and "-v" in c]
+        assert len(resets) == 1
+
+
+class TestMemorySetupStatusResetCLI:
+    def _invoke(self, subcommand, *args, monkeypatch=None):
+        """Run `opencomputer memory <subcommand> <args>` via CliRunner."""
+        from typer.testing import CliRunner
+
+        from opencomputer.cli_memory import memory_app
+
+        runner = CliRunner()
+        return runner.invoke(memory_app, [subcommand, *args])
+
+    def test_setup_docker_missing_exits_cleanly(self, monkeypatch):
+        """Docker missing → setup prints hint, returns 0 (does NOT crash)."""
+        # Patch the bootstrap's detect_docker to simulate Docker missing.
+        # We do this by stubbing shutil.which in the imported bootstrap.
+        import shutil
+
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        result = self._invoke("setup")
+        # Exit 0 because we printed a hint and bailed — did NOT crash.
+        assert result.exit_code == 0
+        assert "docker" in result.stdout.lower()
+
+    def test_status_reports_docker_state(self, monkeypatch):
+        import shutil
+
+        # No docker → should clearly say so
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        result = self._invoke("status")
+        assert result.exit_code == 0
+        assert "docker" in result.stdout.lower()
+
+    def test_reset_asks_confirmation(self, monkeypatch):
+        """Reset without --yes prompts for confirmation; declining aborts."""
+        import shutil
+
+        monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
+        import subprocess
+
+        def _fake_run(args, **kwargs):
+            class _R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return _R()
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+
+        # Respond "n" to the confirmation prompt
+        from typer.testing import CliRunner
+
+        from opencomputer.cli_memory import memory_app
+
+        runner = CliRunner()
+        result = runner.invoke(memory_app, ["reset"], input="n\n")
+        assert "abort" in result.stdout.lower()
