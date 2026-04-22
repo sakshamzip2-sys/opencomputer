@@ -936,3 +936,81 @@ class TestAgentLoopWiring:
         system = call_args.kwargs.get("system") or call_args.args[1]
         assert "distinctive-memory-string" in system
         assert "distinctive-user-string" in system
+
+
+# ─── 10f.I — opencomputer memory CLI ────────────────────────────────────
+
+
+class TestMemoryCLI:
+    """Typer CLI commands: show/edit/search/stats/prune/restore."""
+
+    def _runner(self):
+        from typer.testing import CliRunner
+
+        return CliRunner()
+
+    def _isolated_home(self, tmp_path, monkeypatch):
+        """Point OPENCOMPUTER_HOME at tmp_path so CLI doesn't touch real files."""
+        monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+        # Ensure config module picks up the new home
+        import importlib
+
+        from opencomputer.agent import config as cfg_mod
+
+        importlib.reload(cfg_mod)
+
+    def test_show_empty_memory(self, tmp_path, monkeypatch):
+        from opencomputer.cli_memory import memory_app
+
+        self._isolated_home(tmp_path, monkeypatch)
+        result = self._runner().invoke(memory_app, ["show"])
+        assert result.exit_code == 0
+        assert "empty" in result.stdout.lower()
+
+    def test_show_populated_memory(self, tmp_path, monkeypatch):
+        from opencomputer.cli_memory import memory_app
+
+        self._isolated_home(tmp_path, monkeypatch)
+        # Seed MEMORY.md directly
+        (tmp_path / "MEMORY.md").write_text("distinctive memory line\n")
+        result = self._runner().invoke(memory_app, ["show"])
+        assert result.exit_code == 0
+        assert "distinctive memory line" in result.stdout
+
+    def test_show_user_flag(self, tmp_path, monkeypatch):
+        from opencomputer.cli_memory import memory_app
+
+        self._isolated_home(tmp_path, monkeypatch)
+        (tmp_path / "USER.md").write_text("user preference X\n")
+        result = self._runner().invoke(memory_app, ["show", "--user"])
+        assert result.exit_code == 0
+        assert "user preference X" in result.stdout
+
+    def test_stats_output(self, tmp_path, monkeypatch):
+        from opencomputer.cli_memory import memory_app
+
+        self._isolated_home(tmp_path, monkeypatch)
+        (tmp_path / "MEMORY.md").write_text("hello world\n")
+        result = self._runner().invoke(memory_app, ["stats"])
+        assert result.exit_code == 0
+        # Stats output mentions both files and a char count
+        out = result.stdout
+        assert "MEMORY.md" in out
+        assert "USER.md" in out
+        assert "chars" in out
+
+    def test_search_no_matches(self, tmp_path, monkeypatch):
+        from opencomputer.cli_memory import memory_app
+
+        self._isolated_home(tmp_path, monkeypatch)
+        result = self._runner().invoke(memory_app, ["search", "neverfound"])
+        assert result.exit_code == 0
+        assert "no match" in result.stdout.lower()
+
+    def test_restore_without_backup_errors(self, tmp_path, monkeypatch):
+        from opencomputer.cli_memory import memory_app
+
+        self._isolated_home(tmp_path, monkeypatch)
+        result = self._runner().invoke(memory_app, ["restore"])
+        assert result.exit_code == 1
+        assert "no backup" in result.stdout.lower()

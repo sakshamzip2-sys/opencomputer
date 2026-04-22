@@ -388,9 +388,7 @@ def setup() -> None:
 
 @app.command()
 def doctor(
-    fix: bool = typer.Option(
-        False, "--fix", help="Invoke plugin-contributed repairs in place."
-    ),
+    fix: bool = typer.Option(False, "--fix", help="Invoke plugin-contributed repairs in place."),
 ) -> None:
     """Diagnose common config/env issues.
 
@@ -430,6 +428,11 @@ app.add_typer(config_app, name="config")
 from opencomputer.cli_mcp import mcp_app  # noqa: E402
 
 app.add_typer(mcp_app, name="mcp")
+
+# Phase 10f.I — memory CLI subcommand group
+from opencomputer.cli_memory import memory_app  # noqa: E402
+
+app.add_typer(memory_app, name="memory")
 
 
 @config_app.command("show")
