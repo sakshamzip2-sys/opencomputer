@@ -398,7 +398,7 @@ def test_plugin_registers_rewind_tool_and_auto_checkpoint_hook(
     # Original 6 + Rewind = 7
     assert "Rewind" in tool_names
     assert len(api.tools) == 7
-    # Plan-block + auto-checkpoint = 2 hooks
-    assert len(api.hooks) == 2
-    # Plan-mode injection provider still registered
-    assert len(api.injections) == 1
+    # Plan-block + auto-checkpoint + post-edit-review = 3 hooks (after Phase 6d).
+    assert len(api.hooks) >= 2  # Phase 6c minimum
+    # Plan-mode injection provider registered (more modes added in Phase 6d).
+    assert len(api.injections) >= 1

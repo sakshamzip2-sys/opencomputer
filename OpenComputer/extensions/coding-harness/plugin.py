@@ -1,12 +1,13 @@
 """
 Coding harness plugin — register tools, modes, and hooks.
 
-v2 layout (Phase 6c+):
-    tools/       file and process tools
+v2 layout (Phase 6c–6d):
+    tools/       file and process tools + Rewind
     rewind/      content-hashed checkpoint store
     state/       session-scoped key/value store
-    hooks/       PreToolUse auto-checkpoint, plan-mode block, etc.
-    modes/       injection providers (plan, accept-edits, review) — Phase 6d
+    hooks/       PreToolUse auto-checkpoint, plan-mode block, post-edit review
+    modes/       injection providers (coder-identity, plan, accept-edits, review)
+    prompts/     Jinja2 templates backing the modes
     permissions/ scope checks — Phase 6e
     slash_commands/ in-chat controls — Phase 6f
 
@@ -22,7 +23,11 @@ from pathlib import Path
 from context import HarnessContext  # type: ignore[import-not-found]
 from hooks.auto_checkpoint import build_auto_checkpoint_hook_spec  # type: ignore[import-not-found]
 from hooks.plan_block import build_plan_mode_hook_spec  # type: ignore[import-not-found]
-from plan_mode import PlanModeInjectionProvider  # type: ignore[import-not-found]
+from hooks.post_edit_review import build_post_edit_review_hook_spec  # type: ignore[import-not-found]
+from modes.accept_edits_mode import AcceptEditsModeInjectionProvider  # type: ignore[import-not-found]
+from modes.coder_identity import CoderIdentityInjectionProvider  # type: ignore[import-not-found]
+from modes.plan_mode import PlanModeInjectionProvider  # type: ignore[import-not-found]
+from modes.review_mode import ReviewModeInjectionProvider  # type: ignore[import-not-found]
 from rewind.store import RewindStore  # type: ignore[import-not-found]
 from state.store import SessionStateStore  # type: ignore[import-not-found]
 from tools.background import (  # type: ignore[import-not-found]
@@ -68,9 +73,13 @@ def register(api) -> None:  # PluginAPI duck-typed
     api.register_tool(KillProcessTool())
     api.register_tool(RewindTool(ctx=ctx))
 
-    # Plan-mode: soft guidance (injection) + hard enforcement (hook).
-    api.register_injection_provider(PlanModeInjectionProvider())
-    api.register_hook(build_plan_mode_hook_spec())
+    # Modes — injection providers, ordered by priority.
+    api.register_injection_provider(CoderIdentityInjectionProvider())  # priority 5
+    api.register_injection_provider(PlanModeInjectionProvider())  # 10
+    api.register_injection_provider(AcceptEditsModeInjectionProvider())  # 20
+    api.register_injection_provider(ReviewModeInjectionProvider())  # 30
 
-    # Auto-checkpoint: snapshot files before any destructive tool call.
+    # Hooks — enforcement + lifecycle interceptors.
+    api.register_hook(build_plan_mode_hook_spec())  # hard-block in plan mode
     api.register_hook(build_auto_checkpoint_hook_spec(harness_ctx=ctx))
+    api.register_hook(build_post_edit_review_hook_spec(harness_ctx=ctx))
