@@ -434,6 +434,11 @@ from opencomputer.cli_memory import memory_app  # noqa: E402
 
 app.add_typer(memory_app, name="memory")
 
+# Phase 14.M — named plugin-activation presets
+from opencomputer.cli_preset import preset_app  # noqa: E402
+
+app.add_typer(preset_app, name="preset")
+
 
 @config_app.command("show")
 def config_show() -> None:
