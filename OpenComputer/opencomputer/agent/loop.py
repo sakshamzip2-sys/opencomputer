@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from opencomputer.agent.compaction import CompactionEngine
@@ -48,6 +49,13 @@ class ConversationResult:
     output_tokens: int
 
 
+#: Max number of per-session frozen system prompts retained in memory. Long-running
+#: gateway daemons can accumulate many session_ids; this cap bounds the growth
+#: without compromising the prompt-cache invariant (any evicted session will
+#: simply rebuild on its next turn — a one-time cost, not a per-turn cost).
+DEFAULT_PROMPT_SNAPSHOT_CACHE_MAX = 256
+
+
 class AgentLoop:
     """The single while-loop that runs the agent."""
 
@@ -59,6 +67,7 @@ class AgentLoop:
         memory: MemoryManager | None = None,
         prompt_builder: PromptBuilder | None = None,
         compaction_disabled: bool = False,
+        prompt_snapshot_cache_max: int = DEFAULT_PROMPT_SNAPSHOT_CACHE_MAX,
     ) -> None:
         self.provider = provider
         self.config = config
@@ -73,13 +82,15 @@ class AgentLoop:
             disabled=compaction_disabled,
         )
         self._last_input_tokens = 0
-        # Per-session frozen system prompt. Populated on the first turn of each
-        # session so subsequent turns reuse the exact same prefix (→ prompt-cache
-        # hits on turn 2+). Memory edits mid-session go to disk immediately but
-        # do NOT mutate this snapshot. Compaction invalidates only the suffix,
-        # never the system-prompt prefix. Source: hermes-agent
-        # tools/memory_tool.py:_system_prompt_snapshot.
-        self._prompt_snapshots: dict[str, str] = {}
+        # Per-session frozen system prompt. LRU-evicted once cache is full, so
+        # long-running daemons don't retain snapshots for abandoned sessions
+        # forever. Memory edits mid-session go to disk immediately but do NOT
+        # mutate this snapshot — that's the invariant that keeps the prefix
+        # cache hot on turn 2+. Compaction invalidates only the suffix.
+        # Source: hermes-agent tools/memory_tool.py:_system_prompt_snapshot
+        # (freeze) + agent/prompt_builder.py:_SKILLS_PROMPT_CACHE (LRU).
+        self._prompt_snapshots: OrderedDict[str, str] = OrderedDict()
+        self._prompt_snapshot_cache_max = prompt_snapshot_cache_max
 
     # ─── the loop ──────────────────────────────────────────────────
 
@@ -118,7 +129,14 @@ class AgentLoop:
             if snapshot is None:
                 skills = self.memory.list_skills()
                 snapshot = self.prompt_builder.build(skills=skills)
+                # Evict the least-recently-used snapshot if the cache is full
+                # BEFORE inserting, so we never exceed the cap even transiently.
+                while len(self._prompt_snapshots) >= self._prompt_snapshot_cache_max:
+                    self._prompt_snapshots.popitem(last=False)
                 self._prompt_snapshots[sid] = snapshot
+            else:
+                # Cache hit — mark this session as most-recently-used
+                self._prompt_snapshots.move_to_end(sid)
             base_system = snapshot
 
         # Collect dynamic injections (plan_mode, yolo_mode, etc. from plugins)
