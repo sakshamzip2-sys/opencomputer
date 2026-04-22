@@ -95,6 +95,42 @@ spawned via the `delegate` tool inherit plan mode automatically.
 Remove the coding harness any time by removing or renaming
 `extensions/coding-harness/`. The core agent stays fully functional.
 
+## Memory
+
+OpenComputer remembers what matters across sessions. Three pillars, all on by default, zero API keys needed:
+
+### Declarative — `~/.opencomputer/MEMORY.md`
+
+Agent observations, learned conventions, project facts. The agent curates this via the `Memory` tool (`add`/`replace`/`remove`/`read`). You can also hand-edit it with any text editor.
+
+### User profile — `~/.opencomputer/USER.md`
+
+Your preferences: communication style, workflow habits, expectations. Kept separate from MEMORY.md so agent-learned observations don't muddle your own preferences.
+
+### Episodic — SQLite + FTS5
+
+Every message is indexed. The agent searches prior conversations via the `SessionSearch` tool, and you can too from the CLI.
+
+### CLI commands
+
+```bash
+opencomputer memory show               # print MEMORY.md
+opencomputer memory show --user        # print USER.md
+opencomputer memory edit [--user]      # open in $EDITOR
+opencomputer memory search "kafka"     # FTS5 search across all sessions
+opencomputer memory stats              # chars used / limits / backup age
+opencomputer memory prune              # clear MEMORY.md (keeps .bak)
+opencomputer memory restore            # promote .bak back to live
+```
+
+### Safety
+
+Every write is atomic (temp file + `os.replace`) and locked (`fcntl` on Unix, `msvcrt` on Windows). Every mutation backs up the current state to `<file>.bak` first. Character limits (4000 for MEMORY.md, 2000 for USER.md by default) prevent unbounded growth; over-limit writes return an error with a hint.
+
+### Plugging in deeper memory backends
+
+An optional `MemoryProvider` plugin interface lets you add Honcho-style user modeling, Mem0-style fact extraction, or Cognee-style knowledge graphs as overlays on top of the baseline. Only one provider is active at a time; the baseline above always runs. See `docs/plugin-authors.md` when present.
+
 ## Messaging channels
 
 ### Telegram
