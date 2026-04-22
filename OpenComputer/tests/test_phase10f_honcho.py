@@ -615,3 +615,106 @@ class TestMemorySetupStatusResetCLI:
         runner = CliRunner()
         result = runner.invoke(memory_app, ["reset"], input="n\n")
         assert "abort" in result.stdout.lower()
+
+
+# ─── Phase 10f.N — first-run wizard Honcho step ────────────────────────
+
+
+class TestWizardHonchoStep:
+    """The setup wizard's optional Honcho step (10f.N)."""
+
+    def test_optional_honcho_skipped_by_user_returns_cleanly(self, monkeypatch):
+        """If the user answers 'no' to Honcho, the wizard proceeds without error."""
+        import opencomputer.setup_wizard as wizard
+
+        # Confirm.ask is used to prompt — stub to return False ("skipped")
+        class _FakeConfirm:
+            @staticmethod
+            def ask(question, default=True):
+                return False
+
+        monkeypatch.setattr(wizard, "Confirm", _FakeConfirm)
+
+        # Should not raise
+        wizard._optional_honcho()
+
+    def test_optional_honcho_docker_missing_prints_hint(self, monkeypatch):
+        """If the user says yes but Docker is missing, wizard prints install hint."""
+        import opencomputer.setup_wizard as wizard
+
+        class _FakeConfirm:
+            @staticmethod
+            def ask(question, default=True):
+                return True
+
+        monkeypatch.setattr(wizard, "Confirm", _FakeConfirm)
+
+        # Patch the bootstrap loader to return a stub whose detect_docker
+        # returns (False, False).
+        from types import SimpleNamespace
+
+        stub_bootstrap = SimpleNamespace(
+            detect_docker=lambda: (False, False),
+            honcho_up=lambda: (True, "ignored"),
+        )
+        import opencomputer.cli_memory as cli_memory
+
+        monkeypatch.setattr(
+            cli_memory, "_load_honcho_bootstrap", lambda: stub_bootstrap
+        )
+
+        # Should not raise (it prints a hint and returns)
+        wizard._optional_honcho()
+
+    def test_optional_honcho_happy_path_calls_honcho_up(self, monkeypatch):
+        """If Docker is available and user agrees, wizard calls honcho_up()."""
+        import opencomputer.setup_wizard as wizard
+
+        class _FakeConfirm:
+            @staticmethod
+            def ask(question, default=True):
+                return True
+
+        monkeypatch.setattr(wizard, "Confirm", _FakeConfirm)
+
+        up_called = []
+        from types import SimpleNamespace
+
+        def _up():
+            up_called.append(True)
+            return (True, "Honcho stack started.")
+
+        stub_bootstrap = SimpleNamespace(
+            detect_docker=lambda: (True, True),
+            honcho_up=_up,
+        )
+        import opencomputer.cli_memory as cli_memory
+
+        monkeypatch.setattr(
+            cli_memory, "_load_honcho_bootstrap", lambda: stub_bootstrap
+        )
+
+        wizard._optional_honcho()
+        assert len(up_called) == 1
+
+
+class TestCLAUDEmdUpdated:
+    """CLAUDE.md should no longer list 'Honcho memory' as Won't Do."""
+
+    def test_honcho_moved_out_of_wont_do(self):
+        from pathlib import Path as _P
+
+        claude_md = _P(__file__).resolve().parent.parent / "CLAUDE.md"
+        content = claude_md.read_text(encoding="utf-8")
+        # The Won't Do bullet list should not mention Honcho any more
+        # (it was removed from that line in 10f.N).
+        wont_do_section = content.split("### WON'T DO", 1)[-1].split("\n\n", 2)
+        # First paragraph after the header — the bullet list.
+        bullet_para = wont_do_section[1] if len(wont_do_section) > 1 else ""
+        assert "Honcho memory" not in bullet_para, (
+            "Honcho memory was moved to the Built list in 10f.N; "
+            "it should no longer appear in WON'T DO."
+        )
+        # The follow-up paragraph should document the move.
+        assert "Honcho" in content
+        assert "Phase 10f.K–N" in content or "memory-honcho" in content
