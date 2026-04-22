@@ -1,0 +1,10 @@
+{
+  "id": "memory-honcho",
+  "name": "Honcho Memory (self-hosted)",
+  "version": "0.1.0",
+  "description": "Deep cross-session user understanding via self-hosted Honcho (plastic-labs/honcho)",
+  "kind": "provider",
+  "entry": "plugin",
+  "schema_version": 2,
+  "profiles": ["*"]
+}

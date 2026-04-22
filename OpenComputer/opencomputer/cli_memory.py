@@ -194,3 +194,125 @@ def _fmt_ts(ts) -> str:
         return datetime.datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M")
     except (ValueError, TypeError, OSError):
         return str(ts)
+
+
+# ─── Phase 10f.M — Honcho bootstrap subcommands ─────────────────────────
+
+
+def _load_honcho_bootstrap():
+    """Import the Honcho plugin's bootstrap module.
+
+    The plugin lives at extensions/memory-honcho/ (hyphen, not a Python
+    package), so we use importlib.util directly.
+    """
+    import importlib.util
+    import sys
+    from pathlib import Path as _P
+
+    mod_name = "_memory_honcho_bootstrap"
+    # Cache: return already-loaded module (avoids double-exec side effects
+    # AND fixes the dataclass(slots=True) module-registration requirement).
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    repo_root = _P(__file__).resolve().parent.parent
+    bootstrap_py = repo_root / "extensions" / "memory-honcho" / "bootstrap.py"
+    if not bootstrap_py.exists():
+        return None
+    spec = importlib.util.spec_from_file_location(mod_name, bootstrap_py)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    # Register in sys.modules BEFORE exec so dataclass slots work.
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@memory_app.command("setup")
+def memory_setup() -> None:
+    """Bring up the self-hosted Honcho stack (postgres + redis + api).
+
+    Requires Docker + the 'docker compose' v2 plugin. If neither is
+    installed, prints a clear hint and exits 0 without crashing.
+    """
+    bootstrap = _load_honcho_bootstrap()
+    if bootstrap is None:
+        console.print(
+            "[red]memory-honcho plugin not found.[/red] Expected at extensions/memory-honcho/"
+        )
+        raise typer.Exit(code=1)
+
+    docker, compose_v2 = bootstrap.detect_docker()
+    if not docker:
+        console.print(
+            "[yellow]Docker is not installed on this machine.[/yellow]\n"
+            "Install Docker Desktop (https://www.docker.com/products/docker-desktop/) "
+            "or your distro's docker + docker-compose-plugin packages, then re-run."
+        )
+        return
+    if not compose_v2:
+        console.print(
+            "[yellow]Docker found, but 'docker compose' v2 plugin is missing.[/yellow]\n"
+            "Install the compose plugin and try again."
+        )
+        return
+
+    console.print("[dim]Starting Honcho stack…[/dim]")
+    ok, msg = bootstrap.honcho_up()
+    if ok:
+        console.print(f"[green]✓[/green] {msg}")
+    else:
+        console.print(f"[red]✗[/red] {msg}")
+        raise typer.Exit(code=1)
+
+
+@memory_app.command("status")
+def memory_status() -> None:
+    """Report Docker + Honcho container + health state in one view."""
+    bootstrap = _load_honcho_bootstrap()
+    if bootstrap is None:
+        console.print("[dim]memory-honcho plugin not present — baseline memory only.[/dim]")
+        return
+    s = bootstrap.status()
+    console.print("[bold cyan]Honcho status[/bold cyan]")
+    console.print(
+        f"  Docker installed: {'[green]yes[/green]' if s.docker_installed else '[red]no[/red]'}"
+    )
+    console.print(
+        f"  compose v2 plugin: {'[green]yes[/green]' if s.compose_v2 else '[red]no[/red]'}"
+    )
+    console.print(
+        f"  containers running: {'[green]yes[/green]' if s.honcho_running else '[dim]no[/dim]'}"
+    )
+    console.print(f"  /health ok: {'[green]yes[/green]' if s.honcho_healthy else '[dim]no[/dim]'}")
+    console.print(f"  [dim]{s.message}[/dim]")
+
+
+@memory_app.command("reset")
+def memory_reset(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+) -> None:
+    """Tear down the Honcho stack AND wipe its volumes (postgres + redis).
+
+    Destructive — confirms unless --yes.
+    """
+    bootstrap = _load_honcho_bootstrap()
+    if bootstrap is None:
+        console.print("[red]memory-honcho plugin not found.[/red]")
+        raise typer.Exit(code=1)
+
+    if not yes:
+        confirm = typer.confirm(
+            "This will stop Honcho containers AND delete all Honcho data "
+            "(postgres volume + redis volume). Continue?"
+        )
+        if not confirm:
+            console.print("Aborted.")
+            raise typer.Exit()
+
+    ok, msg = bootstrap.honcho_reset()
+    if ok:
+        console.print(f"[green]✓[/green] {msg}")
+    else:
+        console.print(f"[red]✗[/red] {msg}")
+        raise typer.Exit(code=1)

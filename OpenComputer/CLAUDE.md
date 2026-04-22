@@ -241,7 +241,9 @@ Independent sub-phases: more hook events, compaction strategy plugin API, Jupyte
 
 ### WON'T DO (explicitly parked)
 
-Canvas rendering, native mobile apps, voice wake-word, Atropos RL, trajectory compression, Honcho memory, 6 remote terminal backends, skills marketplace, full i18n. Re-open only if a concrete use case appears.
+Canvas rendering, native mobile apps, voice wake-word, Atropos RL, trajectory compression, 6 remote terminal backends, skills marketplace, full i18n. Re-open only if a concrete use case appears.
+
+**Previously parked, now BUILT (Phase 10f.K–N, 2026-04-22):** Honcho memory — self-hosted overlay that plugs into the baseline memory via `MemoryProvider` ABC. Ships as `extensions/memory-honcho/` (AGPL-safe — pulls upstream Docker image from plastic-labs/honcho instead of vendoring source). Enabled optionally via `opencomputer memory setup` or the first-run wizard. Baseline memory works without it.
 
 ---
 

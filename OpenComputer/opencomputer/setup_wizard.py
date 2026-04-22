@@ -96,13 +96,10 @@ def _prompt_api_key(env_key: str, signup_url: str) -> None:
         return
 
     console.print(
-        f"[yellow]![/yellow] {env_key} is NOT set. "
-        f"Before running, export it in your shell:"
+        f"[yellow]![/yellow] {env_key} is NOT set. Before running, export it in your shell:"
     )
     console.print(f"  [bold]export {env_key}=your-key-here[/bold]")
-    console.print(
-        "[dim]Tip: add it to ~/.zshrc or ~/.bashrc to persist across sessions.[/dim]"
-    )
+    console.print("[dim]Tip: add it to ~/.zshrc or ~/.bashrc to persist across sessions.[/dim]")
 
 
 def _optional_channel(cfg: Config) -> None:
@@ -139,13 +136,9 @@ def _optional_mcp(cfg: Config) -> Config:
         if not name.strip():
             break
         command = Prompt.ask("Command to launch it (e.g. 'python3')")
-        args_str = Prompt.ask(
-            "Args (space-separated, e.g. '-m investor_agent.server')", default=""
-        )
+        args_str = Prompt.ask("Args (space-separated, e.g. '-m investor_agent.server')", default="")
         args = tuple(args_str.split()) if args_str else ()
-        servers.append(
-            MCPServerConfig(name=name, command=command, args=args, enabled=True)
-        )
+        servers.append(MCPServerConfig(name=name, command=command, args=args, enabled=True))
         console.print(f"[green]✓[/green] added {name}")
         if not Confirm.ask("Add another?", default=False):
             break
@@ -156,9 +149,7 @@ def _optional_mcp(cfg: Config) -> Config:
 async def _test_provider(provider_id: str, env_key: str) -> bool:
     """Fire one tiny request to confirm auth works. Returns True on success."""
     if not os.environ.get(env_key):
-        console.print(
-            f"[yellow]skipped[/yellow] — {env_key} not set, can't test auth yet"
-        )
+        console.print(f"[yellow]skipped[/yellow] — {env_key} not set, can't test auth yet")
         return False
 
     from opencomputer.agent.config import default_config
@@ -223,6 +214,9 @@ def run_setup() -> None:
     save_config(cfg)
     console.print(f"\n[green]✓[/green] wrote config → [dim]{config_file_path()}[/dim]")
 
+    # Phase 10f.N — optional Honcho memory overlay
+    _optional_honcho()
+
     console.print("\n[bold]Step 6 — test the provider connection[/bold]")
     if Confirm.ask("Send a tiny test request now?", default=True):
         asyncio.run(_test_provider(provider_id, meta["env_key"]))
@@ -230,6 +224,51 @@ def run_setup() -> None:
     console.print(
         "\n[bold green]Setup complete.[/bold green] Run [bold]opencomputer[/bold] to chat."
     )
+
+
+def _optional_honcho() -> None:
+    """Phase 10f.N — offer to enable the Honcho memory overlay.
+
+    Non-destructive: if the user skips, baseline memory (MEMORY.md +
+    USER.md + FTS5) still works fully. If Docker is missing, prints
+    install hint instead of trying to start containers.
+    """
+    console.print("\n[bold]Step 5.5 — deep memory (optional)[/bold]")
+    console.print(
+        "[dim]Honcho gives your agent a persistent user model across sessions.\n"
+        "Requires Docker. Your built-in memory works without it.[/dim]"
+    )
+    if not Confirm.ask("Enable Honcho memory overlay?", default=True):
+        console.print("[dim]Skipped — baseline memory is on.[/dim]")
+        return
+
+    # Load bootstrap lazily so setup_wizard has no hard dep on the plugin.
+    try:
+        from opencomputer.cli_memory import _load_honcho_bootstrap
+
+        bootstrap = _load_honcho_bootstrap()
+    except Exception:
+        bootstrap = None
+    if bootstrap is None:
+        console.print("[yellow]memory-honcho plugin not found in this install.[/yellow]")
+        return
+
+    docker, compose_v2 = bootstrap.detect_docker()
+    if not docker or not compose_v2:
+        console.print(
+            "[yellow]Docker / 'docker compose' v2 not available.[/yellow]\n"
+            "Install Docker Desktop, then run:\n"
+            "  [cyan]opencomputer memory setup[/cyan]  [dim]# enables Honcho after install[/dim]"
+        )
+        return
+
+    console.print("[dim]Starting Honcho stack…[/dim]")
+    ok, msg = bootstrap.honcho_up()
+    if ok:
+        console.print(f"[green]✓[/green] {msg}")
+    else:
+        console.print(f"[red]✗[/red] {msg}")
+        console.print("[dim]You can retry later with: [cyan]opencomputer memory setup[/cyan][/dim]")
 
 
 __all__ = ["run_setup"]
