@@ -11,7 +11,7 @@ config option later — same return shape, different fetch.
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import unquote, urlparse, parse_qs
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
