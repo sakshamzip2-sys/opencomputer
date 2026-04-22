@@ -30,6 +30,7 @@ from opencomputer.tools.grep import GrepTool
 from opencomputer.tools.notebook_edit import NotebookEditTool
 from opencomputer.tools.push_notification import PushNotificationTool
 from opencomputer.tools.read import ReadTool
+from opencomputer.tools.recall import RecallTool
 from opencomputer.tools.registry import registry
 from opencomputer.tools.skill import SkillTool
 from opencomputer.tools.skill_manage import SkillManageTool
@@ -137,6 +138,9 @@ def _register_builtin_tools() -> None:
     registry.register(SkillTool())
     registry.register(PushNotificationTool())  # CLI mode by default
     registry.register(AskUserQuestionTool())
+    # Phase 12a — episodic recall + long-term note. Companion to the
+    # declarative MemoryTool wired in AgentLoop (10f.D).
+    registry.register(RecallTool())
 
 
 def _resolve_plugin_filter():
