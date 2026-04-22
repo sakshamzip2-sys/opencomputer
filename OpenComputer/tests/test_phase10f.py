@@ -839,3 +839,100 @@ class TestSessionSearchTool:
         props = s.parameters["properties"]
         assert props["limit"]["default"] == 10
         assert props["limit"]["maximum"] == 50
+
+
+# ─── 10f.H — AgentLoop wiring ──────────────────────────────────────────
+
+
+class TestAgentLoopWiring:
+    """Integration: AgentLoop builds MemoryContext + bridge and wires tools."""
+
+    def _loop(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from opencomputer.agent.config import (
+            Config,
+            LoopConfig,
+            MemoryConfig,
+            ModelConfig,
+            SessionConfig,
+        )
+        from opencomputer.agent.loop import AgentLoop
+        from plugin_sdk.core import Message
+        from plugin_sdk.provider_contract import ProviderResponse, Usage
+
+        cfg = Config(
+            model=ModelConfig(
+                provider="mock",
+                model="mock",
+                max_tokens=1024,
+                temperature=0.0,
+            ),
+            loop=LoopConfig(max_iterations=2, parallel_tools=False),
+            session=SessionConfig(db_path=tmp_path / "s.db"),
+            memory=MemoryConfig(
+                declarative_path=tmp_path / "M.md",
+                user_path=tmp_path / "U.md",
+                skills_path=tmp_path / "skills",
+                memory_char_limit=500,
+                user_char_limit=250,
+            ),
+        )
+        provider = MagicMock()
+        provider.complete = AsyncMock(
+            return_value=ProviderResponse(
+                message=Message(role="assistant", content="ok"),
+                stop_reason="end_turn",
+                usage=Usage(10, 3),
+            )
+        )
+        return AgentLoop(provider=provider, config=cfg)
+
+    def test_memory_context_is_built(self, tmp_path):
+        loop = self._loop(tmp_path)
+        assert hasattr(loop, "memory_context")
+        assert loop.memory_context.manager is loop.memory
+        assert loop.memory_context.db is loop.db
+
+    def test_memory_bridge_is_built(self, tmp_path):
+        from opencomputer.agent.memory_bridge import MemoryBridge
+
+        loop = self._loop(tmp_path)
+        assert hasattr(loop, "memory_bridge")
+        assert isinstance(loop.memory_bridge, MemoryBridge)
+
+    def test_memory_manager_has_user_path_and_limits(self, tmp_path):
+        loop = self._loop(tmp_path)
+        assert loop.memory.user_path == tmp_path / "U.md"
+        assert loop.memory.memory_char_limit == 500
+        assert loop.memory.user_char_limit == 250
+
+    def test_memory_tool_registered_in_global_registry(self, tmp_path):
+        from opencomputer.tools.registry import registry
+
+        self._loop(tmp_path)
+        # The loop's __init__ registered the tool.
+        assert "Memory" in registry.names()
+
+    def test_session_search_tool_registered(self, tmp_path):
+        from opencomputer.tools.registry import registry
+
+        self._loop(tmp_path)
+        assert "SessionSearch" in registry.names()
+
+    def test_system_prompt_includes_memory_and_user(self, tmp_path):
+        import asyncio
+
+        loop = self._loop(tmp_path)
+        # Seed memory + user files
+        loop.memory.append_declarative("distinctive-memory-string")
+        loop.memory.append_user("distinctive-user-string")
+
+        result = asyncio.run(loop.run_conversation("hello"))
+
+        # The system prompt passed to provider.complete should contain both
+        # memory and user-profile blocks.
+        call_args = loop.provider.complete.call_args
+        system = call_args.kwargs.get("system") or call_args.args[1]
+        assert "distinctive-memory-string" in system
+        assert "distinctive-user-string" in system

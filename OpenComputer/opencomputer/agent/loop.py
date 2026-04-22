@@ -27,11 +27,15 @@ from opencomputer.agent.config import Config
 from opencomputer.agent.episodic import EpisodicMemory
 from opencomputer.agent.injection import engine as injection_engine
 from opencomputer.agent.memory import MemoryManager
+from opencomputer.agent.memory_bridge import MemoryBridge
+from opencomputer.agent.memory_context import MemoryContext
 from opencomputer.agent.prompt_builder import PromptBuilder
 from opencomputer.agent.state import SessionDB
 from opencomputer.agent.step import StepOutcome
 from opencomputer.agent.tool_ordering import sort_tools_for_request
+from opencomputer.tools.memory_tool import MemoryTool
 from opencomputer.tools.registry import registry
+from opencomputer.tools.session_search_tool import SessionSearchTool
 from plugin_sdk.core import Message, StopReason, ToolCall
 from plugin_sdk.injection import InjectionContext
 from plugin_sdk.provider_contract import BaseProvider
@@ -75,7 +79,11 @@ class AgentLoop:
         self.config = config
         self.db = db or SessionDB(config.session.db_path)
         self.memory = memory or MemoryManager(
-            config.memory.declarative_path, config.memory.skills_path
+            declarative_path=config.memory.declarative_path,
+            skills_path=config.memory.skills_path,
+            user_path=config.memory.user_path,
+            memory_char_limit=config.memory.memory_char_limit,
+            user_char_limit=config.memory.user_char_limit,
         )
         self.prompt_builder = prompt_builder or PromptBuilder()
         self.compaction = CompactionEngine(
@@ -87,6 +95,31 @@ class AgentLoop:
         # completed turn for cross-session "remind me" queries via FTS5.
         self._episodic = None if episodic_disabled else EpisodicMemory(db=self.db)
         self._last_input_tokens = 0
+
+        # Phase 10f.H: memory context + bridge. Bridge wraps an optional
+        # external MemoryProvider (Honcho, Mem0, etc.) with exception safety;
+        # None = built-in memory only. Tools receive the context at init so
+        # they can read/write MEMORY.md, USER.md, and SessionDB without
+        # reaching into globals.
+        self._current_session_id: str = ""
+        self.memory_context = MemoryContext(
+            manager=self.memory,
+            db=self.db,
+            session_id_provider=lambda: self._current_session_id,
+            provider=None,  # plugin registration flips this later
+        )
+        self.memory_bridge = MemoryBridge(self.memory_context)
+
+        # Register agent-facing memory tools in the global registry. Safe to
+        # call repeatedly — the registry's .register() is idempotent on
+        # same-instance re-registration; on different instances it replaces.
+        try:
+            registry.register(MemoryTool(self.memory_context))
+            registry.register(SessionSearchTool(self.memory_context))
+        except Exception:
+            # Registry may disallow re-registration under a different name.
+            # Defensive: don't blow up AgentLoop construction over this.
+            pass
         # Per-session frozen system prompt. LRU-evicted once cache is full, so
         # long-running daemons don't retain snapshots for abandoned sessions
         # forever. Memory edits mid-session go to disk immediately but do NOT
@@ -109,6 +142,8 @@ class AgentLoop:
     ) -> ConversationResult:
         sid = session_id or str(uuid.uuid4())
         self._runtime = runtime or DEFAULT_RUNTIME_CONTEXT
+        # Expose current session id to memory tools via the context provider.
+        self._current_session_id = sid
 
         # If this is a fresh session, create it in the DB and seed history from disk.
         existing = self.db.get_session(sid) if session_id else None
@@ -133,7 +168,18 @@ class AgentLoop:
             snapshot = self._prompt_snapshots.get(sid)
             if snapshot is None:
                 skills = self.memory.list_skills()
-                snapshot = self.prompt_builder.build(skills=skills)
+                # Phase 10f.C: read MEMORY.md + USER.md and render them into
+                # the FROZEN base prompt. Mid-session edits don't rebuild
+                # this — that's the prefix-cache invariant.
+                declarative = self.memory.read_declarative()
+                user_profile = self.memory.read_user()
+                snapshot = self.prompt_builder.build(
+                    skills=skills,
+                    declarative_memory=declarative,
+                    user_profile=user_profile,
+                    memory_char_limit=self.config.memory.memory_char_limit,
+                    user_char_limit=self.config.memory.user_char_limit,
+                )
                 # Evict the least-recently-used snapshot if the cache is full
                 # BEFORE inserting, so we never exceed the cap even transiently.
                 while len(self._prompt_snapshots) >= self._prompt_snapshot_cache_max:

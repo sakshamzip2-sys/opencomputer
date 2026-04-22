@@ -50,11 +50,25 @@ class SessionConfig:
 
 @dataclass(frozen=True, slots=True)
 class MemoryConfig:
-    """The three-pillar memory configuration."""
+    """The three-pillar memory configuration.
+
+    Built-in memory is always on. An external provider (Honcho, Mem0,
+    Cognee, etc.) is optional overlay, controlled by `provider` field:
+      - ""                        → built-in only (default)
+      - "memory-honcho"           → Honcho plugin (requires Docker)
+      - "memory-mem0" / "memory-cognee" → future
+    """
 
     declarative_path: Path = field(default_factory=lambda: _home() / "MEMORY.md")
+    user_path: Path = field(default_factory=lambda: _home() / "USER.md")
     skills_path: Path = field(default_factory=lambda: _home() / "skills")
     # episodic memory uses SessionConfig.db_path
+
+    enabled: bool = True
+    memory_char_limit: int = 4000  # MEMORY.md cap injected into base prompt
+    user_char_limit: int = 2000  # USER.md cap injected into base prompt
+    provider: str = ""  # empty = built-in only
+    fallback_to_builtin: bool = True  # non-negotiable; here for docs
 
 
 @dataclass(frozen=True, slots=True)
