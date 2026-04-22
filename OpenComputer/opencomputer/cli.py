@@ -25,6 +25,7 @@ from opencomputer.tools.bash import BashTool
 from opencomputer.tools.delegate import DelegateTool
 from opencomputer.tools.glob import GlobTool
 from opencomputer.tools.grep import GrepTool
+from opencomputer.tools.memory import MemoryTool
 from opencomputer.tools.read import ReadTool
 from opencomputer.tools.registry import registry
 from opencomputer.tools.skill_manage import SkillManageTool
@@ -50,6 +51,8 @@ def _register_builtin_tools() -> None:
     registry.register(GlobTool())
     registry.register(SkillManageTool())
     registry.register(DelegateTool())
+    # Phase 12a — agent-facing memory query/note + recall_session.
+    registry.register(MemoryTool())
 
 
 def _discover_plugins() -> int:

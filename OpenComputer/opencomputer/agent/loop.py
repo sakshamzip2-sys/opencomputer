@@ -27,6 +27,7 @@ from opencomputer.agent.episodic import EpisodicMemory
 from opencomputer.agent.injection import engine as injection_engine
 from opencomputer.agent.memory import MemoryManager
 from opencomputer.agent.prompt_builder import PromptBuilder
+from opencomputer.agent.reviewer import PostResponseReviewer
 from opencomputer.agent.state import SessionDB
 from opencomputer.agent.step import StepOutcome
 from opencomputer.tools.registry import registry
@@ -60,6 +61,8 @@ class AgentLoop:
         prompt_builder: PromptBuilder | None = None,
         compaction_disabled: bool = False,
         episodic_disabled: bool = False,
+        reviewer_disabled: bool = False,
+        is_reviewer: bool = False,
     ) -> None:
         self.provider = provider
         self.config = config
@@ -76,6 +79,16 @@ class AgentLoop:
         # Phase 11d: third-pillar episodic memory. Records one event per
         # completed turn for cross-session "remind me" queries via FTS5.
         self._episodic = None if episodic_disabled else EpisodicMemory(db=self.db)
+        # Phase 12a: post-response reviewer. Fires after each END_TURN return
+        # to opportunistically file the turn's takeaway into MEMORY.md. Never
+        # blocks the user-facing return. is_reviewer=True suppresses the
+        # spawn entirely so a reviewer agent doesn't trigger another reviewer.
+        self._is_reviewer = is_reviewer
+        self._reviewer = (
+            None
+            if reviewer_disabled or is_reviewer
+            else PostResponseReviewer(memory=self.memory, is_reviewer=False)
+        )
         self._last_input_tokens = 0
 
     # ─── the loop ──────────────────────────────────────────────────
@@ -179,6 +192,17 @@ class AgentLoop:
                         )
                     except Exception:  # noqa: BLE001
                         # Episodic recording is best-effort; never fail the turn.
+                        pass
+                # Phase 12a: spawn the post-response reviewer fire-and-forget.
+                # The user-facing return is NOT awaited on this — if review
+                # crashes or takes long, the turn is unaffected.
+                if self._reviewer is not None and step.assistant_message.content:
+                    try:
+                        self._reviewer.spawn_review(
+                            user_message=user_message,
+                            assistant_message=step.assistant_message.content,
+                        )
+                    except Exception:  # noqa: BLE001
                         pass
                 self.db.end_session(sid)
                 return ConversationResult(
