@@ -23,6 +23,7 @@ from dataclasses import dataclass
 
 from opencomputer.agent.compaction import CompactionEngine
 from opencomputer.agent.config import Config
+from opencomputer.agent.episodic import EpisodicMemory
 from opencomputer.agent.injection import engine as injection_engine
 from opencomputer.agent.memory import MemoryManager
 from opencomputer.agent.prompt_builder import PromptBuilder
@@ -58,6 +59,7 @@ class AgentLoop:
         memory: MemoryManager | None = None,
         prompt_builder: PromptBuilder | None = None,
         compaction_disabled: bool = False,
+        episodic_disabled: bool = False,
     ) -> None:
         self.provider = provider
         self.config = config
@@ -71,6 +73,9 @@ class AgentLoop:
             model=config.model.model,
             disabled=compaction_disabled,
         )
+        # Phase 11d: third-pillar episodic memory. Records one event per
+        # completed turn for cross-session "remind me" queries via FTS5.
+        self._episodic = None if episodic_disabled else EpisodicMemory(db=self.db)
         self._last_input_tokens = 0
 
     # ─── the loop ──────────────────────────────────────────────────
@@ -118,6 +123,9 @@ class AgentLoop:
         user_msg = Message(role="user", content=user_message)
         messages.append(user_msg)
         self.db.append_message(sid, user_msg)
+        # Track where this turn's messages start so episodic recording can
+        # walk only the new tool messages (not the whole prior history).
+        turn_start_index = len(messages) - 1
 
         total_input = 0
         total_output = 0
@@ -129,9 +137,7 @@ class AgentLoop:
             # Compaction check — uses REAL measured tokens from prior turn.
             # First iteration (no prior measurement) skips the check.
             if self._last_input_tokens > 0:
-                result = await self.compaction.maybe_run(
-                    messages, self._last_input_tokens
-                )
+                result = await self.compaction.maybe_run(messages, self._last_input_tokens)
                 if result.did_compact:
                     messages = result.messages
                     # Re-collect injections with the new message list
@@ -153,6 +159,27 @@ class AgentLoop:
             self.db.append_message(sid, step.assistant_message)
 
             if not step.should_continue:
+                # Record an episodic event for this completed turn — pass the
+                # tool messages this turn produced so file paths get extracted.
+                if self._episodic is not None:
+                    try:
+                        turn_tool_msgs = [
+                            m for m in messages[turn_start_index:] if m.role == "tool"
+                        ]
+                        # Count how many turns this session has had so far for
+                        # turn_index (0-based, scoped to a single conversation
+                        # within an AgentLoop).
+                        existing_count = len(self.db.list_episodic(session_id=sid, limit=10_000))
+                        self._episodic.record_turn(
+                            session_id=sid,
+                            turn_index=existing_count,
+                            user_message=user_message,
+                            assistant_message=step.assistant_message,
+                            tool_messages=turn_tool_msgs,
+                        )
+                    except Exception:  # noqa: BLE001
+                        # Episodic recording is best-effort; never fail the turn.
+                        pass
                 self.db.end_session(sid)
                 return ConversationResult(
                     final_message=step.assistant_message,
