@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Mapping
+from datetime import UTC, datetime
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,7 @@ class Checkpoint:
     created_at: str  # ISO 8601 UTC
 
     @staticmethod
-    def from_files(files: Mapping[str, bytes], *, label: str) -> "Checkpoint":
+    def from_files(files: Mapping[str, bytes], *, label: str) -> Checkpoint:
         h = hashlib.sha256()
         for path in sorted(files):
             h.update(path.encode("utf-8"))
@@ -29,7 +29,7 @@ class Checkpoint:
             id=h.hexdigest()[:16],
             files=dict(files),
             label=label,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
         )
 
 

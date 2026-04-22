@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from plugin_sdk.hooks import HookContext, HookDecision, HookEvent, HookSpec
-
 from rewind.checkpoint import Checkpoint  # type: ignore[import-not-found]
+
+from plugin_sdk.hooks import HookContext, HookDecision, HookEvent, HookSpec
 
 DESTRUCTIVE_TOOLS = frozenset({"Edit", "MultiEdit", "Write", "Bash"})
 

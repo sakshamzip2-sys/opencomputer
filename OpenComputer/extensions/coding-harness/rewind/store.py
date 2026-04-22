@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Optional
 
 from .checkpoint import Checkpoint
 
@@ -25,9 +24,9 @@ class RewindStore:
     def __init__(
         self,
         root: Path,
-        workspace_root: Optional[Path] = None,
+        workspace_root: Path | None = None,
         *,
-        subagent_id: Optional[str] = None,
+        subagent_id: str | None = None,
     ):
         base = Path(root)
         self.root = base / "subagents" / subagent_id if subagent_id else base
@@ -60,7 +59,7 @@ class RewindStore:
         """Shielded from cancellation so Ctrl-C mid-save can't corrupt."""
         await asyncio.shield(asyncio.to_thread(self.save, cp))
 
-    def load(self, checkpoint_id: str) -> Optional[Checkpoint]:
+    def load(self, checkpoint_id: str) -> Checkpoint | None:
         cp_dir = self.root / checkpoint_id
         meta_path = cp_dir / "meta.json"
         if not meta_path.exists():

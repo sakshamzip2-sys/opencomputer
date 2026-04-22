@@ -7,8 +7,9 @@ the plugin_sdk surfaces.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any
 
 
 @dataclass
@@ -16,7 +17,7 @@ class HarnessContext:
     session_id: str
     rewind_store: Any  # rewind.store.RewindStore — forward ref avoids cycle
     session_state: Any  # state.store.SessionStateStore
-    emit_progress_fn: Optional[Callable[[dict], None]] = None
+    emit_progress_fn: Callable[[dict], None] | None = None
 
     def emit_progress(self, event: dict) -> None:
         """No-op if no transport is attached; wire-event push if one is."""
