@@ -1,74 +1,72 @@
-"""WebSearch tool — query DuckDuckGo's HTML endpoint and return top results.
+"""WebSearch tool — config-selectable provider chain.
 
-DuckDuckGo's HTML interface is intentionally scraping-friendly (no JS required,
-no API key) so it's the path of least resistance for a default web-search tool.
-Returns a markdown list of (title, url, snippet) for the top N results.
+Phase 12d.2 refactor: was a single DDG path; now picks one of 5 backends
+(DDG / Brave / Tavily / Exa / Firecrawl) per `config.tools.web_search.provider`.
+The agent invokes `WebSearch(query=...)`; the backend distinction is
+invisible in the tool schema.
 
-For commercial / heavier use, swap to Brave Search via a `--brave-api-key`
-config option later — same return shape, different fetch.
+Per-call override: the model can pass `provider="brave"` to swap for
+one query. Useful when the configured default doesn't have a key set
+and the model wants to retry with a known-keyless one.
+
+Backends live in `opencomputer/tools/search_backends/` — one file each,
+all behind `SearchBackend`. To add a new provider: drop another file in
+that directory and add a row to `BACKENDS`.
 """
 
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
-from bs4 import BeautifulSoup
 
+from opencomputer.agent.config import default_config
+from opencomputer.tools.search_backends import (
+    BACKEND_IDS,
+    SearchBackendError,
+    SearchHit,
+    get_backend,
+)
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
-DDG_HTML_URL = "https://html.duckduckgo.com/html/"
-DEFAULT_USER_AGENT = "OpenComputer/0.1 (+https://github.com/sakshamzip2-sys/opencomputer)"
 DEFAULT_TIMEOUT_S = 10.0
 DEFAULT_MAX_RESULTS = 10
 
 
-def _unwrap_ddg_redirect(href: str) -> str:
-    """DDG wraps result links in /l/?uddg=<encoded-url>&rut=...; unwrap to the
-    real URL when that pattern is present, else return href as-is."""
-    if not href:
-        return href
-    parsed = urlparse(href)
-    if "duckduckgo" in (parsed.netloc or "") and parsed.path.startswith("/l/"):
-        qs = parse_qs(parsed.query)
-        if "uddg" in qs:
-            return unquote(qs["uddg"][0])
-    return href
-
-
-def _parse_results(html: str, max_results: int) -> list[dict[str, str]]:
-    soup = BeautifulSoup(html, "html.parser")
-    out: list[dict[str, str]] = []
-    for result in soup.select(".result"):
-        title_el = result.select_one(".result__title a") or result.select_one("h2 a")
-        snippet_el = result.select_one(".result__snippet")
-        if title_el is None:
-            continue
-        title = title_el.get_text(" ", strip=True)
-        href = _unwrap_ddg_redirect(title_el.get("href", "") or "")
-        snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
-        if not title or not href:
-            continue
-        out.append({"title": title, "url": href, "snippet": snippet})
-        if len(out) >= max_results:
-            break
-    return out
+def _format_hits_as_markdown(query: str, hits: list[SearchHit], provider: str) -> str:
+    lines = [f"# Results for: {query}  [provider: {provider}]\n"]
+    for i, h in enumerate(hits, 1):
+        lines.append(f"{i}. **{h.title}**")
+        lines.append(f"   {h.url}")
+        if h.snippet:
+            lines.append(f"   {h.snippet}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 class WebSearchTool(BaseTool):
     parallel_safe = True
+
+    def __init__(self, default_provider: str | None = None) -> None:
+        # Default provider is read from config, but tests + downstream
+        # callers may pin one explicitly via constructor override.
+        if default_provider is None:
+            cfg = default_config()
+            default_provider = cfg.tools.web_search.provider
+        self._default_provider = default_provider
 
     @property
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="WebSearch",
             description=(
-                "Search the web via DuckDuckGo and return the top results as "
-                "a markdown list. Use this when you need current information "
-                "outside training data (news, recent docs, prices). Pair with "
-                "WebFetch to read a specific result in detail."
+                "Search the web and return the top results as a markdown list. "
+                "Use this when you need current information outside training "
+                "data (news, recent docs, prices). Pair with WebFetch to read "
+                "a specific result in detail. Provider is configured via "
+                "`opencomputer config set tools.web_search.provider <name>`; "
+                "the model can override per-call by passing `provider`."
             ),
             parameters={
                 "type": "object",
@@ -89,6 +87,15 @@ class WebSearchTool(BaseTool):
                             f"Request timeout in seconds. Default {DEFAULT_TIMEOUT_S}."
                         ),
                     },
+                    "provider": {
+                        "type": "string",
+                        "enum": list(BACKEND_IDS),
+                        "description": (
+                            "Override the configured default provider for "
+                            "this one query. Useful when the default needs an "
+                            "API key that isn't set."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -99,23 +106,33 @@ class WebSearchTool(BaseTool):
         query = str(args.get("query", "")).strip()
         max_results = int(args.get("max_results", DEFAULT_MAX_RESULTS))
         timeout_s = float(args.get("timeout_s", DEFAULT_TIMEOUT_S))
+        provider = str(args.get("provider", "") or self._default_provider).strip()
 
         if not query:
             return ToolResult(
-                tool_call_id=call.id, content="Error: query is required", is_error=True
+                tool_call_id=call.id,
+                content="Error: query is required",
+                is_error=True,
             )
 
         try:
-            async with httpx.AsyncClient(
-                timeout=timeout_s,
-                follow_redirects=True,
-                headers={"User-Agent": DEFAULT_USER_AGENT},
-            ) as client:
-                resp = await client.post(DDG_HTML_URL, data={"q": query})
+            backend = get_backend(provider)
+        except KeyError as e:
+            return ToolResult(tool_call_id=call.id, content=f"Error: {e}", is_error=True)
+
+        try:
+            hits = await backend.search(query=query, max_results=max_results, timeout_s=timeout_s)
+        except SearchBackendError as e:
+            # Provider-friendly error (auth missing, rate limit, etc.).
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"Error: {e}",
+                is_error=True,
+            )
         except httpx.TimeoutException:
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"Error: timed out after {timeout_s}s searching for {query!r}",
+                content=(f"Error: timed out after {timeout_s}s searching {query!r} via {provider}"),
                 is_error=True,
             )
         except httpx.HTTPError as e:
@@ -125,28 +142,15 @@ class WebSearchTool(BaseTool):
                 is_error=True,
             )
 
-        if resp.status_code >= 400:
+        if not hits:
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"Error: HTTP {resp.status_code} from DuckDuckGo",
-                is_error=True,
+                content=f"No results for {query!r} via {provider}",
             )
-
-        results = _parse_results(resp.text, max_results)
-        if not results:
-            return ToolResult(
-                tool_call_id=call.id,
-                content=f"No results for {query!r}",
-            )
-
-        lines = [f"# Results for: {query}\n"]
-        for i, r in enumerate(results, 1):
-            lines.append(f"{i}. **{r['title']}**")
-            lines.append(f"   {r['url']}")
-            if r["snippet"]:
-                lines.append(f"   {r['snippet']}")
-            lines.append("")
-        return ToolResult(tool_call_id=call.id, content="\n".join(lines))
+        return ToolResult(
+            tool_call_id=call.id,
+            content=_format_hits_as_markdown(query, hits, provider),
+        )
 
 
 __all__ = ["WebSearchTool"]

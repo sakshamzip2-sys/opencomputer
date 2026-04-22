@@ -17,8 +17,17 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+# Phase 12d.2 refactor: _parse_results and _unwrap_ddg_redirect moved out
+# of web_search.py into the dedicated DDG backend. WebSearchTool's public
+# tool contract is unchanged.
+from opencomputer.tools.search_backends.ddg import (
+    _parse_html_results as _parse_results,
+)
+from opencomputer.tools.search_backends.ddg import (
+    _unwrap_ddg_redirect,
+)
 from opencomputer.tools.web_fetch import WebFetchTool, _html_to_text
-from opencomputer.tools.web_search import WebSearchTool, _parse_results, _unwrap_ddg_redirect
+from opencomputer.tools.web_search import WebSearchTool
 from plugin_sdk.core import ToolCall
 
 
@@ -122,9 +131,7 @@ async def test_webfetch_truncates_long_pages(monkeypatch: pytest.MonkeyPatch) ->
             return fake_resp
 
     monkeypatch.setattr("opencomputer.tools.web_fetch.httpx.AsyncClient", _FakeClient)
-    res = await tool.execute(
-        _call("WebFetch", {"url": "https://example.com", "max_chars": 200})
-    )
+    res = await tool.execute(_call("WebFetch", {"url": "https://example.com", "max_chars": 200}))
     assert not res.is_error
     assert "[truncated" in res.content
 
@@ -204,9 +211,10 @@ def test_parse_results_extracts_title_url_snippet() -> None:
     """
     results = _parse_results(html, max_results=10)
     assert len(results) == 2
-    assert results[0]["title"] == "Example A"
-    assert results[0]["url"] == "https://example.com/a"
-    assert results[0]["snippet"] == "Snippet for A"
+    # Phase 12d.2: helper now returns SearchHit dataclasses, not dicts.
+    assert results[0].title == "Example A"
+    assert results[0].url == "https://example.com/a"
+    assert results[0].snippet == "Snippet for A"
 
 
 def test_parse_results_respects_max_results() -> None:
