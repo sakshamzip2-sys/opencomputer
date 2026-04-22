@@ -28,6 +28,8 @@ from opencomputer.tools.grep import GrepTool
 from opencomputer.tools.read import ReadTool
 from opencomputer.tools.registry import registry
 from opencomputer.tools.skill_manage import SkillManageTool
+from opencomputer.tools.web_fetch import WebFetchTool
+from opencomputer.tools.web_search import WebSearchTool
 from opencomputer.tools.write import WriteTool
 from plugin_sdk.runtime_context import RuntimeContext
 
@@ -50,6 +52,8 @@ def _register_builtin_tools() -> None:
     registry.register(GlobTool())
     registry.register(SkillManageTool())
     registry.register(DelegateTool())
+    registry.register(WebFetchTool())
+    registry.register(WebSearchTool())
 
 
 def _discover_plugins() -> int:
