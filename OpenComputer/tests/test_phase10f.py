@@ -724,3 +724,118 @@ class TestMemoryTool:
             MemoryTool(ctx), action="add", target="wrong", content="x"
         )
         assert r.is_error is True
+
+
+# ─── 10f.E — SessionSearch tool + SessionDB.search_messages() ──────────
+
+
+class TestSessionDBSearchMessages:
+    def test_search_messages_returns_full_content(self, tmp_path):
+        from opencomputer.agent.state import SessionDB
+        from plugin_sdk.core import Message
+
+        db = SessionDB(tmp_path / "s.db")
+        db.create_session("sess-1", platform="cli", model="opus")
+        db.append_message(
+            "sess-1", Message(role="user", content="tell me about python decorators")
+        )
+        db.append_message(
+            "sess-1", Message(role="assistant", content="decorators wrap functions")
+        )
+        rows = db.search_messages("python", limit=5)
+        assert len(rows) >= 1
+        # Result rows include full message content, not just snippet.
+        match = next(r for r in rows if "python" in r["content"])
+        assert match["session_id"] == "sess-1"
+        assert match["role"] in {"user", "assistant"}
+        assert "timestamp" in match
+
+    def test_search_messages_empty_query_returns_empty(self, tmp_path):
+        from opencomputer.agent.state import SessionDB
+
+        db = SessionDB(tmp_path / "s.db")
+        assert db.search_messages("", limit=5) == []
+
+    def test_search_messages_limit_respected(self, tmp_path):
+        from opencomputer.agent.state import SessionDB
+        from plugin_sdk.core import Message
+
+        db = SessionDB(tmp_path / "s.db")
+        db.create_session("s", platform="cli", model="opus")
+        for i in range(20):
+            db.append_message(
+                "s", Message(role="user", content=f"query topic alpha {i}")
+            )
+        rows = db.search_messages("alpha", limit=3)
+        assert len(rows) == 3
+
+
+class TestSessionSearchTool:
+    @pytest.fixture
+    def ctx(self, tmp_path):
+        from opencomputer.agent.memory import MemoryManager
+        from opencomputer.agent.memory_context import MemoryContext
+        from opencomputer.agent.state import SessionDB
+        from plugin_sdk.core import Message
+
+        db = SessionDB(tmp_path / "s.db")
+        db.create_session("s1", platform="cli", model="opus")
+        db.append_message(
+            "s1", Message(role="user", content="how does asyncio work?")
+        )
+        db.append_message(
+            "s1",
+            Message(
+                role="assistant",
+                content="asyncio manages cooperative concurrency via event loop",
+            ),
+        )
+        mm = MemoryManager(
+            declarative_path=tmp_path / "M.md",
+            user_path=tmp_path / "U.md",
+            skills_path=tmp_path / "skills",
+        )
+        return MemoryContext(manager=mm, db=db, session_id_provider=lambda: "s1")
+
+    def _call(self, tool, **args):
+        from plugin_sdk.core import ToolCall
+
+        return asyncio.run(
+            tool.execute(ToolCall(id="tc", name="SessionSearch", arguments=args))
+        )
+
+    def test_schema_has_query_param(self, ctx):
+        from opencomputer.tools.session_search_tool import SessionSearchTool
+
+        s = SessionSearchTool(ctx).schema
+        assert s.name == "SessionSearch"
+        assert "query" in s.parameters["properties"]
+
+    def test_finds_matching_messages(self, ctx):
+        from opencomputer.tools.session_search_tool import SessionSearchTool
+
+        r = self._call(SessionSearchTool(ctx), query="asyncio")
+        assert r.is_error is False
+        assert "asyncio" in r.content
+
+    def test_empty_query_returns_error(self, ctx):
+        from opencomputer.tools.session_search_tool import SessionSearchTool
+
+        r = self._call(SessionSearchTool(ctx), query="")
+        assert r.is_error is True
+
+    def test_no_matches_is_not_an_error(self, ctx):
+        from opencomputer.tools.session_search_tool import SessionSearchTool
+
+        r = self._call(SessionSearchTool(ctx), query="entirelyunknownword42")
+        # No match is a valid empty result, not an error.
+        assert r.is_error is False
+        assert "no matches" in r.content.lower()
+
+    def test_limit_defaults_to_10_and_max_50(self, ctx):
+        from opencomputer.tools.session_search_tool import SessionSearchTool
+
+        s = SessionSearchTool(ctx).schema
+        props = s.parameters["properties"]
+        assert props["limit"]["default"] == 10
+        assert props["limit"]["maximum"] == 50
