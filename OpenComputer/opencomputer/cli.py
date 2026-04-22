@@ -481,6 +481,85 @@ def config_path() -> None:
     console.print(str(config_file_path()))
 
 
+# Phase 11d: episodic memory recall + Anthropic batch runner.
+
+
+@app.command()
+def recall(
+    query: str = typer.Argument(..., help="Search across episodic memory."),
+    limit: int = typer.Option(10, "--limit", "-n"),
+) -> None:
+    """Search past turns by what happened — files touched, tools used, gist.
+
+    Episodic memory is the third pillar (declarative + procedural + episodic).
+    Each completed turn writes one event; this command retrieves them via FTS5.
+    """
+    from opencomputer.agent.state import SessionDB
+
+    cfg = default_config()
+    db = SessionDB(cfg.session.db_path)
+    hits = db.search_episodic(query, limit=limit)
+    if not hits:
+        console.print("[dim]no episodic events match[/dim]")
+        return
+    for h in hits:
+        tools = f" [dim]tools:[/dim] {h['tools_used']}" if h.get("tools_used") else ""
+        files = f" [dim]files:[/dim] {h['file_paths']}" if h.get("file_paths") else ""
+        console.print(
+            f"[cyan]{h['session_id'][:8]}…/turn-{h['turn_index']}[/cyan]"
+            f"  {h['summary']}{tools}{files}"
+        )
+
+
+@app.command()
+def batch(
+    input_path: str = typer.Argument(..., help="Path to JSONL with one prompt per line."),
+    output_path: str = typer.Option(
+        "batch-results.jsonl", "--output", "-o", help="Where to write results JSONL."
+    ),
+    poll_interval: float = typer.Option(
+        30.0, "--poll-interval", help="Seconds between status polls."
+    ),
+) -> None:
+    """Submit prompts to Anthropic's batch API; write results to JSONL.
+
+    Input format (one JSON object per line):
+        {"id": "req-1", "prompt": "...", "system": "...", "model": "..."}
+
+    Only `prompt` is required. `id` defaults to req-N. `system` and `model`
+    fall back to defaults. ANTHROPIC_API_KEY must be set.
+    """
+    from pathlib import Path as _Path
+
+    from opencomputer.batch import run_batch_end_to_end
+
+    in_path = _Path(input_path)
+    out_path = _Path(output_path)
+    if not in_path.exists():
+        console.print(f"[bold red]error:[/bold red] input file not found: {in_path}")
+        raise typer.Exit(1)
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        console.print("[bold red]error:[/bold red] ANTHROPIC_API_KEY not set")
+        raise typer.Exit(1)
+
+    def _on_status(status: str) -> None:
+        console.print(f"[dim]batch status: {status}[/dim]")
+
+    try:
+        final_status, n = asyncio.run(
+            run_batch_end_to_end(
+                in_path,
+                out_path,
+                interval_s=poll_interval,
+                on_status=_on_status,
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[bold red]error:[/bold red] {type(e).__name__}: {e}")
+        raise typer.Exit(1) from None
+    console.print(f"[green]✓[/green] batch finished ({final_status}) — {n} result(s) → {out_path}")
+
+
 def main() -> None:
     app()
 
