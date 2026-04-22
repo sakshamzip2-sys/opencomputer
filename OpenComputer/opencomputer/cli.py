@@ -161,7 +161,9 @@ def chat(
     if no_compact:
         console.print("[dim]compaction disabled[/dim]")
     if cfg.mcp.servers:
-        console.print(f"[dim]mcp:     {n_mcp_tools} tool(s) from {len(cfg.mcp.servers)} server(s)[/dim]")
+        console.print(
+            f"[dim]mcp:     {n_mcp_tools} tool(s) from {len(cfg.mcp.servers)} server(s)[/dim]"
+        )
     console.print("[dim]Type 'exit' to quit. Ctrl+C to interrupt.[/dim]\n")
 
     async def _run_turn(user_input: str) -> None:
@@ -242,10 +244,7 @@ def sessions(limit: int = typer.Option(10, "--limit", "-n")) -> None:
     rows = db.list_sessions(limit=limit)
     for r in rows:
         title = r.get("title") or "[untitled]"
-        console.print(
-            f"[dim]{r['id'][:8]}…[/dim] "
-            f"msgs={r['message_count']:<3} {title}"
-        )
+        console.print(f"[dim]{r['id'][:8]}…[/dim] msgs={r['message_count']:<3} {title}")
 
 
 @app.command()
@@ -267,9 +266,7 @@ def wire(
     DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
 
     server = WireServer(loop=loop, host=host, port=port)
-    console.print(
-        f"[bold cyan]OpenComputer wire server[/bold cyan] — ws://{host}:{port}"
-    )
+    console.print(f"[bold cyan]OpenComputer wire server[/bold cyan] — ws://{host}:{port}")
     console.print(f"[dim]model: {cfg.model.model} ({cfg.model.provider})[/dim]")
     console.print("[dim]ctrl+c to stop[/dim]\n")
 
@@ -310,9 +307,7 @@ def gateway() -> None:
     # Connect to MCP servers in the background (kimi-cli deferred pattern)
     mcp_mgr = MCPManager(tool_registry=registry)
     if cfg.mcp.servers:
-        console.print(
-            f"[dim]mcp: deferring connection to {len(cfg.mcp.servers)} server(s)[/dim]"
-        )
+        console.print(f"[dim]mcp: deferring connection to {len(cfg.mcp.servers)} server(s)[/dim]")
 
     gw = Gateway(loop=loop)
     for platform_name, adapter in plugin_registry.channels.items():
@@ -336,9 +331,7 @@ def gateway() -> None:
 
     async def _run():
         if cfg.mcp.servers:
-            asyncio.create_task(
-                mcp_mgr.connect_all(list(cfg.mcp.servers))
-            )
+            asyncio.create_task(mcp_mgr.connect_all(list(cfg.mcp.servers)))
         try:
             await gw.serve_forever()
         finally:
@@ -372,9 +365,7 @@ def plugins() -> None:
         return
     for c in candidates:
         m = c.manifest
-        console.print(
-            f"[cyan]{m.id}[/cyan] v{m.version} — {m.description or '[no description]'}"
-        )
+        console.print(f"[cyan]{m.id}[/cyan] v{m.version} — {m.description or '[no description]'}")
         console.print(f"[dim]  kind: {m.kind}  root: {c.root_dir}[/dim]")
 
 
@@ -424,6 +415,12 @@ config_app = typer.Typer(
     name="config", help="Manage OpenComputer config (~/.opencomputer/config.yaml)"
 )
 app.add_typer(config_app, name="config")
+
+
+# Phase 11c — MCP server management subcommand
+from opencomputer.cli_mcp import mcp_app  # noqa: E402
+
+app.add_typer(mcp_app, name="mcp")
 
 
 @config_app.command("show")
