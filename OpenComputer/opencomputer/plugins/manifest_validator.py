@@ -46,6 +46,12 @@ class PluginManifestSchema(BaseModel):
     homepage: str = Field(default="", max_length=256)
     license: str = Field(default="MIT", max_length=64)
     kind: PluginKind = Field(default="mixed")
+    # Phase 14.C
+    profiles: list[str] | None = Field(default=None)
+    single_instance: bool = Field(default=False)
+    # Phase 14.M/N — already in use via ProfileConfig/WorkspaceOverlay but
+    # manifests often carry a schema_version field. Accept it silently.
+    schema_version: int | None = Field(default=None)
 
     @field_validator("id")
     @classmethod

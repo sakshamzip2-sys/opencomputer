@@ -67,6 +67,9 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
         license=schema.license,
         kind=schema.kind,
         entry=schema.entry,
+        # Phase 14.C — profile scoping. ["*"] or None means "any profile".
+        profiles=(tuple(schema.profiles) if schema.profiles is not None else None),
+        single_instance=schema.single_instance,
     )
 
 

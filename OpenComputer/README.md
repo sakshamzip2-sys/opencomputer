@@ -131,6 +131,99 @@ Every write is atomic (temp file + `os.replace`) and locked (`fcntl` on Unix, `m
 
 An optional `MemoryProvider` plugin interface lets you add Honcho-style user modeling, Mem0-style fact extraction, or Cognee-style knowledge graphs as overlays on top of the baseline. Only one provider is active at a time; the baseline above always runs. See `docs/plugin-authors.md` when present.
 
+## Profiles
+
+One user, many personas. A profile is a separate data dir with its own memory, config, and plugin selection. Switch with `-p`:
+
+```bash
+opencomputer                     # default profile (~/.opencomputer/)
+opencomputer -p coder            # ~/.opencomputer/profiles/coder/
+opencomputer -p stocks           # ~/.opencomputer/profiles/stocks/
+```
+
+Each profile has its **own** `MEMORY.md`, `USER.md`, `config.yaml`, `sessions.db`, `skills/`, and `plugins/`. The agent cannot see across profiles.
+
+### Managing profiles
+
+```bash
+opencomputer profile list                        # table of all profiles + active marker
+opencomputer profile create coder                # creates ~/.opencomputer/profiles/coder/
+opencomputer profile create coder2 --clone-from coder          # copy config from coder
+opencomputer profile create staging --clone-from coder --clone-all  # full copy
+opencomputer profile use coder                   # set sticky default (no -p needed after)
+opencomputer profile rename coder coder-main     # move directory + update sticky
+opencomputer profile delete staging --yes        # remove
+opencomputer profile path [<name>]               # print the filesystem path
+```
+
+The sticky active profile lives in `~/.opencomputer/active_profile`. `-p <name>` always overrides the sticky for one invocation.
+
+### Presets and workspace overlays (plugin activation)
+
+Each profile's `profile.yaml` controls which plugins to load. Two shapes:
+
+```yaml
+# Option A: reference a named preset
+preset: coding
+
+# Option B: explicit list (mutually exclusive with preset)
+plugins:
+  enabled: [anthropic-provider, coding-harness]
+```
+
+Named presets live in `~/.opencomputer/presets/<name>.yaml`:
+
+```bash
+opencomputer preset create coding --plugins anthropic-provider,coding-harness,dev-tools
+opencomputer preset list
+opencomputer preset edit coding
+opencomputer preset show coding
+opencomputer preset where coding
+```
+
+Per-project overrides via `.opencomputer/config.yaml` walked up from CWD:
+
+```yaml
+# ./my-project/.opencomputer/config.yaml
+preset: coding
+plugins:
+  additional: [extra-tool]   # unions into the preset
+```
+
+The walk stops before `$HOME/.opencomputer/config.yaml` (that's the agent's main config, not an overlay).
+
+### Plugin install / uninstall
+
+Custom plugins can live in two places:
+
+```bash
+# Profile-local (default) — only this profile sees it
+opencomputer plugin install ./my-tool                       # → <active profile>/plugins/
+opencomputer plugin install ./my-tool --profile coder       # → explicit profile
+
+# Global — all profiles see it
+opencomputer plugin install ./my-tool --global              # → ~/.opencomputer/plugins/
+
+opencomputer plugin uninstall my-tool --yes
+opencomputer plugin where my-tool                            # print filesystem path
+```
+
+Discovery order: **profile-local → global → bundled**. Profile-local shadows global shadows bundled on id collision.
+
+Plugins can declare compatibility in their manifest:
+
+```json
+{
+  "id": "coding-harness",
+  "profiles": ["coder", "default"],
+  "single_instance": false
+}
+```
+
+- `profiles: ["*"]` (or omitted) means "any profile" — default.
+- `profiles: ["coder"]` skips the plugin in any profile not named "coder".
+- `single_instance: true` (for plugins owning a bot token, etc.) is honoured by a future lock (14.F).
+
 ## Messaging channels
 
 ### Telegram

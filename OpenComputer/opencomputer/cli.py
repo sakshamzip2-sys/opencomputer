@@ -2,8 +2,77 @@
 
 from __future__ import annotations
 
-import asyncio
+# ─── Pre-import profile routing (Phase 14.A) ──────────────────────────
+# Intercept -p / --profile from sys.argv BEFORE any opencomputer.* import,
+# because downstream modules read OPENCOMPUTER_HOME at import time via _home().
+# Flag > sticky active_profile file > default (root).
 import os
+import sys
+
+
+def _apply_profile_override() -> None:
+    argv = sys.argv
+    profile_name: str | None = None
+    # Strip -p/--profile flag from argv so Typer doesn't see it as unknown option
+    new_argv: list[str] = [argv[0]] if argv else []
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("-p", "--profile"):
+            if i + 1 < len(argv):
+                profile_name = argv[i + 1]
+                i += 2
+            else:
+                # -p with no following value: strip the flag, fall back to
+                # default. Don't crash — let Typer report any downstream issue
+                # cleanly (in practice there's nothing after -p to confuse it).
+                i += 1
+            continue
+        if arg.startswith("--profile="):
+            profile_name = arg.split("=", 1)[1]
+            i += 1
+            continue
+        new_argv.append(arg)
+        i += 1
+    sys.argv = new_argv
+
+    # Normalise empty-string profile (e.g. `--profile=`) to None so the
+    # fallback path is explicit rather than a silent falsy pass-through.
+    profile_name = profile_name or None
+
+    if profile_name is None:
+        # No flag. Only consult the sticky file if OPENCOMPUTER_HOME is not
+        # already set — this keeps the function idempotent across multiple
+        # calls (e.g. module reload + explicit call in tests) and means
+        # a parent-process env var wins when no flag was given.
+        if "OPENCOMPUTER_HOME" not in os.environ:
+            try:
+                from opencomputer.profiles import read_active_profile
+
+                profile_name = read_active_profile()
+            except Exception:
+                profile_name = None
+
+    # Explicit flag always wins — even if OPENCOMPUTER_HOME was pre-set in
+    # the parent process. Without this, `opencomputer -p coder` would be
+    # silently suppressed whenever a parent had OPENCOMPUTER_HOME exported.
+    if profile_name and profile_name != "default":
+        try:
+            from opencomputer.profiles import get_profile_dir
+
+            os.environ["OPENCOMPUTER_HOME"] = str(get_profile_dir(profile_name))
+        except Exception:
+            # Invalid profile name (from argv or sticky file) — silently fall
+            # back to default. _apply_profile_override MUST NOT crash the CLI.
+            pass
+
+
+# Apply profile override BEFORE any opencomputer.* module import
+_apply_profile_override()
+
+# ─── Regular imports follow ────────────────────────────────────────────
+
+import asyncio
 import uuid
 
 import typer
@@ -119,18 +188,48 @@ def _resolve_plugin_filter():
 
 
 def _discover_plugins() -> int:
-    """Discover + load plugins from known search paths. Returns count loaded."""
+    """Discover + load plugins from known search paths. Returns count loaded.
+
+    Search order (highest priority first — discovery dedupes by id, so
+    higher-priority roots shadow lower-priority ones):
+
+      1. **Profile-local** (named profiles only):
+         ``<active_profile_dir>/plugins/``
+      2. **Global** (all profiles share):
+         ``~/.opencomputer/plugins/``
+      3. **Bundled** (shipped with OpenComputer):
+         ``<repo>/extensions/``
+
+    Default profile = Global, since _home() == default_root, so steps 1
+    and 2 collapse to the same path.
+    """
     from pathlib import Path
 
-    # In-tree extensions + user plugin dir
+    from opencomputer.agent.config import _home
+    from opencomputer.profiles import get_default_root, read_active_profile
+
     search_paths: list[Path] = []
+
+    active = read_active_profile()
+    default_root = get_default_root()
+    profile_dir = _home()
+
+    # 1. Profile-local (only distinct from global for named profiles)
+    if active is not None:
+        profile_local = profile_dir / "plugins"
+        if profile_local.exists():
+            search_paths.append(profile_local)
+
+    # 2. Global
+    global_plugins = default_root / "plugins"
+    if global_plugins.exists() and global_plugins not in search_paths:
+        search_paths.append(global_plugins)
+
+    # 3. Bundled (extensions/)
     repo_root = Path(__file__).resolve().parent.parent
     ext_dir = repo_root / "extensions"
     if ext_dir.exists():
         search_paths.append(ext_dir)
-    user_dir = Path.home() / ".opencomputer" / "plugins"
-    if user_dir.exists():
-        search_paths.append(user_dir)
 
     enabled = _resolve_plugin_filter()
     loaded = plugin_registry.load_all(search_paths, enabled_ids=enabled)
@@ -496,6 +595,16 @@ app.add_typer(memory_app, name="memory")
 from opencomputer.cli_preset import preset_app  # noqa: E402
 
 app.add_typer(preset_app, name="preset")
+
+# Phase 14.B — profile management CLI
+from opencomputer.cli_profile import profile_app  # noqa: E402
+
+app.add_typer(profile_app, name="profile")
+
+# Phase 14.E — plugin install/uninstall/where CLI
+from opencomputer.cli_plugin import plugin_app  # noqa: E402
+
+app.add_typer(plugin_app, name="plugin")
 
 
 @config_app.command("show")

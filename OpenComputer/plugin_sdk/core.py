@@ -100,6 +100,14 @@ class PluginManifest:
     license: str = "MIT"
     kind: Literal["channel", "provider", "tool", "skill", "mixed"] = "mixed"
     entry: str = ""  # path to the entry module, relative to plugin root
+    # Phase 14.C: profile scoping. None or ["*"] means "any profile can
+    # opt in" (most permissive, backward-compatible default). A list of
+    # profile names restricts the plugin to those profiles only.
+    profiles: tuple[str, ...] | None = None
+    # Phase 14.C: single-instance plugins (e.g. plugins that own a bot
+    # token) can only belong to ONE profile at a time. Core tracks a
+    # lock in ~/.opencomputer/.locks/<plugin-id> when this is True.
+    single_instance: bool = False
 
 
 # ─── Stop reasons ──────────────────────────────────────────────────────

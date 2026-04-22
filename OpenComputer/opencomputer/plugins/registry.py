@@ -23,6 +23,24 @@ from plugin_sdk.provider_contract import BaseProvider
 logger = logging.getLogger("opencomputer.plugins.registry")
 
 
+def _manifest_allows_profile(manifest: object, profile_name: str) -> tuple[bool, str]:
+    """Layer A check: does this manifest's ``profiles`` field permit this profile?
+
+    Rules (Phase 14.C/14.D):
+      - ``manifest.profiles`` is None → permissive, load in any profile.
+      - ``manifest.profiles`` contains ``"*"`` → permissive.
+      - ``manifest.profiles`` contains ``profile_name`` → explicit allow.
+      - Otherwise → skip, with the allowed list in the reason string so
+        the user can see why it was excluded.
+    """
+    profiles = getattr(manifest, "profiles", None)
+    if profiles is None:
+        return True, ""
+    if "*" in profiles or profile_name in profiles:
+        return True, ""
+    return False, f"manifest restricts to {list(profiles)!r}"
+
+
 @dataclass(slots=True)
 class PluginRegistry:
     """Holds all loaded plugins and the shared API they register into."""
@@ -49,18 +67,34 @@ class PluginRegistry:
     ) -> list[LoadedPlugin]:
         """Discover + activate plugins. Returns the successfully loaded ones.
 
-        ``enabled_ids`` controls filtering (Phase 14.M integration):
+        Filtering stack (Phase 14.C/14.D/14.M):
 
-        - ``None`` or ``"*"``: load everything discovered (pre-Phase-14
-          behaviour, fully backward-compatible).
-        - ``frozenset[str]``: load ONLY candidates whose id is in the set.
-          Skipped candidates are logged at INFO — they stay visible via
-          ``list_candidates`` for diagnostics.
+        1. **Layer A — manifest profile scope** (14.C/14.D): if
+           ``manifest.profiles`` is set and doesn't contain the active
+           profile or ``"*"``, the plugin is skipped with a clear log
+           line. This is the plugin AUTHOR's declared compatibility.
+        2. **Layer B — user's enabled_ids filter** (14.M): if
+           ``enabled_ids`` is a frozenset, only listed ids pass. ``None``
+           or ``"*"`` means "no filter" (backward-compatible default).
         """
+        from opencomputer.profiles import read_active_profile
+
+        active_profile = read_active_profile() or "default"
         candidates = discover(search_paths)
         api = self.api()
         wildcard = enabled_ids is None or enabled_ids == "*"
         for cand in candidates:
+            # Layer A — manifest scope check
+            allowed, reason = _manifest_allows_profile(cand.manifest, active_profile)
+            if not allowed:
+                logger.info(
+                    "skipping plugin '%s' in profile '%s': %s",
+                    cand.manifest.id,
+                    active_profile,
+                    reason,
+                )
+                continue
+            # Layer B — user's enabled_ids filter (14.M)
             if not wildcard:
                 assert isinstance(enabled_ids, frozenset)
                 if cand.manifest.id not in enabled_ids:
