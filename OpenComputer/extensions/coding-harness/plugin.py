@@ -1,42 +1,64 @@
 """
-Coding harness plugin — register tools, injection provider, and hook.
+Coding harness plugin — register tools, modes, and hooks.
 
-Install this plugin to turn OpenComputer into a coding agent:
-- Edit / MultiEdit / TodoWrite tools
-- start_process / check_output / kill_process for dev servers
-- Plan mode (via --plan flag) — refuses destructive tools when active
-- Bundled code-reviewer skill (auto-activates on "review this PR" etc.)
+v2 layout (Phase 6c+):
+    tools/       file and process tools
+    rewind/      content-hashed checkpoint store
+    state/       session-scoped key/value store
+    hooks/       PreToolUse auto-checkpoint, plan-mode block, etc.
+    modes/       injection providers (plan, accept-edits, review) — Phase 6d
+    permissions/ scope checks — Phase 6e
+    slash_commands/ in-chat controls — Phase 6f
 
-Design (per Phase 6b plan):
-- Flat file layout; plugin loader adds this dir to sys.path + clears
-  common short-name module cache entries before each load.
-- Sibling imports use plain names.
+Sibling imports use plain names because the plugin loader adds this dir to
+sys.path + clears the common short-name module cache entries before each load.
 """
 
 from __future__ import annotations
 
-try:
-    from background import CheckOutputTool, KillProcessTool, StartProcessTool
-    from edit import EditTool
-    from multi_edit import MultiEditTool
-    from plan_mode import PlanModeInjectionProvider, build_plan_mode_hook_spec
-    from todo_write import TodoWriteTool
-except ImportError:  # pragma: no cover — package-import fallback
-    from extensions.coding_harness.background import (  # type: ignore
-        CheckOutputTool,
-        KillProcessTool,
-        StartProcessTool,
+from pathlib import Path
+
+# Sibling imports — loader-assisted (plugin dir on sys.path).
+from context import HarnessContext  # type: ignore[import-not-found]
+from hooks.auto_checkpoint import build_auto_checkpoint_hook_spec  # type: ignore[import-not-found]
+from hooks.plan_block import build_plan_mode_hook_spec  # type: ignore[import-not-found]
+from plan_mode import PlanModeInjectionProvider  # type: ignore[import-not-found]
+from rewind.store import RewindStore  # type: ignore[import-not-found]
+from state.store import SessionStateStore  # type: ignore[import-not-found]
+from tools.background import (  # type: ignore[import-not-found]
+    CheckOutputTool,
+    KillProcessTool,
+    StartProcessTool,
+)
+from tools.edit import EditTool  # type: ignore[import-not-found]
+from tools.multi_edit import MultiEditTool  # type: ignore[import-not-found]
+from tools.rewind import RewindTool  # type: ignore[import-not-found]
+from tools.todo_write import TodoWriteTool  # type: ignore[import-not-found]
+
+HARNESS_ROOT = Path.home() / ".opencomputer" / "harness"
+
+
+def _build_context(api) -> HarnessContext:
+    session_id = getattr(api, "session_id", None) or "default"
+    workspace_root = getattr(api, "workspace_root", None) or Path.cwd()
+    session_root = HARNESS_ROOT / session_id
+    subagent_id = getattr(api, "subagent_id", None)
+    rewind_store = RewindStore(
+        session_root / "rewind",
+        workspace_root=workspace_root,
+        subagent_id=subagent_id,
     )
-    from extensions.coding_harness.edit import EditTool  # type: ignore
-    from extensions.coding_harness.multi_edit import MultiEditTool  # type: ignore
-    from extensions.coding_harness.plan_mode import (  # type: ignore
-        PlanModeInjectionProvider,
-        build_plan_mode_hook_spec,
+    session_state = SessionStateStore(session_root / "state")
+    return HarnessContext(
+        session_id=session_id,
+        rewind_store=rewind_store,
+        session_state=session_state,
     )
-    from extensions.coding_harness.todo_write import TodoWriteTool  # type: ignore
 
 
 def register(api) -> None:  # PluginAPI duck-typed
+    ctx = _build_context(api)
+
     # Tools
     api.register_tool(EditTool())
     api.register_tool(MultiEditTool())
@@ -44,7 +66,11 @@ def register(api) -> None:  # PluginAPI duck-typed
     api.register_tool(StartProcessTool())
     api.register_tool(CheckOutputTool())
     api.register_tool(KillProcessTool())
+    api.register_tool(RewindTool(ctx=ctx))
 
-    # Plan-mode injection + hard-block hook (belt + suspenders)
+    # Plan-mode: soft guidance (injection) + hard enforcement (hook).
     api.register_injection_provider(PlanModeInjectionProvider())
     api.register_hook(build_plan_mode_hook_spec())
+
+    # Auto-checkpoint: snapshot files before any destructive tool call.
+    api.register_hook(build_auto_checkpoint_hook_spec(harness_ctx=ctx))

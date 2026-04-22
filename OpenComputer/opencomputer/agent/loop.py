@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from opencomputer.agent.compaction import CompactionEngine
@@ -28,6 +29,7 @@ from opencomputer.agent.memory import MemoryManager
 from opencomputer.agent.prompt_builder import PromptBuilder
 from opencomputer.agent.state import SessionDB
 from opencomputer.agent.step import StepOutcome
+from opencomputer.agent.tool_ordering import sort_tools_for_request
 from opencomputer.tools.registry import registry
 from plugin_sdk.core import Message, StopReason, ToolCall
 from plugin_sdk.injection import InjectionContext
@@ -47,6 +49,13 @@ class ConversationResult:
     output_tokens: int
 
 
+#: Max number of per-session frozen system prompts retained in memory. Long-running
+#: gateway daemons can accumulate many session_ids; this cap bounds the growth
+#: without compromising the prompt-cache invariant (any evicted session will
+#: simply rebuild on its next turn — a one-time cost, not a per-turn cost).
+DEFAULT_PROMPT_SNAPSHOT_CACHE_MAX = 256
+
+
 class AgentLoop:
     """The single while-loop that runs the agent."""
 
@@ -58,6 +67,7 @@ class AgentLoop:
         memory: MemoryManager | None = None,
         prompt_builder: PromptBuilder | None = None,
         compaction_disabled: bool = False,
+        prompt_snapshot_cache_max: int = DEFAULT_PROMPT_SNAPSHOT_CACHE_MAX,
     ) -> None:
         self.provider = provider
         self.config = config
@@ -72,6 +82,15 @@ class AgentLoop:
             disabled=compaction_disabled,
         )
         self._last_input_tokens = 0
+        # Per-session frozen system prompt. LRU-evicted once cache is full, so
+        # long-running daemons don't retain snapshots for abandoned sessions
+        # forever. Memory edits mid-session go to disk immediately but do NOT
+        # mutate this snapshot — that's the invariant that keeps the prefix
+        # cache hot on turn 2+. Compaction invalidates only the suffix.
+        # Source: hermes-agent tools/memory_tool.py:_system_prompt_snapshot
+        # (freeze) + agent/prompt_builder.py:_SKILLS_PROMPT_CACHE (LRU).
+        self._prompt_snapshots: OrderedDict[str, str] = OrderedDict()
+        self._prompt_snapshot_cache_max = prompt_snapshot_cache_max
 
     # ─── the loop ──────────────────────────────────────────────────
 
@@ -98,12 +117,27 @@ class AgentLoop:
         else:
             messages = self.db.get_messages(sid)
 
-        # Build system prompt fresh every turn (cheap, keeps skill list up to date)
+        # System prompt is frozen per session: built once on the first turn,
+        # then reused verbatim so the prefix cache hits on turn 2+. Memory
+        # edits during a session do NOT retrigger a rebuild — that's the
+        # invariant that makes hermes's prompt_cache ~10× cheaper than
+        # per-turn rebuilds.
         if system_override is not None:
             base_system = system_override
         else:
-            skills = self.memory.list_skills()
-            base_system = self.prompt_builder.build(skills=skills)
+            snapshot = self._prompt_snapshots.get(sid)
+            if snapshot is None:
+                skills = self.memory.list_skills()
+                snapshot = self.prompt_builder.build(skills=skills)
+                # Evict the least-recently-used snapshot if the cache is full
+                # BEFORE inserting, so we never exceed the cap even transiently.
+                while len(self._prompt_snapshots) >= self._prompt_snapshot_cache_max:
+                    self._prompt_snapshots.popitem(last=False)
+                self._prompt_snapshots[sid] = snapshot
+            else:
+                # Cache hit — mark this session as most-recently-used
+                self._prompt_snapshots.move_to_end(sid)
+            base_system = snapshot
 
         # Collect dynamic injections (plan_mode, yolo_mode, etc. from plugins)
         inj_ctx = InjectionContext(
@@ -149,10 +183,11 @@ class AgentLoop:
             self._last_input_tokens = step.input_tokens
             total_input += step.input_tokens
             total_output += step.output_tokens
-            messages.append(step.assistant_message)
-            self.db.append_message(sid, step.assistant_message)
 
             if not step.should_continue:
+                # No tool calls — safe to persist the assistant message alone.
+                messages.append(step.assistant_message)
+                self.db.append_message(sid, step.assistant_message)
                 self.db.end_session(sid)
                 return ConversationResult(
                     final_message=step.assistant_message,
@@ -171,14 +206,17 @@ class AgentLoop:
             except Exception:
                 pass  # delegate tool may not be registered yet in some contexts
 
-            # Dispatch all tool calls from this step (runtime flows into hooks via sid)
+            # Dispatch tools BEFORE persisting the assistant message. If we saved
+            # it first and then got cancelled mid-dispatch, the DB would hold a
+            # tool_use with no matching tool_result — Anthropic 400s on resume.
+            # Atomic batch persist below restores the invariant.
             tool_results = await self._dispatch_tool_calls(
                 step.assistant_message.tool_calls or [],
                 session_id=sid,
             )
-            for tr_msg in tool_results:
-                messages.append(tr_msg)
-                self.db.append_message(sid, tr_msg)
+            turn_messages: list[Message] = [step.assistant_message, *tool_results]
+            messages.extend(turn_messages)
+            self.db.append_messages_batch(sid, turn_messages)
 
         # Budget exhausted
         final = Message(
@@ -217,7 +255,7 @@ class AgentLoop:
                 model=self.config.model.model,
                 messages=messages,
                 system=system,
-                tools=registry.schemas(),
+                tools=sort_tools_for_request(registry.schemas()),
                 max_tokens=self.config.model.max_tokens,
                 temperature=self.config.model.temperature,
             ):
@@ -233,7 +271,7 @@ class AgentLoop:
                 model=self.config.model.model,
                 messages=messages,
                 system=system,
-                tools=registry.schemas(),
+                tools=sort_tools_for_request(registry.schemas()),
                 max_tokens=self.config.model.max_tokens,
                 temperature=self.config.model.temperature,
             )
