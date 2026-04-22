@@ -259,3 +259,121 @@ def test_slash_command_names_are_distinct():
         )
     }
     assert len(names) == 6
+
+
+# ─── Skills registry + auto-activation ──────────────────────────
+
+
+def test_skill_registry_discovers_bundled_skills():
+    from skills.registry import discover
+
+    entries = discover(PLUGIN_ROOT / "skills")
+    ids = {e.id for e in entries}
+    assert {"code-reviewer", "test-runner", "refactorer"} <= ids
+    # Order is alphabetical (prompt-cache stability).
+    ordered_ids = [e.id for e in entries]
+    assert ordered_ids == sorted(ordered_ids)
+
+
+def test_skill_registry_parses_frontmatter():
+    from skills.registry import discover
+
+    entries = discover(PLUGIN_ROOT / "skills")
+    by_id = {e.id: e for e in entries}
+    reviewer = by_id["code-reviewer"]
+    assert reviewer.name == "Code reviewer"
+    assert "review" in reviewer.description.lower()
+    assert reviewer.version
+
+
+def test_skill_match_strong_overlap():
+    from skills.registry import SkillEntry, match_skill
+    from pathlib import Path
+
+    entries = [
+        SkillEntry(
+            id="code-reviewer",
+            name="Code reviewer",
+            description="review a pull request review a diff code review",
+            version="0.1.0",
+            path=Path("/tmp/x"),
+        ),
+        SkillEntry(
+            id="test-runner",
+            name="Test runner",
+            description="run the tests run pytest run the test suite",
+            version="0.1.0",
+            path=Path("/tmp/y"),
+        ),
+    ]
+    # "review" + "diff" — two overlapping tokens with code-reviewer desc.
+    m = match_skill("please review the diff for this PR", entries)
+    assert m is not None and m.id == "code-reviewer"
+
+    # "run" + "tests" + "pytest" — strong overlap with test-runner desc.
+    m2 = match_skill("please run the tests using pytest", entries)
+    assert m2 is not None and m2.id == "test-runner"
+
+
+def test_skill_match_no_overlap_returns_none():
+    from skills.registry import SkillEntry, match_skill
+    from pathlib import Path
+
+    entries = [
+        SkillEntry(
+            id="x",
+            name="x",
+            description="review diff pull request",
+            version="0",
+            path=Path("/t"),
+        ),
+    ]
+    m = match_skill("what is the weather today", entries)
+    assert m is None
+
+
+def test_skill_activation_provider_injects_on_match(monkeypatch):
+    from plugin_sdk.runtime_context import RuntimeContext
+    from plugin_sdk.injection import InjectionContext
+    from skills.activation import SkillActivationInjectionProvider
+
+    class _Msg:
+        def __init__(self, role, content):
+            self.role = role
+            self.content = content
+
+    provider = SkillActivationInjectionProvider(
+        skills_dir=PLUGIN_ROOT / "skills"
+    )
+    ctx = InjectionContext(
+        messages=(
+            _Msg(
+                "user",
+                "please review the diff and code review for bugs before merging",
+            ),
+        ),
+        runtime=_mutable_runtime(),
+    )
+    out = provider.collect(ctx)
+    assert out is not None
+    assert "Activated skill" in out
+    assert "Code reviewer" in out or "reviewer" in out.lower()
+
+
+def test_skill_activation_provider_no_match_returns_none():
+    from plugin_sdk.injection import InjectionContext
+    from skills.activation import SkillActivationInjectionProvider
+
+    class _Msg:
+        def __init__(self, role, content):
+            self.role = role
+            self.content = content
+
+    provider = SkillActivationInjectionProvider(
+        skills_dir=PLUGIN_ROOT / "skills"
+    )
+    ctx = InjectionContext(
+        messages=(_Msg("user", "what is the weather today"),),
+        runtime=_mutable_runtime(),
+    )
+    assert provider.collect(ctx) is None
