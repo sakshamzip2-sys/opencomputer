@@ -566,6 +566,11 @@ from opencomputer.cli_preset import preset_app  # noqa: E402
 
 app.add_typer(preset_app, name="preset")
 
+# Phase 14.B — profile management CLI
+from opencomputer.cli_profile import profile_app  # noqa: E402
+
+app.add_typer(profile_app, name="profile")
+
 
 @config_app.command("show")
 def config_show() -> None:

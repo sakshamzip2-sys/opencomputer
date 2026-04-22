@@ -14,7 +14,12 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from pathlib import Path
+
+# Keep a module-level reference so ruff / isort autofix cannot remove the
+# `shutil` import when it scans only the top of the file.
+_shutil_ref = shutil
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
@@ -116,12 +121,115 @@ def write_active_profile(name: str | None) -> None:
     path.write_text(name + "\n", encoding="utf-8")
 
 
+class ProfileExistsError(ValueError):
+    """Raised when creating or renaming into a profile name that already exists."""
+
+
+class ProfileNotFoundError(ValueError):
+    """Raised when an operation targets a profile that does not exist."""
+
+
+def create_profile(
+    name: str,
+    *,
+    clone_from: str | None = None,
+    clone_all: bool = False,
+) -> Path:
+    """Create a new profile directory.
+
+    - ``clone_from``: source profile name. If set and ``clone_all`` is False,
+      copies only ``config.yaml`` (and ``profile.yaml`` if present).
+    - ``clone_all``: full recursive copy of the source directory.
+
+    Raises ``ProfileExistsError`` if a profile with this name already exists.
+    Raises ``ProfileNotFoundError`` if ``clone_from`` is set but the source
+    doesn't exist. Raises ``ProfileNameError`` for invalid names (including
+    ``"default"`` and other reserved names).
+    """
+    validate_profile_name(name)
+    dest = get_profile_dir(name)
+    if dest.exists():
+        raise ProfileExistsError(f"profile '{name}' already exists at {dest}")
+
+    if clone_from is not None and clone_all:
+        src = get_profile_dir(clone_from)
+        if not src.is_dir():
+            raise ProfileNotFoundError(f"source profile '{clone_from}' not found at {src}")
+        # copytree creates dest and parents
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, dest)
+        return dest
+
+    dest.mkdir(parents=True, exist_ok=False)
+    if clone_from is not None:
+        src = get_profile_dir(clone_from)
+        if not src.is_dir():
+            # Roll back the empty dir we just created so the state is clean.
+            try:
+                dest.rmdir()
+            except OSError:
+                pass
+            raise ProfileNotFoundError(f"source profile '{clone_from}' not found at {src}")
+        for fname in ("config.yaml", "profile.yaml"):
+            src_file = src / fname
+            if src_file.exists():
+                shutil.copy2(src_file, dest / fname)
+    return dest
+
+
+def delete_profile(name: str) -> None:
+    """Remove a profile directory and clear the sticky file if it was active.
+
+    Refuses to delete the ``default`` profile (rejected by
+    ``validate_profile_name``). Raises ``ProfileNotFoundError`` if the
+    profile does not exist.
+    """
+    validate_profile_name(name)  # rejects "default" and other reserved
+    target = get_profile_dir(name)
+    if not target.is_dir():
+        raise ProfileNotFoundError(f"profile '{name}' not found at {target}")
+    # Clear sticky if the deleted profile was active
+    if read_active_profile() == name:
+        write_active_profile(None)
+    shutil.rmtree(target)
+
+
+def rename_profile(old: str, new: str) -> Path:
+    """Move a profile directory from ``old`` to ``new`` name.
+
+    Updates the sticky ``active_profile`` file if ``old`` was the active
+    profile. The caller is responsible for printing any user-facing
+    continuity warning (Honcho etc.) — this helper only moves the dir.
+
+    Returns the new path. Raises ``ProfileNameError``,
+    ``ProfileNotFoundError``, or ``ProfileExistsError``.
+    """
+    validate_profile_name(old)
+    validate_profile_name(new)
+    src = get_profile_dir(old)
+    dest = get_profile_dir(new)
+    if not src.is_dir():
+        raise ProfileNotFoundError(f"profile '{old}' not found at {src}")
+    if dest.exists():
+        raise ProfileExistsError(f"profile '{new}' already exists at {dest}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dest))
+    if read_active_profile() == old:
+        write_active_profile(new)
+    return dest
+
+
 __all__ = [
     "ProfileNameError",
+    "ProfileExistsError",
+    "ProfileNotFoundError",
     "validate_profile_name",
     "get_default_root",
     "get_profile_dir",
     "list_profiles",
     "read_active_profile",
     "write_active_profile",
+    "create_profile",
+    "delete_profile",
+    "rename_profile",
 ]
