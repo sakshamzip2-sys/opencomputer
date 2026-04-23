@@ -85,6 +85,7 @@ class AgentLoop:
             declarative_path=config.memory.declarative_path,
             skills_path=config.memory.skills_path,
             user_path=config.memory.user_path,
+            soul_path=config.memory.soul_path,
             memory_char_limit=config.memory.memory_char_limit,
             user_char_limit=config.memory.user_char_limit,
         )
@@ -186,10 +187,15 @@ class AgentLoop:
                 # this — that's the prefix-cache invariant.
                 declarative = self.memory.read_declarative()
                 user_profile = self.memory.read_user()
+                # Phase 14.F / C3: per-profile personality from SOUL.md.
+                # Joins the same frozen-prompt lane so drift only lands on
+                # the next session's rebuild, preserving prefix-cache hits.
+                soul = self.memory.read_soul()
                 snapshot = self.prompt_builder.build(
                     skills=skills,
                     declarative_memory=declarative,
                     user_profile=user_profile,
+                    soul=soul,
                     memory_char_limit=self.config.memory.memory_char_limit,
                     user_char_limit=self.config.memory.user_char_limit,
                 )

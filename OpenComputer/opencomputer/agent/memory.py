@@ -136,12 +136,19 @@ class MemoryManager:
         skills_path: Path,
         *,
         user_path: Path | None = None,
+        soul_path: Path | None = None,
         memory_char_limit: int = 4000,
         user_char_limit: int = 2000,
         bundled_skills_paths: list[Path] | None = None,
     ) -> None:
         self.declarative_path = declarative_path
         self.user_path = user_path if user_path is not None else declarative_path.parent / "USER.md"
+        # Phase 14.F / C3 — optional per-profile personality file. Defaults
+        # to ``SOUL.md`` alongside MEMORY.md so existing constructions keep
+        # working (absent file → empty string).
+        self.soul_path = (
+            soul_path if soul_path is not None else declarative_path.parent / "SOUL.md"
+        )
         self.skills_path = skills_path
         self.skills_path.mkdir(parents=True, exist_ok=True)
         self.memory_char_limit = memory_char_limit
@@ -205,6 +212,23 @@ class MemoryManager:
 
     def remove_user(self, block: str) -> bool:
         return self._remove(self.user_path, block, kind="user")
+
+    # ─── personality (SOUL.md) — Phase 14.F / C3 ──────────────────
+
+    def read_soul(self) -> str:
+        """Return the contents of ``SOUL.md`` or '' if absent/unreadable.
+
+        Read-only by design. The profile's personality file is hand-edited
+        by the user, not mutated by the agent. Returning '' when the file
+        doesn't exist means prompt construction degrades gracefully: no
+        profile → no ``## Profile identity`` section.
+        """
+        if not self.soul_path.exists():
+            return ""
+        try:
+            return self.soul_path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
 
     # ─── backup / restore ──────────────────────────────────────────
 

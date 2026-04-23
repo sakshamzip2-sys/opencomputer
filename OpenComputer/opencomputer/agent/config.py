@@ -65,6 +65,10 @@ class MemoryConfig:
     declarative_path: Path = field(default_factory=lambda: _home() / "MEMORY.md")
     user_path: Path = field(default_factory=lambda: _home() / "USER.md")
     skills_path: Path = field(default_factory=lambda: _home() / "skills")
+    #: Phase 14.F / C3 — per-profile personality file. Rendered into the
+    #: FROZEN base prompt so ``SOUL.md`` drift (next session) picks up the
+    #: new identity, but mid-session edits preserve prefix-cache hits.
+    soul_path: Path = field(default_factory=lambda: _home() / "SOUL.md")
     # episodic memory uses SessionConfig.db_path
 
     enabled: bool = True

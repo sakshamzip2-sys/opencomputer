@@ -5,6 +5,12 @@ Current time: {{ now }}
 
 You have tools available. Use them to accomplish what the user asks.
 
+{% if soul -%}
+## Profile identity
+
+{{ soul }}
+
+{% endif %}
 {% if memory -%}
 <memory>
 {{ memory }}

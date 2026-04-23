@@ -197,6 +197,32 @@ def _maybe_remove_wrapper(name: str) -> None:
         pass
 
 
+def _maybe_write_soul_md(name: str) -> None:
+    """Seed ``<profile>/SOUL.md`` with a default personality prompt.
+
+    Idempotent — if the file already exists, leave it alone. Users can
+    edit ``SOUL.md`` to set per-profile tone/identity; mid-session edits
+    do NOT re-freeze the base prompt (that would defeat the prefix-cache
+    invariant the agent loop depends on — a new session picks it up).
+    """
+    log = logging.getLogger("opencomputer.profiles")
+    target = get_profile_dir(name) / "SOUL.md"
+    if target.exists():
+        return
+
+    content = f"""# SOUL — {name}'s personality
+
+You are {name}. When introducing yourself or when context warrants,
+briefly reflect this identity. Adjust tone/style to match the profile's
+purpose as the user describes it.
+"""
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    except OSError as e:
+        log.warning("Could not seed SOUL.md %s: %s", target, e)
+
+
 
 
 def list_profiles() -> list[str]:
@@ -312,15 +338,16 @@ def _post_create_artifacts(name: str) -> None:
     """Emit per-profile artifacts after the profile directory exists.
 
     Separated so both the ``clone_all`` path and the fresh-create path
-    produce the same side-effects: C1 (``home/`` subdir) and C2
-    (wrapper script). C3 (``SOUL.md``) lands in a later commit.
-    Artifacts already present (e.g. from a full clone) are left
-    untouched by ``_maybe_*`` helpers.
+    produce the same side-effects: C1 (``home/`` subdir), C2 (wrapper
+    script), and C3 (``SOUL.md``). Artifacts already present (e.g. from
+    a full clone) are left untouched by ``_maybe_*`` helpers.
     """
     # C1 — home/ subdir
     profile_home_dir(name)
     # C2 — wrapper script
     _maybe_write_wrapper(name)
+    # C3 — SOUL.md default seed
+    _maybe_write_soul_md(name)
 
 
 def delete_profile(name: str) -> None:

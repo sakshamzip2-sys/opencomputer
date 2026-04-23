@@ -283,3 +283,93 @@ class TestWrapperScripts:
         create_profile("coder")
         wrapper = tmp_path / ".local" / "bin" / "coder"
         assert not wrapper.exists()
+
+
+# ─── C3 — SOUL.md per-profile personality injection ─────────────────
+
+
+class TestSoulMdSeed:
+    def test_create_profile_seeds_soul_md_with_default_content(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        from opencomputer.profiles import create_profile
+
+        create_profile("coder")
+        soul = tmp_path / "profiles" / "coder" / "SOUL.md"
+        assert soul.exists()
+        content = soul.read_text()
+        # Default template should reference the profile name + identity framing.
+        assert "coder" in content
+        assert "SOUL" in content
+
+    def test_create_profile_does_not_overwrite_existing_soul_md(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        # Pre-create the profile dir + SOUL.md with custom content, then
+        # call the internal seeder helper directly to verify idempotence.
+        profile_dir = tmp_path / "profiles" / "coder"
+        profile_dir.mkdir(parents=True)
+        soul = profile_dir / "SOUL.md"
+        soul.write_text("# My custom soul\nDon't overwrite me.\n")
+
+        from opencomputer.profiles import _maybe_write_soul_md
+
+        _maybe_write_soul_md("coder")
+        assert soul.read_text() == "# My custom soul\nDon't overwrite me.\n"
+
+
+class TestMemoryManagerReadSoul:
+    def test_memory_manager_read_soul_returns_empty_when_absent(self, tmp_path):
+        from opencomputer.agent.memory import MemoryManager
+
+        mem = MemoryManager(
+            declarative_path=tmp_path / "MEMORY.md",
+            skills_path=tmp_path / "skills",
+            user_path=tmp_path / "USER.md",
+        )
+        # Default soul_path is <declarative_path.parent>/SOUL.md which doesn't
+        # exist in this fresh tmp — should return "".
+        assert mem.read_soul() == ""
+
+    def test_memory_manager_read_soul_reads_from_file(self, tmp_path):
+        from opencomputer.agent.memory import MemoryManager
+
+        soul = tmp_path / "SOUL.md"
+        soul.write_text("# SOUL\nI am coder.\n")
+        mem = MemoryManager(
+            declarative_path=tmp_path / "MEMORY.md",
+            skills_path=tmp_path / "skills",
+            user_path=tmp_path / "USER.md",
+            soul_path=soul,
+        )
+        assert mem.read_soul() == "# SOUL\nI am coder.\n"
+
+
+class TestPromptBuilderSoulInjection:
+    def test_prompt_builder_injects_soul_when_provided(self, tmp_path):
+        from opencomputer.agent.prompt_builder import PromptBuilder
+
+        builder = PromptBuilder()
+        out = builder.build(
+            soul="# SOUL\nI am coder.\n",
+            skills=None,
+            declarative_memory="",
+            user_profile="",
+        )
+        assert "I am coder" in out
+        assert "Profile identity" in out
+
+    def test_prompt_builder_skips_soul_section_when_empty(self, tmp_path):
+        from opencomputer.agent.prompt_builder import PromptBuilder
+
+        builder = PromptBuilder()
+        out = builder.build(
+            soul="",
+            skills=None,
+            declarative_memory="",
+            user_profile="",
+        )
+        # When soul is empty the whole section header shouldn't appear.
+        assert "Profile identity" not in out
