@@ -36,6 +36,11 @@ console = Console()
 
 def _manager() -> MemoryManager:
     cfg = load_config()
+    # Follow-up #25 — one-shot hint if Docker became available after setup.
+    # Gated by sentinel; safe to call from every memory subcommand.
+    from opencomputer.cli_hints import maybe_print_docker_toggle_hint
+
+    maybe_print_docker_toggle_hint(cfg)
     return MemoryManager(
         declarative_path=cfg.memory.declarative_path,
         skills_path=cfg.memory.skills_path,

@@ -320,6 +320,10 @@ def chat(
 ) -> None:
     """Start an interactive chat session."""
     cfg = load_config()
+    # Follow-up #25 — one-shot hint if Docker became available after setup.
+    from opencomputer.cli_hints import maybe_print_docker_toggle_hint
+
+    maybe_print_docker_toggle_hint(cfg)
     _check_provider_key(cfg.model.provider)
 
     from opencomputer.mcp.client import MCPManager
@@ -448,6 +452,10 @@ def wire(
     from opencomputer.gateway.wire_server import WireServer
 
     cfg = load_config()
+    # Follow-up #25 — one-shot hint if Docker became available after setup.
+    from opencomputer.cli_hints import maybe_print_docker_toggle_hint
+
+    maybe_print_docker_toggle_hint(cfg)
     _check_provider_key(cfg.model.provider)
 
     _register_builtin_tools()
@@ -487,6 +495,10 @@ def gateway() -> None:
     from opencomputer.mcp.client import MCPManager
 
     cfg = load_config()
+    # Follow-up #25 — one-shot hint if Docker became available after setup.
+    from opencomputer.cli_hints import maybe_print_docker_toggle_hint
+
+    maybe_print_docker_toggle_hint(cfg)
     _check_provider_key(cfg.model.provider)
 
     _register_builtin_tools()
@@ -707,6 +719,10 @@ def recall(
     from opencomputer.agent.state import SessionDB
 
     cfg = default_config()
+    # Follow-up #25 — one-shot hint if Docker became available after setup.
+    from opencomputer.cli_hints import maybe_print_docker_toggle_hint
+
+    maybe_print_docker_toggle_hint(cfg)
     db = SessionDB(cfg.session.db_path)
     hits = db.search_episodic(query, limit=limit)
     if not hits:
