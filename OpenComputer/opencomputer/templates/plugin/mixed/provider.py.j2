@@ -1,0 +1,65 @@
+"""{{ class_name }}Provider — LLM provider stub."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+
+from plugin_sdk.core import Message
+from plugin_sdk.provider_contract import (
+    BaseProvider,
+    ProviderResponse,
+    StreamEvent,
+    Usage,
+)
+from plugin_sdk.tool_contract import ToolSchema
+
+
+class {{ class_name }}Provider(BaseProvider):
+    """Provider stub for {{ plugin_name }}."""
+
+    name = "{{ module_name }}"
+    default_model = "replace-with-your-default-model-id"
+
+    def __init__(self, api_key: str | None = None) -> None:
+        self.api_key = api_key
+
+    async def complete(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        system: str = "",
+        tools: list[ToolSchema] | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 1.0,
+        stream: bool = False,
+    ) -> ProviderResponse:
+        reply = Message(role="assistant", content="")
+        return ProviderResponse(
+            message=reply,
+            stop_reason="end_turn",
+            usage=Usage(),
+        )
+
+    async def stream_complete(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        system: str = "",
+        tools: list[ToolSchema] | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 1.0,
+    ) -> AsyncIterator[StreamEvent]:
+        final = await self.complete(
+            model=model,
+            messages=messages,
+            system=system,
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        yield StreamEvent(kind="done", response=final)
+
+
+__all__ = ["{{ class_name }}Provider"]

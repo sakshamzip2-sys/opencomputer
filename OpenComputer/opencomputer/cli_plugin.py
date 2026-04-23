@@ -24,6 +24,7 @@ Commands:
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 
 import typer
@@ -201,6 +202,234 @@ def where(
 
     _console.print(f"[red]error:[/red] plugin '{plugin_id}' not found")
     raise typer.Exit(code=1)
+
+
+_VALID_KINDS: tuple[str, ...] = ("channel", "provider", "toolkit", "mixed")
+
+
+def _smoke_load_plugin(plugin_dir: Path) -> None:
+    """Run a post-scaffold smoke check: does the rendered plugin load?
+
+    Builds an ISOLATED PluginRegistry (NOT the process-global one) so
+    scaffolding a plugin never pollutes the running agent's
+    tool/provider/channel tables. Raises on any failure (invalid
+    manifest, bad entry module, register() error) — the caller converts
+    the exception into a red status line + exit 1.
+
+    Also scrubs sys.modules + sys.path entries this load contributed
+    so that scaffolding multiple plugins in one process (tests, batch
+    scripts) doesn't leak cached sibling modules like ``tools.my_tool``
+    from run N into run N+1.
+    """
+    from opencomputer.plugins.discovery import PluginCandidate, _parse_manifest
+    from opencomputer.plugins.loader import load_plugin
+    from opencomputer.plugins.registry import PluginRegistry
+
+    manifest_path = plugin_dir / "plugin.json"
+    manifest = _parse_manifest(manifest_path)
+    if manifest is None:
+        raise RuntimeError(
+            f"rendered plugin.json at {manifest_path} is invalid or unparseable"
+        )
+
+    candidate = PluginCandidate(
+        manifest=manifest,
+        root_dir=plugin_dir,
+        manifest_path=manifest_path,
+    )
+
+    # Isolated registry — separate tool_registry/hook_engine too so nothing
+    # leaks into the running process. We build a fresh PluginRegistry and
+    # use a bespoke PluginAPI that points at throwaway registries.
+    from opencomputer.hooks.engine import HookEngine
+    from opencomputer.plugins.loader import PluginAPI
+    from opencomputer.tools.registry import ToolRegistry
+
+    isolated_tools = ToolRegistry()
+    isolated_hooks = HookEngine()
+    isolated_registry = PluginRegistry()
+    api = PluginAPI(
+        tool_registry=isolated_tools,
+        hook_engine=isolated_hooks,
+        provider_registry=isolated_registry.providers,
+        channel_registry=isolated_registry.channels,
+        injection_engine=None,
+        doctor_contributions=isolated_registry.doctor_contributions,
+    )
+
+    plugin_root_str = str(plugin_dir.resolve())
+    # Snapshot sys.modules keys so we can subtract the delta after load.
+    modules_before = set(sys.modules.keys())
+
+    try:
+        loaded = load_plugin(candidate, api)
+    finally:
+        # Scrub any module keys this plugin introduced so back-to-back
+        # smoke loads don't share cached sibling modules (tools.my_tool,
+        # etc.). Also pop the plugin root from sys.path.
+        for key in set(sys.modules.keys()) - modules_before:
+            sys.modules.pop(key, None)
+        # Defensive: the loader uses well-known short names for siblings.
+        for short in ("provider", "adapter", "plugin", "handlers", "hooks",
+                      "tools", "tools.my_tool"):
+            sys.modules.pop(short, None)
+        try:
+            sys.path.remove(plugin_root_str)
+        except ValueError:
+            pass
+
+    if loaded is None:
+        raise RuntimeError(
+            "loader returned None — check logs for import or register() errors"
+        )
+
+
+@plugin_app.command("new")
+def plugin_new(
+    name: str = typer.Argument(..., help="Plugin id (lowercase, hyphens allowed)."),
+    kind: str = typer.Option(
+        "",
+        "--kind",
+        "-k",
+        help="Template kind: channel | provider | toolkit | mixed.",
+    ),
+    path: Path | None = typer.Option(
+        None,
+        "--path",
+        "-p",
+        help="Output directory (default: ~/.opencomputer/plugins/).",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite existing directory with same name.",
+    ),
+    description: str = typer.Option(
+        "",
+        "--description",
+        "-d",
+        help="Free-form plugin description.",
+    ),
+    author: str = typer.Option(
+        "",
+        "--author",
+        "-a",
+        help="Free-form author string.",
+    ),
+    no_smoke: bool = typer.Option(
+        False,
+        "--no-smoke",
+        help=(
+            "Skip the post-scaffold smoke check. Use when the template's "
+            "register() needs external pip deps you haven't installed yet."
+        ),
+    ),
+) -> None:
+    """Scaffold a new plugin skeleton from the built-in templates.
+
+    Example:
+        opencomputer plugin new my-weather --kind provider
+    """
+    from opencomputer.agent.config import _home
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+
+    # Resolve --kind: interactive prompt when stdin is a tty or has input
+    # waiting; error when truly non-interactive (CI/script with no input).
+    resolved_kind = kind
+    if not resolved_kind:
+        # If stdin is explicitly a non-tty (CI, piped script with no data),
+        # refuse. We also refuse if typer.prompt() raises Abort due to EOF.
+        if not sys.stdin.isatty():
+            # Best-effort: try to read — if input was piped (e.g. tests)
+            # proceed; otherwise error out clearly.
+            try:
+                resolved_kind = typer.prompt(
+                    f"Plugin kind ({', '.join(_VALID_KINDS)})",
+                    default="mixed",
+                )
+            except (typer.Abort, EOFError):
+                _console.print(
+                    "[red]error:[/red] --kind required in non-interactive mode "
+                    f"(one of: {', '.join(_VALID_KINDS)})"
+                )
+                raise typer.Exit(code=1) from None
+        else:
+            resolved_kind = typer.prompt(
+                f"Plugin kind ({', '.join(_VALID_KINDS)})",
+                default="mixed",
+            )
+
+    if resolved_kind not in _VALID_KINDS:
+        _console.print(
+            f"[red]error:[/red] invalid --kind {resolved_kind!r}; "
+            f"must be one of {', '.join(_VALID_KINDS)}"
+        )
+        raise typer.Exit(code=1)
+
+    # Resolve --path: profile-local plugin dir by default.
+    output_dir = path if path is not None else _home() / "plugins"
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        written = render_plugin_template(
+            plugin_id=name,
+            kind=resolved_kind,  # type: ignore[arg-type]
+            output_path=output_dir,
+            description=description,
+            author=author,
+            overwrite=force,
+        )
+    except FileExistsError:
+        target = output_dir / name
+        _console.print(
+            f"[red]error:[/red] Plugin '{name}' already exists at {target}. "
+            "Pass --force to overwrite."
+        )
+        raise typer.Exit(code=1) from None
+    except ValueError as e:
+        _console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from None
+    except Exception as e:  # noqa: BLE001
+        _console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from None
+
+    target = output_dir / name
+    _console.print(
+        f"[green]Scaffolded[/green] {name} ({resolved_kind}) at {target}/"
+    )
+    _console.print("")
+    _console.print("[bold]Created files:[/bold]")
+    for p in written:
+        try:
+            rel = p.relative_to(target)
+        except ValueError:
+            rel = p
+        _console.print(f"  - {rel}")
+    _console.print("")
+    _console.print("[bold]Next steps:[/bold]")
+    _console.print(f"  1. cd {target}")
+    _console.print("  2. Open plugin.py and fill in the TODO(s).")
+    _console.print("  3. Run tests:  pytest tests/")
+    _console.print("  4. opencomputer plugins    # verify it loaded")
+
+    # Post-scaffold smoke check — verify the freshly-rendered plugin
+    # actually loads through the real loader with an isolated registry
+    # so template regressions are caught here, not at agent startup.
+    if not no_smoke:
+        try:
+            _smoke_load_plugin(target)
+        except Exception as e:  # noqa: BLE001
+            _console.print("")
+            _console.print(
+                f"[red]✗ Smoke check failed — plugin raised:[/red] {e}"
+            )
+            raise typer.Exit(code=1) from None
+        _console.print("")
+        _console.print(
+            "[green]✓ Smoke check passed — plugin loads cleanly.[/green]"
+        )
 
 
 __all__ = ["plugin_app"]

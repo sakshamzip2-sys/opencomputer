@@ -1,0 +1,24 @@
+# {{ plugin_name }}
+
+{{ description }}
+
+A channel plugin for OpenComputer. Channels let the agent receive and
+send messages on a third-party platform (Telegram, Discord, Slack, ...).
+
+## Install
+
+Copy this directory into one of:
+
+- `~/.opencomputer/plugins/{{ plugin_id }}/` (global)
+- `~/.opencomputer/profiles/<name>/plugins/{{ plugin_id }}/` (profile-local)
+
+Or run `opencomputer plugin install <path-to-this-dir>`.
+
+## Configure
+
+Set whatever credentials the channel needs (bot tokens, etc.) as env
+vars before starting `opencomputer gateway`. Document them here.
+
+## Authored by
+
+{{ author }}

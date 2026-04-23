@@ -1,0 +1,28 @@
+"""{{ plugin_name }} channel plugin — entry module.
+
+The plugin loader imports this file and calls ``register(api)``. The
+adapter lives in ``adapter.py`` next to this file; the loader puts the
+plugin root on ``sys.path`` so the plain ``from adapter import ...``
+form works when the plugin is loaded at runtime. The fallback import
+path is used when the plugin is imported as a package during testing.
+"""
+
+from __future__ import annotations
+
+try:
+    from adapter import {{ class_name }}Adapter  # plugin-loader mode
+except ImportError:  # pragma: no cover
+    from {{ module_name }}.adapter import {{ class_name }}Adapter  # package mode
+
+
+def register(api) -> None:  # PluginAPI is duck-typed
+    """Register this channel with the gateway.
+
+    Wire up environment-based config here (e.g. bot tokens). If the
+    required config is missing, return without registering so the
+    gateway can still start without this channel.
+    """
+    adapter = {{ class_name }}Adapter(config={})
+    # Replace "{{ module_name }}" with the canonical platform name your
+    # adapter targets — or use one of plugin_sdk.core.Platform.
+    api.register_channel("{{ module_name }}", adapter)

@@ -130,6 +130,25 @@ class StopReason(str, Enum):
     ERROR = "error"  # unrecoverable error
 
 
+# ─── Plugin exceptions ─────────────────────────────────────────────────
+
+
+class SingleInstanceError(RuntimeError):
+    """Raised when a ``single_instance`` plugin can't acquire its lock.
+
+    Single-instance plugins own an exclusive resource (a bot token, a
+    UDP port, an OS-level mutex). Only ONE copy can run at a time across
+    all profiles on the machine. Core enforces this via an atomic PID
+    lock at ``~/.opencomputer/.locks/<plugin-id>.lock``. This exception
+    carries the plugin id and the PID currently holding the lock so
+    callers can render a helpful message.
+
+    Subclasses ``RuntimeError`` so generic ``except RuntimeError`` paths
+    (e.g. in ``PluginRegistry.load_all``) will catch it. Added in Phase
+    12b.2 (Sub-project B, Task B6).
+    """
+
+
 __all__ = [
     "Role",
     "Message",
@@ -140,4 +159,5 @@ __all__ = [
     "SendResult",
     "PluginManifest",
     "StopReason",
+    "SingleInstanceError",
 ]

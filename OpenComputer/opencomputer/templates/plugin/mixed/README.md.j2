@@ -1,0 +1,25 @@
+# {{ plugin_name }}
+
+{{ description }}
+
+A mixed plugin for OpenComputer. Mixed plugins can ship any combination
+of channels, providers, tools, and skills.
+
+## Install
+
+Copy this directory into one of:
+
+- `~/.opencomputer/plugins/{{ plugin_id }}/` (global)
+- `~/.opencomputer/profiles/<name>/plugins/{{ plugin_id }}/` (profile-local)
+
+Or run `opencomputer plugin install <path-to-this-dir>`.
+
+## Trim before shipping
+
+This scaffold registers a channel adapter, a provider, AND a tool. If
+your plugin only ships a subset, delete the files and `register()` lines
+for the components you don't use.
+
+## Authored by
+
+{{ author }}
