@@ -373,3 +373,62 @@ class TestPromptBuilderSoulInjection:
         )
         # When soul is empty the whole section header shouldn't appear.
         assert "Profile identity" not in out
+
+
+# ─── C4 — opencomputer doctor profile artifact checks ───────────────
+
+
+class TestDoctorProfileChecks:
+    def test_doctor_warns_when_profile_home_subdir_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        from opencomputer.profiles import create_profile, write_active_profile
+
+        create_profile("coder")
+        write_active_profile("coder")
+
+        # Remove the home/ subdir to simulate the user deleting it.
+        import shutil
+
+        shutil.rmtree(tmp_path / "profiles" / "coder" / "home")
+
+        from opencomputer.doctor import _check_profile_artifacts
+
+        checks = _check_profile_artifacts()
+        names = [c.name for c in checks]
+        missing = [c for c in checks if "home" in c.name.lower()]
+        assert missing, f"no home/ artifact check produced (names={names})"
+        assert missing[0].status == "warn"
+
+    def test_doctor_warns_when_profile_soul_md_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        from opencomputer.profiles import create_profile, write_active_profile
+
+        create_profile("coder")
+        write_active_profile("coder")
+
+        (tmp_path / "profiles" / "coder" / "SOUL.md").unlink()
+
+        from opencomputer.doctor import _check_profile_artifacts
+
+        checks = _check_profile_artifacts()
+        missing = [c for c in checks if "SOUL" in c.name or "soul" in c.name.lower()]
+        assert missing, f"no SOUL.md artifact check produced (names={[c.name for c in checks]})"
+        assert missing[0].status == "warn"
+
+    def test_doctor_skips_profile_checks_when_default_profile(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # No write_active_profile → default is active.
+
+        from opencomputer.doctor import _check_profile_artifacts
+
+        checks = _check_profile_artifacts()
+        # Default profile must produce no checks (or all skip).
+        assert all(c.status == "skip" for c in checks), (
+            f"default profile should skip all profile-artifact checks "
+            f"(got {[(c.name, c.status) for c in checks]})"
+        )
