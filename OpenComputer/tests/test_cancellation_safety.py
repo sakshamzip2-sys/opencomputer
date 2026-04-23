@@ -81,7 +81,7 @@ async def test_successful_turn_persists_assistant_and_tool_results_together(
         ]
     )
 
-    async def fake_dispatch(call: ToolCall) -> ToolResult:
+    async def fake_dispatch(call: ToolCall, **_kwargs) -> ToolResult:
         return ToolResult(tool_call_id=call.id, content="tool output")
 
     # Patch the registry dispatch so we don't need real tools registered.
@@ -119,7 +119,7 @@ async def test_cancel_mid_dispatch_leaves_no_dangling_assistant_row(
     provider = _mock_provider(first)
 
     # Tool dispatch hangs until cancelled.
-    async def never_ending(call: ToolCall) -> ToolResult:
+    async def never_ending(call: ToolCall, **_kwargs) -> ToolResult:
         await asyncio.sleep(10.0)
         return ToolResult(tool_call_id=call.id, content="should never reach")
 
