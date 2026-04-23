@@ -20,10 +20,18 @@ import asyncio
 import logging
 from typing import Any
 
+from plugin_sdk.runtime_context import RuntimeContext
+
 logger = logging.getLogger(__name__)
 
 _HEALTH_TIMEOUT_S = 2.0
 _CONSECUTIVE_FAILURE_LIMIT = 3
+
+#: Contexts that must NOT spin external memory providers. Referenced by both
+#: :meth:`MemoryBridge.prefetch` and :meth:`MemoryBridge.sync_turn` so the
+#: guard is symmetric — a cron turn that completes won't call
+#: ``provider.sync_turn`` just because it skipped ``prefetch``.
+_BATCH_CONTEXTS: frozenset[str] = frozenset({"cron", "flush"})
 
 
 class MemoryBridge:
@@ -93,11 +101,23 @@ class MemoryBridge:
             self._disable(f"health check raised: {exc}")
             return False
 
-    async def prefetch(self, query: str, turn_index: int) -> str | None:
+    async def prefetch(
+        self,
+        query: str,
+        turn_index: int,
+        runtime: RuntimeContext | None = None,
+    ) -> str | None:
         """Ask the provider for context to inject this turn.
 
         Returns ``None`` if no provider, provider disabled, or provider fails.
+
+        When ``runtime.agent_context`` is ``"cron"`` or ``"flush"`` the guard
+        short-circuits to ``None`` without touching the provider — those batch
+        contexts must not spin up external memory stacks. See Hermes' same
+        guard at ``sources/hermes-agent/plugins/memory/honcho/__init__.py:279-286``.
         """
+        if runtime is not None and runtime.agent_context in _BATCH_CONTEXTS:
+            return None  # cron guard — don't spin external provider for batch jobs
         provider = self._provider
         if provider is None or self._is_disabled():
             return None
@@ -109,12 +129,22 @@ class MemoryBridge:
             self._record_failure("prefetch", exc)
             return None
 
-    async def sync_turn(self, user: str, assistant: str, turn_index: int) -> None:
+    async def sync_turn(
+        self,
+        user: str,
+        assistant: str,
+        turn_index: int,
+        runtime: RuntimeContext | None = None,
+    ) -> None:
         """Notify the provider that a turn completed. Fire-and-forget.
 
         Exceptions are swallowed silently — sync_turn must never propagate
-        failures into the agent loop.
+        failures into the agent loop. Respects the same cron/flush guard as
+        :meth:`prefetch` so a batch turn doesn't spin the provider on write
+        just because it skipped the read.
         """
+        if runtime is not None and runtime.agent_context in _BATCH_CONTEXTS:
+            return  # cron guard — symmetric with prefetch
         provider = self._provider
         if provider is None or self._is_disabled():
             return

@@ -12,7 +12,7 @@ Frozen dataclass — safe to share across tasks / threads.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +26,16 @@ class RuntimeContext:
     #: Yolo mode — auto-approve dangerous operations. Mutually exclusive with plan_mode
     #: (we enforce this in the CLI; if both set, plan_mode wins).
     yolo_mode: bool = False
+
+    #: Which agent context this invocation belongs to. ``Literal`` narrows the
+    #: allowed values at type-check time so typos like ``"Cron"`` fail mypy
+    #: rather than silently no-op-ing the guards downstream. Default
+    #: ``"chat"`` preserves existing behaviour. ``"cron"`` and ``"flush"``
+    #: short-circuit external memory providers — those batch jobs shouldn't
+    #: spin a Docker stack for quick background work (baseline SQLite+FTS5 is
+    #: enough). Mirrors Hermes'
+    #: ``sources/hermes-agent/plugins/memory/honcho/__init__.py:279-286``.
+    agent_context: Literal["chat", "cron", "flush", "review"] = "chat"
 
     #: Escape hatch for third-party plugins to add their own modes without
     #: forcing an SDK version bump.
