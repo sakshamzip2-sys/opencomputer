@@ -127,9 +127,22 @@ opencomputer memory restore            # promote .bak back to live
 
 Every write is atomic (temp file + `os.replace`) and locked (`fcntl` on Unix, `msvcrt` on Windows). Every mutation backs up the current state to `<file>.bak` first. Character limits (4000 for MEMORY.md, 2000 for USER.md by default) prevent unbounded growth; over-limit writes return an error with a hint.
 
-### Plugging in deeper memory backends
+### Deeper memory — Honcho is now the default overlay
 
-An optional `MemoryProvider` plugin interface lets you add Honcho-style user modeling, Mem0-style fact extraction, or Cognee-style knowledge graphs as overlays on top of the baseline. Only one provider is active at a time; the baseline above always runs. See `docs/plugin-authors.md` when present.
+A `MemoryProvider` plugin interface layers deeper cross-session understanding on top of the always-on baseline (MEMORY.md + USER.md + SQLite FTS5). **As of Phase 12b1, [Honcho](https://github.com/plastic-labs/honcho) is the default provider when Docker is available** — the setup wizard detects Docker, pulls the image, and brings up the 3-container stack (api + postgres+pgvector + redis + deriver) automatically. No prompt, no opt-in toggle.
+
+When Docker is **not** installed, the wizard prints a one-line notice with the Docker install URL and persists `provider=""` so subsequent runs don't retry. Baseline memory keeps working — you just don't get the semantic/dialectic overlay.
+
+```bash
+opencomputer memory doctor      # 5-layer health report: baseline / episodic / docker / honcho / provider
+opencomputer memory setup       # bring the Honcho stack up manually (idempotent)
+opencomputer memory status      # just the Honcho stack (compose ps)
+opencomputer memory reset       # blow away the stack + data
+```
+
+The agent loop passes `RuntimeContext.agent_context` through to the provider. Context `"chat"` (default) injects Honcho's recall into the per-turn system block (the frozen snapshot is NOT modified, preserving the Anthropic prefix cache) and calls `sync_turn` after each response. Context `"cron"` or `"flush"` short-circuits both — batch jobs don't spin the external stack.
+
+Alternative providers (Mem0, Cognee, etc.) can be selected by editing `~/.opencomputer/config.yaml` field `memory.provider`. Only one provider is active at a time. See `docs/plugin-authors.md` when present.
 
 ## Profiles
 
