@@ -2,7 +2,7 @@
 
 This file is auto-loaded at session start. It is the **single comprehensive brief** a new Claude session needs to resume work on OpenComputer without re-explaining anything.
 
-Last updated: 2026-04-21 (end of Phase 10b)
+Last updated: 2026-04-23 (Phase 12a merged)
 
 ---
 
@@ -65,7 +65,7 @@ OpenComputer/
 │
 ├── opencomputer/                    ← CORE PACKAGE (can be refactored freely)
 │   ├── __init__.py                  ← __version__ = "0.1.0"
-│   ├── cli.py                       ← Typer CLI — 11 subcommands
+│   ├── cli.py                       ← Typer CLI — 15 subcommands + profile/plugin/preset/memory/mcp groups
 │   ├── doctor.py                    ← opencomputer doctor — health checks
 │   ├── setup_wizard.py              ← opencomputer setup — onboarding
 │   ├── agent/
@@ -113,28 +113,18 @@ OpenComputer/
 │   ├── injection.py                 ← DynamicInjectionProvider ABC, InjectionContext
 │   └── runtime_context.py           ← RuntimeContext (plan_mode, yolo_mode, custom)
 │
-├── extensions/                      ← 5 bundled plugins
-│   ├── telegram/                    ← kind=channel. DISCORD_BOT_TOKEN via env
+├── extensions/                      ← 7 bundled plugins
+│   ├── telegram/                    ← kind=channel. TELEGRAM_BOT_TOKEN via env
 │   ├── discord/                     ← kind=channel. DISCORD_BOT_TOKEN
 │   ├── anthropic-provider/          ← kind=provider. x-api-key + Bearer-proxy support
 │   ├── openai-provider/             ← kind=provider. OpenAI + OpenAI-compatible endpoints
-│   └── coding-harness/              ← kind=mixed. Edit/MultiEdit/TodoWrite/bg/plan-mode
+│   ├── coding-harness/              ← kind=mixed. Edit/MultiEdit/TodoWrite/bg/plan-mode
+│   ├── dev-tools/                   ← kind=tools. Phase 12d.1 — porcelain dev utilities
+│   └── memory-honcho/               ← kind=memory. Phase 10f.K–N — Honcho overlay (opt-in)
 │
-├── tests/                           ← 114 tests, all passing
-│   ├── test_smoke.py                ← package + CLI imports
-│   ├── test_phase1_5.py             ← skill_manage, Grep, Glob, hook engine, discovery
-│   ├── test_phase2.py               ← gateway protocol, dispatch, telegram
-│   ├── test_phase3.py, test_phase3_1.py
-│   ├── test_phase4.py               ← MCP
-│   ├── test_phase5.py               ← doctor + setup wizard
-│   ├── test_phase6a.py              ← InjectionEngine + CompactionEngine + RuntimeContext
-│   ├── test_phase6b.py              ← coding-harness plugin
-│   ├── test_phase7.py               ← streaming + typing heartbeat
-│   ├── test_phase8.py               ← Discord
-│   ├── test_phase9.py               ← WebSocket wire server
-│   └── test_provider_auth.py        ← Anthropic auth modes (x-api-key vs Bearer)
+├── tests/                           ← ~600 tests, all passing (40 test files)
 │
-└── docs/                            ← (empty — Phase 10c will populate)
+└── docs/                            ← reference notes + author guides (Sub-project B populates more)
 ```
 
 ---
@@ -186,9 +176,9 @@ opencomputer    opencomputer            opencomputer
 
 ## 4. What's been built (all phases to date)
 
-All committed + pushed to `main`. 18 commits total.
+All committed + pushed to `main`. Current main sha: `1c08508` (2026-04-23).
 
-| Phase | Commit | What |
+| Phase | PR / Commit | What |
 |---|---|---|
 | 0 | `0d512cb` | Project scaffold — folder structure, pyproject, smoke tests |
 | 1 | `8d96aff` | Core: agent loop, SQLite+FTS5, 3 tools, Anthropic provider |
@@ -206,44 +196,68 @@ All committed + pushed to `main`. 18 commits total.
 | 9 | `d5802c8` | WebSocket wire server + RPC protocol dispatch |
 | 10a | `01a8f9c` | CI/CD (GitHub Actions) + ruff configuration + codebase cleanup |
 | 10b | `2858815` | PyPI release automation + v0.1.0 prep |
+| 10e | PR #2 / `00379e1` | WebFetch + WebSearch tools (2026-04-23) |
+| 10f.K–N | PRs #13 / #15 / #16 | Honcho memory overlay — plugin skeleton, wizard step, host key per profile |
+| 11a | PR #3 | Inventory / parity tracker |
+| 11b | PR #4 | Claude-code parity: NotebookEdit, SkillTool, PushNotification, AskUserQuestion |
+| 11c | PR #5 | MCP expansion — install-from-preset, catalog groundwork |
+| 11d | PR #6 | Episodic memory + Anthropic batch integration |
+| 12a | PR #18 / `1c08508` | Recall tool + post-response reviewer + agent cache (Tier 1 memory loop, 2026-04-23) |
+| 12d.1 | PR #12 | `dev-tools` plugin (porcelain dev utilities) |
+| 12d.2 | PR #17 / `545bf20` | Multi-provider WebSearch backend chain |
+| 12f | PR #9 | 15 curated skills imported (superpowers + everything-claude-code subset) |
+| 12g | PR #10 | SDK boundary hardening (test-enforced `plugin_sdk/` contract) |
+| 14.A | `2ff243c`, `1b02f84` | Per-profile directory + pre-import `-p` flag routing |
+| 14.B | `210599a` | `opencomputer profile` CLI (list/create/use/delete/rename/path) |
+| 14.C | `9673100` | `PluginManifest.profiles` + `single_instance` fields in SDK |
+| 14.D | `10300b4` | Layer A manifest profile enforcement in loader |
+| 14.E | `ee90467` | Profile-local plugin dir + install/uninstall/where CLI |
+| 14.J | PR #16 / `7169820` | Honcho host key derived from active profile + README limitations |
+| 14.L | PR #14 / `ebb32db` | README Profiles / Presets / Plugin sections + CHANGELOG |
+| 14.M | `7fc1185` | Named plugin-activation presets + CLI |
+| 14.N | `0a829ca` | Workspace `.opencomputer/config.yaml` overlay |
 
-**Test count:** 114 passing across 14 test files.
+**Test count:** ~600 passing across 40 test files.
+
+**Bundled extensions (7):** telegram, discord, anthropic-provider, openai-provider, coding-harness, dev-tools, memory-honcho.
 
 ---
 
-## 5. What's NEXT (phases 10c–13 + pause gate)
+## 5. What's NEXT — single source of truth
 
-Full roadmap lives in `~/.claude/plans/delightful-sauteeing-sutherland.md`. Short summary:
+> **This section is the authoritative phase map.** The omnibus plan file at `~/.claude/plans/2026-04-23-honcho-ecosystem-omnibus.md` is a user-scoped draft (lives on the maintainer's laptop, not in the repo) that expands each sub-project into TDD-granular task lists — use it if you have local access, otherwise this section alone is enough to orient. The two older plans (`delightful-sauteeing-sutherland.md`, `phase-12-ultraplan-spec.md`, both in `~/.claude/plans/`) are marked SUPERSEDED — do not use them.
 
-### Remaining Phase 10 (ship-ready 1.0)
+### Current stance — what blocks v1.0
 
-- **10c — Plugin scaffolding + SDK docs** (3-5 days). `opencomputer plugin new` CLI. `docs/plugin-authors.md`. `docs/sdk-reference.md`.
-- **10d — Example third-party plugin repo** (2-3 days). `opencomputer-weather` or similar. On PyPI separately. Proves extensibility.
-- **10e — WebFetch + WebSearch tools** (1-2 days).
+The v1.0 ship-gate is:
 
-### 🛑 GATE after Phase 10: Use OpenComputer daily for 2 weeks
+- **Sub-project A — Honcho as default memory** (4–6 days). Make the Honcho overlay the default memory provider, not opt-in. Baseline SQLite still works without Docker, but a fresh install onboards into Honcho by default. Details in the omnibus plan.
+- **Sub-project B — `opencomputer plugin new` scaffolder** (4–6 days). This is what Phase 10c was. Renamed to Sub-project B in the omnibus. Ships a CLI that generates a working plugin skeleton + `docs/plugin-authors.md` + `docs/sdk-reference.md`. Ship-blocker for v1.0.
+- **Sub-project D — Coding-harness completeness** (5–7 days). Rebase + merge the `feat/coding-harness-v2` branch (11 commits of Phase 6d–6f work), then land ExitPlanMode + cheap-route + 3 hooks + the full slash-command router.
 
-Before Phase 11, the roadmap requires 2 weeks of real use so feature priorities come from actual gaps, not guesses. This gate is load-bearing — don't skip.
+**After v1.0 tag → Sub-project C — Profile completeness parity with Hermes** (2–4 days). Per-profile `home/`, wrapper scripts, `SOUL.md`. Lands *after* Sub-project A so profile-aware memory is already in place.
 
-### Phase 11 (post-pause)
+### 🛑 Dogfood gate (unchanged)
 
-- **11a — TypeScript Ink TUI MVP** (2 weeks) connecting to `opencomputer wire`
-- **11b — Slack channel** (1 day)
-- **11c — Channel UX polish** — tool-call visibility, output truncation, Discord markdown
+Before expanding beyond v1.0, use OpenComputer daily for 2 weeks so feature priorities come from actual gaps, not guesses. This gate is load-bearing — don't skip. Formerly framed as "gate after Phase 10"; still stands, just after A+B+D land.
 
-### Phase 12 (optional)
+### Pending work (reorganized under omnibus sub-projects)
 
-- **12a — ACP adapter** for VS Code / Zed / JetBrains integration
+Everything below is still pending on `main`. The old phase numbers are kept here for traceability only — the active grouping is the A/B/C/D above.
 
-### Phase 13 (a la carte)
-
-Independent sub-phases: more hook events, compaction strategy plugin API, Jupyter support, ExitPlanMode tool, security scanning, `opencomputer upgrade` command.
+- **Phase 10c → now Sub-project B.** Plugin scaffolder + author docs.
+- **Phase 10d — example third-party plugin repo.** Deferred until Sub-project B ships (the scaffolder is what the example would demonstrate).
+- **Phase 12b — MCP install-from-catalog + reconnect/health.** Pending; downstream of Sub-project A settling the config layout.
+- **Phase 12c.1 — first 5 channel adapters** (Slack, Matrix, Email, Webhook, OpenAI-compat API). Dogfood-gated.
+- **Phase 12c.2–4 — 15 more channels.** Dogfood-gated.
+- **Phase 12d.3–6 — memory-vector, memory-wiki, local-providers, media-tools plugin ports.** Dogfood-gated.
+- **Phase 12e — coding-harness dedup audit.** Rolled into Sub-project D (the rebase naturally exposes dedup work).
+- **Phase 14.F/G/H/K — per-profile credential isolation, templates, sharing, profile-aware MCP.** Deferred; Sub-project C scope does not include these.
+- **Phase 15.A — `opencomputer session resume` CLI wiring.** Checkpoint table already shipped; CLI surface still pending.
 
 ### WON'T DO (explicitly parked)
 
 Canvas rendering, native mobile apps, voice wake-word, Atropos RL, trajectory compression, 6 remote terminal backends, skills marketplace, full i18n. Re-open only if a concrete use case appears.
-
-**Previously parked, now BUILT (Phase 10f.K–N, 2026-04-22):** Honcho memory — self-hosted overlay that plugs into the baseline memory via `MemoryProvider` ABC. Ships as `extensions/memory-honcho/` (AGPL-safe — pulls upstream Docker image from plastic-labs/honcho instead of vendoring source). Enabled optionally via `opencomputer memory setup` or the first-run wizard. Baseline memory works without it.
 
 ---
 
@@ -272,7 +286,7 @@ opencomputer               # chat
 opencomputer --plan        # plan mode (Edit/Write/Bash refused)
 opencomputer gateway       # daemon for Telegram/Discord
 opencomputer wire          # WebSocket API at ws://127.0.0.1:18789
-opencomputer plugins       # list 5 installed plugins
+opencomputer plugins       # list 7 installed plugins
 opencomputer skills        # list skills
 opencomputer doctor        # health check
 opencomputer config show   # dump config
@@ -281,7 +295,7 @@ opencomputer config show   # dump config
 ### Test / lint
 
 ```bash
-pytest tests/                                          # all 114 tests
+pytest tests/                                          # all ~600 tests
 pytest tests/test_phase6b.py -v                        # one file
 ruff check opencomputer/ plugin_sdk/ extensions/ tests/  # lint
 ```
@@ -322,7 +336,10 @@ See `RELEASE.md` — basically bump version in two places, tag `vX.Y.Z`, push. C
 
 ## 9. If you need to dig deeper
 
-- **Full plan with rationale + critique:** `~/.claude/plans/delightful-sauteeing-sutherland.md`
+- **Active plan (2026-04-23 onward):** `~/.claude/plans/2026-04-23-honcho-ecosystem-omnibus.md` — current sub-projects A/B/C/D.
+- **Superseded historical plans (kept for context):**
+  - `~/.claude/plans/delightful-sauteeing-sutherland.md` — original master roadmap (Phase 0 through Phase 13). Superseded 2026-04-23.
+  - `~/.claude/plans/phase-12-ultraplan-spec.md` — Phase 12 detail spec. Superseded 2026-04-23.
 - **Reference implementations cloned locally at `../sources/`:**
   - `/Users/saksham/Vscode/claude/sources/claude-code/` (plugin shapes)
   - `/Users/saksham/Vscode/claude/sources/hermes-agent/` (Python patterns, loop, channels)
@@ -338,6 +355,6 @@ See `RELEASE.md` — basically bump version in two places, tag `vX.Y.Z`, push. C
 
 If you're a fresh Claude Code session, the user typically opens with something like:
 
-> "Continue OpenComputer from where we left off. Read CLAUDE.md first, then pick up Phase 10c (plugin scaffolding + SDK docs)."
+> "Continue OpenComputer from where we left off. Read CLAUDE.md §5 first, then pick up the next task in the omnibus plan (Sub-project A / B / C / D)."
 
 That's enough context to start coding.
