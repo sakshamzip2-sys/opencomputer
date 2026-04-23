@@ -33,6 +33,21 @@ _CONSECUTIVE_FAILURE_LIMIT = 3
 #: ``provider.sync_turn`` just because it skipped ``prefetch``.
 _BATCH_CONTEXTS: frozenset[str] = frozenset({"cron", "flush"})
 
+#: Follow-up #28 — cap on prefetch output. Keeps context-window bloat bounded
+#: and prevents the prefix cache from churning when Honcho returns large
+#: recall blobs. Provider output longer than this is truncated by keeping
+#: the latest ``MAX_PREFETCH_CHARS - 40`` chars (recency-weighted) and
+#: prepending a truncation marker. 2000 is big enough that most recall
+#: payloads fit unchanged and small enough that the worst case is ~1 KB of
+#: context, not 10 KB.
+MAX_PREFETCH_CHARS: int = 2000
+
+#: Marker string prepended to truncated prefetch output. Deliberately short
+#: (~30 chars including the newline) to leave room in the budget for
+#: content. The 40-char headroom in the slice computation accounts for this
+#: marker plus any downstream formatting.
+_TRUNCATION_MARKER: str = "[…earlier recall truncated…]\n"
+
 
 class MemoryBridge:
     """Thin shim around an optional ``MemoryProvider``.
@@ -124,6 +139,14 @@ class MemoryBridge:
         try:
             result = await provider.prefetch(query, turn_index)
             self._record_success()
+            # Follow-up #28 — cap oversize recall payloads. Keep the TAIL so
+            # recency is preserved (recent memory matters more than old).
+            # Applies only to truthy strings — None / empty values fall
+            # through unchanged so the caller sees a uniform "no content"
+            # signal.
+            if isinstance(result, str) and len(result) > MAX_PREFETCH_CHARS:
+                tail = result[-(MAX_PREFETCH_CHARS - 40):]
+                return _TRUNCATION_MARKER + tail
             return result
         except Exception as exc:
             self._record_failure("prefetch", exc)
