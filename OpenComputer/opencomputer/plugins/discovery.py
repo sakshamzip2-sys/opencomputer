@@ -70,6 +70,8 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
         # Phase 14.C — profile scoping. ["*"] or None means "any profile".
         profiles=(tuple(schema.profiles) if schema.profiles is not None else None),
         single_instance=schema.single_instance,
+        # Phase 12b1 Sub-project A — Honcho-as-default
+        enabled_by_default=schema.enabled_by_default,
     )
 
 

@@ -198,6 +198,43 @@ async def test_memory_bridge_sync_turn_calls_provider_in_chat_context() -> None:
     provider.sync_mock.assert_awaited_once_with("u", "a", 3)
 
 
+# ─── Phase 12b1 Task A4 — default-on flag in plugin manifest + config ──
+
+
+def test_memory_config_defaults_provider_to_memory_honcho() -> None:
+    """A4: MemoryConfig().provider defaults to "memory-honcho" (not "")
+    so a fresh install tries Honcho first; wizard downgrades to "" only
+    when Docker is confirmed absent."""
+    from opencomputer.agent.config import MemoryConfig
+
+    assert MemoryConfig().provider == "memory-honcho"
+
+
+_HONCHO_MANIFEST_PATH = (
+    Path(__file__).resolve().parent.parent / "extensions" / "memory-honcho" / "plugin.json"
+)
+
+
+def test_memory_honcho_plugin_manifest_has_enabled_by_default_true() -> None:
+    """A4: extensions/memory-honcho/plugin.json now has
+    enabled_by_default=True, which the loader surfaces to the wizard."""
+    import json
+
+    data = json.loads(_HONCHO_MANIFEST_PATH.read_text())
+    assert data.get("enabled_by_default") is True
+
+
+def test_plugin_manifest_schema_accepts_enabled_by_default() -> None:
+    """A4: both the pydantic schema and the frozen dataclass honour the
+    new field. Parsing memory-honcho's manifest returns a manifest with
+    enabled_by_default=True and no validation error."""
+    from opencomputer.plugins.discovery import _parse_manifest
+
+    manifest = _parse_manifest(_HONCHO_MANIFEST_PATH)
+    assert manifest is not None
+    assert manifest.enabled_by_default is True
+
+
 # ─── Phase 12b1 Task A2 — three-mode HonchoSelfHostedProvider ───────────
 
 
