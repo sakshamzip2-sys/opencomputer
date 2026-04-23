@@ -177,9 +177,23 @@ def _acquire_single_instance_lock(plugin_id: str) -> Path:
             return lock_path
 
         # Step 2: something exists. Read its PID.
+        # Race guard: if holder just won O_EXCL but hasn't yet written its
+        # PID, we'll see an empty file. Treating empty as "unparseable →
+        # stale → steal" is the bug that lets two threads both win. Retry
+        # the read a few times with microsleeps to let the writer catch up.
+        # Only after repeated empties do we conclude the lock is truly
+        # stale (prior process crashed between O_EXCL and write).
         holder = _read_lock_pid(lock_path)
         if holder is None:
-            # Unreadable / malformed lock: treat as stale and attempt steal.
+            import time as _time
+
+            for _ in range(10):
+                _time.sleep(0.005)  # 50 ms total budget
+                holder = _read_lock_pid(lock_path)
+                if holder is not None:
+                    break
+        if holder is None:
+            # Still empty/malformed after wait — genuinely stale.
             if _try_steal_stale(lock_path, -1):
                 continue
             # Steal failed this attempt — loop.
