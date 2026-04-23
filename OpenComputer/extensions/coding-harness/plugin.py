@@ -49,6 +49,7 @@ from tools.background import (  # type: ignore[import-not-found]
 )
 from tools.diff import DiffTool  # type: ignore[import-not-found]
 from tools.edit import EditTool  # type: ignore[import-not-found]
+from tools.exit_plan_mode import ExitPlanModeTool  # type: ignore[import-not-found]
 from tools.multi_edit import MultiEditTool  # type: ignore[import-not-found]
 from tools.rewind import RewindTool  # type: ignore[import-not-found]
 from tools.run_tests import RunTestsTool  # type: ignore[import-not-found]
@@ -92,6 +93,7 @@ def register(api) -> None:  # PluginAPI duck-typed
     api.register_tool(EditTool())
     api.register_tool(MultiEditTool())
     api.register_tool(TodoWriteTool(db_path=session_db) if session_db else TodoWriteTool())
+    api.register_tool(ExitPlanModeTool())
     api.register_tool(StartProcessTool())
     api.register_tool(CheckOutputTool())
     api.register_tool(KillProcessTool())
