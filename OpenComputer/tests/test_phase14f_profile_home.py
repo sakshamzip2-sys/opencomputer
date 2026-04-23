@@ -162,3 +162,124 @@ class TestApplyProfileOverrideScopesEnv:
         assert "OPENCOMPUTER_HOME" not in os.environ
         # HOME was not scoped.
         assert os.environ["HOME"] == original_home
+
+
+# ─── C2 — ~/.local/bin/<name> wrapper scripts ───────────────────────
+
+
+class TestWrapperScripts:
+    def test_wrapper_path_returns_local_bin_path(self, tmp_path, monkeypatch):
+        from pathlib import Path
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # Path.home() reads HOME on POSIX; these tests only run on macOS/Linux.
+        from opencomputer.profiles import wrapper_path
+
+        assert wrapper_path("coder") == Path(tmp_path) / ".local" / "bin" / "coder"
+
+    def test_create_profile_writes_wrapper_on_unix(self, tmp_path, monkeypatch):
+        import sys
+
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        from opencomputer.profiles import create_profile
+
+        create_profile("coder")
+        wrapper = tmp_path / ".local" / "bin" / "coder"
+        assert wrapper.exists()
+
+        import stat
+
+        mode = wrapper.stat().st_mode
+        assert mode & stat.S_IXUSR
+        assert mode & stat.S_IXGRP
+        assert mode & stat.S_IXOTH
+
+    def test_wrapper_script_content_invokes_opencomputer_with_profile_flag(
+        self, tmp_path, monkeypatch
+    ):
+        import sys
+
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        from opencomputer.profiles import create_profile
+
+        create_profile("coder")
+        wrapper = tmp_path / ".local" / "bin" / "coder"
+        content = wrapper.read_text()
+        assert content.startswith("#!/")
+        assert "opencomputer" in content
+        assert "-p coder" in content or "--profile coder" in content or "--profile=coder" in content
+        assert '"$@"' in content
+
+    def test_create_profile_does_not_overwrite_existing_wrapper(self, tmp_path, monkeypatch):
+        import sys
+
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        from opencomputer.profiles import create_profile, delete_profile
+
+        # Pre-create wrapper with custom content.
+        (tmp_path / ".local" / "bin").mkdir(parents=True)
+        wrapper = tmp_path / ".local" / "bin" / "coder"
+        wrapper.write_text("#!/bin/bash\necho custom wrapper\n")
+        wrapper.chmod(0o755)
+
+        create_profile("coder")
+
+        # Pre-existing wrapper is untouched.
+        assert wrapper.read_text() == "#!/bin/bash\necho custom wrapper\n"
+
+        # Cleanup so profile-delete doesn't blow up.
+        delete_profile("coder")
+
+    def test_delete_profile_removes_wrapper(self, tmp_path, monkeypatch):
+        import sys
+
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        from opencomputer.profiles import create_profile, delete_profile
+
+        create_profile("coder")
+        wrapper = tmp_path / ".local" / "bin" / "coder"
+        assert wrapper.exists()
+
+        delete_profile("coder")
+        assert not wrapper.exists()
+
+    def test_delete_profile_without_existing_wrapper_is_silent(self, tmp_path, monkeypatch):
+        import sys
+
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        from opencomputer.profiles import create_profile, delete_profile
+
+        create_profile("coder")
+        wrapper = tmp_path / ".local" / "bin" / "coder"
+        wrapper.unlink()  # manually remove wrapper pre-delete
+
+        # Delete should not blow up despite the missing wrapper.
+        delete_profile("coder")
+
+    def test_create_profile_skips_wrapper_on_windows(self, tmp_path, monkeypatch):
+        import sys
+
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(sys, "platform", "win32")
+
+        from opencomputer.profiles import create_profile
+
+        create_profile("coder")
+        wrapper = tmp_path / ".local" / "bin" / "coder"
+        assert not wrapper.exists()

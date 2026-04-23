@@ -29,9 +29,11 @@ Sub-project C additions:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 
 # Keep a module-level reference so ruff / isort autofix cannot remove the
@@ -143,6 +145,56 @@ def scope_subprocess_env(
     env["XDG_CONFIG_HOME"] = str(home / ".config")
     env["XDG_DATA_HOME"] = str(home / ".local" / "share")
     return env
+
+
+def wrapper_path(name: str) -> Path:
+    """Path to the ``~/.local/bin/<name>`` wrapper script for a profile.
+
+    ``~/.local/bin/`` is the conventional user-bin location on Linux /
+    macOS and is typically already on ``$PATH`` via ``.profile`` /
+    ``.zprofile`` / systemd user units. The wrapper invokes
+    ``opencomputer -p <name> "$@"`` so the user can type ``coder chat``
+    instead of ``opencomputer -p coder chat``.
+    """
+    return Path.home() / ".local" / "bin" / name
+
+
+def _maybe_write_wrapper(name: str) -> None:
+    """Write ``~/.local/bin/<name>`` wrapper if missing. Skip on Windows.
+
+    Idempotent — never overwrites an existing file. Failures
+    (permission denied on ``~/.local/bin/``, etc.) are logged as
+    warnings, never raised: profile creation must not block on a
+    missing ``~/.local`` directory.
+    """
+    log = logging.getLogger("opencomputer.profiles")
+    if sys.platform.startswith("win") or os.name == "nt":
+        log.info("Wrapper script skipped on Windows (unsupported).")
+        return
+
+    target = wrapper_path(name)
+    if target.exists():
+        log.info("Wrapper %s already exists — skipped.", target)
+        return
+
+    script = f"""#!/bin/bash
+exec opencomputer -p {name} "$@"
+"""
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(script, encoding="utf-8")
+        target.chmod(0o755)
+    except OSError as e:
+        log.warning("Could not write wrapper %s: %s", target, e)
+
+
+def _maybe_remove_wrapper(name: str) -> None:
+    """Best-effort removal of ``~/.local/bin/<name>`` — silent on missing."""
+    target = wrapper_path(name)
+    try:
+        target.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 
@@ -260,11 +312,15 @@ def _post_create_artifacts(name: str) -> None:
     """Emit per-profile artifacts after the profile directory exists.
 
     Separated so both the ``clone_all`` path and the fresh-create path
-    produce the same side-effects. Currently only C1 (``home/`` subdir);
-    C2 (wrapper script) and C3 (``SOUL.md``) land in later commits.
+    produce the same side-effects: C1 (``home/`` subdir) and C2
+    (wrapper script). C3 (``SOUL.md``) lands in a later commit.
+    Artifacts already present (e.g. from a full clone) are left
+    untouched by ``_maybe_*`` helpers.
     """
     # C1 — home/ subdir
     profile_home_dir(name)
+    # C2 — wrapper script
+    _maybe_write_wrapper(name)
 
 
 def delete_profile(name: str) -> None:
@@ -282,6 +338,10 @@ def delete_profile(name: str) -> None:
     if read_active_profile() == name:
         write_active_profile(None)
     shutil.rmtree(target)
+    # C2 — remove the ~/.local/bin/<name> wrapper script if we wrote one.
+    # Silent on missing: the user may have deleted it manually, or Windows
+    # skipped it on create.
+    _maybe_remove_wrapper(name)
 
 
 def rename_profile(old: str, new: str) -> Path:
@@ -318,6 +378,7 @@ __all__ = [
     "get_profile_dir",
     "profile_home_dir",
     "scope_subprocess_env",
+    "wrapper_path",
     "list_profiles",
     "read_active_profile",
     "write_active_profile",
