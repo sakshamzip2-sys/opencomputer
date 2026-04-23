@@ -384,3 +384,130 @@ def test_plugin_new_prints_next_steps(tmp_path: Path) -> None:
     assert "cd " in result.stdout
     assert "pytest" in result.stdout
     assert "opencomputer plugins" in result.stdout
+
+
+# ─── Task B3: post-scaffold smoke check ───────────────────────────────
+
+
+def test_plugin_new_smoke_passes_for_toolkit(tmp_path: Path) -> None:
+    """After rendering a toolkit, the CLI should load the plugin and print OK."""
+    from typer.testing import CliRunner
+
+    app = _get_plugin_app()
+    result = CliRunner().invoke(
+        app,
+        ["new", "demo", "--kind", "toolkit", "--path", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "Smoke check passed" in result.stdout
+
+
+def test_plugin_new_smoke_passes_for_each_kind(tmp_path: Path) -> None:
+    """Every one of the 4 template kinds should scaffold cleanly + smoke-pass."""
+    from typer.testing import CliRunner
+
+    for kind in ("channel", "provider", "toolkit", "mixed"):
+        out = tmp_path / kind
+        out.mkdir()
+        app = _get_plugin_app()
+        result = CliRunner().invoke(
+            app,
+            ["new", f"demo-{kind}", "--kind", kind, "--path", str(out)],
+        )
+        assert result.exit_code == 0, f"kind={kind}: {result.stdout}"
+        assert "Smoke check passed" in result.stdout, (
+            f"kind={kind} stdout: {result.stdout}"
+        )
+
+
+def test_plugin_new_smoke_failure_prints_red_and_exits_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If load_plugin raises, CLI exits 1 but leaves files on disk."""
+    from typer.testing import CliRunner
+
+    import opencomputer.cli_plugin as cli_plugin_mod
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    # Patch the symbol cli_plugin uses to perform the smoke load.
+    monkeypatch.setattr(cli_plugin_mod, "_smoke_load_plugin", _boom, raising=False)
+
+    # If the attribute doesn't exist yet (before B3 impl), fall back to
+    # patching the underlying loader.load_plugin — either path exercises
+    # the failure branch in the CLI.
+    import opencomputer.plugins.loader as loader_mod
+
+    monkeypatch.setattr(loader_mod, "load_plugin", _boom)
+
+    app = _get_plugin_app()
+    result = CliRunner().invoke(
+        app,
+        ["new", "demo", "--kind", "toolkit", "--path", str(tmp_path)],
+    )
+    assert result.exit_code == 1, result.stdout
+    combined = result.stdout + (result.stderr or "")
+    assert "Smoke check failed" in combined
+    assert "boom" in combined
+    # Files are still on disk — user can fix + retry
+    assert (tmp_path / "demo" / "plugin.json").exists()
+    assert (tmp_path / "demo" / "plugin.py").exists()
+
+
+def test_plugin_new_no_smoke_flag_skips_check(tmp_path: Path) -> None:
+    """--no-smoke suppresses the smoke check entirely."""
+    from typer.testing import CliRunner
+
+    app = _get_plugin_app()
+    result = CliRunner().invoke(
+        app,
+        [
+            "new",
+            "demo",
+            "--kind",
+            "toolkit",
+            "--path",
+            str(tmp_path),
+            "--no-smoke",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    # Neither success nor failure marker should appear
+    assert "Smoke check passed" not in result.stdout
+    assert "Smoke check failed" not in result.stdout
+
+
+def test_plugin_new_smoke_uses_isolated_registry(tmp_path: Path) -> None:
+    """Scaffolding must NOT pollute the process-global plugin registry."""
+    from typer.testing import CliRunner
+
+    from opencomputer.plugins.registry import registry as global_registry
+
+    # Snapshot of provider/channel keys + loaded plugins before scaffolding.
+    providers_before = set(global_registry.providers.keys())
+    channels_before = set(global_registry.channels.keys())
+    loaded_ids_before = {lp.candidate.manifest.id for lp in global_registry.loaded}
+
+    app = _get_plugin_app()
+    # Use mixed — registers channel + provider + tool, maximum chance of pollution.
+    result = CliRunner().invoke(
+        app,
+        ["new", "isolated-demo", "--kind", "mixed", "--path", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "Smoke check passed" in result.stdout
+
+    providers_after = set(global_registry.providers.keys())
+    channels_after = set(global_registry.channels.keys())
+    loaded_ids_after = {lp.candidate.manifest.id for lp in global_registry.loaded}
+
+    assert providers_after == providers_before, (
+        f"smoke check leaked providers: {providers_after - providers_before}"
+    )
+    assert channels_after == channels_before, (
+        f"smoke check leaked channels: {channels_after - channels_before}"
+    )
+    assert loaded_ids_after == loaded_ids_before, (
+        f"smoke check leaked loaded plugins: {loaded_ids_after - loaded_ids_before}"
+    )
