@@ -621,77 +621,79 @@ class TestMemorySetupStatusResetCLI:
 
 
 class TestWizardHonchoStep:
-    """The setup wizard's optional Honcho step (10f.N)."""
+    """The setup wizard's Honcho step — updated for Phase 12b1/A5.
 
-    def test_optional_honcho_skipped_by_user_returns_cleanly(self, monkeypatch):
-        """If the user answers 'no' to Honcho, the wizard proceeds without error."""
+    A5 superseded the original 10f.N contract: the wizard no longer asks
+    ``Confirm.ask`` and now calls ``bootstrap.ensure_started`` (the A3
+    idempotent helper) instead of ``honcho_up`` directly. See the A5
+    section of ``test_phase12b1_honcho_default.py`` for the full spec.
+    These three tests verify behavior that the earlier 10f.N-era suite
+    also exercised, translated to the new contract: (a) plugin absent,
+    (b) docker missing, (c) happy path.
+    """
+
+    def test_optional_honcho_when_plugin_missing_returns_cleanly(self, monkeypatch):
+        """If the memory-honcho plugin isn't loadable, the wizard still
+        finishes without raising (A5: silent-fallback to baseline)."""
+        import opencomputer.cli_memory as cli_memory
         import opencomputer.setup_wizard as wizard
 
-        # Confirm.ask is used to prompt — stub to return False ("skipped")
-        class _FakeConfirm:
-            @staticmethod
-            def ask(question, default=True):
-                return False
-
-        monkeypatch.setattr(wizard, "Confirm", _FakeConfirm)
+        monkeypatch.setattr(cli_memory, "_load_honcho_bootstrap", lambda: None)
+        monkeypatch.setattr(wizard, "save_config", lambda cfg, path=None: None)
 
         # Should not raise
         wizard._optional_honcho()
 
     def test_optional_honcho_docker_missing_prints_hint(self, monkeypatch):
-        """If the user says yes but Docker is missing, wizard prints install hint."""
+        """Docker missing → A5 prints a baseline-memory notice and does
+        NOT attempt to start the stack."""
+        from types import SimpleNamespace
+
+        import opencomputer.cli_memory as cli_memory
         import opencomputer.setup_wizard as wizard
 
-        class _FakeConfirm:
-            @staticmethod
-            def ask(question, default=True):
-                return True
+        ensure_called = []
 
-        monkeypatch.setattr(wizard, "Confirm", _FakeConfirm)
+        def _ensure(timeout_s: int = 60):  # pragma: no cover — must not run
+            ensure_called.append(True)
+            return (True, "unused")
 
         # Patch the bootstrap loader to return a stub whose detect_docker
         # returns (False, False).
-        from types import SimpleNamespace
-
         stub_bootstrap = SimpleNamespace(
             detect_docker=lambda: (False, False),
-            honcho_up=lambda: (True, "ignored"),
+            ensure_started=_ensure,
         )
-        import opencomputer.cli_memory as cli_memory
 
         monkeypatch.setattr(cli_memory, "_load_honcho_bootstrap", lambda: stub_bootstrap)
+        monkeypatch.setattr(wizard, "save_config", lambda cfg, path=None: None)
 
-        # Should not raise (it prints a hint and returns)
+        # Should not raise (it prints the install hint and returns)
         wizard._optional_honcho()
+        assert ensure_called == [], "ensure_started must not run when Docker is absent"
 
-    def test_optional_honcho_happy_path_calls_honcho_up(self, monkeypatch):
-        """If Docker is available and user agrees, wizard calls honcho_up()."""
+    def test_optional_honcho_happy_path_calls_ensure_started(self, monkeypatch):
+        """Docker available → A5 calls ``ensure_started()`` (not the old
+        ``honcho_up``) and never prompts the user to confirm."""
         import opencomputer.setup_wizard as wizard
 
-        class _FakeConfirm:
-            @staticmethod
-            def ask(question, default=True):
-                return True
-
-        monkeypatch.setattr(wizard, "Confirm", _FakeConfirm)
-
-        up_called = []
+        ensure_called = []
         from types import SimpleNamespace
 
-        def _up():
-            up_called.append(True)
+        def _ensure(timeout_s: int = 60):
+            ensure_called.append(timeout_s)
             return (True, "Honcho stack started.")
 
         stub_bootstrap = SimpleNamespace(
             detect_docker=lambda: (True, True),
-            honcho_up=_up,
+            ensure_started=_ensure,
         )
         import opencomputer.cli_memory as cli_memory
 
         monkeypatch.setattr(cli_memory, "_load_honcho_bootstrap", lambda: stub_bootstrap)
 
         wizard._optional_honcho()
-        assert len(up_called) == 1
+        assert len(ensure_called) == 1, "ensure_started should be called once"
 
 
 class TestCLAUDEmdUpdated:

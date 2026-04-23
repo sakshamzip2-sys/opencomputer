@@ -6,5 +6,6 @@
   "kind": "provider",
   "entry": "plugin",
   "schema_version": 2,
-  "profiles": ["*"]
+  "profiles": ["*"],
+  "enabled_by_default": true
 }

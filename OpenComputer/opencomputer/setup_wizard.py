@@ -226,49 +226,95 @@ def run_setup() -> None:
     )
 
 
-def _optional_honcho() -> None:
-    """Phase 10f.N — offer to enable the Honcho memory overlay.
+def _load_honcho_bootstrap():
+    """Thin re-export of ``cli_memory._load_honcho_bootstrap`` so tests can
+    monkeypatch it on the wizard module without reaching across imports.
 
-    Non-destructive: if the user skips, baseline memory (MEMORY.md +
-    USER.md + FTS5) still works fully. If Docker is missing, prints
-    install hint instead of trying to start containers.
+    Returns the bootstrap module or ``None`` if the plugin isn't present.
     """
-    console.print("\n[bold]Step 5.5 — deep memory (optional)[/bold]")
-    console.print(
-        "[dim]Honcho gives your agent a persistent user model across sessions.\n"
-        "Requires Docker. Your built-in memory works without it.[/dim]"
-    )
-    if not Confirm.ask("Enable Honcho memory overlay?", default=True):
-        console.print("[dim]Skipped — baseline memory is on.[/dim]")
-        return
-
-    # Load bootstrap lazily so setup_wizard has no hard dep on the plugin.
     try:
-        from opencomputer.cli_memory import _load_honcho_bootstrap
-
-        bootstrap = _load_honcho_bootstrap()
+        from opencomputer.cli_memory import _load_honcho_bootstrap as _loader
     except Exception:
-        bootstrap = None
+        return None
+    try:
+        return _loader()
+    except Exception:
+        return None
+
+
+def _downgrade_memory_provider_to_empty() -> None:
+    """Persist ``memory.provider=""`` to the on-disk config.
+
+    Called when Docker is absent or when ``ensure_started()`` fails —
+    next wizard/CLI invocation should NOT retry the Honcho bring-up
+    until the user explicitly runs ``opencomputer memory setup``.
+    """
+    try:
+        cfg = load_config()
+        new_cfg = replace(cfg, memory=replace(cfg.memory, provider=""))
+        save_config(new_cfg)
+    except Exception as exc:  # noqa: BLE001
+        # Never crash the wizard on a config-write failure — just report.
+        console.print(
+            f"[yellow]![/yellow] Could not update config to record baseline "
+            f"memory preference: {type(exc).__name__}: {exc}"
+        )
+
+
+def _optional_honcho() -> None:
+    """Phase 12b1 / A5 — silent Honcho activation when Docker is present,
+    honest baseline notice when not.
+
+    Contract (no user prompt — this function never calls ``Confirm.ask``):
+
+    * Docker + compose v2 detected → call ``bootstrap.ensure_started``
+      (the A3 idempotent helper with port-collision detection + pull +
+      health poll). On success: print "Honcho memory running" banner and
+      leave ``memory.provider="memory-honcho"`` as-is (A4 default). On
+      failure: print the error, persist ``provider=""`` so subsequent
+      runs don't retry until the user fixes it.
+    * Docker absent (or compose v2 missing) → print a non-alarming
+      notice pointing at the install URL and persist ``provider=""``.
+    """
+    bootstrap = _load_honcho_bootstrap()
     if bootstrap is None:
-        console.print("[yellow]memory-honcho plugin not found in this install.[/yellow]")
+        # Plugin genuinely absent from this install — fall through the
+        # same path as "no Docker": turn off retries and move on.
+        console.print(
+            "[yellow]ℹ[/yellow] memory-honcho plugin not present — "
+            "running on baseline memory."
+        )
+        _downgrade_memory_provider_to_empty()
         return
 
     docker, compose_v2 = bootstrap.detect_docker()
     if not docker or not compose_v2:
         console.print(
-            "[yellow]Docker / 'docker compose' v2 not available.[/yellow]\n"
-            "Install Docker Desktop, then run:\n"
-            "  [cyan]opencomputer memory setup[/cyan]  [dim]# enables Honcho after install[/dim]"
+            "[yellow]ℹ[/yellow] Running on baseline memory. "
+            "Install Docker to enable advanced memory features: "
+            "https://docs.docker.com/get-docker/"
+        )
+        _downgrade_memory_provider_to_empty()
+        return
+
+    console.print("[dim]Starting Honcho memory stack…[/dim]")
+    try:
+        ok, msg = bootstrap.ensure_started(timeout_s=60)
+    except Exception as exc:  # noqa: BLE001
+        ok, msg = False, f"{type(exc).__name__}: {exc}"
+
+    if ok:
+        console.print(
+            "[green]✓[/green] Honcho memory running on http://localhost:8000"
         )
         return
 
-    console.print("[dim]Starting Honcho stack…[/dim]")
-    ok, msg = bootstrap.honcho_up()
-    if ok:
-        console.print(f"[green]✓[/green] {msg}")
-    else:
-        console.print(f"[red]✗[/red] {msg}")
-        console.print("[dim]You can retry later with: [cyan]opencomputer memory setup[/cyan][/dim]")
+    console.print(f"[red]✗[/red] {msg}")
+    console.print(
+        "[dim]Continuing on baseline memory. Fix the issue and re-run "
+        "[cyan]opencomputer memory setup[/cyan] to enable Honcho later.[/dim]"
+    )
+    _downgrade_memory_provider_to_empty()
 
 
 __all__ = ["run_setup"]

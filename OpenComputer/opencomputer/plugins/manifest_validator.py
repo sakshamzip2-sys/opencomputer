@@ -49,6 +49,8 @@ class PluginManifestSchema(BaseModel):
     # Phase 14.C
     profiles: list[str] | None = Field(default=None)
     single_instance: bool = Field(default=False)
+    # Phase 12b1 Sub-project A — Honcho-as-default
+    enabled_by_default: bool = Field(default=False)
     # Phase 14.M/N — already in use via ProfileConfig/WorkspaceOverlay but
     # manifests often carry a schema_version field. Accept it silently.
     schema_version: int | None = Field(default=None)

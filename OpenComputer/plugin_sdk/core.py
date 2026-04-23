@@ -108,6 +108,12 @@ class PluginManifest:
     # token) can only belong to ONE profile at a time. Core tracks a
     # lock in ~/.opencomputer/.locks/<plugin-id> when this is True.
     single_instance: bool = False
+    # Phase 12b1 (Sub-project A): plugins that should be active on a fresh
+    # install without the user opting in. Currently only `memory-honcho`
+    # uses this (so Honcho becomes the default memory provider when
+    # Docker is available). Wizard + config consumers honor this flag
+    # rather than the legacy "empty provider = baseline only" fallback.
+    enabled_by_default: bool = False
 
 
 # ─── Stop reasons ──────────────────────────────────────────────────────

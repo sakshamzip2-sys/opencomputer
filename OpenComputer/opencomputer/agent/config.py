@@ -53,9 +53,12 @@ class MemoryConfig:
     """The three-pillar memory configuration.
 
     Built-in memory is always on. An external provider (Honcho, Mem0,
-    Cognee, etc.) is optional overlay, controlled by `provider` field:
-      - ""                        → built-in only (default)
-      - "memory-honcho"           → Honcho plugin (requires Docker)
+    Cognee, etc.) is an overlay on top, controlled by `provider` field:
+      - "memory-honcho"           → Honcho plugin (DEFAULT — requires Docker;
+                                    setup wizard falls back to built-in
+                                    cleanly if Docker is absent)
+      - ""                        → built-in only (legacy; wizard may set
+                                    this when Docker is detected absent)
       - "memory-mem0" / "memory-cognee" → future
     """
 
@@ -67,7 +70,10 @@ class MemoryConfig:
     enabled: bool = True
     memory_char_limit: int = 4000  # MEMORY.md cap injected into base prompt
     user_char_limit: int = 2000  # USER.md cap injected into base prompt
-    provider: str = ""  # empty = built-in only
+    # Phase 12b1 Sub-project A: Honcho is the default overlay when Docker
+    # is available. Wizard writes "" back to config.yaml if Docker is
+    # absent so subsequent runs don't keep trying to spin up the stack.
+    provider: str = "memory-honcho"
     fallback_to_builtin: bool = True  # non-negotiable; here for docs
 
 
