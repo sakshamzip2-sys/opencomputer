@@ -72,28 +72,98 @@ opencomputer config set KEY VALUE
 
 ## Coding mode
 
-OpenComputer ships with a `coding-harness` plugin that adds Claude-Code-style
-coding tools (Edit, MultiEdit, TodoWrite, background process management) plus
-a formal "plan mode" that refuses destructive tools while you review the plan.
+OpenComputer ships with a `coding-harness` plugin that turns the agent into a
+coding agent. v2 adds Kimi-style content-hashed checkpoints + rewind,
+Claude-Code-style hook events, permission scopes, in-chat slash commands, and
+auto-activating skills.
+
+### How it works (the mental model)
+
+**You don't invoke plugins directly.** You chat with the agent; the agent
+chooses tools the harness has registered. Your job is to describe a task —
+"fix this bug", "add a test for X", "refactor this function" — and the agent
+picks the right tool (`Edit`, `MultiEdit`, `RunTests`, …) from the harness's
+capability set. Slash commands are the one exception: `/plan`, `/undo`, etc.
+execute directly and deterministically.
+
+List what's installed with `opencomputer plugins`.
+
+### Tools the harness adds
+
+| Tool | What it does |
+|---|---|
+| `Edit`, `MultiEdit` | Precise string-replace edits. Fail-closed if target isn't unique. |
+| `TodoWrite` | Create / update a harness-managed skill in-session. |
+| `StartProcess` / `CheckOutput` / `KillProcess` | Run long-lived processes (dev servers, watchers) and poll them asynchronously. |
+| `Rewind` | Restore files to a previous checkpoint (`steps=N`, `checkpoint_id=...`, or `list_checkpoints=true`). |
+| `Diff` | Unified diff between the working tree and the most recent checkpoint. |
+| `RunTests` | Auto-detect pytest / vitest / jest / cargo / go; run and surface results. |
+
+### Modes
+
+Every mode is a `DynamicInjectionProvider` that conditionally appends guidance
+to the system prompt. Plan mode also registers a PreToolUse hook that
+hard-blocks `Edit` / `Write` / `Bash` — belt + suspenders.
 
 ```bash
-# Normal mode — Edit/Write/Bash work, agent can modify files directly
-opencomputer
-
-# Plan mode — agent describes what it would do, Edit/Write/Bash are refused
-# Useful for big refactors where you want to review before committing
-opencomputer chat --plan
-
-# Disable automatic context compaction (debugging long sessions)
-opencomputer chat --no-compact
+opencomputer chat --plan       # describe what you'd do; destructive tools refused
 ```
 
-In plan mode, plan-mode guidance is injected into the system prompt AND a
-PreToolUse hook hard-blocks destructive tools — belt + suspenders. Subagents
-spawned via the `delegate` tool inherit plan mode automatically.
+```
+/plan              # toggle plan mode on mid-session
+/plan-off          # turn it off
+/accept-edits      # auto-accept minor edits (use /undo to revert)
+/accept-edits off  # explicit off
+```
 
-Remove the coding harness any time by removing or renaming
-`extensions/coding-harness/`. The core agent stays fully functional.
+Subagents spawned via `delegate` inherit the parent's mode flags through
+`RuntimeContext`.
+
+### Checkpoints + Rewind
+
+The harness snapshots every tracked file **before** each destructive tool
+call via a PreToolUse hook. Snapshots are content-hashed, stored at
+`~/.opencomputer/harness/<session_id>/rewind/<checkpoint_id>/`, and shielded
+from `Ctrl-C` (can't corrupt mid-save).
+
+```
+/checkpoint before-refactor   # manual named snapshot
+/undo                         # rewind the last checkpoint
+/undo 3                       # rewind 3 checkpoints back
+/diff                         # unified diff vs latest checkpoint
+/diff <checkpoint_id>         # diff against a specific snapshot
+```
+
+Subagents get their own isolated checkpoint store keyed on `subagent_id`, so
+a reviewer subagent's edits never pollute your `/undo` chain.
+
+### Permission scopes
+
+A scope-check hook refuses destructive tool calls against paths outside your
+workspace (`/etc/**`, `/sys/**`, `/var/log/**`, …) and dangerous Bash
+commands (`rm -rf /`, fork bombs, `dd if=*`, …). Defaults live in
+`extensions/coding-harness/permissions/default_scopes.py`.
+
+### Skill auto-activation
+
+Bundled skills (`extensions/coding-harness/skills/<name>/SKILL.md`) carry YAML
+frontmatter with a `description:` that's matched against your last message.
+If ≥ 2 tokens overlap, the full SKILL.md body is injected into this turn's
+system prompt — no manual invocation needed.
+
+| Skill | Triggered by |
+|---|---|
+| `code-reviewer` | "review this PR", "code review", "check my diff" |
+| `test-runner`   | "run the tests", "pytest", "verify the build" |
+| `refactorer`    | "refactor", "clean up", "extract a function" |
+
+Add your own by dropping a `SKILL.md` in `skills/<your-name>/`.
+
+### Remove the harness
+
+Remove or rename `extensions/coding-harness/` to opt out. The core agent
+stays fully functional — it's a pure chat agent without the harness. Plugins
+are additive.
 
 ## Memory
 
