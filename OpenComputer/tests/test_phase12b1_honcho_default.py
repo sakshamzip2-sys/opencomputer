@@ -479,3 +479,183 @@ def test_wizard_no_confirm_prompt_anymore(monkeypatch) -> None:
             f"Confirm.ask was called with detect={detect}, ensure={ensure} — "
             f"A5 forbids any user prompt in _optional_honcho"
         )
+
+
+# ─── Phase 12b1 Task A6 — `opencomputer memory doctor` subcommand ───────
+
+
+class _FakeDoctorBootstrap:
+    """Stand-in for the memory-honcho bootstrap module used by
+    ``memory doctor``. Only exposes ``detect_docker`` + ``_is_stack_healthy``
+    — the two helpers the doctor command reads. All values pre-scripted so
+    no real subprocess work happens."""
+
+    def __init__(self, *, detect_return, healthy_return) -> None:
+        self._detect_return = detect_return
+        self._healthy_return = healthy_return
+
+    def detect_docker(self):
+        return self._detect_return
+
+    def _is_stack_healthy(self) -> bool:
+        return self._healthy_return
+
+
+def test_memory_doctor_reports_all_layers_ok(tmp_path, monkeypatch) -> None:
+    """All layers green: MEMORY.md + USER.md exist, SessionDB is non-empty,
+    Docker + compose v2 present, Honcho healthy, provider=memory-honcho."""
+    from types import SimpleNamespace
+
+    from typer.testing import CliRunner
+
+    from opencomputer import cli_memory
+    from opencomputer.agent.config import MemoryConfig, SessionConfig
+
+    # Baseline files: both exist with some content.
+    memory_md = tmp_path / "MEMORY.md"
+    memory_md.write_text("hello memory")
+    user_md = tmp_path / "USER.md"
+    user_md.write_text("hello user")
+
+    # Episodic DB: non-empty file on disk.
+    db_path = tmp_path / "sessions.db"
+    db_path.write_bytes(b"\x00" * 128)  # any non-zero size works
+
+    # Patch MemoryManager paths via a fake _manager()
+    fake_mm = SimpleNamespace(
+        declarative_path=memory_md,
+        user_path=user_md,
+        memory_char_limit=4000,
+        user_char_limit=2000,
+    )
+    monkeypatch.setattr(cli_memory, "_manager", lambda: fake_mm)
+
+    # Patch SessionConfig so doctor sees our tmp db_path
+    monkeypatch.setattr(
+        cli_memory,
+        "SessionConfig",
+        lambda: SessionConfig(db_path=db_path),
+    )
+
+    # Patch MemoryConfig to force provider
+    monkeypatch.setattr(
+        cli_memory,
+        "MemoryConfig",
+        lambda: MemoryConfig(provider="memory-honcho"),
+    )
+
+    # Fake bootstrap: docker ok, healthy ok
+    fake = _FakeDoctorBootstrap(detect_return=(True, True), healthy_return=True)
+    monkeypatch.setattr(cli_memory, "_load_honcho_bootstrap", lambda: fake)
+
+    runner = CliRunner()
+    result = runner.invoke(cli_memory.memory_app, ["doctor"])
+
+    assert result.exit_code == 0, f"exit_code={result.exit_code}, stdout={result.stdout}"
+    out = result.stdout
+    # All 5 layer names present
+    for layer in ("baseline", "episodic", "docker", "honcho", "provider"):
+        assert layer in out, f"layer {layer!r} missing from output: {out!r}"
+    # Must mention "ok" status somewhere (rich Table renders status column)
+    assert "ok" in out, f"expected at least one 'ok' status, got {out!r}"
+    # honcho healthy should show up
+    assert "healthy" in out, f"expected honcho healthy row, got {out!r}"
+    # provider active
+    assert "active" in out, f"expected provider active, got {out!r}"
+    # memory-honcho provider name should appear
+    assert "memory-honcho" in out, f"expected provider name in output, got {out!r}"
+
+
+def test_memory_doctor_reports_docker_missing(monkeypatch, tmp_path) -> None:
+    """Docker missing → install URL in detail; honcho becomes n/a."""
+    from types import SimpleNamespace
+
+    from typer.testing import CliRunner
+
+    from opencomputer import cli_memory
+    from opencomputer.agent.config import MemoryConfig, SessionConfig
+
+    # Baseline files present so those layers don't fail
+    memory_md = tmp_path / "MEMORY.md"
+    memory_md.write_text("x")
+    user_md = tmp_path / "USER.md"
+    user_md.write_text("y")
+    db_path = tmp_path / "sessions.db"
+    db_path.write_bytes(b"\x00")
+
+    fake_mm = SimpleNamespace(
+        declarative_path=memory_md,
+        user_path=user_md,
+        memory_char_limit=4000,
+        user_char_limit=2000,
+    )
+    monkeypatch.setattr(cli_memory, "_manager", lambda: fake_mm)
+    monkeypatch.setattr(
+        cli_memory, "SessionConfig", lambda: SessionConfig(db_path=db_path)
+    )
+    monkeypatch.setattr(
+        cli_memory, "MemoryConfig", lambda: MemoryConfig(provider="memory-honcho")
+    )
+
+    fake = _FakeDoctorBootstrap(detect_return=(False, False), healthy_return=False)
+    monkeypatch.setattr(cli_memory, "_load_honcho_bootstrap", lambda: fake)
+
+    runner = CliRunner()
+    result = runner.invoke(cli_memory.memory_app, ["doctor"])
+
+    assert result.exit_code == 0, f"exit_code={result.exit_code}, stdout={result.stdout}"
+    out = result.stdout
+    # Docker row: missing + install URL
+    assert "docker" in out
+    assert "missing" in out
+    assert "docs.docker.com/get-docker" in out, (
+        f"expected install URL in output, got {out!r}"
+    )
+    # Honcho row: n/a because docker missing
+    assert "honcho" in out
+    assert "n/a" in out, f"expected 'n/a' for honcho when docker missing, got {out!r}"
+
+
+def test_memory_doctor_exits_zero_even_when_layers_fail(monkeypatch, tmp_path) -> None:
+    """Diagnostic, not gate: every layer broken → still exit 0, no exception."""
+    from types import SimpleNamespace
+
+    from typer.testing import CliRunner
+
+    from opencomputer import cli_memory
+    from opencomputer.agent.config import MemoryConfig, SessionConfig
+
+    # Files absent (point to paths that do not exist)
+    missing_memory = tmp_path / "absent_MEMORY.md"
+    missing_user = tmp_path / "absent_USER.md"
+    missing_db = tmp_path / "absent_sessions.db"
+
+    fake_mm = SimpleNamespace(
+        declarative_path=missing_memory,
+        user_path=missing_user,
+        memory_char_limit=4000,
+        user_char_limit=2000,
+    )
+    monkeypatch.setattr(cli_memory, "_manager", lambda: fake_mm)
+    monkeypatch.setattr(
+        cli_memory, "SessionConfig", lambda: SessionConfig(db_path=missing_db)
+    )
+    # Provider fallback (empty string)
+    monkeypatch.setattr(cli_memory, "MemoryConfig", lambda: MemoryConfig(provider=""))
+
+    fake = _FakeDoctorBootstrap(detect_return=(False, False), healthy_return=False)
+    monkeypatch.setattr(cli_memory, "_load_honcho_bootstrap", lambda: fake)
+
+    runner = CliRunner()
+    result = runner.invoke(cli_memory.memory_app, ["doctor"])
+
+    assert result.exit_code == 0, f"exit_code={result.exit_code}, stdout={result.stdout}"
+    # No traceback should appear
+    assert result.exception is None or isinstance(result.exception, SystemExit), (
+        f"unexpected exception: {result.exception!r}"
+    )
+    out = result.stdout
+    # Expect failure markers — baseline missing, episodic missing, docker missing,
+    # honcho n/a, provider fallback.
+    assert "missing" in out
+    assert "fallback" in out, f"expected 'fallback' for empty provider, got {out!r}"
