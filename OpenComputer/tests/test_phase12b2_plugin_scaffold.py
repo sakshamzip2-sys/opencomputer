@@ -254,3 +254,133 @@ def test_mixed_channel_provider_kinds_pass_through(tmp_path: Path) -> None:
         )
         data = json.loads((out / f"kind-{kind}" / "plugin.json").read_text())
         assert data["kind"] == kind
+
+
+# ─── Task B2: CLI wiring ───────────────────────────────────────────────
+
+
+def _get_plugin_app():
+    """Import the plugin_app fresh so tests pick up any module state."""
+    import importlib
+
+    from opencomputer import cli_plugin
+
+    importlib.reload(cli_plugin)
+    return cli_plugin.plugin_app
+
+
+def test_plugin_new_creates_toolkit_scaffold_in_custom_path(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    app = _get_plugin_app()
+    result = CliRunner().invoke(
+        app,
+        ["new", "demo", "--kind", "toolkit", "--path", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert (tmp_path / "demo" / "plugin.json").exists()
+    assert (tmp_path / "demo" / "plugin.py").exists()
+
+
+def test_plugin_new_respects_profile_default_path_when_no_path_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typer.testing import CliRunner
+
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    app = _get_plugin_app()
+    result = CliRunner().invoke(app, ["new", "demo", "--kind", "toolkit"])
+    assert result.exit_code == 0, result.stdout
+    assert (tmp_path / "plugins" / "demo" / "plugin.json").exists()
+
+
+def test_plugin_new_refuses_duplicate_without_force(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    (tmp_path / "demo").mkdir()
+    app = _get_plugin_app()
+    result = CliRunner().invoke(
+        app,
+        ["new", "demo", "--kind", "toolkit", "--path", str(tmp_path)],
+    )
+    assert result.exit_code == 1
+    combined = (result.stdout + (result.stderr or "")).lower()
+    assert "already exists" in combined
+    assert "--force" in combined
+
+
+def test_plugin_new_overwrites_with_force(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    (tmp_path / "demo").mkdir()
+    (tmp_path / "demo" / "leftover.txt").write_text("old")
+    app = _get_plugin_app()
+    result = CliRunner().invoke(
+        app,
+        ["new", "demo", "--kind", "toolkit", "--path", str(tmp_path), "--force"],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert (tmp_path / "demo" / "plugin.json").exists()
+    assert not (tmp_path / "demo" / "leftover.txt").exists()
+
+
+def test_plugin_new_rejects_invalid_id(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    app = _get_plugin_app()
+    result = CliRunner().invoke(
+        app,
+        ["new", "Bad Name", "--kind", "toolkit", "--path", str(tmp_path)],
+    )
+    assert result.exit_code == 1
+    combined = (result.stdout + (result.stderr or "")).lower()
+    assert "id" in combined or "lowercase" in combined or "format" in combined
+
+
+def test_plugin_new_interactive_prompt_for_kind_when_tty(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    app = _get_plugin_app()
+    result = CliRunner().invoke(
+        app,
+        ["new", "demo", "--path", str(tmp_path)],
+        input="provider\n",
+    )
+    assert result.exit_code == 0, result.stdout
+    data = json.loads((tmp_path / "demo" / "plugin.json").read_text())
+    assert data["kind"] == "provider"
+
+
+def test_plugin_new_errors_when_kind_omitted_in_non_tty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typer.testing import CliRunner
+
+    app = _get_plugin_app()
+    import opencomputer.cli_plugin as cli_plugin_mod
+
+    monkeypatch.setattr(cli_plugin_mod.sys.stdin, "isatty", lambda: False)
+    result = CliRunner().invoke(
+        app,
+        ["new", "demo", "--path", str(tmp_path)],
+        input="",
+    )
+    assert result.exit_code == 1
+    combined = (result.stdout + (result.stderr or "")).lower()
+    assert "non-interactive" in combined or "required" in combined
+
+
+def test_plugin_new_prints_next_steps(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    app = _get_plugin_app()
+    result = CliRunner().invoke(
+        app,
+        ["new", "demo", "--kind", "provider", "--path", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "Next steps" in result.stdout
+    # Numbered list items — at least three specific markers
+    assert "cd " in result.stdout
+    assert "pytest" in result.stdout
+    assert "opencomputer plugins" in result.stdout

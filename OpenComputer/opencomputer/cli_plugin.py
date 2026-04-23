@@ -24,6 +24,7 @@ Commands:
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 
 import typer
@@ -201,6 +202,132 @@ def where(
 
     _console.print(f"[red]error:[/red] plugin '{plugin_id}' not found")
     raise typer.Exit(code=1)
+
+
+_VALID_KINDS: tuple[str, ...] = ("channel", "provider", "toolkit", "mixed")
+
+
+@plugin_app.command("new")
+def plugin_new(
+    name: str = typer.Argument(..., help="Plugin id (lowercase, hyphens allowed)."),
+    kind: str = typer.Option(
+        "",
+        "--kind",
+        "-k",
+        help="Template kind: channel | provider | toolkit | mixed.",
+    ),
+    path: Path | None = typer.Option(
+        None,
+        "--path",
+        "-p",
+        help="Output directory (default: ~/.opencomputer/plugins/).",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite existing directory with same name.",
+    ),
+    description: str = typer.Option(
+        "",
+        "--description",
+        "-d",
+        help="Free-form plugin description.",
+    ),
+    author: str = typer.Option(
+        "",
+        "--author",
+        "-a",
+        help="Free-form author string.",
+    ),
+) -> None:
+    """Scaffold a new plugin skeleton from the built-in templates.
+
+    Example:
+        opencomputer plugin new my-weather --kind provider
+    """
+    from opencomputer.agent.config import _home
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+
+    # Resolve --kind: interactive prompt when stdin is a tty or has input
+    # waiting; error when truly non-interactive (CI/script with no input).
+    resolved_kind = kind
+    if not resolved_kind:
+        # If stdin is explicitly a non-tty (CI, piped script with no data),
+        # refuse. We also refuse if typer.prompt() raises Abort due to EOF.
+        if not sys.stdin.isatty():
+            # Best-effort: try to read — if input was piped (e.g. tests)
+            # proceed; otherwise error out clearly.
+            try:
+                resolved_kind = typer.prompt(
+                    f"Plugin kind ({', '.join(_VALID_KINDS)})",
+                    default="mixed",
+                )
+            except (typer.Abort, EOFError):
+                _console.print(
+                    "[red]error:[/red] --kind required in non-interactive mode "
+                    f"(one of: {', '.join(_VALID_KINDS)})"
+                )
+                raise typer.Exit(code=1) from None
+        else:
+            resolved_kind = typer.prompt(
+                f"Plugin kind ({', '.join(_VALID_KINDS)})",
+                default="mixed",
+            )
+
+    if resolved_kind not in _VALID_KINDS:
+        _console.print(
+            f"[red]error:[/red] invalid --kind {resolved_kind!r}; "
+            f"must be one of {', '.join(_VALID_KINDS)}"
+        )
+        raise typer.Exit(code=1)
+
+    # Resolve --path: profile-local plugin dir by default.
+    output_dir = path if path is not None else _home() / "plugins"
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        written = render_plugin_template(
+            plugin_id=name,
+            kind=resolved_kind,  # type: ignore[arg-type]
+            output_path=output_dir,
+            description=description,
+            author=author,
+            overwrite=force,
+        )
+    except FileExistsError:
+        target = output_dir / name
+        _console.print(
+            f"[red]error:[/red] Plugin '{name}' already exists at {target}. "
+            "Pass --force to overwrite."
+        )
+        raise typer.Exit(code=1) from None
+    except ValueError as e:
+        _console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from None
+    except Exception as e:  # noqa: BLE001
+        _console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from None
+
+    target = output_dir / name
+    _console.print(
+        f"[green]Scaffolded[/green] {name} ({resolved_kind}) at {target}/"
+    )
+    _console.print("")
+    _console.print("[bold]Created files:[/bold]")
+    for p in written:
+        try:
+            rel = p.relative_to(target)
+        except ValueError:
+            rel = p
+        _console.print(f"  - {rel}")
+    _console.print("")
+    _console.print("[bold]Next steps:[/bold]")
+    _console.print(f"  1. cd {target}")
+    _console.print("  2. Open plugin.py and fill in the TODO(s).")
+    _console.print("  3. Run tests:  pytest tests/")
+    _console.print("  4. opencomputer plugins    # verify it loaded")
 
 
 __all__ = ["plugin_app"]
