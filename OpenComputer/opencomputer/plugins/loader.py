@@ -262,6 +262,7 @@ class PluginAPI:
         channel_registry: dict[str, Any],
         injection_engine: Any = None,
         doctor_contributions: list[Any] | None = None,
+        session_db_path: Path | None = None,
     ) -> None:
         self.tools = tool_registry
         self.hooks = hook_engine
@@ -274,6 +275,12 @@ class PluginAPI:
         # At most one external memory provider can be active at a time
         # (Phase 10f.G). None = built-in memory only.
         self.memory_provider: Any = None
+        # Per-profile SQLite session DB path. Plugins that persist per-session
+        # state (coding-harness TodoWrite, scratchpads, etc.) get this via
+        # api.session_db_path instead of importing opencomputer.agent.config —
+        # preserves the plugin→SDK boundary for third-party plugins that don't
+        # have opencomputer in their import path.
+        self.session_db_path: Path | None = session_db_path
 
     def register_tool(self, tool: Any) -> None:
         self.tools.register(tool)

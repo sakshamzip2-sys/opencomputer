@@ -52,7 +52,7 @@ from tools.edit import EditTool  # type: ignore[import-not-found]
 from tools.multi_edit import MultiEditTool  # type: ignore[import-not-found]
 from tools.rewind import RewindTool  # type: ignore[import-not-found]
 from tools.run_tests import RunTestsTool  # type: ignore[import-not-found]
-from tools.todo_write import TodoWriteTool  # type: ignore[import-not-found]
+from tools.todo_write import TodoWriteTool, set_default_db_path  # type: ignore[import-not-found]
 
 HARNESS_ROOT = Path.home() / ".opencomputer" / "harness"
 
@@ -80,10 +80,18 @@ def _build_context(api) -> HarnessContext:
 def register(api) -> None:  # PluginAPI duck-typed
     ctx = _build_context(api)
 
+    # Thread the per-profile session DB path into the TodoWrite module so
+    # it doesn't need to import opencomputer.agent.config (SDK-boundary
+    # violation). Falls back to the caller's default when the core doesn't
+    # set session_db_path (legacy tests that hand-build a PluginAPI).
+    session_db = getattr(api, "session_db_path", None)
+    if session_db is not None:
+        set_default_db_path(session_db)
+
     # Tools — 9 total (6 original + Rewind + Diff + RunTests).
     api.register_tool(EditTool())
     api.register_tool(MultiEditTool())
-    api.register_tool(TodoWriteTool())
+    api.register_tool(TodoWriteTool(db_path=session_db) if session_db else TodoWriteTool())
     api.register_tool(StartProcessTool())
     api.register_tool(CheckOutputTool())
     api.register_tool(KillProcessTool())

@@ -11,7 +11,6 @@ import sqlite3
 from pathlib import Path
 from typing import Literal
 
-import opencomputer.agent.config as _cfg_mod
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -25,14 +24,30 @@ CREATE TABLE IF NOT EXISTS session_state (
 );
 """
 
+# Module-level default so _read_todos / _write_todos module helpers still
+# work for the existing test_todos_roundtrip_for_session helper path.
+# Set by the plugin's register() via api.session_db_path; tests set it
+# directly. TodoWriteTool instances prefer their own self._db_path.
+_default_db_path: Path | None = None
 
-def _db_path() -> Path:
-    # Dynamic lookup — tests patch _cfg_mod.default_config to redirect the DB.
-    return _cfg_mod.default_config().session.db_path
+
+def set_default_db_path(path: Path) -> None:
+    """Module-level setter used by the plugin's register() + tests."""
+    global _default_db_path
+    _default_db_path = Path(path)
 
 
-def _ensure_table() -> None:
-    conn = sqlite3.connect(_db_path())
+def _resolve_db_path() -> Path:
+    if _default_db_path is None:
+        raise RuntimeError(
+            "TodoWrite DB path not configured — the coding-harness plugin's "
+            "register() should have called set_default_db_path(api.session_db_path)"
+        )
+    return _default_db_path
+
+
+def _ensure_table(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
     try:
         conn.execute(DDL)
         conn.commit()
@@ -40,9 +55,10 @@ def _ensure_table() -> None:
         conn.close()
 
 
-def _read_todos(session_id: str) -> list[dict]:
-    _ensure_table()
-    conn = sqlite3.connect(_db_path())
+def _read_todos(session_id: str, db_path: Path | None = None) -> list[dict]:
+    path = db_path or _resolve_db_path()
+    _ensure_table(path)
+    conn = sqlite3.connect(path)
     try:
         row = conn.execute(
             "SELECT value FROM session_state WHERE session_id=? AND key='todos'",
@@ -58,11 +74,12 @@ def _read_todos(session_id: str) -> list[dict]:
         return []
 
 
-def _write_todos(session_id: str, todos: list[dict]) -> None:
+def _write_todos(session_id: str, todos: list[dict], db_path: Path | None = None) -> None:
     import time as _time
 
-    _ensure_table()
-    conn = sqlite3.connect(_db_path())
+    path = db_path or _resolve_db_path()
+    _ensure_table(path)
+    conn = sqlite3.connect(path)
     try:
         conn.execute(
             "INSERT OR REPLACE INTO session_state(session_id, key, value, updated_at) "
@@ -95,6 +112,11 @@ class TodoWriteTool(BaseTool):
     @classmethod
     def set_session_id(cls, session_id: str) -> None:
         cls._session_id = session_id
+
+    def __init__(self, db_path: Path | None = None) -> None:
+        # Optional instance-level override (primarily for tests); falls back
+        # to the module-level _default_db_path set by plugin register().
+        self._db_path: Path | None = Path(db_path) if db_path is not None else None
 
     @property
     def schema(self) -> ToolSchema:
@@ -157,7 +179,7 @@ class TodoWriteTool(BaseTool):
                 is_error=True,
             )
         sid = self._session_id or "default"
-        _write_todos(sid, todos)
+        _write_todos(sid, todos, db_path=getattr(self, "_db_path", None))
         counts = {
             "pending": sum(1 for t in todos if t.get("status") == "pending"),
             "in_progress": sum(1 for t in todos if t.get("status") == "in_progress"),
@@ -174,9 +196,13 @@ class TodoWriteTool(BaseTool):
         )
 
 
-def read_todos_for_session(session_id: str) -> list[dict]:
-    """Public helper for tests and external tools."""
-    return _read_todos(session_id)
+def read_todos_for_session(session_id: str, db_path: Path | None = None) -> list[dict]:
+    """Public helper for tests and external tools.
+
+    Tests typically pass ``db_path`` for isolation; callers in the running
+    agent rely on the module-level default set by the plugin's register().
+    """
+    return _read_todos(session_id, db_path=db_path)
 
 
 __all__ = ["TodoWriteTool", "read_todos_for_session"]

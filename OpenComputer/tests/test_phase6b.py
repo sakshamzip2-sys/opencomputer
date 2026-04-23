@@ -150,60 +150,51 @@ def test_multi_edit_all_succeed(tmp_path: Path) -> None:
 
 def test_todo_write_persists_to_sqlite(tmp_path: Path) -> None:
     """TodoWrite writes to session_state table; reads survive 'resume'."""
-    from dataclasses import replace
-
-    from opencomputer.agent.config import default_config
-
     mod = _load_module("tw", "tools/todo_write.py")
 
-    # Redirect DB to tmp for isolation. The module imports `_cfg_mod` and
-    # calls `_cfg_mod.default_config()` dynamically, so patching works.
-    cfg = default_config()
-    cfg = replace(cfg, session=replace(cfg.session, db_path=tmp_path / "test.db"))
-    with patch.object(mod._cfg_mod, "default_config", return_value=cfg):
-        tool = mod.TodoWriteTool()
-        tool.set_session_id("session-xyz")
-        todos = [
-            {"id": "1", "content": "Add logging", "status": "pending"},
-            {
-                "id": "2",
-                "content": "Write tests",
-                "status": "in_progress",
-                "activeForm": "Writing tests",
-            },
-        ]
-        r = asyncio.run(tool.execute(_call("TodoWrite", todos=todos)))
-        assert not r.is_error, r.content
+    # D3: the module no longer imports opencomputer.agent.config. Instead
+    # the plugin's register() threads api.session_db_path through
+    # set_default_db_path, or a test can pass db_path directly to the
+    # tool constructor. Use the instance override for full isolation.
+    db = tmp_path / "test.db"
+    tool = mod.TodoWriteTool(db_path=db)
+    tool.set_session_id("session-xyz")
+    todos = [
+        {"id": "1", "content": "Add logging", "status": "pending"},
+        {
+            "id": "2",
+            "content": "Write tests",
+            "status": "in_progress",
+            "activeForm": "Writing tests",
+        },
+    ]
+    r = asyncio.run(tool.execute(_call("TodoWrite", todos=todos)))
+    assert not r.is_error, r.content
 
-        # Roundtrip: simulate `--resume`
-        got = mod.read_todos_for_session("session-xyz")
-        assert len(got) == 2
-        assert got[1]["status"] == "in_progress"
+    # Roundtrip: simulate `--resume`. read_todos_for_session now takes
+    # an optional db_path so callers don't need the module-level default.
+    got = mod.read_todos_for_session("session-xyz", db_path=db)
+    assert len(got) == 2
+    assert got[1]["status"] == "in_progress"
 
 
 def test_todo_write_rejects_multiple_in_progress(tmp_path: Path) -> None:
-    from dataclasses import replace
-
-    from opencomputer.agent.config import default_config
-
     mod = _load_module("tw2", "tools/todo_write.py")
-    cfg = default_config()
-    cfg = replace(cfg, session=replace(cfg.session, db_path=tmp_path / "t.db"))
-    with patch.object(mod._cfg_mod, "default_config", return_value=cfg):
-        tool = mod.TodoWriteTool()
-        r = asyncio.run(
-            tool.execute(
-                _call(
-                    "TodoWrite",
-                    todos=[
-                        {"id": "1", "content": "A", "status": "in_progress"},
-                        {"id": "2", "content": "B", "status": "in_progress"},
-                    ],
-                )
+    db = tmp_path / "t.db"
+    tool = mod.TodoWriteTool(db_path=db)
+    r = asyncio.run(
+        tool.execute(
+            _call(
+                "TodoWrite",
+                todos=[
+                    {"id": "1", "content": "A", "status": "in_progress"},
+                    {"id": "2", "content": "B", "status": "in_progress"},
+                ],
             )
         )
-        assert r.is_error
-        assert "Only one" in r.content or "in_progress" in r.content
+    )
+    assert r.is_error
+    assert "Only one" in r.content or "in_progress" in r.content
 
 
 # ─── Background process lifecycle ───────────────────────────────
