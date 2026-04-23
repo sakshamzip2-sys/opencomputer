@@ -245,6 +245,19 @@ class AgentLoop:
             # Compaction check — uses REAL measured tokens from prior turn.
             # First iteration (no prior measurement) skips the check.
             if self._last_input_tokens > 0:
+                # D7: emit PreCompact hook BEFORE actually compacting so
+                # plugins can observe / log / modify behavior pre-summary.
+                if self.compaction.should_compact(self._last_input_tokens):
+                    from opencomputer.hooks.engine import engine as _hook_engine
+                    from plugin_sdk.hooks import HookContext, HookEvent
+
+                    _hook_engine.fire_and_forget(
+                        HookContext(
+                            event=HookEvent.PRE_COMPACT,
+                            session_id=sid,
+                            runtime=self._runtime,
+                        )
+                    )
                 result = await self.compaction.maybe_run(messages, self._last_input_tokens)
                 if result.did_compact:
                     messages = result.messages

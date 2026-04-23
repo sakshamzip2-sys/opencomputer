@@ -76,6 +76,24 @@ class PushNotificationTool(BaseTool):
                 tool_call_id=call.id, content="Error: text is required", is_error=True
             )
 
+        # D7: emit Notification hook so plugins can log / mirror the
+        # notification elsewhere. Fire-and-forget — must not break the
+        # notification flow itself.
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine
+            from plugin_sdk.core import Message
+            from plugin_sdk.hooks import HookContext, HookEvent
+
+            _hook_engine.fire_and_forget(
+                HookContext(
+                    event=HookEvent.NOTIFICATION,
+                    session_id="",  # push notifications are tool-scope, not session-scope
+                    message=Message(role="system", content=text),
+                )
+            )
+        except Exception:
+            pass
+
         # CLI mode — no gateway dispatcher available.
         if self._dispatch is None:
             print(f"[NOTIFICATION{' urgent' if urgent else ''}] {text}", flush=True)
