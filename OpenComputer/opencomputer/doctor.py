@@ -143,6 +143,93 @@ def _check_channel_tokens(cfg) -> list[Check]:
     return out
 
 
+def _check_profile_artifacts() -> list[Check]:
+    """Phase 14.F / C4 — validate per-profile C1/C2/C3 artifacts exist.
+
+    Runs for the sticky active profile only. Default profile
+    (no sticky file / sticky="default") produces skip checks — the
+    default profile doesn't have a ``home/`` subdir or wrapper by
+    design (it uses the user's real HOME and `opencomputer` binary).
+
+    Each check is WARN on miss (not fail): a user may have intentionally
+    deleted a wrapper or SOUL.md. The point is to surface drift, not
+    block startup.
+    """
+    import sys as _sys
+
+    from opencomputer.profiles import (
+        ProfileNameError,
+        get_profile_dir,
+        read_active_profile,
+        wrapper_path,
+    )
+
+    out: list[Check] = []
+
+    try:
+        active = read_active_profile()
+    except Exception as e:  # noqa: BLE001 — never let doctor crash
+        return [Check("profile artifacts", "fail", f"could not read active profile: {e}")]
+
+    if active is None:
+        # Default profile — no per-profile artifacts to validate.
+        return [
+            Check("profile home/", "skip", "default profile"),
+            Check("profile wrapper", "skip", "default profile"),
+            Check("profile SOUL.md", "skip", "default profile"),
+        ]
+
+    try:
+        pdir = get_profile_dir(active)
+    except ProfileNameError as e:
+        return [Check("profile artifacts", "fail", f"sticky profile invalid: {e}")]
+
+    # C1 — home/ subdir. Deliberately DO NOT call profile_home_dir (which
+    # mkdirs on demand); we want to report drift, not silently repair.
+    home_check_path = pdir / "home"
+    if home_check_path.is_dir():
+        out.append(Check("profile home/", "pass", str(home_check_path)))
+    else:
+        out.append(
+            Check(
+                "profile home/",
+                "warn",
+                f"expected {home_check_path} (use `opencomputer profile create` to re-seed)",
+            )
+        )
+
+    # C2 — wrapper script (unix only)
+    if _sys.platform.startswith("win") or os.name == "nt":
+        out.append(Check("profile wrapper", "skip", "wrapper scripts unsupported on Windows"))
+    else:
+        wrapper = wrapper_path(active)
+        if wrapper.exists():
+            out.append(Check("profile wrapper", "pass", str(wrapper)))
+        else:
+            out.append(
+                Check(
+                    "profile wrapper",
+                    "warn",
+                    f"expected {wrapper} (use `opencomputer profile create` to re-seed)",
+                )
+            )
+
+    # C3 — SOUL.md personality file
+    soul = pdir / "SOUL.md"
+    if soul.exists():
+        out.append(Check("profile SOUL.md", "pass", str(soul)))
+    else:
+        out.append(
+            Check(
+                "profile SOUL.md",
+                "warn",
+                f"expected {soul} (use `opencomputer profile create` to re-seed)",
+            )
+        )
+
+    return out
+
+
 def _check_profile_and_overlay() -> list[Check]:
     """Phase 14.M/14.N doctor checks.
 
@@ -325,6 +412,8 @@ def run_doctor(fix: bool = False) -> int:
     checks.append(_check_skills_dir(cfg))
     checks.extend(_check_channel_tokens(cfg))
     checks.extend(_check_profile_and_overlay())
+    # Phase 14.F / C4 — per-profile C1/C2/C3 artifact drift detection.
+    checks.extend(_check_profile_artifacts())
 
     try:
         mcp_checks = asyncio.run(_check_mcp(cfg))

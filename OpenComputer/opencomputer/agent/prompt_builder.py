@@ -55,6 +55,9 @@ class PromptContext:
     skills: list[SkillMeta] | None = None
     memory: str = ""
     user_profile: str = ""
+    #: Phase 14.F / C3 — per-profile personality from ``SOUL.md``. Empty
+    #: means "no profile identity" and the section is omitted.
+    soul: str = ""
 
 
 class PromptBuilder:
@@ -77,6 +80,7 @@ class PromptBuilder:
         skills: list[SkillMeta] | None = None,
         declarative_memory: str = "",
         user_profile: str = "",
+        soul: str = "",
         memory_char_limit: int = 4000,
         user_char_limit: int = 2000,
         template: str = "base.j2",
@@ -90,6 +94,7 @@ class PromptBuilder:
             skills=skills or [],
             memory=memory,
             user_profile=profile,
+            soul=soul,
         )
         tpl = self.env.get_template(template)
         return tpl.render(
@@ -99,6 +104,7 @@ class PromptBuilder:
             skills=ctx.skills,
             memory=ctx.memory,
             user_profile=ctx.user_profile,
+            soul=ctx.soul,
         )
 
 

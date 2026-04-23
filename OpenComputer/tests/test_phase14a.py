@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -115,6 +116,21 @@ class TestProfileFlagRouting:
     After the Phase 14-followup refactor, the function runs inside
     ``main()`` and is a normal callable — tests just invoke it directly.
     """
+
+    # Phase 14.F / C1: _apply_profile_override mutates HOME / XDG_* in
+    # os.environ directly (so child subprocesses inherit scoped paths).
+    # Every test in this class registers the pre-existing values with
+    # monkeypatch via this autouse fixture so teardown restores them —
+    # without it, a later test's ``Path.home()`` would resolve to the
+    # now-deleted ``tmp_path`` used by this class.
+    import pytest
+
+    @pytest.fixture(autouse=True)
+    def _preserve_home_env(self, monkeypatch):
+        monkeypatch.setenv("HOME", os.environ.get("HOME", ""))
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        yield
 
     def _run_override(self):
         from opencomputer.cli import _apply_profile_override
@@ -323,6 +339,14 @@ class TestProfileRoutingLazyInvariant:
 
         monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        # Phase 14.F / C1: _apply_profile_override now mutates HOME /
+        # XDG_* directly so subprocesses inherit scoped paths. Register
+        # the pre-existing value with monkeypatch so teardown restores
+        # it (otherwise the mutation leaks to the next test's
+        # Path.home() and breaks plugin discovery).
+        monkeypatch.setenv("HOME", os.environ.get("HOME", ""))
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
 
         # Force a fresh import of cli.py (which pulls in default_config,
         # agent/state, agent/memory, plugins/*, tools/*, plugin_sdk/*).
