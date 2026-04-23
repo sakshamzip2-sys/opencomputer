@@ -101,6 +101,32 @@ class MCPConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WebSearchConfig:
+    """Per-tool config for the WebSearch tool (Phase 12d.2).
+
+    Picks ONE provider per query. Multi-provider auto-fallback is
+    intentionally not built in — predictable cost, predictable rate-limit
+    blast radius. Add an explicit `--fallback` flag in a later PR if
+    the dogfood log says it's needed.
+
+    API keys live in env vars (BRAVE_API_KEY, TAVILY_API_KEY, etc.) —
+    NOT in this YAML. Writing tokens to config.yaml is the kind of
+    decision that gets a key committed to git six months from now.
+    """
+
+    #: One of "ddg" | "brave" | "tavily" | "exa" | "firecrawl".
+    #: DDG is the only keyless option and the safe default.
+    provider: str = "ddg"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolsConfig:
+    """Per-tool configuration. Add a new field per tool that needs settings."""
+
+    web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Root configuration — composed of small focused configs."""
 
@@ -109,6 +135,7 @@ class Config:
     session: SessionConfig = field(default_factory=SessionConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
     home: Path = field(default_factory=_home)
 
 
@@ -125,5 +152,7 @@ __all__ = [
     "MemoryConfig",
     "MCPConfig",
     "MCPServerConfig",
+    "ToolsConfig",
+    "WebSearchConfig",
     "default_config",
 ]

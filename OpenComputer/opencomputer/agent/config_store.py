@@ -140,6 +140,7 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
         "session": _encode(cfg.session),
         "memory": _encode(cfg.memory),
         "mcp": _encode(cfg.mcp),
+        "tools": _encode(cfg.tools),
     }
 
 
