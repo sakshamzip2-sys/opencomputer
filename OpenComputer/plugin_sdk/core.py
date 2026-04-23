@@ -114,6 +114,12 @@ class PluginManifest:
     # Docker is available). Wizard + config consumers honor this flag
     # rather than the legacy "empty provider = baseline only" fallback.
     enabled_by_default: bool = False
+    # Phase 12b5 (Sub-project E, Task E1): schema names of tools this
+    # plugin registers via ``api.register_tool``. Used by the core demand
+    # tracker (E2) to resolve tool-not-found events to candidate plugins
+    # without loading them. Default ``()`` means the plugin registers no
+    # tools (provider-only / channel-only / memory-only plugins).
+    tool_names: tuple[str, ...] = ()
 
 
 # ─── Stop reasons ──────────────────────────────────────────────────────
