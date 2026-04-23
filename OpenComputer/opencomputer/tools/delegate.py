@@ -89,6 +89,22 @@ class DelegateTool(BaseTool):
             user_message=task,
             runtime=self._current_runtime,
         )
+        # D7: emit SubagentStop hook when the delegated subagent finishes
+        # so plugins can log / summarize / react. Fire-and-forget.
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine
+            from plugin_sdk.hooks import HookContext, HookEvent
+
+            _hook_engine.fire_and_forget(
+                HookContext(
+                    event=HookEvent.SUBAGENT_STOP,
+                    session_id=result.session_id,
+                    runtime=self._current_runtime,
+                )
+            )
+        except Exception:
+            # Hook emission must never break the main delegate flow.
+            pass
         return ToolResult(
             tool_call_id=call.id,
             content=result.final_message.content,
