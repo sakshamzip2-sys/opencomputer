@@ -13,8 +13,11 @@ Design rules:
 
 from __future__ import annotations
 
+import errno
 import shutil
+import socket
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +25,16 @@ PLUGIN_DIR = Path(__file__).resolve().parent
 COMPOSE_FILE = PLUGIN_DIR / "docker-compose.yml"
 IMAGE_VERSION_FILE = PLUGIN_DIR / "IMAGE_VERSION"
 HEALTH_URL = "http://127.0.0.1:8000/health"
+
+# Host ports the Honcho stack binds on 127.0.0.1. Derived from
+# ``docker-compose.yml`` (only the API is exposed externally — postgres
+# and redis stay inside the compose network). If the compose file ever
+# grows new host-level ports, extend this tuple in lockstep.
+_PORTS: tuple[int, ...] = (8000,)
+
+# Poll cadence for ``ensure_started`` health-wait. 2s aligns with the
+# compose healthcheck intervals in ``docker-compose.yml``.
+_HEALTH_POLL_INTERVAL_S: float = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,9 +224,167 @@ def status() -> DockerStatus:
     )
 
 
+def _check_port_available(port: int) -> bool:
+    """Return True if ``127.0.0.1:<port>`` can be bound (i.e. nothing else
+    is listening on it). False if the bind fails with EADDRINUSE.
+
+    Uses a short-lived socket — caller keeps no state. A port bound by our
+    own Honcho stack will also report False; callers who care about that
+    distinction should check ``_is_stack_healthy()`` first.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", port))
+        return True
+    except OSError as e:
+        if e.errno == errno.EADDRINUSE:
+            return False
+        # Any other OSError (permission, invalid fd, …) is also a reason
+        # to treat the port as unusable — be conservative.
+        return False
+
+
+def _is_stack_healthy() -> bool:
+    """Return True iff *our* compose stack is already up and healthy.
+
+    Tolerant: if docker/compose are missing, or ``docker compose ps``
+    returns no services, or the stack exists but isn't healthy yet, we
+    return False. Only explicit ``Health: healthy`` on at least one
+    service counts as healthy.
+    """
+    docker, compose_v2 = detect_docker()
+    if not docker or not compose_v2:
+        return False
+    try:
+        r = _compose("ps", "--format", "json", env=_compose_env())
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if r.returncode != 0 or not r.stdout.strip():
+        return False
+    import json
+
+    rows: list[dict] = []
+    try:
+        parsed = json.loads(r.stdout)
+        rows = parsed if isinstance(parsed, list) else [parsed]
+    except json.JSONDecodeError:
+        # Some compose versions emit one JSON object per line
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    if not rows:
+        return False
+    # A row reports healthy when ``Health`` is the literal string
+    # ``healthy`` (compose emits that key for services with a healthcheck).
+    # Fall back to the legacy ``State`` check if ``Health`` is absent —
+    # that's a degraded signal but better than none.
+    for row in rows:
+        health = (row.get("Health") or "").lower()
+        if health == "healthy":
+            return True
+    return False
+
+
+def ensure_started(timeout_s: int = 60) -> tuple[bool, str]:
+    """Bring the Honcho stack up safely and idempotently.
+
+    Returns ``(ok, message)``. On success: pulled (if needed), started,
+    and polled-healthy. On any failure along the way: a human-readable
+    explanation suitable for the wizard / ``memory doctor`` to display.
+
+    Steps:
+      1. Detect Docker + compose v2.
+      2. If the stack is already healthy, short-circuit with
+         ``(True, "already running and healthy")``.
+      3. Check each host-level port in ``_PORTS`` is free (port collision
+         with some *other* process aborts before any docker work).
+      4. ``docker compose pull --quiet`` — missing image is a common
+         first-run failure mode, better to surface it here than mid-``up``.
+      5. ``docker compose up -d``.
+      6. Poll ``_is_stack_healthy()`` every ~2s until healthy or
+         ``timeout_s`` elapses.
+    """
+    # Step 1: pre-flight docker detection.
+    docker, compose_v2 = detect_docker()
+    if not docker:
+        return (
+            False,
+            "Docker is not installed. "
+            "Install from https://docs.docker.com/get-docker/",
+        )
+    if not compose_v2:
+        return (
+            False,
+            "Docker found but 'docker compose' v2 plugin missing. "
+            "Install docker-compose-plugin or upgrade Docker Desktop.",
+        )
+
+    # Step 2: idempotency — if already healthy, don't touch anything.
+    if _is_stack_healthy():
+        return (True, "Honcho stack already running and healthy.")
+
+    # Step 3: port collision. A port bound by some *other* process (not
+    # our stack, which we'd have detected above) means ``up`` will fail
+    # in a hard-to-debug way — catch it now with a clear error.
+    for port in _PORTS:
+        if not _check_port_available(port):
+            return (
+                False,
+                f"Port {port} already in use by another process — stop "
+                f"that process or adjust the compose file port mapping.",
+            )
+
+    # Step 4: pull image(s). Quiet so the terminal doesn't fill with
+    # layer-download progress; stderr is what we surface on failure.
+    env = _compose_env()
+    try:
+        r = _compose("pull", "--quiet", env=env)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return (False, f"docker compose pull failed: {e}")
+    if r.returncode != 0:
+        stderr = r.stderr if isinstance(r.stderr, str) else (r.stderr or b"").decode(
+            "utf-8", errors="replace"
+        )
+        snippet = stderr[:200] if stderr else (r.stdout or "")[:200]
+        return (False, f"docker compose pull failed: {snippet}")
+
+    # Step 5: up -d.
+    try:
+        r = _compose("up", "-d", env=env)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return (False, f"docker compose up failed: {e}")
+    if r.returncode != 0:
+        stderr = r.stderr if isinstance(r.stderr, str) else (r.stderr or b"").decode(
+            "utf-8", errors="replace"
+        )
+        snippet = stderr[:200] if stderr else (r.stdout or "")[:200]
+        return (False, f"docker compose up failed: {snippet}")
+
+    # Step 6: health poll. Deadline-based so the sleep granularity
+    # doesn't accidentally shift the effective timeout.
+    deadline = time.monotonic() + float(timeout_s)
+    while time.monotonic() < deadline:
+        if _is_stack_healthy():
+            return (True, "Honcho stack started and healthy.")
+        time.sleep(_HEALTH_POLL_INTERVAL_S)
+
+    return (
+        False,
+        f"Honcho stack did not become healthy within {timeout_s}s. "
+        f"Check 'docker compose logs'.",
+    )
+
+
 __all__ = [
     "DockerStatus",
     "detect_docker",
+    "ensure_started",
     "honcho_up",
     "honcho_down",
     "honcho_reset",
