@@ -1,26 +1,17 @@
-"""Phase 12b1 / Sub-project A Task A1 — cron-mode guard on MemoryBridge.
+"""Phase 12b1 / Sub-project A — cron-mode guard + three-mode Honcho provider.
 
-Background:
-  Honcho is becoming the default memory provider. Some workflows (cron
-  batches, periodic flushes) should NOT spin up the external provider —
-  they're quick background work where the baseline SQLite+FTS5 is
-  sufficient and a Docker stack would be overhead.
-
-  Hermes uses this same pattern at
-  ``sources/hermes-agent/plugins/memory/honcho/__init__.py:279-286``
-  where ``agent_context in {"cron","flush"}`` skips the provider.
-
-This task adds:
-  * ``RuntimeContext.agent_context`` — a str field defaulting to ``"chat"``
-    accepting ``"chat" | "cron" | "flush" | "review"`` (not enforced at
-    construction time, lint-checked).
-  * An optional ``runtime`` kwarg on ``MemoryBridge.prefetch`` that
-    short-circuits to ``None`` when ``agent_context`` is ``"cron"`` or
-    ``"flush"``.
+Tasks covered:
+  * A1 — cron/flush guard on ``MemoryBridge`` + ``RuntimeContext.agent_context``.
+  * A2 — three-mode ``HonchoSelfHostedProvider`` (``context`` / ``tools`` /
+    ``hybrid``). Mirrors Hermes' recall_mode at
+    ``sources/hermes-agent/plugins/memory/honcho/__init__.py:155-200``.
 """
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -28,6 +19,40 @@ import pytest
 
 from opencomputer.agent.memory_bridge import MemoryBridge
 from plugin_sdk.runtime_context import RuntimeContext
+
+# ─── Honcho provider loader (same pattern as test_phase10f_honcho.py) ───
+
+_HONCHO_EXT_DIR = (
+    Path(__file__).resolve().parent.parent / "extensions" / "memory-honcho"
+)
+
+
+def _load_honcho_provider_module():
+    """Load ``extensions/memory-honcho/provider.py`` under a synthetic package.
+
+    The extension dir has a hyphen so it's not an importable package — use
+    ``importlib.util`` the same way the real plugin loader does. Caches on
+    ``sys.modules`` under a unique package name so repeated calls reuse the
+    same module.
+    """
+    import sys
+
+    pkg_name = "_honcho_a2_test_pkg"
+    if f"{pkg_name}.provider" in sys.modules:
+        return sys.modules[f"{pkg_name}.provider"]
+    pkg_spec = importlib.machinery.ModuleSpec(
+        pkg_name, loader=None, origin=str(_HONCHO_EXT_DIR), is_package=True
+    )
+    pkg_spec.submodule_search_locations = [str(_HONCHO_EXT_DIR)]
+    pkg = importlib.util.module_from_spec(pkg_spec)
+    sys.modules[pkg_name] = pkg
+    prov_spec = importlib.util.spec_from_file_location(
+        f"{pkg_name}.provider", _HONCHO_EXT_DIR / "provider.py"
+    )
+    prov_mod = importlib.util.module_from_spec(prov_spec)
+    sys.modules[f"{pkg_name}.provider"] = prov_mod
+    prov_spec.loader.exec_module(prov_mod)
+    return prov_mod
 
 
 class _ExplodingProvider:
@@ -171,3 +196,35 @@ async def test_memory_bridge_sync_turn_calls_provider_in_chat_context() -> None:
         "u", "a", turn_index=3, runtime=RuntimeContext(agent_context="chat")
     )
     provider.sync_mock.assert_awaited_once_with("u", "a", 3)
+
+
+# ─── Phase 12b1 Task A2 — three-mode HonchoSelfHostedProvider ───────────
+
+
+def test_honcho_provider_defaults_to_context_mode() -> None:
+    """No ``mode`` kwarg → provider defaults to ``"context"`` (back-compat
+    for existing loaders / configs that don't know about the flag)."""
+    prov_mod = _load_honcho_provider_module()
+    prov = prov_mod.HonchoSelfHostedProvider()
+    assert prov.mode == "context"
+
+
+def test_honcho_provider_accepts_all_three_valid_modes() -> None:
+    """Each of the three documented modes round-trips onto ``self.mode``."""
+    prov_mod = _load_honcho_provider_module()
+    for mode in ("context", "tools", "hybrid"):
+        prov = prov_mod.HonchoSelfHostedProvider(mode=mode)
+        assert prov.mode == mode, f"mode={mode!r} did not round-trip"
+
+
+def test_honcho_provider_rejects_unknown_mode() -> None:
+    """Unknown mode string → ``ValueError`` at construction time, with a
+    message that names the field and lists the valid set."""
+    prov_mod = _load_honcho_provider_module()
+    with pytest.raises(ValueError) as excinfo:
+        prov_mod.HonchoSelfHostedProvider(mode="bogus")
+    msg = str(excinfo.value)
+    assert "mode" in msg
+    # All three valid values must appear in the error so the user can fix it.
+    for valid in ("context", "tools", "hybrid"):
+        assert valid in msg, f"error message should list {valid!r}: {msg!r}"

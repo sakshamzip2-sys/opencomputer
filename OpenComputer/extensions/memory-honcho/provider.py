@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -27,6 +27,11 @@ logger = logging.getLogger("memory-honcho")
 _DEFAULT_BASE_URL = "http://localhost:8000"
 _DEFAULT_HEALTH_TIMEOUT_S = 2.0
 _DEFAULT_REQUEST_TIMEOUT_S = 10.0
+
+#: Valid values for ``HonchoSelfHostedProvider(mode=...)``. The Literal on
+#: the kwarg catches typos at type-check time; this frozenset is the
+#: runtime safety net for dynamic instantiation from config files / env.
+_VALID_MODES: frozenset[str] = frozenset({"context", "tools", "hybrid"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,14 +56,36 @@ class _HonchoState:
 
 
 class HonchoSelfHostedProvider(MemoryProvider):
-    """Deep user-understanding overlay backed by a local Honcho instance."""
+    """Deep user-understanding overlay backed by a local Honcho instance.
+
+    The ``mode`` kwarg selects how Honcho is surfaced to the agent loop:
+
+    * ``"context"`` — inject Honcho's context-cache text into the system
+      prompt each turn (cheaper per-turn; default).
+    * ``"tools"`` — expose Honcho as agent-facing tools (profile / search /
+      context / reasoning / conclude) and let the model decide when to query.
+    * ``"hybrid"`` — both: inject context AND expose tools.
+
+    Mirrors Hermes' ``recall_mode`` at
+    ``sources/hermes-agent/plugins/memory/honcho/__init__.py:155-200``.
+
+    A2 stores the field only — ``prefetch`` / ``sync_turn`` / ``tool_schemas``
+    behavior is unchanged. A5 (wizard) and A7 (AgentLoop wiring) will
+    consume ``self.mode`` in follow-up tasks.
+    """
 
     def __init__(
         self,
         config: HonchoConfig | None = None,
         *,
         http_client: httpx.AsyncClient | None = None,
+        mode: Literal["context", "tools", "hybrid"] = "context",
     ) -> None:
+        if mode not in _VALID_MODES:
+            raise ValueError(
+                f"mode must be one of {sorted(_VALID_MODES)}, got {mode!r}"
+            )
+        self.mode: str = mode
         self._config = config or HonchoConfig()
         self._state = _HonchoState()
         if self._config.api_key:
