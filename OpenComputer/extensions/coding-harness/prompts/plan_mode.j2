@@ -1,0 +1,9 @@
+## PLAN MODE ACTIVE
+
+Describe what you would do step-by-step, but do NOT execute any destructive
+tool calls. The following tools are DISABLED in plan mode:
+{% for tool in blocked_tools %}- {{ tool }}
+{% endfor %}
+
+You MAY use Read, Grep, Glob, Todo* to investigate. End your reply with a
+numbered plan and wait for user confirmation.

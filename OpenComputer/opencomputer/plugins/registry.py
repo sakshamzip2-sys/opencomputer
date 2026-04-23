@@ -52,6 +52,11 @@ class PluginRegistry:
     doctor_contributions: list[HealthContribution] = field(default_factory=list)
 
     def api(self) -> PluginAPI:
+        # Surface the per-profile SQLite session DB path so plugins can
+        # persist session-scoped state without importing opencomputer.*.
+        from opencomputer.agent.config import default_config
+
+        cfg = default_config()
         return PluginAPI(
             tool_registry=tool_registry,
             hook_engine=hook_engine,
@@ -59,6 +64,7 @@ class PluginRegistry:
             channel_registry=self.channels,
             injection_engine=injection_engine,
             doctor_contributions=self.doctor_contributions,
+            session_db_path=cfg.session.db_path,
         )
 
     def load_all(
