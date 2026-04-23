@@ -83,6 +83,28 @@ Enum of reasons a turn ended: `END_TURN`, `TOOL_USE`, `MAX_TOKENS`,
 `INTERRUPTED`, `BUDGET_EXHAUSTED`, `ERROR`. Providers set it on
 `ProviderResponse.stop_reason`.
 
+### `SingleInstanceError`
+
+`RuntimeError` subclass raised by the plugin loader when a
+`single_instance` plugin can't acquire its exclusive PID lock at
+`~/.opencomputer/.locks/<plugin-id>.lock`. If your plugin owns an
+exclusive resource (bot token, UDP port), set `single_instance: true`
+in `plugin.json`; core handles the lock automatically and will raise
+this when a second profile tries to load the same plugin.
+
+```python
+from plugin_sdk import SingleInstanceError
+
+try:
+    ...
+except SingleInstanceError as e:
+    # Another profile already owns the resource — fall back gracefully.
+    ...
+```
+
+`PluginRegistry.load_all` catches this internally and downgrades it to
+a WARNING so one contended plugin doesn't block the rest.
+
 ---
 
 ## Tool contract

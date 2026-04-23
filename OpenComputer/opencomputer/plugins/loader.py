@@ -12,14 +12,19 @@ a `register(api)` function where `api` exposes the plugin-facing registries.
 
 from __future__ import annotations
 
+import atexit
 import importlib
 import importlib.util
 import logging
+import os
 import sys
+import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from opencomputer.plugins.discovery import PluginCandidate
+from plugin_sdk.core import SingleInstanceError
 
 logger = logging.getLogger("opencomputer.plugins.loader")
 
@@ -33,6 +38,195 @@ _PLUGIN_LOCAL_NAMES = ("provider", "adapter", "plugin", "handlers", "hooks")
 def _clear_plugin_local_cache() -> None:
     for name in _PLUGIN_LOCAL_NAMES:
         sys.modules.pop(name, None)
+
+
+# ─── single_instance lock (Phase 12b.2, Task B6) ──────────────────────
+
+# Locks we acquired in THIS process. atexit iterates this and deletes
+# only what we own — never a lock held by some other process. Guarded by
+# _OWNED_LOCKS_LOCK so concurrent load_plugin calls don't race on the set.
+_OWNED_LOCKS: set[Path] = set()
+_OWNED_LOCKS_LOCK = threading.Lock()
+
+# Bounded retry: if `os.rename` keeps failing during steal, give up after
+# this many attempts rather than looping forever. Three is enough to
+# survive a legitimate race; more than that means something is badly
+# wrong and we should raise.
+_STEAL_MAX_ATTEMPTS = 3
+
+
+def _locks_dir() -> Path:
+    """Return ``~/.opencomputer/.locks/`` (creating parent on demand).
+
+    Uses the same ``_home()`` source as the rest of the config layer so
+    OPENCOMPUTER_HOME overrides (tests, profile isolation) just work.
+    """
+    from opencomputer.agent.config import _home
+
+    return _home() / ".locks"
+
+
+def _pid_is_running(pid: int) -> bool:
+    """Return True if the given PID is currently alive.
+
+    Uses ``os.kill(pid, 0)`` — sends no actual signal but raises:
+      - ``ProcessLookupError`` if the process does not exist (→ False).
+      - ``PermissionError`` if the process exists but isn't ours; treat
+        this as ALIVE (safer default — we can't prove it's dead, so we
+        refuse to steal).
+      - ``OSError`` on other failures — treat as alive for safety.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Running but we can't signal it — don't steal.
+        return True
+    except OSError:
+        # Unknown kernel state — be conservative.
+        return True
+    return True
+
+
+def _read_lock_pid(lock_path: Path) -> int | None:
+    """Read the PID from an existing lock file. Returns None on any error."""
+    try:
+        raw = lock_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def _try_atomic_create(lock_path: Path) -> bool:
+    """Attempt atomic creation with O_EXCL; write our PID.
+
+    Returns True iff we won the race and own the lock. Returns False if
+    the file already existed (caller must decide: steal or surrender).
+    Any other OSError propagates.
+    """
+    try:
+        fd = os.open(
+            str(lock_path),
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+    except FileExistsError:
+        return False
+    try:
+        os.write(fd, f"{os.getpid()}\n".encode())
+    finally:
+        os.close(fd)
+    with _OWNED_LOCKS_LOCK:
+        _OWNED_LOCKS.add(lock_path)
+    return True
+
+
+def _try_steal_stale(lock_path: Path, holder_pid: int) -> bool:
+    """Atomically steal a stale lock.
+
+    Rename the lock file to ``<lock_path>.stale``. Rename is atomic on
+    POSIX, so exactly ONE concurrent stealer wins the rename; the losers
+    get ``OSError`` and must restart the acquire loop. The winner then
+    deletes the .stale file and returns True so the caller can retry
+    ``O_EXCL`` creation.
+
+    Returns False if the rename failed (another process beat us or the
+    file no longer exists).
+    """
+    stale_path = lock_path.with_suffix(".lock.stale")
+    try:
+        os.rename(str(lock_path), str(stale_path))
+    except OSError:
+        # Someone else moved/deleted it, or rename failed — retry the
+        # acquire loop from scratch.
+        logger.debug(
+            "steal rename failed for %s (holder pid=%s) — retrying",
+            lock_path,
+            holder_pid,
+        )
+        return False
+    # We own the stale file now; clean it up.
+    try:
+        stale_path.unlink()
+    except OSError:
+        # Best-effort; .stale shrapnel won't block anyone.
+        pass
+    return True
+
+
+def _acquire_single_instance_lock(plugin_id: str) -> Path:
+    """Acquire the ``~/.opencomputer/.locks/<plugin-id>.lock`` lock.
+
+    Returns the lock path on success. Raises SingleInstanceError if the
+    lock is held by a running process OR if stale-steal hits the
+    bounded-retry ceiling.
+    """
+    locks_dir = _locks_dir()
+    locks_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = locks_dir / f"{plugin_id}.lock"
+
+    for attempt in range(_STEAL_MAX_ATTEMPTS):
+        # Step 1: try atomic create.
+        if _try_atomic_create(lock_path):
+            return lock_path
+
+        # Step 2: something exists. Read its PID.
+        holder = _read_lock_pid(lock_path)
+        if holder is None:
+            # Unreadable / malformed lock: treat as stale and attempt steal.
+            if _try_steal_stale(lock_path, -1):
+                continue
+            # Steal failed this attempt — loop.
+            continue
+
+        # Step 3: if the holder is running, we lose. Raise.
+        if _pid_is_running(holder):
+            raise SingleInstanceError(
+                f"Plugin {plugin_id!r} already held by PID {holder}"
+            )
+
+        # Step 4: holder is dead → steal atomically.
+        if _try_steal_stale(lock_path, holder):
+            # Rename succeeded, file is gone, retry create on next iter.
+            continue
+        # Steal failed (another process got there first) — loop.
+
+    raise SingleInstanceError(
+        f"Plugin {plugin_id!r} — failed to acquire lock after "
+        f"{_STEAL_MAX_ATTEMPTS} steal attempts"
+    )
+
+
+def _release_owned_lock(lock_path: Path) -> None:
+    """Delete a lock file IFF we own it. Called by atexit + tests."""
+    with _OWNED_LOCKS_LOCK:
+        if lock_path not in _OWNED_LOCKS:
+            return
+        _OWNED_LOCKS.discard(lock_path)
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:  # pragma: no cover — best-effort cleanup
+        logger.debug("failed to unlink owned lock %s: %s", lock_path, e)
+
+
+def _atexit_release_all() -> None:
+    """Clean up every lock we acquired in this process."""
+    with _OWNED_LOCKS_LOCK:
+        owned = list(_OWNED_LOCKS)
+    for p in owned:
+        _release_owned_lock(p)
+
+
+# Register once per process.
+atexit.register(_atexit_release_all)
 
 
 @dataclass(slots=True)
@@ -128,12 +322,23 @@ def load_plugin(candidate: PluginCandidate, api: PluginAPI) -> LoadedPlugin | No
 
     Also adds the plugin root to sys.path so the entry module's own sibling
     imports (e.g. `from adapter import X`) resolve correctly.
+
+    If ``candidate.manifest.single_instance`` is True, acquires an atomic
+    PID lock at ``~/.opencomputer/.locks/<plugin-id>.lock`` BEFORE running
+    any plugin code. Raises :class:`SingleInstanceError` if the lock is
+    held by another running process.
     """
     manifest = candidate.manifest
     entry = manifest.entry.strip()
     if not entry:
         logger.warning("plugin '%s' has no 'entry' field in manifest", manifest.id)
         return None
+
+    # Single-instance enforcement (Task B6). Acquire BEFORE import so we
+    # don't run plugin code twice in parallel profiles.
+    if manifest.single_instance:
+        _acquire_single_instance_lock(manifest.id)
+        # Lock release is handled by the module-level atexit hook.
 
     plugin_root = candidate.root_dir.resolve()
     plugin_root_str = str(plugin_root)
@@ -189,4 +394,9 @@ def load_plugin(candidate: PluginCandidate, api: PluginAPI) -> LoadedPlugin | No
     return LoadedPlugin(candidate=candidate, module=module)
 
 
-__all__ = ["PluginAPI", "LoadedPlugin", "load_plugin"]
+__all__ = [
+    "PluginAPI",
+    "LoadedPlugin",
+    "load_plugin",
+    "SingleInstanceError",
+]

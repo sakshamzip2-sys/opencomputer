@@ -17,6 +17,7 @@ from opencomputer.hooks.engine import engine as hook_engine
 from opencomputer.plugins.discovery import PluginCandidate, discover
 from opencomputer.plugins.loader import LoadedPlugin, PluginAPI, load_plugin
 from opencomputer.tools.registry import registry as tool_registry
+from plugin_sdk.core import SingleInstanceError
 from plugin_sdk.doctor import HealthContribution
 from plugin_sdk.provider_contract import BaseProvider
 
@@ -103,7 +104,18 @@ class PluginRegistry:
                         cand.manifest.id,
                     )
                     continue
-            loaded = load_plugin(cand, api)
+            try:
+                loaded = load_plugin(cand, api)
+            except SingleInstanceError as e:
+                # Task B6: one plugin losing the single-instance race
+                # must NOT prevent the rest of the registry from coming
+                # up. Log a WARNING so ops can see it; continue.
+                logger.warning(
+                    "skipping plugin '%s': single-instance lock unavailable (%s)",
+                    cand.manifest.id,
+                    e,
+                )
+                continue
             if loaded:
                 self.loaded.append(loaded)
         return self.loaded

@@ -235,13 +235,13 @@ Plugins can declare compatibility in their manifest:
 
 - `profiles: ["*"]` (or omitted) means "any profile" — default.
 - `profiles: ["coder"]` skips the plugin in any profile not named "coder".
-- `single_instance: true` (for plugins owning a bot token, etc.) is honoured by a future lock (14.F).
+- `single_instance: true` (for plugins owning a bot token, etc.) is enforced at load time via an atomic PID lock at `~/.opencomputer/.locks/<plugin-id>.lock`. A second profile attempting to load the same plugin raises `SingleInstanceError`; stale locks from crashed processes are detected via `os.kill(pid, 0)` and atomically stolen.
 
 ### Known limitations
 
 These are current edge cases. Each has a planned fix; the workaround below is the officially-supported approach until that fix ships.
 
-- **Single-instance channels across profiles.** Bundled channel plugins (Telegram, Discord) hold a single bot token each. Running the same channel concurrently in two profiles will cause duplicate message delivery or message loss — the Bot APIs don't support multiple pollers on one token. **Workaround:** pick ONE profile as the "telegram home" and run `opencomputer gateway` only from it; in the other profile's `profile.yaml`, exclude the channel plugin via `plugins.enabled: [...]` (omit `telegram`). Planned fix: 14.F single-instance lock.
+- **Single-instance channels across profiles.** Bundled channel plugins (Telegram, Discord) hold a single bot token each; the Bot APIs don't support multiple pollers on one token. Set `single_instance: true` in the plugin manifest (Telegram/Discord already do) and core enforces the constraint with an atomic PID lock — the second profile that tries to load the same plugin fails fast with `SingleInstanceError`, and `PluginRegistry.load_all` logs a WARNING and continues loading the rest of the registry. Crashed-process locks are detected and stolen atomically on the next load attempt.
 
 - **Cloud-synced `~/.opencomputer/`.** SQLite's WAL mode does not compose with file-sync tools (Dropbox, iCloud Drive, Syncthing, OneDrive). If your home directory syncs, **add `~/.opencomputer/` (or at minimum `~/.opencomputer/sessions.db*`) to your sync tool's ignore list** or you will silently corrupt your session history. MEMORY.md and USER.md are safe to sync; `sessions.db*` are not. Planned fix: 14.I automatic sync-ignore marker seeding.
 

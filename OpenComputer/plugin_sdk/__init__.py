@@ -17,6 +17,7 @@ from plugin_sdk.core import (
     PluginManifest,
     Role,
     SendResult,
+    SingleInstanceError,
     StopReason,
     ToolCall,
     ToolResult,
@@ -59,6 +60,7 @@ __all__ = [
     "SendResult",
     "PluginManifest",
     "StopReason",
+    "SingleInstanceError",
     # contracts
     "BaseTool",
     "ToolSchema",

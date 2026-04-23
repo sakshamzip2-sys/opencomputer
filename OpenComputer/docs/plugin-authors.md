@@ -43,7 +43,7 @@ Every plugin starts with a manifest. Fields come from
 | `kind` | enum | One of `channel`, `provider`, `tool`, `skill`, `mixed`. Determines which registry methods `register()` calls. |
 | `entry` | string | Path to the entry module (without `.py`), relative to the plugin root. The loader imports this module and calls its `register(api)`. |
 | `profiles` | `["*"]` or list of names | Phase 14.C profile scoping. `null`/`["*"]` = any profile. A list like `["coding", "research"]` restricts the plugin to those profiles only. Set when a plugin should only be visible to certain workspace profiles. |
-| `single_instance` | bool | True if the plugin owns an exclusive resource (e.g. a bot token) and can only belong to ONE profile at a time. Currently best-effort — see "Common gotchas". |
+| `single_instance` | bool | True if the plugin owns an exclusive resource (e.g. a bot token) and can only belong to ONE profile at a time. Enforced by an atomic PID lock at `~/.opencomputer/.locks/<plugin-id>.lock`; a second profile trying to load the plugin raises `SingleInstanceError`. Stale locks from crashed processes are stolen atomically on the next load. |
 | `enabled_by_default` | bool | True if the plugin should be auto-enabled on a fresh install. Today only `memory-honcho` uses this. Leave `false` unless you're shipping a core overlay. |
 
 Note: the CLI `--kind` flag uses the UX-friendly `toolkit`, but the
