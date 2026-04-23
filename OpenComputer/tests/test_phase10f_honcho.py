@@ -659,9 +659,7 @@ class TestWizardHonchoStep:
         )
         import opencomputer.cli_memory as cli_memory
 
-        monkeypatch.setattr(
-            cli_memory, "_load_honcho_bootstrap", lambda: stub_bootstrap
-        )
+        monkeypatch.setattr(cli_memory, "_load_honcho_bootstrap", lambda: stub_bootstrap)
 
         # Should not raise (it prints a hint and returns)
         wizard._optional_honcho()
@@ -690,9 +688,7 @@ class TestWizardHonchoStep:
         )
         import opencomputer.cli_memory as cli_memory
 
-        monkeypatch.setattr(
-            cli_memory, "_load_honcho_bootstrap", lambda: stub_bootstrap
-        )
+        monkeypatch.setattr(cli_memory, "_load_honcho_bootstrap", lambda: stub_bootstrap)
 
         wizard._optional_honcho()
         assert len(up_called) == 1
@@ -702,9 +698,9 @@ class TestCLAUDEmdUpdated:
     """CLAUDE.md should no longer list 'Honcho memory' as Won't Do."""
 
     def test_honcho_moved_out_of_wont_do(self):
-        from pathlib import Path as _P
+        from pathlib import Path
 
-        claude_md = _P(__file__).resolve().parent.parent / "CLAUDE.md"
+        claude_md = Path(__file__).resolve().parent.parent / "CLAUDE.md"
         content = claude_md.read_text(encoding="utf-8")
         # The Won't Do bullet list should not mention Honcho any more
         # (it was removed from that line in 10f.N).
@@ -745,9 +741,7 @@ def _load_plugin_entry_module():
     prov_mod = importlib.util.module_from_spec(prov_spec)
     sys.modules[f"{pkg_name}.provider"] = prov_mod
     prov_spec.loader.exec_module(prov_mod)
-    plug_spec = importlib.util.spec_from_file_location(
-        f"{pkg_name}.plugin", _EXT_DIR / "plugin.py"
-    )
+    plug_spec = importlib.util.spec_from_file_location(f"{pkg_name}.plugin", _EXT_DIR / "plugin.py")
     plug_mod = importlib.util.module_from_spec(plug_spec)
     sys.modules[f"{pkg_name}.plugin"] = plug_mod
     plug_spec.loader.exec_module(plug_mod)

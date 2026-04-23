@@ -13,6 +13,8 @@ explicit opt-in) to load.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 
 class TestManifestAllowsProfileHelper:
     """Unit tests for the pure-function helper."""

@@ -2,15 +2,61 @@
 
 from __future__ import annotations
 
-# ─── Pre-import profile routing (Phase 14.A) ──────────────────────────
-# Intercept -p / --profile from sys.argv BEFORE any opencomputer.* import,
-# because downstream modules read OPENCOMPUTER_HOME at import time via _home().
-# Flag > sticky active_profile file > default (root).
+import asyncio
 import os
 import sys
+import uuid
+
+import typer
+from rich.console import Console
+from rich.markdown import Markdown
+
+from opencomputer import __version__
+from opencomputer.agent.config import default_config
+from opencomputer.agent.config_store import (
+    config_file_path,
+    get_value,
+    load_config,
+    save_config,
+    set_value,
+)
+from opencomputer.agent.loop import AgentLoop
+from opencomputer.plugins.registry import registry as plugin_registry
+from opencomputer.tools.ask_user_question import AskUserQuestionTool
+from opencomputer.tools.bash import BashTool
+from opencomputer.tools.delegate import DelegateTool
+from opencomputer.tools.glob import GlobTool
+from opencomputer.tools.grep import GrepTool
+from opencomputer.tools.notebook_edit import NotebookEditTool
+from opencomputer.tools.push_notification import PushNotificationTool
+from opencomputer.tools.read import ReadTool
+from opencomputer.tools.registry import registry
+from opencomputer.tools.skill import SkillTool
+from opencomputer.tools.skill_manage import SkillManageTool
+from opencomputer.tools.web_fetch import WebFetchTool
+from opencomputer.tools.web_search import WebSearchTool
+from opencomputer.tools.write import WriteTool
+from plugin_sdk.runtime_context import RuntimeContext
 
 
 def _apply_profile_override() -> None:
+    """Intercept ``-p`` / ``--profile`` from sys.argv and set OPENCOMPUTER_HOME.
+
+    Called from :func:`main` before ``app()`` runs. Stripping must happen
+    before Typer parses argv (otherwise Typer flags ``-p`` as an unknown
+    option on subcommands). Setting ``OPENCOMPUTER_HOME`` must happen
+    before any code calls :func:`opencomputer.agent.config._home` — today
+    that's always deferred until a Typer command body runs (module-level
+    callers use ``default_factory=lambda: _home() / ...``), so calling
+    from ``main()`` is sufficient. Flag beats sticky ``active_profile``
+    file beats default root.
+
+    Safe to call multiple times: each call re-derives argv from the
+    current ``sys.argv`` and overwrites it in place. Exception handling
+    is intentionally narrow — this function MUST NOT crash the CLI; a
+    bad profile name falls back to default and the user gets a normal
+    error downstream.
+    """
     argv = sys.argv
     profile_name: str | None = None
     # Strip -p/--profile flag from argv so Typer doesn't see it as unknown option
@@ -40,18 +86,15 @@ def _apply_profile_override() -> None:
     # fallback path is explicit rather than a silent falsy pass-through.
     profile_name = profile_name or None
 
-    if profile_name is None:
-        # No flag. Only consult the sticky file if OPENCOMPUTER_HOME is not
-        # already set — this keeps the function idempotent across multiple
-        # calls (e.g. module reload + explicit call in tests) and means
-        # a parent-process env var wins when no flag was given.
-        if "OPENCOMPUTER_HOME" not in os.environ:
-            try:
-                from opencomputer.profiles import read_active_profile
+    # No flag + OPENCOMPUTER_HOME unset = consult the sticky active-profile
+    # file. Parent-process env var wins when no flag was given.
+    if profile_name is None and "OPENCOMPUTER_HOME" not in os.environ:
+        try:
+            from opencomputer.profiles import read_active_profile
 
-                profile_name = read_active_profile()
-            except Exception:
-                profile_name = None
+            profile_name = read_active_profile()
+        except Exception:
+            profile_name = None
 
     # Explicit flag always wins — even if OPENCOMPUTER_HOME was pre-set in
     # the parent process. Without this, `opencomputer -p coder` would be
@@ -66,43 +109,6 @@ def _apply_profile_override() -> None:
             # back to default. _apply_profile_override MUST NOT crash the CLI.
             pass
 
-
-# Apply profile override BEFORE any opencomputer.* module import
-_apply_profile_override()
-
-# ─── Regular imports follow ────────────────────────────────────────────
-
-import asyncio
-import uuid
-
-import typer
-from rich.console import Console
-from rich.markdown import Markdown
-
-from opencomputer import __version__
-from opencomputer.agent.config import default_config
-from opencomputer.agent.config_store import (
-    config_file_path,
-    get_value,
-    load_config,
-    save_config,
-    set_value,
-)
-from opencomputer.agent.loop import AgentLoop
-from opencomputer.plugins.registry import registry as plugin_registry
-from opencomputer.tools.ask_user_question import AskUserQuestionTool
-from opencomputer.tools.bash import BashTool
-from opencomputer.tools.delegate import DelegateTool
-from opencomputer.tools.glob import GlobTool
-from opencomputer.tools.grep import GrepTool
-from opencomputer.tools.notebook_edit import NotebookEditTool
-from opencomputer.tools.push_notification import PushNotificationTool
-from opencomputer.tools.read import ReadTool
-from opencomputer.tools.registry import registry
-from opencomputer.tools.skill import SkillTool
-from opencomputer.tools.skill_manage import SkillManageTool
-from opencomputer.tools.write import WriteTool
-from plugin_sdk.runtime_context import RuntimeContext
 
 app = typer.Typer(
     name="opencomputer",
@@ -123,6 +129,9 @@ def _register_builtin_tools() -> None:
     registry.register(GlobTool())
     registry.register(SkillManageTool())
     registry.register(DelegateTool())
+    # Phase 10e — web tools
+    registry.register(WebFetchTool())
+    registry.register(WebSearchTool())
     # Phase 11b — Claude Code parity (core slice)
     registry.register(NotebookEditTool())
     registry.register(SkillTool())
@@ -745,6 +754,9 @@ def batch(
 
 
 def main() -> None:
+    # Profile routing runs here (not at import time) so tests and library
+    # consumers can import this module without their argv being mutated.
+    _apply_profile_override()
     app()
 
 

@@ -11,7 +11,7 @@ Allowed fields (whitelist; ``extra="forbid"``):
     env                 dict       override env for this invocation
 
 Explicitly rejected fields:
-    profile             — would break pre-import --profile routing
+    profile             — would break ``main()``-time --profile routing
     home                — HOME is upstream of overlay resolution
 
 The actual merge into the active plugin set is a loader-level concern
