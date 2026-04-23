@@ -265,3 +265,217 @@ def test_honcho_provider_rejects_unknown_mode() -> None:
     # All three valid values must appear in the error so the user can fix it.
     for valid in ("context", "tools", "hybrid"):
         assert valid in msg, f"error message should list {valid!r}: {msg!r}"
+
+
+# ─── Phase 12b1 Task A5 — silent-on-Docker wizard activation ────────────
+
+
+def _make_recording_console(monkeypatch):
+    """Swap ``setup_wizard.console`` for a Console writing into an in-memory
+    buffer. Returns the buffer — callers read ``buf.getvalue()``.
+
+    Needed because rich.Console auto-detects terminal width / stream and
+    pytest's ``capsys`` sometimes races with that detection; a dedicated
+    buffer is deterministic.
+    """
+    import io
+
+    from rich.console import Console as _RichConsole
+
+    from opencomputer import setup_wizard as _wiz
+
+    buf = io.StringIO()
+    recording = _RichConsole(file=buf, force_terminal=False, width=200, record=True)
+    monkeypatch.setattr(_wiz, "console", recording)
+    return buf
+
+
+class _FakeBootstrap:
+    """Stand-in for the memory-honcho bootstrap module used by the wizard.
+
+    The real loader reaches into ``extensions/memory-honcho/bootstrap.py``
+    via importlib — here we just expose the two attributes the wizard
+    currently cares about (``detect_docker`` + ``ensure_started``) so a
+    monkeypatch on ``_load_honcho_bootstrap`` can feed in pre-scripted
+    return values without doing any real subprocess work.
+    """
+
+    def __init__(self, *, detect_return, ensure_return) -> None:
+        self._detect_return = detect_return
+        self._ensure_return = ensure_return
+        self.detect_calls = 0
+        self.ensure_calls = 0
+        self.honcho_up_calls = 0
+
+    def detect_docker(self):
+        self.detect_calls += 1
+        return self._detect_return
+
+    def ensure_started(self, timeout_s: int = 60):
+        self.ensure_calls += 1
+        self._ensure_timeout = timeout_s
+        return self._ensure_return
+
+    def honcho_up(self):  # pragma: no cover — must NOT be called anymore
+        self.honcho_up_calls += 1
+        raise AssertionError(
+            "honcho_up() must no longer be called from the wizard — "
+            "A5 replaced it with ensure_started()."
+        )
+
+
+def _install_fake_bootstrap(monkeypatch, fake):
+    """Point both the wizard's bootstrap loader and cli_memory's loader at
+    ``fake`` so the test doesn't depend on which one the wizard imports."""
+    from opencomputer import cli_memory, setup_wizard
+
+    monkeypatch.setattr(cli_memory, "_load_honcho_bootstrap", lambda: fake)
+    # The wizard may have its own loader symbol after A5 — patch both
+    # names defensively so the test is resilient to the refactor choosing
+    # either name.
+    if hasattr(setup_wizard, "_load_honcho_bootstrap"):
+        monkeypatch.setattr(setup_wizard, "_load_honcho_bootstrap", lambda: fake)
+
+
+def test_wizard_starts_honcho_when_docker_present(monkeypatch) -> None:
+    """Docker + compose v2 present → wizard silently auto-starts Honcho via
+    ``bootstrap.ensure_started`` (NOT the old ``honcho_up``) and never
+    asks the user to confirm."""
+    from unittest.mock import patch
+
+    from opencomputer import setup_wizard
+
+    fake = _FakeBootstrap(
+        detect_return=(True, True),
+        ensure_return=(True, "Honcho stack already running and healthy."),
+    )
+    _install_fake_bootstrap(monkeypatch, fake)
+    buf = _make_recording_console(monkeypatch)
+
+    with patch("opencomputer.setup_wizard.Confirm.ask") as mock_confirm:
+        setup_wizard._optional_honcho()
+
+    assert fake.ensure_calls == 1, "ensure_started should be called exactly once"
+    assert fake.honcho_up_calls == 0, "old honcho_up path must not be taken"
+    assert mock_confirm.call_count == 0, "A5 removed the Confirm.ask prompt"
+
+    out = buf.getvalue()
+    assert "Honcho memory running" in out, f"expected success banner, got {out!r}"
+
+
+def test_wizard_silent_fallback_when_docker_absent(monkeypatch) -> None:
+    """No Docker → print non-alarming notice, skip ensure_started entirely,
+    and persist ``provider=""`` to config so the next run doesn't retry."""
+    from unittest.mock import patch
+
+    from opencomputer import setup_wizard
+
+    fake = _FakeBootstrap(
+        detect_return=(False, False),
+        ensure_return=(True, "unreachable"),  # must NOT be used
+    )
+    _install_fake_bootstrap(monkeypatch, fake)
+    buf = _make_recording_console(monkeypatch)
+
+    saved_cfgs: list = []
+
+    def _capture_save(cfg, path=None):
+        saved_cfgs.append(cfg)
+        return path
+
+    monkeypatch.setattr(setup_wizard, "save_config", _capture_save)
+
+    # Wizard reads current config via load_config — return defaults so the
+    # write path has something to mutate.
+    from opencomputer.agent.config import default_config
+
+    monkeypatch.setattr(setup_wizard, "load_config", lambda: default_config())
+
+    with patch("opencomputer.setup_wizard.Confirm.ask") as mock_confirm:
+        setup_wizard._optional_honcho()
+
+    assert fake.ensure_calls == 0, "ensure_started must not be called without Docker"
+    assert mock_confirm.call_count == 0, "A5 removed the Confirm.ask prompt"
+
+    out = buf.getvalue()
+    assert "baseline memory" in out, f"expected baseline notice, got {out!r}"
+    assert "docs.docker.com/get-docker" in out, (
+        f"expected docker install URL in notice, got {out!r}"
+    )
+
+    assert saved_cfgs, "save_config should have been called to persist provider=''"
+    assert saved_cfgs[-1].memory.provider == "", (
+        "config should be updated with provider='' when Docker absent"
+    )
+
+
+def test_wizard_silent_fallback_when_ensure_started_fails(monkeypatch) -> None:
+    """Docker present but stack-start fails → surface the error, persist
+    ``provider=""``, and do NOT propagate an exception."""
+    from unittest.mock import patch
+
+    from opencomputer import setup_wizard
+
+    fake = _FakeBootstrap(
+        detect_return=(True, True),
+        ensure_return=(False, "Port 8000 already in use by another process"),
+    )
+    _install_fake_bootstrap(monkeypatch, fake)
+    buf = _make_recording_console(monkeypatch)
+
+    saved_cfgs: list = []
+    monkeypatch.setattr(
+        setup_wizard, "save_config", lambda cfg, path=None: saved_cfgs.append(cfg)
+    )
+
+    from opencomputer.agent.config import default_config
+
+    monkeypatch.setattr(setup_wizard, "load_config", lambda: default_config())
+
+    with patch("opencomputer.setup_wizard.Confirm.ask") as mock_confirm:
+        # Must not raise — failure is handled gracefully.
+        setup_wizard._optional_honcho()
+
+    assert fake.ensure_calls == 1, "ensure_started should be attempted once"
+    assert mock_confirm.call_count == 0, "A5 removed the Confirm.ask prompt"
+
+    out = buf.getvalue()
+    assert "Port 8000" in out or "port conflict" in out.lower() or "already in use" in out, (
+        f"error message should surface to stdout, got {out!r}"
+    )
+
+    assert saved_cfgs, "save_config should be called to persist provider=''"
+    assert saved_cfgs[-1].memory.provider == "", (
+        "failed start should downgrade provider to '' so next run doesn't retry"
+    )
+
+
+def test_wizard_no_confirm_prompt_anymore(monkeypatch) -> None:
+    """Regardless of Docker state, ``_optional_honcho`` must not invoke
+    ``Confirm.ask``. Silent activation is the whole contract of A5."""
+    from unittest.mock import patch
+
+    from opencomputer import setup_wizard
+    from opencomputer.agent.config import default_config
+
+    monkeypatch.setattr(setup_wizard, "load_config", lambda: default_config())
+    monkeypatch.setattr(setup_wizard, "save_config", lambda cfg, path=None: None)
+
+    scenarios = [
+        ((True, True), (True, "running")),
+        ((True, True), (False, "broke")),
+        ((False, False), (True, "n/a")),
+        ((True, False), (True, "n/a")),
+    ]
+
+    for detect, ensure in scenarios:
+        fake = _FakeBootstrap(detect_return=detect, ensure_return=ensure)
+        _install_fake_bootstrap(monkeypatch, fake)
+        _make_recording_console(monkeypatch)
+
+        with patch("opencomputer.setup_wizard.Confirm.ask") as mock_confirm:
+            setup_wizard._optional_honcho()
+        assert mock_confirm.call_count == 0, (
+            f"Confirm.ask was called with detect={detect}, ensure={ensure} — "
+            f"A5 forbids any user prompt in _optional_honcho"
+        )
