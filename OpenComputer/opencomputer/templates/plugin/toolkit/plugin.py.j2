@@ -1,0 +1,18 @@
+"""{{ plugin_name }} toolkit plugin — entry module.
+
+Registers one or more tools the agent can call. Add more tools by
+subclassing ``BaseTool`` in ``tools/`` and registering them in
+``register``.
+"""
+
+from __future__ import annotations
+
+try:
+    from tools.my_tool import {{ class_name }}Tool  # plugin-loader mode
+except ImportError:  # pragma: no cover
+    from {{ module_name }}.tools.my_tool import {{ class_name }}Tool  # package mode
+
+
+def register(api) -> None:  # PluginAPI is duck-typed
+    """Register each tool with the agent's tool registry."""
+    api.register_tool({{ class_name }}Tool())

@@ -1,0 +1,27 @@
+"""{{ plugin_name }} mixed plugin — entry module.
+
+A mixed plugin can register any combination of channels, providers,
+tools, and skills. Trim the imports and ``register`` calls below to
+only register what your plugin actually ships.
+"""
+
+from __future__ import annotations
+
+try:
+    from adapter import {{ class_name }}Adapter  # plugin-loader mode
+    from provider import {{ class_name }}Provider
+    from tools.my_tool import {{ class_name }}Tool
+except ImportError:  # pragma: no cover
+    from {{ module_name }}.adapter import {{ class_name }}Adapter  # package mode
+    from {{ module_name }}.provider import {{ class_name }}Provider
+    from {{ module_name }}.tools.my_tool import {{ class_name }}Tool
+
+
+def register(api) -> None:  # PluginAPI is duck-typed
+    """Register every component this plugin ships.
+
+    Remove the lines for components you don't actually use.
+    """
+    api.register_channel("{{ module_name }}", {{ class_name }}Adapter(config={}))
+    api.register_provider("{{ module_name }}", {{ class_name }}Provider)
+    api.register_tool({{ class_name }}Tool())

@@ -1,0 +1,39 @@
+"""{{ class_name }}Adapter — channel adapter stub.
+
+Subclass of ``BaseChannelAdapter``. Implement connect/disconnect/send
+to wire up a new messaging platform. See ``extensions/discord/adapter.py``
+or ``extensions/telegram/adapter.py`` for reference implementations.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from plugin_sdk.channel_contract import BaseChannelAdapter
+from plugin_sdk.core import Platform, SendResult
+
+
+class {{ class_name }}Adapter(BaseChannelAdapter):
+    """Channel adapter for {{ plugin_name }}."""
+
+    # Pick an existing Platform or add one to plugin_sdk.core.Platform.
+    platform = Platform.WEB
+    max_message_length = 4000
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config)
+
+    async def connect(self) -> bool:
+        """Connect to the platform and begin listening for messages."""
+        return True
+
+    async def disconnect(self) -> None:
+        """Stop listening and clean up resources."""
+        return None
+
+    async def send(self, chat_id: str, text: str, **kwargs: Any) -> SendResult:
+        """Deliver ``text`` to ``chat_id`` on the remote platform."""
+        return SendResult(success=True)
+
+
+__all__ = ["{{ class_name }}Adapter"]

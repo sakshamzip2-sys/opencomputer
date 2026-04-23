@@ -1,0 +1,30 @@
+"""{{ class_name }}Adapter — channel adapter stub."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from plugin_sdk.channel_contract import BaseChannelAdapter
+from plugin_sdk.core import Platform, SendResult
+
+
+class {{ class_name }}Adapter(BaseChannelAdapter):
+    """Channel adapter for {{ plugin_name }}."""
+
+    platform = Platform.WEB
+    max_message_length = 4000
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config)
+
+    async def connect(self) -> bool:
+        return True
+
+    async def disconnect(self) -> None:
+        return None
+
+    async def send(self, chat_id: str, text: str, **kwargs: Any) -> SendResult:
+        return SendResult(success=True)
+
+
+__all__ = ["{{ class_name }}Adapter"]

@@ -1,0 +1,256 @@
+"""Phase 12b.2 — Sub-project B, Task B1.
+
+Tests for the plugin template tree + Jinja2 renderer (the foundation of
+`opencomputer plugin new`). The renderer is in
+``opencomputer/cli_plugin_scaffold.py``; templates live under
+``opencomputer/templates/plugin/{channel,provider,toolkit,mixed}/``.
+
+B1 ships only the renderer + templates — CLI wiring lands in B2, smoke
+in B3. These tests exercise the renderer directly.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+from pathlib import Path
+
+import pytest
+
+# ─── one test per kind: the expected tree is present ─────────────────
+
+
+def test_render_channel_template_creates_expected_files(tmp_path: Path) -> None:
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+
+    written = render_plugin_template(
+        plugin_id="demo-chan",
+        kind="channel",
+        output_path=tmp_path,
+    )
+    root = tmp_path / "demo-chan"
+    assert (root / "plugin.json").exists()
+    assert (root / "plugin.py").exists()
+    assert (root / "adapter.py").exists()
+    assert (root / "README.md").exists()
+    assert (root / "tests" / "test_demo_chan.py").exists()
+    assert any(str(p).endswith("adapter.py") for p in written)
+
+
+def test_render_provider_template_creates_expected_files(tmp_path: Path) -> None:
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+
+    written = render_plugin_template(
+        plugin_id="demo-prov",
+        kind="provider",
+        output_path=tmp_path,
+    )
+    root = tmp_path / "demo-prov"
+    assert (root / "plugin.json").exists()
+    assert (root / "plugin.py").exists()
+    assert (root / "provider.py").exists()
+    assert (root / "README.md").exists()
+    assert (root / "tests" / "test_demo_prov.py").exists()
+    assert any(str(p).endswith("provider.py") for p in written)
+
+
+def test_render_toolkit_template_creates_expected_files(tmp_path: Path) -> None:
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+
+    written = render_plugin_template(
+        plugin_id="demo-tool",
+        kind="toolkit",
+        output_path=tmp_path,
+    )
+    root = tmp_path / "demo-tool"
+    assert (root / "plugin.json").exists()
+    assert (root / "plugin.py").exists()
+    assert (root / "tests" / "test_demo_tool.py").exists()
+    assert (root / "README.md").exists()
+    assert (root / "tools" / "__init__.py").exists()
+    assert any(
+        "tools/my_tool.py" in str(p) or "tools\\my_tool.py" in str(p) for p in written
+    )
+
+
+def test_render_mixed_template_creates_expected_files(tmp_path: Path) -> None:
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+
+    written = render_plugin_template(
+        plugin_id="demo-mixed",
+        kind="mixed",
+        output_path=tmp_path,
+    )
+    root = tmp_path / "demo-mixed"
+    assert (root / "plugin.json").exists()
+    assert (root / "plugin.py").exists()
+    assert (root / "adapter.py").exists()
+    assert (root / "provider.py").exists()
+    assert (root / "tools" / "__init__.py").exists()
+    assert (root / "tools" / "my_tool.py").exists()
+    assert (root / "README.md").exists()
+    assert (root / "tests" / "test_demo_mixed.py").exists()
+    # written is a non-empty list of absolute paths
+    assert len(written) >= 7
+    assert all(isinstance(p, Path) for p in written)
+
+
+# ─── content correctness ─────────────────────────────────────────────
+
+
+def test_rendered_plugin_json_parses(tmp_path: Path) -> None:
+    """Every rendered plugin.json must pass validate_manifest()."""
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+    from opencomputer.plugins.manifest_validator import validate_manifest
+
+    render_plugin_template(
+        plugin_id="good-provider",
+        kind="provider",
+        output_path=tmp_path,
+        description="a test provider",
+        author="Tester",
+    )
+    manifest_data = json.loads((tmp_path / "good-provider" / "plugin.json").read_text())
+    schema, err = validate_manifest(manifest_data)
+    assert err == "", f"validate_manifest rejected rendered manifest: {err}"
+    assert schema is not None
+    assert schema.id == "good-provider"
+    assert schema.kind == "provider"
+
+
+def test_rendered_plugin_py_syntax_ok(tmp_path: Path) -> None:
+    """Every rendered .py file must parse cleanly via ast.parse()."""
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+
+    for kind in ("channel", "provider", "toolkit", "mixed"):
+        out = tmp_path / kind
+        out.mkdir()
+        render_plugin_template(
+            plugin_id=f"syntax-{kind}",
+            kind=kind,
+            output_path=out,
+        )
+        root = out / f"syntax-{kind}"
+        py_files = list(root.rglob("*.py"))
+        assert py_files, f"no .py files rendered for kind={kind}"
+        for py in py_files:
+            try:
+                ast.parse(py.read_text())
+            except SyntaxError as e:  # pragma: no cover — failure path
+                pytest.fail(f"{py} has SyntaxError: {e}")
+
+
+def test_module_name_and_class_name_derivation(tmp_path: Path) -> None:
+    """plugin_id='foo-bar-baz' → module_name=foo_bar_baz, class_name=FooBarBaz."""
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+
+    render_plugin_template(
+        plugin_id="foo-bar-baz",
+        kind="provider",
+        output_path=tmp_path,
+    )
+    root = tmp_path / "foo-bar-baz"
+    # File-name templating: tests/test_{{ module_name }}.py.j2 →
+    # tests/test_foo_bar_baz.py
+    assert (root / "tests" / "test_foo_bar_baz.py").exists()
+    # Class-name shows up in provider.py
+    provider_src = (root / "provider.py").read_text()
+    assert "FooBarBaz" in provider_src, f"missing PascalCase class_name: {provider_src}"
+
+
+# ─── overwrite semantics ─────────────────────────────────────────────
+
+
+def test_render_refuses_overwrite_without_flag(tmp_path: Path) -> None:
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+
+    render_plugin_template(
+        plugin_id="dup",
+        kind="toolkit",
+        output_path=tmp_path,
+    )
+    with pytest.raises(FileExistsError):
+        render_plugin_template(
+            plugin_id="dup",
+            kind="toolkit",
+            output_path=tmp_path,
+        )
+
+
+def test_render_with_overwrite_true_succeeds_second_time(tmp_path: Path) -> None:
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+
+    render_plugin_template(
+        plugin_id="over",
+        kind="provider",
+        output_path=tmp_path,
+        description="first",
+    )
+    first_json = json.loads((tmp_path / "over" / "plugin.json").read_text())
+    assert first_json["description"] == "first"
+
+    render_plugin_template(
+        plugin_id="over",
+        kind="provider",
+        output_path=tmp_path,
+        description="second",
+        overwrite=True,
+    )
+    second_json = json.loads((tmp_path / "over" / "plugin.json").read_text())
+    assert second_json["description"] == "second"
+
+
+# ─── id validation ───────────────────────────────────────────────────
+
+
+def test_render_rejects_invalid_plugin_id(tmp_path: Path) -> None:
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+
+    with pytest.raises(ValueError, match="id"):
+        render_plugin_template(
+            plugin_id="Bad ID",
+            kind="toolkit",
+            output_path=tmp_path,
+        )
+
+
+def test_render_rejects_empty_plugin_id(tmp_path: Path) -> None:
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+
+    with pytest.raises(ValueError):
+        render_plugin_template(
+            plugin_id="",
+            kind="toolkit",
+            output_path=tmp_path,
+        )
+
+
+# ─── CLI kind → manifest kind mapping ─────────────────────────────────
+
+
+def test_toolkit_kind_maps_to_tool_in_manifest(tmp_path: Path) -> None:
+    """CLI uses 'toolkit' for clarity; manifest stores SDK value 'tool'."""
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+
+    render_plugin_template(
+        plugin_id="map-test",
+        kind="toolkit",
+        output_path=tmp_path,
+    )
+    data = json.loads((tmp_path / "map-test" / "plugin.json").read_text())
+    assert data["kind"] == "tool"
+
+
+def test_mixed_channel_provider_kinds_pass_through(tmp_path: Path) -> None:
+    from opencomputer.cli_plugin_scaffold import render_plugin_template
+
+    for kind in ("channel", "provider", "mixed"):
+        out = tmp_path / kind
+        out.mkdir()
+        render_plugin_template(
+            plugin_id=f"kind-{kind}",
+            kind=kind,
+            output_path=out,
+        )
+        data = json.loads((out / f"kind-{kind}" / "plugin.json").read_text())
+        assert data["kind"] == kind
