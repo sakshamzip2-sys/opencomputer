@@ -835,3 +835,73 @@ async def test_agent_loop_injects_prefetch_output_into_system_without_polluting_
     assert "PAST CONTEXT" not in snapshot, (
         "frozen snapshot was polluted by prefetch injection — prefix cache broken"
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_multi_turn_snapshot_stays_identical_across_different_prefetches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up #27 — multi-turn prefetch snapshot invariant.
+
+    A7 proved the frozen snapshot isn't polluted on a single turn. This
+    test proves the stronger property: across TWO turns of the same
+    session, where prefetch returns DIFFERENT content each time, the
+    snapshot stays byte-identical. That's what makes the Anthropic
+    prefix cache usable — only the ephemeral suffix varies per turn.
+
+    Without this invariant, turn-2's system prompt would rebuild from
+    the new prefetch and the prefix cache would miss on every turn.
+    """
+    loop, provider = _a7_build_loop(tmp_path, monkeypatch)
+
+    # Prefetch returns DIFFERENT content on consecutive calls.
+    prefetch_mock = AsyncMock(side_effect=["CONTEXT ONE", "CONTEXT TWO"])
+    loop.memory_bridge = MagicMock()
+    loop.memory_bridge.prefetch = prefetch_mock
+    loop.memory_bridge.sync_turn = AsyncMock(return_value=None)
+
+    sid = "s-multi-turn"
+
+    # Turn 1
+    await loop.run_conversation(
+        user_message="first",
+        session_id=sid,
+        runtime=RuntimeContext(agent_context="chat"),
+    )
+    snapshot_after_turn_1 = loop._prompt_snapshots.get(sid)
+    assert snapshot_after_turn_1 is not None
+    turn_1_system = _extract_system(provider.complete.call_args)
+    assert "CONTEXT ONE" in turn_1_system
+    assert "CONTEXT TWO" not in turn_1_system
+    assert "CONTEXT ONE" not in snapshot_after_turn_1  # ephemeral → not frozen
+
+    # Turn 2 on the same session — prefetch returns different content.
+    await loop.run_conversation(
+        user_message="second",
+        session_id=sid,
+        runtime=RuntimeContext(agent_context="chat"),
+    )
+    snapshot_after_turn_2 = loop._prompt_snapshots.get(sid)
+    turn_2_system = _extract_system(provider.complete.call_args)
+
+    # The CORE invariant: snapshot byte-identical across turns.
+    assert snapshot_after_turn_1 == snapshot_after_turn_2, (
+        "frozen snapshot changed between turn 1 and turn 2 — prefix cache would miss"
+    )
+    # Turn 2 saw the new prefetch content in its per-turn system, not the old.
+    assert "CONTEXT TWO" in turn_2_system
+    assert "CONTEXT ONE" not in turn_2_system  # previous turn's ephemeral suffix is gone
+
+    # Both calls to prefetch ran (one per turn).
+    assert prefetch_mock.await_count == 2
+
+
+def _extract_system(call_args) -> str:
+    """Pull the system string out of provider.complete call args (kwargs or positional)."""
+    if call_args is None:
+        return ""
+    system = call_args.kwargs.get("system")
+    if system is None and call_args.args:
+        # positional fallback — system is typically arg 1 in the provider contract
+        system = call_args.args[1] if len(call_args.args) > 1 else ""
+    return system or ""

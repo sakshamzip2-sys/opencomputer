@@ -72,6 +72,10 @@ black .
 - **Never break the SDK without a major version bump** — third-party plugins depend on it.
 - **Hooks must be fire-and-forget for post-actions.** Never block the main loop.
 
+## Runtime context quirks
+
+- **`RuntimeContext.agent_context`** (values `"chat" | "cron" | "flush" | "review"`, default `"chat"`) controls the cron/flush guard in `MemoryBridge.prefetch` and `MemoryBridge.sync_turn` — when the context is `cron` or `flush`, the external memory provider (Honcho) is bypassed so batch jobs don't spin a Docker stack. Today **no production entry point sets `agent_context` to anything but the default** — the only `RuntimeContext(...)` construction in the production path is `cli.py::_cmd_chat` which passes `plan_mode=plan`. If you ever add a batch runner (`opencomputer batch run-all`, cron tab, PreCompact flush job), construct `RuntimeContext(agent_context="cron")` at that entry point — otherwise the guard silently no-ops and every batch turn will spin Honcho. The guard itself is tested against the bridge directly; what's not exercised is an end-to-end path with a real cron caller.
+
 ## Reference repos (in parent folder)
 
 - `../claude-code/` — plugin primitives vocabulary
