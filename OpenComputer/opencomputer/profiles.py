@@ -13,6 +13,18 @@ caching), so any code path that resolves paths AFTER ``main()`` has
 called the override sees the correct profile directory — whether it
 runs during Typer command dispatch, inside an agent loop, or from a
 subprocess that inherits the env.
+
+Sub-project C additions:
+
+- Per-profile ``home/`` subdirectory (C1). Subprocesses spawned by the
+  agent (BashTool, gateway, wire) get ``HOME=<profile>/home/`` + matching
+  ``XDG_CONFIG_HOME`` / ``XDG_DATA_HOME`` so git / ssh / npm tool configs
+  are isolated per profile. Closes the credential-leak weakness raised
+  in the Sub-project A adversarial review.
+- ``~/.local/bin/<name>`` wrapper script (C2) for one-word profile
+  invocation (``coder chat`` → ``opencomputer -p coder chat``).
+- Per-profile ``SOUL.md`` (C3) seeded at profile create, threaded into
+  the agent's frozen base prompt as a ``## Profile identity`` section.
 """
 
 from __future__ import annotations
@@ -73,6 +85,66 @@ def get_profile_dir(name: str | None) -> Path:
         return get_default_root()
     validate_profile_name(name)
     return get_default_root() / "profiles" / name
+
+
+def profile_home_dir(name: str) -> Path:
+    """Return the per-profile ``home/`` subdirectory, creating on demand.
+
+    This is the filesystem sandbox that subprocesses spawned by the agent
+    (BashTool, gateway, wire, etc.) see as ``$HOME`` when the profile is
+    active. Isolating HOME means git/ssh/npm/etc. write their credentials
+    and caches under ``~/.opencomputer/profiles/<name>/home/`` instead of
+    the user's real home — profile-scoped credential isolation.
+
+    Calling this on the ``default`` profile returns ``<root>/home/`` but
+    the default profile intentionally never activates env scoping
+    (see :func:`scope_subprocess_env`), so nothing actually uses it.
+    """
+    target = get_profile_dir(name) / "home"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def scope_subprocess_env(
+    env: dict[str, str] | None = None,
+    *,
+    profile: str | None = None,
+) -> dict[str, str]:
+    """Return an env dict with HOME/XDG_* scoped to a profile's home/.
+
+    - ``env=None`` → start from a copy of ``os.environ``.
+    - ``profile`` selects which profile to scope to. ``None`` (the default)
+      falls back to :func:`read_active_profile` — the sticky active
+      profile. Pass an explicit name to scope without mutating sticky
+      state.
+    - If the resolved profile is ``None`` or ``"default"`` (no named
+      profile), the env is returned unchanged. The default profile
+      deliberately does NOT get scoped — it uses the user's real HOME
+      so existing tool configs keep working.
+    - Otherwise sets HOME, XDG_CONFIG_HOME, XDG_DATA_HOME to the profile's
+      ``home/`` subdir and ``home/.config`` / ``home/.local/share``
+      respectively. Other env keys are preserved.
+
+    Safe to call at any point after :func:`_apply_profile_override` has
+    set the sticky active profile (or the test equivalent).
+    """
+    env = os.environ.copy() if env is None else dict(env)
+
+    target = profile if profile is not None else read_active_profile()
+    if target is None or target == "default":
+        return env
+
+    try:
+        home = profile_home_dir(target)
+    except ProfileNameError:
+        return env
+
+    env["HOME"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
+    env["XDG_DATA_HOME"] = str(home / ".local" / "share")
+    return env
+
+
 
 
 def list_profiles() -> list[str]:
@@ -163,6 +235,7 @@ def create_profile(
         # copytree creates dest and parents
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(src, dest)
+        _post_create_artifacts(name)
         return dest
 
     dest.mkdir(parents=True, exist_ok=False)
@@ -179,7 +252,19 @@ def create_profile(
             src_file = src / fname
             if src_file.exists():
                 shutil.copy2(src_file, dest / fname)
+    _post_create_artifacts(name)
     return dest
+
+
+def _post_create_artifacts(name: str) -> None:
+    """Emit per-profile artifacts after the profile directory exists.
+
+    Separated so both the ``clone_all`` path and the fresh-create path
+    produce the same side-effects. Currently only C1 (``home/`` subdir);
+    C2 (wrapper script) and C3 (``SOUL.md``) land in later commits.
+    """
+    # C1 — home/ subdir
+    profile_home_dir(name)
 
 
 def delete_profile(name: str) -> None:
@@ -231,6 +316,8 @@ __all__ = [
     "validate_profile_name",
     "get_default_root",
     "get_profile_dir",
+    "profile_home_dir",
+    "scope_subprocess_env",
     "list_profiles",
     "read_active_profile",
     "write_active_profile",
