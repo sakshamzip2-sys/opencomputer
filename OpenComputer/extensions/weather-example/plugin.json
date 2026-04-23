@@ -1,0 +1,12 @@
+{
+  "id": "weather-example",
+  "name": "Weather Example",
+  "version": "0.1.0",
+  "description": "Example provider plugin that returns hardcoded weather for demos",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "provider",
+  "entry": "plugin",
+  "profiles": ["*"],
+  "enabled_by_default": false
+}
