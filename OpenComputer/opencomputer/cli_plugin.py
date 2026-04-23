@@ -36,10 +36,12 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from typing import Annotated
 
 import typer
 import yaml
 from rich.console import Console
+from rich.table import Table
 
 plugin_app = typer.Typer(
     name="plugin",
@@ -649,6 +651,143 @@ def plugin_disable(
         f"[green]Disabled[/green] '{plugin_id}' for profile "
         f"'{profile_name}'. Restart opencomputer to unload it."
     )
+
+
+@plugin_app.command("demand")
+def plugin_demand(
+    since_turns: Annotated[
+        int | None,
+        typer.Option(
+            "--since-turns",
+            help=(
+                "Only show signals from the last N turns (per-session "
+                "max_turn). Default: show everything."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """List demand signals recorded by the E2 tracker for the active DB.
+
+    Empty state prints a helpful explainer; populated state prints a
+    Rich table of ``(plugin, tool, session, turn, count)`` rows (same
+    tool-not-found firing across multiple turns aggregates into ONE row
+    with a count) plus a footer with the top-recommendation plugin.
+
+    Option-A pattern: constructs a ``PluginDemandTracker`` directly with
+    a no-op ``discover_fn`` — we only query, never insert, so
+    ``discover_fn`` + ``active_profile_plugins`` don't matter here.
+    """
+    from opencomputer.agent.config import default_config
+    from opencomputer.plugins.demand_tracker import PluginDemandTracker
+
+    cfg = default_config()
+    tracker = PluginDemandTracker(
+        db_path=cfg.session.db_path,
+        discover_fn=lambda: [],
+        active_profile_plugins=None,
+    )
+
+    signals = tracker.signals_by_plugin(session_id=None)
+
+    # Apply --since-turns filter per-session if requested. E2's
+    # recommended_plugins() helper implements similar semantics but
+    # returns per-plugin counts only; for table rendering we need the
+    # row-level detail, so we filter the dict manually here.
+    if since_turns is not None:
+        # Per-session max turn — matches the semantics used for rendering
+        # (each session's window is relative to that session's latest).
+        max_turn_by_session: dict[str, int] = {}
+        for rows in signals.values():
+            for row in rows:
+                sid = row["session_id"]
+                ti = int(row["turn_index"])
+                if sid not in max_turn_by_session or ti > max_turn_by_session[sid]:
+                    max_turn_by_session[sid] = ti
+        filtered: dict[str, list[dict]] = {}
+        for plugin_id, rows in signals.items():
+            kept = [
+                r for r in rows
+                if int(r["turn_index"])
+                >= max_turn_by_session[r["session_id"]] - since_turns
+            ]
+            if kept:
+                filtered[plugin_id] = kept
+        signals = filtered
+
+    if not signals:
+        _console.print("No demand signals recorded yet.")
+        _console.print("")
+        _console.print(
+            "Demand signals are emitted when the agent calls a tool that "
+            "isn't\nenabled in the current profile. For example, in a "
+            "profile without\ncoding-harness enabled, calls to "
+            "Edit/MultiEdit/TodoWrite/etc. would\naccumulate here as a "
+            "signal that this profile could benefit from\nthat plugin."
+        )
+        _console.print("")
+        _console.print("Enable a plugin with: opencomputer plugin enable <plugin-id>")
+        raise typer.Exit(code=0)
+
+    # Aggregate (plugin_id, tool_name, session_id) → count + latest turn.
+    # Using the latest turn per group gives the user a useful "when did
+    # this last happen" hint; total count reflects every occurrence.
+    aggregated: dict[tuple[str, str, str], dict] = {}
+    plugin_totals: dict[str, int] = {}
+    for plugin_id, rows in signals.items():
+        for row in rows:
+            key = (plugin_id, row["tool_name"], row["session_id"])
+            entry = aggregated.get(key)
+            if entry is None:
+                entry = {"count": 0, "latest_turn": int(row["turn_index"])}
+                aggregated[key] = entry
+            entry["count"] += 1
+            if int(row["turn_index"]) > entry["latest_turn"]:
+                entry["latest_turn"] = int(row["turn_index"])
+            plugin_totals[plugin_id] = plugin_totals.get(plugin_id, 0) + 1
+
+    # Sort: count desc, then plugin_id asc for stable tiebreak.
+    sorted_rows = sorted(
+        aggregated.items(),
+        key=lambda kv: (-kv[1]["count"], kv[0][0], kv[0][1], kv[0][2]),
+    )
+
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Plugin")
+    table.add_column("Tool")
+    table.add_column("Session")
+    table.add_column("Turn", justify="right")
+    table.add_column("Signals", justify="right")
+
+    for (plugin_id, tool_name, session_id), meta in sorted_rows:
+        session_short = f"{session_id[:8]}…" if len(session_id) > 8 else session_id
+        table.add_row(
+            plugin_id,
+            tool_name,
+            session_short,
+            str(meta["latest_turn"]),
+            str(meta["count"]),
+        )
+
+    _console.print(table)
+
+    # Footer: top recommendation — plugin with the highest total signal
+    # count across all tools (alphabetical tiebreaker).
+    top_plugin = min(
+        plugin_totals.items(),
+        key=lambda kv: (-kv[1], kv[0]),
+    )
+    top_id, top_count = top_plugin
+    tools_for_top = {
+        tool_name
+        for (pid, tool_name, _sid) in aggregated
+        if pid == top_id
+    }
+    _console.print("")
+    _console.print(
+        f"Top recommendation: enable '{top_id}' ({top_count} signals "
+        f"across {len(tools_for_top)} tools)."
+    )
+    _console.print(f"Run: opencomputer plugin enable {top_id}")
 
 
 __all__ = ["plugin_app"]
