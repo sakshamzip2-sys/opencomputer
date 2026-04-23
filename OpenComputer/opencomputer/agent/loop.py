@@ -220,6 +220,21 @@ class AgentLoop:
         # walk only the new tool messages (not the whole prior history).
         turn_start_index = len(messages) - 1
 
+        # Phase 12b1 A7: MemoryBridge prefetch. Ask the external memory
+        # provider (Honcho, Mem0, etc.) for any context worth injecting
+        # this turn. The bridge is exception-safe and guards on
+        # runtime.agent_context — a cron/flush turn short-circuits without
+        # touching the provider. Result (if any) is appended to the
+        # per-turn ``system`` variable; ``_prompt_snapshots[sid]`` stays
+        # frozen so the prefix cache keeps hitting on turn 2+.
+        prefetched = await self.memory_bridge.prefetch(
+            query=user_message,
+            turn_index=turn_start_index,
+            runtime=self._runtime,
+        )
+        if prefetched:
+            system = system + "\n\n## Relevant memory\n\n" + prefetched
+
         total_input = 0
         total_output = 0
         iterations = 0
@@ -282,6 +297,18 @@ class AgentLoop:
                         )
                     except Exception:  # noqa: BLE001
                         pass
+                # Phase 12b1 A7: notify the external memory provider that
+                # a turn completed. Bridge is fire-and-forget (exceptions
+                # swallowed internally) and guards on runtime.agent_context
+                # — symmetric with prefetch above. Only called on END_TURN;
+                # never on max-iterations exhaustion or exception exits,
+                # because a half-finished turn would confuse the provider.
+                await self.memory_bridge.sync_turn(
+                    user=user_message,
+                    assistant=step.assistant_message.content or "",
+                    turn_index=turn_start_index,
+                    runtime=self._runtime,
+                )
                 self.db.end_session(sid)
                 return ConversationResult(
                     final_message=step.assistant_message,

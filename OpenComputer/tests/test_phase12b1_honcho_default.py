@@ -13,7 +13,7 @@ import importlib.machinery
 import importlib.util
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -659,3 +659,179 @@ def test_memory_doctor_exits_zero_even_when_layers_fail(monkeypatch, tmp_path) -
     # honcho n/a, provider fallback.
     assert "missing" in out
     assert "fallback" in out, f"expected 'fallback' for empty provider, got {out!r}"
+
+
+# ─── Phase 12b1 Task A7 — wire MemoryBridge into AgentLoop ──────────────
+
+
+def _a7_config(tmp_path: Path):
+    """Minimal Config for AgentLoop-integration tests in A7."""
+    from opencomputer.agent.config import (
+        Config,
+        LoopConfig,
+        MemoryConfig,
+        ModelConfig,
+        SessionConfig,
+    )
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    return Config(
+        model=ModelConfig(provider="mock", model="mock", max_tokens=512, temperature=0.0),
+        loop=LoopConfig(max_iterations=2, parallel_tools=False),
+        session=SessionConfig(db_path=tmp_path / "a7.db"),
+        memory=MemoryConfig(
+            declarative_path=tmp_path / "A7_MEMORY.md",
+            user_path=tmp_path / "A7_USER.md",
+            skills_path=tmp_path / "a7_skills",
+            memory_char_limit=4000,
+            user_char_limit=2000,
+        ),
+    )
+
+
+def _a7_build_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Build an AgentLoop whose provider returns a single END_TURN response.
+
+    Returns ``(loop, provider)``. The caller can then replace
+    ``loop.memory_bridge`` with a mock to observe bridge calls.
+    """
+    from opencomputer.agent.loop import AgentLoop
+    from opencomputer.tools.registry import registry
+    from plugin_sdk.core import Message as _Message
+    from plugin_sdk.provider_contract import ProviderResponse, Usage
+
+    # Keep the tools list empty so the provider call is minimal.
+    monkeypatch.setattr(registry, "schemas", lambda: [])
+
+    from unittest.mock import MagicMock
+
+    provider = MagicMock()
+    provider.complete = AsyncMock(
+        return_value=ProviderResponse(
+            message=_Message(role="assistant", content="response text"),
+            stop_reason="end_turn",
+            usage=Usage(5, 2),
+        )
+    )
+    loop = AgentLoop(
+        provider=provider,
+        config=_a7_config(tmp_path),
+        compaction_disabled=True,
+        episodic_disabled=True,
+        reviewer_disabled=True,  # keep narrow: only test bridge wiring
+    )
+    return loop, provider
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_calls_bridge_prefetch_in_chat_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A7: run_conversation should call memory_bridge.prefetch in chat
+    context with the user message, turn index, and current runtime."""
+    loop, _provider = _a7_build_loop(tmp_path, monkeypatch)
+
+    # Replace the bridge with a mock so we can observe the call.
+    loop.memory_bridge = MagicMock()
+    loop.memory_bridge.prefetch = AsyncMock(return_value=None)
+    loop.memory_bridge.sync_turn = AsyncMock(return_value=None)
+
+    chat_runtime = RuntimeContext(agent_context="chat")
+    await loop.run_conversation(
+        user_message="hello world", session_id="s-a7-chat", runtime=chat_runtime
+    )
+
+    loop.memory_bridge.prefetch.assert_awaited_once()
+    # Verify call args — either by keyword or positional.
+    call = loop.memory_bridge.prefetch.await_args
+    kwargs = call.kwargs
+    assert kwargs.get("query") == "hello world"
+    assert kwargs.get("turn_index") == 0
+    assert kwargs.get("runtime") is chat_runtime
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_skips_bridge_prefetch_in_cron_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A7: In cron context the underlying provider.prefetch must not be
+    called. The bridge still gets invoked but short-circuits on the guard
+    so the real provider is never touched."""
+    loop, _provider = _a7_build_loop(tmp_path, monkeypatch)
+
+    # Attach an exploding memory provider via the context — if the guard
+    # isn't threaded through, the bridge would hit this and raise.
+    exploding = _ExplodingProvider()
+    loop.memory_context.provider = exploding
+
+    cron_runtime = RuntimeContext(agent_context="cron")
+    # Must not raise — the cron guard in MemoryBridge.prefetch short-circuits
+    # before touching the provider.
+    await loop.run_conversation(
+        user_message="batched work", session_id="s-a7-cron", runtime=cron_runtime
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_calls_bridge_sync_turn_on_end_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A7: After END_TURN, run_conversation should call
+    memory_bridge.sync_turn with the user + assistant content and the
+    turn index."""
+    loop, _provider = _a7_build_loop(tmp_path, monkeypatch)
+
+    loop.memory_bridge = MagicMock()
+    loop.memory_bridge.prefetch = AsyncMock(return_value=None)
+    loop.memory_bridge.sync_turn = AsyncMock(return_value=None)
+
+    chat_runtime = RuntimeContext(agent_context="chat")
+    await loop.run_conversation(
+        user_message="a user line", session_id="s-a7-sync", runtime=chat_runtime
+    )
+
+    loop.memory_bridge.sync_turn.assert_awaited_once()
+    call = loop.memory_bridge.sync_turn.await_args
+    kwargs = call.kwargs
+    assert kwargs.get("user") == "a user line"
+    assert kwargs.get("assistant") == "response text"
+    assert kwargs.get("turn_index") == 0
+    assert kwargs.get("runtime") is chat_runtime
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_injects_prefetch_output_into_system_without_polluting_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A7: prefetch output is injected into the per-turn ``system`` passed
+    to the provider, but MUST NOT mutate ``_prompt_snapshots[sid]`` (the
+    frozen base prompt used for prefix-cache hits on turn 2+)."""
+    loop, provider = _a7_build_loop(tmp_path, monkeypatch)
+
+    loop.memory_bridge = MagicMock()
+    loop.memory_bridge.prefetch = AsyncMock(return_value="PAST CONTEXT")
+    loop.memory_bridge.sync_turn = AsyncMock(return_value=None)
+
+    sid = "s-a7-inject"
+    await loop.run_conversation(
+        user_message="hello",
+        session_id=sid,
+        runtime=RuntimeContext(agent_context="chat"),
+    )
+
+    # (a) The model saw "PAST CONTEXT" somewhere in its system prompt.
+    call_args = provider.complete.call_args
+    system_arg = call_args.kwargs.get("system")
+    if system_arg is None:
+        # fall back to positional lookup
+        system_arg = call_args.args[1]
+    assert "PAST CONTEXT" in system_arg, (
+        f"prefetch output should be injected into system, got: {system_arg!r}"
+    )
+
+    # (b) The frozen snapshot must not contain "PAST CONTEXT" — cache invariant.
+    snapshot = loop._prompt_snapshots.get(sid)
+    assert snapshot is not None, "snapshot should be built on first turn"
+    assert "PAST CONTEXT" not in snapshot, (
+        "frozen snapshot was polluted by prefetch injection — prefix cache broken"
+    )
