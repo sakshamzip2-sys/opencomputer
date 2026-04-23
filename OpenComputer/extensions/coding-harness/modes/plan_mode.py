@@ -7,10 +7,10 @@ done separately by `hooks/plan_block.py`; this is the soft-guidance half.
 
 from __future__ import annotations
 
-from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
-
 from hooks.plan_block import DESTRUCTIVE_TOOLS  # type: ignore[import-not-found]
+
 from modes import render  # type: ignore[import-not-found]
+from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
 
 
 class PlanModeInjectionProvider(DynamicInjectionProvider):

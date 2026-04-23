@@ -7,6 +7,7 @@ Each mode is a `DynamicInjectionProvider` that renders a Jinja2 template from
 from __future__ import annotations
 
 from pathlib import Path
+
 from jinja2 import Environment, FileSystemLoader
 
 _TEMPLATE_ROOT = Path(__file__).parent.parent / "prompts"

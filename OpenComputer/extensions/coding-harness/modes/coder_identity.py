@@ -7,9 +7,8 @@ the user hasn't explicitly enabled plan or review mode.
 
 from __future__ import annotations
 
-from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
-
 from modes import render  # type: ignore[import-not-found]
+from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
 
 
 class CoderIdentityInjectionProvider(DynamicInjectionProvider):

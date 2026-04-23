@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Optional
 
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
@@ -30,7 +29,7 @@ _COMMANDS: dict[str, list[str]] = {
 }
 
 
-def _detect(root: Path) -> Optional[str]:
+def _detect(root: Path) -> str | None:
     for runner, markers in _MARKERS:
         for m in markers:
             if (root / m).exists():
@@ -105,7 +104,7 @@ class RunTestsTool(BaseTool):
             )
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
                 await proc.wait()
                 return ToolResult(

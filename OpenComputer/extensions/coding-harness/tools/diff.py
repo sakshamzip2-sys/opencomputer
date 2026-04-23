@@ -7,7 +7,6 @@ see what actually changed vs. the last known-good state.
 from __future__ import annotations
 
 import difflib
-from pathlib import Path
 
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema

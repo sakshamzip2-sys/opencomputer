@@ -25,13 +25,21 @@ from context import HarnessContext  # type: ignore[import-not-found]
 from hooks.auto_checkpoint import build_auto_checkpoint_hook_spec  # type: ignore[import-not-found]
 from hooks.cleanup_session import build_cleanup_session_hook_spec  # type: ignore[import-not-found]
 from hooks.plan_block import build_plan_mode_hook_spec  # type: ignore[import-not-found]
-from hooks.post_edit_review import build_post_edit_review_hook_spec  # type: ignore[import-not-found]
-from hooks.session_bootstrap import build_session_bootstrap_hook_spec  # type: ignore[import-not-found]
-from modes.accept_edits_mode import AcceptEditsModeInjectionProvider  # type: ignore[import-not-found]
+from hooks.post_edit_review import (
+    build_post_edit_review_hook_spec,  # type: ignore[import-not-found]
+)
+from hooks.session_bootstrap import (
+    build_session_bootstrap_hook_spec,  # type: ignore[import-not-found]
+)
+from modes.accept_edits_mode import (
+    AcceptEditsModeInjectionProvider,  # type: ignore[import-not-found]
+)
 from modes.coder_identity import CoderIdentityInjectionProvider  # type: ignore[import-not-found]
 from modes.plan_mode import PlanModeInjectionProvider  # type: ignore[import-not-found]
 from modes.review_mode import ReviewModeInjectionProvider  # type: ignore[import-not-found]
-from permissions.scope_check_hook import build_scope_check_hook_spec  # type: ignore[import-not-found]
+from permissions.scope_check_hook import (
+    build_scope_check_hook_spec,  # type: ignore[import-not-found]
+)
 from rewind.store import RewindStore  # type: ignore[import-not-found]
 from state.store import SessionStateStore  # type: ignore[import-not-found]
 from tools.background import (  # type: ignore[import-not-found]

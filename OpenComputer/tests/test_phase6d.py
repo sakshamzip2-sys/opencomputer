@@ -23,7 +23,6 @@ from plugin_sdk.hooks import HookContext, HookEvent
 from plugin_sdk.injection import InjectionContext
 from plugin_sdk.runtime_context import RuntimeContext
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_ROOT = REPO_ROOT / "extensions" / "coding-harness"
 

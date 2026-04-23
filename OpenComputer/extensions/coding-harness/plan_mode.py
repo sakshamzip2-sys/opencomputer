@@ -24,7 +24,9 @@ from hooks.plan_block import (  # type: ignore[import-not-found]  # noqa: E402
     build_plan_mode_hook_spec,
     plan_mode_block_hook,
 )
-from modes.plan_mode import PlanModeInjectionProvider  # type: ignore[import-not-found]  # noqa: E402
+from modes.plan_mode import (  # noqa: E402
+    PlanModeInjectionProvider,  # type: ignore[import-not-found]
+)
 
 PLAN_MODE_TEXT = (
     "## PLAN MODE ACTIVE\n\n"

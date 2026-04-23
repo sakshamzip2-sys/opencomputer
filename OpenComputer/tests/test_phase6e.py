@@ -23,7 +23,6 @@ import pytest
 from plugin_sdk.core import ToolCall
 from plugin_sdk.hooks import HookContext, HookEvent
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_ROOT = REPO_ROOT / "extensions" / "coding-harness"
 

@@ -11,9 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
-
 from skills.registry import discover, match_skill  # type: ignore[import-not-found]
-
 
 _SKILLS_DIR = Path(__file__).resolve().parent
 

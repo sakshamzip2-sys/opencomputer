@@ -15,7 +15,6 @@ import pytest
 
 from plugin_sdk.runtime_context import RuntimeContext
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_ROOT = REPO_ROOT / "extensions" / "coding-harness"
 
@@ -287,8 +286,9 @@ def test_skill_registry_parses_frontmatter():
 
 
 def test_skill_match_strong_overlap():
-    from skills.registry import SkillEntry, match_skill
     from pathlib import Path
+
+    from skills.registry import SkillEntry, match_skill
 
     entries = [
         SkillEntry(
@@ -316,8 +316,9 @@ def test_skill_match_strong_overlap():
 
 
 def test_skill_match_no_overlap_returns_none():
-    from skills.registry import SkillEntry, match_skill
     from pathlib import Path
+
+    from skills.registry import SkillEntry, match_skill
 
     entries = [
         SkillEntry(
@@ -333,9 +334,10 @@ def test_skill_match_no_overlap_returns_none():
 
 
 def test_skill_activation_provider_injects_on_match(monkeypatch):
-    from plugin_sdk.runtime_context import RuntimeContext
-    from plugin_sdk.injection import InjectionContext
     from skills.activation import SkillActivationInjectionProvider
+
+    from plugin_sdk.injection import InjectionContext
+    from plugin_sdk.runtime_context import RuntimeContext
 
     class _Msg:
         def __init__(self, role, content):
@@ -361,8 +363,9 @@ def test_skill_activation_provider_injects_on_match(monkeypatch):
 
 
 def test_skill_activation_provider_no_match_returns_none():
-    from plugin_sdk.injection import InjectionContext
     from skills.activation import SkillActivationInjectionProvider
+
+    from plugin_sdk.injection import InjectionContext
 
     class _Msg:
         def __init__(self, role, content):
