@@ -19,16 +19,29 @@ Commands:
   opencomputer plugin where <id>
     Print the filesystem path of an installed plugin (searches all
     known roots: profile-local → global → bundled).
+
+  opencomputer plugin enable <id>        (Phase 12b5, Sub-project E.E4)
+    Append <id> to the active profile's profile.yaml ``plugins.enabled``
+    list. Friendly no-op if already enabled. Validates <id> against the
+    currently-discovered plugins. Atomic write via tmp + os.replace.
+
+  opencomputer plugin disable <id>       (Phase 12b5, Sub-project E.E4)
+    Symmetric removal from the active profile's profile.yaml. Friendly
+    no-op if the id isn't present. Atomic write.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from pathlib import Path
+from typing import Annotated
 
 import typer
+import yaml
 from rich.console import Console
+from rich.table import Table
 
 plugin_app = typer.Typer(
     name="plugin",
@@ -430,6 +443,351 @@ def plugin_new(
         _console.print(
             "[green]✓ Smoke check passed — plugin loads cleanly.[/green]"
         )
+
+
+def _active_profile_yaml_path() -> tuple[Path, str]:
+    """Return ``(profile_yaml_path, profile_name_for_display)``.
+
+    Uses ``_home()`` (which honours ``OPENCOMPUTER_HOME``) for the profile
+    dir, and ``read_active_profile()`` for the display name. A sticky-
+    active named profile sets OPENCOMPUTER_HOME to its dir at CLI
+    startup, so ``_home()`` already points at the right place by the
+    time this runs.
+    """
+    from opencomputer.agent.config import _home
+    from opencomputer.profiles import read_active_profile
+
+    profile_dir = _home()
+    display = read_active_profile() or "default"
+    return profile_dir / "profile.yaml", display
+
+
+def _enable_search_paths() -> list[Path]:
+    """Same priority order as ``cli._discover_plugins``.
+
+    Duplicated here (rather than imported) because ``opencomputer.cli``
+    imports from this module; a reverse import would cycle. Kept in
+    step with the loop.py / cli.py copies.
+    """
+    from opencomputer.agent.config import _home
+    from opencomputer.profiles import get_default_root, read_active_profile
+
+    search_paths: list[Path] = []
+
+    active = read_active_profile()
+    default_root = get_default_root()
+    profile_dir = _home()
+
+    if active is not None:
+        profile_local = profile_dir / "plugins"
+        if profile_local.exists():
+            search_paths.append(profile_local)
+
+    global_plugins = default_root / "plugins"
+    if global_plugins.exists() and global_plugins not in search_paths:
+        search_paths.append(global_plugins)
+
+    repo_root = Path(__file__).resolve().parent.parent
+    ext_dir = repo_root / "extensions"
+    if ext_dir.exists():
+        search_paths.append(ext_dir)
+
+    return search_paths
+
+
+def _atomic_write_yaml(path: Path, data: dict) -> None:
+    """Write `data` to `path` as YAML via tmp + os.replace.
+
+    Crash-safe: a partial write lands in ``profile.yaml.tmp`` which is
+    never visible to readers. ``os.replace`` is atomic on POSIX and on
+    Windows for same-volume moves, which is always our case here.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(yaml.safe_dump(data, default_flow_style=False, sort_keys=False))
+    os.replace(tmp, path)
+
+
+def _try_clear_demand_tracker(plugin_id: str) -> None:
+    """Best-effort clear of the demand tracker's rows for ``plugin_id``.
+
+    Sub-project E.E4 design note Option A: construct a tracker directly
+    from ``cfg.session.db_path`` with a no-op discover_fn. We only need
+    ``clear()`` which doesn't invoke discover_fn at all, so there's no
+    risk of walking the filesystem. Any failure is swallowed — this is
+    a cleanup nice-to-have, not a correctness requirement.
+    """
+    try:
+        from opencomputer.agent.config import default_config
+        from opencomputer.plugins.demand_tracker import PluginDemandTracker
+
+        cfg = default_config()
+        tracker = PluginDemandTracker(
+            db_path=cfg.session.db_path,
+            discover_fn=lambda: [],  # no-op; clear() never calls this
+        )
+        tracker.clear(plugin_id)
+    except Exception:  # noqa: BLE001
+        # Intentional: the CLI should succeed even if the tracker DB
+        # isn't available (fresh install, read-only FS, etc.).
+        pass
+
+
+@plugin_app.command("enable")
+def plugin_enable(
+    plugin_id: str = typer.Argument(..., help="Plugin id to enable for the active profile."),
+) -> None:
+    """Append ``<id>`` to the active profile's ``profile.yaml``.
+
+    Validates the id against all discovered plugins (profile-local,
+    global, bundled). Writes atomically. Friendly no-op if already
+    enabled. Reminds the user to restart opencomputer since plugins are
+    loaded at AgentLoop construction time.
+    """
+    from opencomputer.plugins.discovery import discover
+
+    candidates = discover(_enable_search_paths())
+    known_ids = {c.manifest.id for c in candidates}
+    if plugin_id not in known_ids:
+        _console.print(
+            f"[red]error:[/red] unknown plugin id '{plugin_id}'. "
+            "Run `opencomputer plugins` to see installed plugins."
+        )
+        raise typer.Exit(code=1)
+
+    path, profile_name = _active_profile_yaml_path()
+
+    if path.exists():
+        raw = yaml.safe_load(path.read_text()) or {}
+        if not isinstance(raw, dict):
+            _console.print(
+                f"[red]error:[/red] {path} does not contain a YAML mapping at top level"
+            )
+            raise typer.Exit(code=1)
+    else:
+        raw = {}
+
+    plugins_block = raw.get("plugins")
+    if plugins_block is None:
+        plugins_block = {"enabled": []}
+        raw["plugins"] = plugins_block
+    elif not isinstance(plugins_block, dict):
+        _console.print(
+            f"[red]error:[/red] {path}: `plugins` must be a mapping"
+        )
+        raise typer.Exit(code=1)
+
+    enabled = plugins_block.get("enabled")
+    if enabled is None:
+        enabled = []
+        plugins_block["enabled"] = enabled
+    elif not isinstance(enabled, list):
+        _console.print(
+            f"[red]error:[/red] {path}: `plugins.enabled` must be a list"
+        )
+        raise typer.Exit(code=1)
+
+    if plugin_id in enabled:
+        _console.print(
+            f"Plugin '{plugin_id}' is already enabled for profile "
+            f"'{profile_name}'. No change."
+        )
+        raise typer.Exit(code=0)
+
+    enabled.append(plugin_id)
+
+    _atomic_write_yaml(path, raw)
+    _try_clear_demand_tracker(plugin_id)
+
+    _console.print(
+        f"[green]Enabled[/green] '{plugin_id}' for profile '{profile_name}'. "
+        "Restart opencomputer to load it."
+    )
+
+
+@plugin_app.command("disable")
+def plugin_disable(
+    plugin_id: str = typer.Argument(..., help="Plugin id to disable for the active profile."),
+) -> None:
+    """Remove ``<id>`` from the active profile's ``profile.yaml``.
+
+    Friendly no-op if the id isn't currently enabled (including when
+    profile.yaml doesn't exist yet). Writes atomically on success.
+    """
+    path, profile_name = _active_profile_yaml_path()
+
+    def _already_not_enabled() -> None:
+        _console.print(
+            f"Plugin '{plugin_id}' is not enabled for profile "
+            f"'{profile_name}'. Nothing to do."
+        )
+
+    if not path.exists():
+        _already_not_enabled()
+        raise typer.Exit(code=0)
+
+    raw = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(raw, dict):
+        _console.print(
+            f"[red]error:[/red] {path} does not contain a YAML mapping at top level"
+        )
+        raise typer.Exit(code=1)
+
+    plugins_block = raw.get("plugins")
+    if not isinstance(plugins_block, dict):
+        _already_not_enabled()
+        raise typer.Exit(code=0)
+
+    enabled = plugins_block.get("enabled")
+    if not isinstance(enabled, list) or plugin_id not in enabled:
+        _already_not_enabled()
+        raise typer.Exit(code=0)
+
+    enabled.remove(plugin_id)
+
+    _atomic_write_yaml(path, raw)
+
+    _console.print(
+        f"[green]Disabled[/green] '{plugin_id}' for profile "
+        f"'{profile_name}'. Restart opencomputer to unload it."
+    )
+
+
+@plugin_app.command("demand")
+def plugin_demand(
+    since_turns: Annotated[
+        int | None,
+        typer.Option(
+            "--since-turns",
+            help=(
+                "Only show signals from the last N turns (per-session "
+                "max_turn). Default: show everything."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """List demand signals recorded by the E2 tracker for the active DB.
+
+    Empty state prints a helpful explainer; populated state prints a
+    Rich table of ``(plugin, tool, session, turn, count)`` rows (same
+    tool-not-found firing across multiple turns aggregates into ONE row
+    with a count) plus a footer with the top-recommendation plugin.
+
+    Option-A pattern: constructs a ``PluginDemandTracker`` directly with
+    a no-op ``discover_fn`` — we only query, never insert, so
+    ``discover_fn`` + ``active_profile_plugins`` don't matter here.
+    """
+    from opencomputer.agent.config import default_config
+    from opencomputer.plugins.demand_tracker import PluginDemandTracker
+
+    cfg = default_config()
+    tracker = PluginDemandTracker(
+        db_path=cfg.session.db_path,
+        discover_fn=lambda: [],
+        active_profile_plugins=None,
+    )
+
+    signals = tracker.signals_by_plugin(session_id=None)
+
+    # Apply --since-turns filter per-session if requested. E2's
+    # recommended_plugins() helper implements similar semantics but
+    # returns per-plugin counts only; for table rendering we need the
+    # row-level detail, so we filter the dict manually here.
+    if since_turns is not None:
+        # Per-session max turn — matches the semantics used for rendering
+        # (each session's window is relative to that session's latest).
+        max_turn_by_session: dict[str, int] = {}
+        for rows in signals.values():
+            for row in rows:
+                sid = row["session_id"]
+                ti = int(row["turn_index"])
+                if sid not in max_turn_by_session or ti > max_turn_by_session[sid]:
+                    max_turn_by_session[sid] = ti
+        filtered: dict[str, list[dict]] = {}
+        for plugin_id, rows in signals.items():
+            kept = [
+                r for r in rows
+                if int(r["turn_index"])
+                >= max_turn_by_session[r["session_id"]] - since_turns
+            ]
+            if kept:
+                filtered[plugin_id] = kept
+        signals = filtered
+
+    if not signals:
+        _console.print("No demand signals recorded yet.")
+        _console.print("")
+        _console.print(
+            "Demand signals are emitted when the agent calls a tool that "
+            "isn't\nenabled in the current profile. For example, in a "
+            "profile without\ncoding-harness enabled, calls to "
+            "Edit/MultiEdit/TodoWrite/etc. would\naccumulate here as a "
+            "signal that this profile could benefit from\nthat plugin."
+        )
+        _console.print("")
+        _console.print("Enable a plugin with: opencomputer plugin enable <plugin-id>")
+        raise typer.Exit(code=0)
+
+    # Aggregate (plugin_id, tool_name, session_id) → count + latest turn.
+    # Using the latest turn per group gives the user a useful "when did
+    # this last happen" hint; total count reflects every occurrence.
+    aggregated: dict[tuple[str, str, str], dict] = {}
+    plugin_totals: dict[str, int] = {}
+    for plugin_id, rows in signals.items():
+        for row in rows:
+            key = (plugin_id, row["tool_name"], row["session_id"])
+            entry = aggregated.get(key)
+            if entry is None:
+                entry = {"count": 0, "latest_turn": int(row["turn_index"])}
+                aggregated[key] = entry
+            entry["count"] += 1
+            if int(row["turn_index"]) > entry["latest_turn"]:
+                entry["latest_turn"] = int(row["turn_index"])
+            plugin_totals[plugin_id] = plugin_totals.get(plugin_id, 0) + 1
+
+    # Sort: count desc, then plugin_id asc for stable tiebreak.
+    sorted_rows = sorted(
+        aggregated.items(),
+        key=lambda kv: (-kv[1]["count"], kv[0][0], kv[0][1], kv[0][2]),
+    )
+
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Plugin")
+    table.add_column("Tool")
+    table.add_column("Session")
+    table.add_column("Turn", justify="right")
+    table.add_column("Signals", justify="right")
+
+    for (plugin_id, tool_name, session_id), meta in sorted_rows:
+        session_short = f"{session_id[:8]}…" if len(session_id) > 8 else session_id
+        table.add_row(
+            plugin_id,
+            tool_name,
+            session_short,
+            str(meta["latest_turn"]),
+            str(meta["count"]),
+        )
+
+    _console.print(table)
+
+    # Footer: top recommendation — plugin with the highest total signal
+    # count across all tools (alphabetical tiebreaker).
+    top_plugin = min(
+        plugin_totals.items(),
+        key=lambda kv: (-kv[1], kv[0]),
+    )
+    top_id, top_count = top_plugin
+    tools_for_top = {
+        tool_name
+        for (pid, tool_name, _sid) in aggregated
+        if pid == top_id
+    }
+    _console.print("")
+    _console.print(
+        f"Top recommendation: enable '{top_id}' ({top_count} signals "
+        f"across {len(tools_for_top)} tools)."
+    )
+    _console.print(f"Run: opencomputer plugin enable {top_id}")
 
 
 __all__ = ["plugin_app"]

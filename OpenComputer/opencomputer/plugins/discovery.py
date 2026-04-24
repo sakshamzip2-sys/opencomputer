@@ -72,6 +72,8 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
         single_instance=schema.single_instance,
         # Phase 12b1 Sub-project A — Honcho-as-default
         enabled_by_default=schema.enabled_by_default,
+        # Phase 12b5 Sub-project E — tool_names for demand-driven activation
+        tool_names=tuple(schema.tool_names),
     )
 
 

@@ -7,5 +7,6 @@
   "entry": "plugin",
   "schema_version": 2,
   "profiles": ["*"],
-  "enabled_by_default": true
+  "enabled_by_default": true,
+  "tool_names": []
 }

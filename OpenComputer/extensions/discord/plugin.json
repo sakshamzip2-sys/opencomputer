@@ -6,5 +6,6 @@
   "author": "OpenComputer Contributors",
   "license": "MIT",
   "kind": "channel",
-  "entry": "plugin"
+  "entry": "plugin",
+  "tool_names": []
 }

@@ -8,5 +8,6 @@
   "kind": "provider",
   "entry": "plugin",
   "profiles": ["*"],
-  "enabled_by_default": false
+  "enabled_by_default": false,
+  "tool_names": []
 }

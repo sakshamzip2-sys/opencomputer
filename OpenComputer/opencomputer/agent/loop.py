@@ -18,9 +18,11 @@ we studied condense to this:
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import Any
 
 from opencomputer.agent.compaction import CompactionEngine
 from opencomputer.agent.config import Config
@@ -41,6 +43,22 @@ from plugin_sdk.core import Message, StopReason, ToolCall
 from plugin_sdk.injection import InjectionContext
 from plugin_sdk.provider_contract import BaseProvider
 from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
+
+_log = logging.getLogger("opencomputer.agent.loop")
+
+
+class _NoOpDemandTracker:
+    """Fallback when the real ``PluginDemandTracker`` can't be constructed.
+
+    Preserves the contract ``dispatch`` expects (a
+    ``record_tool_not_found(tool, session, turn)`` callable) so the loop
+    doesn't have to null-check. Any call is a silent no-op.
+    """
+
+    def record_tool_not_found(
+        self, tool_name: str, session_id: str, turn_index: int
+    ) -> None:
+        return None
 
 
 @dataclass(slots=True)
@@ -134,6 +152,14 @@ class AgentLoop:
             # Registry may disallow re-registration under a different name.
             # Defensive: don't blow up AgentLoop construction over this.
             pass
+
+        # Phase 12b.5 Task E3: demand tracker for "plugins raising their hand"
+        # when the agent calls tools it doesn't have. Wired into dispatch;
+        # surfaces via ``opencomputer plugin demand`` (E5) and
+        # ``opencomputer plugin enable`` (E4). Wrapped in a broad try/except
+        # because the agent loop MUST work even if demand infrastructure
+        # blows up (bad manifest, unreadable profile.yaml, etc.).
+        self.demand_tracker: Any = self._build_demand_tracker(config)
         # Per-session frozen system prompt. LRU-evicted once cache is full, so
         # long-running daemons don't retain snapshots for abandoned sessions
         # forever. Memory edits mid-session go to disk immediately but do NOT
@@ -353,6 +379,7 @@ class AgentLoop:
             tool_results = await self._dispatch_tool_calls(
                 step.assistant_message.tool_calls or [],
                 session_id=sid,
+                turn_index=iterations,
             )
             turn_messages: list[Message] = [step.assistant_message, *tool_results]
             messages.extend(turn_messages)
@@ -440,7 +467,7 @@ class AgentLoop:
     # ─── tool dispatch ─────────────────────────────────────────────
 
     async def _dispatch_tool_calls(
-        self, calls: list[ToolCall], session_id: str = ""
+        self, calls: list[ToolCall], session_id: str = "", turn_index: int = 0
     ) -> list[Message]:
         """Run all tool calls — in parallel where safe — and return result Messages.
 
@@ -475,7 +502,12 @@ class AgentLoop:
                     content=f"[blocked by PreToolUse hook: {blocked[c.id]}]",
                     is_error=True,
                 )
-            return await registry.dispatch(c)
+            return await registry.dispatch(
+                c,
+                session_id=session_id,
+                turn_index=turn_index,
+                demand_tracker=self.demand_tracker,
+            )
 
         if self.config.loop.parallel_tools and self._all_parallel_safe(calls):
             results = await asyncio.gather(*(_run_one(c) for c in calls))
@@ -499,6 +531,91 @@ class AgentLoop:
             if tool is None or not tool.parallel_safe:
                 return False
         return True
+
+    # ─── E3: demand tracker construction ───────────────────────────
+
+    @staticmethod
+    def _default_search_paths() -> list:
+        """The same search paths ``cli._discover_plugins`` walks.
+
+        Mirrored here (not imported from cli) because cli imports from the
+        agent package — a reverse import would create a cycle and the CLI
+        module has side-effects we don't want to execute inside a library
+        constructor.
+        """
+        from pathlib import Path
+
+        from opencomputer.agent.config import _home
+        from opencomputer.profiles import get_default_root, read_active_profile
+
+        search_paths: list[Path] = []
+        try:
+            active = read_active_profile()
+            default_root = get_default_root()
+            profile_dir = _home()
+
+            # 1. Profile-local (only distinct from global for named profiles)
+            if active is not None:
+                profile_local = profile_dir / "plugins"
+                if profile_local.exists():
+                    search_paths.append(profile_local)
+
+            # 2. Global
+            global_plugins = default_root / "plugins"
+            if global_plugins.exists() and global_plugins not in search_paths:
+                search_paths.append(global_plugins)
+
+            # 3. Bundled extensions/
+            repo_root = Path(__file__).resolve().parent.parent.parent
+            ext_dir = repo_root / "extensions"
+            if ext_dir.exists():
+                search_paths.append(ext_dir)
+        except Exception:  # noqa: BLE001
+            _log.debug("demand_tracker: search-path resolution failed", exc_info=True)
+        return search_paths
+
+    def _active_profile_plugins(self) -> frozenset[str] | None:
+        """Best-effort read of the active profile's enabled plugin set.
+
+        Returns ``None`` on any failure so the tracker falls back to
+        "no filter" (record signals for every matching candidate). A
+        concrete frozenset means "these plugins are already enabled; skip
+        them when recording signals".
+        """
+        try:
+            from opencomputer.agent.config import _home
+            from opencomputer.agent.profile_config import load_profile_config
+
+            cfg = load_profile_config(_home())
+            enabled = cfg.enabled_plugins
+            if enabled == "*":
+                # Wildcard = "all plugins allowed" — treat as "no specific
+                # filter" so the tracker records for any matching candidate.
+                return None
+            assert isinstance(enabled, frozenset)
+            return enabled
+        except Exception:  # noqa: BLE001
+            _log.debug("demand_tracker: profile-config read failed", exc_info=True)
+            return None
+
+    def _build_demand_tracker(self, cfg: Any) -> Any:
+        """Construct the real tracker, or fall back to a no-op shim."""
+        try:
+            from opencomputer.plugins.demand_tracker import PluginDemandTracker
+            from opencomputer.plugins.discovery import discover
+
+            search_paths = self._default_search_paths()
+            return PluginDemandTracker(
+                db_path=cfg.session.db_path,
+                discover_fn=lambda: discover(search_paths),
+                active_profile_plugins=self._active_profile_plugins(),
+            )
+        except Exception:  # noqa: BLE001
+            _log.debug(
+                "demand_tracker: construction failed; falling back to no-op",
+                exc_info=True,
+            )
+            return _NoOpDemandTracker()
 
 
 __all__ = ["AgentLoop", "ConversationResult"]
