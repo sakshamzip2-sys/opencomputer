@@ -4,6 +4,22 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project F1 — Consent layer + audit log)
+
+- **Core consent layer** (`opencomputer.agent.consent`) — non-bypassable. Lives in core (NOT in `extensions/`) because plugins can be disabled; a disable-able consent plugin would silently bypass the security boundary. The gate is invoked by `AgentLoop._dispatch_tool_calls` BEFORE any `PreToolUse` hook fires — plugin-authored hooks cannot pre-empt it.
+- **Four-tier consent model** — `ConsentTier.IMPLICIT / EXPLICIT / PER_ACTION / DELEGATED` (`plugin_sdk/consent.py`). Plus `CapabilityClaim`, `ConsentGrant`, `ConsentDecision` frozen dataclasses, re-exported from `plugin_sdk.__init__`.
+- **BaseTool.capability_claims** — new `ClassVar[tuple[CapabilityClaim, ...]]` attribute. Tools declare what they need; default empty (no gate check). F1 ships the infrastructure; F2+ attaches claims to real tools (read_files.metadata etc.).
+- **Schema migration framework** — `apply_migrations()` in `opencomputer.agent.state`. Ordered migrations `(0,1) → (1,2) → (2,3)`; v1→v2 adds II.6 `reasoning_details` + `codex_reasoning_items` columns on `messages`; v2→v3 adds `consent_grants`, `consent_counters`, `audit_log` tables. Bumps `SCHEMA_VERSION = 3`. Idempotent. Existing DBs upgrade without data loss.
+- **Append-only `audit_log` table** — SQLite triggers block `UPDATE`/`DELETE` at the engine level (tamper-evident, not tamper-proof). HMAC-SHA256 chain over `(prev_hmac ‖ canonicalized row)` catches FS-level tampering via `AuditLogger.verify_chain()`.
+- **`ConsentStore`** — SQLite-backed grant CRUD. Uses delete-then-insert (not `INSERT OR REPLACE`) because SQLite allows multiple NULLs in a PK column. Expiry enforced at read time.
+- **`AuditLogger`** — HMAC-SHA256 chain + `export_chain_head()` / `import_chain_head()` for user-side backup + `restart_chain()` for post-keyring-wipe recovery.
+- **`ProgressivePromoter`** — tracks clean vs dirty runs per `(capability, scope)`. N=10 default (high trust, per user preference). Offers Tier-2 → Tier-1 promotion at threshold; dirty run resets counter.
+- **`BypassManager`** — `OPENCOMPUTER_CONSENT_BYPASS=1` env flag for unbricking a broken gate. Banner rendered on every prompt while active.
+- **`KeyringAdapter`** — wraps `keyring` with graceful file-based fallback for environments without D-Bus/Keychain (CI, headless SSH, minimal Docker). Warns on fallback.
+- **`opencomputer consent` CLI** — `list / grant / revoke / history / verify-chain / export-chain-head / import-chain-head / bypass`. Default grant expiry: 30 days. `--expires never|session|<N>d|<N>h` overrides. Tier default: 1 (`EXPLICIT`).
+- **License boundary test** (`test_sub_f1_license_boundary.py`) — grep-based check that no `interpreter` or `openinterpreter` import appears in `opencomputer/` or `plugin_sdk/`. Guards against F7's Open Interpreter subprocess wrapper regressing into a direct AGPL import.
+- **~50 new tests** covering the above.
+
 ### Added (Phase C2 — F6 OpenCLI plugin skeleton, parallel Session C)
 
 - **`extensions/opencli-scraper/` plugin scaffold** — wraps upstream OpenCLI (Apache-2.0) for safe, consented web scraping. Per `docs/f6/design.md`. **Tools NOT registered yet** — plugin.py stub returns early; Session A wires `ConsentGate.require()` + `SignalNormalizer.publish()` and flips `enabled_by_default: true` in Phase 4 of the master plan.
