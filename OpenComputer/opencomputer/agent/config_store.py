@@ -8,6 +8,7 @@ or if a given key isn't set.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -16,9 +17,12 @@ import yaml
 
 from opencomputer.agent.config import (
     Config,
+    HookCommandConfig,
     _home,
     default_config,
 )
+
+_log = logging.getLogger("opencomputer.config")
 
 
 def config_file_path() -> Path:
@@ -101,10 +105,141 @@ def _extract_tuple_inner_type(
     return None
 
 
+def _parse_hooks_block(block: Any) -> tuple[HookCommandConfig, ...]:
+    """Convert the top-level ``hooks:`` YAML block into a flat
+    tuple of :class:`HookCommandConfig`.
+
+    III.6 — mirrors Claude Code's settings-format hook declarations
+    (``sources/claude-code/plugins/plugin-dev/skills/hook-development/SKILL.md``).
+
+    Accepts two shapes:
+
+    **Nested (event-keyed)** — matches Claude Code's settings.json layout::
+
+        hooks:
+          PreToolUse:
+            - matcher: "Edit|Write|MultiEdit"
+              command: "python3 /path/to/linter.py"
+              timeout_seconds: 10
+          Stop:
+            - command: "bash /path/to/cleanup.sh"
+
+    **Flat list** — friendlier for programmatic config generation::
+
+        hooks:
+          - event: PreToolUse
+            matcher: "Edit|Write"
+            command: "..."
+          - event: Stop
+            command: "..."
+
+    Malformed entries (missing ``command``, unknown event name, wrong types)
+    are logged at WARNING and skipped so one bad hook can't break startup.
+    ``None`` / missing block → empty tuple.
+    """
+    from plugin_sdk.hooks import HookEvent
+
+    if block is None:
+        return ()
+    valid_events = {e.value for e in HookEvent}
+
+    def _coerce(raw: dict, default_event: str | None = None) -> HookCommandConfig | None:
+        # Support both "type": "command" and no-type-field entries; reject
+        # anything else (LLM-prompt hooks aren't wired in OpenComputer yet).
+        hook_type = raw.get("type", "command")
+        if hook_type != "command":
+            _log.warning(
+                "hooks: skipping entry with unsupported type %r (only 'command' is supported): %r",
+                hook_type,
+                raw,
+            )
+            return None
+        event_name = raw.get("event", default_event)
+        if not isinstance(event_name, str) or not event_name:
+            _log.warning("hooks: skipping entry missing event name: %r", raw)
+            return None
+        if event_name not in valid_events:
+            _log.warning(
+                "hooks: skipping entry with unknown event %r (expected one of %s)",
+                event_name,
+                sorted(valid_events),
+            )
+            return None
+        command = raw.get("command")
+        if not isinstance(command, str) or not command.strip():
+            _log.warning("hooks: skipping entry missing command: %r", raw)
+            return None
+        matcher_value = raw.get("matcher")
+        if matcher_value is not None and not isinstance(matcher_value, str):
+            _log.warning("hooks: skipping entry with non-string matcher: %r", raw)
+            return None
+        timeout_value = raw.get("timeout_seconds", raw.get("timeout", 10.0))
+        try:
+            timeout_seconds = float(timeout_value)
+        except (TypeError, ValueError):
+            _log.warning(
+                "hooks: skipping entry with non-numeric timeout_seconds=%r: %r",
+                timeout_value,
+                raw,
+            )
+            return None
+        return HookCommandConfig(
+            event=event_name,
+            command=command,
+            matcher=matcher_value,
+            timeout_seconds=timeout_seconds,
+        )
+
+    parsed: list[HookCommandConfig] = []
+
+    if isinstance(block, list):
+        # Flat list — each entry must carry its own "event" field.
+        for entry in block:
+            if not isinstance(entry, dict):
+                _log.warning("hooks: skipping non-mapping list entry: %r", entry)
+                continue
+            spec = _coerce(entry)
+            if spec is not None:
+                parsed.append(spec)
+        return tuple(parsed)
+
+    if isinstance(block, dict):
+        # Nested: { "PreToolUse": [ {matcher, command, ...}, ... ], ... }
+        for event_name, entries in block.items():
+            if not isinstance(entries, list):
+                _log.warning(
+                    "hooks: skipping %r — expected list of entries, got %s",
+                    event_name,
+                    type(entries).__name__,
+                )
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    _log.warning(
+                        "hooks: skipping non-mapping entry under %r: %r",
+                        event_name,
+                        entry,
+                    )
+                    continue
+                spec = _coerce(entry, default_event=event_name)
+                if spec is not None:
+                    parsed.append(spec)
+        return tuple(parsed)
+
+    _log.warning(
+        "hooks: top-level block must be a mapping or a list, got %s; ignoring",
+        type(block).__name__,
+    )
+    return ()
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load config from YAML, applying overrides on top of defaults.
 
     Missing file or empty file → returns defaults. Invalid YAML is an error.
+
+    III.6 — the top-level ``hooks:`` block is parsed via
+    :func:`_parse_hooks_block` and merged into :attr:`Config.hooks`.
     """
     cfg_path = path or config_file_path()
     base = default_config()
@@ -116,7 +251,19 @@ def load_config(path: Path | None = None) -> Config:
         raise RuntimeError(f"Failed to parse {cfg_path}: {e}") from e
     if not isinstance(raw, dict):
         raise RuntimeError(f"Config file {cfg_path} must be a YAML mapping")
-    return _apply_overrides(base, raw)
+
+    # Extract and parse the hooks block before applying regular overrides
+    # (so the nested/list shape doesn't go through _apply_overrides, which
+    # only knows about flat tuple-of-dataclasses).
+    hooks_block = raw.pop("hooks", None)
+    parsed_hooks = _parse_hooks_block(hooks_block)
+
+    cfg = _apply_overrides(base, raw)
+    if parsed_hooks:
+        kwargs = {f.name: getattr(cfg, f.name) for f in fields(cfg)}
+        kwargs["hooks"] = parsed_hooks
+        cfg = Config(**kwargs)
+    return cfg
 
 
 # ─── save ────────────────────────────────────────────────────────
@@ -134,7 +281,7 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
             return [_encode(item) for item in v]
         return v
 
-    return {
+    result: dict[str, Any] = {
         "model": _encode(cfg.model),
         "loop": _encode(cfg.loop),
         "session": _encode(cfg.session),
@@ -142,6 +289,19 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
         "mcp": _encode(cfg.mcp),
         "tools": _encode(cfg.tools),
     }
+    # III.6 — only serialise the hooks block when non-empty so default
+    # configs stay tidy. Shape matches the nested event-keyed form users
+    # write by hand (see _parse_hooks_block for the round-trip contract).
+    if cfg.hooks:
+        hooks_by_event: dict[str, list[dict[str, Any]]] = {}
+        for h in cfg.hooks:
+            entry: dict[str, Any] = {"command": h.command}
+            if h.matcher is not None:
+                entry["matcher"] = h.matcher
+            entry["timeout_seconds"] = h.timeout_seconds
+            hooks_by_event.setdefault(h.event, []).append(entry)
+        result["hooks"] = hooks_by_event
+    return result
 
 
 def save_config(cfg: Config, path: Path | None = None) -> Path:
@@ -208,4 +368,5 @@ __all__ = [
     "save_config",
     "get_value",
     "set_value",
+    "_parse_hooks_block",
 ]
