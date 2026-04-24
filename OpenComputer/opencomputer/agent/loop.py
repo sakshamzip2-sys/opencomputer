@@ -77,6 +77,57 @@ class ConversationResult:
     output_tokens: int
 
 
+def merge_adjacent_user_messages(messages: list[Message]) -> list[Message]:
+    """Merge consecutive text-only user messages into one, joining with ``"\\n\\n"``.
+
+    IV.3 — normalize-history injection merging. Mirrors Kimi CLI's
+    ``normalize_history`` (``sources/kimi-cli/src/kimi_cli/soul/
+    dynamic_injection.py:40-66``): when multiple dynamic-injection
+    providers fire in a single turn and each appends a standalone user
+    message, the API sees N consecutive user messages instead of one.
+    Merging at the API-call boundary saves tokens and improves
+    prompt-cache hit rate.
+
+    Merge rules — both messages must satisfy ALL of:
+      * ``role == "user"``
+      * no ``tool_call_id`` (OpenComputer keeps tool results under
+        ``role="tool"``, but defensive: if any adapter put one on a
+        user message, don't merge — it would break the tool_use /
+        tool_result pair linkage that Anthropic 400s on)
+      * no ``tool_calls`` (not expected on user messages, but again
+        defensive — merging would drop the linkage)
+
+    Pure function, no side effects. Idempotent — running it twice
+    produces the same list as running it once.
+    """
+    if not messages:
+        return []
+
+    def _mergeable(m: Message) -> bool:
+        return (
+            m.role == "user"
+            and m.tool_call_id is None
+            and not m.tool_calls
+        )
+
+    out: list[Message] = []
+    for m in messages:
+        if out and _mergeable(out[-1]) and _mergeable(m):
+            prev = out[-1]
+            merged_content = (prev.content or "") + "\n\n" + (m.content or "")
+            out[-1] = Message(
+                role="user",
+                content=merged_content,
+                tool_call_id=None,
+                tool_calls=None,
+                name=prev.name or m.name,
+                reasoning=prev.reasoning or m.reasoning,
+            )
+        else:
+            out.append(m)
+    return out
+
+
 #: Max number of per-session frozen system prompts retained in memory. Long-running
 #: gateway daemons can accumulate many session_ids; this cap bounds the growth
 #: without compromising the prompt-cache invariant (any evicted session will
@@ -606,11 +657,16 @@ class AgentLoop:
         """
         model_name = model if model is not None else self.config.model.model
         tool_schemas = sort_tools_for_request(self._filtered_schemas())
+        # IV.3: normalize the message list right before the wire call.
+        # If multiple providers somehow stacked standalone user messages
+        # earlier this turn, collapse adjacent text-only users into one
+        # so the API sees a clean sequence. No-op in the common case.
+        wire_messages = merge_adjacent_user_messages(messages)
         if stream_callback is not None:
             final_response = None
             async for event in self.provider.stream_complete(
                 model=model_name,
-                messages=messages,
+                messages=wire_messages,
                 system=system,
                 tools=tool_schemas,
                 max_tokens=self.config.model.max_tokens,
@@ -626,7 +682,7 @@ class AgentLoop:
         else:
             resp = await self.provider.complete(
                 model=model_name,
-                messages=messages,
+                messages=wire_messages,
                 system=system,
                 tools=tool_schemas,
                 max_tokens=self.config.model.max_tokens,
@@ -808,4 +864,4 @@ class AgentLoop:
             return _NoOpDemandTracker()
 
 
-__all__ = ["AgentLoop", "ConversationResult"]
+__all__ = ["AgentLoop", "ConversationResult", "merge_adjacent_user_messages"]
