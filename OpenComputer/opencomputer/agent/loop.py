@@ -24,6 +24,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
+from opencomputer.agent.cheap_route import should_route_cheap
 from opencomputer.agent.compaction import CompactionEngine
 from opencomputer.agent.config import Config
 from opencomputer.agent.episodic import EpisodicMemory
@@ -274,6 +275,25 @@ class AgentLoop:
         for _iter in range(self.config.loop.max_iterations):
             iterations += 1
 
+            # D6 cheap-route gating: on iteration 0 only, if cheap_model is
+            # configured AND the heuristic fires, pass the cheap model to
+            # the provider for this turn. Subsequent iterations revert to
+            # the main model — cheap models often have capability gaps
+            # that cascade once tools start firing.
+            model_for_turn = self.config.model.model
+            cheap = self.config.model.cheap_model
+            if (
+                cheap is not None
+                and _iter == 0
+                and should_route_cheap(user_message)
+            ):
+                _log.debug(
+                    "cheap-route fired: routing first turn to %s (msg len=%d)",
+                    cheap,
+                    len(user_message),
+                )
+                model_for_turn = cheap
+
             # Compaction check — uses REAL measured tokens from prior turn.
             # First iteration (no prior measurement) skips the check.
             if self._last_input_tokens > 0:
@@ -303,7 +323,10 @@ class AgentLoop:
                     system = base_system + ("\n\n" + injected if injected else "")
 
             step = await self._run_one_step(
-                messages=messages, system=system, stream_callback=stream_callback
+                messages=messages,
+                system=system,
+                stream_callback=stream_callback,
+                model=model_for_turn,
             )
             self._last_input_tokens = step.input_tokens
             total_input += step.input_tokens
@@ -410,16 +433,22 @@ class AgentLoop:
         messages: list[Message],
         system: str,
         stream_callback=None,
+        model: str | None = None,
     ) -> StepOutcome:
         """One LLM call + classification of the result.
 
         If `stream_callback` is provided, stream_complete is used and each
         text chunk is passed to the callback synchronously.
+
+        ``model`` overrides ``config.model.model`` for this turn only —
+        used by the cheap-route gate on iteration 0. ``None`` = use the
+        config default.
         """
+        model_name = model if model is not None else self.config.model.model
         if stream_callback is not None:
             final_response = None
             async for event in self.provider.stream_complete(
-                model=self.config.model.model,
+                model=model_name,
                 messages=messages,
                 system=system,
                 tools=sort_tools_for_request(registry.schemas()),
@@ -435,7 +464,7 @@ class AgentLoop:
             resp = final_response
         else:
             resp = await self.provider.complete(
-                model=self.config.model.model,
+                model=model_name,
                 messages=messages,
                 system=system,
                 tools=sort_tools_for_request(registry.schemas()),
