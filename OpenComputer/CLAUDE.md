@@ -224,8 +224,10 @@ All committed + pushed to `main`. Current main sha: `5c62a12` (2026-04-24).
 | Adversarial follow-ups | PR #25 / `89b1e84` | Follow-ups across PRs #25-#28 (test hardening, drift guards) |
 | Sub-project E | PR #26 / `633c8eb` | Demand-driven plugin activation (E1-E6) |
 | Sub-project D tail | PR #27 / `5c62a12` | Cheap-route gating (D6) + slash-command router formalization (D8) — v1.0 candidate (2026-04-24) |
+| Drift preventers | PR #29 / `00bf48b` | Pre-v1.0 cleanup — PascalCase tool renames (CheckpointDiff, GitDiff, StartProcess, CheckOutput, KillProcess) + plugin search-path consolidation |
+| Sub-project F1 | PR #?? / (pending) | Consent layer + immutable audit log (core, non-bypassable). Schema v1→v2, 4 SDK types, 8 CLI subcommands, HMAC-chained tamper-evident audit, progressive promotion (N=10), bypass flag, AGPL-isolation grep test. Infrastructure only — F2+ attach claims to tools |
 
-**Test count:** 809 passing across 59 test files.
+**Test count:** 885 passing across 71 test files.
 
 **Bundled extensions (7):** telegram, discord, anthropic-provider, openai-provider, coding-harness, dev-tools, memory-honcho.
 
