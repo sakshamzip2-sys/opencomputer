@@ -10,7 +10,8 @@ non-bypassable.
 See ~/.claude/plans/i-want-you-to-twinkly-squirrel.md §Architectural
 approach for the full rationale (Critical #1 in the audit section).
 """
+from opencomputer.agent.consent.audit import AuditEvent, AuditLogger
 from opencomputer.agent.consent.keyring_adapter import KeyringAdapter
 from opencomputer.agent.consent.store import ConsentStore
 
-__all__ = ["ConsentStore", "KeyringAdapter"]
+__all__ = ["AuditEvent", "AuditLogger", "ConsentStore", "KeyringAdapter"]
