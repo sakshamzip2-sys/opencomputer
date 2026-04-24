@@ -34,6 +34,13 @@ Both sessions read this file at startup. Both update it after every commit.
 - `docs/evolution/*`
 - `opencomputer/evolution/prompts/*.j2`
 
+## Reserved files — Session C only (Session A + B must NOT modify)
+
+- `extensions/opencli-scraper/*`
+- `extensions/oi-capability/*` (provisional — Session A's Phase 5 refactors into `extensions/coding-harness/oi_bridge/` per `docs/f7/interweaving-plan.md`)
+- `tests/test_opencli_*.py`, `tests/test_oi_*.py`
+- `docs/f6/*`, `docs/f7/*`
+
 ## Shared files (coordinate)
 
 - `CLAUDE.md` — **Session A only** during scheduled refreshes. Session B flags changes needed via a PR to docs/evolution/README.md; Session A folds them in at next refresh.
@@ -57,7 +64,11 @@ Both sessions read this file at startup. Both update it after every commit.
 
 - `[2026-04-24 13:45] feat/hermes-evolution-b1` touched `opencomputer/evolution/*` (new subpackage), `docs/evolution/*` (new), `tests/test_evolution_*.py` (new — 5 files / 73 tests), `docs/parallel-sessions.md` (this file), `CHANGELOG.md` (append [Unreleased] entry). **Zero changes to Session-A-reserved files.** Working from git worktree at `/tmp/oc-evo` to avoid branch-cycling conflicts with Session A in the primary checkout.
 - `[2026-04-24 14:30] feat/hermes-evolution-b2` (stacked off `feat/hermes-evolution-b1`) touched `opencomputer/evolution/{reflect,synthesize,cli,entrypoint}.py`, `opencomputer/evolution/prompts/{reflect,synthesize}.j2`, `tests/test_evolution_{reflect_template,reflect_engine,synthesize_skill,cli}.py` (4 new test files / 36 new tests; -1 obsolete B1 stub test), `docs/evolution/README.md` (B1 placeholder → B2 user docs), `CHANGELOG.md` (append B2 entry under [Unreleased]). Full suite at 1070 passing. Worktree at `/tmp/oc-evo-b2`. **Zero Session-A-reserved files touched** (`opencomputer/cli.py` NOT modified — Session A wires the subapp via one-line PR per `docs/evolution/README.md`). **MERGED 2026-04-24 12:51 as `59ffa7c`** after #41 (B1) merged as `d2b13ac`.
-- `[2026-04-24 18:30] feat/hermes-evolution-b4` touched `opencomputer/evolution/{prompt_evolution,monitor}.py` (new), `opencomputer/evolution/migrations/002_evolution_b4_tables.sql` (new), `opencomputer/evolution/{storage,cli}.py` (extended), `tests/test_evolution_{storage_b4,prompt_evolution,monitor,cli_b4}.py` (4 new test files / 58 new tests), `docs/evolution/README.md` (B2 status → B4 status), `CHANGELOG.md` (append B4 entry). Full suite at 1326 passing. Worktree at `/tmp/oc-evo-b4`. **B3 explicitly skipped** — depends on Session A's `opencomputer/ingestion/bus.py` which doesn't exist yet on main. **Zero Session-A-reserved files touched.**
+- `[2026-04-24 18:30] feat/hermes-evolution-b4` touched `opencomputer/evolution/{prompt_evolution,monitor}.py` (new), `opencomputer/evolution/migrations/002_evolution_b4_tables.sql` (new), `opencomputer/evolution/{storage,cli}.py` (extended), `tests/test_evolution_{storage_b4,prompt_evolution,monitor,cli_b4}.py` (4 new test files / 58 new tests), `docs/evolution/README.md` (B2 status → B4 status), `CHANGELOG.md` (append B4 entry). Full suite at 1326 passing. Worktree at `/tmp/oc-evo-b4`. **B3 explicitly skipped** — depends on Session A's `opencomputer/ingestion/bus.py` which doesn't exist yet on main. **Zero Session-A-reserved files touched.** **MERGED 2026-04-24 13:07 as `a4bbd17`.**
+
+### Session C — active
+
+- `[2026-04-25 09:00] feat/f6-f7-c1-deep-scans` touched `docs/f6/{opencli-source-map,design,README}.md` (new — 491-line OpenCLI deep-scan + design doc with full self-audit + adversarial review + user README), `docs/f7/{oi-source-map,design,README,interweaving-plan}.md` (new — 578-line OI deep-scan + design doc + user README + Phase 5 refactor contract for Session A), `docs/parallel-sessions.md` (this file — added Session C reserved-files block + active-working entry), `CHANGELOG.md` (append C1 entry under [Unreleased]). **Docs only — no code, no tests, no plugin scaffolding yet** (those are C2/C3). **Zero Session-A or Session-B reserved files touched.** Worktree at `/tmp/oc-c1`. C2 (OpenCLI plugin skeleton) waits for Session A's PR review per the plan's stated gate "Session A reviews C1 design doc before C2/C3".
 
 ---
 
