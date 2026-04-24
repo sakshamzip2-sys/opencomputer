@@ -11,10 +11,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from plugin_sdk.core import Message
 from plugin_sdk.tool_contract import ToolSchema
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,10 +71,31 @@ class StreamEvent:
 
 
 class BaseProvider(ABC):
-    """Base class for an LLM provider plugin."""
+    """Base class for an LLM provider plugin.
+
+    Providers may optionally declare a ``config_schema`` class attribute
+    (a ``pydantic.BaseModel`` subclass) describing the shape of their
+    construction kwargs / ``self.config`` object. When set, the plugin
+    registry validates the provider's config against this schema at
+    ``register_provider`` time, raising ``ValueError`` early instead of
+    waiting for a confusing first-use failure.
+
+    Providers that don't set ``config_schema`` (the default ``None``)
+    skip registry-side validation — backwards compatible with every
+    pre-I.6 provider.
+
+    Matches the OpenClaw pattern in
+    ``sources/openclaw/src/plugins/provider-validation.ts``
+    (``normalizeRegisteredProvider``): validate shape at registration,
+    not at first request.
+    """
 
     name: str = ""
     default_model: str = ""
+    #: Optional pydantic schema describing this provider's config shape.
+    #: When non-None, the registry validates ``self.config`` against it
+    #: at ``register_provider`` time.
+    config_schema: type[BaseModel] | None = None
 
     @abstractmethod
     async def complete(
