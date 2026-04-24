@@ -307,6 +307,26 @@ Sentinel `RuntimeContext()` with defaults — used when callers don't
 care about modes. Prefer reading `ctx.runtime.plan_mode` etc. over
 constructing your own.
 
+### `RequestContext`
+
+Frozen dataclass — per-REQUEST scope populated by the gateway during a
+dispatch. Fields: `request_id` (UUID), `channel` (e.g. `"telegram"`,
+`"wire"`), `user_id`, `session_id`, `started_at` (`time.monotonic()`
+reading).
+
+Plugins read this via `api.request_context` (returns `None` outside a
+dispatch — the CLI + direct `AgentLoop` path produces no scope). The
+gateway enters a scope with `api.in_request(ctx)` around each inbound
+message. Nested scopes on one `PluginAPI` raise `RuntimeError` — one
+request in flight at a time per scope.
+
+Use cases: auth gating (check `ctx.channel` + `ctx.user_id` against an
+allowlist), rate limiting (key a token-bucket on
+`(channel, user_id)`), and activation-context queries ("am I running
+from Telegram or from the CLI right now?"). Matches OpenClaw's per-
+request plugin scope at
+`sources/openclaw/src/gateway/server-plugins.ts`.
+
 ### `DynamicInjectionProvider`
 
 Abstract base — implement `collect(ctx)` to return a string that gets

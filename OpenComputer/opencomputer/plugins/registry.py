@@ -58,6 +58,12 @@ class PluginRegistry:
     # Phase 12b.6 Task D8: plugin-authored slash commands. Shared across
     # all plugins; threaded into PluginAPI via ``api()``.
     slash_commands: dict[str, Any] = field(default_factory=dict)
+    # Task I.9: the most-recent ``PluginAPI`` handed out by ``load_all``.
+    # Gateway ``Dispatch`` reads this to wrap each request in
+    # ``api.in_request(ctx)`` so plugins can query their per-request
+    # scope. ``None`` before any ``load_all`` call — the gateway must
+    # have loaded plugins before dispatching.
+    shared_api: PluginAPI | None = None
 
     def api(self) -> PluginAPI:
         # Surface the per-profile SQLite session DB path so plugins can
@@ -98,6 +104,10 @@ class PluginRegistry:
         active_profile = read_active_profile() or "default"
         candidates = discover(search_paths)
         api = self.api()
+        # Task I.9: expose the shared api so the gateway dispatch can
+        # wrap each request in ``api.in_request(ctx)`` — plugins then
+        # see their per-request scope via ``api.request_context``.
+        self.shared_api = api
         wildcard = enabled_ids is None or enabled_ids == "*"
         for cand in candidates:
             # Layer A — manifest scope check
