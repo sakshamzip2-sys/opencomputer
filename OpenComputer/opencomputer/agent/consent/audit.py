@@ -165,3 +165,95 @@ class AuditLogger:
             capability_id="", tier=0, scope=None,
             decision="n/a", reason=reason,
         ))
+
+    # ─── 2.B.4: structured query for the `opencomputer audit show` CLI ───
+
+    def query(
+        self,
+        *,
+        capability_pattern: str | None = None,
+        since: float | None = None,
+        decision: str | None = None,
+        session_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return audit_log rows matching the given filters.
+
+        ``capability_pattern`` is interpreted as a regular expression
+        anchored with ``re.search`` against ``capability_id`` (so plain
+        substrings work too: ``read_files`` matches ``read_files.metadata``).
+        Filters compose with AND semantics. Results are ordered newest-first
+        and capped at ``limit`` rows.
+        """
+        import re
+
+        sql = (
+            "SELECT id, session_id, timestamp, actor, action, capability_id, "
+            "tier, scope, decision, reason "
+            "FROM audit_log WHERE 1=1"
+        )
+        params: list[object] = []
+        if since is not None:
+            sql += " AND timestamp >= ?"
+            params.append(since)
+        if decision is not None:
+            sql += " AND decision = ?"
+            params.append(decision)
+        if session_id is not None:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(int(limit))
+
+        rows = self._conn.execute(sql, params).fetchall()
+        cols = (
+            "id", "session_id", "timestamp", "actor", "action",
+            "capability_id", "tier", "scope", "decision", "reason",
+        )
+        out = [dict(zip(cols, r, strict=True)) for r in rows]
+
+        if capability_pattern is not None:
+            try:
+                regex = re.compile(capability_pattern)
+            except re.error:
+                # Fall back to literal substring on invalid regex.
+                out = [r for r in out if capability_pattern in r["capability_id"]]
+            else:
+                out = [r for r in out if regex.search(r["capability_id"])]
+        return out
+
+    def verify_chain_detailed(self) -> tuple[bool, int]:
+        """Like :meth:`verify_chain` but also returns row-count info.
+
+        Returns ``(ok, count)`` where ``count`` is:
+          - the number of rows successfully verified when ``ok`` is True
+          - the row id of the first row that failed when ``ok`` is False
+            (0 means the very first row already breaks vs GENESIS)
+        Used by the ``opencomputer audit verify`` CLI to print a useful
+        diagnostic ("Chain intact (N rows verified)" or "Chain broken at row K").
+        """
+        prev = GENESIS_HMAC
+        verified = 0
+        for row in self._conn.execute(
+            "SELECT id, prev_hmac, row_hmac, session_id, timestamp, actor, action, "
+            "capability_id, tier, scope, decision, reason "
+            "FROM audit_log ORDER BY id"
+        ):
+            row_id = int(row[0])
+            if row[1] != prev:
+                return False, row_id
+            evt = AuditEvent(
+                session_id=row[3], actor=row[5], action=row[6],
+                capability_id=row[7], tier=row[8], scope=row[9],
+                decision=row[10], reason=row[11],
+            )
+            expected = hmac.new(
+                self._key,
+                self._canonicalize(evt, row[4], row[1]).encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            if expected != row[2]:
+                return False, row_id
+            prev = row[2]
+            verified += 1
+        return True, verified

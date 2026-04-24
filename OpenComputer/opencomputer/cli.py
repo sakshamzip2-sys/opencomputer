@@ -765,6 +765,11 @@ from opencomputer.cli_consent import consent_app  # noqa: E402
 
 app.add_typer(consent_app, name="consent")
 
+# Sub-project F1 2.B.4 — audit-log viewer (`audit show` / `audit verify`)
+from opencomputer.cli_audit import audit_app  # noqa: E402
+
+app.add_typer(audit_app, name="audit")
+
 
 @config_app.command("show")
 def config_show() -> None:
