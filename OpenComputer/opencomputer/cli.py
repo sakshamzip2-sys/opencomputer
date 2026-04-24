@@ -636,6 +636,11 @@ from opencomputer.cli_plugin import plugin_app  # noqa: E402
 
 app.add_typer(plugin_app, name="plugin")
 
+# Task II.3 — channel directory list CLI
+from opencomputer.cli_channels import channels_app  # noqa: E402
+
+app.add_typer(channels_app, name="channels")
+
 
 @config_app.command("show")
 def config_show() -> None:

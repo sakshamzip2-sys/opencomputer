@@ -27,6 +27,7 @@ from plugin_sdk.core import MessageEvent
 from plugin_sdk.runtime_context import RequestContext
 
 if TYPE_CHECKING:
+    from opencomputer.gateway.channel_directory import ChannelDirectory
     from opencomputer.plugins.loader import PluginAPI
 
 logger = logging.getLogger("opencomputer.gateway.dispatch")
@@ -39,6 +40,7 @@ class Dispatch:
         self,
         loop: AgentLoop,
         plugin_api: PluginAPI | None = None,
+        channel_directory: ChannelDirectory | None = None,
     ) -> None:
         self.loop = loop
         # One lock per chat_id — prevents interleaved turns from the same chat
@@ -50,6 +52,11 @@ class Dispatch:
         # existing CLI test paths constructing Dispatch without a
         # plugin_api keep working.
         self._plugin_api: PluginAPI | None = plugin_api
+        # Task II.3: channel directory cache. Records every inbound
+        # MessageEvent's (platform, chat_id, display_name) so future
+        # send-message tools can resolve friendly names instead of raw
+        # numeric ids. ``None`` is fine — record() becomes a no-op.
+        self._channel_directory: ChannelDirectory | None = channel_directory
 
     def register_adapter(self, platform: str, adapter) -> None:
         self._adapters_by_platform[platform] = adapter
@@ -71,7 +78,34 @@ class Dispatch:
         the ``run_conversation`` call in ``plugin_api.in_request(ctx)``
         so plugins can query their per-request scope. Empty-text
         early-return skips the wrap entirely (no work → no scope).
+
+        Task II.3 — before touching the agent loop, we record this
+        event into the channel directory so future send-message tools
+        can resolve friendly names instead of raw chat ids. Failures
+        are swallowed at WARNING level — the directory is best-effort
+        metadata and must never take dispatch down.
         """
+        # Task II.3: cache the inbound channel. Best-effort; don't let a
+        # write failure (full disk, permissions) break the reply path.
+        if self._channel_directory is not None:
+            try:
+                display_name = None
+                if event.metadata:
+                    raw = event.metadata.get("display_name")
+                    if isinstance(raw, str) and raw.strip():
+                        display_name = raw
+                self._channel_directory.record(
+                    platform=event.platform.value if event.platform else "",
+                    chat_id=event.chat_id,
+                    display_name=display_name,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "channel_directory record failed for %s:%s — %s",
+                    getattr(event.platform, "value", "?"),
+                    event.chat_id,
+                    e,
+                )
         if not event.text.strip():
             return None
         session_id = self._session_id_for(event)
