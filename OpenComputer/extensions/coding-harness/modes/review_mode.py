@@ -18,7 +18,7 @@ class ReviewModeInjectionProvider(DynamicInjectionProvider):
     def provider_id(self) -> str:
         return "coding-harness:review-mode"
 
-    def collect(self, ctx: InjectionContext) -> str | None:
+    async def collect(self, ctx: InjectionContext) -> str | None:
         if not ctx.runtime.custom.get("review_mode"):
             return None
         return render("review_mode.j2")

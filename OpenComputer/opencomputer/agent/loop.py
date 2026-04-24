@@ -268,13 +268,14 @@ class AgentLoop:
                 self._prompt_snapshots.move_to_end(sid)
             base_system = snapshot
 
-        # Collect dynamic injections (plan_mode, yolo_mode, etc. from plugins)
+        # Collect dynamic injections (plan_mode, yolo_mode, etc. from plugins).
+        # ``compose`` is async — providers gather concurrently (IV.1 refactor).
         inj_ctx = InjectionContext(
             messages=tuple(messages),
             runtime=self._runtime,
             session_id=sid,
         )
-        injected = injection_engine.compose(inj_ctx)
+        injected = await injection_engine.compose(inj_ctx)
         system = base_system + ("\n\n" + injected if injected else "")
 
         # Append user message + persist
@@ -351,7 +352,7 @@ class AgentLoop:
                         runtime=self._runtime,
                         session_id=sid,
                     )
-                    injected = injection_engine.compose(inj_ctx)
+                    injected = await injection_engine.compose(inj_ctx)
                     system = base_system + ("\n\n" + injected if injected else "")
 
             step = await self._run_one_step(

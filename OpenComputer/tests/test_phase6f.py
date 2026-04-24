@@ -338,7 +338,7 @@ def test_skill_activation_provider_injects_on_match(monkeypatch):
     from skills.activation import SkillActivationInjectionProvider
 
     from plugin_sdk.injection import InjectionContext
-    from plugin_sdk.runtime_context import RuntimeContext
+    from plugin_sdk.runtime_context import RuntimeContext  # noqa: F401
 
     class _Msg:
         def __init__(self, role, content):
@@ -357,7 +357,7 @@ def test_skill_activation_provider_injects_on_match(monkeypatch):
         ),
         runtime=_mutable_runtime(),
     )
-    out = provider.collect(ctx)
+    out = asyncio.run(provider.collect(ctx))
     assert out is not None
     assert "Activated skill" in out
     assert "Code reviewer" in out or "reviewer" in out.lower()
@@ -380,4 +380,4 @@ def test_skill_activation_provider_no_match_returns_none():
         messages=(_Msg("user", "what is the weather today"),),
         runtime=_mutable_runtime(),
     )
-    assert provider.collect(ctx) is None
+    assert asyncio.run(provider.collect(ctx)) is None

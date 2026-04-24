@@ -1,16 +1,26 @@
-"""
-InjectionEngine — queries all registered DynamicInjectionProviders per turn.
+"""InjectionEngine — queries all registered DynamicInjectionProviders per turn.
 
 Deterministic ordering (priority asc, then provider_id asc) so repeated turns
 with the same state produce the same system prompt. Critical for prompt cache
 stability on the LLM side.
+
+Providers run concurrently via ``asyncio.gather``. ``collect_all`` is the
+modern async entry point; ``compose`` is the async convenience wrapper that
+joins results with a separator. A sync ``collect`` shim is preserved for the
+legacy test suite — it uses ``asyncio.run`` internally and will raise if
+called from inside a running event loop.
 
 Providers register via `opencomputer.plugins.loader.PluginAPI.register_injection_provider`.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
+
+_log = logging.getLogger("opencomputer.agent.injection")
 
 
 class InjectionEngine:
@@ -31,26 +41,65 @@ class InjectionEngine:
     def providers(self) -> list[DynamicInjectionProvider]:
         return list(self._providers.values())
 
-    def collect(self, ctx: InjectionContext) -> list[str]:
-        """Call each provider, return non-empty injections in deterministic order."""
-        # Deterministic: sort by (priority, provider_id). Same inputs → same output.
-        ordered = sorted(
+    def _ordered(self) -> list[DynamicInjectionProvider]:
+        """Deterministic ordering: priority asc, then provider_id asc."""
+        return sorted(
             self._providers.values(),
             key=lambda p: (p.priority, p.provider_id),
         )
+
+    async def collect_all(self, ctx: InjectionContext) -> list[str]:
+        """Gather every provider concurrently, return non-empty injections in order.
+
+        Providers run via ``asyncio.gather(..., return_exceptions=True)`` so a
+        single misbehaving provider never blocks the turn. Exceptions are
+        logged at DEBUG and that provider's contribution is dropped — the
+        order of surviving contributions is preserved.
+        """
+        ordered = self._ordered()
+        if not ordered:
+            return []
+
+        results = await asyncio.gather(
+            *(p.collect(ctx) for p in ordered),
+            return_exceptions=True,
+        )
+
         out: list[str] = []
-        for p in ordered:
-            try:
-                text = p.collect(ctx)
-            except Exception:  # noqa: BLE001 — providers never break the loop
+        for provider, res in zip(ordered, results, strict=True):
+            if isinstance(res, BaseException):
+                _log.debug(
+                    "injection provider %r raised; skipping",
+                    provider.provider_id,
+                    exc_info=res,
+                )
                 continue
-            if text and text.strip():
-                out.append(text.strip())
+            if res and res.strip():
+                out.append(res.strip())
         return out
 
-    def compose(self, ctx: InjectionContext, separator: str = "\n\n") -> str:
-        """Convenience: collect() + join."""
-        return separator.join(self.collect(ctx))
+    async def compose(self, ctx: InjectionContext, separator: str = "\n\n") -> str:
+        """Convenience: ``collect_all()`` + join with ``separator``."""
+        return separator.join(await self.collect_all(ctx))
+
+    def collect(self, ctx: InjectionContext) -> list[str]:
+        """Sync shim over ``collect_all`` for callers outside an event loop.
+
+        This exists solely so pre-refactor callers (unit tests, occasional
+        synchronous diagnostic hooks) keep working. It will raise
+        ``RuntimeError`` if called while an event loop is already running —
+        use ``await collect_all(ctx)`` from async contexts.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            raise RuntimeError(
+                "InjectionEngine.collect() cannot be called from within a running "
+                "event loop — use `await engine.collect_all(ctx)` instead."
+            )
+        return asyncio.run(self.collect_all(ctx))
 
 
 #: Global singleton (matches tool_registry pattern)
