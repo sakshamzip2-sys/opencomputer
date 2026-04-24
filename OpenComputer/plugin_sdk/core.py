@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 # ─── Message / conversation primitives ─────────────────────────────────
 
@@ -142,6 +142,58 @@ class PluginManifest:
     tool_names: tuple[str, ...] = ()
 
 
+# ─── Plugin activation source (Task I.7) ───────────────────────────────
+
+PluginActivationSource = Literal[
+    "bundled",
+    "global_install",
+    "profile_local",
+    "workspace_overlay",
+    "user_enable",
+    "auto_enable_default",
+    "auto_enable_demand",
+]
+"""Why a plugin was activated this process — surfaced on ``PluginAPI``.
+
+Mirrors OpenClaw's ``createPluginActivationSource`` pattern at
+``sources/openclaw/src/plugins/config-state.ts``. Plugins can read
+``api.activation_source`` inside ``register(api)`` and behave differently
+based on WHY they were enabled (e.g. log at INFO when user-enabled,
+at DEBUG when auto-enabled).
+
+Values:
+
+* ``bundled``             — shipped under ``extensions/`` (auto-active
+                            per manifest ``enabled_by_default`` or the
+                            active profile's preset).
+* ``global_install``      — user installed via
+                            ``opencomputer plugin install --global``.
+* ``profile_local``       — user installed into the active profile's
+                            plugin directory.
+* ``workspace_overlay``   — enabled via ``.opencomputer/config.yaml``
+                            in the current workspace (Phase 14.N).
+* ``user_enable``         — explicit ``opencomputer plugin enable <id>``
+                            toggled the plugin on in the active profile.
+* ``auto_enable_default`` — manifest ``enabled_by_default: true`` on
+                            fresh install (first-run wizard path).
+* ``auto_enable_demand``  — demand-driven activation (Sub-project E:
+                            a tool-not-found signal resolved to this
+                            plugin via ``tool_names`` and the user
+                            accepted the auto-enable prompt).
+"""
+
+
+VALID_ACTIVATION_SOURCES: frozenset[str] = frozenset(get_args(PluginActivationSource))
+"""Materialised tuple of ``PluginActivationSource`` values for runtime checks.
+
+``Literal`` is erased at runtime, so callers that want to validate a
+string argument (``PluginAPI.__init__``) need a concrete set. This is
+the single source of truth — both the Literal and the set are
+maintained together; updating one without the other is caught by
+``test_activation_source_literal_exports_seven_values``.
+"""
+
+
 # ─── Stop reasons ──────────────────────────────────────────────────────
 
 
@@ -184,6 +236,8 @@ __all__ = [
     "MessageEvent",
     "SendResult",
     "PluginManifest",
+    "PluginActivationSource",
+    "VALID_ACTIVATION_SOURCES",
     "StopReason",
     "SingleInstanceError",
 ]

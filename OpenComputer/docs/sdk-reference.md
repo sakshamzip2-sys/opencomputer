@@ -77,6 +77,29 @@ plugins rarely construct one by hand. Fields map 1:1 to manifest
 keys — see [`plugin-authors.md`](./plugin-authors.md) §2 for the
 "when to set" table.
 
+### `PluginActivationSource`
+
+`Literal` describing WHY the plugin was activated this process. Core
+threads the origin through `PluginAPI.activation_source` so
+`register(api)` can adapt — e.g. verbose onboarding on `user_enable`,
+quiet on `auto_enable_demand`. The seven values are: `bundled`,
+`global_install`, `profile_local`, `workspace_overlay`, `user_enable`,
+`auto_enable_default`, `auto_enable_demand`. Mirrors OpenClaw's
+`createPluginActivationSource` at
+`sources/openclaw/src/plugins/config-state.ts`.
+
+```python
+def register(api):
+    if api.activation_source == "user_enable":
+        api.hooks.notify("thanks for enabling <plugin>!")
+    elif api.activation_source == "auto_enable_demand":
+        # Quiet — the user didn't explicitly ask for us.
+        pass
+```
+
+Default is `"bundled"` — backwards compatible for every
+`extensions/*` plugin shipped before I.7.
+
 ### `StopReason`
 
 Enum of reasons a turn ended: `END_TURN`, `TOOL_USE`, `MAX_TOKENS`,

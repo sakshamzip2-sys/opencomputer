@@ -14,6 +14,7 @@ from plugin_sdk.core import (
     Message,
     MessageEvent,
     Platform,
+    PluginActivationSource,
     PluginManifest,
     Role,
     SendResult,
@@ -60,6 +61,7 @@ __all__ = [
     "MessageEvent",
     "SendResult",
     "PluginManifest",
+    "PluginActivationSource",
     "StopReason",
     "SingleInstanceError",
     # contracts
