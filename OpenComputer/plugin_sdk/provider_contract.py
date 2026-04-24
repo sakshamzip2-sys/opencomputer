@@ -11,7 +11,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from plugin_sdk.core import Message
 from plugin_sdk.tool_contract import ToolSchema
@@ -29,11 +29,27 @@ class Usage:
 
 @dataclass(frozen=True, slots=True)
 class ProviderResponse:
-    """The result of calling `provider.complete(...)`."""
+    """The result of calling `provider.complete(...)`.
+
+    Reasoning fields (default ``None``) let reasoning-capable providers
+    (OpenAI o1 / o3, Anthropic extended thinking, Nous, OpenRouter)
+    surface the reasoning chain alongside the assistant message so the
+    agent loop can persist it into SessionDB. Providers that don't
+    expose reasoning (standard Opus/Sonnet completions, stock OpenAI
+    chat completions) leave these ``None`` — no behaviour change.
+
+    * ``reasoning``             — reasoning TEXT.
+    * ``reasoning_details``     — structured OpenRouter / Nous array.
+    * ``codex_reasoning_items`` — OpenAI o1/o3 reasoning items for
+                                  verbatim replay.
+    """
 
     message: Message  # the assistant message, possibly containing tool_calls
     stop_reason: str  # "end_turn" | "tool_use" | "max_tokens" | ...
     usage: Usage
+    reasoning: str | None = None
+    reasoning_details: Any = None  # list[dict[str, Any]] | None
+    codex_reasoning_items: Any = None  # list[dict[str, Any]] | None
 
 
 @dataclass(frozen=True, slots=True)

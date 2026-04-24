@@ -22,7 +22,12 @@ from typing import Any
 
 from plugin_sdk.core import Message, ToolCall
 
-SCHEMA_VERSION = 1
+#: Incremented when the SQLite schema is extended. Migration at open
+#: time compares ``SELECT version FROM schema_version`` against this
+#: constant and fires idempotent ``ALTER TABLE`` statements for columns
+#: added since. Existing rows keep their data — new columns default to
+#: NULL for older messages.
+SCHEMA_VERSION = 2
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -42,15 +47,17 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE TABLE IF NOT EXISTS messages (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id    TEXT NOT NULL,
-    role          TEXT NOT NULL,
-    content       TEXT NOT NULL,
-    tool_call_id  TEXT,
-    tool_calls    TEXT,   -- JSON array if role=assistant + tool calls
-    name          TEXT,   -- tool name for role=tool
-    reasoning     TEXT,   -- extended thinking
-    timestamp     REAL NOT NULL,
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id             TEXT NOT NULL,
+    role                   TEXT NOT NULL,
+    content                TEXT NOT NULL,
+    tool_call_id           TEXT,
+    tool_calls             TEXT,   -- JSON array if role=assistant + tool calls
+    name                   TEXT,   -- tool name for role=tool
+    reasoning              TEXT,   -- extended thinking (free-form text)
+    reasoning_details      TEXT,   -- II.6: JSON, OpenRouter/Nous structured array
+    codex_reasoning_items  TEXT,   -- II.6: JSON, OpenAI o1/o3 reasoning items
+    timestamp              REAL NOT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
@@ -146,8 +153,34 @@ class SessionDB:
             conn.executescript(DDL)
             cur = conn.execute("SELECT version FROM schema_version LIMIT 1")
             row = cur.fetchone()
+            current = int(row[0]) if row is not None else 0
             if row is None:
-                conn.execute("INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
+                conn.execute(
+                    "INSERT INTO schema_version(version) VALUES (?)",
+                    (SCHEMA_VERSION,),
+                )
+                current = SCHEMA_VERSION
+
+            # v1 → v2 (II.6): reasoning_details + codex_reasoning_items.
+            # Pre-existing DBs only carry ``reasoning TEXT`` on messages;
+            # ALTER TABLE adds the two new columns so round-tripping of
+            # OpenRouter-style reasoning metadata works after upgrade.
+            # SQLite ALTER TABLE ADD COLUMN is non-destructive and fast
+            # (no table rewrite) — safe to run on large legacy DBs.
+            if current < 2:
+                for col_name in ("reasoning_details", "codex_reasoning_items"):
+                    try:
+                        conn.execute(
+                            f'ALTER TABLE messages ADD COLUMN "{col_name}" TEXT'
+                        )
+                    except sqlite3.OperationalError:
+                        # Column already exists (e.g. fresh DB built from
+                        # the v2 DDL above, or prior partial migration).
+                        pass
+                conn.execute(
+                    "UPDATE schema_version SET version = ?",
+                    (SCHEMA_VERSION,),
+                )
 
     @contextmanager
     def _txn(self) -> Iterator[sqlite3.Connection]:
@@ -213,6 +246,21 @@ class SessionDB:
             if msg.tool_calls
             else None
         )
+        # II.6: reasoning structured fields serialise as JSON.
+        # ``None`` (no reasoning, or non-reasoning provider) stays NULL;
+        # non-None lists/dicts are JSON-dumped so ``get_messages`` can
+        # load them back with ``json.loads``. No fallback coercion — if
+        # a caller passes an un-JSON-able object, let the error surface.
+        reasoning_details_json = (
+            json.dumps(msg.reasoning_details)
+            if msg.reasoning_details is not None
+            else None
+        )
+        codex_items_json = (
+            json.dumps(msg.codex_reasoning_items)
+            if msg.codex_reasoning_items is not None
+            else None
+        )
         return (
             session_id,
             msg.role,
@@ -221,15 +269,25 @@ class SessionDB:
             tool_calls_json,
             msg.name,
             msg.reasoning,
+            reasoning_details_json,
+            codex_items_json,
             time.time(),
         )
+
+    #: Shared INSERT statement for the messages table. Kept as a module
+    #: constant so ``append_message`` + ``append_messages_batch`` agree
+    #: on column order — mismatch is a class of bug worth designing out.
+    _INSERT_MESSAGE_SQL = (
+        "INSERT INTO messages "
+        "(session_id, role, content, tool_call_id, tool_calls, name, "
+        "reasoning, reasoning_details, codex_reasoning_items, timestamp) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
 
     def append_message(self, session_id: str, msg: Message) -> int:
         with self._txn() as conn:
             cur = conn.execute(
-                "INSERT INTO messages "
-                "(session_id, role, content, tool_call_id, tool_calls, name, reasoning, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                self._INSERT_MESSAGE_SQL,
                 self._msg_row(session_id, msg),
             )
             conn.execute(
@@ -252,9 +310,7 @@ class SessionDB:
             ids: list[int] = []
             for msg in msgs:
                 cur = conn.execute(
-                    "INSERT INTO messages "
-                    "(session_id, role, content, tool_call_id, tool_calls, name, reasoning, timestamp) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    self._INSERT_MESSAGE_SQL,
                     self._msg_row(session_id, msg),
                 )
                 ids.append(int(cur.lastrowid or 0))
@@ -267,7 +323,8 @@ class SessionDB:
     def get_messages(self, session_id: str) -> list[Message]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT role, content, tool_call_id, tool_calls, name, reasoning "
+                "SELECT role, content, tool_call_id, tool_calls, name, "
+                "reasoning, reasoning_details, codex_reasoning_items "
                 "FROM messages WHERE session_id = ? ORDER BY id",
                 (session_id,),
             ).fetchall()
@@ -279,6 +336,21 @@ class SessionDB:
                 tool_calls = [
                     ToolCall(id=tc["id"], name=tc["name"], arguments=tc["arguments"]) for tc in raw
                 ]
+            # II.6: deserialise reasoning_details / codex_reasoning_items
+            # if present. Tolerate bad JSON defensively — a corrupt column
+            # should never break conversation resume, just drop the field.
+            reasoning_details: Any = None
+            if r["reasoning_details"]:
+                try:
+                    reasoning_details = json.loads(r["reasoning_details"])
+                except (json.JSONDecodeError, TypeError):
+                    reasoning_details = None
+            codex_items: Any = None
+            if r["codex_reasoning_items"]:
+                try:
+                    codex_items = json.loads(r["codex_reasoning_items"])
+                except (json.JSONDecodeError, TypeError):
+                    codex_items = None
             out.append(
                 Message(
                     role=r["role"],
@@ -287,6 +359,8 @@ class SessionDB:
                     tool_calls=tool_calls,
                     name=r["name"],
                     reasoning=r["reasoning"],
+                    reasoning_details=reasoning_details,
+                    codex_reasoning_items=codex_items,
                 )
             )
         return out
