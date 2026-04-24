@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Final
 
@@ -65,3 +66,16 @@ class KeyringAdapter:
             data = json.loads(self._fallback_path.read_text())
         data[key] = value
         self._fallback_path.write_text(json.dumps(data, indent=2))
+        # The fallback file holds the HMAC chain key in plaintext. On
+        # multi-user systems (Linux server, shared host), default 0644 lets
+        # other users read and forge audit entries. Restrict to owner r/w.
+        # chmod is best-effort — Windows & some network filesystems may not
+        # support it.
+        try:
+            os.chmod(self._fallback_path, 0o600)
+        except OSError as e:
+            logger.warning(
+                "could not chmod 0600 on %s (%s); fallback secret may be "
+                "world-readable",
+                self._fallback_path, e,
+            )

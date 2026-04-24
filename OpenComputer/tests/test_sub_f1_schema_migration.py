@@ -1,4 +1,4 @@
-"""Schema migration framework for v1 → v2 (consent tables)."""
+"""Schema migration framework: v1 baseline → v2 (II.6 reasoning columns) → v3 (F1 consent tables)."""
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -20,11 +20,15 @@ def _fresh_conn() -> sqlite3.Connection:
     return conn
 
 
-def test_schema_version_is_2():
-    assert SCHEMA_VERSION == 2
+def test_schema_version_is_3():
+    # v1 = baseline; v2 = II.6 reasoning-chain metadata columns on ``messages``;
+    # v3 = F1 consent tables. Re-numbering from F1's original v2 happened when
+    # F1 was rebased onto main in the Phase 2 inherit — II.6 had already
+    # claimed v2 in the interim.
+    assert SCHEMA_VERSION == 3
 
 
-def test_apply_migrations_on_fresh_db_creates_all_v2_tables():
+def test_apply_migrations_on_fresh_db_creates_all_tables():
     conn = _fresh_conn()
     apply_migrations(conn)
     cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -33,7 +37,7 @@ def test_apply_migrations_on_fresh_db_creates_all_v2_tables():
     assert "sessions" in tables
     assert "messages" in tables
     assert "episodic_events" in tables
-    # new v2 tables
+    # F1 consent-layer tables (added in v3)
     assert "consent_grants" in tables
     assert "consent_counters" in tables
     assert "audit_log" in tables
@@ -43,7 +47,7 @@ def test_apply_migrations_is_idempotent():
     conn = _fresh_conn()
     apply_migrations(conn)
     apply_migrations(conn)  # second call should be a no-op
-    assert _read_schema_version(conn) == 2
+    assert _read_schema_version(conn) == 3
 
 
 def test_existing_v1_db_migrates_with_data_preserved():
@@ -59,7 +63,7 @@ def test_existing_v1_db_migrates_with_data_preserved():
     conn.commit()
 
     apply_migrations(conn)
-    assert _read_schema_version(conn) == 2
+    assert _read_schema_version(conn) == 3
     got = conn.execute("SELECT id FROM sessions WHERE id='s1'").fetchone()
     assert got == ("s1",)  # data preserved
 

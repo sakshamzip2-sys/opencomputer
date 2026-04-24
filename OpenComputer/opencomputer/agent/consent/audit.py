@@ -125,11 +125,23 @@ class AuditLogger:
         Path(path).write_text(json.dumps(payload, indent=2))
 
     def import_chain_head(self, path: Path) -> None:
-        """Verify a backed-up chain head still matches the current DB.
+        """Verify the full chain AND that the backed-up head still matches.
 
-        Raises ValueError if the row at `row_id` does not match the expected
-        `row_hmac`. Informational only — doesn't mutate the DB.
+        Two-step check:
+          1. `verify_chain()` — the chain itself must be intact from genesis.
+             Without this, an attacker could delete rows 50-99 and leave row
+             100's hmac intact; the old single-row check would pass.
+          2. The row at `row_id` must still have `row_hmac` matching the
+             backup — detects tampering AT the backed-up row.
+
+        Raises ValueError on either failure. Informational only — doesn't
+        mutate the DB.
         """
+        if not self.verify_chain():
+            raise ValueError(
+                "audit chain is broken — rows have been tampered with or "
+                "removed; cannot verify backup against a compromised DB"
+            )
         payload = json.loads(Path(path).read_text())
         if payload["row_id"] == 0:
             # No rows to verify — accept.

@@ -75,3 +75,36 @@ def test_restart_chain_appends_marker():
         "SELECT actor, action, reason FROM audit_log ORDER BY id DESC LIMIT 1"
     ).fetchone()
     assert rows == ("system", "chain_restart", "keyring_wipe_recovery")
+
+
+# ─── M2 regression: import_chain_head must verify full chain ───
+
+
+def test_import_chain_head_rejects_broken_chain(tmp_path):
+    """M2 regression — single-row match is insufficient if chain is broken.
+
+    Attack: drop rows from middle of log, leave the backed-up row intact.
+    Old implementation: only checked the backup row's hmac → FALSELY passes.
+    New implementation: calls verify_chain() first → detects tampering.
+    """
+    c = sqlite3.connect(tmp_path / "t.db", check_same_thread=False)
+    apply_migrations(c)
+    log = AuditLogger(c, hmac_key=b"k" * 16)
+    for _ in range(5):
+        log.append(AuditEvent("s1", "user", "grant", "x", 1, None, "allow", ""))
+    backup = tmp_path / "head.json"
+    log.export_chain_head(backup)
+
+    # Simulate FS-level tampering — drop a middle row via raw SQL.
+    # (Bypass the append-only triggers by dropping them first, mimicking
+    # what a user with shell access to the DB file could do.)
+    c.execute("DROP TRIGGER IF EXISTS audit_log_no_delete")
+    c.execute("DROP TRIGGER IF EXISTS audit_log_no_update")
+    c.commit()
+    c.execute("DELETE FROM audit_log WHERE id=3")
+    c.commit()
+
+    # Even though the backup's row_id (5) still exists with matching hmac,
+    # the chain is broken at row 3 — import_chain_head must reject.
+    with pytest.raises(ValueError, match="chain"):
+        log.import_chain_head(backup)

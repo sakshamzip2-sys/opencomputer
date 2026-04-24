@@ -97,3 +97,57 @@ def test_check_returns_audit_event_id():
         (d.audit_event_id,),
     ).fetchone()
     assert row == ("check", "deny")
+
+
+# ─── H1 regression: path-anchored prefix match (no scope escape) ───
+
+
+def test_prefix_match_rejects_scope_escape():
+    """Regression for review finding H1. A grant on `/Users/saksham/Projects`
+    must NOT allow a call on `/Users/saksham/Projects-secret/anything` —
+    that's a scope escape bug (`startswith` is too permissive without anchor).
+    """
+    c, store, log, gate = _setup()
+    store.upsert(ConsentGrant(
+        "read_files", ConsentTier.EXPLICIT,
+        "/Users/saksham/Projects", time.time(), None, "user",
+    ))
+    claim = CapabilityClaim("read_files", ConsentTier.EXPLICIT, "")
+    # Legitimate subpath: allowed
+    allowed = gate.check(
+        claim, scope="/Users/saksham/Projects/foo.py", session_id="s1",
+    )
+    assert allowed.allowed is True
+    # Scope escape attempt: must be denied
+    denied = gate.check(
+        claim, scope="/Users/saksham/Projects-secret/.env", session_id="s1",
+    )
+    assert denied.allowed is False, (
+        "scope escape: /Projects-secret must NOT match grant on /Projects"
+    )
+
+
+def test_prefix_match_allows_exact_directory_match():
+    """A grant on a directory path must also match the directory itself."""
+    c, store, log, gate = _setup()
+    store.upsert(ConsentGrant(
+        "read_files", ConsentTier.EXPLICIT,
+        "/a/b", time.time(), None, "user",
+    ))
+    claim = CapabilityClaim("read_files", ConsentTier.EXPLICIT, "")
+    d = gate.check(claim, scope="/a/b", session_id="s1")
+    assert d.allowed is True
+
+
+def test_prefix_match_handles_trailing_slash_in_filter():
+    """Grant stored with trailing slash still matches anchored paths."""
+    c, store, log, gate = _setup()
+    store.upsert(ConsentGrant(
+        "read_files", ConsentTier.EXPLICIT,
+        "/a/b/", time.time(), None, "user",
+    ))
+    claim = CapabilityClaim("read_files", ConsentTier.EXPLICIT, "")
+    d_sub = gate.check(claim, scope="/a/b/c.py", session_id="s1")
+    d_escape = gate.check(claim, scope="/a/b-other/c.py", session_id="s1")
+    assert d_sub.allowed is True
+    assert d_escape.allowed is False

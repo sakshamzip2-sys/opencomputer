@@ -48,3 +48,23 @@ def test_get_tries_file_when_keyring_returns_none(tmp_path):
     (tmp_path / "test-service-2.json").write_text('{"k": "file-value"}')
     # With working keyring but no keyring entry, falls back to file
     assert adapter.get("k") == "file-value"
+
+
+def test_fallback_file_has_0600_permissions(tmp_path):
+    """M1 regression — fallback file must be owner-r/w only.
+
+    The fallback holds the HMAC chain key in plaintext; default 0644 on
+    multi-user Linux exposes it to other users who could then forge audit
+    entries.
+    """
+    import stat
+    adapter = KeyringAdapter(service="perm-test", fallback_dir=tmp_path)
+    with patch(
+        "opencomputer.agent.consent.keyring_adapter.keyring.set_password",
+        side_effect=RuntimeError("no daemon"),
+    ):
+        adapter.set("k", "secret")
+    fallback = tmp_path / "perm-test.json"
+    assert fallback.exists()
+    mode = stat.S_IMODE(fallback.stat().st_mode)
+    assert mode == 0o600, f"expected 0600, got {oct(mode)}"

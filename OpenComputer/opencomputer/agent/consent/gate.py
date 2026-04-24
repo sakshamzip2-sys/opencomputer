@@ -39,16 +39,22 @@ class ConsentGate:
         # 2. Global grant
         if grant is None:
             grant = self._store.get(claim.capability_id, None)
-        # 3. Prefix-match against any active scope_filter
+        # 3. Path-anchored prefix match against any active scope_filter.
+        #
+        # CRITICAL: a plain `startswith` would let grant=`/Users/saksham/Projects`
+        # allow a call on `/Users/saksham/Projects-secret/.env` — scope escape.
+        # Anchored check requires the scope to equal the filter OR start with
+        # filter + '/'. Trailing slash on the filter is normalized away.
         if grant is None and scope is not None:
             for g in self._store.list_active():
                 if (
                     g.capability_id == claim.capability_id
                     and g.scope_filter is not None
-                    and scope.startswith(g.scope_filter)
                 ):
-                    grant = g
-                    break
+                    anchor = g.scope_filter.rstrip("/")
+                    if scope == anchor or scope.startswith(anchor + "/"):
+                        grant = g
+                        break
 
         if grant is None:
             decision_bool = False
