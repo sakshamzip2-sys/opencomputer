@@ -1,0 +1,81 @@
+{#-
+  reflect.j2 — Reflection prompt template for OpenComputer Evolution.
+
+  Design choices (from design.md §6 and §7):
+  - "Be CONSERVATIVE" framing: the reward function is rule-based + LLM-judge is post-v1.1;
+    we must not ask the LLM to be optimistic — noop is the safe default.
+  - JSON-only output: simplifies B2.3 parsing (no markdown fence stripping needed).
+  - evidence_refs cross-check: enables the synthesizer to validate Insights against the
+    actual trajectory store before acting.
+  - Payload schema documented inline: the LLM has everything it needs in one prompt;
+    no chained calls required.
+
+  Whitespace notes: loader sets trim_blocks=True and lstrip_blocks=True.
+  Event lines end with a variable tag {{ ... }} (not a block tag) so trim_blocks does
+  not consume the trailing newline — metadata is rendered via ternary expression
+  rather than {% if %}...{% endif %} for this reason.
+-#}
+# OpenComputer Evolution — Reflection Pass
+
+You are analyzing recent agent-session trajectories to identify behavioral
+patterns worth capturing as new skills or prompt edits. Be CONSERVATIVE:
+propose only high-confidence, repeatable patterns. When in doubt, return
+action_type "noop".
+
+## Trajectories ({{ records|length }} total, model: {{ model_hint }})
+
+{% for r in records %}
+### Trajectory #{{ loop.index }} — session {{ r.session_id }}
+- Duration: {{ ((r.ended_at or now) - r.started_at) | round(1) }}s
+- Completion: {{ "✓" if r.completion_flag else "✗" }}
+- Events: {{ r.events|length }}
+
+{% if r.events %}
+Tool sequence:
+{% for ev in r.events %}- [{{ ev.action_type }}]{% if ev.tool_name %} {{ ev.tool_name }}{% endif %} → {{ ev.outcome }}{{ " " + ev.metadata|tojson if ev.metadata else "" }}
+{% endfor %}
+{% else %}
+(no events recorded)
+{% endif %}
+
+{% endfor %}
+## What to return
+
+Return a JSON list of Insight objects. Each Insight is:
+
+  {
+    "observation": "<one-sentence pattern description>",
+    "evidence_refs": [<trajectory ids — ints from the records above>],
+    "action_type": "create_skill" | "edit_prompt" | "noop",
+    "payload": { ... action-specific fields ... },
+    "confidence": <0.0 to 1.0>
+  }
+
+If action_type == "create_skill":
+  payload = {
+    "slug": "<kebab-case-slug>",
+    "name": "<human-readable name>",
+    "description": "<one-line summary of when to use>",
+    "body": "<markdown body of the skill, 50-300 words>"
+  }
+
+If action_type == "edit_prompt":
+  payload = {
+    "target": "system" | "tool_spec",
+    "diff_hint": "<natural-language description of the edit; do NOT write a unified diff>"
+  }
+
+If action_type == "noop":
+  payload = {"reason": "<why this batch yielded no actionable insight>"}
+
+CRITICAL constraints:
+- Return ONLY a JSON array (no surrounding markdown fences, no preamble)
+- Every evidence_ref MUST appear in the trajectories above
+- confidence < 0.5 means the Insight will be filtered; only return high-confidence findings
+- Privacy: do not echo raw prompt text in observations or payloads (you didn't see any prompts — only tool sequences)
+
+## Notes
+
+- The most recent trajectory ended {{ ((now - (records[-1].ended_at or now)) / 60) | round(1) if records else 0 }} minutes ago.
+- Trajectories with completion_flag=✗ may indicate workflow gaps worth a skill.
+- Repeated tool patterns across multiple trajectories are stronger signals than single-session quirks.

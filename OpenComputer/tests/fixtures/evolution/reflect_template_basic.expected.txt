@@ -1,0 +1,58 @@
+# OpenComputer Evolution — Reflection Pass
+
+You are analyzing recent agent-session trajectories to identify behavioral
+patterns worth capturing as new skills or prompt edits. Be CONSERVATIVE:
+propose only high-confidence, repeatable patterns. When in doubt, return
+action_type "noop".
+
+## Trajectories (1 total, model: claude-opus-4-7)
+
+### Trajectory #1 — session sess-snapshot
+- Duration: 100.0s
+- Completion: ✓
+- Events: 2
+
+Tool sequence:
+- [tool_call] Read → success {"path": "/src/foo.py"}
+- [user_reply] → success
+
+## What to return
+
+Return a JSON list of Insight objects. Each Insight is:
+
+  {
+    "observation": "<one-sentence pattern description>",
+    "evidence_refs": [<trajectory ids — ints from the records above>],
+    "action_type": "create_skill" | "edit_prompt" | "noop",
+    "payload": { ... action-specific fields ... },
+    "confidence": <0.0 to 1.0>
+  }
+
+If action_type == "create_skill":
+  payload = {
+    "slug": "<kebab-case-slug>",
+    "name": "<human-readable name>",
+    "description": "<one-line summary of when to use>",
+    "body": "<markdown body of the skill, 50-300 words>"
+  }
+
+If action_type == "edit_prompt":
+  payload = {
+    "target": "system" | "tool_spec",
+    "diff_hint": "<natural-language description of the edit; do NOT write a unified diff>"
+  }
+
+If action_type == "noop":
+  payload = {"reason": "<why this batch yielded no actionable insight>"}
+
+CRITICAL constraints:
+- Return ONLY a JSON array (no surrounding markdown fences, no preamble)
+- Every evidence_ref MUST appear in the trajectories above
+- confidence < 0.5 means the Insight will be filtered; only return high-confidence findings
+- Privacy: do not echo raw prompt text in observations or payloads (you didn't see any prompts — only tool sequences)
+
+## Notes
+
+- The most recent trajectory ended 1.0 minutes ago.
+- Trajectories with completion_flag=✗ may indicate workflow gaps worth a skill.
+- Repeated tool patterns across multiple trajectories are stronger signals than single-session quirks.
