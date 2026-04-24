@@ -1,7 +1,7 @@
 """Phase 12d.1 — bundled `dev-tools` plugin: Diff + Browser + Fal.
 
 Tests are network-free and git-aware:
-- DiffTool exercises a real `git diff` in a tmp repo (git is required for
+- GitDiffTool exercises a real `git diff` in a tmp repo (git is required for
   any dev box; if it's missing on CI we skip the affected tests).
 - BrowserTool tests the optional-import path (Playwright absent → friendly
   error) — we don't require Playwright on CI.
@@ -81,10 +81,10 @@ def test_register_function_lands_all_three_named_tools() -> None:
     api = _FakeAPI()
     plugin_mod.register(api)
     names = {t.schema.name for t in api.registered}
-    assert names == {"Diff", "Browser", "Fal"}
+    assert names == {"GitDiff", "Browser", "Fal"}
 
 
-# ─── DiffTool ───────────────────────────────────────────────────────────
+# ─── GitDiffTool ────────────────────────────────────────────────────────
 
 
 def _init_git_repo(root: Path) -> None:
@@ -102,13 +102,13 @@ async def test_diff_working_changes_in_real_repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     diff_mod = _import_plugin_module("diff_tool.py")
-    DiffTool = diff_mod.DiffTool
+    GitDiffTool = diff_mod.GitDiffTool
 
     _init_git_repo(tmp_path)
     (tmp_path / "a.txt").write_text("alpha\nbravo\n")
     monkeypatch.chdir(tmp_path)
 
-    res = await DiffTool().execute(_call("Diff", {}))
+    res = await GitDiffTool().execute(_call("GitDiff", {}))
     assert not res.is_error
     assert "+bravo" in res.content
     assert "-alpha" not in res.content  # alpha unchanged, not removed
@@ -122,7 +122,7 @@ async def test_diff_clean_repo_says_no_changes(
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    res = await diff_mod.DiffTool().execute(_call("Diff", {}))
+    res = await diff_mod.GitDiffTool().execute(_call("GitDiff", {}))
     assert not res.is_error
     assert "no changes" in res.content
 
@@ -139,7 +139,7 @@ async def test_diff_staged_only_shows_index_changes(
     (tmp_path / "a.txt").write_text("alpha\nbravo\ncharlie\n")
     monkeypatch.chdir(tmp_path)
 
-    staged_res = await diff_mod.DiffTool().execute(_call("Diff", {"staged": True}))
+    staged_res = await diff_mod.GitDiffTool().execute(_call("GitDiff", {"staged": True}))
     assert not staged_res.is_error
     assert "+bravo" in staged_res.content
     assert "+charlie" not in staged_res.content
@@ -147,7 +147,7 @@ async def test_diff_staged_only_shows_index_changes(
 
 async def test_diff_rejects_staged_and_against_both_set() -> None:
     diff_mod = _import_plugin_module("diff_tool.py")
-    res = await diff_mod.DiffTool().execute(_call("Diff", {"staged": True, "against": "HEAD"}))
+    res = await diff_mod.GitDiffTool().execute(_call("GitDiff", {"staged": True, "against": "HEAD"}))
     assert res.is_error
     assert "mutually exclusive" in res.content
 
@@ -161,7 +161,7 @@ async def test_diff_handles_missing_git_binary(
         "shutil",
         type("S", (), {"which": staticmethod(lambda *_a, **_k: None)}),
     )
-    res = await diff_mod.DiffTool().execute(_call("Diff", {}))
+    res = await diff_mod.GitDiffTool().execute(_call("GitDiff", {}))
     assert res.is_error
     assert "git" in res.content
 
@@ -179,7 +179,7 @@ async def test_diff_truncates_to_max_lines(tmp_path: Path, monkeypatch: pytest.M
     (tmp_path / "big.txt").write_text("\n".join(f"changed{i}" for i in range(500)) + "\n")
     monkeypatch.chdir(tmp_path)
 
-    res = await diff_mod.DiffTool().execute(_call("Diff", {"max_lines": 50}))
+    res = await diff_mod.GitDiffTool().execute(_call("GitDiff", {"max_lines": 50}))
     assert not res.is_error
     assert "[truncated" in res.content
     line_count = len(res.content.splitlines())

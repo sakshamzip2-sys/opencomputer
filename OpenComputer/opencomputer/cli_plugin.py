@@ -462,39 +462,6 @@ def _active_profile_yaml_path() -> tuple[Path, str]:
     return profile_dir / "profile.yaml", display
 
 
-def _enable_search_paths() -> list[Path]:
-    """Same priority order as ``cli._discover_plugins``.
-
-    Duplicated here (rather than imported) because ``opencomputer.cli``
-    imports from this module; a reverse import would cycle. Kept in
-    step with the loop.py / cli.py copies.
-    """
-    from opencomputer.agent.config import _home
-    from opencomputer.profiles import get_default_root, read_active_profile
-
-    search_paths: list[Path] = []
-
-    active = read_active_profile()
-    default_root = get_default_root()
-    profile_dir = _home()
-
-    if active is not None:
-        profile_local = profile_dir / "plugins"
-        if profile_local.exists():
-            search_paths.append(profile_local)
-
-    global_plugins = default_root / "plugins"
-    if global_plugins.exists() and global_plugins not in search_paths:
-        search_paths.append(global_plugins)
-
-    repo_root = Path(__file__).resolve().parent.parent
-    ext_dir = repo_root / "extensions"
-    if ext_dir.exists():
-        search_paths.append(ext_dir)
-
-    return search_paths
-
-
 def _atomic_write_yaml(path: Path, data: dict) -> None:
     """Write `data` to `path` as YAML via tmp + os.replace.
 
@@ -544,9 +511,9 @@ def plugin_enable(
     enabled. Reminds the user to restart opencomputer since plugins are
     loaded at AgentLoop construction time.
     """
-    from opencomputer.plugins.discovery import discover
+    from opencomputer.plugins.discovery import discover, standard_search_paths
 
-    candidates = discover(_enable_search_paths())
+    candidates = discover(standard_search_paths())
     known_ids = {c.manifest.id for c in candidates}
     if plugin_id not in known_ids:
         _console.print(

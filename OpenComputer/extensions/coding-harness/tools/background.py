@@ -1,7 +1,7 @@
-"""Background process tools: start_process, check_output, kill_process.
+"""Background process tools: StartProcess, CheckOutput, KillProcess.
 
 Shared in-memory registry keyed by pid. Output is streamed into a bounded
-buffer so check_output can read pending lines without blocking. Processes
+buffer so CheckOutput can read pending lines without blocking. Processes
 are cleaned up on SessionEnd to prevent zombies.
 """
 
@@ -65,11 +65,11 @@ class StartProcessTool(BaseTool):
     @property
     def schema(self) -> ToolSchema:
         return ToolSchema(
-            name="start_process",
+            name="StartProcess",
             description=(
                 "Start a long-running process in the background and return its pid. "
                 "Use for dev servers, test watchers, any command you'll want to check "
-                "on later. The pid lets you call check_output and kill_process."
+                "on later. The pid lets you call CheckOutput and KillProcess."
             ),
             parameters={
                 "type": "object",
@@ -123,7 +123,7 @@ class CheckOutputTool(BaseTool):
     @property
     def schema(self) -> ToolSchema:
         return ToolSchema(
-            name="check_output",
+            name="CheckOutput",
             description="Read pending stdout/stderr lines from a background process by pid.",
             parameters={
                 "type": "object",
@@ -179,7 +179,7 @@ class KillProcessTool(BaseTool):
     @property
     def schema(self) -> ToolSchema:
         return ToolSchema(
-            name="kill_process",
+            name="KillProcess",
             description="Terminate a background process by pid.",
             parameters={
                 "type": "object",

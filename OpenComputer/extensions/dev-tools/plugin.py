@@ -2,7 +2,7 @@
 
 Registers three tools the agent can call when working on a developer's
 machine:
-- Diff   — git diff (working / staged / vs ref)
+- GitDiff — git diff (working / staged / vs ref)
 - Browser — fetch a JS-rendered page via Playwright (optional dep)
 - Fal    — fal.ai REST API for image / video / model generation
 
@@ -21,16 +21,16 @@ from __future__ import annotations
 # directly via the package path. Mirrors `extensions/discord/plugin.py`.
 try:
     from browser_tool import BrowserTool
-    from diff_tool import DiffTool
+    from diff_tool import GitDiffTool
     from fal_tool import FalTool
 except ImportError:  # pragma: no cover
     from extensions.dev_tools.browser_tool import BrowserTool
-    from extensions.dev_tools.diff_tool import DiffTool
+    from extensions.dev_tools.diff_tool import GitDiffTool
     from extensions.dev_tools.fal_tool import FalTool
 
 
 def register(api) -> None:  # PluginAPI is duck-typed
     """Register the three dev-tools with the agent's tool registry."""
-    api.register_tool(DiffTool())
+    api.register_tool(GitDiffTool())
     api.register_tool(BrowserTool())
     api.register_tool(FalTool())

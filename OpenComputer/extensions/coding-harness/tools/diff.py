@@ -1,4 +1,4 @@
-"""Diff tool — unified diff between current files and the most recent checkpoint.
+"""CheckpointDiff tool — unified diff between current files and the most recent checkpoint.
 
 Useful after an Edit/MultiEdit series when the user (or reviewer) wants to
 see what actually changed vs. the last known-good state.
@@ -12,14 +12,14 @@ from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 
-class DiffTool(BaseTool):
+class CheckpointDiffTool(BaseTool):
     def __init__(self, ctx):
         self._ctx = ctx
 
     @property
     def schema(self) -> ToolSchema:
         return ToolSchema(
-            name="Diff",
+            name="CheckpointDiff",
             description=(
                 "Show a unified diff between the most recent checkpoint and "
                 "current on-disk files. Pass `checkpoint_id` to diff against "
@@ -102,4 +102,4 @@ def _decode(b: bytes) -> str:
         return b.decode("latin-1")
 
 
-__all__ = ["DiffTool"]
+__all__ = ["CheckpointDiffTool"]

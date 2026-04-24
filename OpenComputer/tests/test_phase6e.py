@@ -1,11 +1,11 @@
-"""Phase 6e tests: permissions, session-bootstrap, cleanup, Diff, RunTests.
+"""Phase 6e tests: permissions, session-bootstrap, cleanup, CheckpointDiff, RunTests.
 
 Scope:
 - permissions.scope_check.is_allowed — file + bash branches
 - scope_check_hook blocks denied calls, allows others
 - session_bootstrap records start time + initializes edited_files
 - cleanup_session _do_sweep prunes old dirs
-- DiffTool shows unified diff vs latest checkpoint
+- CheckpointDiffTool shows unified diff vs latest checkpoint
 - RunTestsTool detects pytest marker and times out gracefully
 - Plugin wiring: 9 tools, 4 injections, 6 hooks
 """
@@ -164,7 +164,7 @@ def test_cleanup_session_sweep_removes_old(tmp_path):
     assert new.exists()
 
 
-# ─── DiffTool ───────────────────────────────────────────────────
+# ─── CheckpointDiffTool ─────────────────────────────────────────
 
 
 def test_diff_tool_shows_changes_since_checkpoint(tmp_path):
@@ -172,7 +172,7 @@ def test_diff_tool_shows_changes_since_checkpoint(tmp_path):
     from rewind.checkpoint import Checkpoint
     from rewind.store import RewindStore
     from state.store import SessionStateStore
-    from tools.diff import DiffTool
+    from tools.diff import CheckpointDiffTool
 
     workspace = tmp_path / "w"
     workspace.mkdir()
@@ -186,9 +186,9 @@ def test_diff_tool_shows_changes_since_checkpoint(tmp_path):
         rewind_store=store,
         session_state=SessionStateStore(tmp_path / "ss"),
     )
-    tool = DiffTool(ctx=ctx)
+    tool = CheckpointDiffTool(ctx=ctx)
     result = asyncio.run(
-        tool.execute(ToolCall(id="d", name="Diff", arguments={}))
+        tool.execute(ToolCall(id="d", name="CheckpointDiff", arguments={}))
     )
     assert not result.is_error
     assert "line2-changed" in result.content
@@ -200,7 +200,7 @@ def test_diff_tool_empty_when_no_changes(tmp_path):
     from rewind.checkpoint import Checkpoint
     from rewind.store import RewindStore
     from state.store import SessionStateStore
-    from tools.diff import DiffTool
+    from tools.diff import CheckpointDiffTool
 
     workspace = tmp_path / "w"
     workspace.mkdir()
@@ -213,9 +213,9 @@ def test_diff_tool_empty_when_no_changes(tmp_path):
         rewind_store=store,
         session_state=SessionStateStore(tmp_path / "ss"),
     )
-    tool = DiffTool(ctx=ctx)
+    tool = CheckpointDiffTool(ctx=ctx)
     result = asyncio.run(
-        tool.execute(ToolCall(id="d", name="Diff", arguments={}))
+        tool.execute(ToolCall(id="d", name="CheckpointDiff", arguments={}))
     )
     assert not result.is_error
     assert "No changes" in result.content
@@ -225,16 +225,16 @@ def test_diff_tool_errors_without_checkpoints(tmp_path):
     from context import HarnessContext
     from rewind.store import RewindStore
     from state.store import SessionStateStore
-    from tools.diff import DiffTool
+    from tools.diff import CheckpointDiffTool
 
     ctx = HarnessContext(
         session_id="s",
         rewind_store=RewindStore(tmp_path / "rw"),
         session_state=SessionStateStore(tmp_path / "ss"),
     )
-    tool = DiffTool(ctx=ctx)
+    tool = CheckpointDiffTool(ctx=ctx)
     result = asyncio.run(
-        tool.execute(ToolCall(id="d", name="Diff", arguments={}))
+        tool.execute(ToolCall(id="d", name="CheckpointDiff", arguments={}))
     )
     assert result.is_error
 
@@ -289,5 +289,5 @@ def test_phase6e_modules_importable():
     from hooks.cleanup_session import build_cleanup_session_hook_spec  # noqa: F401
     from hooks.session_bootstrap import build_session_bootstrap_hook_spec  # noqa: F401
     from permissions.scope_check_hook import build_scope_check_hook_spec  # noqa: F401
-    from tools.diff import DiffTool  # noqa: F401
+    from tools.diff import CheckpointDiffTool  # noqa: F401
     from tools.run_tests import RunTestsTool  # noqa: F401

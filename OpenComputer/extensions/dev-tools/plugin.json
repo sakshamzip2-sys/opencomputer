@@ -7,5 +7,5 @@
   "license": "MIT",
   "kind": "tool",
   "entry": "plugin",
-  "tool_names": ["Diff", "Browser", "Fal"]
+  "tool_names": ["GitDiff", "Browser", "Fal"]
 }

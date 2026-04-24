@@ -1,4 +1,4 @@
-"""Diff tool — shell out to `git diff` for plain, ref, or staged diffs.
+"""GitDiff tool — shell out to `git diff` for plain, ref, or staged diffs.
 
 Why shell out instead of using GitPython / pygit2:
 - Zero new deps. `git` is already on every dev's machine.
@@ -39,13 +39,13 @@ def _truncate(text: str, max_lines: int) -> tuple[str, bool]:
     )
 
 
-class DiffTool(BaseTool):
+class GitDiffTool(BaseTool):
     parallel_safe = True  # read-only
 
     @property
     def schema(self) -> ToolSchema:
         return ToolSchema(
-            name="Diff",
+            name="GitDiff",
             description=(
                 "Show git diff for the current repository. Three modes:\n"
                 "- Working diff (default): unstaged changes vs HEAD\n"
@@ -149,4 +149,4 @@ class DiffTool(BaseTool):
         return ToolResult(tool_call_id=call.id, content=capped)
 
 
-__all__ = ["DiffTool"]
+__all__ = ["GitDiffTool"]

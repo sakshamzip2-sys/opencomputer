@@ -12,11 +12,11 @@
     "MultiEdit",
     "TodoWrite",
     "ExitPlanMode",
-    "start_process",
-    "check_output",
-    "kill_process",
+    "StartProcess",
+    "CheckOutput",
+    "KillProcess",
     "Rewind",
-    "Diff",
+    "CheckpointDiff",
     "RunTests"
   ]
 }

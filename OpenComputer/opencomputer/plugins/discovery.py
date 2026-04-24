@@ -118,4 +118,57 @@ def discover(search_paths: list[Path]) -> list[PluginCandidate]:
     return candidates
 
 
-__all__ = ["discover", "PluginCandidate"]
+def standard_search_paths() -> list[Path]:
+    """Canonical plugin search-path list, in priority order.
+
+    ``discover()`` dedupes by id, so higher-priority roots shadow
+    lower-priority ones. Priority (highest first):
+
+      1. Profile-local — ``<active_profile_dir>/plugins/``  (only
+         present for named profiles; for the default profile the
+         profile dir == default_root so this collapses into step 2).
+      2. Global        — ``~/.opencomputer/plugins/``
+      3. Bundled       — ``<repo>/extensions/``
+
+    Non-existent directories are omitted. Does not swallow exceptions
+    from profile/config resolution — callers that need silent failure
+    wrap the call themselves (see ``AgentLoop._default_search_paths``).
+
+    Single source of truth for the plugin search paths used by
+    ``cli._discover_plugins``, ``cli.plugins`` (the listing command),
+    ``cli_plugin.plugin_enable``, and ``AgentLoop._default_search_paths``.
+    """
+    # Lazy imports — avoid cycles with opencomputer.agent.config /
+    # opencomputer.profiles, which are loaded later in the cli chain.
+    from opencomputer.agent.config import _home
+    from opencomputer.profiles import get_default_root, read_active_profile
+
+    search_paths: list[Path] = []
+
+    active = read_active_profile()
+    default_root = get_default_root()
+    profile_dir = _home()
+
+    # 1. Profile-local (only distinct from global for named profiles)
+    if active is not None:
+        profile_local = profile_dir / "plugins"
+        if profile_local.exists():
+            search_paths.append(profile_local)
+
+    # 2. Global
+    global_plugins = default_root / "plugins"
+    if global_plugins.exists() and global_plugins not in search_paths:
+        search_paths.append(global_plugins)
+
+    # 3. Bundled (extensions/) — __file__ is at
+    # OpenComputer/opencomputer/plugins/discovery.py, so
+    # parent.parent.parent resolves to the OpenComputer/ repo root.
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    ext_dir = repo_root / "extensions"
+    if ext_dir.exists():
+        search_paths.append(ext_dir)
+
+    return search_paths
+
+
+__all__ = ["discover", "PluginCandidate", "standard_search_paths"]
