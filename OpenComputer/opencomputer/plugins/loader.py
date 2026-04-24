@@ -263,6 +263,7 @@ class PluginAPI:
         injection_engine: Any = None,
         doctor_contributions: list[Any] | None = None,
         session_db_path: Path | None = None,
+        slash_commands: dict[str, Any] | None = None,
     ) -> None:
         self.tools = tool_registry
         self.hooks = hook_engine
@@ -281,6 +282,12 @@ class PluginAPI:
         # preserves the plugin→SDK boundary for third-party plugins that don't
         # have opencomputer in their import path.
         self.session_db_path: Path | None = session_db_path
+        # Phase 12b.6 Task D8: plugin-authored slash commands. Shared dict
+        # threaded in from PluginRegistry so all plugins register into the
+        # same table. Keyed by command name (no leading slash).
+        self.slash_commands: dict[str, Any] = (
+            slash_commands if slash_commands is not None else {}
+        )
 
     def register_tool(self, tool: Any) -> None:
         self.tools.register(tool)
@@ -321,6 +328,27 @@ class PluginAPI:
                 "only one external provider is allowed at a time"
             )
         self.memory_provider = provider
+
+    def register_slash_command(self, cmd: Any) -> None:
+        """Register a slash command instance.
+
+        Accepts either a ``plugin_sdk.SlashCommand`` subclass instance
+        OR a duck-typed object with ``name``, ``description``, and
+        ``execute(args, runtime)`` attributes (Phase 6f legacy compat).
+
+        Raises ``ValueError`` on missing/invalid name or name collision.
+        """
+        name = getattr(cmd, "name", None)
+        if not name or not isinstance(name, str):
+            raise ValueError(
+                f"slash command must have a str 'name' attribute; "
+                f"got {type(cmd).__name__}"
+            )
+        if name in self.slash_commands:
+            raise ValueError(
+                f"slash command '{name}' is already registered"
+            )
+        self.slash_commands[name] = cmd
 
     def register_doctor_contribution(self, contribution: Any) -> None:
         """Register a HealthContribution — runs on `opencomputer doctor [--fix]`.

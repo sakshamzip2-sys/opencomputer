@@ -46,6 +46,7 @@ from plugin_sdk.provider_contract import (
     Usage,
 )
 from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
+from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 __all__ = [
@@ -91,4 +92,7 @@ __all__ = [
     "InteractionResponse",
     # memory (Phase 10f)
     "MemoryProvider",
+    # slash commands (Phase 12b.6, Task D8)
+    "SlashCommand",
+    "SlashCommandResult",
 ]

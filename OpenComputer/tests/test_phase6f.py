@@ -1,8 +1,11 @@
 """Phase 6f tests: slash commands.
 
 Each command is tested directly by constructing it + calling execute() on it.
-A formal core SlashCommand dispatcher is a core-SDK change tracked separately;
-these unit tests verify the harness's command logic independent of dispatch.
+Phase 12b6 Task D8 formalized the SlashCommand contract in plugin_sdk, so
+the harness's 6 commands now subclass ``plugin_sdk.SlashCommand`` and capture
+the ``HarnessContext`` in ``__init__``; ``execute(args, runtime)`` returns
+``SlashCommandResult``. These unit tests cover the harness-side logic
+independent of the dispatcher (which has its own test file).
 """
 
 from __future__ import annotations
@@ -69,11 +72,11 @@ def test_plan_on_sets_custom_flag(tmp_path):
 
     runtime = _mutable_runtime()
     ctx = _ctx(tmp_path)
-    cmd = PlanOnCommand()
+    cmd = PlanOnCommand(harness_ctx=ctx)
 
-    result = asyncio.run(cmd.execute("", runtime, ctx))
+    result = asyncio.run(cmd.execute("", runtime))
     assert runtime.custom["plan_mode"] is True
-    assert "Plan mode enabled" in result
+    assert "Plan mode enabled" in result.output
     assert ctx.session_state.get("mode:plan") is True
 
 
@@ -83,11 +86,11 @@ def test_plan_off_clears_custom_flag(tmp_path):
     runtime = _mutable_runtime()
     runtime.custom["plan_mode"] = True
     ctx = _ctx(tmp_path)
-    cmd = PlanOffCommand()
+    cmd = PlanOffCommand(harness_ctx=ctx)
 
-    result = asyncio.run(cmd.execute("", runtime, ctx))
+    result = asyncio.run(cmd.execute("", runtime))
     assert runtime.custom["plan_mode"] is False
-    assert "Plan mode disabled" in result
+    assert "Plan mode disabled" in result.output
 
 
 # ─── /accept-edits ──────────────────────────────────────────────
@@ -98,15 +101,15 @@ def test_accept_edits_toggles(tmp_path):
 
     runtime = _mutable_runtime()
     ctx = _ctx(tmp_path)
-    cmd = AcceptEditsCommand()
+    cmd = AcceptEditsCommand(harness_ctx=ctx)
 
-    r1 = asyncio.run(cmd.execute("", runtime, ctx))
+    r1 = asyncio.run(cmd.execute("", runtime))
     assert runtime.custom["accept_edits"] is True
-    assert "on" in r1.lower()
+    assert "on" in r1.output.lower()
 
-    r2 = asyncio.run(cmd.execute("", runtime, ctx))
+    r2 = asyncio.run(cmd.execute("", runtime))
     assert runtime.custom["accept_edits"] is False
-    assert "off" in r2.lower()
+    assert "off" in r2.output.lower()
 
 
 def test_accept_edits_explicit_on_off(tmp_path):
@@ -114,11 +117,11 @@ def test_accept_edits_explicit_on_off(tmp_path):
 
     runtime = _mutable_runtime()
     ctx = _ctx(tmp_path)
-    cmd = AcceptEditsCommand()
+    cmd = AcceptEditsCommand(harness_ctx=ctx)
 
-    asyncio.run(cmd.execute("off", runtime, ctx))
+    asyncio.run(cmd.execute("off", runtime))
     assert runtime.custom["accept_edits"] is False
-    asyncio.run(cmd.execute("on", runtime, ctx))
+    asyncio.run(cmd.execute("on", runtime))
     assert runtime.custom["accept_edits"] is True
 
 
@@ -130,9 +133,9 @@ def test_checkpoint_no_edited_files(tmp_path):
 
     ctx = _ctx(tmp_path)
     runtime = _mutable_runtime()
-    cmd = CheckpointCommand()
-    result = asyncio.run(cmd.execute("", runtime, ctx))
-    assert "No edited files" in result
+    cmd = CheckpointCommand(harness_ctx=ctx)
+    result = asyncio.run(cmd.execute("", runtime))
+    assert "No edited files" in result.output
 
 
 def test_checkpoint_saves_tracked_files(tmp_path, monkeypatch):
@@ -145,10 +148,10 @@ def test_checkpoint_saves_tracked_files(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     ctx.session_state.set("edited_files", ["a.py", "b.py"])
     runtime = _mutable_runtime()
-    cmd = CheckpointCommand()
-    result = asyncio.run(cmd.execute("before-refactor", runtime, ctx))
-    assert "Checkpoint saved" in result
-    assert "before-refactor" in result
+    cmd = CheckpointCommand(harness_ctx=ctx)
+    result = asyncio.run(cmd.execute("before-refactor", runtime))
+    assert "Checkpoint saved" in result.output
+    assert "before-refactor" in result.output
     assert len(ctx.rewind_store.list()) == 1
 
 
@@ -160,9 +163,9 @@ def test_undo_no_checkpoints(tmp_path):
 
     ctx = _ctx(tmp_path)
     runtime = _mutable_runtime()
-    cmd = UndoCommand()
-    result = asyncio.run(cmd.execute("", runtime, ctx))
-    assert "nothing to undo" in result.lower()
+    cmd = UndoCommand(harness_ctx=ctx)
+    result = asyncio.run(cmd.execute("", runtime))
+    assert "nothing to undo" in result.output.lower()
 
 
 def test_undo_restores_last_checkpoint(tmp_path, monkeypatch):
@@ -189,9 +192,9 @@ def test_undo_restores_last_checkpoint(tmp_path, monkeypatch):
         session_state=SessionStateStore(tmp_path / "ss"),
     )
     runtime = _mutable_runtime()
-    cmd = UndoCommand()
-    result = asyncio.run(cmd.execute("", runtime, ctx))
-    assert "Rewound 1" in result
+    cmd = UndoCommand(harness_ctx=ctx)
+    result = asyncio.run(cmd.execute("", runtime))
+    assert "Rewound 1" in result.output
     assert (workspace / "f.py").read_bytes() == b"v1"
 
 
@@ -200,9 +203,9 @@ def test_undo_rejects_bad_integer(tmp_path):
 
     ctx = _ctx(tmp_path)
     runtime = _mutable_runtime()
-    cmd = UndoCommand()
-    result = asyncio.run(cmd.execute("nope", runtime, ctx))
-    assert "bad argument" in result.lower() or "nope" in result.lower()
+    cmd = UndoCommand(harness_ctx=ctx)
+    result = asyncio.run(cmd.execute("nope", runtime))
+    assert "bad argument" in result.output.lower() or "nope" in result.output.lower()
 
 
 # ─── /diff ──────────────────────────────────────────────────────
@@ -231,9 +234,9 @@ def test_diff_command_delegates_to_tool(tmp_path, monkeypatch):
         session_state=SessionStateStore(tmp_path / "ss"),
     )
     runtime = _mutable_runtime()
-    cmd = DiffCommand()
-    result = asyncio.run(cmd.execute("", runtime, ctx))
-    assert "line1 changed" in result or "line1" in result
+    cmd = DiffCommand(harness_ctx=ctx)
+    result = asyncio.run(cmd.execute("", runtime))
+    assert "line1 changed" in result.output or "line1" in result.output
 
 
 # ─── SlashCommand base contract ─────────────────────────────────
@@ -246,16 +249,14 @@ def test_slash_command_names_are_distinct():
     from slash_commands.plan import PlanOffCommand, PlanOnCommand
     from slash_commands.undo import UndoCommand
 
+    # Name is a class attribute — no need to construct fully.
     names = {
-        c.name
-        for c in (
-            PlanOnCommand(),
-            PlanOffCommand(),
-            AcceptEditsCommand(),
-            CheckpointCommand(),
-            UndoCommand(),
-            DiffCommand(),
-        )
+        PlanOnCommand.name,
+        PlanOffCommand.name,
+        AcceptEditsCommand.name,
+        CheckpointCommand.name,
+        UndoCommand.name,
+        DiffCommand.name,
     }
     assert len(names) == 6
 

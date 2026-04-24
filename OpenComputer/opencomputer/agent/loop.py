@@ -198,6 +198,38 @@ class AgentLoop:
         else:
             messages = self.db.get_messages(sid)
 
+        # Phase 12b6 D8: slash-command dispatch. If the user's message maps
+        # to a registered command, handle it inline. When the command's
+        # handled=True, return early — no LLM call for this turn. When
+        # handled=False (rare: e.g. /plan sets a flag, then chat continues),
+        # fall through to the normal loop.
+        from opencomputer.agent.slash_dispatcher import dispatch as _slash_dispatch
+        from opencomputer.plugins.registry import registry as _plugin_registry
+
+        _slash_result = await _slash_dispatch(
+            user_message,
+            _plugin_registry.slash_commands,
+            self._runtime,
+        )
+        if _slash_result is not None and _slash_result.handled:
+            user_msg = Message(role="user", content=user_message)
+            assistant_msg = Message(
+                role="assistant", content=_slash_result.output
+            )
+            messages.append(user_msg)
+            messages.append(assistant_msg)
+            self.db.append_message(sid, user_msg)
+            self.db.append_message(sid, assistant_msg)
+            self.db.end_session(sid)
+            return ConversationResult(
+                final_message=assistant_msg,
+                messages=messages,
+                session_id=sid,
+                iterations=0,
+                input_tokens=0,
+                output_tokens=0,
+            )
+
         # System prompt is frozen per session: built once on the first turn,
         # then reused verbatim so the prefix cache hits on turn 2+. Memory
         # edits during a session do NOT retrigger a rebuild — that's the

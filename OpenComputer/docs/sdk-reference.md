@@ -394,6 +394,39 @@ class MyMemory(MemoryProvider):
 
 ---
 
+## Slash commands
+
+### `SlashCommand`
+
+Abstract base for plugin-authored in-chat slash commands (e.g. `/plan`,
+`/diff`). Set the class attributes `name` (no leading slash) and
+`description`, and implement async `execute(args, runtime)` returning a
+`SlashCommandResult`. Register via `api.register_slash_command(cmd)`
+from your plugin's `register(api)`. Legacy duck-typed commands that
+return a bare `str` from `execute` are accepted for backwards compat —
+the dispatcher wraps them into a `SlashCommandResult` transparently.
+
+```python
+from plugin_sdk import SlashCommand, SlashCommandResult, RuntimeContext
+
+class HelloCommand(SlashCommand):
+    name = "hello"
+    description = "Say hi."
+
+    async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
+        return SlashCommandResult(output=f"hi {args}".strip(), handled=True)
+```
+
+### `SlashCommandResult`
+
+Frozen dataclass returned by `SlashCommand.execute`. Fields: `output:
+str` (shown to the user) and `handled: bool = True`. When `handled=True`
+the agent loop returns early without invoking the LLM — zero tokens
+for the turn. Set `handled=False` for side-effect commands that flip a
+flag and want the chat turn to proceed (rare).
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute

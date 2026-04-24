@@ -15,6 +15,8 @@ discouraged in plugin code.
    If a new type belongs in the public API, add it to `__all__` AND the
    from-import block. Plugins consume `from plugin_sdk import X`, never
    `from plugin_sdk.specific_module import X`.
+   - `SlashCommand` + `SlashCommandResult` — for plugin-authored slash
+     commands (Phase 12b6).
 
 3. **Every public class/dataclass is `@dataclass(frozen=True, slots=True)`**
    unless it must be subclassed (the contract ABCs:

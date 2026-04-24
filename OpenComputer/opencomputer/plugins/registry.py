@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from opencomputer.agent.injection import engine as injection_engine
 from opencomputer.hooks.engine import engine as hook_engine
@@ -50,6 +50,9 @@ class PluginRegistry:
     channels: dict[str, object] = field(default_factory=dict)
     loaded: list[LoadedPlugin] = field(default_factory=list)
     doctor_contributions: list[HealthContribution] = field(default_factory=list)
+    # Phase 12b.6 Task D8: plugin-authored slash commands. Shared across
+    # all plugins; threaded into PluginAPI via ``api()``.
+    slash_commands: dict[str, Any] = field(default_factory=dict)
 
     def api(self) -> PluginAPI:
         # Surface the per-profile SQLite session DB path so plugins can
@@ -65,6 +68,7 @@ class PluginRegistry:
             injection_engine=injection_engine,
             doctor_contributions=self.doctor_contributions,
             session_db_path=cfg.session.db_path,
+            slash_commands=self.slash_commands,
         )
 
     def load_all(
