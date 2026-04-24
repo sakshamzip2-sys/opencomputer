@@ -1,8 +1,14 @@
-"""/accept-edits slash command — toggle accept-edits mode."""
+"""/accept-edits slash command — toggle accept-edits mode.
+
+Phase 12b6 D8: subclasses ``plugin_sdk.SlashCommand`` + returns
+``SlashCommandResult``.
+"""
 
 from __future__ import annotations
 
-from .base import SlashCommand
+from typing import Any
+
+from .base import SlashCommand, SlashCommandResult
 
 
 class AcceptEditsCommand(SlashCommand):
@@ -12,7 +18,7 @@ class AcceptEditsCommand(SlashCommand):
         "use /undo to revert the most recent one."
     )
 
-    async def execute(self, args: str, runtime, harness_ctx) -> str:
+    async def execute(self, args: str, runtime: Any) -> SlashCommandResult:
         current = bool(runtime.custom.get("accept_edits"))
         new = args.strip().lower() not in {"off", "0", "false", "no"} and not current
         if args.strip().lower() in {"on", "1", "true", "yes"}:
@@ -20,8 +26,11 @@ class AcceptEditsCommand(SlashCommand):
         elif args.strip().lower() in {"off", "0", "false", "no"}:
             new = False
         runtime.custom["accept_edits"] = new
-        harness_ctx.session_state.set("mode:accept_edits", new)
-        return f"Accept-edits mode: {'on' if new else 'off'}."
+        self.harness_ctx.session_state.set("mode:accept_edits", new)
+        return SlashCommandResult(
+            output=f"Accept-edits mode: {'on' if new else 'off'}.",
+            handled=True,
+        )
 
 
 __all__ = ["AcceptEditsCommand"]

@@ -1,10 +1,11 @@
 """In-chat slash commands for the coding-harness.
 
-Each command implements `SlashCommand` (from plugin_sdk, Phase 6f core add) OR
-quacks the shape `{name: str, description: str, execute(args, runtime) -> str}`.
-When the core SDK ships a formal SlashCommand base class the harness upgrades
-to subclass it; until then, duck typing keeps these usable by the existing
-plugin loader.
+Each command subclasses ``plugin_sdk.SlashCommand`` (Phase 12b6 Task D8
+formalization of the earlier Phase 6f duck-typed contract). The harness
+base in ``base.py`` extends the SDK's SlashCommand to bind a shared
+``HarnessContext`` at construction time; the public
+``execute(args, runtime) -> SlashCommandResult`` signature is what the
+core dispatcher calls.
 
 Commands bundled here:
     /plan         — enable plan mode

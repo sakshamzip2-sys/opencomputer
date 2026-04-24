@@ -22,13 +22,21 @@ def _home() -> Path:
 
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
-    """Which LLM to use and how."""
+    """Which LLM to use and how.
+
+    ``cheap_model``: When set, short/simple prompts (see
+    ``agent/cheap_route.py``) are routed to this model instead of
+    ``model`` for the first turn only. ``None`` = feature disabled.
+    Example:
+    ``ModelConfig(model="claude-sonnet-4-6", cheap_model="claude-haiku-4-5-20251001")``.
+    """
 
     provider: str = "anthropic"  # maps to a provider plugin name
     model: str = "claude-opus-4-7"
     max_tokens: int = 4096
     temperature: float = 1.0
     api_key_env: str = "ANTHROPIC_API_KEY"
+    cheap_model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

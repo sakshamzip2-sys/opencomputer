@@ -2,13 +2,17 @@
 
 Self-contained (no plugin-local tool dependency) so the command is importable
 in any test harness regardless of sys.path state.
+
+Phase 12b6 D8: subclasses ``plugin_sdk.SlashCommand`` + returns
+``SlashCommandResult``.
 """
 
 from __future__ import annotations
 
 import difflib
+from typing import Any
 
-from .base import SlashCommand
+from .base import SlashCommand, SlashCommandResult
 
 
 def _decode(b: bytes) -> str:
@@ -25,22 +29,26 @@ class DiffCommand(SlashCommand):
         "Optional checkpoint id argument: `/diff <checkpoint_id>`."
     )
 
-    async def execute(self, args: str, runtime, harness_ctx) -> str:
-        checkpoints = harness_ctx.rewind_store.list()
+    async def execute(self, args: str, runtime: Any) -> SlashCommandResult:
+        checkpoints = self.harness_ctx.rewind_store.list()
         if not checkpoints:
-            return "No checkpoints to diff against."
+            return SlashCommandResult(
+                output="No checkpoints to diff against.", handled=True
+            )
 
         cp_id = args.strip() or None
         if cp_id:
             target = next((c for c in checkpoints if c.id == cp_id), None)
             if target is None:
-                return f"No checkpoint {cp_id}."
+                return SlashCommandResult(
+                    output=f"No checkpoint {cp_id}.", handled=True
+                )
         else:
             target = checkpoints[0]
 
         lines: list[str] = []
         for rel_path, old_bytes in target.files.items():
-            live = harness_ctx.rewind_store.workspace_root / rel_path
+            live = self.harness_ctx.rewind_store.workspace_root / rel_path
             new_bytes = live.read_bytes() if live.exists() and live.is_file() else b""
             old_text = _decode(old_bytes)
             new_text = _decode(new_bytes)
@@ -55,8 +63,10 @@ class DiffCommand(SlashCommand):
                 )
             )
         if not lines:
-            return f"No changes since checkpoint {target.id}."
-        return "".join(lines)
+            return SlashCommandResult(
+                output=f"No changes since checkpoint {target.id}.", handled=True
+            )
+        return SlashCommandResult(output="".join(lines), handled=True)
 
 
 __all__ = ["DiffCommand"]

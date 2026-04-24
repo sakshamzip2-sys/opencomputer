@@ -41,6 +41,11 @@ from permissions.scope_check_hook import (
     build_scope_check_hook_spec,  # type: ignore[import-not-found]
 )
 from rewind.store import RewindStore  # type: ignore[import-not-found]
+from slash_commands.accept_edits import AcceptEditsCommand  # type: ignore[import-not-found]
+from slash_commands.checkpoint import CheckpointCommand  # type: ignore[import-not-found]
+from slash_commands.diff import DiffCommand  # type: ignore[import-not-found]
+from slash_commands.plan import PlanOffCommand, PlanOnCommand  # type: ignore[import-not-found]
+from slash_commands.undo import UndoCommand  # type: ignore[import-not-found]
 from state.store import SessionStateStore  # type: ignore[import-not-found]
 from tools.background import (  # type: ignore[import-not-found]
     CheckOutputTool,
@@ -116,3 +121,14 @@ def register(api) -> None:  # PluginAPI duck-typed
     api.register_hook(build_post_edit_review_hook_spec(harness_ctx=ctx))
     api.register_hook(build_session_bootstrap_hook_spec(harness_ctx=ctx))
     api.register_hook(build_cleanup_session_hook_spec())
+
+    # Slash commands — 6 total. Phase 12b6 Task D8 formalization. Only
+    # register if the host's PluginAPI supports it — older cores without
+    # ``register_slash_command`` still load the rest of the harness cleanly.
+    if hasattr(api, "register_slash_command"):
+        api.register_slash_command(PlanOnCommand(harness_ctx=ctx))
+        api.register_slash_command(PlanOffCommand(harness_ctx=ctx))
+        api.register_slash_command(AcceptEditsCommand(harness_ctx=ctx))
+        api.register_slash_command(CheckpointCommand(harness_ctx=ctx))
+        api.register_slash_command(DiffCommand(harness_ctx=ctx))
+        api.register_slash_command(UndoCommand(harness_ctx=ctx))

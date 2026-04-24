@@ -5,23 +5,31 @@ core RuntimeContext is frozen, so modes that need per-turn toggling read from
 `runtime.custom` instead of the top-level flag. PlanModeInjectionProvider
 honours both `runtime.plan_mode` and `runtime.custom["plan_mode"]` when the
 core loop is plumbed (Phase 6f core work).
+
+Phase 12b6 D8: formally subclasses ``plugin_sdk.SlashCommand`` and returns
+``SlashCommandResult``; harness context is captured in ``__init__``.
 """
 
 from __future__ import annotations
 
-from .base import SlashCommand
+from typing import Any
+
+from .base import SlashCommand, SlashCommandResult
 
 
 class PlanOnCommand(SlashCommand):
     name = "plan"
     description = "Enable plan mode (read-only planning; destructive tools refused)."
 
-    async def execute(self, args: str, runtime, harness_ctx) -> str:
+    async def execute(self, args: str, runtime: Any) -> SlashCommandResult:
         runtime.custom["plan_mode"] = True
-        harness_ctx.session_state.set("mode:plan", True)
-        return (
-            "Plan mode enabled. Destructive tools will be refused. "
-            "Describe your plan and the user will confirm before execution."
+        self.harness_ctx.session_state.set("mode:plan", True)
+        return SlashCommandResult(
+            output=(
+                "Plan mode enabled. Destructive tools will be refused. "
+                "Describe your plan and the user will confirm before execution."
+            ),
+            handled=True,
         )
 
 
@@ -29,10 +37,10 @@ class PlanOffCommand(SlashCommand):
     name = "plan-off"
     description = "Disable plan mode and allow destructive tool calls again."
 
-    async def execute(self, args: str, runtime, harness_ctx) -> str:
+    async def execute(self, args: str, runtime: Any) -> SlashCommandResult:
         runtime.custom["plan_mode"] = False
-        harness_ctx.session_state.set("mode:plan", False)
-        return "Plan mode disabled."
+        self.harness_ctx.session_state.set("mode:plan", False)
+        return SlashCommandResult(output="Plan mode disabled.", handled=True)
 
 
 __all__ = ["PlanOnCommand", "PlanOffCommand"]
