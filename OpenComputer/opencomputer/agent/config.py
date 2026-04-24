@@ -41,11 +41,20 @@ class ModelConfig:
 
 @dataclass(frozen=True, slots=True)
 class LoopConfig:
-    """Behavior of the main agent loop."""
+    """Behavior of the main agent loop.
+
+    ``delegation_max_iterations`` (II.1) is the independent iteration
+    budget applied to subagent loops spawned via ``DelegateTool``.
+    Mirrors Hermes's pattern (``sources/hermes-agent/run_agent.py``
+    ``IterationBudget.__init__`` lines 185-196): parent gets its full
+    ``max_iterations``, subagents get a tighter cap so runaway chains
+    can't exhaust the parent's token budget.
+    """
 
     max_iterations: int = 50
     parallel_tools: bool = True
     iteration_timeout_s: int = 600
+    delegation_max_iterations: int = 50
 
 
 @dataclass(frozen=True, slots=True)

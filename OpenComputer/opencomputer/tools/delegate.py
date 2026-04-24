@@ -13,6 +13,8 @@ Later phases can add context isolation, tool restrictions, etc.
 
 from __future__ import annotations
 
+import dataclasses
+
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
@@ -83,6 +85,21 @@ class DelegateTool(BaseTool):
                 is_error=True,
             )
         subagent_loop = self._factory()
+        # II.1: cap the subagent's iteration budget at the parent's
+        # ``delegation_max_iterations`` (default 50) instead of letting it
+        # inherit the full ``max_iterations``. Mirrors Hermes's pattern
+        # (sources/hermes-agent/run_agent.py:IterationBudget lines 185-196).
+        # Config/LoopConfig are frozen dataclasses — use ``dataclasses.replace``
+        # to build a new LoopConfig with the override, then swap it onto the
+        # child. ``dataclasses.is_dataclass`` guards against fake/mocked
+        # subagents in tests that don't carry a real Config.
+        child_cfg = getattr(subagent_loop, "config", None)
+        if child_cfg is not None and dataclasses.is_dataclass(child_cfg):
+            new_loop_cfg = dataclasses.replace(
+                child_cfg.loop,
+                max_iterations=child_cfg.loop.delegation_max_iterations,
+            )
+            subagent_loop.config = dataclasses.replace(child_cfg, loop=new_loop_cfg)
         # Propagate the parent's runtime context — plan mode, yolo mode, etc.
         # must apply to subagents too, otherwise delegating becomes an escape hatch.
         result = await subagent_loop.run_conversation(
