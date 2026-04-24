@@ -2,7 +2,7 @@
 Coding harness plugin — register tools, modes, and hooks.
 
 v2 layout (Phase 6c–6e):
-    tools/       file + process tools, Rewind, Diff, RunTests
+    tools/       file + process tools, Rewind, CheckpointDiff, RunTests
     rewind/      content-hashed checkpoint store
     state/       session-scoped key/value store
     hooks/       auto-checkpoint, plan-block, post-edit-review,
@@ -52,7 +52,7 @@ from tools.background import (  # type: ignore[import-not-found]
     KillProcessTool,
     StartProcessTool,
 )
-from tools.diff import DiffTool  # type: ignore[import-not-found]
+from tools.diff import CheckpointDiffTool  # type: ignore[import-not-found]
 from tools.edit import EditTool  # type: ignore[import-not-found]
 from tools.exit_plan_mode import ExitPlanModeTool  # type: ignore[import-not-found]
 from tools.multi_edit import MultiEditTool  # type: ignore[import-not-found]
@@ -94,7 +94,7 @@ def register(api) -> None:  # PluginAPI duck-typed
     if session_db is not None:
         set_default_db_path(session_db)
 
-    # Tools — 9 total (6 original + Rewind + Diff + RunTests).
+    # Tools — 9 total (6 original + Rewind + CheckpointDiff + RunTests).
     api.register_tool(EditTool())
     api.register_tool(MultiEditTool())
     api.register_tool(TodoWriteTool(db_path=session_db) if session_db else TodoWriteTool())
@@ -103,7 +103,7 @@ def register(api) -> None:  # PluginAPI duck-typed
     api.register_tool(CheckOutputTool())
     api.register_tool(KillProcessTool())
     api.register_tool(RewindTool(ctx=ctx))
-    api.register_tool(DiffTool(ctx=ctx))
+    api.register_tool(CheckpointDiffTool(ctx=ctx))
     api.register_tool(RunTestsTool(ctx=ctx))
 
     # Modes — 4 injection providers (priority 5 / 10 / 20 / 30).

@@ -16,7 +16,7 @@
     "check_output",
     "kill_process",
     "Rewind",
-    "Diff",
+    "CheckpointDiff",
     "RunTests"
   ]
 }
