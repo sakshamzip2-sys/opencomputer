@@ -290,6 +290,20 @@ Canvas rendering, native mobile apps, voice wake-word, Atropos RL, trajectory co
 
 **Schema-name uniqueness is the collision guard for tool names.** If two plugins register tools with the same `schema().name`, `ToolRegistry` raises `ValueError` at load. Tool names are PascalCase by convention (Edit, MultiEdit, Read, TodoWrite, etc.) — the SDK boundary test keeps this honest.
 
+**Settings-based hooks — declare shell hooks without writing a plugin (III.6).** The top-level `hooks:` key in `~/.opencomputer/<profile>/config.yaml` accepts the same event-keyed shape Claude Code uses in `.claude/settings.json`:
+
+```yaml
+hooks:
+  PreToolUse:
+    - matcher: "Edit|Write|MultiEdit"
+      command: "python3 /path/to/linter.py"
+      timeout_seconds: 10
+  Stop:
+    - command: "bash /path/to/cleanup.sh"
+```
+
+Exit-code contract (matches Claude Code): `0` → pass (tool runs), `2` → block with stderr fed back as the reason, any other code → fail-open (warn + pass). Timeouts are fail-open too — a hung hook must never wedge the loop. Env vars: `OPENCOMPUTER_EVENT`, `OPENCOMPUTER_TOOL_NAME`, `OPENCOMPUTER_SESSION_ID`, `OPENCOMPUTER_PROFILE_HOME`, plus `CLAUDE_PLUGIN_ROOT` aliased to profile home so Claude Code hook scripts drop in unchanged. A JSON blob carrying the `HookContext` is piped to the command's stdin. See `sources/claude-code/plugins/plugin-dev/skills/hook-development/SKILL.md` for the inspiration; settings-declared hooks coexist with (and fire AFTER) plugin-declared ones.
+
 ---
 
 ## 6. How to run / develop / test

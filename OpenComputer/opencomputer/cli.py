@@ -14,7 +14,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 from opencomputer import __version__
-from opencomputer.agent.config import default_config
+from opencomputer.agent.config import Config, default_config
 from opencomputer.agent.config_store import (
     config_file_path,
     get_value,
@@ -24,6 +24,8 @@ from opencomputer.agent.config_store import (
 )
 from opencomputer.agent.loop import AgentLoop
 from opencomputer.agent.memory_bridge import MemoryBridge
+from opencomputer.hooks.engine import engine as hook_engine
+from opencomputer.hooks.shell_handlers import make_shell_hook_handler
 from opencomputer.plugins.registry import registry as plugin_registry
 from opencomputer.tools.ask_user_question import AskUserQuestionTool
 from opencomputer.tools.bash import BashTool
@@ -40,6 +42,7 @@ from opencomputer.tools.skill_manage import SkillManageTool
 from opencomputer.tools.web_fetch import WebFetchTool
 from opencomputer.tools.web_search import WebSearchTool
 from opencomputer.tools.write import WriteTool
+from plugin_sdk.hooks import HookEvent, HookSpec
 from plugin_sdk.runtime_context import RuntimeContext
 
 _log = logging.getLogger("opencomputer.cli")
@@ -284,6 +287,47 @@ def _discover_and_register_agents() -> int:
     return len(templates)
 
 
+def _register_settings_hooks(cfg: Config) -> int:
+    """III.6 — register shell-command hooks declared in ``config.yaml``.
+
+    Iterates ``cfg.hooks`` and wraps each :class:`HookCommandConfig` in
+    a shell-invoking async handler (see
+    :func:`opencomputer.hooks.shell_handlers.make_shell_hook_handler`)
+    then registers it against the global hook engine.
+
+    Settings-declared hooks run AFTER plugin-declared hooks because
+    plugins call ``api.register_hook`` at plugin-load time (which is
+    earlier than this CLI-time call). Coexistence is by design — both
+    fire for matching events.
+
+    Invalid ``event`` names are logged at WARNING and skipped, not raised,
+    so a single bad entry can't wedge CLI startup. Returns the count
+    successfully registered (used by the chat banner).
+    """
+    if not cfg.hooks:
+        return 0
+    registered = 0
+    for h in cfg.hooks:
+        try:
+            event = HookEvent(h.event)
+        except ValueError:
+            _log.warning(
+                "settings hook: unknown event %r on command %r; skipping",
+                h.event,
+                h.command,
+            )
+            continue
+        hook_engine.register(
+            HookSpec(
+                event=event,
+                handler=make_shell_hook_handler(h),
+                matcher=h.matcher,
+            )
+        )
+        registered += 1
+    return registered
+
+
 def _resolve_provider(provider_name: str):
     """Resolve a provider by name from the plugin registry.
 
@@ -353,6 +397,7 @@ def chat(
     _register_builtin_tools()
     n_plugins = _discover_plugins()
     n_agents = _discover_and_register_agents()
+    n_settings_hooks = _register_settings_hooks(cfg)
     provider = _resolve_provider(cfg.model.provider)
     runtime = RuntimeContext(plan_mode=plan)
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
@@ -377,6 +422,8 @@ def chat(
     console.print(f"[dim]plugins: {n_plugins} loaded[/dim]")
     if n_agents:
         console.print(f"[dim]agents:  {n_agents} template(s) registered[/dim]")
+    if n_settings_hooks:
+        console.print(f"[dim]hooks:   {n_settings_hooks} from settings.yaml[/dim]")
     if plan:
         console.print("[bold yellow]plan mode ON[/bold yellow] — destructive tools will be refused")
     if no_compact:
@@ -486,6 +533,7 @@ def wire(
     _register_builtin_tools()
     _discover_plugins()
     _discover_and_register_agents()
+    _register_settings_hooks(cfg)
 
     provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
@@ -530,6 +578,7 @@ def gateway() -> None:
     _register_builtin_tools()
     n_plugins = _discover_plugins()
     _discover_and_register_agents()
+    _register_settings_hooks(cfg)
 
     provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)

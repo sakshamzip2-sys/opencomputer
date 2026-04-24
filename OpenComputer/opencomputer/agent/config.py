@@ -99,6 +99,36 @@ class MemoryConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class HookCommandConfig:
+    """One shell-command hook entry declared in config.yaml.
+
+    III.6 — mirrors Claude Code's settings-format hook block
+    (``sources/claude-code/plugins/plugin-dev/skills/hook-development/SKILL.md``).
+
+    Users declare these under the top-level ``hooks:`` key in
+    ``~/.opencomputer/<profile>/config.yaml`` and they're converted into
+    ``HookSpec`` instances at CLI startup. Plugin-declared hooks and
+    settings-declared hooks coexist; both fire for matching events.
+
+    Attributes:
+        event: Hook event name (``"PreToolUse"``, ``"PostToolUse"``,
+            ``"Stop"``, etc.). Must match a :class:`HookEvent` enum value.
+        command: Shell command to run. Env-var substitution happens via
+            ``shlex.split`` at invocation time — do not rely on shell-only
+            features like pipes/redirects inside a single command.
+        matcher: Optional regex over tool name (PreToolUse / PostToolUse only).
+        timeout_seconds: Hard wall-clock limit. Exceeded → hook is killed
+            and the handler returns ``decision="pass"`` (fail-open).
+    """
+
+    event: str = ""  # "PreToolUse", "PostToolUse", "Stop", etc.
+    command: str = ""  # shell command to run (env-var substitution allowed)
+    matcher: str | None = None  # regex over tool name (PreToolUse / PostToolUse only)
+    timeout_seconds: float = 10.0
+    # "type": only "command" is supported (no LLM-prompt hooks yet)
+
+
+@dataclass(frozen=True, slots=True)
 class MCPServerConfig:
     """One MCP server the agent should connect to.
 
@@ -163,6 +193,11 @@ class Config:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
+    #: III.6 — settings-declared shell-command hooks. Parsed from the
+    #: top-level ``hooks:`` YAML block by
+    #: :func:`opencomputer.agent.config_store._parse_hooks_block` and
+    #: registered into the global :class:`HookEngine` at CLI startup.
+    hooks: tuple[HookCommandConfig, ...] = ()
     home: Path = field(default_factory=_home)
 
 
@@ -179,6 +214,7 @@ __all__ = [
     "MemoryConfig",
     "MCPConfig",
     "MCPServerConfig",
+    "HookCommandConfig",
     "ToolsConfig",
     "WebSearchConfig",
     "default_config",
