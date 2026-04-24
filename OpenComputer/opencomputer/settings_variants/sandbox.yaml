@@ -1,0 +1,44 @@
+# OpenComputer Settings — SANDBOX variant
+#
+# III.3 — Bash tool runs INSIDE a sandbox on every invocation. Pairs with
+# Claude Code's sources/claude-code/examples/settings/settings-bash-
+# sandbox.json. This variant assumes the caller has sandbox-exec (macOS)
+# or bwrap (Linux) installed — no fallback to unsandboxed execution.
+#
+# Enforcement is via a PreToolUse hook that mutates the Bash tool_input
+# to prepend the sandbox wrapper. Full wrapper implementation ships
+# under F3 (pluggable sandbox strategy); until then, the hook below is
+# a log-only placeholder that documents the intent.
+
+model:
+  provider: anthropic
+  model: claude-opus-4-7
+  max_tokens: 4096
+
+loop:
+  max_iterations: 30
+  parallel_tools: false
+  iteration_timeout_s: 600
+  delegation_max_iterations: 20
+
+memory:
+  enabled: true
+  provider: memory-honcho
+
+tools:
+  web_search:
+    provider: ddg
+
+hooks:
+  PreToolUse:
+    # Placeholder hook — logs every Bash invocation with the command
+    # that WOULD be wrapped by F3's SandboxStrategy. Full sandbox
+    # interception lands with F3 (see ~/.claude/plans/declarative-
+    # moseying-glade.md Phase 3.E).
+    #
+    # One-liner extracts the command into a local `c` (avoiding an
+    # f-string that would need a backslash inside `{...}`, which is
+    # a Python syntax error) and appends it to the intent log.
+    - matcher: "Bash"
+      command: "python3 -c 'import sys,json,os; d=json.loads(sys.stdin.read()); c=d.get(\"tool_input\",{}).get(\"command\",\"\"); open(os.path.expanduser(\"~/.opencomputer/sandbox-intent.log\"),\"a\").write(\"[sandbox-intent] \"+c+\"\\n\"); sys.exit(0)'"
+      timeout_seconds: 5
