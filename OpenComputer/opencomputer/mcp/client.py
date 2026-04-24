@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
@@ -24,6 +25,10 @@ from opencomputer.agent.config import MCPServerConfig
 from opencomputer.tools.registry import ToolRegistry
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
+
+#: Narrowed connection lifecycle used by ``status_snapshot``. Mirrors
+#: Kimi CLI's ``MCPServerSnapshot.status`` values.
+ConnectionState = Literal["connected", "disconnected", "error"]
 
 logger = logging.getLogger("opencomputer.mcp.client")
 
@@ -95,11 +100,18 @@ class MCPConnection:
     config: MCPServerConfig
     session: ClientSession | None = None
     exit_stack: AsyncExitStack | None = None
-    tools: list[MCPTool] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        if self.tools is None:
-            self.tools = []
+    tools: list[MCPTool] = field(default_factory=list)
+    #: Lifecycle state used by :meth:`MCPManager.status_snapshot` (IV.4).
+    #: Starts ``disconnected``; flips to ``connected`` after a successful
+    #: ``connect()``, ``error`` on failure, and back to ``disconnected``
+    #: after ``disconnect()``.
+    state: ConnectionState = "disconnected"
+    #: Server's self-reported version from MCP ``initialize`` response.
+    version: str | None = None
+    #: Monotonic timestamp of last successful connect (for uptime math).
+    connect_time: float | None = None
+    #: Latest connect-time error message, ``None`` when healthy.
+    last_error: str | None = None
 
     async def connect(self) -> bool:
         """Spin up the server process / HTTP session, initialize, cache tool list."""
@@ -141,7 +153,15 @@ class MCPConnection:
             session = await self.exit_stack.enter_async_context(
                 ClientSession(read_stream, write_stream)
             )
-            await session.initialize()
+            init_result = await session.initialize()
+            # Capture server version from the InitializeResult.serverInfo block
+            # when present. Kept defensive — custom servers or mocks may not
+            # expose the nested attribute.
+            try:
+                server_info = getattr(init_result, "serverInfo", None)
+                self.version = getattr(server_info, "version", None) if server_info else None
+            except Exception:  # noqa: BLE001
+                self.version = None
             self.session = session
 
             # List + cache tools
@@ -156,6 +176,9 @@ class MCPConnection:
                         session=session,
                     )
                 )
+            self.state = "connected"
+            self.connect_time = time.monotonic()
+            self.last_error = None
             logger.info(
                 "MCP server '%s' connected — %d tool(s)",
                 self.config.name,
@@ -164,10 +187,12 @@ class MCPConnection:
             return True
         except Exception as e:  # noqa: BLE001
             logger.exception("MCP server '%s' failed to connect: %s", self.config.name, e)
-            await self.disconnect()
+            self.state = "error"
+            self.last_error = f"{type(e).__name__}: {e}"
+            await self.disconnect(_preserve_error_state=True)
             return False
 
-    async def disconnect(self) -> None:
+    async def disconnect(self, *, _preserve_error_state: bool = False) -> None:
         if self.exit_stack is not None:
             try:
                 await self.exit_stack.aclose()
@@ -175,6 +200,12 @@ class MCPConnection:
                 pass
         self.exit_stack = None
         self.session = None
+        # Keep ``error`` state visible to snapshot consumers so a failed
+        # connect can still be diagnosed. A clean disconnect flips to
+        # ``disconnected``.
+        if not _preserve_error_state:
+            self.state = "disconnected"
+        self.connect_time = None
 
 
 # ─── MCPManager — orchestrates multiple connections ───────────────
@@ -218,5 +249,61 @@ class MCPManager:
         """Start connecting in the background (kimi-cli pattern) — returns the Task."""
         return asyncio.create_task(self.connect_all(servers))
 
+    def status_snapshot(self) -> list[dict[str, Any]]:
+        """Return a diagnostic snapshot of every tracked MCP connection (IV.4).
 
-__all__ = ["MCPTool", "MCPConnection", "MCPManager"]
+        Shape per entry::
+
+            {
+                "name": str,
+                "url": str,
+                "version": str | None,
+                "tool_count": int,
+                "tools": list[str],
+                "connection_state": "connected" | "disconnected" | "error",
+                "last_error": str | None,
+                "uptime_sec": float | None,
+            }
+
+        Mirrors Kimi CLI's ``mcp_status_snapshot`` at
+        ``sources/kimi-cli/src/kimi_cli/soul/toolset.py`` line 277 — same
+        intent (read-only diagnostic view), adapted to our dict return
+        shape so the CLI layer can render it with Rich.
+
+        ``url`` for stdio servers is synthesized from ``command + args``
+        since those servers have no real URL — lets the CLI table show
+        something useful for every transport.
+        """
+        snap: list[dict[str, Any]] = []
+        now = time.monotonic()
+        for conn in self.connections:
+            cfg = conn.config
+            if cfg.transport == "stdio":
+                target = (
+                    f"{cfg.command} {' '.join(cfg.args)}".strip()
+                    if cfg.command
+                    else ""
+                )
+            else:
+                target = cfg.url
+            uptime: float | None
+            if conn.connect_time is not None and conn.state == "connected":
+                uptime = max(0.0, now - conn.connect_time)
+            else:
+                uptime = None
+            snap.append(
+                {
+                    "name": cfg.name,
+                    "url": target,
+                    "version": conn.version,
+                    "tool_count": len(conn.tools),
+                    "tools": [t.tool_name for t in conn.tools],
+                    "connection_state": conn.state,
+                    "last_error": conn.last_error,
+                    "uptime_sec": uptime,
+                }
+            )
+        return snap
+
+
+__all__ = ["MCPTool", "MCPConnection", "MCPManager", "ConnectionState"]
