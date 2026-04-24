@@ -256,6 +256,34 @@ def _discover_plugins() -> int:
     return len(loaded)
 
 
+def _discover_and_register_agents() -> int:
+    """III.5 — scan agent-template dirs and register with DelegateTool.
+
+    Runs the same three-tier discovery as :func:`discover_agents` and
+    pushes the result onto the class-level template map. Intentionally
+    silent on errors (a bad template is logged at WARNING inside the
+    discovery helper, never raised) so CLI startup never breaks over a
+    malformed frontmatter file.
+
+    Returns the count of registered templates — surfaced in the chat
+    banner alongside plugins / MCP counts.
+    """
+    try:
+        from opencomputer.agent.agent_templates import discover_agents
+        from opencomputer.plugins.discovery import standard_search_paths
+
+        # Plugin search paths are also the roots whose ``agents/`` dirs
+        # we check — matches Claude Code's ``plugins/<id>/agents/*.md``
+        # shape (sources/claude-code/plugins/feature-dev/agents/).
+        plugin_roots = standard_search_paths()
+        templates = discover_agents(plugin_roots=plugin_roots)
+    except Exception as e:  # noqa: BLE001 — discovery MUST NOT break CLI startup
+        _log.warning("agent template discovery failed: %s", e)
+        templates = {}
+    DelegateTool.set_templates(templates)
+    return len(templates)
+
+
 def _resolve_provider(provider_name: str):
     """Resolve a provider by name from the plugin registry.
 
@@ -324,6 +352,7 @@ def chat(
 
     _register_builtin_tools()
     n_plugins = _discover_plugins()
+    n_agents = _discover_and_register_agents()
     provider = _resolve_provider(cfg.model.provider)
     runtime = RuntimeContext(plan_mode=plan)
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
@@ -346,6 +375,8 @@ def chat(
     console.print(f"[dim]model:   {cfg.model.model} ({cfg.model.provider})[/dim]")
     console.print(f"[dim]tools:   {', '.join(sorted(registry.names()))}[/dim]")
     console.print(f"[dim]plugins: {n_plugins} loaded[/dim]")
+    if n_agents:
+        console.print(f"[dim]agents:  {n_agents} template(s) registered[/dim]")
     if plan:
         console.print("[bold yellow]plan mode ON[/bold yellow] — destructive tools will be refused")
     if no_compact:
@@ -454,6 +485,7 @@ def wire(
 
     _register_builtin_tools()
     _discover_plugins()
+    _discover_and_register_agents()
 
     provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
@@ -497,6 +529,7 @@ def gateway() -> None:
 
     _register_builtin_tools()
     n_plugins = _discover_plugins()
+    _discover_and_register_agents()
 
     provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
@@ -603,6 +636,42 @@ def skills() -> None:
         return
     for s in found:
         console.print(f"[cyan]{s.name}[/cyan] — {s.description}")
+
+
+# III.5 — subagent template management subcommand.
+agents_app = typer.Typer(
+    name="agents",
+    help="Manage subagent templates (DelegateTool `agent` parameter).",
+    no_args_is_help=True,
+)
+app.add_typer(agents_app, name="agents")
+
+
+@agents_app.command("list")
+def agents_list() -> None:
+    """List discovered agent templates.
+
+    III.5 — mirrors Claude Code's ``.md`` agent definitions
+    (``sources/claude-code/plugins/<plugin>/agents/*.md``). Scanning
+    order is bundled → plugin → profile/user, with later tiers
+    overriding earlier entries by name (same precedence as skills).
+    """
+    from opencomputer.agent.agent_templates import discover_agents
+    from opencomputer.plugins.discovery import standard_search_paths
+
+    plugin_roots = standard_search_paths()
+    templates = discover_agents(plugin_roots=plugin_roots)
+    if not templates:
+        console.print("[dim]no agent templates found[/dim]")
+        return
+    for name in sorted(templates):
+        tpl = templates[name]
+        tools_str = ", ".join(tpl.tools) if tpl.tools else "(inherit)"
+        console.print(
+            f"[cyan]{tpl.name}[/cyan] [dim]({tpl.source})[/dim] — {tpl.description}"
+        )
+        console.print(f"[dim]  tools: {tools_str}[/dim]")
+        console.print(f"[dim]  source: {tpl.source_path}[/dim]")
 
 
 config_app = typer.Typer(
