@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from opencomputer.plugins.security import _path_is_inside, validate_plugin_root
 from plugin_sdk.core import PluginManifest
 
 # I.8 — derivation provenance for a plugin's resolved id.
@@ -111,6 +112,17 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
     )
 
 
+def _bundled_extensions_root() -> Path:
+    """Resolved path to the repo's ``extensions/`` dir (I.1).
+
+    ``validate_plugin_root`` loosens its permission/UID checks for
+    plugins under this tree because some package managers widen
+    bundled dirs during install. Matches ``standard_search_paths``'s
+    derivation (``<__file__>.parent.parent.parent / "extensions"``).
+    """
+    return (Path(__file__).resolve().parent.parent.parent / "extensions").resolve()
+
+
 def _cache_key(search_paths: list[Path]) -> tuple:
     """Cache key for ``discover`` — paths + effective uid.
 
@@ -158,6 +170,11 @@ def discover(
     # name both sides' derivation paths and filesystem locations (I.8).
     seen: dict[str, PluginCandidate] = {}
 
+    # I.1 — pre-resolve the bundled root so every candidate pays the
+    # cost once per discover() call (and we don't re-import Path inside
+    # the hot loop).
+    bundled_root = _bundled_extensions_root()
+
     for root in search_paths:
         if not root.exists() or not root.is_dir():
             continue
@@ -166,6 +183,23 @@ def discover(
                 continue
             manifest_path = entry / "plugin.json"
             if not manifest_path.exists():
+                continue
+            # I.1 — filesystem security gate. Reject candidates with
+            # symlink escapes / bad permissions / suspicious ownership
+            # BEFORE parsing their manifest. Bundled plugins (under
+            # ``extensions/``) get relaxed rules; user-installed plugins
+            # fail closed. See opencomputer.plugins.security.
+            try:
+                is_bundled = _path_is_inside(entry.resolve(), bundled_root)
+            except OSError:
+                is_bundled = False
+            check = validate_plugin_root(entry, root, is_bundled=is_bundled)
+            if not check.ok:
+                logger.warning(
+                    "blocked plugin candidate at %s — %s",
+                    entry,
+                    check.reason,
+                )
                 continue
             manifest = _parse_manifest(manifest_path)
             if manifest is None:
