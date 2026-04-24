@@ -10,8 +10,8 @@ DESTRUCTIVE_TOOLS = frozenset(
         "Write",
         "Bash",
         "MultiEdit",
-        "start_process",
-        "kill_process",
+        "StartProcess",
+        "KillProcess",
     }
 )
 

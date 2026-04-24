@@ -210,7 +210,7 @@ def test_background_process_lifecycle() -> None:
 
     async def full_lifecycle():
         r = await start.execute(
-            _call("start_process", command="echo hello && sleep 5")
+            _call("StartProcess", command="echo hello && sleep 5")
         )
         assert not r.is_error, r.content
         pid = int(r.content.split("pid=")[1].split(")")[0])
@@ -218,11 +218,11 @@ def test_background_process_lifecycle() -> None:
         # Give the echo a moment to land in the buffer
         await asyncio.sleep(0.5)
 
-        r = await check.execute(_call("check_output", pid=pid))
+        r = await check.execute(_call("CheckOutput", pid=pid))
         assert not r.is_error, r.content
         assert "hello" in r.content
 
-        r = await kill.execute(_call("kill_process", pid=pid))
+        r = await kill.execute(_call("KillProcess", pid=pid))
         assert not r.is_error, r.content
 
     asyncio.run(full_lifecycle())
@@ -231,7 +231,7 @@ def test_background_process_lifecycle() -> None:
 def test_background_check_output_unknown_pid() -> None:
     mod = _load_module("bg2", "tools/background.py")
     check = mod.CheckOutputTool()
-    r = asyncio.run(check.execute(_call("check_output", pid=999999)))
+    r = asyncio.run(check.execute(_call("CheckOutput", pid=999999)))
     assert r.is_error
     assert "no background process" in r.content
 
