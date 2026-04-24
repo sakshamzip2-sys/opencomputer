@@ -760,6 +760,11 @@ from opencomputer.cli_channels import channels_app  # noqa: E402
 
 app.add_typer(channels_app, name="channels")
 
+# Sub-project F1 — consent grant/revoke/history/verify-chain
+from opencomputer.cli_consent import consent_app  # noqa: E402
+
+app.add_typer(consent_app, name="consent")
+
 
 @config_app.command("show")
 def config_show() -> None:
