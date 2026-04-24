@@ -4,6 +4,19 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Phase C2 — F6 OpenCLI plugin skeleton, parallel Session C)
+
+- **`extensions/opencli-scraper/` plugin scaffold** — wraps upstream OpenCLI (Apache-2.0) for safe, consented web scraping. Per `docs/f6/design.md`. **Tools NOT registered yet** — plugin.py stub returns early; Session A wires `ConsentGate.require()` + `SignalNormalizer.publish()` and flips `enabled_by_default: true` in Phase 4 of the master plan.
+- **`OpenCLIWrapper`** (`wrapper.py`) — async subprocess orchestration via `asyncio.create_subprocess_exec`. **Free-port scan** in 19825-19899 with `OPENCLI_DAEMON_PORT` env override; **version check** against `MIN_OPENCLI_VERSION = "1.7.0"` (raises if too old); **encoding-safe stdout** (`errors='replace'`); **per-call timeout** with kill-on-timeout via `asyncio.wait_for`; **exit-code mapping** to typed exceptions (`OpenCLIError`, `OpenCLINetworkError`, `OpenCLIAuthError`, `OpenCLIRateLimitError`, `OpenCLITimeoutError`); **global concurrent-scrape semaphore** (cap 8 — design doc §13.4 refinement).
+- **`RateLimiter`** (`rate_limiter.py`) — per-domain token bucket with `asyncio.Lock`. Conservative defaults: GitHub 60/hr, Reddit 60/min, LinkedIn 30/min, Twitter 30/min, etc., per design §7. `*` wildcard fallback at 30/60s.
+- **`RobotsCache`** (`robots_cache.py`) — 24h TTL cache for robots.txt using stdlib `urllib.robotparser`. **404 → allow** (per RFC); **5xx / network error → deny** (could be deliberate block). Async fetch via `httpx.AsyncClient`. Per-domain locks prevent thundering herd.
+- **`FIELD_WHITELISTS`** (`field_whitelist.py`) — per-adapter dict for all 15 curated adapters (github/reddit/linkedin/twitter/hackernews/stackoverflow/youtube/medium/bluesky/arxiv/wikipedia/producthunt + 3 reddit subcommands). `filter_output()` handles dict + list-of-dicts; **unknown adapter returns empty** (fail-closed).
+- **`subprocess_bootstrap`** — `detect_opencli()` (with `npx --no-install` fallback per F6 design §13.2), `detect_chrome()` (platform-specific paths + PATH search). `BootstrapError` raised with platform-specific install instructions; **never auto-installs**.
+- **3 tool classes** in `tools.py`: `ScrapeRawTool`, `FetchProfileTool`, `MonitorPageTool` — all inherit `BaseTool`, take `wrapper + rate_limiter + robots_cache` via constructor injection (mockable in tests). Shared `_execute_scrape()` enforces `rate_limit → robots_check → wrapper.run → field_whitelist.filter` order.
+- **`LICENSE`** (Apache-2.0) + **`NOTICE`** for upstream OpenCLI attribution.
+- **85 new tests** across 6 files (`tests/test_opencli_{wrapper,rate_limiter,robots_cache,field_whitelist,subprocess_bootstrap,tools}.py`). Full suite: **1442 passing** (was 1357 entering C2). All external deps mocked — no live network, no live `opencli` binary in CI.
+- **Discrepancy flagged**: `PluginManifest.kind` is `"tool"` (singular) per `plugin_sdk/__init__.py`; this plugin's `plugin.json` uses `"tools"` (plural). Both coexist because the loader reads raw JSON without validating. Worth picking one in a follow-up — for now we stay on `"tools"` to match recent Session A plugins.
+
 ### Added (Phase C1 — F6 OpenCLI + F7 Open Interpreter deep-scans + design docs, parallel Session C)
 
 - **F6 deep-scan** `docs/f6/opencli-source-map.md` (491 lines) — complete architecture map of the upstream OpenCLI repo (`sources/OpenCLI/`, Apache-2.0). Confirms port 19825 hardcoded with `OPENCLI_DAEMON_PORT` env override; global registry pattern via `cli({...})`; daemon + Manifest V3 Chrome extension architecture; 6 strategies (`PUBLIC`/`LOCAL`/`COOKIE`/`HEADER`/`INTERCEPT`/`UI`); 624 commands across 103+ sites with all 15 of our shortlist verified present. License analysis confirms safe for closed-source wrapper.
