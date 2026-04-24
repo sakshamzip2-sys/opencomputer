@@ -214,49 +214,14 @@ def _resolve_plugin_filter():
 
 
 def _discover_plugins() -> int:
-    """Discover + load plugins from known search paths. Returns count loaded.
+    """Discover + load plugins from the canonical search paths. Returns count loaded.
 
-    Search order (highest priority first — discovery dedupes by id, so
-    higher-priority roots shadow lower-priority ones):
-
-      1. **Profile-local** (named profiles only):
-         ``<active_profile_dir>/plugins/``
-      2. **Global** (all profiles share):
-         ``~/.opencomputer/plugins/``
-      3. **Bundled** (shipped with OpenComputer):
-         ``<repo>/extensions/``
-
-    Default profile = Global, since _home() == default_root, so steps 1
-    and 2 collapse to the same path.
+    See ``opencomputer.plugins.discovery.standard_search_paths`` for the
+    shared search-order contract (profile-local → global → bundled).
     """
-    from pathlib import Path
+    from opencomputer.plugins.discovery import standard_search_paths
 
-    from opencomputer.agent.config import _home
-    from opencomputer.profiles import get_default_root, read_active_profile
-
-    search_paths: list[Path] = []
-
-    active = read_active_profile()
-    default_root = get_default_root()
-    profile_dir = _home()
-
-    # 1. Profile-local (only distinct from global for named profiles)
-    if active is not None:
-        profile_local = profile_dir / "plugins"
-        if profile_local.exists():
-            search_paths.append(profile_local)
-
-    # 2. Global
-    global_plugins = default_root / "plugins"
-    if global_plugins.exists() and global_plugins not in search_paths:
-        search_paths.append(global_plugins)
-
-    # 3. Bundled (extensions/)
-    repo_root = Path(__file__).resolve().parent.parent
-    ext_dir = repo_root / "extensions"
-    if ext_dir.exists():
-        search_paths.append(ext_dir)
-
+    search_paths = standard_search_paths()
     enabled = _resolve_plugin_filter()
     loaded = plugin_registry.load_all(search_paths, enabled_ids=enabled)
     return len(loaded)
@@ -549,17 +514,15 @@ def gateway() -> None:
 
 @app.command()
 def plugins() -> None:
-    """List discovered plugins (metadata only — no activation)."""
-    from pathlib import Path
+    """List discovered plugins (metadata only — no activation).
 
-    repo_root = Path(__file__).resolve().parent.parent
-    search_paths: list[Path] = []
-    ext_dir = repo_root / "extensions"
-    if ext_dir.exists():
-        search_paths.append(ext_dir)
-    user_dir = Path.home() / ".opencomputer" / "plugins"
-    if user_dir.exists():
-        search_paths.append(user_dir)
+    Uses the canonical search-path order (profile-local → global → bundled).
+    Run with ``opencomputer -p <name> plugins`` to see that named profile's
+    locally-installed plugins.
+    """
+    from opencomputer.plugins.discovery import standard_search_paths
+
+    search_paths = standard_search_paths()
 
     candidates = plugin_registry.list_candidates(search_paths)
     if not candidates:

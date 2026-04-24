@@ -597,43 +597,20 @@ class AgentLoop:
 
     @staticmethod
     def _default_search_paths() -> list:
-        """The same search paths ``cli._discover_plugins`` walks.
+        """Canonical plugin search paths — thin wrapper that silences failures.
 
-        Mirrored here (not imported from cli) because cli imports from the
-        agent package — a reverse import would create a cycle and the CLI
-        module has side-effects we don't want to execute inside a library
-        constructor.
+        Delegates to ``opencomputer.plugins.discovery.standard_search_paths``
+        (single source of truth). Demand-tracker construction must never
+        crash the agent, so exceptions are swallowed here — the base
+        function intentionally doesn't swallow them.
         """
-        from pathlib import Path
-
-        from opencomputer.agent.config import _home
-        from opencomputer.profiles import get_default_root, read_active_profile
-
-        search_paths: list[Path] = []
         try:
-            active = read_active_profile()
-            default_root = get_default_root()
-            profile_dir = _home()
+            from opencomputer.plugins.discovery import standard_search_paths
 
-            # 1. Profile-local (only distinct from global for named profiles)
-            if active is not None:
-                profile_local = profile_dir / "plugins"
-                if profile_local.exists():
-                    search_paths.append(profile_local)
-
-            # 2. Global
-            global_plugins = default_root / "plugins"
-            if global_plugins.exists() and global_plugins not in search_paths:
-                search_paths.append(global_plugins)
-
-            # 3. Bundled extensions/
-            repo_root = Path(__file__).resolve().parent.parent.parent
-            ext_dir = repo_root / "extensions"
-            if ext_dir.exists():
-                search_paths.append(ext_dir)
+            return standard_search_paths()
         except Exception:  # noqa: BLE001
             _log.debug("demand_tracker: search-path resolution failed", exc_info=True)
-        return search_paths
+            return []
 
     def _active_profile_plugins(self) -> frozenset[str] | None:
         """Best-effort read of the active profile's enabled plugin set.
