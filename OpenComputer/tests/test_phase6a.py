@@ -22,7 +22,7 @@ class _PlanProvider(DynamicInjectionProvider):
     def provider_id(self) -> str:
         return "plan"
 
-    def collect(self, ctx: InjectionContext) -> str | None:
+    async def collect(self, ctx: InjectionContext) -> str | None:
         return "PLAN MODE" if ctx.runtime.plan_mode else None
 
 
@@ -33,11 +33,11 @@ class _ClockProvider(DynamicInjectionProvider):
     def provider_id(self) -> str:
         return "clock"
 
-    def collect(self, ctx: InjectionContext) -> str | None:
+    async def collect(self, ctx: InjectionContext) -> str | None:
         return "current time"
 
 
-def test_injection_engine_registers_and_collects() -> None:
+async def test_injection_engine_registers_and_collects() -> None:
     from opencomputer.agent.injection import InjectionEngine
 
     eng = InjectionEngine()
@@ -48,12 +48,12 @@ def test_injection_engine_registers_and_collects() -> None:
         messages=(),
         runtime=RuntimeContext(plan_mode=True),
     )
-    out = eng.collect(ctx_plan)
+    out = await eng.collect_all(ctx_plan)
     # Priority ordering: plan (10) before clock (90)
     assert out == ["PLAN MODE", "current time"]
 
     ctx_no_plan = InjectionContext(messages=(), runtime=DEFAULT_RUNTIME_CONTEXT)
-    out = eng.collect(ctx_no_plan)
+    out = await eng.collect_all(ctx_no_plan)
     # plan returns None when flag false — only clock appears
     assert out == ["current time"]
 
@@ -67,7 +67,7 @@ def test_injection_engine_dedup_provider_id() -> None:
         eng.register(_PlanProvider())
 
 
-def test_injection_engine_ordering_is_deterministic() -> None:
+async def test_injection_engine_ordering_is_deterministic() -> None:
     """Same inputs → same output (cache stability)."""
     from opencomputer.agent.injection import InjectionEngine
 
@@ -75,14 +75,14 @@ def test_injection_engine_ordering_is_deterministic() -> None:
     eng.register(_ClockProvider())  # priority 90
     eng.register(_PlanProvider())  # priority 10
     ctx = InjectionContext(messages=(), runtime=RuntimeContext(plan_mode=True))
-    out1 = eng.collect(ctx)
-    out2 = eng.collect(ctx)
+    out1 = await eng.collect_all(ctx)
+    out2 = await eng.collect_all(ctx)
     assert out1 == out2
     # Priority asc means plan (10) comes first
     assert out1[0] == "PLAN MODE"
 
 
-def test_injection_engine_provider_exception_is_swallowed() -> None:
+async def test_injection_engine_provider_exception_is_swallowed() -> None:
     """A broken provider must not break other providers or the loop."""
     from opencomputer.agent.injection import InjectionEngine
 
@@ -93,14 +93,14 @@ def test_injection_engine_provider_exception_is_swallowed() -> None:
         def provider_id(self) -> str:
             return "broken"
 
-        def collect(self, ctx: InjectionContext) -> str | None:
+        async def collect(self, ctx: InjectionContext) -> str | None:
             raise RuntimeError("plugin broken")
 
     eng = InjectionEngine()
     eng.register(Broken())
     eng.register(_ClockProvider())
     ctx = InjectionContext(messages=(), runtime=DEFAULT_RUNTIME_CONTEXT)
-    out = eng.collect(ctx)
+    out = await eng.collect_all(ctx)
     assert out == ["current time"]  # broken skipped, clock intact
 
 

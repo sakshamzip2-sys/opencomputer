@@ -26,7 +26,7 @@ class SkillActivationInjectionProvider(DynamicInjectionProvider):
     def provider_id(self) -> str:
         return "coding-harness:skill-activation"
 
-    def collect(self, ctx: InjectionContext) -> str | None:
+    async def collect(self, ctx: InjectionContext) -> str | None:
         # Find the last user message's text.
         last_user_text = ""
         for msg in reversed(ctx.messages or ()):

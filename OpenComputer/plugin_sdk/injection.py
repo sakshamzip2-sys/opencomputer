@@ -43,6 +43,11 @@ class DynamicInjectionProvider(ABC):
     `priority` orders providers in the final prompt — lower first.
     `provider_id` must be unique per registration; it's also used for
     deterministic ordering when two providers share a priority.
+
+    `collect` is ``async`` — the engine gathers all providers concurrently
+    so an I/O-bound provider (Honcho, a remote vector index, etc.) can't
+    become a serial bottleneck. Pure-function providers can simply
+    ``async def`` and ``return`` without awaiting anything.
     """
 
     #: Lower runs first. Plan mode is 10, yolo is 20, user-added modes 50+.
@@ -55,7 +60,7 @@ class DynamicInjectionProvider(ABC):
         ...
 
     @abstractmethod
-    def collect(self, ctx: InjectionContext) -> str | None:
+    async def collect(self, ctx: InjectionContext) -> str | None:
         """Return injection text or None if this provider doesn't apply."""
         ...
 

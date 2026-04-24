@@ -20,7 +20,7 @@ class PlanModeInjectionProvider(DynamicInjectionProvider):
     def provider_id(self) -> str:
         return "coding-harness:plan-mode"
 
-    def collect(self, ctx: InjectionContext) -> str | None:
+    async def collect(self, ctx: InjectionContext) -> str | None:
         if not ctx.runtime.plan_mode:
             return None
         return render("plan_mode.j2", blocked_tools=sorted(DESTRUCTIVE_TOOLS))

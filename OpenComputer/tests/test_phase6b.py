@@ -244,11 +244,11 @@ def test_plan_mode_injection_fires_only_when_flag_set() -> None:
     provider = mod.PlanModeInjectionProvider()
 
     ctx_on = InjectionContext(messages=(), runtime=RuntimeContext(plan_mode=True))
-    out = provider.collect(ctx_on)
+    out = asyncio.run(provider.collect(ctx_on))
     assert out and "PLAN MODE" in out
 
     ctx_off = InjectionContext(messages=(), runtime=RuntimeContext(plan_mode=False))
-    assert provider.collect(ctx_off) is None
+    assert asyncio.run(provider.collect(ctx_off)) is None
 
 
 def test_plan_mode_hook_blocks_destructive_tools() -> None:

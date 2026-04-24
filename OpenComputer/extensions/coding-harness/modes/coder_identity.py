@@ -19,7 +19,7 @@ class CoderIdentityInjectionProvider(DynamicInjectionProvider):
     def provider_id(self) -> str:
         return "coding-harness:coder-identity"
 
-    def collect(self, ctx: InjectionContext) -> str | None:  # noqa: ARG002
+    async def collect(self, ctx: InjectionContext) -> str | None:  # noqa: ARG002
         return render("coder_identity.j2")
 
 

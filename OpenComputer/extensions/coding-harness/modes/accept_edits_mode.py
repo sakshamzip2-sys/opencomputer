@@ -18,7 +18,7 @@ class AcceptEditsModeInjectionProvider(DynamicInjectionProvider):
     def provider_id(self) -> str:
         return "coding-harness:accept-edits-mode"
 
-    def collect(self, ctx: InjectionContext) -> str | None:
+    async def collect(self, ctx: InjectionContext) -> str | None:
         if not ctx.runtime.custom.get("accept_edits"):
             return None
         return render("accept_edits_mode.j2")

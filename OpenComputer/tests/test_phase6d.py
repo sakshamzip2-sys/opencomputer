@@ -57,8 +57,10 @@ def test_plan_mode_text_loaded_from_jinja_template():
     from modes.plan_mode import PlanModeInjectionProvider
 
     p = PlanModeInjectionProvider()
-    out = p.collect(
-        InjectionContext(messages=(), runtime=RuntimeContext(plan_mode=True))
+    out = asyncio.run(
+        p.collect(
+            InjectionContext(messages=(), runtime=RuntimeContext(plan_mode=True))
+        )
     )
     assert out is not None
     assert "PLAN MODE ACTIVE" in out
@@ -73,8 +75,10 @@ def test_plan_mode_returns_none_when_flag_off():
 
     p = PlanModeInjectionProvider()
     assert (
-        p.collect(
-            InjectionContext(messages=(), runtime=RuntimeContext(plan_mode=False))
+        asyncio.run(
+            p.collect(
+                InjectionContext(messages=(), runtime=RuntimeContext(plan_mode=False))
+            )
         )
         is None
     )
@@ -87,10 +91,15 @@ def test_accept_edits_mode_fires_only_when_flag_set():
     from modes.accept_edits_mode import AcceptEditsModeInjectionProvider
 
     p = AcceptEditsModeInjectionProvider()
-    assert p.collect(InjectionContext(messages=(), runtime=_runtime())) is None
+    assert (
+        asyncio.run(p.collect(InjectionContext(messages=(), runtime=_runtime())))
+        is None
+    )
 
-    on = p.collect(
-        InjectionContext(messages=(), runtime=_runtime(accept_edits=True))
+    on = asyncio.run(
+        p.collect(
+            InjectionContext(messages=(), runtime=_runtime(accept_edits=True))
+        )
     )
     assert on is not None and "ACCEPT-EDITS MODE" in on
 
@@ -102,10 +111,15 @@ def test_review_mode_fires_only_when_flag_set():
     from modes.review_mode import ReviewModeInjectionProvider
 
     p = ReviewModeInjectionProvider()
-    assert p.collect(InjectionContext(messages=(), runtime=_runtime())) is None
+    assert (
+        asyncio.run(p.collect(InjectionContext(messages=(), runtime=_runtime())))
+        is None
+    )
 
-    on = p.collect(
-        InjectionContext(messages=(), runtime=_runtime(review_mode=True))
+    on = asyncio.run(
+        p.collect(
+            InjectionContext(messages=(), runtime=_runtime(review_mode=True))
+        )
     )
     assert on is not None and "REVIEW MODE" in on
 
@@ -117,7 +131,7 @@ def test_coder_identity_always_fires():
     from modes.coder_identity import CoderIdentityInjectionProvider
 
     p = CoderIdentityInjectionProvider()
-    out = p.collect(InjectionContext(messages=(), runtime=_runtime()))
+    out = asyncio.run(p.collect(InjectionContext(messages=(), runtime=_runtime())))
     assert out is not None
     assert "coding agent" in out.lower()
 
