@@ -22,7 +22,7 @@ from typing import Any
 
 from plugin_sdk.core import Message, ToolCall
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -120,6 +120,106 @@ AFTER DELETE ON episodic_events BEGIN
 END;
 """
 
+# ─── F1 (Sub-project F, phase 1): consent layer tables ────────────────
+# Added in schema v2. See ~/.claude/plans/i-want-you-to-twinkly-squirrel.md
+# for the full design rationale.
+V2_DDL = """
+CREATE TABLE IF NOT EXISTS consent_grants (
+    capability_id   TEXT NOT NULL,
+    scope_filter    TEXT,
+    tier            INTEGER NOT NULL,
+    granted_at      REAL NOT NULL,
+    expires_at      REAL,
+    granted_by      TEXT NOT NULL,
+    PRIMARY KEY (capability_id, scope_filter)
+);
+
+CREATE TABLE IF NOT EXISTS consent_counters (
+    capability_id   TEXT NOT NULL,
+    scope_filter    TEXT,
+    clean_run_count INTEGER NOT NULL DEFAULT 0,
+    last_updated    REAL NOT NULL,
+    PRIMARY KEY (capability_id, scope_filter)
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT,
+    timestamp       REAL NOT NULL,
+    actor           TEXT NOT NULL,
+    action          TEXT NOT NULL,
+    capability_id   TEXT NOT NULL,
+    tier            INTEGER NOT NULL,
+    scope           TEXT,
+    decision        TEXT NOT NULL,
+    reason          TEXT,
+    prev_hmac       TEXT NOT NULL,
+    row_hmac        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_cap
+    ON audit_log(capability_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_log_session
+    ON audit_log(session_id, timestamp);
+
+-- Tamper-EVIDENCE (not tamper-proof): these triggers block writes via
+-- the SQLite engine. FS-level tampering (rm, dd, bytewise edit) is
+-- caught by AuditLogger.verify_chain() via the HMAC-SHA256 chain.
+CREATE TRIGGER IF NOT EXISTS audit_log_no_update
+BEFORE UPDATE ON audit_log BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
+BEFORE DELETE ON audit_log BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
+"""
+
+
+# ─── Migration framework ──────────────────────────────────────────────
+
+MIGRATIONS: dict[tuple[int, int], str] = {
+    (0, 1): "_migrate_v0_to_v1",
+    (1, 2): "_migrate_v1_to_v2",
+}
+
+
+def _read_schema_version(conn: sqlite3.Connection) -> int:
+    """Return stored schema version. Returns 0 on fresh DBs (no table yet)."""
+    try:
+        row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.OperationalError:
+        return 0
+
+
+def _bump_schema_version(conn: sqlite3.Connection, v: int) -> None:
+    """Replace the single schema_version row."""
+    conn.execute("DELETE FROM schema_version")
+    conn.execute("INSERT INTO schema_version(version) VALUES (?)", (v,))
+
+
+def _migrate_v0_to_v1(conn: sqlite3.Connection) -> None:
+    """Apply the original v1 DDL — sessions, messages, FTS5, episodic."""
+    conn.executescript(DDL)
+
+
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """F1: add consent_grants, consent_counters, audit_log tables + triggers."""
+    conn.executescript(V2_DDL)
+
+
+def apply_migrations(conn: sqlite3.Connection) -> None:
+    """Advance DB from stored schema_version to SCHEMA_VERSION. Idempotent."""
+    current = _read_schema_version(conn)
+    while current < SCHEMA_VERSION:
+        fn_name = MIGRATIONS[(current, current + 1)]
+        globals()[fn_name](conn)
+        _bump_schema_version(conn, current + 1)
+        current += 1
+    conn.commit()
+
 
 class SessionDB:
     """Lightweight SQLite wrapper for session storage + FTS5 search."""
@@ -143,11 +243,7 @@ class SessionDB:
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
-            conn.executescript(DDL)
-            cur = conn.execute("SELECT version FROM schema_version LIMIT 1")
-            row = cur.fetchone()
-            if row is None:
-                conn.execute("INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
+            apply_migrations(conn)
 
     @contextmanager
     def _txn(self) -> Iterator[sqlite3.Connection]:
