@@ -1,6 +1,6 @@
 # OpenComputer Evolution — User Guide
 
-> **Status: B2 (reflect + synthesize + CLI).** Skeleton from B1 + working reflection engine + skill synthesizer + the `opencomputer evolution …` CLI subapp. Auto-collection (B3) and prompt-evolution + dashboard (B4) are gated behind a **dogfood checkpoint** — try the CLI commands below, decide if the synthesized output is useful, then signal whether B3/B4 are worth building.
+> **Status: B4 landed.** Reflection, skill synthesis, prompt-evolution proposals, monitoring dashboard, and capability-atrophy detection all work. Only **B3 (auto-collection of trajectories from real agent runs)** is still pending — it depends on Session A's TypedEvent bus (`opencomputer/ingestion/bus.py`), which doesn't exist yet. Until B3 ships, you seed trajectories manually for dogfood.
 
 ---
 
@@ -21,9 +21,9 @@ Inspired by the GEPA reflection pattern from [Hermes Self-Evolution](https://git
 | Phase | Status | What ships |
 |---|---|---|
 | **B1** | ✅ Landed (PR #41) | Subpackage skeleton; trajectory dataclasses; SQLite storage; rule-based reward function; reflection + synthesis stubs |
-| **B2** | ✅ Landed (this branch) | GEPA-style reflection engine wired to provider registry; skill synthesis with III.4 hierarchical layout (atomic write + path-traversal guard); CLI surface (`opencomputer evolution reflect / skills list / skills promote / reset`); Jinja2 prompt templates for both reflection and skill body |
-| **B3** | Awaits Session A's TypedEvent bus | Auto-collection of trajectories from real agent runs |
-| **B4** | After B3 | Prompt-evolution proposals (diff-only, never auto-applied) + monitoring dashboard + capability-atrophy detection |
+| **B2** | ✅ Landed (PR #58) | GEPA-style reflection engine wired to provider registry; skill synthesis with III.4 hierarchical layout (atomic write + path-traversal guard); CLI (`reflect`, `skills list/promote`, `reset`); Jinja2 prompt templates |
+| **B3** | ⏸ Blocked on Session A's TypedEvent bus | Auto-collection of trajectories from real agent runs (`opencomputer/ingestion/bus.py` doesn't exist yet on main) |
+| **B4** | ✅ Landed (this branch) | Migration 002 (reflections + skill_invocations + prompt_proposals tables); `PromptEvolver` (diff-only, never auto-applies); `MonitorDashboard` (reflection history + reward trend + atrophy flags); CLI (`prompts list/apply/reject`, `dashboard`, `skills retire`, `skills record-invocation`) |
 
 Each phase ships behind PR review. Nothing here is auto-enabled.
 

@@ -405,6 +405,224 @@ def update_reward(
             conn.close()
 
 
+# ---------------------------------------------------------------------------
+# B4 CRUD helpers — reflections, skill_invocations, prompt_proposals
+# ---------------------------------------------------------------------------
+
+
+def record_reflection(
+    *,
+    window_size: int,
+    records_count: int,
+    insights_count: int,
+    records_hash: str,
+    cache_hit: bool = False,
+    invoked_at: float | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> int:
+    """Insert a reflections row. Returns the new id."""
+    _own_conn = conn is None
+    if _own_conn:
+        conn = _connect()
+    assert conn is not None
+    _ts = invoked_at if invoked_at is not None else time.time()
+
+    def _do(c: sqlite3.Connection) -> int:
+        with c:
+            cur = c.execute(
+                """
+                INSERT INTO reflections
+                    (invoked_at, window_size, records_count, insights_count, records_hash, cache_hit)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (_ts, window_size, records_count, insights_count, records_hash, 1 if cache_hit else 0),
+            )
+            return int(cur.lastrowid or 0)
+
+    try:
+        return _with_retry(conn, _do)
+    finally:
+        if _own_conn:
+            conn.close()
+
+
+def list_reflections(
+    limit: int = 50,
+    conn: sqlite3.Connection | None = None,
+) -> list[sqlite3.Row]:
+    """Return up to `limit` most-recent reflections (invoked_at DESC)."""
+    _own_conn = conn is None
+    if _own_conn:
+        conn = _connect()
+    assert conn is not None
+    try:
+        return conn.execute(
+            "SELECT * FROM reflections ORDER BY invoked_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    finally:
+        if _own_conn:
+            conn.close()
+
+
+def record_skill_invocation(
+    slug: str,
+    *,
+    invoked_at: float | None = None,
+    source: str = "manual",
+    conn: sqlite3.Connection | None = None,
+) -> int:
+    """Insert a skill_invocations row. Returns the new id."""
+    _own_conn = conn is None
+    if _own_conn:
+        conn = _connect()
+    assert conn is not None
+    _ts = invoked_at if invoked_at is not None else time.time()
+
+    def _do(c: sqlite3.Connection) -> int:
+        with c:
+            cur = c.execute(
+                """
+                INSERT INTO skill_invocations (slug, invoked_at, source)
+                VALUES (?, ?, ?)
+                """,
+                (slug, _ts, source),
+            )
+            return int(cur.lastrowid or 0)
+
+    try:
+        return _with_retry(conn, _do)
+    finally:
+        if _own_conn:
+            conn.close()
+
+
+def list_skill_invocations(
+    *,
+    slug: str | None = None,
+    since_ts: float | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> list[sqlite3.Row]:
+    """List skill invocations, optionally filtered by slug + since timestamp.
+
+    Order: invoked_at DESC.
+    """
+    _own_conn = conn is None
+    if _own_conn:
+        conn = _connect()
+    assert conn is not None
+    try:
+        clauses: list[str] = []
+        params: list[object] = []
+        if slug is not None:
+            clauses.append("slug = ?")
+            params.append(slug)
+        if since_ts is not None:
+            clauses.append("invoked_at >= ?")
+            params.append(since_ts)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        return conn.execute(
+            f"SELECT * FROM skill_invocations {where} ORDER BY invoked_at DESC",
+            params,
+        ).fetchall()
+    finally:
+        if _own_conn:
+            conn.close()
+
+
+def record_prompt_proposal(
+    *,
+    target: str,
+    diff_hint: str,
+    insight_json: str,
+    proposed_at: float | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> int:
+    """Insert a prompt_proposals row with status='pending'. Returns the new id."""
+    _own_conn = conn is None
+    if _own_conn:
+        conn = _connect()
+    assert conn is not None
+    _ts = proposed_at if proposed_at is not None else time.time()
+
+    def _do(c: sqlite3.Connection) -> int:
+        with c:
+            cur = c.execute(
+                """
+                INSERT INTO prompt_proposals
+                    (proposed_at, target, diff_hint, insight_json, status)
+                VALUES (?, ?, ?, ?, 'pending')
+                """,
+                (_ts, target, diff_hint, insight_json),
+            )
+            return int(cur.lastrowid or 0)
+
+    try:
+        return _with_retry(conn, _do)
+    finally:
+        if _own_conn:
+            conn.close()
+
+
+def list_prompt_proposals(
+    *,
+    status: str | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> list[sqlite3.Row]:
+    """List prompt proposals, optionally filtered by status."""
+    _own_conn = conn is None
+    if _own_conn:
+        conn = _connect()
+    assert conn is not None
+    try:
+        if status is not None:
+            return conn.execute(
+                "SELECT * FROM prompt_proposals WHERE status = ? ORDER BY proposed_at DESC",
+                (status,),
+            ).fetchall()
+        return conn.execute(
+            "SELECT * FROM prompt_proposals ORDER BY proposed_at DESC"
+        ).fetchall()
+    finally:
+        if _own_conn:
+            conn.close()
+
+
+def update_prompt_proposal_status(
+    *,
+    proposal_id: int,
+    status: str,
+    reason: str = "",
+    decided_at: float | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    """Set status + decided_at + decided_reason. Status must be 'applied' or 'rejected'."""
+    if status not in {"applied", "rejected"}:
+        raise ValueError(f"status must be 'applied' or 'rejected', got {status!r}")
+    _own_conn = conn is None
+    if _own_conn:
+        conn = _connect()
+    assert conn is not None
+    _ts = decided_at if decided_at is not None else time.time()
+
+    def _do(c: sqlite3.Connection) -> None:
+        with c:
+            c.execute(
+                """
+                UPDATE prompt_proposals
+                SET status = ?, decided_at = ?, decided_reason = ?
+                WHERE id = ?
+                """,
+                (status, _ts, reason or None, proposal_id),
+            )
+
+    try:
+        _with_retry(conn, _do)
+    finally:
+        if _own_conn:
+            conn.close()
+
+
 __all__ = [
     "evolution_home",
     "trajectory_db_path",
@@ -417,4 +635,12 @@ __all__ = [
     "count_records",
     "purge_older_than",
     "update_reward",
+    # B4 additions
+    "record_reflection",
+    "list_reflections",
+    "record_skill_invocation",
+    "list_skill_invocations",
+    "record_prompt_proposal",
+    "list_prompt_proposals",
+    "update_prompt_proposal_status",
 ]
