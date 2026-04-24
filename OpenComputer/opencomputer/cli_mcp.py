@@ -182,6 +182,74 @@ def disable_server(name: str = typer.Argument(...)) -> None:
     _set_enabled(name, False)
 
 
+@mcp_app.command("status")
+def status_servers() -> None:
+    """Print a rich status snapshot of every enabled MCP server (IV.4).
+
+    Connects to each enabled server, calls
+    :meth:`opencomputer.mcp.client.MCPManager.status_snapshot`, then
+    renders a Rich table with name / transport / state / tools /
+    version / uptime / last error.
+
+    This is a diagnostic command — it spins up + tears down a fresh
+    ``MCPManager`` each call so it never touches the live agent's
+    registry. Mirrors Kimi CLI's per-server diagnostics view
+    (``sources/kimi-cli/src/kimi_cli/ui/shell/mcp_status.py``).
+    """
+    cfg = load_config()
+    enabled = [s for s in cfg.mcp.servers if s.enabled]
+    if not enabled:
+        console.print("[dim]no MCP servers configured (or all disabled).[/dim]")
+        console.print(
+            "[dim]add one with: opencomputer mcp add NAME --transport stdio --command CMD ...[/dim]"
+        )
+        return
+
+    from opencomputer.mcp.client import MCPManager
+    from opencomputer.tools.registry import ToolRegistry
+
+    async def _run() -> list[dict[str, object]]:
+        # Fresh registry so this doesn't collide with anything; we just
+        # want the snapshot, not to register tools.
+        mgr = MCPManager(tool_registry=ToolRegistry())
+        try:
+            await mgr.connect_all(enabled)
+            return mgr.status_snapshot()
+        finally:
+            await mgr.shutdown()
+
+    snapshot = asyncio.run(_run())
+
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("name")
+    table.add_column("state")
+    table.add_column("tools")
+    table.add_column("version")
+    table.add_column("uptime")
+    table.add_column("target")
+    table.add_column("last error")
+
+    state_colors = {
+        "connected": "[green]connected[/green]",
+        "disconnected": "[yellow]disconnected[/yellow]",
+        "error": "[red]error[/red]",
+    }
+    for row in snapshot:
+        state = str(row["connection_state"])
+        uptime_sec = row["uptime_sec"]
+        uptime_str = f"{float(uptime_sec):.1f}s" if uptime_sec is not None else "—"
+        table.add_row(
+            str(row["name"]),
+            state_colors.get(state, state),
+            str(row["tool_count"]),
+            str(row["version"] or "—"),
+            uptime_str,
+            str(row["url"] or "—"),
+            str(row["last_error"] or ""),
+        )
+    console.print(table)
+
+
 @mcp_app.command("test")
 def test_server(name: str = typer.Argument(..., help="Server name to test.")) -> None:
     """Connect to one server, list its tools, then disconnect. No registration.

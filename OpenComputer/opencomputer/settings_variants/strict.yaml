@@ -1,0 +1,37 @@
+# OpenComputer Settings — STRICT variant
+#
+# III.3 — conservative posture. Pairs with Claude Code's
+# sources/claude-code/examples/settings/settings-strict.json. Plan mode
+# ON by default so destructive tools (Edit / Write / Bash) refuse at the
+# source. Pairs with the II.4 destructive-Bash gate in the coding-
+# harness plan-block hook. Add your own PreToolUse hooks below for
+# organization-specific policy.
+
+model:
+  provider: anthropic
+  model: claude-opus-4-7
+  max_tokens: 4096
+
+loop:
+  max_iterations: 30       # lower than lax — tighter belt on long chains
+  parallel_tools: false    # serial tool dispatch forces ordered review
+  iteration_timeout_s: 600
+  delegation_max_iterations: 20  # subagents get less headroom too
+
+memory:
+  enabled: true
+  provider: memory-honcho
+
+tools:
+  web_search:
+    provider: ddg
+
+# III.6 settings-declared hooks. The strict variant logs every PreToolUse
+# dispatch to a per-profile audit file so a reviewer can replay the
+# session after the fact. Block decisions come from the plan-mode gate
+# and the II.4 destructive-Bash heuristic — they don't need a hook.
+hooks:
+  PreToolUse:
+    - matcher: "Edit|Write|Bash|MultiEdit"
+      command: "python3 -c 'import sys,json,os; open(os.path.expanduser(\"~/.opencomputer/strict-audit.log\"),\"a\").write(sys.stdin.read()+\"\\n\"); sys.exit(0)'"
+      timeout_seconds: 5

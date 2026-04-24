@@ -37,6 +37,7 @@ from opencomputer.agent.reviewer import PostResponseReviewer
 from opencomputer.agent.state import SessionDB
 from opencomputer.agent.step import StepOutcome
 from opencomputer.agent.tool_ordering import sort_tools_for_request
+from opencomputer.tools.bash_safety import detect_destructive
 from opencomputer.tools.memory_tool import MemoryTool
 from opencomputer.tools.registry import registry
 from opencomputer.tools.session_search_tool import SessionSearchTool
@@ -133,6 +134,55 @@ def merge_adjacent_user_messages(messages: list[Message]) -> list[Message]:
 #: without compromising the prompt-cache invariant (any evicted session will
 #: simply rebuild on its next turn — a one-time cost, not a per-turn cost).
 DEFAULT_PROMPT_SNAPSHOT_CACHE_MAX = 256
+
+
+#: II.2 — Tool names that MUST NEVER run in parallel, regardless of their
+#: per-tool ``parallel_safe`` flag. These are tools whose side-effects can
+#: race even when two invocations look independent: arbitrary shell
+#: commands (``Bash``), user-facing prompts (``AskUserQuestion``), plan-mode
+#: state transitions (``ExitPlanMode``), and mutable-state TODO writes.
+#:
+#: This is the first of two layers stacked on top of the existing
+#: ``parallel_safe`` flag. The flag is a hint from the plugin author; this
+#: frozenset is a core-level guarantee that catches plugin-author mistakes
+#: (e.g. a plugin marking its Bash tool parallel_safe=True).
+#:
+#: Mirrors Hermes's ``_NEVER_PARALLEL_TOOLS`` at
+#: ``sources/hermes-agent/run_agent.py`` line 217.
+HARDCODED_NEVER_PARALLEL: frozenset[str] = frozenset({
+    "Bash",
+    "AskUserQuestion",
+    "ExitPlanMode",
+    "TodoWrite",
+})
+
+#: II.2 — Tool names whose parallel-safety depends on whether their args
+#: point to the same path. Two ``Edit`` calls on different files are safe
+#: to run in parallel; two on the same file must run sequentially (the
+#: second's ``old_string`` search is invalidated by the first's write).
+#:
+#: Path lookup walks a prioritized arg list —
+#: ``file_path`` → ``path`` → ``pattern`` — taking whichever is present.
+#: Duplicate paths within a single tool name reject the batch from parallel.
+#:
+#: Mirrors Hermes's ``_PATH_SCOPED_TOOLS`` at
+#: ``sources/hermes-agent/run_agent.py`` line 235.
+PATH_SCOPED: frozenset[str] = frozenset({
+    "Edit",
+    "MultiEdit",
+    "Write",
+    "NotebookEdit",
+})
+
+
+def _extract_scoped_path(args: dict[str, Any]) -> Any:
+    """Return the first recognizable path-ish arg for a PATH_SCOPED tool.
+
+    Walks ``file_path``, ``path``, ``pattern`` in priority order. Returns
+    ``None`` if none are present — callers treat that as "can't prove
+    paths are distinct; reject parallel" (conservative default).
+    """
+    return args.get("file_path") or args.get("path") or args.get("pattern")
 
 
 class AgentLoop:
@@ -248,7 +298,28 @@ class AgentLoop:
         system_override: str | None = None,
         runtime: RuntimeContext | None = None,
         stream_callback=None,
+        system_prompt_override: str | None = None,
     ) -> ConversationResult:
+        """Run the agent loop until the model stops calling tools.
+
+        Parameters
+        ----------
+        system_prompt_override:
+            III.5 — when set, bypass the normal PromptBuilder pipeline and
+            use this string verbatim as the system prompt. Skills /
+            declarative memory / USER.md / SOUL.md are NOT injected — the
+            template author owns the full prompt. Used by
+            :class:`opencomputer.tools.delegate.DelegateTool` when the
+            ``agent`` parameter resolves to a registered
+            :class:`~opencomputer.agent.agent_templates.AgentTemplate`.
+
+            Distinct from ``system_override`` (pre-existing): that kwarg
+            also bypasses PromptBuilder but was never adopted by
+            DelegateTool. Treat ``system_prompt_override`` as the newer,
+            named-template path; ``system_override`` remains for direct
+            callers that want a raw swap. When both are set,
+            ``system_prompt_override`` wins (it's the III.5 semantic).
+        """
         sid = session_id or str(uuid.uuid4())
         self._runtime = runtime or DEFAULT_RUNTIME_CONTEXT
         # Expose current session id to memory tools via the context provider.
@@ -303,7 +374,14 @@ class AgentLoop:
         # edits during a session do NOT retrigger a rebuild — that's the
         # invariant that makes hermes's prompt_cache ~10× cheaper than
         # per-turn rebuilds.
-        if system_override is not None:
+        # III.5: ``system_prompt_override`` wins over ``system_override``
+        # (and both win over the PromptBuilder path). Template-authored
+        # prompts are treated as rendered-Jinja strings: declarative /
+        # skills / memory / SOUL injection OFF — the body is assumed
+        # intentional.
+        if system_prompt_override is not None:
+            base_system = system_prompt_override
+        elif system_override is not None:
             base_system = system_override
         else:
             snapshot = self._prompt_snapshots.get(sid)
@@ -833,11 +911,70 @@ class AgentLoop:
         ]
 
     def _all_parallel_safe(self, calls: list[ToolCall]) -> bool:
-        """Only parallelize when every tool in the batch declared parallel_safe."""
+        """Decide whether a batch of tool calls is safe to run in parallel.
+
+        Three-layer gate (II.2 — mirrors Hermes's ``_should_parallelize_tool_batch``
+        at ``sources/hermes-agent/run_agent.py`` line 267):
+
+        1. **Hardcoded-never name check.** Any tool in
+           :data:`HARDCODED_NEVER_PARALLEL` forces sequential, regardless of
+           its plugin-declared ``parallel_safe`` flag. Catches plugin-author
+           flag mistakes and tools whose side-effects can race.
+
+        2. **Per-tool flag check** (backwards compat). An unregistered tool
+           or one with ``parallel_safe=False`` forces sequential.
+
+        3. **Path-scope check.** For tools in :data:`PATH_SCOPED`, extract
+           the first recognizable path arg (``file_path``/``path``/``pattern``).
+           Duplicate paths within a single tool name reject parallel —
+           concurrent writes to the same file can collide, and two ``Edit``
+           calls on the same file have an ordering dependency.
+
+        4. **Bash destructive-command scan.** If any ``Bash`` call's
+           ``command`` arg matches a pattern in
+           :mod:`opencomputer.tools.bash_safety`, reject parallel. (Bash
+           is also in the hardcoded-never set above, so this layer is
+           defence-in-depth: if a future refactor drops Bash from
+           HARDCODED_NEVER_PARALLEL, this still catches ``rm -rf /``.)
+
+        Empty input returns True (no-op is trivially parallel-safe).
+        """
+        # Layer 1 + 2: name whitelist + per-tool flag.
         for c in calls:
+            if c.name in HARDCODED_NEVER_PARALLEL:
+                return False
             tool = registry.get(c.name)
             if tool is None or not tool.parallel_safe:
                 return False
+
+        # Layer 3: path-scope dedup. Per-tool-name buckets so ``Edit`` vs
+        # ``Write`` on the same path are tracked separately — matches
+        # Hermes's ``reserved_paths`` semantics. A None path means the
+        # call has no recognizable path arg; we can't prove paths differ,
+        # so conservative default: reject parallel. Otherwise check for
+        # duplicate paths within the same tool name.
+        path_by_name: dict[str, list[Any]] = {}
+        for c in calls:
+            if c.name in PATH_SCOPED:
+                p = _extract_scoped_path(c.arguments)
+                if p is None:
+                    return False
+                path_by_name.setdefault(c.name, []).append(p)
+        for paths in path_by_name.values():
+            if len(set(paths)) < len(paths):
+                return False
+
+        # Layer 4: Bash destructive-command scan. ``Bash`` is also in the
+        # hardcoded-never set above, so in practice we've already returned
+        # False. This remains so that a future loosening of
+        # HARDCODED_NEVER_PARALLEL (e.g. allowing read-only Bash) still
+        # catches ``rm -rf /`` shapes.
+        for c in calls:
+            if c.name == "Bash":
+                cmd = c.arguments.get("command")
+                if isinstance(cmd, str) and detect_destructive(cmd) is not None:
+                    return False
+
         return True
 
     # ─── E3: demand tracker construction ───────────────────────────
@@ -903,4 +1040,10 @@ class AgentLoop:
             return _NoOpDemandTracker()
 
 
-__all__ = ["AgentLoop", "ConversationResult", "merge_adjacent_user_messages"]
+__all__ = [
+    "AgentLoop",
+    "ConversationResult",
+    "HARDCODED_NEVER_PARALLEL",
+    "PATH_SCOPED",
+    "merge_adjacent_user_messages",
+]

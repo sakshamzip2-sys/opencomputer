@@ -14,6 +14,7 @@ from plugin_sdk.core import (
     Message,
     MessageEvent,
     Platform,
+    PluginActivationSource,
     PluginManifest,
     Role,
     SendResult,
@@ -45,7 +46,11 @@ from plugin_sdk.provider_contract import (
     StreamEvent,
     Usage,
 )
-from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
+from plugin_sdk.runtime_context import (
+    DEFAULT_RUNTIME_CONTEXT,
+    RequestContext,
+    RuntimeContext,
+)
 from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -60,6 +65,7 @@ __all__ = [
     "MessageEvent",
     "SendResult",
     "PluginManifest",
+    "PluginActivationSource",
     "StopReason",
     "SingleInstanceError",
     # contracts
@@ -80,6 +86,7 @@ __all__ = [
     # runtime + injection
     "RuntimeContext",
     "DEFAULT_RUNTIME_CONTEXT",
+    "RequestContext",
     "DynamicInjectionProvider",
     "InjectionContext",
     # doctor

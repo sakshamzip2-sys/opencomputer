@@ -13,9 +13,9 @@ Last updated: 2026-04-24 (v1.0-candidate — all ship-gate sub-projects A/B/C/D/
 | Reference | What we took |
 |---|---|
 | [Claude Code](https://github.com/anthropics/claude-code) | Plugin primitives (commands/skills/agents/hooks/MCP), lifecycle events, tool shapes (Edit, MultiEdit, TodoWrite) |
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Python core patterns, three-pillar memory (declarative + procedural + episodic), agent loop shape, channel adapter pattern |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Python core patterns, three-pillar memory (declarative + procedural + episodic), agent loop shape, channel adapter pattern, Jinja2 prompt templating (shared with Kimi) |
 | [OpenClaw](https://github.com/openclaw/openclaw) | Plugin-first architecture, strict SDK boundary, manifest-first two-phase discovery (scan cheap metadata, activate lazily), typed wire protocol |
-| [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) | Dynamic injection providers for cross-cutting modes, fire-and-forget hooks, deferred MCP loading, StepOutcome abstraction, Jinja2 prompts |
+| [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) | Dynamic injection providers for cross-cutting modes, fire-and-forget hooks, deferred MCP loading, StepOutcome abstraction |
 
 **Positioning:** "Same agent, same memory. Install the coding-harness plugin → it's a coding agent. Don't install → it's a chat agent. Your choice." Works from CLI, Telegram, Discord, and any WebSocket client (TUI, IDE).
 
@@ -289,6 +289,30 @@ Canvas rendering, native mobile apps, voice wake-word, Atropos RL, trajectory co
 **Plugin registration is Python-declarative, not YAML-based.** There are no `manifest.yaml` or `manifest.toml` files in `extensions/`. Each plugin's metadata (name, description, kind, tool set) is declared via a `register(api)` function in its `plugin.py`, typically constructing a `PluginManifest` from `plugin_sdk`. Don't hunt for YAML manifests — they don't exist.
 
 **Schema-name uniqueness is the collision guard for tool names.** If two plugins register tools with the same `schema().name`, `ToolRegistry` raises `ValueError` at load. Tool names are PascalCase by convention (Edit, MultiEdit, Read, TodoWrite, etc.) — the SDK boundary test keeps this honest.
+
+**Settings-based hooks — declare shell hooks without writing a plugin (III.6).** The top-level `hooks:` key in `~/.opencomputer/<profile>/config.yaml` accepts the same event-keyed shape Claude Code uses in `.claude/settings.json`:
+
+```yaml
+hooks:
+  PreToolUse:
+    - matcher: "Edit|Write|MultiEdit"
+      command: "python3 /path/to/linter.py"
+      timeout_seconds: 10
+  Stop:
+    - command: "bash /path/to/cleanup.sh"
+```
+
+Exit-code contract (matches Claude Code): `0` → pass (tool runs), `2` → block with stderr fed back as the reason, any other code → fail-open (warn + pass). Timeouts are fail-open too — a hung hook must never wedge the loop. Env vars: `OPENCOMPUTER_EVENT`, `OPENCOMPUTER_TOOL_NAME`, `OPENCOMPUTER_SESSION_ID`, `OPENCOMPUTER_PROFILE_HOME`, plus `CLAUDE_PLUGIN_ROOT` aliased to profile home so Claude Code hook scripts drop in unchanged. A JSON blob carrying the `HookContext` is piped to the command's stdin. See `sources/claude-code/plugins/plugin-dev/skills/hook-development/SKILL.md` for the inspiration; settings-declared hooks coexist with (and fire AFTER) plugin-declared ones.
+
+**Bundled settings variants (III.3).** Three starter `config.yaml` templates live under `opencomputer/settings_variants/` — `lax.yaml` (permissive dev posture, no hooks), `strict.yaml` (tightened loop budget + PreToolUse audit hook), and `sandbox.yaml` (placeholder Bash-sandbox hook; full wrapper lands with F3). Mirrors Claude Code's `sources/claude-code/examples/settings/README.md` examples. Discover and initialize from the CLI:
+
+```bash
+opencomputer config variants                           # list the three variants + descriptions
+opencomputer config init --variant strict              # copy strict.yaml → ~/.opencomputer/<profile>/config.yaml
+opencomputer config init --variant lax --force         # overwrite an existing config.yaml
+```
+
+The init command verifies the copied file re-parses via `load_config()` before confirming success; a bad variant rolls back (or restores the previous file on `--force`) so the user never ends up with a half-written `config.yaml`. Variants are starting points — edit the copied file freely after init; they integrate with the III.6 settings-hooks surface above.
 
 ---
 

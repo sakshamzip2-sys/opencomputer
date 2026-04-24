@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import logging
 import os
 import sys
 import uuid
+from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.markdown import Markdown
 
 from opencomputer import __version__
-from opencomputer.agent.config import default_config
+from opencomputer.agent.config import Config, default_config
 from opencomputer.agent.config_store import (
     config_file_path,
     get_value,
@@ -21,6 +24,9 @@ from opencomputer.agent.config_store import (
     set_value,
 )
 from opencomputer.agent.loop import AgentLoop
+from opencomputer.agent.memory_bridge import MemoryBridge
+from opencomputer.hooks.engine import engine as hook_engine
+from opencomputer.hooks.shell_handlers import make_shell_hook_handler
 from opencomputer.plugins.registry import registry as plugin_registry
 from opencomputer.tools.ask_user_question import AskUserQuestionTool
 from opencomputer.tools.bash import BashTool
@@ -37,7 +43,34 @@ from opencomputer.tools.skill_manage import SkillManageTool
 from opencomputer.tools.web_fetch import WebFetchTool
 from opencomputer.tools.web_search import WebSearchTool
 from opencomputer.tools.write import WriteTool
+from plugin_sdk.hooks import HookEvent, HookSpec
 from plugin_sdk.runtime_context import RuntimeContext
+
+_log = logging.getLogger("opencomputer.cli")
+
+
+def _memory_shutdown_atexit() -> None:
+    """Drain ``MemoryBridge.shutdown_all`` from the CLI atexit hook (II.5).
+
+    Runs outside any event loop (atexit fires after the last loop closes),
+    so this helper spins up a fresh ``asyncio.run`` call. Every exception
+    is swallowed — atexit handlers that raise become scary tracebacks for
+    users at exit time, and memory-provider shutdown is best-effort.
+
+    Mirrors Hermes' ``_run_cleanup`` atexit at
+    ``sources/hermes-agent/cli.py:717-723``.
+    """
+    try:
+        asyncio.run(MemoryBridge.shutdown_all())
+    except Exception as e:  # noqa: BLE001 — atexit must never propagate
+        _log.debug("memory-provider atexit shutdown swallowed: %s", e)
+
+
+# Register once at import time so every CLI subcommand + the gateway
+# daemon inherit the hook. ``atexit`` is idempotent across duplicate
+# registrations of the same callable, so even if this module is re-
+# imported under a test harness we only get one handler.
+atexit.register(_memory_shutdown_atexit)
 
 
 def _apply_profile_override() -> None:
@@ -227,6 +260,75 @@ def _discover_plugins() -> int:
     return len(loaded)
 
 
+def _discover_and_register_agents() -> int:
+    """III.5 — scan agent-template dirs and register with DelegateTool.
+
+    Runs the same three-tier discovery as :func:`discover_agents` and
+    pushes the result onto the class-level template map. Intentionally
+    silent on errors (a bad template is logged at WARNING inside the
+    discovery helper, never raised) so CLI startup never breaks over a
+    malformed frontmatter file.
+
+    Returns the count of registered templates — surfaced in the chat
+    banner alongside plugins / MCP counts.
+    """
+    try:
+        from opencomputer.agent.agent_templates import discover_agents
+        from opencomputer.plugins.discovery import standard_search_paths
+
+        # Plugin search paths are also the roots whose ``agents/`` dirs
+        # we check — matches Claude Code's ``plugins/<id>/agents/*.md``
+        # shape (sources/claude-code/plugins/feature-dev/agents/).
+        plugin_roots = standard_search_paths()
+        templates = discover_agents(plugin_roots=plugin_roots)
+    except Exception as e:  # noqa: BLE001 — discovery MUST NOT break CLI startup
+        _log.warning("agent template discovery failed: %s", e)
+        templates = {}
+    DelegateTool.set_templates(templates)
+    return len(templates)
+
+
+def _register_settings_hooks(cfg: Config) -> int:
+    """III.6 — register shell-command hooks declared in ``config.yaml``.
+
+    Iterates ``cfg.hooks`` and wraps each :class:`HookCommandConfig` in
+    a shell-invoking async handler (see
+    :func:`opencomputer.hooks.shell_handlers.make_shell_hook_handler`)
+    then registers it against the global hook engine.
+
+    Settings-declared hooks run AFTER plugin-declared hooks because
+    plugins call ``api.register_hook`` at plugin-load time (which is
+    earlier than this CLI-time call). Coexistence is by design — both
+    fire for matching events.
+
+    Invalid ``event`` names are logged at WARNING and skipped, not raised,
+    so a single bad entry can't wedge CLI startup. Returns the count
+    successfully registered (used by the chat banner).
+    """
+    if not cfg.hooks:
+        return 0
+    registered = 0
+    for h in cfg.hooks:
+        try:
+            event = HookEvent(h.event)
+        except ValueError:
+            _log.warning(
+                "settings hook: unknown event %r on command %r; skipping",
+                h.event,
+                h.command,
+            )
+            continue
+        hook_engine.register(
+            HookSpec(
+                event=event,
+                handler=make_shell_hook_handler(h),
+                matcher=h.matcher,
+            )
+        )
+        registered += 1
+    return registered
+
+
 def _resolve_provider(provider_name: str):
     """Resolve a provider by name from the plugin registry.
 
@@ -295,6 +397,8 @@ def chat(
 
     _register_builtin_tools()
     n_plugins = _discover_plugins()
+    n_agents = _discover_and_register_agents()
+    n_settings_hooks = _register_settings_hooks(cfg)
     provider = _resolve_provider(cfg.model.provider)
     runtime = RuntimeContext(plan_mode=plan)
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
@@ -317,6 +421,10 @@ def chat(
     console.print(f"[dim]model:   {cfg.model.model} ({cfg.model.provider})[/dim]")
     console.print(f"[dim]tools:   {', '.join(sorted(registry.names()))}[/dim]")
     console.print(f"[dim]plugins: {n_plugins} loaded[/dim]")
+    if n_agents:
+        console.print(f"[dim]agents:  {n_agents} template(s) registered[/dim]")
+    if n_settings_hooks:
+        console.print(f"[dim]hooks:   {n_settings_hooks} from settings.yaml[/dim]")
     if plan:
         console.print("[bold yellow]plan mode ON[/bold yellow] — destructive tools will be refused")
     if no_compact:
@@ -425,6 +533,8 @@ def wire(
 
     _register_builtin_tools()
     _discover_plugins()
+    _discover_and_register_agents()
+    _register_settings_hooks(cfg)
 
     provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
@@ -468,6 +578,8 @@ def gateway() -> None:
 
     _register_builtin_tools()
     n_plugins = _discover_plugins()
+    _discover_and_register_agents()
+    _register_settings_hooks(cfg)
 
     provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
@@ -576,6 +688,42 @@ def skills() -> None:
         console.print(f"[cyan]{s.name}[/cyan] — {s.description}")
 
 
+# III.5 — subagent template management subcommand.
+agents_app = typer.Typer(
+    name="agents",
+    help="Manage subagent templates (DelegateTool `agent` parameter).",
+    no_args_is_help=True,
+)
+app.add_typer(agents_app, name="agents")
+
+
+@agents_app.command("list")
+def agents_list() -> None:
+    """List discovered agent templates.
+
+    III.5 — mirrors Claude Code's ``.md`` agent definitions
+    (``sources/claude-code/plugins/<plugin>/agents/*.md``). Scanning
+    order is bundled → plugin → profile/user, with later tiers
+    overriding earlier entries by name (same precedence as skills).
+    """
+    from opencomputer.agent.agent_templates import discover_agents
+    from opencomputer.plugins.discovery import standard_search_paths
+
+    plugin_roots = standard_search_paths()
+    templates = discover_agents(plugin_roots=plugin_roots)
+    if not templates:
+        console.print("[dim]no agent templates found[/dim]")
+        return
+    for name in sorted(templates):
+        tpl = templates[name]
+        tools_str = ", ".join(tpl.tools) if tpl.tools else "(inherit)"
+        console.print(
+            f"[cyan]{tpl.name}[/cyan] [dim]({tpl.source})[/dim] — {tpl.description}"
+        )
+        console.print(f"[dim]  tools: {tools_str}[/dim]")
+        console.print(f"[dim]  source: {tpl.source_path}[/dim]")
+
+
 config_app = typer.Typer(
     name="config", help="Manage OpenComputer config (~/.opencomputer/config.yaml)"
 )
@@ -606,6 +754,11 @@ app.add_typer(profile_app, name="profile")
 from opencomputer.cli_plugin import plugin_app  # noqa: E402
 
 app.add_typer(plugin_app, name="plugin")
+
+# Task II.3 — channel directory list CLI
+from opencomputer.cli_channels import channels_app  # noqa: E402
+
+app.add_typer(channels_app, name="channels")
 
 
 @config_app.command("show")
@@ -664,6 +817,151 @@ def config_set(
 def config_path() -> None:
     """Print the path to the config file."""
     console.print(str(config_file_path()))
+
+
+# III.3 — bundled settings variants. Mirrors sources/claude-code/examples/
+# settings/README.md: three starter postures users copy and adjust.
+
+
+def _variants_dir() -> Path:
+    """Return the directory holding bundled variant YAMLs (III.3)."""
+    return Path(__file__).parent / "settings_variants"
+
+
+def _available_variants() -> list[str]:
+    """Discover bundled variants by scanning ``*.yaml`` in :func:`_variants_dir`."""
+    d = _variants_dir()
+    if not d.is_dir():
+        return []
+    return sorted(p.stem for p in d.glob("*.yaml"))
+
+
+def _variant_description(variant_path: Path) -> str:
+    """Extract the first non-blank comment block from a variant YAML.
+
+    Returns a single-line summary for the ``config variants`` listing.
+    Fails open — unreadable / missing header yields an empty string so
+    the command never crashes on a malformed variant.
+    """
+    try:
+        lines: list[str] = []
+        for raw in variant_path.read_text(encoding="utf-8").splitlines():
+            stripped = raw.strip()
+            if not stripped.startswith("#"):
+                if lines:
+                    break  # first non-comment line ends the header block
+                continue
+            body = stripped.lstrip("#").strip()
+            # Skip the banner line ("OpenComputer Settings — LAX variant") —
+            # it's redundant with the variant name we already print.
+            if not body or body.lower().startswith("opencomputer settings"):
+                continue
+            lines.append(body)
+            if len(lines) >= 2:
+                break
+        return " ".join(lines)
+    except OSError:
+        return ""
+
+
+@config_app.command("variants")
+def config_variants() -> None:
+    """List the bundled settings variants (III.3).
+
+    Each variant ships a starter ``config.yaml`` with a distinct security
+    posture (see ``sources/claude-code/examples/settings/README.md`` for the
+    inspiration). Use ``opencomputer config init --variant <name>`` to
+    copy one into the active profile.
+    """
+    names = _available_variants()
+    if not names:
+        console.print("[yellow]no bundled variants found[/yellow]")
+        return
+    console.print("[bold]Bundled settings variants:[/bold]")
+    for name in names:
+        desc = _variant_description(_variants_dir() / f"{name}.yaml") or "(no description)"
+        console.print(f"  [cyan]{name}[/cyan] — {desc}")
+    console.print(
+        "\n[dim]copy one into the active profile with "
+        "[bold]opencomputer config init --variant <name>[/bold][/dim]"
+    )
+
+
+@config_app.command("init")
+def config_init(
+    variant: str = typer.Option(..., "--variant", help="lax | strict | sandbox"),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing config.yaml"),
+) -> None:
+    """Initialize the active profile's config.yaml from a bundled variant.
+
+    III.3 — pairs with Claude Code's
+    ``sources/claude-code/examples/settings/README.md`` examples. The copied
+    file is re-parsed via :func:`load_config` as a smoke test; a variant that
+    fails to round-trip triggers a rollback so the user isn't left with a
+    broken ``config.yaml``.
+    """
+    names = _available_variants()
+    src = _variants_dir() / f"{variant}.yaml"
+    if variant not in names or not src.is_file():
+        available = ", ".join(names) if names else "(none)"
+        console.print(
+            f"[bold red]error:[/bold red] unknown variant {variant!r}. "
+            f"Available: {available}"
+        )
+        raise typer.Exit(1)
+
+    dst = config_file_path()
+    backup: Path | None = None
+    if dst.exists():
+        if not force:
+            console.print(
+                f"[bold red]error:[/bold red] config.yaml already exists at {dst}, "
+                "re-run with --force to overwrite"
+            )
+            raise typer.Exit(1)
+        backup = dst.with_suffix(dst.suffix + ".bak")
+        try:
+            backup.write_bytes(dst.read_bytes())
+        except OSError as e:
+            console.print(f"[bold red]error:[/bold red] could not back up {dst}: {e}")
+            raise typer.Exit(1) from None
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    content = src.read_text(encoding="utf-8")
+    dst.write_text(content, encoding="utf-8")
+
+    # Sanity-check: the freshly copied file must parse. If it doesn't,
+    # roll back (restore the backup or delete the new file) so the user is
+    # never stranded with a broken config.
+    try:
+        load_config(dst)
+    except Exception as e:  # noqa: BLE001 — we always want to roll back
+        if backup is not None:
+            try:
+                dst.write_bytes(backup.read_bytes())
+            except OSError:
+                pass
+        else:
+            try:
+                dst.unlink()
+            except OSError:
+                pass
+        console.print(
+            f"[bold red]error:[/bold red] variant {variant!r} failed to parse after copy: {e}"
+        )
+        raise typer.Exit(1) from None
+
+    if backup is not None:
+        # Keep the backup only when --force replaced an existing file, and
+        # only as a one-shot safety net; we clean it up on success to avoid
+        # accumulating .bak crumbs on repeated re-inits.
+        try:
+            backup.unlink()
+        except OSError:
+            pass
+
+    console.print(f"[green]✓[/green] initialized config.yaml from variant [cyan]{variant}[/cyan]")
+    console.print(f"[dim]  → {dst}[/dim]")
 
 
 # Phase 11d: episodic memory recall + Anthropic batch runner.

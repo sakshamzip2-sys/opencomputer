@@ -19,12 +19,19 @@ import logging
 import os
 import sys
 import threading
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from opencomputer.plugins.discovery import PluginCandidate
-from plugin_sdk.core import SingleInstanceError
+from plugin_sdk.core import (
+    VALID_ACTIVATION_SOURCES,
+    PluginActivationSource,
+    SingleInstanceError,
+)
+from plugin_sdk.runtime_context import RequestContext
 
 logger = logging.getLogger("opencomputer.plugins.loader")
 
@@ -244,11 +251,326 @@ atexit.register(_atexit_release_all)
 
 
 @dataclass(slots=True)
+class PluginRegistrations:
+    """Exact set of items a single plugin registered on ``PluginAPI``.
+
+    Computed by diffing the snapshots captured before/after
+    ``register(api)``. Stored on ``LoadedPlugin`` so teardown (Task I.4)
+    knows which entries to remove even when multiple plugins contributed
+    to the same shared registry dict.
+
+    Hooks are tracked by object identity (``HookSpec`` instances the
+    plugin registered) rather than by name — ``HookEngine`` keys by
+    event, and multiple plugins can register handlers on the same
+    event, so only identity-match unregister is safe.
+    """
+
+    tool_names: tuple[str, ...] = ()
+    provider_names: tuple[str, ...] = ()
+    channel_names: tuple[str, ...] = ()
+    slash_names: tuple[str, ...] = ()
+    injection_provider_ids: tuple[str, ...] = ()
+    hook_specs: tuple[Any, ...] = ()
+    #: How many doctor contributions this plugin added (most recent N).
+    doctor_contributions_count: int = 0
+    #: True iff this plugin registered the currently-active memory provider.
+    registered_memory_provider: bool = False
+
+
+@dataclass(slots=True)
 class LoadedPlugin:
-    """Record of an activated plugin."""
+    """Record of an activated plugin.
+
+    ``registrations`` + ``api`` are I.4 teardown hooks — the loader
+    captures them so ``PluginRegistry.teardown_plugin`` can remove
+    exactly the entries this plugin registered (safely, even when
+    multiple plugins contributed to the same registry dict).
+    """
 
     candidate: PluginCandidate
     module: Any
+    registrations: PluginRegistrations = field(default_factory=PluginRegistrations)
+    api: PluginAPI | None = None
+
+
+# ─── runtime contract validation (Task I.5) ───────────────────────────
+
+
+@dataclass(slots=True)
+class _RegistrationSnapshot:
+    """Point-in-time view of registered items on a ``PluginAPI``.
+
+    Used by ``_validate_runtime_contract`` AND by I.4 teardown: the diff
+    between before/after snapshots is the exact set of items a single
+    plugin's ``register(api)`` call contributed.
+
+    Sets of names for bulk registries (tools/providers/channels/slash
+    commands), a count for hooks (used for contract warning), a tuple
+    of the actual ``HookSpec`` identities present (used for teardown),
+    a count for doctor contributions (list-append pattern), and a flag
+    for the currently-exclusive memory provider slot.
+
+    Matches OpenClaw's loader-side contract check
+    (``sources/openclaw/src/plugins/loader.ts``) which snapshots before
+    and diffs after ``plugin.register()``.
+    """
+
+    tool_names: set[str]
+    provider_names: set[str]
+    channel_names: set[str]
+    slash_names: set[str]
+    injection_provider_ids: set[str]
+    hook_count: int
+    hook_specs: list[Any]
+    doctor_contributions_count: int
+    memory_provider_present: bool
+
+
+def _snapshot_registrations(api: PluginAPI) -> _RegistrationSnapshot:
+    """Capture the currently-registered items on ``api`` for before/after diff.
+
+    Duck-typed on purpose: tests routinely pass ``_Noop`` stubs for the
+    tool registry and hook engine when they only care about the loader's
+    lock/import paths. ``getattr`` with sensible defaults keeps the
+    contract check a best-effort diagnostic that never breaks those
+    stub-based tests.
+
+    ``hook_specs`` captures identities (the actual ``HookSpec`` objects
+    currently registered) so teardown can remove exactly the specs a
+    plugin added — multiple plugins can register handlers on the same
+    event, so name-keyed removal isn't safe.
+    """
+    names_iter = getattr(api.tools, "names", None)
+    tool_names = set(names_iter()) if callable(names_iter) else set()
+    hooks_dict = getattr(api.hooks, "_hooks", None)
+    hook_count = (
+        sum(len(specs) for specs in hooks_dict.values())
+        if isinstance(hooks_dict, dict)
+        else 0
+    )
+    hook_specs: list[Any] = []
+    if isinstance(hooks_dict, dict):
+        for specs in hooks_dict.values():
+            hook_specs.extend(specs)
+    # Injection engine stores providers in ``_providers`` dict keyed by
+    # provider_id. Duck-type so stub engines (no ``_providers``) don't
+    # break the diagnostic path.
+    inj_dict = getattr(api.injection, "_providers", None) if api.injection else None
+    injection_ids = set(inj_dict.keys()) if isinstance(inj_dict, dict) else set()
+    return _RegistrationSnapshot(
+        tool_names=tool_names,
+        provider_names=set(api.providers.keys()),
+        channel_names=set(api.channels.keys()),
+        slash_names=set(api.slash_commands.keys()),
+        injection_provider_ids=injection_ids,
+        hook_count=hook_count,
+        hook_specs=hook_specs,
+        doctor_contributions_count=len(api.doctor_contributions),
+        memory_provider_present=(api.memory_provider is not None),
+    )
+
+
+def _compute_plugin_registrations(
+    before: _RegistrationSnapshot,
+    after: _RegistrationSnapshot,
+) -> PluginRegistrations:
+    """Diff two snapshots to produce the exact delta a plugin registered.
+
+    The result is stored on ``LoadedPlugin.registrations`` and consumed
+    by ``PluginRegistry.teardown_plugin`` to remove precisely the items
+    this plugin added — safe even when multiple plugins contributed to
+    the same shared registry dict.
+
+    ``hook_specs`` uses identity diff (``id()``) because ``HookSpec``
+    is a frozen dataclass and two plugins could theoretically register
+    equal-valued specs; identity-match is the only unambiguous key.
+    """
+    before_hook_ids = {id(s) for s in before.hook_specs}
+    new_hook_specs = tuple(
+        s for s in after.hook_specs if id(s) not in before_hook_ids
+    )
+    added_doctor = max(
+        0, after.doctor_contributions_count - before.doctor_contributions_count
+    )
+    return PluginRegistrations(
+        tool_names=tuple(sorted(after.tool_names - before.tool_names)),
+        provider_names=tuple(sorted(after.provider_names - before.provider_names)),
+        channel_names=tuple(sorted(after.channel_names - before.channel_names)),
+        slash_names=tuple(sorted(after.slash_names - before.slash_names)),
+        injection_provider_ids=tuple(
+            sorted(after.injection_provider_ids - before.injection_provider_ids)
+        ),
+        hook_specs=new_hook_specs,
+        doctor_contributions_count=added_doctor,
+        registered_memory_provider=(
+            after.memory_provider_present and not before.memory_provider_present
+        ),
+    )
+
+
+def _validate_runtime_contract(
+    manifest: Any,
+    before: _RegistrationSnapshot,
+    after: _RegistrationSnapshot,
+) -> None:
+    """Compare post-``register()`` deltas against manifest claims.
+
+    Emits WARNINGs only — never raises, never blocks load. Matches
+    OpenClaw's ``manifest.contracts`` field + loader-side validation:
+    a plugin declaring ``kind=provider`` but registering zero providers
+    is almost certainly a drift bug (refactored away but manifest not
+    updated). Logging early means ``opencomputer doctor`` and CI smoke
+    tests surface the drift before it blows up at dispatch time.
+
+    The mapping is intentionally BROAD for ``kind=provider``: a memory
+    provider also satisfies the claim (this matches the bundled
+    ``memory-honcho`` plugin which declares ``kind=provider`` and
+    registers via ``register_memory_provider``). ``kind=skill`` skips
+    the check entirely — skill plugins contribute markdown files, not
+    runtime registrations.
+
+    Separately, if ``manifest.tool_names`` is a non-empty tuple, at
+    least one newly-registered tool schema name must match (full set
+    equality is enforced by a separate drift-guard test on bundled
+    extensions; the loader only needs partial-match here so a plugin
+    advertising multiple variants doesn't falsely warn on partial load).
+    """
+    kind = getattr(manifest, "kind", "mixed")
+    plugin_id = getattr(manifest, "id", "<unknown>")
+
+    # Compute the per-kind delta.
+    new_tools = after.tool_names - before.tool_names
+    new_providers = after.provider_names - before.provider_names
+    new_channels = after.channel_names - before.channel_names
+    new_slash = after.slash_names - before.slash_names
+    added_hooks = after.hook_count - before.hook_count
+    added_memory = (
+        after.memory_provider_present and not before.memory_provider_present
+    )
+
+    def _warn(reason: str) -> None:
+        # Wording deliberately matches the I.5 spec so downstream
+        # log-scrapers can recognise the event. Don't change without
+        # updating the I.5 tests.
+        logger.warning(
+            "Plugin %r declared kind=%r but registered no %s. "
+            "Manifest claim may be wrong.",
+            plugin_id,
+            kind,
+            reason,
+        )
+
+    # ── kind claim check ───────────────────────────────────────────
+    if kind == "provider":
+        # Broad: either an LLM provider or a memory provider counts.
+        if not new_providers and not added_memory:
+            _warn("provider")
+    elif kind == "channel":
+        if not new_channels:
+            _warn("channel")
+    elif kind == "tool":
+        if not new_tools:
+            _warn("tool")
+    elif kind == "memory":
+        # ``memory`` is not currently in the PluginKind literal, but
+        # keep the branch so a future schema expansion Just Works.
+        if not added_memory:
+            _warn("memory")
+    elif kind == "mixed" and (
+        not new_tools
+        and not new_providers
+        and not new_channels
+        and not new_slash
+        and added_hooks == 0
+        and not added_memory
+    ):
+        _warn("mixed")
+    # kind == "skill": skill plugins typically register no runtime
+    # items (they contribute markdown files via the skills directory).
+    # Skip the check entirely.
+
+    # ── tool_names claim check ─────────────────────────────────────
+    declared_tool_names = getattr(manifest, "tool_names", ()) or ()
+    if declared_tool_names and not any(
+        name in new_tools for name in declared_tool_names
+    ):
+        logger.warning(
+            "Plugin %r declared tool_names=%r but registered tools %r — "
+            "at least one declared name must match a registered tool.",
+            plugin_id,
+            list(declared_tool_names),
+            sorted(new_tools),
+        )
+
+
+# ─── provider config-schema validation (Task I.6) ─────────────────────
+
+
+def _validate_provider_config(name: str, provider: Any) -> None:
+    """Validate a provider's ``config`` against its declared ``config_schema``.
+
+    Mirror of OpenClaw's ``normalizeRegisteredProvider``
+    (``sources/openclaw/src/plugins/provider-validation.ts``) — catch bad
+    config at registration instead of at first-use.
+
+    Rules:
+      - If ``provider`` is a class (not an instance), skip. The instance
+        doesn't exist yet; construction errors surface at resolve time.
+      - If the provider's type has ``config_schema = None`` (the
+        default), skip. Backwards compat with pre-I.6 providers.
+      - If the provider exposes ``self.config``:
+          * already a pydantic BaseModel → ensure it's an instance of
+            ``config_schema`` (or re-validate via dump + model_validate
+            to catch unrelated models).
+          * dict → parse via ``config_schema(**config)``.
+          * anything else → parse via ``config_schema(**config.__dict__)``
+            (tolerates dataclass-style configs).
+      - If the provider declares ``config_schema`` but has no ``config``
+        attribute, skip — the provider hasn't opted into validation yet.
+
+    Raises:
+        ValueError: config fails pydantic validation. Message names the
+            provider and includes the pydantic error for debuggability.
+    """
+    # Class-registered providers: no instance to validate. The class's
+    # own config_schema attr stays available for future instances.
+    if isinstance(provider, type):
+        return
+
+    schema = getattr(type(provider), "config_schema", None)
+    if schema is None:
+        return
+
+    config = getattr(provider, "config", None)
+    if config is None:
+        return
+
+    from pydantic import BaseModel as _PydanticBaseModel
+    from pydantic import ValidationError
+
+    try:
+        if isinstance(config, _PydanticBaseModel):
+            if isinstance(config, schema):
+                # Already the right shape. Fastest path.
+                return
+            # Different pydantic model — re-validate via dump.
+            schema.model_validate(config.model_dump())
+            return
+        if isinstance(config, dict):
+            schema.model_validate(config)
+            return
+        # Tolerate dataclass-style or namespace-style configs.
+        schema.model_validate(vars(config))
+    except ValidationError as e:
+        raise ValueError(
+            f"provider {name!r} config failed schema validation: {e}"
+        ) from e
+    else:
+        logger.debug(
+            "provider %r config validated against schema %s",
+            name,
+            schema.__name__,
+        )
 
 
 class PluginAPI:
@@ -264,6 +586,7 @@ class PluginAPI:
         doctor_contributions: list[Any] | None = None,
         session_db_path: Path | None = None,
         slash_commands: dict[str, Any] | None = None,
+        activation_source: PluginActivationSource = "bundled",
     ) -> None:
         self.tools = tool_registry
         self.hooks = hook_engine
@@ -288,6 +611,90 @@ class PluginAPI:
         self.slash_commands: dict[str, Any] = (
             slash_commands if slash_commands is not None else {}
         )
+        # Task I.7: why this plugin was activated. Exposed to plugin code
+        # via the ``activation_source`` property so ``register(api)`` can
+        # branch on the origin (user-enabled → verbose logging;
+        # auto-enabled → quiet). Validated here because the Literal type
+        # is erased at runtime — without the check, typos silently pass.
+        if activation_source not in VALID_ACTIVATION_SOURCES:
+            raise ValueError(
+                f"activation_source must be one of "
+                f"{sorted(VALID_ACTIVATION_SOURCES)!r}; got {activation_source!r}"
+            )
+        self._activation_source: PluginActivationSource = activation_source
+        # Task I.9: per-request scope. ``None`` outside any dispatch;
+        # populated by the gateway via ``in_request(ctx)`` around each
+        # inbound MessageEvent / wire call. Plugins read via the
+        # ``request_context`` property.
+        self._request_context: RequestContext | None = None
+
+    @property
+    def activation_source(self) -> PluginActivationSource:
+        """Why this plugin was activated — see ``PluginActivationSource``.
+
+        Plugins can read this inside ``register(api)`` and adapt. For
+        example, a noisy onboarding message only makes sense the first
+        time a user explicitly enables the plugin::
+
+            def register(api):
+                if api.activation_source == "user_enable":
+                    api.hooks.notify("thanks for enabling <plugin>!")
+        """
+        return self._activation_source
+
+    @property
+    def request_context(self) -> RequestContext | None:
+        """Per-request scope, if the gateway has entered one — else ``None``.
+
+        Populated by ``in_request(ctx)`` on this same PluginAPI during
+        each dispatch. Plugins reach this from any code that runs
+        inside the dispatch (tool handlers, injection providers, hook
+        handlers) to learn about the inbound request identity.
+
+        ``None`` outside a scope — the CLI + direct
+        ``AgentLoop.run_conversation`` path does not populate a scope,
+        so the return is ``None`` there. Plugins MUST handle the
+        ``None`` case; it's the common case for offline / CLI runs.
+
+        Mirrors OpenClaw's per-request plugin scope at
+        ``sources/openclaw/src/gateway/server-plugins.ts:47-64, 107-144``.
+        """
+        return self._request_context
+
+    @contextmanager
+    def in_request(self, ctx: RequestContext) -> Iterator[None]:
+        """Enter a per-request scope for the duration of a dispatch.
+
+        The gateway wraps each inbound channel message's
+        ``run_conversation`` call in this context manager so plugins
+        running during the dispatch can read ``api.request_context``
+        and query the current request identity (for auth gating,
+        rate limiting, activation-context branching).
+
+        Scopes do NOT stack on a single PluginAPI — a second entry
+        while one is already active raises ``RuntimeError``. This
+        matches OpenClaw's server-plugins model: one request in flight
+        per scope at a time (fire-per-message channels produce one
+        scope per message; the wire server produces one scope per
+        method call; concurrent chats go through separate session
+        locks at the dispatcher level, not through nested scopes).
+
+        The scope unwinds cleanly even if the wrapped block raises —
+        ``request_context`` reverts to its prior value (usually
+        ``None``) before the exception propagates.
+        """
+        if self._request_context is not None:
+            raise RuntimeError(
+                "PluginAPI is already in a request (request_id="
+                f"{self._request_context.request_id!r}) — nested in_request "
+                "scopes are not supported; concurrent dispatches must use "
+                "separate locks at the dispatcher level."
+            )
+        self._request_context = ctx
+        try:
+            yield
+        finally:
+            self._request_context = None
 
     def register_tool(self, tool: Any) -> None:
         self.tools.register(tool)
@@ -296,6 +703,27 @@ class PluginAPI:
         self.hooks.register(spec)
 
     def register_provider(self, name: str, provider: Any) -> None:
+        """Register an LLM provider under ``name``.
+
+        ``provider`` may be either a provider INSTANCE or a provider
+        CLASS. Plugins typically register the class (existing pattern)
+        and the CLI instantiates it on demand in ``_resolve_provider``.
+
+        Task I.6 — config-schema validation. If the provider's type (or
+        the provider itself, if it's a class) declares a
+        ``config_schema`` class attribute AND the object is an
+        instance with a ``config`` attribute, the registry validates
+        ``config`` against the schema using pydantic and raises
+        ``ValueError`` on mismatch. This catches malformed config at
+        plugin load rather than at first-use.
+
+        Providers without ``config_schema`` (the default) skip
+        validation entirely — backwards compatible with every pre-I.6
+        provider. When ``provider`` is a class (not an instance), we
+        skip validation too; the instance doesn't exist yet, and the
+        CLI path will surface construction errors naturally.
+        """
+        _validate_provider_config(name, provider)
         self.providers[name] = provider
 
     def register_channel(self, name: str, adapter: Any) -> None:
@@ -361,7 +789,11 @@ class PluginAPI:
         self.doctor_contributions.append(contribution)
 
 
-def load_plugin(candidate: PluginCandidate, api: PluginAPI) -> LoadedPlugin | None:
+def load_plugin(
+    candidate: PluginCandidate,
+    api: PluginAPI,
+    activation_source: PluginActivationSource | None = None,
+) -> LoadedPlugin | None:
     """Import a candidate's entry module and call its register(api) function.
 
     Uses importlib.util.spec_from_file_location with a unique synthetic module
@@ -376,6 +808,14 @@ def load_plugin(candidate: PluginCandidate, api: PluginAPI) -> LoadedPlugin | No
     PID lock at ``~/.opencomputer/.locks/<plugin-id>.lock`` BEFORE running
     any plugin code. Raises :class:`SingleInstanceError` if the lock is
     held by another running process.
+
+    Task I.7: ``activation_source`` lets callers describe WHY this plugin
+    is being activated (e.g. ``"user_enable"`` from the CLI, vs the
+    ``"bundled"`` default for ``extensions/*``). When supplied, the value
+    is pushed onto the shared ``api`` for the duration of the plugin's
+    ``register()`` call so plugin code can read ``api.activation_source``
+    and branch on it. ``None`` (the default) leaves ``api``'s existing
+    source untouched — backwards compatible with every pre-I.7 caller.
     """
     manifest = candidate.manifest
     entry = manifest.entry.strip()
@@ -433,19 +873,180 @@ def load_plugin(candidate: PluginCandidate, api: PluginAPI) -> LoadedPlugin | No
         )
         return None
 
+    # Task I.7: temporarily override the shared api's activation source
+    # for this specific plugin's register() call. Save + restore so
+    # sibling plugins loaded through the same api see their own source
+    # (or the original baseline if this was a one-off override).
+    prior_source: PluginActivationSource | None = None
+    if activation_source is not None:
+        if activation_source not in VALID_ACTIVATION_SOURCES:
+            raise ValueError(
+                f"activation_source must be one of "
+                f"{sorted(VALID_ACTIVATION_SOURCES)!r}; got {activation_source!r}"
+            )
+        prior_source = api._activation_source
+        api._activation_source = activation_source
+
+    # Task I.5: snapshot registrations BEFORE calling into the plugin so
+    # we can diff after and catch manifest-vs-runtime drift. Snapshot is
+    # cheap (set copies + int count); cost is paid once per plugin load.
+    before_snapshot = _snapshot_registrations(api)
+
     try:
         register_fn(api)
     except Exception as e:  # noqa: BLE001
         logger.exception("plugin '%s' register() raised: %s", manifest.id, e)
         return None
+    finally:
+        if prior_source is not None:
+            api._activation_source = prior_source
+
+    # Task I.5: compare post-register state against manifest claims.
+    # Emits WARNINGs on mismatch — never blocks load. Intentionally
+    # non-fatal: the plugin's register() may have had side effects we
+    # don't want to abort on mid-way.
+    after_snapshot = _snapshot_registrations(api)
+    try:
+        _validate_runtime_contract(manifest, before_snapshot, after_snapshot)
+    except Exception:  # noqa: BLE001
+        # Contract validation is diagnostics — never break load for it.
+        logger.debug(
+            "runtime contract validation raised for plugin '%s'; swallowing",
+            manifest.id,
+            exc_info=True,
+        )
+
+    # Task I.4: capture the exact delta THIS plugin added so teardown
+    # can surgically remove just those entries. Reusing the I.5 snapshot
+    # infrastructure — no extra work at load time beyond one diff call.
+    registrations = _compute_plugin_registrations(before_snapshot, after_snapshot)
 
     logger.info("loaded plugin '%s' v%s", manifest.id, manifest.version)
-    return LoadedPlugin(candidate=candidate, module=module)
+    return LoadedPlugin(
+        candidate=candidate,
+        module=module,
+        registrations=registrations,
+        api=api,
+    )
+
+
+def teardown_loaded_plugin(
+    loaded: LoadedPlugin,
+    *,
+    api: PluginAPI | None = None,
+) -> None:
+    """Remove a plugin's registrations + synthetic modules (Task I.4).
+
+    Safe to call once per ``LoadedPlugin``. Never raises — teardown is
+    best-effort cleanup; a failed step is logged and the rest of the
+    teardown continues.
+
+    Order (mirrors OpenClaw's ``clearPluginLoaderCache`` pattern,
+    ``sources/openclaw/src/plugins/loader.ts:222-230``):
+
+    1. Call the plugin's ``cleanup()`` / ``teardown()`` entry-point
+       function if present. Plugin-owned cleanup first so the plugin
+       can flush caches / close resources while its registrations are
+       still reachable.
+    2. Unregister the plugin's items from the shared registries
+       (tools, providers, channels, slash commands, injection
+       providers, hooks, doctor contributions, memory provider).
+    3. Drop the plugin's synthetic module name + common sibling names
+       from ``sys.modules`` so a later reload imports fresh state.
+
+    ``api`` can override the api on ``loaded`` — used by registry
+    callers that want to be explicit about which PluginAPI instance
+    owns the registrations.
+    """
+    plugin_id = loaded.candidate.manifest.id
+    module = loaded.module
+    target_api = api if api is not None else loaded.api
+
+    # Step 1 — call the plugin's cleanup hook if present.
+    cleanup_fn = None
+    for hook_name in ("cleanup", "teardown"):
+        fn = getattr(module, hook_name, None)
+        if callable(fn):
+            cleanup_fn = fn
+            break
+    if cleanup_fn is not None:
+        try:
+            cleanup_fn()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "plugin %r cleanup/teardown raised; continuing teardown",
+                plugin_id,
+            )
+
+    # Step 2 — remove registrations if we have the owning api.
+    regs = loaded.registrations
+    if target_api is not None:
+        for name in regs.tool_names:
+            unregister = getattr(target_api.tools, "unregister", None)
+            if callable(unregister):
+                try:
+                    unregister(name)
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "tool unregister failed for %r (plugin %r)",
+                        name,
+                        plugin_id,
+                        exc_info=True,
+                    )
+        for name in regs.provider_names:
+            target_api.providers.pop(name, None)
+        for name in regs.channel_names:
+            target_api.channels.pop(name, None)
+        for name in regs.slash_names:
+            target_api.slash_commands.pop(name, None)
+        if target_api.injection is not None:
+            inj_unreg = getattr(target_api.injection, "unregister", None)
+            for pid in regs.injection_provider_ids:
+                if callable(inj_unreg):
+                    try:
+                        inj_unreg(pid)
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "injection unregister failed for %r (plugin %r)",
+                            pid,
+                            plugin_id,
+                            exc_info=True,
+                        )
+        # Hooks — identity-match remove from each event's list.
+        hooks_dict = getattr(target_api.hooks, "_hooks", None)
+        if isinstance(hooks_dict, dict) and regs.hook_specs:
+            target_ids = {id(s) for s in regs.hook_specs}
+            for event, specs in list(hooks_dict.items()):
+                remaining = [s for s in specs if id(s) not in target_ids]
+                if len(remaining) != len(specs):
+                    hooks_dict[event] = remaining
+        # Doctor contributions — remove the most recent N entries we added.
+        # Best-effort: if the list shrank under us, trim however many
+        # are left (never negative).
+        if regs.doctor_contributions_count > 0:
+            to_drop = min(
+                regs.doctor_contributions_count,
+                len(target_api.doctor_contributions),
+            )
+            if to_drop > 0:
+                del target_api.doctor_contributions[-to_drop:]
+        if regs.registered_memory_provider:
+            target_api.memory_provider = None
+
+    # Step 3 — drop the synthetic module + common sibling names from
+    # sys.modules so a later reload sees a clean graph. Synthetic name
+    # is deterministic (see load_plugin below).
+    entry = loaded.candidate.manifest.entry.strip()
+    synth_name = f"_opencomputer_plugin_{plugin_id.replace('-', '_')}_{entry}"
+    sys.modules.pop(synth_name, None)
+    _clear_plugin_local_cache()
 
 
 __all__ = [
     "PluginAPI",
     "LoadedPlugin",
+    "PluginRegistrations",
     "load_plugin",
+    "teardown_loaded_plugin",
     "SingleInstanceError",
 ]

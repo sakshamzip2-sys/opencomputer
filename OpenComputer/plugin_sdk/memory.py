@@ -108,5 +108,20 @@ class MemoryProvider(ABC):
         """Optional: called when a session ends. Default: no-op."""
         return None
 
+    async def shutdown(self) -> None:
+        """Optional: close resources on process exit. Default: no-op.
+
+        Called once at CLI / gateway shutdown via
+        :meth:`opencomputer.agent.memory_bridge.MemoryBridge.shutdown_all`.
+        Implementations SHOULD close any httpx clients and flush pending
+        writes. MUST be idempotent — ``shutdown_all`` may be invoked more
+        than once in edge cases (``atexit`` + explicit cleanup path).
+
+        Mirrors Hermes' ``AIAgent.shutdown_memory_provider`` hook at
+        ``sources/hermes-agent/run_agent.py:3445-3470``. See II.5 in the
+        2026-04-24 reference-parity plan.
+        """
+        return None
+
 
 __all__ = ["MemoryProvider"]

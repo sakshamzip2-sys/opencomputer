@@ -111,11 +111,38 @@ Plugin discovery is **two-phase**, modeled on OpenClaw:
    under synthetic names (`_opencomputer_plugin_<id>_<entry>`) to
    avoid `sys.modules` collisions between sibling `plugin.py` files.
 
-**Teardown: there isn't one** (today). Plugins that allocate resources
-in `register` (e.g. open WebSocket connections) leak them until process
-exit. Channel adapters have `connect()`/`disconnect()` managed by the
-gateway, but tools / providers / hooks have no symmetric teardown
-event. This is a known limitation — do not rely on a shutdown hook.
+**Teardown is opt-in.** Plugins MAY define a `cleanup()` (or
+`teardown()`) function at module level in their entry module. When
+callers invoke `PluginRegistry.teardown_plugin(plugin_id)` — used for
+live-reload and test isolation — the loader:
+
+1. Calls the plugin's `cleanup()` / `teardown()` function if present.
+2. Removes the plugin's registrations from every shared registry
+   (tools, providers, channels, slash commands, injection providers,
+   hooks, doctor contributions, memory provider) using the delta
+   captured at load time. Sibling plugins are left intact.
+3. Drops the plugin's synthetic module (and the common sibling names
+   `provider`, `adapter`, `plugin`, `handlers`, `hooks`) from
+   `sys.modules` so a subsequent reload sees fresh state.
+
+`teardown_plugin` is NEVER called automatically during normal plugin
+lifecycle — only when something explicitly opts in. Channel adapters
+still have `connect()`/`disconnect()` managed by the gateway, which is
+independent of the teardown pathway above.
+
+```python
+# Example: a plugin that owns a background task
+_TASK: asyncio.Task | None = None
+
+def register(api):
+    global _TASK
+    _TASK = asyncio.ensure_future(_worker())
+    api.register_tool(MyTool())
+
+def cleanup():
+    if _TASK is not None and not _TASK.done():
+        _TASK.cancel()
+```
 
 ## 6. Testing
 

@@ -259,6 +259,28 @@ class HonchoSelfHostedProvider(MemoryProvider):
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def shutdown(self) -> None:
+        """Close the httpx client + flush any pending work.
+
+        Called by ``MemoryBridge.shutdown_all`` from the CLI's atexit
+        handler (II.5). Must be idempotent — atexit may fire alongside an
+        explicit cleanup path, and a second ``aclose`` on an already-
+        closed client raises ``RuntimeError`` in newer httpx.
+
+        Honcho's HTTP API has no batched /flush endpoint — sync_turn is
+        already one-POST-per-call, so "flush pending writes" here reduces
+        to awaiting any in-flight client requests. ``aclose`` handles
+        that by draining the client's internal connection pool.
+        """
+        if getattr(self._client, "is_closed", False):
+            return
+        try:
+            await self._client.aclose()
+        except RuntimeError as e:
+            # Tolerate "client has already been closed" races without
+            # crashing atexit — we're on a best-effort path at shutdown.
+            logger.debug("honcho shutdown aclose tolerated: %s", e)
+
     # ─── internal HTTP helpers (one per tool) ──────────────────────
 
     async def _profile(self, args: dict[str, Any]) -> str:

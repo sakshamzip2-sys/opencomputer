@@ -7,6 +7,11 @@ to InjectionProviders (so they can decide whether to fire) and to Hooks
 subagents, so modes like `--plan` apply to the whole subagent tree.
 
 Frozen dataclass — safe to share across tasks / threads.
+
+``RequestContext`` (Task I.9) is the adjacent per-REQUEST scope —
+populated by the gateway around each inbound channel message so plugins
+can query the request identity (auth gating, rate limiting, activation
+context queries). CLI + direct AgentLoop calls leave it None.
 """
 
 from __future__ import annotations
@@ -46,4 +51,54 @@ class RuntimeContext:
 DEFAULT_RUNTIME_CONTEXT = RuntimeContext()
 
 
-__all__ = ["RuntimeContext", "DEFAULT_RUNTIME_CONTEXT"]
+# ─── RequestContext (Task I.9) ─────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class RequestContext:
+    """Per-request metadata available to plugins during a dispatch.
+
+    Populated by the gateway around each inbound ``MessageEvent`` and
+    around each wire-server call. CLI + direct ``AgentLoop.run_conversation``
+    callers leave it ``None`` — ``PluginAPI.request_context`` returns
+    ``None`` when no scope is active.
+
+    Plugins read this via ``PluginAPI.request_context`` inside any code
+    that runs during dispatch (tool handlers, injection providers,
+    hooks). Use cases:
+
+    * **Auth gating** — block a tool for users outside a channel allowlist.
+    * **Rate limiting** — key a token-bucket on ``(channel, user_id)``.
+    * **Activation-context queries** — "am I being called from Telegram
+      or from the CLI?" (matches OpenClaw's per-request plugin scope at
+      ``sources/openclaw/src/gateway/server-plugins.ts:47-64, 107-144``).
+
+    Immutable — the gateway assembles the ctx once per request and
+    never mutates it. A new request gets a fresh ``RequestContext``.
+    """
+
+    #: UUID per incoming request. Never reused — a long-running wire
+    #: connection will cycle through many request_ids, one per method call.
+    request_id: str
+
+    #: Channel identifier ("telegram", "discord", "wire", "cli", ...).
+    #: ``None`` if the dispatch path does not know (shouldn't happen in
+    #: practice, but defensive default).
+    channel: str | None = None
+
+    #: Channel-specific user identifier. For Telegram / Discord this is
+    #: the chat_id; for wire server it's the connection id. Plugins
+    #: that rate-limit or auth-gate key on this.
+    user_id: str | None = None
+
+    #: Agent session id — sha256 of ``(platform, chat_id)`` in the
+    #: current dispatcher. Same session across turns in the same chat.
+    session_id: str | None = None
+
+    #: ``time.monotonic()`` reading at request start. Used by request
+    #: timing / rate-limit token buckets. ``0.0`` default so callers
+    #: that don't care can skip the argument.
+    started_at: float = 0.0
+
+
+__all__ = ["RuntimeContext", "DEFAULT_RUNTIME_CONTEXT", "RequestContext"]

@@ -28,7 +28,14 @@ class Gateway:
 
     def __init__(self, loop: AgentLoop) -> None:
         self.loop = loop
-        self.dispatch = Dispatch(loop)
+        # Task I.9: wire the shared PluginAPI through to Dispatch so
+        # plugins see a per-request scope via ``api.request_context``.
+        # ``shared_api`` is set by ``PluginRegistry.load_all``; if the
+        # caller built a Gateway before loading plugins, dispatch
+        # silently falls back to the no-scope path.
+        from opencomputer.plugins.registry import registry as plugin_registry
+
+        self.dispatch = Dispatch(loop, plugin_api=plugin_registry.shared_api)
         self._adapters: list[BaseChannelAdapter] = []
 
     def register_adapter(self, adapter: BaseChannelAdapter) -> None:
