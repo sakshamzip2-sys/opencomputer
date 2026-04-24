@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
+from plugin_sdk.consent import CapabilityClaim
 from plugin_sdk.core import ToolCall, ToolResult
 
 
@@ -51,6 +52,12 @@ class BaseTool(ABC):
 
     #: Maximum size of the result string (longer is truncated with a notice).
     max_result_size: int = 100_000
+
+    #: F1 (Sub-project F): capabilities this tool needs the user to have
+    #: granted. Empty list (default) means unprivileged — no gate check.
+    #: Subclasses SHOULD override with a tuple (not list) to avoid the
+    #: mutable-default-class-attribute footgun.
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = ()
 
     @property
     @abstractmethod
