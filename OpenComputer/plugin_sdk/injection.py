@@ -29,8 +29,12 @@ class InjectionContext:
     runtime: RuntimeContext
     #: Session id — useful for session-scoped caches or per-chat behaviors.
     session_id: str = ""
-    #: Which turn number we're on in the session (0-indexed). Cadence-aware
-    #: providers (Honcho, etc.) use this to return content only every N turns.
+    #: Per-turn monotonic counter. Providers can use this to throttle heavy
+    #: content to every Nth turn. Positive ``int`` means "this is turn N"
+    #: with ``N`` starting at 1. Default ``0`` is the neutral "caller did not
+    #: thread the counter" sentinel — throttling providers should treat it as
+    #: equivalent to the first exposure (return FULL content) rather than
+    #: silently falling into sparse mode forever.
     turn_index: int = 0
 
 

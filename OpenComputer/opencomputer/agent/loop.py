@@ -268,12 +268,20 @@ class AgentLoop:
                 self._prompt_snapshots.move_to_end(sid)
             base_system = snapshot
 
+        # Compute the 1-indexed turn number for this session. IV.2: providers
+        # use this to throttle heavy content (plan/review reminders flip from
+        # FULL to SPARSE after the first turn, with a FULL refresh every 5th
+        # turn). Count user messages already in history; the user message
+        # we're about to append is turn ``N+1``.
+        turn_index = sum(1 for m in messages if m.role == "user") + 1
+
         # Collect dynamic injections (plan_mode, yolo_mode, etc. from plugins).
         # ``compose`` is async — providers gather concurrently (IV.1 refactor).
         inj_ctx = InjectionContext(
             messages=tuple(messages),
             runtime=self._runtime,
             session_id=sid,
+            turn_index=turn_index,
         )
         injected = await injection_engine.compose(inj_ctx)
         system = base_system + ("\n\n" + injected if injected else "")
@@ -346,11 +354,16 @@ class AgentLoop:
                 result = await self.compaction.maybe_run(messages, self._last_input_tokens)
                 if result.did_compact:
                     messages = result.messages
-                    # Re-collect injections with the new message list
+                    # Re-collect injections with the new message list. Reuse
+                    # the same ``turn_index`` computed at turn-start — the
+                    # logical turn number doesn't change just because we
+                    # summarized earlier history; throttling decisions must
+                    # stay consistent for this turn.
                     inj_ctx = InjectionContext(
                         messages=tuple(messages),
                         runtime=self._runtime,
                         session_id=sid,
+                        turn_index=turn_index,
                     )
                     injected = await injection_engine.compose(inj_ctx)
                     system = base_system + ("\n\n" + injected if injected else "")
