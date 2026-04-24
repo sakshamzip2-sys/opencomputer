@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import logging
 import os
 import sys
 import uuid
@@ -21,6 +23,7 @@ from opencomputer.agent.config_store import (
     set_value,
 )
 from opencomputer.agent.loop import AgentLoop
+from opencomputer.agent.memory_bridge import MemoryBridge
 from opencomputer.plugins.registry import registry as plugin_registry
 from opencomputer.tools.ask_user_question import AskUserQuestionTool
 from opencomputer.tools.bash import BashTool
@@ -38,6 +41,32 @@ from opencomputer.tools.web_fetch import WebFetchTool
 from opencomputer.tools.web_search import WebSearchTool
 from opencomputer.tools.write import WriteTool
 from plugin_sdk.runtime_context import RuntimeContext
+
+_log = logging.getLogger("opencomputer.cli")
+
+
+def _memory_shutdown_atexit() -> None:
+    """Drain ``MemoryBridge.shutdown_all`` from the CLI atexit hook (II.5).
+
+    Runs outside any event loop (atexit fires after the last loop closes),
+    so this helper spins up a fresh ``asyncio.run`` call. Every exception
+    is swallowed — atexit handlers that raise become scary tracebacks for
+    users at exit time, and memory-provider shutdown is best-effort.
+
+    Mirrors Hermes' ``_run_cleanup`` atexit at
+    ``sources/hermes-agent/cli.py:717-723``.
+    """
+    try:
+        asyncio.run(MemoryBridge.shutdown_all())
+    except Exception as e:  # noqa: BLE001 — atexit must never propagate
+        _log.debug("memory-provider atexit shutdown swallowed: %s", e)
+
+
+# Register once at import time so every CLI subcommand + the gateway
+# daemon inherit the hook. ``atexit`` is idempotent across duplicate
+# registrations of the same callable, so even if this module is re-
+# imported under a test harness we only get one handler.
+atexit.register(_memory_shutdown_atexit)
 
 
 def _apply_profile_override() -> None:

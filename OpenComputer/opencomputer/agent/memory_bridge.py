@@ -55,10 +55,109 @@ class MemoryBridge:
     The bridge is cheap to construct; create one per ``AgentLoop`` instance
     and reuse it across turns. All public methods are safe to call when no
     provider is registered (no-op fast path).
+
+    Class-level shutdown registry (II.5)
+    ─────────────────────────────────────
+    Every non-``None`` provider that gets wrapped by a bridge is tracked in
+    ``_SHUTDOWN_REGISTRY`` so :meth:`shutdown_all` (invoked from the CLI's
+    ``atexit`` hook) can flush pending writes + close httpx clients for
+    every provider the process ever saw — regardless of how many
+    ``AgentLoop`` / ``MemoryBridge`` instances were constructed.
+
+    Registration is deduplicated by object identity: wrapping the same
+    provider in two bridges registers it once, so ``shutdown_all`` never
+    double-closes (which would blow up on a closed httpx client).
+
+    Mirrors Hermes' ``AIAgent.shutdown_memory_provider`` +
+    ``_run_cleanup`` atexit hook at ``sources/hermes-agent/cli.py:717-723``.
     """
+
+    #: Ordered registry of providers awaiting shutdown. Insertion order is
+    #: preserved (Python dict guarantees) so ``shutdown_all`` drains in
+    #: registration order — deterministic across runs. Keys are providers,
+    #: values are unused. ``dict`` over ``set`` for ordered iteration.
+    _SHUTDOWN_REGISTRY: dict[Any, None] = {}
+
+    #: Tracks providers we've already shut down so a second ``shutdown_all``
+    #: call is a clean no-op (idempotent atexit).
+    _SHUTDOWN_COMPLETED: set[int] = set()
 
     def __init__(self, ctx: Any) -> None:
         self._ctx = ctx
+        provider = getattr(ctx, "provider", None)
+        if provider is not None:
+            # Register for atexit shutdown. Dedup by identity — wrapping
+            # the same provider twice must not cause a double-close.
+            type(self)._SHUTDOWN_REGISTRY[provider] = None
+
+    # ─── II.5 shutdown lifecycle ───────────────────────────────────
+
+    @classmethod
+    def _registered_providers(cls) -> list[Any]:
+        """Test helper — snapshot the current shutdown registry in order."""
+        return list(cls._SHUTDOWN_REGISTRY.keys())
+
+    @classmethod
+    def _reset_shutdown_registry(cls) -> None:
+        """Test helper — clear the registry + completion tracker.
+
+        Production code MUST NOT call this. It exists so tests can run in
+        isolation without bleeding registered providers across cases.
+        """
+        cls._SHUTDOWN_REGISTRY.clear()
+        cls._SHUTDOWN_COMPLETED.clear()
+
+    @classmethod
+    async def shutdown_all(cls) -> None:
+        """Await ``shutdown()`` on every registered provider.
+
+        Semantics:
+          * Drains in registration order — deterministic.
+          * Uses ``asyncio.gather(..., return_exceptions=True)`` so one
+            provider raising MUST NOT stop others from shutting down.
+          * Idempotent: providers that already shut down are skipped, so
+            calling ``shutdown_all`` twice does not re-invoke
+            ``shutdown`` on any provider.
+          * Returns cleanly if the registry is empty.
+        """
+        pending = [
+            p for p in cls._SHUTDOWN_REGISTRY if id(p) not in cls._SHUTDOWN_COMPLETED
+        ]
+        if not pending:
+            return
+        # Mark before awaiting — otherwise a concurrent second call could
+        # double-schedule the same provider. ``id`` rather than the
+        # object itself because providers don't need to be hashable (the
+        # registry dict already stores them as keys, so they are, but
+        # the completion set is cheaper keyed by ``id``).
+        for provider in pending:
+            cls._SHUTDOWN_COMPLETED.add(id(provider))
+        results = await asyncio.gather(
+            *(cls._safe_shutdown(p) for p in pending),
+            return_exceptions=True,
+        )
+        for provider, res in zip(pending, results, strict=False):
+            if isinstance(res, BaseException):
+                logger.warning(
+                    "Memory provider %s shutdown raised: %s",
+                    getattr(provider, "provider_id", "<unknown>"),
+                    res,
+                )
+
+    @staticmethod
+    async def _safe_shutdown(provider: Any) -> None:
+        """Call ``provider.shutdown`` if defined; otherwise a no-op.
+
+        Catches ``AttributeError`` so providers that pre-date II.5 (e.g.
+        stubs from third-party plugins built against an older plugin_sdk)
+        don't crash the atexit path just because they lack ``shutdown``.
+        The base class supplies a default no-op, so this is strictly a
+        backwards-compat belt-and-braces.
+        """
+        shutdown_fn = getattr(provider, "shutdown", None)
+        if shutdown_fn is None:
+            return
+        await shutdown_fn()
 
     # ─── helpers ────────────────────────────────────────────────────
 
