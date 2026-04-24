@@ -24,7 +24,11 @@ from pathlib import Path
 from typing import Any
 
 from opencomputer.plugins.discovery import PluginCandidate
-from plugin_sdk.core import SingleInstanceError
+from plugin_sdk.core import (
+    VALID_ACTIVATION_SOURCES,
+    PluginActivationSource,
+    SingleInstanceError,
+)
 
 logger = logging.getLogger("opencomputer.plugins.loader")
 
@@ -264,6 +268,7 @@ class PluginAPI:
         doctor_contributions: list[Any] | None = None,
         session_db_path: Path | None = None,
         slash_commands: dict[str, Any] | None = None,
+        activation_source: PluginActivationSource = "bundled",
     ) -> None:
         self.tools = tool_registry
         self.hooks = hook_engine
@@ -288,6 +293,31 @@ class PluginAPI:
         self.slash_commands: dict[str, Any] = (
             slash_commands if slash_commands is not None else {}
         )
+        # Task I.7: why this plugin was activated. Exposed to plugin code
+        # via the ``activation_source`` property so ``register(api)`` can
+        # branch on the origin (user-enabled → verbose logging;
+        # auto-enabled → quiet). Validated here because the Literal type
+        # is erased at runtime — without the check, typos silently pass.
+        if activation_source not in VALID_ACTIVATION_SOURCES:
+            raise ValueError(
+                f"activation_source must be one of "
+                f"{sorted(VALID_ACTIVATION_SOURCES)!r}; got {activation_source!r}"
+            )
+        self._activation_source: PluginActivationSource = activation_source
+
+    @property
+    def activation_source(self) -> PluginActivationSource:
+        """Why this plugin was activated — see ``PluginActivationSource``.
+
+        Plugins can read this inside ``register(api)`` and adapt. For
+        example, a noisy onboarding message only makes sense the first
+        time a user explicitly enables the plugin::
+
+            def register(api):
+                if api.activation_source == "user_enable":
+                    api.hooks.notify("thanks for enabling <plugin>!")
+        """
+        return self._activation_source
 
     def register_tool(self, tool: Any) -> None:
         self.tools.register(tool)
@@ -361,7 +391,11 @@ class PluginAPI:
         self.doctor_contributions.append(contribution)
 
 
-def load_plugin(candidate: PluginCandidate, api: PluginAPI) -> LoadedPlugin | None:
+def load_plugin(
+    candidate: PluginCandidate,
+    api: PluginAPI,
+    activation_source: PluginActivationSource | None = None,
+) -> LoadedPlugin | None:
     """Import a candidate's entry module and call its register(api) function.
 
     Uses importlib.util.spec_from_file_location with a unique synthetic module
@@ -376,6 +410,14 @@ def load_plugin(candidate: PluginCandidate, api: PluginAPI) -> LoadedPlugin | No
     PID lock at ``~/.opencomputer/.locks/<plugin-id>.lock`` BEFORE running
     any plugin code. Raises :class:`SingleInstanceError` if the lock is
     held by another running process.
+
+    Task I.7: ``activation_source`` lets callers describe WHY this plugin
+    is being activated (e.g. ``"user_enable"`` from the CLI, vs the
+    ``"bundled"`` default for ``extensions/*``). When supplied, the value
+    is pushed onto the shared ``api`` for the duration of the plugin's
+    ``register()`` call so plugin code can read ``api.activation_source``
+    and branch on it. ``None`` (the default) leaves ``api``'s existing
+    source untouched — backwards compatible with every pre-I.7 caller.
     """
     manifest = candidate.manifest
     entry = manifest.entry.strip()
@@ -433,11 +475,28 @@ def load_plugin(candidate: PluginCandidate, api: PluginAPI) -> LoadedPlugin | No
         )
         return None
 
+    # Task I.7: temporarily override the shared api's activation source
+    # for this specific plugin's register() call. Save + restore so
+    # sibling plugins loaded through the same api see their own source
+    # (or the original baseline if this was a one-off override).
+    prior_source: PluginActivationSource | None = None
+    if activation_source is not None:
+        if activation_source not in VALID_ACTIVATION_SOURCES:
+            raise ValueError(
+                f"activation_source must be one of "
+                f"{sorted(VALID_ACTIVATION_SOURCES)!r}; got {activation_source!r}"
+            )
+        prior_source = api._activation_source
+        api._activation_source = activation_source
+
     try:
         register_fn(api)
     except Exception as e:  # noqa: BLE001
         logger.exception("plugin '%s' register() raised: %s", manifest.id, e)
         return None
+    finally:
+        if prior_source is not None:
+            api._activation_source = prior_source
 
     logger.info("loaded plugin '%s' v%s", manifest.id, manifest.version)
     return LoadedPlugin(candidate=candidate, module=module)
