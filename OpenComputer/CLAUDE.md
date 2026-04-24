@@ -13,9 +13,9 @@ Last updated: 2026-04-24 (v1.0-candidate — all ship-gate sub-projects A/B/C/D/
 | Reference | What we took |
 |---|---|
 | [Claude Code](https://github.com/anthropics/claude-code) | Plugin primitives (commands/skills/agents/hooks/MCP), lifecycle events, tool shapes (Edit, MultiEdit, TodoWrite) |
-| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Python core patterns, three-pillar memory (declarative + procedural + episodic), agent loop shape, channel adapter pattern |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Python core patterns, three-pillar memory (declarative + procedural + episodic), agent loop shape, channel adapter pattern, Jinja2 prompt templating (shared with Kimi) |
 | [OpenClaw](https://github.com/openclaw/openclaw) | Plugin-first architecture, strict SDK boundary, manifest-first two-phase discovery (scan cheap metadata, activate lazily), typed wire protocol |
-| [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) | Dynamic injection providers for cross-cutting modes, fire-and-forget hooks, deferred MCP loading, StepOutcome abstraction, Jinja2 prompts |
+| [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) | Dynamic injection providers for cross-cutting modes, fire-and-forget hooks, deferred MCP loading, StepOutcome abstraction |
 
 **Positioning:** "Same agent, same memory. Install the coding-harness plugin → it's a coding agent. Don't install → it's a chat agent. Your choice." Works from CLI, Telegram, Discord, and any WebSocket client (TUI, IDE).
 
