@@ -20,10 +20,42 @@ from opencomputer.agent.consent.store import ConsentStore
 from plugin_sdk import CapabilityClaim, ConsentDecision, ConsentTier
 
 
+def render_prompt_message(claim: CapabilityClaim, scope: str | None) -> str:
+    """Build the user-facing prompt for a Tier-2 (PER_ACTION) consent ask.
+
+    F1 2.B.2 — when a scope is available, the prompt names the specific
+    resource being accessed instead of just the capability class. This
+    is what AgentLoop / TUI / wire clients show to a user when a
+    capability requires per-action approval.
+
+    Examples:
+        render_prompt_message(claim, "/Users/x/foo.py")
+        → "Allow read_files.metadata on /Users/x/foo.py? [y/N/always]"
+        render_prompt_message(claim, None)
+        → "Allow read_files.metadata? [y/N/always]"
+    """
+    cap = claim.capability_id
+    if scope:
+        return f"Allow {cap} on {scope}? [y/N/always]"
+    return f"Allow {cap}? [y/N/always]"
+
+
 class ConsentGate:
     def __init__(self, *, store: ConsentStore, audit: AuditLogger) -> None:
         self._store = store
         self._audit = audit
+
+    @staticmethod
+    def render_prompt(
+        claim: CapabilityClaim, scope: str | None,
+    ) -> str:
+        """Public alias for :func:`render_prompt_message`.
+
+        Surfaced as a method so callers (TUI, wire server, AgentLoop's
+        consent-prompt path) can ask the gate to format the prompt
+        without importing the module-level helper directly.
+        """
+        return render_prompt_message(claim, scope)
 
     def check(
         self,
@@ -58,7 +90,16 @@ class ConsentGate:
 
         if grant is None:
             decision_bool = False
+            # 2.B.2 — name the resource in the deny reason when we have one
+            # so callers surfacing this string to the user see "no grant for
+            # capability — would prompt: Allow X on /path? ..." rather than
+            # the bare capability class.
             reason = "no grant for capability"
+            if scope:
+                reason = (
+                    f"{reason} (would prompt: "
+                    f"{render_prompt_message(claim, scope)})"
+                )
             tier: ConsentTier | None = None
         elif grant.tier < claim.tier_required:
             decision_bool = False
@@ -66,6 +107,11 @@ class ConsentGate:
                 f"grant tier {grant.tier.name} insufficient "
                 f"(need {claim.tier_required.name})"
             )
+            if scope:
+                reason = (
+                    f"{reason} (would prompt: "
+                    f"{render_prompt_message(claim, scope)})"
+                )
             tier = grant.tier
         else:
             decision_bool = True

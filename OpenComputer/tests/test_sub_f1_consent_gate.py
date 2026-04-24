@@ -151,3 +151,81 @@ def test_prefix_match_handles_trailing_slash_in_filter():
     d_escape = gate.check(claim, scope="/a/b-other/c.py", session_id="s1")
     assert d_sub.allowed is True
     assert d_escape.allowed is False
+
+
+# ─── 2.B.2: per-resource consent prompt rendering ────────────────────
+
+
+def test_render_prompt_includes_scope_when_present():
+    """The prompt names the specific resource being accessed."""
+    from opencomputer.agent.consent.gate import render_prompt_message
+
+    claim = CapabilityClaim(
+        "read_files.metadata", ConsentTier.PER_ACTION, "",
+    )
+    msg = render_prompt_message(claim, "/Users/saksham/Projects/foo.py")
+    assert "read_files.metadata" in msg
+    assert "/Users/saksham/Projects/foo.py" in msg
+    assert " on " in msg
+    assert "[y/N/always]" in msg
+
+
+def test_render_prompt_falls_back_when_no_scope():
+    """Without a scope the prompt is the generic capability-only form."""
+    from opencomputer.agent.consent.gate import render_prompt_message
+
+    claim = CapabilityClaim(
+        "read_files.metadata", ConsentTier.PER_ACTION, "",
+    )
+    msg = render_prompt_message(claim, None)
+    assert msg == "Allow read_files.metadata? [y/N/always]"
+
+
+def test_check_deny_reason_includes_scope_aware_prompt_text():
+    """When the gate denies and a scope is known, the deny reason embeds the
+    scope-aware prompt — so callers surfacing reason to the user see the
+    specific resource, not just the capability class.
+    """
+    c, store, log, gate = _setup()
+    claim = CapabilityClaim(
+        "read_files.metadata", ConsentTier.PER_ACTION, "",
+    )
+    d = gate.check(
+        claim,
+        scope="/Users/saksham/Projects/foo.py",
+        session_id="s1",
+    )
+    assert d.allowed is False
+    assert "/Users/saksham/Projects/foo.py" in d.reason
+    assert "read_files.metadata" in d.reason
+
+
+# ─── 2.B.3: consent-expiry regression ────────────────────────────────
+
+
+def test_grant_expiry_is_rechecked_per_call():
+    """Regression for F1 2.B.3 — expiry MUST be enforced at every gate.check.
+
+    Seed a grant with expires_at slightly in the future, call the gate
+    once (allowed), wait for expiry, call again — the second call must
+    deny ("no grant for capability") because ConsentStore.get filters
+    out expired rows at read time.
+    """
+    c, store, log, gate = _setup()
+    now = time.time()
+    store.upsert(ConsentGrant(
+        "read_files", ConsentTier.EXPLICIT, None,
+        now, now + 1.0, "user",
+    ))
+    claim = CapabilityClaim("read_files", ConsentTier.EXPLICIT, "")
+    d_first = gate.check(claim, scope=None, session_id="s1")
+    assert d_first.allowed is True, (
+        "first call should hit the still-valid grant"
+    )
+    # Sleep until past expiry.
+    time.sleep(1.2)
+    d_second = gate.check(claim, scope=None, session_id="s1")
+    assert d_second.allowed is False
+    assert "no grant" in d_second.reason.lower(), (
+        "after expiry the gate should treat the grant as absent and deny"
+    )

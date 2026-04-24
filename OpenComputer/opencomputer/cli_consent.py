@@ -9,6 +9,7 @@ Subcommands:
     opencomputer consent export-chain-head --out <file>    — backup head HMAC
     opencomputer consent import-chain-head --from <file>   — verify backup still matches
     opencomputer consent bypass [--status]                 — show emergency-bypass state
+    opencomputer consent suggest-promotions [--auto-accept] — list promotion candidates
 
 Grants, counters and audit log all live in the ACTIVE PROFILE's
 SQLite DB at `_home() / "sessions.db"`.
@@ -22,6 +23,8 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from rich.console import Console
+from rich.table import Table
 
 from opencomputer.agent.config import _home
 from opencomputer.agent.consent import (
@@ -260,4 +263,105 @@ def consent_bypass(
         "To enable: `export OPENCOMPUTER_CONSENT_BYPASS=1` in your shell.\n"
         "This should only be used to unbrick a broken gate. Every action "
         "is heavily audit-logged while bypass is active."
+    )
+
+
+# ─── 2.B.1 — Progressive-tier auto-promotion CLI ─────────────────────
+
+
+@consent_app.command("suggest-promotions")
+def consent_suggest_promotions(
+    auto_accept: Annotated[
+        bool,
+        typer.Option(
+            "--auto-accept",
+            help=(
+                "Apply each suggested promotion immediately instead of "
+                "printing instructions."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """List Tier-2 grants eligible for promotion to Tier-1 (>=10 clean runs).
+
+    Reads the per-(capability, scope) clean_run_count from
+    ``consent_counters`` (maintained by ProgressivePromoter) and shows
+    only those whose currently-stored grant is still EXPLICIT (Tier 2):
+    a counter without a matching EXPLICIT grant has nothing to promote.
+
+    With ``--auto-accept`` each candidate is upgraded in place to
+    IMPLICIT (Tier 1) and an audit row is appended with
+    ``actor=progressive_auto_promoter``, ``action=promote``,
+    ``reason=clean_run_count>=10``.
+    """
+    conn, store, logger = _open_consent_db()
+    threshold = 10
+    rows = conn.execute(
+        "SELECT capability_id, scope_filter, clean_run_count "
+        "FROM consent_counters WHERE clean_run_count >= ? "
+        "ORDER BY capability_id, scope_filter",
+        (threshold,),
+    ).fetchall()
+
+    eligible: list[tuple[str, str | None, int, ConsentGrant]] = []
+    for cap_id, scope, count in rows:
+        grant = store.get(cap_id, scope)
+        if grant is None:
+            # No active grant (revoked or expired) — nothing to promote.
+            continue
+        if grant.tier != ConsentTier.EXPLICIT:
+            # Already IMPLICIT or higher-trust — skip.
+            continue
+        eligible.append((cap_id, scope, int(count), grant))
+
+    if not eligible:
+        typer.echo("No promotion candidates.")
+        return
+
+    if auto_accept:
+        for cap_id, scope, count, grant in eligible:
+            promoted = ConsentGrant(
+                capability_id=cap_id,
+                tier=ConsentTier.IMPLICIT,
+                scope_filter=scope,
+                granted_at=time.time(),
+                expires_at=grant.expires_at,
+                granted_by="promoted",
+            )
+            store.upsert(promoted)
+            logger.append(AuditEvent(
+                session_id=None,
+                actor="progressive_auto_promoter",
+                action="promote",
+                capability_id=cap_id,
+                tier=int(ConsentTier.IMPLICIT),
+                scope=scope,
+                decision="allow",
+                reason="clean_run_count>=10",
+            ))
+            typer.echo(
+                f"Promoted {cap_id} scope={scope or '*'} "
+                f"(clean_run_count={count}) → IMPLICIT"
+            )
+        return
+
+    console = Console()
+    table = Table(title="Tier-2 → Tier-1 promotion candidates")
+    table.add_column("capability_id", style="cyan")
+    table.add_column("scope", style="green")
+    table.add_column("clean_run_count", justify="right")
+    table.add_column("current tier")
+    table.add_column("suggested tier")
+    for cap_id, scope, count, _grant in eligible:
+        table.add_row(
+            cap_id,
+            scope if scope else "(global)",
+            str(count),
+            ConsentTier.EXPLICIT.name,
+            ConsentTier.IMPLICIT.name,
+        )
+    console.print(table)
+    typer.echo(
+        "To accept a suggestion, run: "
+        "opencomputer consent grant <cap> --tier 1 [--scope <path>]"
     )
