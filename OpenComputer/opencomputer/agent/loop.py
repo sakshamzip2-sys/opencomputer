@@ -702,10 +702,49 @@ class AgentLoop:
         if resp.message.tool_calls and stop == StopReason.END_TURN:
             stop = StopReason.TOOL_USE
 
+        # II.6: pull reasoning-chain metadata off the ProviderResponse onto
+        # the assistant message. Providers that don't surface reasoning
+        # (standard Opus/Sonnet, stock OpenAI chat) return ``None`` for
+        # these fields; the reconstructed Message stays functionally
+        # identical. For reasoning-capable providers (OpenAI o1/o3, Nous,
+        # OpenRouter unified, Anthropic extended thinking), SessionDB's
+        # ``append_message`` persists the fields so the next turn can
+        # replay them — matches Hermes v6 schema intent.
+        msg = resp.message
+        resp_reasoning = getattr(resp, "reasoning", None)
+        resp_reasoning_details = getattr(resp, "reasoning_details", None)
+        resp_codex_items = getattr(resp, "codex_reasoning_items", None)
+        if (
+            resp_reasoning is not None
+            or resp_reasoning_details is not None
+            or resp_codex_items is not None
+        ):
+            # Prefer the provider-level fields; only fall back to
+            # message-level ones if the provider already attached them
+            # (some providers populate Message.reasoning directly).
+            msg = Message(
+                role=msg.role,
+                content=msg.content,
+                tool_call_id=msg.tool_call_id,
+                tool_calls=msg.tool_calls,
+                name=msg.name,
+                reasoning=resp_reasoning if resp_reasoning is not None else msg.reasoning,
+                reasoning_details=(
+                    resp_reasoning_details
+                    if resp_reasoning_details is not None
+                    else msg.reasoning_details
+                ),
+                codex_reasoning_items=(
+                    resp_codex_items
+                    if resp_codex_items is not None
+                    else msg.codex_reasoning_items
+                ),
+            )
+
         return StepOutcome(
             stop_reason=stop,
-            assistant_message=resp.message,
-            tool_calls_made=len(resp.message.tool_calls or []),
+            assistant_message=msg,
+            tool_calls_made=len(msg.tool_calls or []),
             input_tokens=resp.usage.input_tokens,
             output_tokens=resp.usage.output_tokens,
         )

@@ -18,7 +18,25 @@ Role = Literal["system", "user", "assistant", "tool"]
 
 @dataclass(frozen=True, slots=True)
 class Message:
-    """A single conversation message — canonical form used everywhere internally."""
+    """A single conversation message — canonical form used everywhere internally.
+
+    Reasoning fields (``reasoning``, ``reasoning_details``,
+    ``codex_reasoning_items``) carry provider-specific reasoning-chain
+    output (Anthropic extended thinking, OpenAI o1 / o3 reasoning
+    replay, Nous / OpenRouter unified reasoning). Default ``None``
+    keeps round-trips backwards-compatible for non-reasoning models.
+
+    * ``reasoning``             — free-form reasoning TEXT from the
+                                  provider (single string).
+    * ``reasoning_details``     — OpenRouter / Nous unified-format
+                                  structured array (list of dicts).
+    * ``codex_reasoning_items`` — OpenAI o1/o3 reasoning items that
+                                  must be replayed verbatim on the
+                                  next turn to preserve continuity.
+
+    SessionDB serialises the two list fields as JSON and restores them
+    via ``json.loads`` on read — see ``opencomputer.agent.state``.
+    """
 
     role: Role
     content: str
@@ -26,6 +44,8 @@ class Message:
     tool_calls: list[ToolCall] | None = None
     name: str | None = None  # for tool messages, the tool name
     reasoning: str | None = None  # extended thinking, if supported
+    reasoning_details: Any = None  # list[dict[str, Any]] | None
+    codex_reasoning_items: Any = None  # list[dict[str, Any]] | None
 
 
 @dataclass(frozen=True, slots=True)
