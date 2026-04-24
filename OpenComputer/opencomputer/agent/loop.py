@@ -96,6 +96,7 @@ class AgentLoop:
         episodic_disabled: bool = False,
         reviewer_disabled: bool = False,
         is_reviewer: bool = False,
+        consent_gate: Any = None,  # F1: opencomputer.agent.consent.ConsentGate | None
     ) -> None:
         self.provider = provider
         self.config = config
@@ -128,6 +129,13 @@ class AgentLoop:
             else PostResponseReviewer(memory=self.memory, is_reviewer=False)
         )
         self._last_input_tokens = 0
+
+        # F1 (Sub-project F): optional consent gate. When set, every tool
+        # call with declared capability_claims is checked BEFORE PreToolUse
+        # hooks fire — gate-before-hook invariant keeps plugins from
+        # pre-empting the security boundary. When None, gate is disabled
+        # (back-compat: tools without claims are unaffected either way).
+        self._consent_gate = consent_gate
 
         # Phase 10f.H: memory context + bridge. Bridge wraps an optional
         # external MemoryProvider (Honcho, Mem0, etc.) with exception safety;
@@ -539,13 +547,37 @@ class AgentLoop:
         if not calls:
             return []
 
-        # Fire PreToolUse hooks first (blocking). Determine which calls are blocked.
+        # F1: consent gate fires BEFORE any PreToolUse hook. Plugin-registered
+        # hooks cannot pre-empt or bypass this check. Only tools that declare
+        # capability_claims are gated; un-declared tools pass through (same
+        # behavior as before F1). Bypass via OPENCOMPUTER_CONSENT_BYPASS=1.
         from opencomputer.hooks.engine import engine as hook_engine
         from plugin_sdk.core import ToolResult
         from plugin_sdk.hooks import HookContext, HookEvent
 
         blocked: dict[str, str] = {}  # call.id → block reason
+
+        if self._consent_gate is not None:
+            from opencomputer.agent.consent.bypass import BypassManager
+            if not BypassManager.is_active():
+                for c in calls:
+                    tool = registry.get(c.name)
+                    if tool is None:
+                        continue
+                    claims = getattr(tool, "capability_claims", ())
+                    for claim in claims:
+                        scope = _extract_scope(c)
+                        decision = self._consent_gate.check(
+                            claim, scope=scope, session_id=session_id,
+                        )
+                        if not decision.allowed:
+                            blocked[c.id] = f"consent denied: {decision.reason}"
+                            break
+
+        # Fire PreToolUse hooks next (blocking). Determine which calls are blocked.
         for c in calls:
+            if c.id in blocked:
+                continue  # already blocked by consent gate; skip hook dispatch
             ctx = HookContext(
                 event=HookEvent.PRE_TOOL_USE,
                 session_id=session_id,
@@ -654,6 +686,22 @@ class AgentLoop:
                 exc_info=True,
             )
             return _NoOpDemandTracker()
+
+
+def _extract_scope(call: ToolCall) -> str | None:
+    """F1: extract a scope-like argument from a tool call for gate matching.
+
+    Heuristic: look for common scope-ish keys (path, file, file_path, url,
+    directory, cwd). Plugin authors should use one of these if they want
+    scope-level grant granularity. F1 MVP — more formal scope-extractor
+    hooks arrive in a follow-up.
+    """
+    args = call.arguments or {}
+    for key in ("path", "file_path", "file", "url", "directory", "dir", "cwd"):
+        v = args.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return None
 
 
 __all__ = ["AgentLoop", "ConversationResult"]
