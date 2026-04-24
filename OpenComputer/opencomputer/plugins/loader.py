@@ -402,6 +402,76 @@ def _validate_runtime_contract(
         )
 
 
+# ─── provider config-schema validation (Task I.6) ─────────────────────
+
+
+def _validate_provider_config(name: str, provider: Any) -> None:
+    """Validate a provider's ``config`` against its declared ``config_schema``.
+
+    Mirror of OpenClaw's ``normalizeRegisteredProvider``
+    (``sources/openclaw/src/plugins/provider-validation.ts``) — catch bad
+    config at registration instead of at first-use.
+
+    Rules:
+      - If ``provider`` is a class (not an instance), skip. The instance
+        doesn't exist yet; construction errors surface at resolve time.
+      - If the provider's type has ``config_schema = None`` (the
+        default), skip. Backwards compat with pre-I.6 providers.
+      - If the provider exposes ``self.config``:
+          * already a pydantic BaseModel → ensure it's an instance of
+            ``config_schema`` (or re-validate via dump + model_validate
+            to catch unrelated models).
+          * dict → parse via ``config_schema(**config)``.
+          * anything else → parse via ``config_schema(**config.__dict__)``
+            (tolerates dataclass-style configs).
+      - If the provider declares ``config_schema`` but has no ``config``
+        attribute, skip — the provider hasn't opted into validation yet.
+
+    Raises:
+        ValueError: config fails pydantic validation. Message names the
+            provider and includes the pydantic error for debuggability.
+    """
+    # Class-registered providers: no instance to validate. The class's
+    # own config_schema attr stays available for future instances.
+    if isinstance(provider, type):
+        return
+
+    schema = getattr(type(provider), "config_schema", None)
+    if schema is None:
+        return
+
+    config = getattr(provider, "config", None)
+    if config is None:
+        return
+
+    from pydantic import BaseModel as _PydanticBaseModel
+    from pydantic import ValidationError
+
+    try:
+        if isinstance(config, _PydanticBaseModel):
+            if isinstance(config, schema):
+                # Already the right shape. Fastest path.
+                return
+            # Different pydantic model — re-validate via dump.
+            schema.model_validate(config.model_dump())
+            return
+        if isinstance(config, dict):
+            schema.model_validate(config)
+            return
+        # Tolerate dataclass-style or namespace-style configs.
+        schema.model_validate(vars(config))
+    except ValidationError as e:
+        raise ValueError(
+            f"provider {name!r} config failed schema validation: {e}"
+        ) from e
+    else:
+        logger.debug(
+            "provider %r config validated against schema %s",
+            name,
+            schema.__name__,
+        )
+
+
 class PluginAPI:
     """Passed to each plugin's register() — the narrow runtime surface."""
 
@@ -473,6 +543,27 @@ class PluginAPI:
         self.hooks.register(spec)
 
     def register_provider(self, name: str, provider: Any) -> None:
+        """Register an LLM provider under ``name``.
+
+        ``provider`` may be either a provider INSTANCE or a provider
+        CLASS. Plugins typically register the class (existing pattern)
+        and the CLI instantiates it on demand in ``_resolve_provider``.
+
+        Task I.6 — config-schema validation. If the provider's type (or
+        the provider itself, if it's a class) declares a
+        ``config_schema`` class attribute AND the object is an
+        instance with a ``config`` attribute, the registry validates
+        ``config`` against the schema using pydantic and raises
+        ``ValueError`` on mismatch. This catches malformed config at
+        plugin load rather than at first-use.
+
+        Providers without ``config_schema`` (the default) skip
+        validation entirely — backwards compatible with every pre-I.6
+        provider. When ``provider`` is a class (not an instance), we
+        skip validation too; the instance doesn't exist yet, and the
+        CLI path will surface construction errors naturally.
+        """
+        _validate_provider_config(name, provider)
         self.providers[name] = provider
 
     def register_channel(self, name: str, adapter: Any) -> None:

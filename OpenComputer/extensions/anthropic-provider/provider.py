@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
+from pydantic import BaseModel, Field
 
 from plugin_sdk.core import Message, ToolCall
 from plugin_sdk.provider_contract import (
@@ -24,6 +25,30 @@ from plugin_sdk.provider_contract import (
     Usage,
 )
 from plugin_sdk.tool_contract import ToolSchema
+
+
+class AnthropicProviderConfig(BaseModel):
+    """Pydantic schema for AnthropicProvider construction kwargs.
+
+    Wired onto ``AnthropicProvider.config_schema`` (Task I.6). The
+    plugin registry uses this to validate ``provider.config`` at
+    ``register_provider`` time and raise ``ValueError`` on shape
+    mismatch — catching bad config at plugin load instead of at first
+    request.
+
+    Fields mirror the ``__init__`` signature: all three are optional
+    because construction also reads from env vars
+    (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``,
+    ``ANTHROPIC_AUTH_MODE``).
+
+    ``auth_mode`` accepts the legacy ``"x-api-key"`` spelling AND the
+    newer ``"api_key"`` spelling. The construction logic coerces both
+    to the same effective behavior (``"x-api-key"`` header mode).
+    """
+
+    api_key: str | None = Field(default=None)
+    base_url: str | None = Field(default=None)
+    auth_mode: Literal["api_key", "x-api-key", "bearer"] = Field(default="api_key")
 
 
 async def _strip_x_api_key(request: httpx.Request) -> None:
@@ -40,6 +65,9 @@ async def _strip_x_api_key(request: httpx.Request) -> None:
 class AnthropicProvider(BaseProvider):
     name = "anthropic"
     default_model = "claude-opus-4-7"
+    #: Task I.6 — schema used by the plugin registry to validate
+    #: ``self.config`` at ``register_provider`` time.
+    config_schema = AnthropicProviderConfig
 
     def __init__(
         self,
@@ -64,6 +92,26 @@ class AnthropicProvider(BaseProvider):
         base = base_url or os.environ.get("ANTHROPIC_BASE_URL") or None
         mode = (auth_mode or os.environ.get("ANTHROPIC_AUTH_MODE") or "x-api-key").lower()
 
+        # Pre-validate mode with a clear RuntimeError before the pydantic
+        # schema turns it into a less-helpful ValidationError. Keeps the
+        # existing error message contract that callers rely on.
+        if mode not in ("x-api-key", "api_key", "bearer"):
+            raise RuntimeError(
+                f"Unknown ANTHROPIC_AUTH_MODE: {mode!r} "
+                f"(expected 'x-api-key', 'api_key', or 'bearer')"
+            )
+
+        # Task I.6: store a validated config snapshot so the plugin
+        # registry can re-check it against ``config_schema`` at
+        # ``register_provider`` time. The schema is permissive about
+        # auth_mode spelling (accepts "x-api-key" and "api_key"), so
+        # pass the effective value through.
+        self.config = AnthropicProviderConfig(
+            api_key=key,
+            base_url=base,
+            auth_mode=mode,  # type: ignore[arg-type]
+        )
+
         kwargs: dict[str, Any] = {"api_key": key}
         if base:
             kwargs["base_url"] = base
@@ -77,10 +125,8 @@ class AnthropicProvider(BaseProvider):
                 event_hooks={"request": [_strip_x_api_key]},
                 timeout=httpx.Timeout(60.0, connect=10.0),
             )
-        elif mode != "x-api-key":
-            raise RuntimeError(
-                f"Unknown ANTHROPIC_AUTH_MODE: {mode!r} (expected 'x-api-key' or 'bearer')"
-            )
+        # Otherwise mode is "x-api-key" or "api_key" → default SDK behavior
+        # uses x-api-key; both spellings are equivalent here.
         self.client = AsyncAnthropic(**kwargs)
 
     # ─── message conversion ─────────────────────────────────────────
@@ -214,4 +260,4 @@ class AnthropicProvider(BaseProvider):
         yield StreamEvent(kind="done", response=self._parse_response(final))
 
 
-__all__ = ["AnthropicProvider"]
+__all__ = ["AnthropicProvider", "AnthropicProviderConfig"]
