@@ -26,6 +26,8 @@ from opencomputer.evolution.storage import (
     evolution_home,
     init_db,
     list_recent,
+    record_reflection,
+    record_skill_invocation,
 )
 from opencomputer.evolution.synthesize import SkillSynthesizer
 
@@ -104,6 +106,13 @@ def skills_promote(
         shutil.rmtree(main_dir)
     main_dir.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(src, main_dir)
+    # Record an invocation so the promoted skill starts with non-atrophied state.
+    # init_db() ensures migrations (including B4 tables) are applied before writing.
+    conn = init_db()
+    try:
+        record_skill_invocation(slug, source="cli_promote", conn=conn)
+    finally:
+        conn.close()
     console.print(f"[green]Promoted[/green] {slug} → {main_dir}")
 
 
@@ -165,6 +174,21 @@ def reflect(
     engine = ReflectionEngine(provider=provider, model=model, window=window)
     insights = engine.reflect(records)
     console.print(f"[green]Got {len(insights)} insights.[/green]")
+
+    # Persist a reflection row for dashboard / audit trail.
+    # cache_hit detection requires engine introspection out of scope for B4 —
+    # always False here; a future pass can wire through engine._cache state.
+    import hashlib as _hashlib
+    _ids_str = ",".join(str(r.id) for r in records if r.id is not None)
+    _records_hash = _hashlib.sha256(_ids_str.encode()).hexdigest()
+    record_reflection(
+        window_size=window,
+        records_count=len(records),
+        insights_count=len(insights),
+        records_hash=_records_hash,
+        cache_hit=False,
+    )
+
     synth = SkillSynthesizer()
     created = []
     for ins in insights:
@@ -246,9 +270,208 @@ def _resolve_provider():
     return _first() if isinstance(_first, type) else _first
 
 
+# ---------------------------------------------------------------------------
+# prompts sub-group
+# ---------------------------------------------------------------------------
+
+prompts_app = typer.Typer(
+    name="prompts",
+    help="Review and decide on prompt-evolution proposals (never auto-applied).",
+    no_args_is_help=True,
+)
+evolution_app.add_typer(prompts_app, name="prompts")
+
+
+@prompts_app.command("list")
+def prompts_list(
+    status: str = typer.Option(
+        "pending",
+        "--status",
+        help="Filter by status: pending|applied|rejected|all",
+    ),
+) -> None:
+    """List prompt proposals (default: pending)."""
+    from opencomputer.evolution.prompt_evolution import PromptEvolver
+
+    pe = PromptEvolver()
+    proposals = (
+        pe.list_all()
+        if status == "all"
+        else [p for p in pe.list_all() if p.status == status]
+    )
+    if not proposals:
+        console.print(f"[dim]No prompt proposals with status={status}.[/dim]")
+        return
+    table = Table(title=f"Prompt proposals ({status})")
+    table.add_column("id", style="cyan")
+    table.add_column("target")
+    table.add_column("status")
+    table.add_column("diff_hint", overflow="fold")
+    for p in proposals:
+        table.add_row(str(p.id), p.target, p.status, p.diff_hint[:120])
+    console.print(table)
+
+
+@prompts_app.command("apply")
+def prompts_apply(
+    proposal_id: int = typer.Argument(..., help="Proposal id (from `prompts list`)"),
+    reason: str = typer.Option("", "--reason", help="Optional reason for the decision"),
+) -> None:
+    """Mark a prompt proposal as applied. The actual prompt-file edit is your responsibility —
+    this command persists the decision only.
+    """
+    from opencomputer.evolution.prompt_evolution import PromptEvolver
+
+    pe = PromptEvolver()
+    try:
+        p = pe.apply(proposal_id, reason=reason)
+    except KeyError:
+        console.print(f"[red]No proposal with id={proposal_id}[/red]")
+        raise typer.Exit(code=1)
+    console.print(
+        f"[green]Marked proposal {p.id} as applied.[/green] "
+        "(You still need to edit the target prompt file.)"
+    )
+
+
+@prompts_app.command("reject")
+def prompts_reject(
+    proposal_id: int = typer.Argument(...),
+    reason: str = typer.Option("", "--reason"),
+) -> None:
+    """Mark a prompt proposal as rejected."""
+    from opencomputer.evolution.prompt_evolution import PromptEvolver
+
+    pe = PromptEvolver()
+    try:
+        p = pe.reject(proposal_id, reason=reason)
+    except KeyError:
+        console.print(f"[red]No proposal with id={proposal_id}[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"[yellow]Rejected proposal {p.id}.[/yellow]")
+
+
+# ---------------------------------------------------------------------------
+# dashboard command
+# ---------------------------------------------------------------------------
+
+
+def _fmt_ts(ts: float | None) -> str:
+    if ts is None:
+        return "[dim]never[/dim]"
+    from datetime import datetime
+
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def _fmt_float(v: float | None) -> str:
+    return "[dim]n/a[/dim]" if v is None else f"{v:.3f}"
+
+
+@evolution_app.command("dashboard")
+def dashboard(
+    atrophy_days: int = typer.Option(
+        60,
+        "--atrophy-days",
+        help="Days of inactivity before a skill counts as atrophied",
+    ),
+) -> None:
+    """Show the evolution monitoring dashboard."""
+    from opencomputer.evolution.monitor import MonitorDashboard
+
+    snap = MonitorDashboard(atrophy_days=atrophy_days).snapshot()
+    summary = Table(title="Evolution dashboard")
+    summary.add_column("metric")
+    summary.add_column("value")
+    summary.add_row("total reflections", str(snap.total_reflections))
+    summary.add_row("last reflection", _fmt_ts(snap.last_reflection_at))
+    summary.add_row(
+        "synthesized skills",
+        f"{len(snap.synthesized_skills)} ({snap.atrophied_count} atrophied)",
+    )
+    summary.add_row("avg reward (30d)", _fmt_float(snap.avg_reward_last_30))
+    summary.add_row("avg reward (lifetime)", _fmt_float(snap.avg_reward_lifetime))
+    console.print(summary)
+
+    if snap.synthesized_skills:
+        skills_table = Table(title="Skills")
+        skills_table.add_column("slug")
+        skills_table.add_column("invocations")
+        skills_table.add_column("last")
+        skills_table.add_column("status")
+        for s in snap.synthesized_skills:
+            skills_table.add_row(
+                s.slug,
+                str(s.invocation_count),
+                _fmt_ts(s.last_invoked_at),
+                "[red]atrophied[/red]" if s.is_atrophied else "[green]active[/green]",
+            )
+        console.print(skills_table)
+
+
+# ---------------------------------------------------------------------------
+# skills retire + skills record-invocation
+# ---------------------------------------------------------------------------
+
+
+@skills_app.command("retire")
+def skills_retire(
+    slug: str = typer.Argument(..., help="Slug of synthesized skill to retire"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+) -> None:
+    """Move a synthesized skill from quarantine to <evolution_home>/retired/<slug>/.
+
+    Audit trail preserved; skill no longer shows in `skills list`.
+    """
+    src = evolution_home() / "skills" / slug
+    if not src.exists():
+        console.print(f"[red]Skill not found:[/red] {src}")
+        raise typer.Exit(code=1)
+    if not yes and not typer.confirm(f"Retire {slug}? It will be moved to retired/{slug}/."):
+        console.print("[dim]Cancelled.[/dim]")
+        raise typer.Exit(code=0)
+    retired_dir = evolution_home() / "retired"
+    retired_dir.mkdir(parents=True, exist_ok=True)
+    target = retired_dir / slug
+    if target.exists():
+        # Already a previous retirement — resolve collision (slug-2, slug-3, …)
+        n = 2
+        while (retired_dir / f"{slug}-{n}").exists():
+            n += 1
+        target = retired_dir / f"{slug}-{n}"
+    src.rename(target)
+    console.print(f"[yellow]Retired[/yellow] {slug} → {target}")
+
+
+@skills_app.command("record-invocation")
+def skills_record_invocation(
+    slug: str = typer.Argument(...),
+    source: str = typer.Option(
+        "manual",
+        "--source",
+        help="manual | agent_loop | cli_promote",
+    ),
+) -> None:
+    """Manually record that a synthesized skill was invoked (atrophy data).
+
+    Manual analog for B5 auto-recording; lets you inject invocation data
+    outside of the agent loop.
+    """
+    rec_id = record_skill_invocation(slug, source=source)
+    console.print(
+        f"[dim]recorded invocation {rec_id} for[/dim] [cyan]{slug}[/cyan]"
+    )
+
+
 __all__ = [
     "skills_list",
     "skills_promote",
+    "skills_retire",
+    "skills_record_invocation",
     "reflect",
     "reset",
+    "prompts_list",
+    "prompts_apply",
+    "prompts_reject",
+    "dashboard",
 ]
