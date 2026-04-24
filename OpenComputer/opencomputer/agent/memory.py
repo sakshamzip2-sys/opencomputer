@@ -21,11 +21,12 @@ Write-path invariants for MEMORY.md / USER.md:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -51,14 +52,51 @@ class MemoryTooLargeError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class SkillReference:
+    """A single on-demand reference or worked example attached to a skill.
+
+    Claude Code's directory-hierarchy skill layout stores deep content in
+    sibling ``references/*.md`` and ``examples/*`` directories so the main
+    SKILL.md stays concise. ``SkillReference`` represents one such file.
+
+    - ``path``    — absolute path to the reference file on disk.
+    - ``title``   — derived from (in priority order) frontmatter
+                    ``title``/``name`` → first ``# Heading`` line → filename
+                    stem. Used for prompt-injection labelling.
+    - ``content`` — full file contents as text. Eager-loaded at scan time
+                    to keep the dataclass frozen and hashable; the whole
+                    corpus is only ~16 skills × a handful of files, so the
+                    cost is negligible at startup.
+    """
+
+    path: Path
+    title: str
+    content: str
+
+
+# Alias: worked examples share the same shape as references. Exposed as a
+# distinct name so callers can type-hint ``SkillExample`` when they mean
+# "this is a worked example" vs "this is reference documentation".
+SkillExample = SkillReference
+
+
+@dataclass(frozen=True, slots=True)
 class SkillMeta:
-    """Lightweight skill metadata — from frontmatter, without loading the body."""
+    """Lightweight skill metadata — from frontmatter, without loading the body.
+
+    Phase III.4 extends this with ``references`` + ``examples`` tuples to
+    support Claude Code's directory-hierarchy skill layout. Flat
+    single-file SKILL.md skills get empty tuples for both — the behaviour
+    is unchanged from their perspective.
+    """
 
     id: str
     name: str
     description: str
     path: Path
     version: str = "0.1.0"
+    references: tuple[SkillReference, ...] = field(default_factory=tuple)
+    examples: tuple[SkillReference, ...] = field(default_factory=tuple)
 
 
 # ─── atomic-write + locking helpers ───────────────────────────────────
@@ -115,6 +153,74 @@ def _write_atomic(path: Path, text: str) -> None:
 
 def _backup_path(path: Path) -> Path:
     return Path(str(path) + ".bak")
+
+
+# ─── skill-hierarchy helpers (III.4) ──────────────────────────────────
+
+
+# Match only the first ``# `` heading line, ignoring leading blank lines or
+# frontmatter. Used to derive a reference's display title when no
+# frontmatter ``title``/``name`` is present.
+_H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _derive_reference_title(path: Path, raw_text: str) -> str:
+    """Pick a human-readable label for a reference/example file.
+
+    Priority:
+      1. Frontmatter ``title`` or ``name`` (if the file parses as a
+         markdown-with-frontmatter post).
+      2. First ``# Heading`` line in the body.
+      3. Filename stem (e.g. ``alpha.md`` → ``alpha``).
+    """
+    # Try frontmatter first — many reference files under claude-code's
+    # plugin-dev skills carry frontmatter of their own.
+    try:
+        post = frontmatter.loads(raw_text)
+        fm_title = post.metadata.get("title") or post.metadata.get("name")
+        if isinstance(fm_title, str) and fm_title.strip():
+            return fm_title.strip()
+        body = post.content
+    except Exception:  # noqa: BLE001 — any parse failure falls through
+        body = raw_text
+
+    m = _H1_RE.search(body)
+    if m:
+        return m.group(1).strip()
+    return path.stem
+
+
+def _load_references_dir(
+    subdir: Path, *, markdown_only: bool
+) -> tuple[SkillReference, ...]:
+    """Enumerate files in a subdir and build SkillReference tuples.
+
+    ``references/`` accepts only ``*.md`` — structured documentation.
+    ``examples/`` accepts any file type (``.md``, ``.py``, ``.json``,
+    ``.yaml``, ...) and reads each as text.
+
+    Non-text files (e.g. images accidentally dropped under examples/)
+    that fail UTF-8 decoding are silently skipped rather than crashing
+    the loader.
+
+    Entries are sorted by filename so prompt injection is deterministic.
+    """
+    if not subdir.is_dir():
+        return ()
+
+    out: list[SkillReference] = []
+    for child in sorted(subdir.iterdir()):
+        if not child.is_file():
+            continue
+        if markdown_only and child.suffix.lower() != ".md":
+            continue
+        try:
+            raw = child.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        title = _derive_reference_title(child, raw)
+        out.append(SkillReference(path=child, title=title, content=raw))
+    return tuple(out)
 
 
 # ─── memory manager ───────────────────────────────────────────────────
@@ -300,7 +406,15 @@ class MemoryManager:
     # ─── procedural (skills) ─────────────────────────────────────
 
     def list_skills(self) -> list[SkillMeta]:
-        """Scan all skill roots for SKILL.md files. User skills shadow bundled ones."""
+        """Scan all skill roots for SKILL.md files. User skills shadow bundled ones.
+
+        Phase III.4: also enumerates sibling ``references/`` (``.md`` only)
+        and ``examples/`` (any file type, read as text) subdirs when
+        present, populating ``SkillMeta.references`` + ``SkillMeta.examples``.
+        A skill directory missing ``SKILL.md`` is silently skipped — including
+        when it only has a lone ``references/`` subdir (treated as an
+        incomplete skill, not an error).
+        """
         roots = [self.skills_path, *self.bundled_skills_paths]
         seen_ids: set[str] = set()
         out: list[SkillMeta] = []
@@ -319,6 +433,12 @@ class MemoryManager:
                     continue
                 meta = post.metadata
                 seen_ids.add(skill_dir.name)
+                references = _load_references_dir(
+                    skill_dir / "references", markdown_only=True
+                )
+                examples = _load_references_dir(
+                    skill_dir / "examples", markdown_only=False
+                )
                 out.append(
                     SkillMeta(
                         id=skill_dir.name,
@@ -326,6 +446,8 @@ class MemoryManager:
                         description=str(meta.get("description", "")),
                         path=skill_md,
                         version=str(meta.get("version", "0.1.0")),
+                        references=references,
+                        examples=examples,
                     )
                 )
         return out
@@ -355,4 +477,10 @@ class MemoryManager:
         return skill_md
 
 
-__all__ = ["MemoryManager", "SkillMeta", "MemoryTooLargeError"]
+__all__ = [
+    "MemoryManager",
+    "MemoryTooLargeError",
+    "SkillExample",
+    "SkillMeta",
+    "SkillReference",
+]
