@@ -14,10 +14,14 @@ Later phases can add context isolation, tool restrictions, etc.
 from __future__ import annotations
 
 import dataclasses
+from typing import TYPE_CHECKING
 
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
+
+if TYPE_CHECKING:
+    from opencomputer.agent.agent_templates import AgentTemplate
 
 
 class DelegateTool(BaseTool):
@@ -28,6 +32,13 @@ class DelegateTool(BaseTool):
     #: Class-level "current runtime" set by the parent loop before dispatching
     #: tool calls. Ensures subagent loops inherit plan_mode / yolo_mode, etc.
     _current_runtime: RuntimeContext = DEFAULT_RUNTIME_CONTEXT
+    #: III.5 — registered subagent templates. Populated at CLI startup via
+    #: ``set_templates(discover_agents(...))``. Empty until then, so a bare
+    #: ``agent`` argument without prior registration surfaces a clean error
+    #: listing available names (of which there are none, yet). Mirrors the
+    #: Claude Code concept of pre-registered named subagents from
+    #: ``sources/claude-code/plugins/<plugin>/agents/*.md``.
+    _templates: dict[str, AgentTemplate] = {}
 
     @classmethod
     def set_factory(cls, factory) -> None:
@@ -41,6 +52,18 @@ class DelegateTool(BaseTool):
     def set_runtime(cls, runtime: RuntimeContext) -> None:
         """Set the runtime context to propagate into subagents. Called by AgentLoop."""
         cls._current_runtime = runtime
+
+    @classmethod
+    def set_templates(cls, templates: dict[str, AgentTemplate]) -> None:
+        """Register the discovered agent templates.
+
+        III.5 — called once at CLI startup after
+        :func:`opencomputer.agent.agent_templates.discover_agents` runs.
+        A second call REPLACES the registry (so per-profile CLI invocations
+        don't leak templates from a previous process state in long-lived
+        test harnesses). Passing an empty dict clears the registry.
+        """
+        cls._templates = dict(templates)
 
     @property
     def schema(self) -> ToolSchema:
@@ -77,6 +100,18 @@ class DelegateTool(BaseTool):
                             "use for pure-reasoning delegations with zero side effects."
                         ),
                     },
+                    # III.5: pre-registered agent templates. Mirrors Claude
+                    # Code's subagent-definition pattern from
+                    # ``sources/claude-code/plugins/<plugin>/agents/*.md``.
+                    "agent": {
+                        "type": "string",
+                        "description": (
+                            "Optional. Name of a registered agent template "
+                            "(from `opencomputer agents list`). Applies its "
+                            "system-prompt + tool allowlist + model override. "
+                            "Omit for default delegation."
+                        ),
+                    },
                 },
                 "required": ["task"],
             },
@@ -104,10 +139,12 @@ class DelegateTool(BaseTool):
         # of strings → exactly those tool names.
         raw_allowed = call.arguments.get("allowed_tools")
         allowed: frozenset[str] | None
+        explicit_allowed = False
         if raw_allowed is None:
             allowed = None
         elif isinstance(raw_allowed, (list, tuple, set, frozenset)):
             allowed = frozenset(str(x) for x in raw_allowed)
+            explicit_allowed = True
         else:
             return ToolResult(
                 tool_call_id=call.id,
@@ -117,6 +154,39 @@ class DelegateTool(BaseTool):
                 ),
                 is_error=True,
             )
+
+        # III.5: resolve the optional ``agent`` parameter. A registered
+        # template overrides the default subagent shape: its ``tools``
+        # become the allowlist (unless an explicit ``allowed_tools``
+        # argument was supplied — explicit beats template), and its
+        # ``system_prompt`` is passed through to the child loop verbatim.
+        raw_agent = call.arguments.get("agent")
+        template: AgentTemplate | None = None
+        if raw_agent is not None and isinstance(raw_agent, str) and raw_agent.strip():
+            agent_name = raw_agent.strip()
+            template = self._templates.get(agent_name)
+            if template is None:
+                available = sorted(self._templates.keys())
+                available_str = (
+                    ", ".join(available) if available else "(no templates registered)"
+                )
+                return ToolResult(
+                    tool_call_id=call.id,
+                    content=(
+                        f"Error: unknown agent template {agent_name!r}. "
+                        f"Available: {available_str}."
+                    ),
+                    is_error=True,
+                )
+            # Template's tool list becomes the allowlist ONLY when the
+            # caller didn't supply an explicit ``allowed_tools`` argument.
+            # Explicit beats template — matches III.1's "caller intent wins"
+            # semantic. An empty template ``tools`` tuple means the author
+            # intentionally chose "inherit parent's tool set" (documented
+            # on AgentTemplate.tools).
+            if not explicit_allowed and template.tools:
+                allowed = frozenset(template.tools)
+
         subagent_loop = self._factory()
         # II.1: cap the subagent's iteration budget at the parent's
         # ``delegation_max_iterations`` (default 50) instead of letting it
@@ -139,9 +209,17 @@ class DelegateTool(BaseTool):
         subagent_loop.allowed_tools = allowed
         # Propagate the parent's runtime context — plan mode, yolo mode, etc.
         # must apply to subagents too, otherwise delegating becomes an escape hatch.
+        # III.5: pass the template's system_prompt to the child loop. When
+        # ``template is None`` the kwarg is ``None`` and the child builds
+        # its usual declarative + skills + memory + SOUL prompt (existing
+        # behavior). With a template, the template BODY is the whole
+        # prompt — no further injection on top.
         result = await subagent_loop.run_conversation(
             user_message=task,
             runtime=self._current_runtime,
+            system_prompt_override=(
+                template.system_prompt if template is not None else None
+            ),
         )
         # D7: emit SubagentStop hook when the delegated subagent finishes
         # so plugins can log / summarize / react. Fire-and-forget.

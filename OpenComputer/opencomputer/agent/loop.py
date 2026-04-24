@@ -298,7 +298,28 @@ class AgentLoop:
         system_override: str | None = None,
         runtime: RuntimeContext | None = None,
         stream_callback=None,
+        system_prompt_override: str | None = None,
     ) -> ConversationResult:
+        """Run the agent loop until the model stops calling tools.
+
+        Parameters
+        ----------
+        system_prompt_override:
+            III.5 — when set, bypass the normal PromptBuilder pipeline and
+            use this string verbatim as the system prompt. Skills /
+            declarative memory / USER.md / SOUL.md are NOT injected — the
+            template author owns the full prompt. Used by
+            :class:`opencomputer.tools.delegate.DelegateTool` when the
+            ``agent`` parameter resolves to a registered
+            :class:`~opencomputer.agent.agent_templates.AgentTemplate`.
+
+            Distinct from ``system_override`` (pre-existing): that kwarg
+            also bypasses PromptBuilder but was never adopted by
+            DelegateTool. Treat ``system_prompt_override`` as the newer,
+            named-template path; ``system_override`` remains for direct
+            callers that want a raw swap. When both are set,
+            ``system_prompt_override`` wins (it's the III.5 semantic).
+        """
         sid = session_id or str(uuid.uuid4())
         self._runtime = runtime or DEFAULT_RUNTIME_CONTEXT
         # Expose current session id to memory tools via the context provider.
@@ -353,7 +374,14 @@ class AgentLoop:
         # edits during a session do NOT retrigger a rebuild — that's the
         # invariant that makes hermes's prompt_cache ~10× cheaper than
         # per-turn rebuilds.
-        if system_override is not None:
+        # III.5: ``system_prompt_override`` wins over ``system_override``
+        # (and both win over the PromptBuilder path). Template-authored
+        # prompts are treated as rendered-Jinja strings: declarative /
+        # skills / memory / SOUL injection OFF — the body is assumed
+        # intentional.
+        if system_prompt_override is not None:
+            base_system = system_prompt_override
+        elif system_override is not None:
             base_system = system_override
         else:
             snapshot = self._prompt_snapshots.get(sid)
