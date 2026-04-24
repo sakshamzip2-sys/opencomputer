@@ -470,6 +470,51 @@ flag and want the chat turn to proceed (rare).
 
 ---
 
+## Consent (Sub-project F1)
+
+Consent primitives gate privileged tool calls. A tool declares what
+capabilities it needs via a `CapabilityClaim` on its class; the core
+`ConsentGate` resolves each claim against stored `ConsentGrant`s and
+returns a `ConsentDecision`. The gate runs in `AgentLoop` BEFORE any
+`PreToolUse` hook, so it cannot be bypassed by disabling a plugin.
+See `~/.claude/plans/i-want-you-to-twinkly-squirrel.md` for the full
+architectural rationale.
+
+### `ConsentTier`
+
+`IntEnum` with four ordered tiers. Lower value = less friction, less
+trust required:
+- `IMPLICIT` (0) — user told agent in chat; no external data read.
+- `EXPLICIT` (1) — user clicked "enable" for a source; revocable.
+- `PER_ACTION` (2) — per-action prompt naming the specific data.
+- `DELEGATED` (3) — time-windowed autonomy, capability-scoped.
+
+### `CapabilityClaim`
+
+Frozen dataclass a plugin attaches to its `BaseTool` subclass to declare
+what the tool needs. Fields: `capability_id: str`, `tier_required:
+ConsentTier`, `human_description: str`, `data_scope: str | None = None`.
+The gate uses `capability_id` + (optionally) runtime scope to match
+against grants.
+
+### `ConsentGrant`
+
+Frozen dataclass representing a user-approved grant. Fields:
+`capability_id: str`, `tier: ConsentTier`, `scope_filter: str | None`,
+`granted_at: float`, `expires_at: float | None` (null = never expires),
+`granted_by: Literal["user", "auto", "promoted"]`. Grants persist in the
+per-profile SQLite `consent_grants` table.
+
+### `ConsentDecision`
+
+Frozen dataclass returned by `ConsentGate.check`. Fields: `allowed:
+bool`, `reason: str` (human-readable), `tier_matched: ConsentTier |
+None`, `audit_event_id: int | None` (row id in the append-only
+`audit_log`). Plugins don't construct this themselves — the core
+produces it.
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute

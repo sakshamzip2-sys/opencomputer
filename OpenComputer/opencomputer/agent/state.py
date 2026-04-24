@@ -23,11 +23,13 @@ from typing import Any
 from plugin_sdk.core import Message, ToolCall
 
 #: Incremented when the SQLite schema is extended. Migration at open
-#: time compares ``SELECT version FROM schema_version`` against this
-#: constant and fires idempotent ``ALTER TABLE`` statements for columns
-#: added since. Existing rows keep their data — new columns default to
-#: NULL for older messages.
-SCHEMA_VERSION = 2
+#: time advances the DB from its stored version to :data:`SCHEMA_VERSION`
+#: via :func:`apply_migrations`. v1 = baseline (sessions/messages/FTS/
+#: episodic). v2 = II.6 reasoning-chain metadata columns on ``messages``.
+#: v3 = F1 consent layer tables (consent_grants, consent_counters,
+#: audit_log). Existing rows keep their data — new columns default to
+#: NULL.
+SCHEMA_VERSION = 3
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -127,6 +129,135 @@ AFTER DELETE ON episodic_events BEGIN
 END;
 """
 
+# ─── F1 (Sub-project F, phase 1): consent layer tables ────────────────
+# Added in schema v3. See ~/.claude/plans/i-want-you-to-twinkly-squirrel.md
+# for the full design rationale.
+V3_CONSENT_DDL = """
+CREATE TABLE IF NOT EXISTS consent_grants (
+    capability_id   TEXT NOT NULL,
+    scope_filter    TEXT,
+    tier            INTEGER NOT NULL,
+    granted_at      REAL NOT NULL,
+    expires_at      REAL,
+    granted_by      TEXT NOT NULL,
+    PRIMARY KEY (capability_id, scope_filter)
+);
+
+CREATE TABLE IF NOT EXISTS consent_counters (
+    capability_id   TEXT NOT NULL,
+    scope_filter    TEXT,
+    clean_run_count INTEGER NOT NULL DEFAULT 0,
+    last_updated    REAL NOT NULL,
+    PRIMARY KEY (capability_id, scope_filter)
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT,
+    timestamp       REAL NOT NULL,
+    actor           TEXT NOT NULL,
+    action          TEXT NOT NULL,
+    capability_id   TEXT NOT NULL,
+    tier            INTEGER NOT NULL,
+    scope           TEXT,
+    decision        TEXT NOT NULL,
+    reason          TEXT,
+    prev_hmac       TEXT NOT NULL,
+    row_hmac        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_cap
+    ON audit_log(capability_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_log_session
+    ON audit_log(session_id, timestamp);
+
+-- Tamper-EVIDENCE (not tamper-proof): these triggers block writes via
+-- the SQLite engine. FS-level tampering (rm, dd, bytewise edit) is
+-- caught by AuditLogger.verify_chain() via the HMAC-SHA256 chain.
+CREATE TRIGGER IF NOT EXISTS audit_log_no_update
+BEFORE UPDATE ON audit_log BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
+BEFORE DELETE ON audit_log BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only');
+END;
+"""
+
+
+# ─── Migration framework ──────────────────────────────────────────────
+
+MIGRATIONS: dict[tuple[int, int], str] = {
+    (0, 1): "_migrate_v0_to_v1",
+    (1, 2): "_migrate_v1_to_v2",
+    (2, 3): "_migrate_v2_to_v3",
+}
+
+
+def _read_schema_version(conn: sqlite3.Connection) -> int:
+    """Return stored schema version. Returns 0 on fresh DBs (no table yet)."""
+    try:
+        row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.OperationalError:
+        return 0
+
+
+def _bump_schema_version(conn: sqlite3.Connection, v: int) -> None:
+    """Replace the single schema_version row."""
+    conn.execute("DELETE FROM schema_version")
+    conn.execute("INSERT INTO schema_version(version) VALUES (?)", (v,))
+
+
+def _migrate_v0_to_v1(conn: sqlite3.Connection) -> None:
+    """Apply the baseline DDL — sessions, messages, FTS5, episodic.
+
+    DDL is idempotent (IF NOT EXISTS everywhere). Fresh DBs get the
+    latest-shape tables including II.6's ``reasoning_details`` and
+    ``codex_reasoning_items`` columns on ``messages`` — the v1→v2 ALTER
+    below is a no-op for fresh DBs and only fires on legacy (pre-II.6)
+    DBs where those columns don't yet exist.
+    """
+    conn.executescript(DDL)
+
+
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """II.6: add reasoning-chain metadata columns to ``messages``.
+
+    Pre-II.6 DBs carry only ``reasoning TEXT``; ``reasoning_details``
+    (OpenRouter-style structured array) and ``codex_reasoning_items``
+    (OpenAI o1/o3 reasoning) arrived later. SQLite ALTER TABLE ADD
+    COLUMN is non-destructive and fast (no table rewrite) — safe on
+    large legacy DBs. Wrapped in try/except so fresh DBs that already
+    have the columns from DDL get a silent no-op.
+    """
+    for col_name in ("reasoning_details", "codex_reasoning_items"):
+        try:
+            conn.execute(
+                f'ALTER TABLE messages ADD COLUMN "{col_name}" TEXT'
+            )
+        except sqlite3.OperationalError:
+            # Column already exists (fresh DB built from v1 DDL that
+            # already carries these columns, or prior partial migration).
+            pass
+
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """F1: add consent_grants, consent_counters, audit_log tables + triggers."""
+    conn.executescript(V3_CONSENT_DDL)
+
+
+def apply_migrations(conn: sqlite3.Connection) -> None:
+    """Advance DB from stored schema_version to SCHEMA_VERSION. Idempotent."""
+    current = _read_schema_version(conn)
+    while current < SCHEMA_VERSION:
+        fn_name = MIGRATIONS[(current, current + 1)]
+        globals()[fn_name](conn)
+        _bump_schema_version(conn, current + 1)
+        current += 1
+    conn.commit()
+
 
 class SessionDB:
     """Lightweight SQLite wrapper for session storage + FTS5 search."""
@@ -150,37 +281,7 @@ class SessionDB:
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
-            conn.executescript(DDL)
-            cur = conn.execute("SELECT version FROM schema_version LIMIT 1")
-            row = cur.fetchone()
-            current = int(row[0]) if row is not None else 0
-            if row is None:
-                conn.execute(
-                    "INSERT INTO schema_version(version) VALUES (?)",
-                    (SCHEMA_VERSION,),
-                )
-                current = SCHEMA_VERSION
-
-            # v1 → v2 (II.6): reasoning_details + codex_reasoning_items.
-            # Pre-existing DBs only carry ``reasoning TEXT`` on messages;
-            # ALTER TABLE adds the two new columns so round-tripping of
-            # OpenRouter-style reasoning metadata works after upgrade.
-            # SQLite ALTER TABLE ADD COLUMN is non-destructive and fast
-            # (no table rewrite) — safe to run on large legacy DBs.
-            if current < 2:
-                for col_name in ("reasoning_details", "codex_reasoning_items"):
-                    try:
-                        conn.execute(
-                            f'ALTER TABLE messages ADD COLUMN "{col_name}" TEXT'
-                        )
-                    except sqlite3.OperationalError:
-                        # Column already exists (e.g. fresh DB built from
-                        # the v2 DDL above, or prior partial migration).
-                        pass
-                conn.execute(
-                    "UPDATE schema_version SET version = ?",
-                    (SCHEMA_VERSION,),
-                )
+            apply_migrations(conn)
 
     @contextmanager
     def _txn(self) -> Iterator[sqlite3.Connection]:

@@ -10,6 +10,12 @@ backwards-compatible guarantees across minor releases.
 __version__ = "0.1.0"
 
 from plugin_sdk.channel_contract import BaseChannelAdapter
+from plugin_sdk.consent import (
+    CapabilityClaim,
+    ConsentDecision,
+    ConsentGrant,
+    ConsentTier,
+)
 from plugin_sdk.core import (
     Message,
     MessageEvent,
@@ -102,4 +108,9 @@ __all__ = [
     # slash commands (Phase 12b.6, Task D8)
     "SlashCommand",
     "SlashCommandResult",
+    # consent (F1)
+    "ConsentTier",
+    "CapabilityClaim",
+    "ConsentGrant",
+    "ConsentDecision",
 ]
