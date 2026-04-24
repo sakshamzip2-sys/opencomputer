@@ -4,6 +4,25 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Phase C3 — F7 Open Interpreter capability plugin skeleton, parallel Session C)
+
+- **`extensions/oi-capability/` plugin scaffold** — wraps upstream Open Interpreter (AGPL v3) via strict subprocess isolation. Per `docs/f7/design.md`. **Tools NOT registered yet** — plugin.py stub returns early; Session A wires consent + sandbox + AuditLog and **refactors the entire plugin into `extensions/coding-harness/oi_bridge/`** in Phase 5 per `docs/f7/interweaving-plan.md`.
+- **AGPL boundary discipline (load-bearing)** — `import interpreter` appears in exactly ONE file: `extensions/oi-capability/subprocess/server.py` (the in-venv server script). New CI test `tests/test_oi_agpl_boundary.py` greps the entire codebase outside that allowed path and fails the build on any match. 3 tests; passes with zero forbidden imports.
+- **Telemetry kill-switch** (`subprocess/telemetry_disable.py`) — patches `sys.modules["interpreter.core.utils.telemetry"]` with a `_NoopModule` BEFORE any OI import. Plus `disable_litellm_telemetry()` toggles `litellm.telemetry = False` + calls `litellm._turn_off_message_logging()`. Verified by `tests/test_oi_telemetry_disable.py` which patches `requests.post` with a fail-loudly assertion.
+- **JSON-RPC subprocess protocol** (`subprocess/{protocol,wrapper,server}.py`) — frozen+slots dataclasses for request/response/error; standard JSON-RPC error codes (-32700 parse, -32600 invalid request, -32601 method not found, -32602 invalid params, -32603 internal) plus app codes (-32000 consent_denied, -32001 sandbox_violation, -32002 timeout, -32003 tool_not_found). Wrapper reads `\n`-delimited JSON from subprocess stdout; correlation-id matched; per-call timeout with kill-on-timeout; auto-respawn on dead subprocess; resource limit (4 GB RAM cap on Unix); stderr → `<_home() / "oi_capability" / "subprocess.log">`.
+- **Lazy venv bootstrap** (`subprocess/venv_bootstrap.py`) — creates `<_home() / "oi_capability" / "venv">` on first use with minimal `requirements.txt` (pinned `OI_VERSION = "0.4.3"`; NO torch / opencv / sentence-transformers — saves ~500 MB on Apple Silicon). Idempotent; `OPENCOMPUTER_OI_VERSION` env override.
+- **23 tools across 5 risk tiers** with constructor-injection consent / sandbox / audit hooks (pre-declared `# CONSENT_HOOK` / `# SANDBOX_HOOK` / `# AUDIT_HOOK` markers per `docs/f7/interweaving-plan.md` so Phase 5 refactor is mechanical):
+  - **Tier 1 introspection** (8 tools, read-only): read_file_region, list_app_usage, read_clipboard_once, screenshot, extract_screen_text, list_recent_files, search_files, read_git_log
+  - **Tier 2 communication** (5 tools, drafts-only writes): read_email_metadata, read_email_bodies, list_calendar_events, read_contacts, send_email
+  - **Tier 3 browser** (3 tools): read_browser_history, read_browser_bookmarks, read_browser_dom
+  - **Tier 4 system control** (4 mutating tools, per-action consent in Phase 5): edit_file, run_shell, run_applescript, inject_keyboard
+  - **Tier 5 advanced** (3 tools): extract_selected_text, list_running_processes, read_sms_messages
+- **`read_git_log` carve-out** — implemented INLINE via `git log` shell call, NOT routed through OI subprocess (per F7 design §11.4 refinement — zero AGPL exposure for a trivially-implementable tool).
+- **Drafts-only `send_email` enforcement** — wrapper raises `ValueError` on `send_now=True`. Test verifies. Email goes to draft folder only; user sends from their email client.
+- **`tests/conftest.py` (new)** — handles hyphenated extension directory names (`extensions/oi-capability/` → importable as `extensions.oi_capability`) by registering module aliases in `sys.modules` before test collection. Affects all tests but is purely additive (no existing test affected).
+- **162 new tests** across 10 files. Full suite: **1604 passing** (was 1442 entering C3). Ruff clean. AGPL boundary test passes with 0 forbidden imports detected.
+- **`extensions/oi-capability/LICENSE`** is MIT (matches OpenComputer); the OI subprocess venv contains AGPL-licensed open-interpreter, isolated by the boundary. **`NOTICE`** explains the AGPL isolation strategy.
+
 ### Added (Phase C2 — F6 OpenCLI plugin skeleton, parallel Session C)
 
 - **`extensions/opencli-scraper/` plugin scaffold** — wraps upstream OpenCLI (Apache-2.0) for safe, consented web scraping. Per `docs/f6/design.md`. **Tools NOT registered yet** — plugin.py stub returns early; Session A wires `ConsentGate.require()` + `SignalNormalizer.publish()` and flips `enabled_by_default: true` in Phase 4 of the master plan.

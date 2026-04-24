@@ -1,0 +1,9 @@
+{
+  "id": "oi-capability",
+  "name": "Open Interpreter capability",
+  "kind": "tools",
+  "version": "0.1.0",
+  "enabled_by_default": false,
+  "description": "Wraps Open Interpreter as a sandboxed subprocess. AGPL v3 — kept isolated.",
+  "schema_version": 1
+}
