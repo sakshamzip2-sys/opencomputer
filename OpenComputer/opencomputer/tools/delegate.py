@@ -62,6 +62,21 @@ class DelegateTool(BaseTool):
                             "no memory of the main conversation — include all context it needs."
                         ),
                     },
+                    # III.1 tool allowlist. Mirrors Claude Code's
+                    # ``allowed-tools:`` command frontmatter
+                    # (sources/claude-code/plugins/code-review/commands/
+                    # code-review.md) applied to OpenComputer's actual
+                    # tool-dispatching surface (subagent spawn).
+                    "allowed_tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional. Restrict the subagent to these tool names. "
+                            "Omit or pass null for the parent's full tool set "
+                            "(existing behavior). An empty list means no tools — "
+                            "use for pure-reasoning delegations with zero side effects."
+                        ),
+                    },
                 },
                 "required": ["task"],
             },
@@ -84,6 +99,24 @@ class DelegateTool(BaseTool):
                 ),
                 is_error=True,
             )
+        # III.1: parse the allowlist input. ``None`` / missing → unrestricted
+        # (parent's full registry); explicit ``[]`` → no tools at all; list
+        # of strings → exactly those tool names.
+        raw_allowed = call.arguments.get("allowed_tools")
+        allowed: frozenset[str] | None
+        if raw_allowed is None:
+            allowed = None
+        elif isinstance(raw_allowed, (list, tuple, set, frozenset)):
+            allowed = frozenset(str(x) for x in raw_allowed)
+        else:
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    "Error: 'allowed_tools' must be a list of tool names "
+                    f"(got {type(raw_allowed).__name__})."
+                ),
+                is_error=True,
+            )
         subagent_loop = self._factory()
         # II.1: cap the subagent's iteration budget at the parent's
         # ``delegation_max_iterations`` (default 50) instead of letting it
@@ -100,6 +133,10 @@ class DelegateTool(BaseTool):
                 max_iterations=child_cfg.loop.delegation_max_iterations,
             )
             subagent_loop.config = dataclasses.replace(child_cfg, loop=new_loop_cfg)
+        # III.1: push the allowlist onto the child BEFORE it runs. ``None``
+        # is also explicitly assigned so callers who re-use a loop factory
+        # don't inherit a stale allowlist from a prior delegation.
+        subagent_loop.allowed_tools = allowed
         # Propagate the parent's runtime context — plan mode, yolo mode, etc.
         # must apply to subagents too, otherwise delegating becomes an escape hatch.
         result = await subagent_loop.run_conversation(

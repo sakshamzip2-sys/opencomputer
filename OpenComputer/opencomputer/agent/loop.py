@@ -96,9 +96,23 @@ class AgentLoop:
         episodic_disabled: bool = False,
         reviewer_disabled: bool = False,
         is_reviewer: bool = False,
+        allowed_tools: frozenset[str] | None = None,
     ) -> None:
         self.provider = provider
         self.config = config
+        # III.1 tool allowlist. ``None`` = full registry (existing behavior);
+        # a concrete frozenset = filter both the schemas handed to the
+        # provider and the dispatch path. Applied per-loop (not per-turn),
+        # set at construction time or mutated by a caller (e.g. DelegateTool)
+        # before the loop runs. Mirrors Claude Code's frontmatter
+        # ``allowed-tools:`` concept applied to OpenComputer's actual
+        # tool-dispatching surface (subagent spawn). See
+        # sources/claude-code/plugins/code-review/commands/code-review.md.
+        self.allowed_tools: frozenset[str] | None = allowed_tools
+        # Default runtime context — overwritten by ``run_conversation`` on
+        # every turn. Declared here so direct callers of ``_dispatch_tool_calls``
+        # (tests, harness hooks) don't hit AttributeError before the first run.
+        self._runtime: RuntimeContext = DEFAULT_RUNTIME_CONTEXT
         self.db = db or SessionDB(config.session.db_path)
         self.memory = memory or MemoryManager(
             declarative_path=config.memory.declarative_path,
@@ -471,6 +485,24 @@ class AgentLoop:
             output_tokens=total_output,
         )
 
+    # ─── allowlist helpers ─────────────────────────────────────────
+
+    def _filtered_schemas(self) -> list:
+        """Return registry schemas filtered by ``self.allowed_tools``.
+
+        * ``allowed_tools is None`` → full registry (existing behavior).
+        * ``allowed_tools`` concrete (possibly empty) → only schemas whose
+          ``name`` is in the set are returned.
+
+        III.1 applies to BOTH the schemas handed to the provider AND the
+        dispatch path — otherwise the model sees tool X, calls it, and
+        we'd silently run it because only schemas were filtered.
+        """
+        all_schemas = registry.schemas()
+        if self.allowed_tools is None:
+            return all_schemas
+        return [s for s in all_schemas if s.name in self.allowed_tools]
+
     # ─── one step ──────────────────────────────────────────────────
 
     async def _run_one_step(
@@ -491,13 +523,14 @@ class AgentLoop:
         config default.
         """
         model_name = model if model is not None else self.config.model.model
+        tool_schemas = sort_tools_for_request(self._filtered_schemas())
         if stream_callback is not None:
             final_response = None
             async for event in self.provider.stream_complete(
                 model=model_name,
                 messages=messages,
                 system=system,
-                tools=sort_tools_for_request(registry.schemas()),
+                tools=tool_schemas,
                 max_tokens=self.config.model.max_tokens,
                 temperature=self.config.model.temperature,
             ):
@@ -513,7 +546,7 @@ class AgentLoop:
                 model=model_name,
                 messages=messages,
                 system=system,
-                tools=sort_tools_for_request(registry.schemas()),
+                tools=tool_schemas,
                 max_tokens=self.config.model.max_tokens,
                 temperature=self.config.model.temperature,
             )
@@ -570,11 +603,27 @@ class AgentLoop:
             if decision is not None and decision.decision == "block":
                 blocked[c.id] = decision.reason or "blocked by hook"
 
+        # III.1: gate dispatch on the allowlist too. Filtering only the
+        # provider-facing schemas isn't enough — a model could still emit
+        # a tool_use block for a disallowed name (e.g. recovered from
+        # earlier history before the allowlist was in effect). Refuse
+        # here so the subagent can't escape its blast-radius budget.
+        allow = self.allowed_tools
+
         async def _run_one(c: ToolCall):
             if c.id in blocked:
                 return ToolResult(
                     tool_call_id=c.id,
                     content=f"[blocked by PreToolUse hook: {blocked[c.id]}]",
+                    is_error=True,
+                )
+            if allow is not None and c.name not in allow:
+                return ToolResult(
+                    tool_call_id=c.id,
+                    content=(
+                        f"Error: tool {c.name!r} is not allowed in this "
+                        "subagent (not in the allowlist)."
+                    ),
                     is_error=True,
                 )
             return await registry.dispatch(
