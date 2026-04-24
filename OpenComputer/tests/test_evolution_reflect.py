@@ -149,14 +149,3 @@ def test_reflection_engine_window_must_be_positive() -> None:
     with pytest.raises(ValueError, match="window"):
         ReflectionEngine(provider=object(), window=-5)
 
-
-# ---------------------------------------------------------------------------
-# 9. reflect() raises NotImplementedError mentioning B2
-# ---------------------------------------------------------------------------
-
-
-def test_reflect_raises_not_implemented() -> None:
-    """engine.reflect([]) raises NotImplementedError with a message mentioning 'B2'."""
-    engine = ReflectionEngine(provider=object())
-    with pytest.raises(NotImplementedError, match="B2"):
-        engine.reflect([])

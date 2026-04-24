@@ -10,11 +10,30 @@ Design reference: OpenComputer/docs/evolution/design.md §4.3 and §7.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import hashlib
+import json
+import logging
+import time
 from collections.abc import Mapping
-from typing import Any, Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
+
+from jinja2 import Environment, FileSystemLoader
 
 from opencomputer.evolution.trajectory import TrajectoryRecord
+
+if TYPE_CHECKING:
+    from plugin_sdk.provider_contract import BaseProvider
+
+# ---------------------------------------------------------------------------
+# Module-level constants
+# ---------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
+
+_TEMPLATE_DIR = Path(__file__).parent / "prompts"
 
 # ---------------------------------------------------------------------------
 # Valid action_type values (checked at runtime — Literal isn't enforced by Python)
@@ -73,30 +92,116 @@ class Insight:
 
 
 # ---------------------------------------------------------------------------
-# ReflectionEngine (B1 stub)
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_env() -> Environment:
+    """Build a Jinja2 Environment pointing at the prompts directory."""
+    return Environment(
+        loader=FileSystemLoader(_TEMPLATE_DIR),
+        trim_blocks=True,
+        lstrip_blocks=True,
+        keep_trailing_newline=True,
+    )
+
+
+def _run_async(coro: Any) -> Any:
+    """Run an async coroutine from sync code, handling existing-loop case."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop — safe to use asyncio.run
+        return asyncio.run(coro)
+    # We're inside a running loop (e.g., called from an async test) — refuse.
+    raise RuntimeError(
+        "ReflectionEngine.reflect() must not be called from inside a running event loop. "
+        "Run it from sync code (CLI / background thread)."
+    )
+
+
+def _cache_key(records: list[TrajectoryRecord]) -> str:
+    """Compute a cache key from the record ids (None ids excluded)."""
+    ids = ",".join(str(r.id) for r in records if r.id is not None)
+    return hashlib.sha256(ids.encode()).hexdigest()
+
+
+def _parse_insights(raw: str, record_ids: set[int]) -> list[Insight]:
+    """Parse LLM output into Insight list.
+
+    Returns [] on top-level parse failure (logs warning). Skips individual
+    entries that fail validation (logs per-entry debug). Filters out
+    evidence_refs not in record_ids (LLM hallucinated id).
+    """
+    raw = raw.strip()
+    # Strip markdown fences if the LLM ignored the instruction
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        raw = "\n".join(lines)
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("ReflectionEngine: top-level JSON parse failed: %s", exc)
+        return []
+    if not isinstance(parsed, list):
+        logger.warning(
+            "ReflectionEngine: expected JSON list, got %s", type(parsed).__name__
+        )
+        return []
+    out: list[Insight] = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            logger.debug("ReflectionEngine: skipping non-dict entry %r", entry)
+            continue
+        try:
+            evidence = tuple(int(x) for x in entry.get("evidence_refs", []))
+            evidence = tuple(e for e in evidence if e in record_ids)
+            insight = Insight(
+                observation=str(entry["observation"]),
+                evidence_refs=evidence,
+                action_type=entry["action_type"],
+                payload=dict(entry.get("payload", {})),
+                confidence=float(entry["confidence"]),
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            logger.debug(
+                "ReflectionEngine: skipping malformed entry %s — %s", entry, exc
+            )
+            continue
+        out.append(insight)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# ReflectionEngine
 # ---------------------------------------------------------------------------
 
 
 class ReflectionEngine:
     """GEPA-style reflection engine — analyses trajectory batches, proposes Insights.
 
-    B1: stub only — ``reflect()`` raises NotImplementedError.  The constructor accepts
-    the parameters that B2 will need (provider + window) so callers can be written
-    against a stable signature today.
+    B2: real implementation — renders the reflect.j2 Jinja2 template, calls the
+    provider, and parses Insights from the JSON response.
     """
 
     def __init__(
         self,
         *,
-        provider: Any,
+        provider: BaseProvider,
+        model: str = "claude-opus-4-7",
+        max_tokens: int = 4096,
         window: int = 30,
     ) -> None:
         """Initialise the engine.
 
         Args:
-            provider: LLM provider instance.  B2 will tighten the type to
-                ``BaseProvider`` from ``plugin_sdk.provider_contract``; B1 accepts
-                ``Any`` to avoid prematurely locking that import.
+            provider: LLM provider instance (BaseProvider from plugin_sdk).
+            model: Model identifier to pass to the provider.
+            max_tokens: Token budget for the reflection completion.
             window: Maximum number of trajectory records to pass to a single
                 ``reflect()`` call.  Must be >= 1.
 
@@ -106,7 +211,10 @@ class ReflectionEngine:
         if window < 1:
             raise ValueError("window must be >= 1")
         self._provider = provider
+        self._model = model
+        self._max_tokens = max_tokens
         self._window = window
+        self._cache: dict[str, list[Insight]] = {}
 
     @property
     def window(self) -> int:
@@ -114,12 +222,58 @@ class ReflectionEngine:
         return self._window
 
     def reflect(self, records: list[TrajectoryRecord]) -> list[Insight]:
-        """Analyse a batch of completed trajectories.  Returns Insights.
+        """Run a reflection pass on a batch of trajectories.
 
-        B1: NotImplementedError.  B2 implementation: render Jinja2 prompt at
-        ``opencomputer/evolution/prompts/reflect.j2``, call provider, parse JSON output.
+        Steps:
+          1. Trim records to the most recent ``self._window`` (oldest dropped).
+          2. Compute a cache key from the record ids (in order).
+          3. Cache hit → return cached list.
+          4. Render the Jinja2 reflect.j2 template with the records.
+          5. Call provider.complete(...) (sync wrapper around async).
+          6. Parse the response text as JSON.
+          7. Validate each entry → Insight (skip + log on per-entry failures).
+          8. Cache + return.
 
         Raises:
-            NotImplementedError: always in B1.
+            RuntimeError: if called from inside a running event loop.
         """
-        raise NotImplementedError("ReflectionEngine.reflect() lands in B2 — see plan §B2")
+        from plugin_sdk.core import Message  # runtime import — provider needs Message anyway
+
+        # 1. Trim to window
+        records = records[-self._window :]
+
+        # 2. Compute cache key
+        key = _cache_key(records)
+
+        # 3. Cache hit
+        if key in self._cache:
+            return self._cache[key]
+
+        # 4. Render template
+        env = _build_env()
+        template = env.get_template("reflect.j2")
+        prompt_text = template.render(
+            records=records,
+            model_hint=self._model,
+            now=time.time(),
+        )
+
+        # 5. Call provider (sync bridge)
+        messages = [Message(role="user", content=prompt_text)]
+        response = _run_async(
+            self._provider.complete(
+                model=self._model,
+                messages=messages,
+                max_tokens=self._max_tokens,
+                temperature=0.3,
+            )
+        )
+        raw_text = response.message.content
+
+        # 6 & 7. Parse + validate
+        record_ids = {r.id for r in records if r.id is not None}
+        insights = _parse_insights(raw_text, record_ids)
+
+        # 8. Cache + return
+        self._cache[key] = insights
+        return insights

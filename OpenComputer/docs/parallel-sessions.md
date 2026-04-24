@@ -56,6 +56,7 @@ Both sessions read this file at startup. Both update it after every commit.
 ### Session B — active
 
 - `[2026-04-24 13:45] feat/hermes-evolution-b1` touched `opencomputer/evolution/*` (new subpackage), `docs/evolution/*` (new), `tests/test_evolution_*.py` (new — 5 files / 73 tests), `docs/parallel-sessions.md` (this file), `CHANGELOG.md` (append [Unreleased] entry). **Zero changes to Session-A-reserved files.** Working from git worktree at `/tmp/oc-evo` to avoid branch-cycling conflicts with Session A in the primary checkout.
+- `[2026-04-24 14:30] feat/hermes-evolution-b2` (stacked off `feat/hermes-evolution-b1`) touched `opencomputer/evolution/{reflect,synthesize,cli,entrypoint}.py`, `opencomputer/evolution/prompts/{reflect,synthesize}.j2`, `tests/test_evolution_{reflect_template,reflect_engine,synthesize_skill,cli}.py` (4 new test files / 36 new tests; -1 obsolete B1 stub test), `docs/evolution/README.md` (B1 placeholder → B2 user docs), `CHANGELOG.md` (append B2 entry under [Unreleased]). Full suite at 1070 passing. Worktree at `/tmp/oc-evo-b2`. **Zero Session-A-reserved files touched** (`opencomputer/cli.py` NOT modified — Session A wires the subapp via one-line PR per `docs/evolution/README.md`).
 
 ---
 

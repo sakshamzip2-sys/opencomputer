@@ -1,6 +1,6 @@
 # OpenComputer Evolution — User Guide
 
-> **Status: B1 (skeleton).** This document is the user-facing entry point. The subpackage exists in `opencomputer/evolution/`, but reflection + skill synthesis logic land in **B2** (next phase). Read this to understand what's shipping, what's coming, and the safety guarantees.
+> **Status: B2 (reflect + synthesize + CLI).** Skeleton from B1 + working reflection engine + skill synthesizer + the `opencomputer evolution …` CLI subapp. Auto-collection (B3) and prompt-evolution + dashboard (B4) are gated behind a **dogfood checkpoint** — try the CLI commands below, decide if the synthesized output is useful, then signal whether B3/B4 are worth building.
 
 ---
 
@@ -20,8 +20,8 @@ Inspired by the GEPA reflection pattern from [Hermes Self-Evolution](https://git
 
 | Phase | Status | What ships |
 |---|---|---|
-| **B1** | ✅ Landed (this branch) | Subpackage skeleton; trajectory dataclasses; SQLite storage; rule-based reward function; reflection + synthesis stubs |
-| **B2** | Coming | GEPA-style reflection engine; skill synthesis to quarantine namespace; CLI surface (`opencomputer evolution reflect`, `... skills list / promote`, `... reset`) |
+| **B1** | ✅ Landed (PR #41) | Subpackage skeleton; trajectory dataclasses; SQLite storage; rule-based reward function; reflection + synthesis stubs |
+| **B2** | ✅ Landed (this branch) | GEPA-style reflection engine wired to provider registry; skill synthesis with III.4 hierarchical layout (atomic write + path-traversal guard); CLI surface (`opencomputer evolution reflect / skills list / skills promote / reset`); Jinja2 prompt templates for both reflection and skill body |
 | **B3** | Awaits Session A's TypedEvent bus | Auto-collection of trajectories from real agent runs |
 | **B4** | After B3 | Prompt-evolution proposals (diff-only, never auto-applied) + monitoring dashboard + capability-atrophy detection |
 
@@ -49,37 +49,82 @@ These are **load-bearing** — verify them in code if you're skeptical (paths in
 
 ---
 
-## What's actually usable today (B1)
+## What's actually usable today (B2)
 
-**Nothing user-visible yet.** B1 is foundational — dataclasses + storage + reward — with no CLI, no auto-collection, no reflection. The point of landing B1 separately is that downstream work (B2 reflection, B3 bus subscription) plugs into a stable, tested base.
+You can now run the full reflection → synthesis loop manually. **Trajectory auto-collection is still B3** (waits for Session A's TypedEvent bus), so until then you can either: (a) try the CLI against a fresh empty trajectory store and see the "no data" path, or (b) seed the SQLite DB with synthetic trajectories for dogfood evaluation.
 
-If you want to peek at what's in the package right now:
+### CLI commands
+
+The `opencomputer evolution` subapp must be wired into the main CLI before `opencomputer evolution …` works. Until Session A folds it in via a one-line PR, you can invoke it directly:
+
+```bash
+# Direct invocation (works today):
+python -m opencomputer.evolution.entrypoint reflect --dry-run
+python -m opencomputer.evolution.entrypoint skills list
+python -m opencomputer.evolution.entrypoint skills promote <slug>
+python -m opencomputer.evolution.entrypoint reset --yes
+
+# After Session A wires the subapp in (cli.py +1 line):
+opencomputer evolution reflect --window 30 --dry-run
+opencomputer evolution skills list
+opencomputer evolution skills promote read-then-edit
+opencomputer evolution reset --yes
+```
+
+For Session A to wire the subapp in, the change in `opencomputer/cli.py` is one line:
+
+```python
+from opencomputer.evolution.entrypoint import evolution_app
+app.add_typer(evolution_app, name="evolution")
+```
+
+### Dogfood gate — the next decision point
+
+Once trajectories exist (either via B3 auto-collection or hand-seeded), run:
+
+```bash
+opencomputer evolution reflect              # real reflection — calls your configured provider
+opencomputer evolution skills list          # see what landed in the quarantine
+opencomputer evolution skills promote <slug>  # if a skill looks useful, promote it
+opencomputer evolution reset --yes          # if everything's noise, wipe and try again
+```
+
+**Does the synthesized output actually help your agent?** That's the gate for whether B3 (auto-collection) and B4 (prompt evolution + dashboard) are worth building. Run the loop a few times against real workflows, then signal go / no-go.
+
+### Programmatic surface
 
 ```python
 from opencomputer.evolution import (
-    TrajectoryEvent, TrajectoryRecord,    # the data shapes
-    new_record, with_event,                # ergonomic builders
-    RewardFunction, RuleBasedRewardFunction,  # scoring
-    ReflectionEngine, Insight, SkillSynthesizer,  # stubs (B2)
+    TrajectoryEvent, TrajectoryRecord,                # data shapes
+    new_record, with_event,                           # ergonomic builders
+    RewardFunction, RuleBasedRewardFunction,          # scoring
+    ReflectionEngine, Insight, SkillSynthesizer,      # working pipeline (B2)
 )
-```
+from opencomputer.evolution.storage import (
+    init_db, insert_record, list_recent, count_records,
+)
 
-The stubs raise `NotImplementedError("...lands in B2...")` — that's the contract for B1.
+# Real reflection requires a BaseProvider (use the one your provider plugin gives you):
+engine = ReflectionEngine(provider=my_provider, model="claude-opus-4-7", window=30)
+records = list_recent(limit=30)
+insights = engine.reflect(records)
+
+synth = SkillSynthesizer()
+for ins in insights:
+    if ins.action_type == "create_skill":
+        path = synth.synthesize(ins)
+        print(f"synthesized: {path}")
+```
 
 ---
 
-## What's coming in B2
+## What's coming in B3 + B4 (gated on dogfood feedback)
 
-CLI surface (final shape locked at design time):
+**B3** — auto-collection of trajectories from real agent runs. Subscribes (read-only) to Session A's TypedEvent bus when it lands; `opencomputer/ingestion/bus.py` is the dependency. CLI additions: `opencomputer evolution enable / disable`, `opencomputer evolution trajectories show --limit 50`.
 
-```
-opencomputer evolution reflect [--window 30] [--dry-run]   # manual reflection trigger
-opencomputer evolution skills list                          # show synthesized skills
-opencomputer evolution skills promote <slug>                # quarantine → main skills
-opencomputer evolution reset                                # rollback (DB + quarantine wipe)
-```
+**B4** — prompt-evolution proposals (diff-only, never auto-applied) + monitoring dashboard + capability-atrophy detection. CLI additions: `opencomputer evolution prompts list / apply / reject`, `opencomputer evolution dashboard`, `opencomputer evolution skills retire`.
 
-After B2 ships, there's a **dogfood gate**: you (the user) try `opencomputer evolution reflect` against a real session, decide if the synthesized skills are useful, and signal whether B3 + B4 are worth building. If the answer is "the output is junk", evolution stops shipping at "reflect-on-demand only" and we don't expand it.
+If B2 dogfood shows the synthesized output isn't useful, B3 + B4 are deferred indefinitely and evolution ships at "reflect-on-demand only".
 
 ---
 
