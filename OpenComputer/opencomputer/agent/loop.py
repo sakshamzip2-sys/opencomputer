@@ -44,6 +44,9 @@ from plugin_sdk.core import Message, StopReason, ToolCall
 from plugin_sdk.injection import InjectionContext
 from plugin_sdk.provider_contract import BaseProvider
 from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
+from plugin_sdk.tool_matcher import ToolPattern as _ToolPattern
+from plugin_sdk.tool_matcher import matches as _pattern_matches
+from plugin_sdk.tool_matcher import parse as _parse_pattern
 
 _log = logging.getLogger("opencomputer.agent.loop")
 
@@ -487,21 +490,100 @@ class AgentLoop:
 
     # ─── allowlist helpers ─────────────────────────────────────────
 
+    def _split_allowlist(self) -> tuple[frozenset[str], list[_ToolPattern]]:
+        """Split ``self.allowed_tools`` into (bare-names, parsed-patterns).
+
+        Bare names (plain tool identifiers like ``"Read"``) stay in a
+        frozenset for O(1) lookup — the III.1 shape. Entries containing
+        parens or a trailing ``*`` are parsed into ``ToolPattern`` values
+        and matched per-call in the dispatch path.
+
+        Malformed entries are silently ignored: a broken allowlist
+        shouldn't take down an otherwise valid subagent delegation.
+        The test suite asserts parser-level rejection separately via
+        ``tool_matcher.parse`` unit tests.
+        """
+        assert self.allowed_tools is not None
+        names: set[str] = set()
+        patterns: list[_ToolPattern] = []
+        for entry in self.allowed_tools:
+            if "(" in entry or "*" in entry:
+                try:
+                    patterns.append(_parse_pattern(entry))
+                except ValueError:
+                    _log.warning(
+                        "allowed_tools: ignoring malformed entry %r", entry
+                    )
+            else:
+                names.add(entry.strip())
+        return frozenset(names), patterns
+
+    def _is_tool_name_allowed_for_schemas(
+        self,
+        tool_name: str,
+        names: frozenset[str],
+        patterns: list[_ToolPattern],
+    ) -> bool:
+        """True if ``tool_name`` is allowed by any allowlist entry for the
+        purpose of exposing its schema to the provider.
+
+        For arg-patterned entries (e.g. ``Bash(git:*)``) the schema IS
+        surfaced so the model can discover the tool exists — dispatch
+        filters the specific arg shape. Without this, the model would
+        never see Bash in the tools list and couldn't call it at all.
+        """
+        if tool_name in names:
+            return True
+        for p in patterns:
+            if p.is_prefix:
+                if tool_name.startswith(p.tool_name):
+                    return True
+            elif p.arg_pattern is not None:
+                # Arg-patterned: surface the schema if the tool name matches.
+                if tool_name == p.tool_name:
+                    return True
+            else:
+                # Bare name in pattern (rare, shouldn't happen after split)
+                if tool_name == p.tool_name:
+                    return True
+        return False
+
+    def _is_call_allowed_for_dispatch(
+        self,
+        tool_name: str,
+        tool_args: dict,
+        names: frozenset[str],
+        patterns: list[_ToolPattern],
+    ) -> bool:
+        """True if a specific tool call (name + args) passes the allowlist.
+
+        Bare names match first (O(1)). Otherwise iterate patterns until
+        one returns True.
+        """
+        if tool_name in names:
+            return True
+        return any(_pattern_matches(p, tool_name, tool_args) for p in patterns)
+
     def _filtered_schemas(self) -> list:
         """Return registry schemas filtered by ``self.allowed_tools``.
 
         * ``allowed_tools is None`` → full registry (existing behavior).
         * ``allowed_tools`` concrete (possibly empty) → only schemas whose
-          ``name`` is in the set are returned.
+          ``name`` is allowed by at least one bare name or pattern entry.
 
-        III.1 applies to BOTH the schemas handed to the provider AND the
-        dispatch path — otherwise the model sees tool X, calls it, and
+        III.1/III.2 applies to BOTH the schemas handed to the provider AND
+        the dispatch path — otherwise the model sees tool X, calls it, and
         we'd silently run it because only schemas were filtered.
         """
         all_schemas = registry.schemas()
         if self.allowed_tools is None:
             return all_schemas
-        return [s for s in all_schemas if s.name in self.allowed_tools]
+        names, patterns = self._split_allowlist()
+        return [
+            s
+            for s in all_schemas
+            if self._is_tool_name_allowed_for_schemas(s.name, names, patterns)
+        ]
 
     # ─── one step ──────────────────────────────────────────────────
 
@@ -603,12 +685,17 @@ class AgentLoop:
             if decision is not None and decision.decision == "block":
                 blocked[c.id] = decision.reason or "blocked by hook"
 
-        # III.1: gate dispatch on the allowlist too. Filtering only the
-        # provider-facing schemas isn't enough — a model could still emit
-        # a tool_use block for a disallowed name (e.g. recovered from
-        # earlier history before the allowlist was in effect). Refuse
-        # here so the subagent can't escape its blast-radius budget.
+        # III.1/III.2: gate dispatch on the allowlist too. Filtering only
+        # the provider-facing schemas isn't enough — a model could still
+        # emit a tool_use block for a disallowed name (e.g. recovered from
+        # earlier history before the allowlist was in effect). Refuse here
+        # so the subagent can't escape its blast-radius budget. Pattern
+        # entries (e.g. ``Bash(git:*)``) check the actual call args.
         allow = self.allowed_tools
+        if allow is not None:
+            _allow_names, _allow_patterns = self._split_allowlist()
+        else:
+            _allow_names, _allow_patterns = frozenset(), []
 
         async def _run_one(c: ToolCall):
             if c.id in blocked:
@@ -617,7 +704,9 @@ class AgentLoop:
                     content=f"[blocked by PreToolUse hook: {blocked[c.id]}]",
                     is_error=True,
                 )
-            if allow is not None and c.name not in allow:
+            if allow is not None and not self._is_call_allowed_for_dispatch(
+                c.name, c.arguments, _allow_names, _allow_patterns
+            ):
                 return ToolResult(
                     tool_call_id=c.id,
                     content=(
