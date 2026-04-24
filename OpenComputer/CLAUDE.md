@@ -2,7 +2,7 @@
 
 This file is auto-loaded at session start. It is the **single comprehensive brief** a new Claude session needs to resume work on OpenComputer without re-explaining anything.
 
-Last updated: 2026-04-23 (Phase 12a merged)
+Last updated: 2026-04-24 (v1.0-candidate — all ship-gate sub-projects A/B/C/D/E merged)
 
 ---
 
@@ -122,7 +122,7 @@ OpenComputer/
 │   ├── dev-tools/                   ← kind=tools. Phase 12d.1 — porcelain dev utilities
 │   └── memory-honcho/               ← kind=memory. Phase 10f.K–N — Honcho overlay (opt-in)
 │
-├── tests/                           ← ~600 tests, all passing (40 test files)
+├── tests/                           ← 809 tests, all passing (59 test files)
 │
 └── docs/                            ← reference notes + author guides (Sub-project B populates more)
 ```
@@ -176,7 +176,7 @@ opencomputer    opencomputer            opencomputer
 
 ## 4. What's been built (all phases to date)
 
-All committed + pushed to `main`. Current main sha: `1c08508` (2026-04-23).
+All committed + pushed to `main`. Current main sha: `5c62a12` (2026-04-24).
 
 | Phase | PR / Commit | What |
 |---|---|---|
@@ -216,8 +216,16 @@ All committed + pushed to `main`. Current main sha: `1c08508` (2026-04-23).
 | 14.L | PR #14 / `ebb32db` | README Profiles / Presets / Plugin sections + CHANGELOG |
 | 14.M | `7fc1185` | Named plugin-activation presets + CLI |
 | 14.N | `0a829ca` | Workspace `.opencomputer/config.yaml` overlay |
+| Sub-project A | PR #20 / `6ad86b5` | Honcho-as-default memory (A1-A8) — v1.0 ship-gate |
+| Sub-project B | PR #21 / `e57d191` | `opencomputer plugin new` scaffolder (B1-B6) — v1.0 ship-gate |
+| Sub-project D.1–3 | PR #22 / `9b55789` | Coding-harness Phase 6d-6f rebase + SDK boundary fix |
+| Sub-project D.5+D.7 | PR #23 / `1227e19` | ExitPlanMode tool + PreCompact/SubagentStop/Notification hook emissions |
+| Sub-project C | PR #24 / `f2e8f0f` | Profile parity with Hermes — `home/` + wrappers + `SOUL.md` (C1-C4) |
+| Adversarial follow-ups | PR #25 / `89b1e84` | Follow-ups across PRs #25-#28 (test hardening, drift guards) |
+| Sub-project E | PR #26 / `633c8eb` | Demand-driven plugin activation (E1-E6) |
+| Sub-project D tail | PR #27 / `5c62a12` | Cheap-route gating (D6) + slash-command router formalization (D8) — v1.0 candidate (2026-04-24) |
 
-**Test count:** ~600 passing across 40 test files.
+**Test count:** 809 passing across 59 test files.
 
 **Bundled extensions (7):** telegram, discord, anthropic-provider, openai-provider, coding-harness, dev-tools, memory-honcho.
 
@@ -225,39 +233,62 @@ All committed + pushed to `main`. Current main sha: `1c08508` (2026-04-23).
 
 ## 5. What's NEXT — single source of truth
 
-> **This section is the authoritative phase map.** The omnibus plan file at `~/.claude/plans/2026-04-23-honcho-ecosystem-omnibus.md` is a user-scoped draft (lives on the maintainer's laptop, not in the repo) that expands each sub-project into TDD-granular task lists — use it if you have local access, otherwise this section alone is enough to orient. The two older plans (`delightful-sauteeing-sutherland.md`, `phase-12-ultraplan-spec.md`, both in `~/.claude/plans/`) are marked SUPERSEDED — do not use them.
+> **This section is the authoritative phase map.** The omnibus plan `~/.claude/plans/2026-04-23-honcho-ecosystem-omnibus.md` drove Sub-projects A–D to completion; two older plans (`delightful-sauteeing-sutherland.md`, `phase-12-ultraplan-spec.md`) are superseded — do not use them.
 
-### Current stance — what blocks v1.0
+### Current stance — v1.0 candidate, dogfood gate next
 
-The v1.0 ship-gate is:
+**All v1.0 ship-gate sub-projects are merged on `main`** (tip: `5c62a12`):
 
-- **Sub-project A — Honcho as default memory** (4–6 days). Make the Honcho overlay the default memory provider, not opt-in. Baseline SQLite still works without Docker, but a fresh install onboards into Honcho by default. Details in the omnibus plan.
-- **Sub-project B — `opencomputer plugin new` scaffolder** (4–6 days). This is what Phase 10c was. Renamed to Sub-project B in the omnibus. Ships a CLI that generates a working plugin skeleton + `docs/plugin-authors.md` + `docs/sdk-reference.md`. Ship-blocker for v1.0.
-- **Sub-project D — Coding-harness completeness** (5–7 days). Rebase + merge the `feat/coding-harness-v2` branch (11 commits of Phase 6d–6f work), then land ExitPlanMode + cheap-route + 3 hooks + the full slash-command router.
+- Sub-project A — Honcho-as-default memory ✅ (PR #20)
+- Sub-project B — `opencomputer plugin new` scaffolder ✅ (PR #21)
+- Sub-project C — Profile parity with Hermes ✅ (PR #24)
+- Sub-project D — Coding-harness completeness ✅ (PRs #22, #23, #27)
+- Sub-project E — Demand-driven plugin activation ✅ (PR #26)
 
-**After v1.0 tag → Sub-project C — Profile completeness parity with Hermes** (2–4 days). Per-profile `home/`, wrapper scripts, `SOUL.md`. Lands *after* Sub-project A so profile-aware memory is already in place.
+Next concrete action: tag v1.0 + PyPI release (see `RELEASE.md`).
 
-### 🛑 Dogfood gate (unchanged)
+### 🛑 Dogfood gate — 2 weeks before v1.1 scope
 
-Before expanding beyond v1.0, use OpenComputer daily for 2 weeks so feature priorities come from actual gaps, not guesses. This gate is load-bearing — don't skip. Formerly framed as "gate after Phase 10"; still stands, just after A+B+D land.
+Before expanding beyond v1.0, use OpenComputer daily for 2 weeks. Feature priorities must come from actual usage gaps, not guesses. This gate is load-bearing — don't skip.
 
-### Pending work (reorganized under omnibus sub-projects)
+### Immediately actionable (Tier 1)
 
-Everything below is still pending on `main`. The old phase numbers are kept here for traceability only — the active grouping is the A/B/C/D above.
+- **Tag v1.0 + PyPI release** (~1 hr; runbook in `RELEASE.md`; human-attended — PyPI publish uses OIDC tied to maintainer's GitHub identity, requires explicit sign-off).
+- **Phase 10d — publish example third-party plugin repo to PyPI** (1-2 days). Now unblocked by Sub-project B — the scaffolder is what the example would demonstrate end-to-end.
 
-- **Phase 10c → now Sub-project B.** Plugin scaffolder + author docs.
-- **Phase 10d — example third-party plugin repo.** Deferred until Sub-project B ships (the scaffolder is what the example would demonstrate).
-- **Phase 12b — MCP install-from-catalog + reconnect/health.** Pending; downstream of Sub-project A settling the config layout.
-- **Phase 12c.1 — first 5 channel adapters** (Slack, Matrix, Email, Webhook, OpenAI-compat API). Dogfood-gated.
-- **Phase 12c.2–4 — 15 more channels.** Dogfood-gated.
-- **Phase 12d.3–6 — memory-vector, memory-wiki, local-providers, media-tools plugin ports.** Dogfood-gated.
-- **Phase 12e — coding-harness dedup audit.** Rolled into Sub-project D (the rebase naturally exposes dedup work).
-- **Phase 14.F/G/H/K — per-profile credential isolation, templates, sharing, profile-aware MCP.** Deferred; Sub-project C scope does not include these.
-- **Phase 15.A — `opencomputer session resume` CLI wiring.** Checkpoint table already shipped; CLI surface still pending.
+### Dogfood-gated (Tier 2 — park until real demand signals)
 
-### WON'T DO (explicitly parked)
+- **Phase 12m — MCP install-from-catalog + reconnect/health.** (Renamed from the older "Phase 12b" label to avoid collision with the `phase-12b*` branch-naming convention used for Sub-project D work, which is distinct and already merged.)
+- Phase 12c.1 — first 5 channel adapters (Slack, Matrix, Email, Webhook, OpenAI-compat API).
+- Phase 12c.2–4 — 15 more channel adapters.
+- Phase 12d.3–6 — memory-vector, memory-wiki, local-providers, media-tools plugin ports.
+- Phase 12e — coding-harness dedup audit.
+- Phase 14.F/G/H/K — per-profile credential isolation, templates, sharing, profile-aware MCP.
+- Phase 15.A — `opencomputer session resume` CLI wiring. Checkpoint table shipped; CLI surface pending.
 
-Canvas rendering, native mobile apps, voice wake-word, Atropos RL, trajectory compression, 6 remote terminal backends, skills marketplace, full i18n. Re-open only if a concrete use case appears.
+### Parked by design (Tier 3 — big scope, don't start without explicit go-ahead)
+
+- **Sub-project F — User Intelligence System.** 10-phase roadmap at `~/.claude/plans/there-are-many-pending-tranquil-fern.md` (F1 consent layer → F10 plural-representation ensemble). Explicitly parked until post-v1.0.
+
+### Latent tech debt (Tier 4 — cheap cleanup when convenient)
+
+- `profile.yaml` write lacks `flock` — concurrent plugin-enable calls silently last-write-wins (~1 hr).
+- Strict `load_profile_config` vs lenient plugin enable/disable YAML handlers — two parse paths to unify (~1-2 hr).
+- AgentCache utility shipped in Phase 12a as a class + tests but never wired into production caller (~half day if pursued).
+- Per-profile `.env` loading for Phase 14.F credential isolation (~1 day).
+- E7 — keyword-match demand detection on `UserPromptSubmit` hook (natural-language intent scanner so demand signals fire even when the model never calls the missing tool; ~1-2 days).
+
+### Won't do (Tier 5 — parked forever)
+
+Canvas rendering, native mobile apps, voice wake-word, Atropos RL, trajectory compression, 6 remote terminal backends, skills marketplace, full i18n. Reopen only if a concrete use case appears.
+
+---
+
+### Non-obvious infra notes (add to your mental model)
+
+**Plugin registration is Python-declarative, not YAML-based.** There are no `manifest.yaml` or `manifest.toml` files in `extensions/`. Each plugin's metadata (name, description, kind, tool set) is declared via a `register(api)` function in its `plugin.py`, typically constructing a `PluginManifest` from `plugin_sdk`. Don't hunt for YAML manifests — they don't exist.
+
+**Schema-name uniqueness is the collision guard for tool names.** If two plugins register tools with the same `schema().name`, `ToolRegistry` raises `ValueError` at load. Tool names are PascalCase by convention (Edit, MultiEdit, Read, TodoWrite, etc.) — the SDK boundary test keeps this honest.
 
 ---
 
