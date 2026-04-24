@@ -19,6 +19,8 @@ import logging
 import os
 import sys
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,7 @@ from plugin_sdk.core import (
     PluginActivationSource,
     SingleInstanceError,
 )
+from plugin_sdk.runtime_context import RequestContext
 
 logger = logging.getLogger("opencomputer.plugins.loader")
 
@@ -619,6 +622,11 @@ class PluginAPI:
                 f"{sorted(VALID_ACTIVATION_SOURCES)!r}; got {activation_source!r}"
             )
         self._activation_source: PluginActivationSource = activation_source
+        # Task I.9: per-request scope. ``None`` outside any dispatch;
+        # populated by the gateway via ``in_request(ctx)`` around each
+        # inbound MessageEvent / wire call. Plugins read via the
+        # ``request_context`` property.
+        self._request_context: RequestContext | None = None
 
     @property
     def activation_source(self) -> PluginActivationSource:
@@ -633,6 +641,60 @@ class PluginAPI:
                     api.hooks.notify("thanks for enabling <plugin>!")
         """
         return self._activation_source
+
+    @property
+    def request_context(self) -> RequestContext | None:
+        """Per-request scope, if the gateway has entered one — else ``None``.
+
+        Populated by ``in_request(ctx)`` on this same PluginAPI during
+        each dispatch. Plugins reach this from any code that runs
+        inside the dispatch (tool handlers, injection providers, hook
+        handlers) to learn about the inbound request identity.
+
+        ``None`` outside a scope — the CLI + direct
+        ``AgentLoop.run_conversation`` path does not populate a scope,
+        so the return is ``None`` there. Plugins MUST handle the
+        ``None`` case; it's the common case for offline / CLI runs.
+
+        Mirrors OpenClaw's per-request plugin scope at
+        ``sources/openclaw/src/gateway/server-plugins.ts:47-64, 107-144``.
+        """
+        return self._request_context
+
+    @contextmanager
+    def in_request(self, ctx: RequestContext) -> Iterator[None]:
+        """Enter a per-request scope for the duration of a dispatch.
+
+        The gateway wraps each inbound channel message's
+        ``run_conversation`` call in this context manager so plugins
+        running during the dispatch can read ``api.request_context``
+        and query the current request identity (for auth gating,
+        rate limiting, activation-context branching).
+
+        Scopes do NOT stack on a single PluginAPI — a second entry
+        while one is already active raises ``RuntimeError``. This
+        matches OpenClaw's server-plugins model: one request in flight
+        per scope at a time (fire-per-message channels produce one
+        scope per message; the wire server produces one scope per
+        method call; concurrent chats go through separate session
+        locks at the dispatcher level, not through nested scopes).
+
+        The scope unwinds cleanly even if the wrapped block raises —
+        ``request_context`` reverts to its prior value (usually
+        ``None``) before the exception propagates.
+        """
+        if self._request_context is not None:
+            raise RuntimeError(
+                "PluginAPI is already in a request (request_id="
+                f"{self._request_context.request_id!r}) — nested in_request "
+                "scopes are not supported; concurrent dispatches must use "
+                "separate locks at the dispatcher level."
+            )
+        self._request_context = ctx
+        try:
+            yield
+        finally:
+            self._request_context = None
 
     def register_tool(self, tool: Any) -> None:
         self.tools.register(tool)
