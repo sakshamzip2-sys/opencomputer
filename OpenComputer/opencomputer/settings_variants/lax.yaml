@@ -1,0 +1,27 @@
+# OpenComputer Settings — LAX variant
+#
+# III.3 — permissive developer posture. Pairs with Claude Code's
+# sources/claude-code/examples/settings/settings-lax.json. Ship this
+# for trusted local dev where Bash, WebSearch, WebFetch are all OK
+# to run unsandboxed.
+
+model:
+  provider: anthropic
+  model: claude-opus-4-7
+  max_tokens: 4096
+
+loop:
+  max_iterations: 50
+  parallel_tools: true
+  iteration_timeout_s: 600
+
+memory:
+  enabled: true
+  provider: memory-honcho
+
+tools:
+  web_search:
+    provider: ddg
+
+# No settings hooks — lax variant trusts the caller. Add your own
+# under `hooks:` if you want log-only observation.

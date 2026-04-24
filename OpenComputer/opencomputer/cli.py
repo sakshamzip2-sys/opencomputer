@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import uuid
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -816,6 +817,151 @@ def config_set(
 def config_path() -> None:
     """Print the path to the config file."""
     console.print(str(config_file_path()))
+
+
+# III.3 — bundled settings variants. Mirrors sources/claude-code/examples/
+# settings/README.md: three starter postures users copy and adjust.
+
+
+def _variants_dir() -> Path:
+    """Return the directory holding bundled variant YAMLs (III.3)."""
+    return Path(__file__).parent / "settings_variants"
+
+
+def _available_variants() -> list[str]:
+    """Discover bundled variants by scanning ``*.yaml`` in :func:`_variants_dir`."""
+    d = _variants_dir()
+    if not d.is_dir():
+        return []
+    return sorted(p.stem for p in d.glob("*.yaml"))
+
+
+def _variant_description(variant_path: Path) -> str:
+    """Extract the first non-blank comment block from a variant YAML.
+
+    Returns a single-line summary for the ``config variants`` listing.
+    Fails open — unreadable / missing header yields an empty string so
+    the command never crashes on a malformed variant.
+    """
+    try:
+        lines: list[str] = []
+        for raw in variant_path.read_text(encoding="utf-8").splitlines():
+            stripped = raw.strip()
+            if not stripped.startswith("#"):
+                if lines:
+                    break  # first non-comment line ends the header block
+                continue
+            body = stripped.lstrip("#").strip()
+            # Skip the banner line ("OpenComputer Settings — LAX variant") —
+            # it's redundant with the variant name we already print.
+            if not body or body.lower().startswith("opencomputer settings"):
+                continue
+            lines.append(body)
+            if len(lines) >= 2:
+                break
+        return " ".join(lines)
+    except OSError:
+        return ""
+
+
+@config_app.command("variants")
+def config_variants() -> None:
+    """List the bundled settings variants (III.3).
+
+    Each variant ships a starter ``config.yaml`` with a distinct security
+    posture (see ``sources/claude-code/examples/settings/README.md`` for the
+    inspiration). Use ``opencomputer config init --variant <name>`` to
+    copy one into the active profile.
+    """
+    names = _available_variants()
+    if not names:
+        console.print("[yellow]no bundled variants found[/yellow]")
+        return
+    console.print("[bold]Bundled settings variants:[/bold]")
+    for name in names:
+        desc = _variant_description(_variants_dir() / f"{name}.yaml") or "(no description)"
+        console.print(f"  [cyan]{name}[/cyan] — {desc}")
+    console.print(
+        "\n[dim]copy one into the active profile with "
+        "[bold]opencomputer config init --variant <name>[/bold][/dim]"
+    )
+
+
+@config_app.command("init")
+def config_init(
+    variant: str = typer.Option(..., "--variant", help="lax | strict | sandbox"),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing config.yaml"),
+) -> None:
+    """Initialize the active profile's config.yaml from a bundled variant.
+
+    III.3 — pairs with Claude Code's
+    ``sources/claude-code/examples/settings/README.md`` examples. The copied
+    file is re-parsed via :func:`load_config` as a smoke test; a variant that
+    fails to round-trip triggers a rollback so the user isn't left with a
+    broken ``config.yaml``.
+    """
+    names = _available_variants()
+    src = _variants_dir() / f"{variant}.yaml"
+    if variant not in names or not src.is_file():
+        available = ", ".join(names) if names else "(none)"
+        console.print(
+            f"[bold red]error:[/bold red] unknown variant {variant!r}. "
+            f"Available: {available}"
+        )
+        raise typer.Exit(1)
+
+    dst = config_file_path()
+    backup: Path | None = None
+    if dst.exists():
+        if not force:
+            console.print(
+                f"[bold red]error:[/bold red] config.yaml already exists at {dst}, "
+                "re-run with --force to overwrite"
+            )
+            raise typer.Exit(1)
+        backup = dst.with_suffix(dst.suffix + ".bak")
+        try:
+            backup.write_bytes(dst.read_bytes())
+        except OSError as e:
+            console.print(f"[bold red]error:[/bold red] could not back up {dst}: {e}")
+            raise typer.Exit(1) from None
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    content = src.read_text(encoding="utf-8")
+    dst.write_text(content, encoding="utf-8")
+
+    # Sanity-check: the freshly copied file must parse. If it doesn't,
+    # roll back (restore the backup or delete the new file) so the user is
+    # never stranded with a broken config.
+    try:
+        load_config(dst)
+    except Exception as e:  # noqa: BLE001 — we always want to roll back
+        if backup is not None:
+            try:
+                dst.write_bytes(backup.read_bytes())
+            except OSError:
+                pass
+        else:
+            try:
+                dst.unlink()
+            except OSError:
+                pass
+        console.print(
+            f"[bold red]error:[/bold red] variant {variant!r} failed to parse after copy: {e}"
+        )
+        raise typer.Exit(1) from None
+
+    if backup is not None:
+        # Keep the backup only when --force replaced an existing file, and
+        # only as a one-shot safety net; we clean it up on success to avoid
+        # accumulating .bak crumbs on repeated re-inits.
+        try:
+            backup.unlink()
+        except OSError:
+            pass
+
+    console.print(f"[green]✓[/green] initialized config.yaml from variant [cyan]{variant}[/cyan]")
+    console.print(f"[dim]  → {dst}[/dim]")
 
 
 # Phase 11d: episodic memory recall + Anthropic batch runner.
