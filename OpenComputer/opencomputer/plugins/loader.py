@@ -255,6 +255,153 @@ class LoadedPlugin:
     module: Any
 
 
+# ─── runtime contract validation (Task I.5) ───────────────────────────
+
+
+@dataclass(slots=True)
+class _RegistrationSnapshot:
+    """Point-in-time view of registered items on a ``PluginAPI``.
+
+    Used by ``_validate_runtime_contract`` to compute the delta produced
+    by a single plugin's ``register(api)`` call. The snapshot is cheap:
+    sets of tool/provider/channel/slash-command names, a count of hooks
+    and a boolean for the currently-exclusive memory provider slot.
+
+    Matches OpenClaw's loader-side contract check
+    (``sources/openclaw/src/plugins/loader.ts``) which snapshots before
+    and diffs after ``plugin.register()``.
+    """
+
+    tool_names: set[str]
+    provider_names: set[str]
+    channel_names: set[str]
+    slash_names: set[str]
+    hook_count: int
+    memory_provider_present: bool
+
+
+def _snapshot_registrations(api: PluginAPI) -> _RegistrationSnapshot:
+    """Capture the currently-registered items on ``api`` for before/after diff.
+
+    Duck-typed on purpose: tests routinely pass ``_Noop`` stubs for the
+    tool registry and hook engine when they only care about the loader's
+    lock/import paths. ``getattr`` with sensible defaults keeps the
+    contract check a best-effort diagnostic that never breaks those
+    stub-based tests.
+    """
+    names_iter = getattr(api.tools, "names", None)
+    tool_names = set(names_iter()) if callable(names_iter) else set()
+    hooks_dict = getattr(api.hooks, "_hooks", None)
+    hook_count = (
+        sum(len(specs) for specs in hooks_dict.values())
+        if isinstance(hooks_dict, dict)
+        else 0
+    )
+    return _RegistrationSnapshot(
+        tool_names=tool_names,
+        provider_names=set(api.providers.keys()),
+        channel_names=set(api.channels.keys()),
+        slash_names=set(api.slash_commands.keys()),
+        hook_count=hook_count,
+        memory_provider_present=(api.memory_provider is not None),
+    )
+
+
+def _validate_runtime_contract(
+    manifest: Any,
+    before: _RegistrationSnapshot,
+    after: _RegistrationSnapshot,
+) -> None:
+    """Compare post-``register()`` deltas against manifest claims.
+
+    Emits WARNINGs only — never raises, never blocks load. Matches
+    OpenClaw's ``manifest.contracts`` field + loader-side validation:
+    a plugin declaring ``kind=provider`` but registering zero providers
+    is almost certainly a drift bug (refactored away but manifest not
+    updated). Logging early means ``opencomputer doctor`` and CI smoke
+    tests surface the drift before it blows up at dispatch time.
+
+    The mapping is intentionally BROAD for ``kind=provider``: a memory
+    provider also satisfies the claim (this matches the bundled
+    ``memory-honcho`` plugin which declares ``kind=provider`` and
+    registers via ``register_memory_provider``). ``kind=skill`` skips
+    the check entirely — skill plugins contribute markdown files, not
+    runtime registrations.
+
+    Separately, if ``manifest.tool_names`` is a non-empty tuple, at
+    least one newly-registered tool schema name must match (full set
+    equality is enforced by a separate drift-guard test on bundled
+    extensions; the loader only needs partial-match here so a plugin
+    advertising multiple variants doesn't falsely warn on partial load).
+    """
+    kind = getattr(manifest, "kind", "mixed")
+    plugin_id = getattr(manifest, "id", "<unknown>")
+
+    # Compute the per-kind delta.
+    new_tools = after.tool_names - before.tool_names
+    new_providers = after.provider_names - before.provider_names
+    new_channels = after.channel_names - before.channel_names
+    new_slash = after.slash_names - before.slash_names
+    added_hooks = after.hook_count - before.hook_count
+    added_memory = (
+        after.memory_provider_present and not before.memory_provider_present
+    )
+
+    def _warn(reason: str) -> None:
+        # Wording deliberately matches the I.5 spec so downstream
+        # log-scrapers can recognise the event. Don't change without
+        # updating the I.5 tests.
+        logger.warning(
+            "Plugin %r declared kind=%r but registered no %s. "
+            "Manifest claim may be wrong.",
+            plugin_id,
+            kind,
+            reason,
+        )
+
+    # ── kind claim check ───────────────────────────────────────────
+    if kind == "provider":
+        # Broad: either an LLM provider or a memory provider counts.
+        if not new_providers and not added_memory:
+            _warn("provider")
+    elif kind == "channel":
+        if not new_channels:
+            _warn("channel")
+    elif kind == "tool":
+        if not new_tools:
+            _warn("tool")
+    elif kind == "memory":
+        # ``memory`` is not currently in the PluginKind literal, but
+        # keep the branch so a future schema expansion Just Works.
+        if not added_memory:
+            _warn("memory")
+    elif kind == "mixed" and (
+        not new_tools
+        and not new_providers
+        and not new_channels
+        and not new_slash
+        and added_hooks == 0
+        and not added_memory
+    ):
+        _warn("mixed")
+    # kind == "skill": skill plugins typically register no runtime
+    # items (they contribute markdown files via the skills directory).
+    # Skip the check entirely.
+
+    # ── tool_names claim check ─────────────────────────────────────
+    declared_tool_names = getattr(manifest, "tool_names", ()) or ()
+    if declared_tool_names and not any(
+        name in new_tools for name in declared_tool_names
+    ):
+        logger.warning(
+            "Plugin %r declared tool_names=%r but registered tools %r — "
+            "at least one declared name must match a registered tool.",
+            plugin_id,
+            list(declared_tool_names),
+            sorted(new_tools),
+        )
+
+
 class PluginAPI:
     """Passed to each plugin's register() — the narrow runtime surface."""
 
@@ -489,6 +636,11 @@ def load_plugin(
         prior_source = api._activation_source
         api._activation_source = activation_source
 
+    # Task I.5: snapshot registrations BEFORE calling into the plugin so
+    # we can diff after and catch manifest-vs-runtime drift. Snapshot is
+    # cheap (set copies + int count); cost is paid once per plugin load.
+    before_snapshot = _snapshot_registrations(api)
+
     try:
         register_fn(api)
     except Exception as e:  # noqa: BLE001
@@ -497,6 +649,21 @@ def load_plugin(
     finally:
         if prior_source is not None:
             api._activation_source = prior_source
+
+    # Task I.5: compare post-register state against manifest claims.
+    # Emits WARNINGs on mismatch — never blocks load. Intentionally
+    # non-fatal: the plugin's register() may have had side effects we
+    # don't want to abort on mid-way.
+    after_snapshot = _snapshot_registrations(api)
+    try:
+        _validate_runtime_contract(manifest, before_snapshot, after_snapshot)
+    except Exception:  # noqa: BLE001
+        # Contract validation is diagnostics — never break load for it.
+        logger.debug(
+            "runtime contract validation raised for plugin '%s'; swallowing",
+            manifest.id,
+            exc_info=True,
+        )
 
     logger.info("loaded plugin '%s' v%s", manifest.id, manifest.version)
     return LoadedPlugin(candidate=candidate, module=module)
