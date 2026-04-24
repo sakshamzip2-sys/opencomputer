@@ -17,8 +17,21 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from plugin_sdk.core import PluginManifest
+
+# I.8 — derivation provenance for a plugin's resolved id.
+#
+# Today the id only comes from the ``id`` field in ``plugin.json``
+# (``"manifest"``). OpenClaw supports two more fallbacks —
+# ``package.name`` from a package.json sibling and the directory
+# basename (sources/openclaw/src/plugins/discovery.ts:678-725,
+# ``resolvePackageExtensionEntries`` + ``deriveIdHint``). We keep those
+# two values in the Literal so the field is first-class the day
+# OpenComputer grows those paths; collision warnings already know how
+# to surface whichever source produced each side.
+IdSource = Literal["manifest", "package_name", "directory"]
 
 logger = logging.getLogger("opencomputer.plugins.discovery")
 
@@ -55,6 +68,11 @@ class PluginCandidate:
     manifest: PluginManifest
     root_dir: Path
     manifest_path: Path
+    # I.8 — which derivation path supplied this candidate's id. Today
+    # always ``"manifest"`` (id came from plugin.json); ``"package_name"``
+    # and ``"directory"`` are reserved for future fallbacks so collision
+    # logs can say exactly what each side resolved from.
+    id_source: IdSource = "manifest"
 
 
 def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
@@ -136,7 +154,9 @@ def discover(
             _discovery_cache.pop(key, None)
 
     candidates: list[PluginCandidate] = []
-    seen_ids: set[str] = set()
+    # Map id → already-accepted candidate so the collision warning can
+    # name both sides' derivation paths and filesystem locations (I.8).
+    seen: dict[str, PluginCandidate] = {}
 
     for root in search_paths:
         if not root.exists() or not root.is_dir():
@@ -150,21 +170,31 @@ def discover(
             manifest = _parse_manifest(manifest_path)
             if manifest is None:
                 continue
-            if manifest.id in seen_ids:
+            # Today every candidate's id comes from plugin.json's ``id``
+            # field. The ``id_source`` field is future-proofed for
+            # package_name / directory fallbacks; once those land, this
+            # literal is where the derivation path gets decided.
+            new_candidate = PluginCandidate(
+                manifest=manifest,
+                root_dir=entry,
+                manifest_path=manifest_path,
+                id_source="manifest",
+            )
+            existing = seen.get(manifest.id)
+            if existing is not None:
                 logger.warning(
-                    "plugin id collision: '%s' — skipping second occurrence at %s",
+                    "plugin id collision: '%s' (%s at %s, %s at %s) — "
+                    "skipping second occurrence at %s",
                     manifest.id,
+                    existing.id_source,
+                    existing.root_dir,
+                    new_candidate.id_source,
+                    new_candidate.root_dir,
                     entry,
                 )
                 continue
-            seen_ids.add(manifest.id)
-            candidates.append(
-                PluginCandidate(
-                    manifest=manifest,
-                    root_dir=entry,
-                    manifest_path=manifest_path,
-                )
-            )
+            seen[manifest.id] = new_candidate
+            candidates.append(new_candidate)
 
     # Store an independent list so later cache hits can hand out a fresh
     # copy without the canonical entry being affected by caller mutations.
@@ -225,4 +255,4 @@ def standard_search_paths() -> list[Path]:
     return search_paths
 
 
-__all__ = ["discover", "PluginCandidate", "standard_search_paths"]
+__all__ = ["discover", "IdSource", "PluginCandidate", "standard_search_paths"]
