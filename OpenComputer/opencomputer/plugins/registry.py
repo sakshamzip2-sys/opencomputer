@@ -15,7 +15,12 @@ from typing import Any, Literal
 from opencomputer.agent.injection import engine as injection_engine
 from opencomputer.hooks.engine import engine as hook_engine
 from opencomputer.plugins.discovery import PluginCandidate, discover
-from opencomputer.plugins.loader import LoadedPlugin, PluginAPI, load_plugin
+from opencomputer.plugins.loader import (
+    LoadedPlugin,
+    PluginAPI,
+    load_plugin,
+    teardown_loaded_plugin,
+)
 from opencomputer.tools.registry import registry as tool_registry
 from plugin_sdk.core import SingleInstanceError
 from plugin_sdk.doctor import HealthContribution
@@ -133,6 +138,52 @@ class PluginRegistry:
     def list_candidates(self, search_paths: list[Path]) -> list[PluginCandidate]:
         """Cheap discovery only — doesn't activate anything."""
         return discover(search_paths)
+
+    def teardown_plugin(self, plugin_id: str) -> bool:
+        """Tear down a single loaded plugin (Task I.4).
+
+        Looks up the ``LoadedPlugin`` by id, then:
+
+        1. Calls its optional ``cleanup()`` / ``teardown()`` entry-point
+           function (plugins MAY define one for resource cleanup).
+        2. Removes the plugin's registrations from the shared API
+           (tools, providers, channels, slash commands, injection
+           providers, hooks, doctor contributions, memory provider).
+           Uses the delta captured at load time so only the entries
+           this plugin added are removed — sibling plugins' entries
+           are preserved.
+        3. Drops the plugin's synthetic module + common sibling names
+           from ``sys.modules`` so a later reload sees fresh state.
+        4. Removes the ``LoadedPlugin`` from ``self.loaded``.
+
+        Returns ``True`` if the plugin was found and torn down,
+        ``False`` if no plugin with that id was loaded (no-op).
+
+        Teardown is OPT-IN — it's never called automatically during
+        normal plugin lifecycle. Callers use it for live-reload
+        scenarios and test isolation.
+
+        Mirrors OpenClaw's ``clearPluginLoaderCache`` pattern
+        (``sources/openclaw/src/plugins/loader.ts:222-230``).
+        """
+        target: LoadedPlugin | None = None
+        for lp in self.loaded:
+            if lp.candidate.manifest.id == plugin_id:
+                target = lp
+                break
+        if target is None:
+            return False
+
+        # teardown_loaded_plugin is never-raise; failures are logged.
+        teardown_loaded_plugin(target)
+
+        # Drop from loaded list AFTER teardown so a parallel iterator
+        # that holds a reference still sees it finish cleanly. Use
+        # identity-match so a manifest-id collision doesn't drop an
+        # unrelated entry.
+        self.loaded = [lp for lp in self.loaded if lp is not target]
+        logger.info("torn down plugin '%s'", plugin_id)
+        return True
 
 
 registry = PluginRegistry()
