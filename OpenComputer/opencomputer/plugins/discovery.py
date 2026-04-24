@@ -13,12 +13,28 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from plugin_sdk.core import PluginManifest
 
 logger = logging.getLogger("opencomputer.plugins.discovery")
+
+# I.2 — TTL cache for plugin discovery. Bursty CLI flows (e.g. multiple
+# `opencomputer plugins` calls, doctor + CLI in sequence, tests) would
+# otherwise pay filesystem I/O on every call. The window is deliberately
+# short (1 s): long enough to collapse same-tick rescans, short enough
+# that a freshly-installed plugin shows up within normal human latency.
+#
+# Keyed on ``tuple(search_paths) + (uid,)`` so concurrent processes /
+# profiles / test setups with different roots don't alias. In-memory only
+# — the cache never persists across process restarts, which matches
+# OpenClaw's ``discoveryCache`` (sources/openclaw/src/plugins/
+# discovery.ts:61-91, ``getCachedDiscoveryResult``).
+_discovery_cache: dict[tuple, tuple[float, list[PluginCandidate]]] = {}
+_DISCOVERY_TTL_SEC = 1.0
 
 _IGNORE_DIRS = {
     ".git",
@@ -77,13 +93,48 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
     )
 
 
-def discover(search_paths: list[Path]) -> list[PluginCandidate]:
+def _cache_key(search_paths: list[Path]) -> tuple:
+    """Cache key for ``discover`` — paths + effective uid.
+
+    The uid guards against aliasing when multiple users share a host
+    (``~/.opencomputer/plugins`` resolves differently per user but the
+    raw path tuple could still match on e.g. `/tmp` fixtures). On
+    platforms without ``os.geteuid`` (Windows) the uid component
+    collapses to ``0``.
+    """
+    uid = os.geteuid() if hasattr(os, "geteuid") else 0
+    return tuple(search_paths) + (uid,)
+
+
+def discover(
+    search_paths: list[Path],
+    force_rescan: bool = False,
+) -> list[PluginCandidate]:
     """
     Scan each path for `plugin.json` files. Return a list of PluginCandidates.
 
     Only direct children of each search path are considered (we don't recurse
     deeply — plugins live at `<root>/<plugin-id>/plugin.json`).
+
+    Results are cached for ``_DISCOVERY_TTL_SEC`` keyed on the search paths
+    and effective uid. Pass ``force_rescan=True`` to bypass the cache (the
+    refreshed result still populates the cache for subsequent calls).
     """
+    key = _cache_key(search_paths)
+    now = time.monotonic()
+
+    if not force_rescan:
+        hit = _discovery_cache.get(key)
+        if hit is not None:
+            stored_at, cached = hit
+            if now - stored_at < _DISCOVERY_TTL_SEC:
+                # Return a shallow copy so callers mutating the list don't
+                # corrupt the cache's internal state. PluginCandidate is
+                # frozen so the elements themselves are safe to share.
+                return list(cached)
+            # Expired — drop it so the cache doesn't accumulate stale keys.
+            _discovery_cache.pop(key, None)
+
     candidates: list[PluginCandidate] = []
     seen_ids: set[str] = set()
 
@@ -115,6 +166,9 @@ def discover(search_paths: list[Path]) -> list[PluginCandidate]:
                 )
             )
 
+    # Store an independent list so later cache hits can hand out a fresh
+    # copy without the canonical entry being affected by caller mutations.
+    _discovery_cache[key] = (now, list(candidates))
     return candidates
 
 
