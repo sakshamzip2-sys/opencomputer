@@ -54,6 +54,7 @@ METHOD_CHAT = "chat"  # send a user message, get assistant response
 METHOD_SESSION_LIST = "sessions.list"
 METHOD_SEARCH = "search"
 METHOD_SKILLS_LIST = "skills.list"
+METHOD_STEER_SUBMIT = "steer.submit"  # P-2 round 2a: mid-run /steer nudge
 
 
 # ─── Event names (gateway → client) ─────────────────────────────
@@ -75,6 +76,7 @@ __all__ = [
     "METHOD_SESSION_LIST",
     "METHOD_SEARCH",
     "METHOD_SKILLS_LIST",
+    "METHOD_STEER_SUBMIT",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",

@@ -539,6 +539,49 @@ class AgentLoop:
                 )
                 model_for_turn = cheap
 
+            # P-2 (round 2a): mid-run /steer nudge. Between turns means
+            # after the previous iteration's tool dispatch but before the
+            # next LLM request — i.e. _iter > 0 (the first iteration's
+            # context is the user's original message, no nudge needed).
+            # Latest-wins is enforced inside SteerRegistry.submit; here
+            # we just consume + append a synthetic user message so the
+            # next ``_run_one_step`` call sees it. The format string is
+            # centralised in ``opencomputer.agent.steer.format_nudge_message``
+            # so CLI / wire / Telegram acknowledgements stay in sync.
+            if _iter > 0:
+                try:
+                    from opencomputer.agent.steer import (
+                        default_registry as _steer_registry,
+                    )
+                    from opencomputer.agent.steer import (
+                        format_nudge_message as _format_nudge,
+                    )
+
+                    nudge = _steer_registry.consume(sid)
+                    if nudge:
+                        nudge_msg = Message(
+                            role="user",
+                            content=_format_nudge(nudge),
+                        )
+                        messages.append(nudge_msg)
+                        # Persist so a resumed session sees the same
+                        # context (the nudge was already promised to
+                        # the user; replaying without it would silently
+                        # change the next turn's semantics).
+                        self.db.append_message(sid, nudge_msg)
+                        _log.debug(
+                            "steer: applied pending nudge for session %s "
+                            "(len=%d)",
+                            sid,
+                            len(nudge),
+                        )
+                except Exception:  # noqa: BLE001 — never break the loop
+                    _log.warning(
+                        "steer: consume failed for session %s — continuing",
+                        sid,
+                        exc_info=True,
+                    )
+
             # Compaction check — uses REAL measured tokens from prior turn.
             # First iteration (no prior measurement) skips the check.
             if self._last_input_tokens > 0:

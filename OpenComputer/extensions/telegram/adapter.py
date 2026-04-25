@@ -33,6 +33,12 @@ from plugin_sdk.core import MessageEvent, Platform, SendResult
 logger = logging.getLogger("opencomputer.ext.telegram")
 
 
+#: P-2 round 2a — leading prefix that routes a Telegram message into the
+#: SteerRegistry instead of the agent loop. The space after ``/steer`` is
+#: required so a future ``/steerable`` command (or similar) doesn't collide.
+_STEER_PREFIX = "/steer "
+
+
 # Telegram MarkdownV2 requires escaping these characters
 _MDV2_SPECIAL = r"_*[]()~`>#+-=|{}.!"
 _MDV2_RE = re.compile(f"([{re.escape(_MDV2_SPECIAL)}])")
@@ -209,6 +215,18 @@ class TelegramAdapter(BaseChannelAdapter):
         if not text and not attachments:
             return
 
+        # P-2 round 2a — ``/steer <text>`` is intercepted BEFORE the message
+        # reaches the gateway. We route the body into SteerRegistry keyed by
+        # the same session_id the dispatcher would have used for this chat,
+        # then send a short ack back to the user. The agent loop picks up
+        # the nudge between turns on its next iteration boundary.
+        if text and text.startswith(_STEER_PREFIX):
+            await self._handle_steer_command(
+                chat_id=str(msg["chat"]["id"]),
+                text=text,
+            )
+            return
+
         metadata: dict[str, Any] = {"message_id": msg.get("message_id")}
         if attachment_meta:
             metadata["attachment_meta"] = attachment_meta
@@ -223,6 +241,42 @@ class TelegramAdapter(BaseChannelAdapter):
             metadata=metadata,
         )
         await self.handle_message(event)
+
+    async def _handle_steer_command(self, *, chat_id: str, text: str) -> None:
+        """Route a ``/steer <text>`` Telegram message into SteerRegistry.
+
+        Called from :meth:`_handle_update` when an inbound message starts
+        with ``/steer ``. Latest-wins is enforced inside
+        :meth:`SteerRegistry.submit`; here we just normalize, derive the
+        session id the dispatcher would key on for this chat, and ack
+        the user. Empty bodies (``/steer`` with nothing after it) get a
+        usage hint instead of being silently dropped.
+        """
+        # Lazy imports keep the SteerRegistry / dispatch coupling out
+        # of plugin discovery — the adapter must still import cleanly
+        # in environments where the gateway hasn't been initialised.
+        from opencomputer.agent.steer import default_registry as _steer_registry
+        from opencomputer.gateway.dispatch import session_id_for
+
+        body = text[len(_STEER_PREFIX) :].strip()
+        if not body:
+            await self.send(
+                chat_id,
+                "usage: /steer <prompt>\n"
+                "(injects a mid-run nudge into the next agent turn).",
+            )
+            return
+
+        session_id = session_id_for(Platform.TELEGRAM.value, chat_id)
+        had_pending = _steer_registry.has_pending(session_id)
+        _steer_registry.submit(session_id, body)
+        ack = (
+            f"steer queued for this chat ({len(body)} chars). "
+            "It will be applied at the next turn boundary."
+        )
+        if had_pending:
+            ack = "steer override: previous nudge discarded.\n" + ack
+        await self.send(chat_id, ack)
 
     async def send(self, chat_id: str, text: str, **kwargs: Any) -> SendResult:
         assert self._client is not None

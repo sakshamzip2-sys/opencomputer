@@ -26,6 +26,7 @@ from typing import Any
 import websockets
 
 from opencomputer.agent.loop import AgentLoop
+from opencomputer.agent.steer import default_registry as _steer_registry
 from opencomputer.gateway.protocol import (
     EVENT_ASSISTANT_MESSAGE,
     EVENT_ERROR,
@@ -36,6 +37,7 @@ from opencomputer.gateway.protocol import (
     METHOD_SEARCH,
     METHOD_SESSION_LIST,
     METHOD_SKILLS_LIST,
+    METHOD_STEER_SUBMIT,
     WireEvent,
     WireRequest,
     WireResponse,
@@ -130,6 +132,7 @@ class WireServer:
                         METHOD_SESSION_LIST,
                         METHOD_SEARCH,
                         METHOD_SKILLS_LIST,
+                        METHOD_STEER_SUBMIT,
                     ],
                     "events": [
                         EVENT_TURN_BEGIN,
@@ -164,6 +167,36 @@ class WireServer:
                 ]
             }
             await self._send_response(ws, req.id, True, payload=payload)
+        elif req.method == METHOD_STEER_SUBMIT:
+            # P-2 round 2a: route a /steer nudge into SteerRegistry. The
+            # actual injection happens between turns inside AgentLoop;
+            # here we just record + ack. ``had_pending`` tells the caller
+            # whether their submission overrode an earlier pending nudge
+            # so the UI can surface a "previous nudge discarded" hint.
+            session_id = str(req.params.get("session_id", "")).strip()
+            prompt = str(req.params.get("prompt", "")).strip()
+            if not session_id:
+                await self._send_response(
+                    ws, req.id, False, error="steer.submit: session_id is required"
+                )
+                return
+            if not prompt:
+                await self._send_response(
+                    ws, req.id, False, error="steer.submit: prompt must be non-empty"
+                )
+                return
+            had_pending = _steer_registry.has_pending(session_id)
+            _steer_registry.submit(session_id, prompt)
+            await self._send_response(
+                ws,
+                req.id,
+                True,
+                payload={
+                    "session_id": session_id,
+                    "had_pending": had_pending,
+                    "queued_chars": len(prompt),
+                },
+            )
         else:
             await self._send_response(
                 ws, req.id, False, error=f"unknown method: {req.method}"

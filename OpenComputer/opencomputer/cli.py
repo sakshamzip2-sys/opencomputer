@@ -1106,6 +1106,131 @@ def recall(
         )
 
 
+@app.command()
+def steer(
+    prompt: str = typer.Argument(..., help="The mid-run nudge text to inject."),
+    session_id: str = typer.Option(
+        "", "--session-id", "-s",
+        help="Target session id. Required when reaching a remote wire server "
+        "or when the local registry holds multiple sessions.",
+    ),
+    wire_url: str = typer.Option(
+        "", "--wire-url",
+        help="Optional ws://host:port — if set, submit via wire RPC instead "
+        "of writing to the in-process registry.",
+    ),
+) -> None:
+    """Submit a mid-run /steer nudge for an active session.
+
+    Round 2a P-2. Latest-wins: if a nudge is already pending for the
+    target session, it is replaced (the wire server response surfaces
+    a ``had_pending`` flag so you know your nudge overrode a previous
+    one). The agent loop consumes the nudge between turns — after the
+    current tool dispatch finishes, before the next LLM call.
+
+    Two modes:
+
+    * ``--wire-url ws://127.0.0.1:18789`` — submit via JSON-RPC to a
+      running wire server (the standard case when the agent is hosted
+      on a separate process).
+    * No ``--wire-url`` — write directly into the in-process
+      :data:`opencomputer.agent.steer.default_registry`. Useful for
+      tests, scripts, or `opencomputer chat` running in a sibling
+      thread.
+    """
+    if not prompt.strip():
+        console.print("[bold red]error:[/bold red] prompt must be non-empty")
+        raise typer.Exit(1)
+
+    if wire_url:
+        if not session_id:
+            console.print(
+                "[bold red]error:[/bold red] --session-id is required when "
+                "--wire-url is set"
+            )
+            raise typer.Exit(1)
+        # Fire a single steer.submit call against the wire server and
+        # exit. We deliberately don't keep the connection open — the
+        # nudge is one-shot.
+        import json as _json
+        import uuid as _uuid
+
+        import websockets
+
+        from opencomputer.gateway.protocol import METHOD_STEER_SUBMIT
+
+        async def _submit() -> dict:
+            async with websockets.connect(wire_url) as ws:
+                await ws.send(
+                    _json.dumps(
+                        {
+                            "type": "req",
+                            "id": str(_uuid.uuid4()),
+                            "method": METHOD_STEER_SUBMIT,
+                            "params": {
+                                "session_id": session_id,
+                                "prompt": prompt,
+                            },
+                        }
+                    )
+                )
+                raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                return _json.loads(raw)
+
+        try:
+            data = asyncio.run(_submit())
+        except Exception as e:  # noqa: BLE001
+            console.print(
+                f"[bold red]error:[/bold red] wire submit failed: "
+                f"{type(e).__name__}: {e}"
+            )
+            raise typer.Exit(1) from None
+
+        if not data.get("ok"):
+            console.print(
+                f"[bold red]error:[/bold red] {data.get('error', 'unknown')}"
+            )
+            raise typer.Exit(1)
+
+        payload = data.get("payload") or {}
+        if payload.get("had_pending"):
+            console.print(
+                "[yellow]steer override:[/yellow] previous nudge discarded "
+                f"for session {session_id}"
+            )
+        console.print(
+            f"[green]steer queued[/green] for session "
+            f"[cyan]{session_id}[/cyan] ({payload.get('queued_chars', 0)} chars)"
+        )
+        return
+
+    # Standalone / in-process registry path. Useful in tests and when
+    # the user runs `opencomputer chat` and `opencomputer steer` in
+    # sibling threads inside the same process. The session_id is
+    # optional but strongly recommended — without it, this is a no-op
+    # (the registry is keyed by session_id).
+    from opencomputer.agent.steer import default_registry as _steer_registry
+
+    if not session_id:
+        console.print(
+            "[bold red]error:[/bold red] --session-id is required for the "
+            "in-process path (otherwise the registry has no key to write to)"
+        )
+        raise typer.Exit(1)
+
+    had_pending = _steer_registry.has_pending(session_id)
+    _steer_registry.submit(session_id, prompt)
+    if had_pending:
+        console.print(
+            "[yellow]steer override:[/yellow] previous nudge discarded "
+            f"for session {session_id}"
+        )
+    console.print(
+        f"[green]steer queued[/green] for session "
+        f"[cyan]{session_id}[/cyan] ({len(prompt)} chars)"
+    )
+
+
 @app.command(name="acp")
 def acp_serve() -> None:
     """Start the Agent Client Protocol server over stdio.
