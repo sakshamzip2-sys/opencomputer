@@ -30,6 +30,7 @@ from opencomputer.hooks.shell_handlers import make_shell_hook_handler
 from opencomputer.plugins.registry import registry as plugin_registry
 from opencomputer.tools.ask_user_question import AskUserQuestionTool
 from opencomputer.tools.bash import BashTool
+from opencomputer.tools.cron_tool import CronTool
 from opencomputer.tools.delegate import DelegateTool
 from opencomputer.tools.glob import GlobTool
 from opencomputer.tools.grep import GrepTool
@@ -187,6 +188,10 @@ def _register_builtin_tools() -> None:
     # Phase 12a — episodic recall + long-term note. Companion to the
     # declarative MemoryTool wired in AgentLoop (10f.D).
     registry.register(RecallTool())
+    # G.1 — Cron jobs (Tier 1.1 of Sub-project G — see plan
+    # ~/.claude/plans/toasty-wiggling-eclipse.md). Capability-claimed
+    # through F1 ConsentGate so the agent can self-schedule with consent.
+    registry.register(CronTool())
 
 
 def _resolve_plugin_filter():
@@ -762,8 +767,10 @@ app.add_typer(channels_app, name="channels")
 
 # Sub-project F1 — consent grant/revoke/history/verify-chain
 from opencomputer.cli_consent import consent_app  # noqa: E402
+from opencomputer.cli_cron import cron_app  # noqa: E402
 
 app.add_typer(consent_app, name="consent")
+app.add_typer(cron_app, name="cron")
 
 # Sub-project F1 2.B.4 — audit-log viewer (`audit show` / `audit verify`)
 from opencomputer.cli_audit import audit_app  # noqa: E402

@@ -4,6 +4,65 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.2 — Telegram file/voice/reaction/edit/delete capabilities, Tier 1.2 + 2.0)
+
+- **`plugin_sdk/channel_contract.py`** — added `ChannelCapabilities` flag enum (TYPING, REACTIONS,
+  PHOTO_IN/OUT, DOCUMENT_IN/OUT, VOICE_IN/OUT, EDIT_MESSAGE, DELETE_MESSAGE, THREADS). `BaseChannelAdapter`
+  gains 7 new optional methods — `send_photo`, `send_document`, `send_voice`, `send_reaction`,
+  `edit_message`, `delete_message`, `download_attachment` — each raising `NotImplementedError` by
+  default so adapters only override what their `capabilities` flag advertises. Self-audit R1 from
+  the integration plan: prevents ~50 method duplications when 10+ adapters land.
+- **`plugin_sdk/__init__.py`** — re-exports `ChannelCapabilities` (now a public type).
+- **`extensions/telegram/adapter.py`** — Telegram now advertises 10 capability flags and implements
+  all 7 optional methods + inbound photo/document/voice attachment parsing into
+  `MessageEvent.attachments`. Uses raw Bot API multipart upload (no python-telegram-bot dep).
+  Bot-API limits enforced locally before request: 10 MB photo, 50 MB document, 20 MB getFile
+  download. `download_attachment` accepts both raw `file_id` and `"telegram:<id>"` reference form.
+- **`docs/sdk-reference.md`** — new section documenting `ChannelCapabilities` + sample adapter.
+- **29 new tests** in `tests/test_channel_capabilities.py` (14 — flag enum + base defaults) and
+  `tests/test_telegram_attachments.py` (15 — capability flag check, send_photo/document/voice
+  request shape, oversized-file local rejection, missing-file error, reaction/edit/delete
+  endpoints, download_attachment round-trip with httpx MockTransport, inbound photo/document/voice
+  parsing into MessageEvent.attachments, metadata-only update skipped). Full suite: **2307 passing**.
+
+Use case unlocked: Saksham forwards a stock chart screenshot to OC via Telegram → adapter
+parses photo file_id into `MessageEvent.attachments` → agent calls `download_attachment(file_id)` →
+analyzes via vision-capable provider → replies with annotated chart via `send_photo()`.
+
+### Added (Sub-project G.1 — Hermes cron jobs port, Tier 1.1 of `~/.claude/plans/toasty-wiggling-eclipse.md`)
+
+- **`opencomputer/cron/`** — new subpackage porting Hermes's cron infrastructure. Adapted from
+  `sources/hermes-agent-2026.4.23/cron/{jobs,scheduler}.py` and `tools/cronjob_tools.py`. Profile-isolated;
+  integrates with F1 ConsentGate via capability claims.
+  - `cron/jobs.py` — JSON-backed CRUD: `create_job`, `list_jobs`, `update_job`, `pause_job`,
+    `resume_job`, `trigger_job`, `remove_job`, `mark_job_run`, `advance_next_run`, `get_due_jobs`.
+    Schedule kinds: `once` (`30m`/`2h`/`1d`/timestamp), `interval` (`every 30m`),
+    `cron` expression (`0 9 * * *`). Stale-run detection fast-forwards recurring jobs past their
+    grace window instead of replaying a backlog after downtime.
+  - `cron/scheduler.py` — asyncio-native `tick()` (single-shot) and `run_scheduler_loop()`
+    (60s default tick interval). Cross-process file lock at `<cron_dir>/.tick.lock` so the gateway's
+    in-process ticker, a standalone `opencomputer cron daemon`, and manual `cron tick` never
+    overlap. Recurring jobs have `next_run_at` advanced under the lock BEFORE execution
+    (at-most-once on crash). Bounded parallel execution via asyncio Semaphore (default 3).
+    `[SILENT]` marker in agent response suppresses delivery (output still saved).
+  - `cron/threats.py` — prompt-injection scanner ported verbatim from Hermes: 10 critical regex
+    patterns (prompt injection, deception, exfil, secrets read, SSH backdoor, sudoers mod, root rm)
+    + 10 invisible-character classes (zero-width, BOM, bidi overrides). `scan_cron_prompt()` returns
+    string, `assert_cron_prompt_safe()` raises `CronThreatBlocked`. Defence-in-depth: scan at create + at every tick.
+- **`opencomputer/tools/cron_tool.py::CronTool`** — single agent-callable tool with `action`
+  parameter (create/list/get/pause/resume/trigger/remove). Declares 4 F1 capability claims:
+  `cron.create` / `cron.modify` / `cron.delete` (EXPLICIT tier), `cron.list` (IMPLICIT).
+  Mirrors Hermes's compressed-action design to avoid schema bloat.
+- **`opencomputer/cli_cron.py`** — new `opencomputer cron {list,create,get,pause,resume,run,remove,tick,daemon,status}`
+  subcommand group. `--skill` is the preferred entry path; `--prompt` triggers the threat scan.
+  `--yolo` disables `plan_mode` (use with caution). `cron daemon` is a standalone scheduler that
+  runs even when the gateway isn't up.
+- **`croniter>=2.0`** added to `pyproject.toml::dependencies`.
+- **93 new tests** across `tests/test_cron_{threats,jobs,scheduler,tool}.py` — schedule parsing,
+  threat patterns (12 pattern types + 6 invisible chars), CRUD, profile isolation, secure
+  permissions (0700 dirs / 0600 files), file-lock semantics, tick integration with mocked
+  AgentLoop, runtime threat re-scan, `[SILENT]` marker handling, capability-claim shapes.
+
 ### Refactored (Phase A4 — F7 OI interweaving, PR-3 of 2026-04-25 Hermes parity plan)
 
 - **`extensions/coding-harness/oi_bridge/`** — 23 OI tools (5 tiers) moved from the standalone
