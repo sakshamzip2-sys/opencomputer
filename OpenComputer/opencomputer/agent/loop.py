@@ -506,6 +506,20 @@ class AgentLoop:
         for _iter in range(self.config.loop.max_iterations):
             iterations += 1
 
+            # T3.2 (PR-8): publish TurnStartEvent at the top of each iteration.
+            # Best-effort + exception-isolated so a broken bus never stalls the loop.
+            try:
+                from opencomputer.ingestion.bus import default_bus as _bus
+                from plugin_sdk.ingestion import TurnStartEvent
+
+                _bus.publish(TurnStartEvent(
+                    session_id=sid,
+                    source="agent_loop",
+                    turn_index=iterations,
+                ))
+            except Exception:  # noqa: BLE001
+                pass
+
             # D6 cheap-route gating: on iteration 0 only, if cheap_model is
             # configured AND the heuristic fires, pass the cheap model to
             # the provider for this turn. Subsequent iterations revert to
@@ -1012,12 +1026,13 @@ class AgentLoop:
                     session_id=session_id,
                 )
                 raise
-            except Exception:
+            except Exception as _exc:
                 self._emit_tool_call_event(
                     call=c,
                     outcome="failure",
                     duration_seconds=_time.monotonic() - start,
                     session_id=session_id,
+                    exception=_exc,
                 )
                 raise
             else:
@@ -1029,6 +1044,7 @@ class AgentLoop:
                     outcome=outcome,
                     duration_seconds=_time.monotonic() - start,
                     session_id=session_id,
+                    result=result if outcome == "failure" else None,
                 )
                 return result
 
@@ -1054,6 +1070,8 @@ class AgentLoop:
         outcome: str,
         duration_seconds: float,
         session_id: str,
+        exception: BaseException | None = None,
+        result: Any | None = None,
     ) -> None:
         """Publish a :class:`ToolCallEvent` after a tool call settles.
 
@@ -1061,6 +1079,10 @@ class AgentLoop:
         AFTER the existing ``PostToolUse``-eligible path runs. This is
         the thin publisher wiring that Session B's B3 trajectory
         subscriber depends on.
+
+        T3.1 (PR-8): when outcome=="failure", captures error_class and
+        error_message_preview (truncated to 200 chars per privacy rule)
+        into event.metadata so the reflection LLM can learn from failures.
 
         Exception-isolated: a broken bus MUST NOT break the agent loop.
         Import is lazy (inside the function) so a hypothetical import
@@ -1071,6 +1093,18 @@ class AgentLoop:
             from opencomputer.ingestion.bus import default_bus
             from plugin_sdk.ingestion import ToolCallEvent
 
+            # T3.1: build error metadata when the outcome is a failure.
+            # Privacy rule: truncate to 200 chars (same limit as TrajectoryEvent).
+            metadata: dict[str, Any] = {}
+            if outcome == "failure":
+                if exception is not None:
+                    metadata["error_class"] = type(exception).__name__
+                    metadata["error_message_preview"] = str(exception)[:200]
+                elif result is not None and getattr(result, "is_error", False):
+                    content_str = str(getattr(result, "content", ""))[:200]
+                    if content_str:
+                        metadata["error_message_preview"] = content_str
+
             event = ToolCallEvent(
                 session_id=session_id or None,
                 source="agent_loop",
@@ -1078,6 +1112,7 @@ class AgentLoop:
                 arguments=dict(call.arguments or {}),
                 outcome=outcome,  # type: ignore[arg-type]
                 duration_seconds=max(0.0, duration_seconds),
+                metadata=metadata,
             )
             default_bus.publish(event)
         except Exception:  # noqa: BLE001 — bus must never break the loop

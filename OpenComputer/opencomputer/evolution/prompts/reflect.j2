@@ -32,7 +32,7 @@ action_type "noop".
 
 {% if r.events %}
 Tool sequence:
-{% for ev in r.events %}- [{{ ev.action_type }}]{% if ev.tool_name %} {{ ev.tool_name }}{% endif %} → {{ ev.outcome }}{{ " " + ev.metadata|tojson if ev.metadata else "" }}
+{% for ev in r.events %}- [{{ ev.action_type }}]{% if ev.tool_name %} {{ ev.tool_name }}{% endif %} → {{ ev.outcome }}{% if ev.metadata.get("error_class") %}  ⚠️ {{ ev.metadata["error_class"] }}: {{ ev.metadata.get("error_message_preview") or "" }}{% endif %}{{ " " + ev.metadata|tojson if ev.metadata else "" }}
 {% endfor %}
 {% else %}
 (no events recorded)

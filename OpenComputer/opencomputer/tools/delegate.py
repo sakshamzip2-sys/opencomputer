@@ -297,6 +297,24 @@ class DelegateTool(BaseTool):
         except Exception:
             # Hook emission must never break the main delegate flow.
             pass
+
+        # T3.2 (PR-8): publish DelegationCompleteEvent so MemoryBridge
+        # subscribers (and any other bus listener) can react. Best-effort.
+        try:
+            from opencomputer.ingestion.bus import default_bus as _bus
+            from plugin_sdk.ingestion import DelegationCompleteEvent
+
+            _child_outcome = "failure" if result.final_message.content is None else "success"
+            _bus.publish(DelegationCompleteEvent(
+                session_id=call.id,  # parent tool-call id as session context
+                source="agent_loop",
+                parent_session_id="",  # parent session_id unavailable here; set to empty
+                child_session_id=result.session_id,
+                child_outcome=_child_outcome,
+            ))
+        except Exception:
+            pass
+
         return ToolResult(
             tool_call_id=call.id,
             content=result.final_message.content,

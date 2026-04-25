@@ -196,6 +196,57 @@ class HookSignalEvent(SignalEvent):
     reason: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class TurnStartEvent(SignalEvent):
+    """Fires at the top of each agent turn iteration.
+
+    Allows MemoryProvider hooks (via MemoryBridge.register_with_bus)
+    to trigger fresh prefetch, telemetry, or side-channel logic at
+    the start of each turn without requiring plugin_sdk extensions.
+
+    PR-8 of Hermes parity plan.
+    """
+
+    event_type: str = field(default="turn_start", init=False)
+    turn_index: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationCompleteEvent(SignalEvent):
+    """Fires after DelegateTool subagent finishes.
+
+    Allows memory providers and bus subscribers to observe the end of
+    each subagent delegation — e.g. to flush per-session state or
+    trigger cross-session summarisation. The ``child_outcome`` field
+    is one of ``"success"``, ``"failure"``, or ``"error"``.
+
+    PR-8 of Hermes parity plan.
+    """
+
+    event_type: str = field(default="delegation_complete", init=False)
+    parent_session_id: str = ""
+    child_session_id: str = ""
+    child_outcome: str = "success"  # "success" | "failure" | "error"
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryWriteEvent(SignalEvent):
+    """Fires when a declarative-memory write happens.
+
+    Privacy posture: carries ``content_size`` only — NOT the content
+    being written — so subscribers cannot reconstruct the memory body
+    from bus traffic alone. Useful for audit patterns, quota
+    enforcement, and provider cache-invalidation.
+
+    PR-8 of Hermes parity plan.
+    """
+
+    event_type: str = field(default="memory_write", init=False)
+    action: str = ""    # "append" | "replace" | "remove" | etc.
+    target: str = ""    # which file (e.g. "MEMORY.md" / "USER.md")
+    content_size: int = 0
+
+
 # ---------------------------------------------------------------------------
 # Normalizers
 # ---------------------------------------------------------------------------
@@ -279,6 +330,10 @@ __all__ = [
     "FileObservationEvent",
     "MessageSignalEvent",
     "HookSignalEvent",
+    # PR-8: bus-driven memory hooks (T3.2)
+    "TurnStartEvent",
+    "DelegationCompleteEvent",
+    "MemoryWriteEvent",
     # normalizer
     "SignalNormalizer",
     "IdentityNormalizer",

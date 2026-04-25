@@ -153,5 +153,55 @@ class MemoryProvider(ABC):
         """
         return None
 
+    # ─── T3.2 PR-8: bus-driven lifecycle hooks (no-op defaults) ───────
+
+    async def on_turn_start(self, *, session_id: str | None, turn_index: int) -> None:
+        """Optional: react to each turn start (e.g. trigger a fresh prefetch).
+
+        Called by MemoryBridge when a TurnStartEvent arrives on the bus.
+        Default: no-op. Implementing this avoids polling — the provider
+        is notified exactly once per agent-loop iteration.
+
+        PR-8 of Hermes parity plan.
+        """
+        return None
+
+    async def on_delegation(
+        self,
+        *,
+        parent_session_id: str,
+        child_session_id: str,
+        child_outcome: str,
+    ) -> None:
+        """Optional: react to subagent delegation completion.
+
+        Called by MemoryBridge when a DelegationCompleteEvent arrives on
+        the bus. ``child_outcome`` is one of "success", "failure", "error".
+        Default: no-op. Useful for flushing per-session state or triggering
+        cross-session summarisation.
+
+        PR-8 of Hermes parity plan.
+        """
+        return None
+
+    async def on_memory_write(
+        self,
+        *,
+        action: str,
+        target: str,
+        content_size: int,
+    ) -> None:
+        """Optional: observe declarative-memory writes (audit pattern).
+
+        Called by MemoryBridge when a MemoryWriteEvent arrives on the bus.
+        ``action`` is "append" | "replace" | "remove". ``target`` is the
+        file name (e.g. "MEMORY.md" / "USER.md"). ``content_size`` is the
+        total byte count AFTER the write — NOT the delta, NOT the content.
+        Default: no-op.
+
+        PR-8 of Hermes parity plan.
+        """
+        return None
+
 
 __all__ = ["MemoryProvider"]
