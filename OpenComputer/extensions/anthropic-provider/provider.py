@@ -17,6 +17,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
 from pydantic import BaseModel, Field
 
+from opencomputer.agent.credential_pool import CredentialPool
 from plugin_sdk.core import Message, ToolCall
 from plugin_sdk.provider_contract import (
     BaseProvider,
@@ -69,6 +70,8 @@ class AnthropicProvider(BaseProvider):
     #: ``self.config`` at ``register_provider`` time.
     config_schema = AnthropicProviderConfig
 
+    _api_key_env: str = "ANTHROPIC_API_KEY"
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -78,13 +81,25 @@ class AnthropicProvider(BaseProvider):
         """
         Args:
             api_key: API key / proxy key. Defaults to $ANTHROPIC_API_KEY.
+                     Comma-separated value triggers pool mode (PR-A).
             base_url: Override the API endpoint (for proxies like Claude Router).
                       Defaults to $ANTHROPIC_BASE_URL, or None (direct Anthropic).
             auth_mode: "x-api-key" (Anthropic native) or "bearer"
                       (Authorization: Bearer header — for proxies that require it).
                       Defaults to $ANTHROPIC_AUTH_MODE, or "x-api-key".
         """
-        key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        # Optional credential pool (PR-A): comma-separated env value triggers pool mode.
+        # Single key (no comma) → no pool, behavior IDENTICAL to today (regression-tested).
+        api_key_raw = api_key or os.environ.get(self._api_key_env, "")
+        if "," in api_key_raw:
+            keys = [k.strip() for k in api_key_raw.split(",") if k.strip()]
+            self._credential_pool: CredentialPool | None = CredentialPool(keys=keys) if len(keys) > 1 else None
+            self._api_key = keys[0] if keys else api_key_raw
+        else:
+            self._credential_pool = None
+            self._api_key = api_key_raw.strip()
+
+        key = self._api_key
         if not key:
             raise RuntimeError(
                 "Anthropic API key not set. Export ANTHROPIC_API_KEY or pass api_key."
@@ -112,6 +127,8 @@ class AnthropicProvider(BaseProvider):
             auth_mode=mode,  # type: ignore[arg-type]
         )
 
+        self._base = base
+        self._mode = mode
         kwargs: dict[str, Any] = {"api_key": key}
         if base:
             kwargs["base_url"] = base
@@ -201,6 +218,45 @@ class AnthropicProvider(BaseProvider):
 
     # ─── completion ────────────────────────────────────────────────
 
+    def _build_client_for_key(self, key: str) -> AsyncAnthropic:
+        """Build an AsyncAnthropic client for the given key (used in pool rotation)."""
+        kwargs: dict[str, Any] = {"api_key": key}
+        if self._base:
+            kwargs["base_url"] = self._base
+        if self._mode == "bearer":
+            kwargs["default_headers"] = {"Authorization": f"Bearer {key}"}
+            kwargs["http_client"] = httpx.AsyncClient(
+                event_hooks={"request": [_strip_x_api_key]},
+                timeout=httpx.Timeout(60.0, connect=10.0),
+            )
+        return AsyncAnthropic(**kwargs)
+
+    async def _do_complete(
+        self,
+        key: str,
+        *,
+        model: str,
+        messages: list[Message],
+        system: str = "",
+        tools: list[ToolSchema] | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 1.0,
+    ) -> ProviderResponse:
+        """Low-level complete using the given API key (pool-rotation target)."""
+        client = self._build_client_for_key(key) if key != self._api_key else self.client
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": self._to_anthropic_messages(messages),
+        }
+        if system:
+            kwargs["system"] = system
+        if tools:
+            kwargs["tools"] = [t.to_anthropic_format() for t in tools]
+        resp = await client.messages.create(**kwargs)
+        return self._parse_response(resp)
+
     async def complete(
         self,
         *,
@@ -212,6 +268,46 @@ class AnthropicProvider(BaseProvider):
         temperature: float = 1.0,
         stream: bool = False,
     ) -> ProviderResponse:
+        if self._credential_pool is None:
+            return await self._do_complete(
+                self._api_key,
+                model=model,
+                messages=messages,
+                system=system,
+                tools=tools,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+
+        def _is_auth_failure(exc: Exception) -> bool:
+            return "401" in str(exc) or "authentication" in str(exc).lower()
+
+        return await self._credential_pool.with_retry(
+            lambda key: self._do_complete(
+                key,
+                model=model,
+                messages=messages,
+                system=system,
+                tools=tools,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            ),
+            is_auth_failure=_is_auth_failure,
+        )
+
+    async def _do_stream_complete(
+        self,
+        key: str,
+        *,
+        model: str,
+        messages: list[Message],
+        system: str = "",
+        tools: list[ToolSchema] | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 1.0,
+    ) -> ProviderResponse:
+        """Low-level stream_complete that aggregates into a ProviderResponse (pool target)."""
+        client = self._build_client_for_key(key) if key != self._api_key else self.client
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
@@ -222,8 +318,9 @@ class AnthropicProvider(BaseProvider):
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = [t.to_anthropic_format() for t in tools]
-        resp = await self.client.messages.create(**kwargs)
-        return self._parse_response(resp)
+        async with client.messages.stream(**kwargs) as stream_ctx:
+            final = await stream_ctx.get_final_message()
+        return self._parse_response(final)
 
     async def stream_complete(
         self,
@@ -251,6 +348,30 @@ class AnthropicProvider(BaseProvider):
         if tools:
             kwargs["tools"] = [t.to_anthropic_format() for t in tools]
 
+        if self._credential_pool is not None:
+            # Pool path: stream_complete falls back to aggregated response on rotation.
+            # Streaming is best-effort; on auth failure we rotate and re-try non-streaming.
+            def _is_auth_failure(exc: Exception) -> bool:
+                return "401" in str(exc) or "authentication" in str(exc).lower()
+
+            response = await self._credential_pool.with_retry(
+                lambda key: self._do_stream_complete(
+                    key,
+                    model=model,
+                    messages=messages,
+                    system=system,
+                    tools=tools,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                ),
+                is_auth_failure=_is_auth_failure,
+            )
+            if response.message.content:
+                yield StreamEvent(kind="text_delta", text=response.message.content)
+            yield StreamEvent(kind="done", response=response)
+            return
+
+        # No pool — native streaming path (unchanged behavior).
         async with self.client.messages.stream(**kwargs) as stream:
             async for text in stream.text_stream:
                 if text:
