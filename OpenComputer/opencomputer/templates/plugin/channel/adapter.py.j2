@@ -1,39 +1,170 @@
 """{{ class_name }}Adapter — channel adapter stub.
 
 Subclass of ``BaseChannelAdapter``. Implement connect/disconnect/send
-to wire up a new messaging platform. See ``extensions/discord/adapter.py``
-or ``extensions/telegram/adapter.py`` for reference implementations.
+to get a working text channel; uncomment the optional capability blocks
+below to add reactions / file attachments / voice / message edits.
+
+Reference implementations: ``extensions/telegram/adapter.py`` (full
+capability set), ``extensions/discord/adapter.py``,
+``extensions/webhook/adapter.py`` (inbound-only).
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
-from plugin_sdk.channel_contract import BaseChannelAdapter
+from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import Platform, SendResult
 
 
 class {{ class_name }}Adapter(BaseChannelAdapter):
-    """Channel adapter for {{ plugin_name }}."""
+    """Channel adapter for {{ plugin_name }}.
+
+    Capabilities: edit the ``capabilities`` flag to advertise what your
+    platform supports. The base class raises ``NotImplementedError`` for
+    every optional method by default — only override what your flag
+    advertises (the gateway / agent loop checks before calling).
+    """
 
     # Pick an existing Platform or add one to plugin_sdk.core.Platform.
     platform = Platform.WEB
     max_message_length = 4000
 
+    # Start with the bare minimum — text only. Add flags as you implement
+    # the corresponding methods below.
+    capabilities = ChannelCapabilities.NONE
+
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
 
+    # ------------------------------------------------------------------
+    # Required: lifecycle + text send
+    # ------------------------------------------------------------------
+
     async def connect(self) -> bool:
-        """Connect to the platform and begin listening for messages."""
+        """Connect to the platform and begin listening for messages.
+
+        Return True on success. Spawn any background polling/streaming
+        tasks here. Inbound messages call ``self.handle_message(event)``
+        which dispatches to the gateway.
+        """
         return True
 
     async def disconnect(self) -> None:
-        """Stop listening and clean up resources."""
+        """Stop listening and clean up resources.
+
+        Cancel polling tasks, close client sessions, etc.
+        """
         return None
 
     async def send(self, chat_id: str, text: str, **kwargs: Any) -> SendResult:
-        """Deliver ``text`` to ``chat_id`` on the remote platform."""
+        """Deliver ``text`` to ``chat_id`` on the remote platform.
+
+        Implement chunking here if your platform has a length limit.
+        See ``_chunk_for_telegram`` in extensions/telegram/adapter.py.
+        """
         return SendResult(success=True)
+
+    # ------------------------------------------------------------------
+    # Optional: typing indicator
+    # Add ``ChannelCapabilities.TYPING`` to ``capabilities`` if implemented.
+    # ------------------------------------------------------------------
+
+    # async def send_typing(self, chat_id: str) -> None:
+    #     """Show a typing indicator while the agent thinks."""
+    #     ...
+
+    # ------------------------------------------------------------------
+    # Optional: emoji reactions
+    # Add ``ChannelCapabilities.REACTIONS`` if implemented.
+    # ------------------------------------------------------------------
+
+    # async def send_reaction(
+    #     self,
+    #     chat_id: str,
+    #     message_id: str,
+    #     emoji: str,
+    #     **kwargs: Any,
+    # ) -> SendResult:
+    #     """Add an emoji reaction to a previously-sent message."""
+    #     ...
+
+    # ------------------------------------------------------------------
+    # Optional: file attachments
+    # Add ``PHOTO_OUT / DOCUMENT_OUT / VOICE_OUT`` flags if implemented.
+    # ------------------------------------------------------------------
+
+    # async def send_photo(
+    #     self,
+    #     chat_id: str,
+    #     photo_path: str | Path,
+    #     caption: str = "",
+    #     **kwargs: Any,
+    # ) -> SendResult:
+    #     """Send an image from a local file path."""
+    #     ...
+
+    # async def send_document(
+    #     self,
+    #     chat_id: str,
+    #     file_path: str | Path,
+    #     caption: str = "",
+    #     **kwargs: Any,
+    # ) -> SendResult:
+    #     """Send an arbitrary file (PDF, ZIP, etc.)."""
+    #     ...
+
+    # async def send_voice(
+    #     self,
+    #     chat_id: str,
+    #     audio_path: str | Path,
+    #     caption: str = "",
+    #     **kwargs: Any,
+    # ) -> SendResult:
+    #     """Send an audio / voice message (typically OGG/Opus or MP3)."""
+    #     ...
+
+    # ------------------------------------------------------------------
+    # Optional: edit / delete sent messages
+    # Add ``EDIT_MESSAGE`` / ``DELETE_MESSAGE`` if implemented.
+    # ------------------------------------------------------------------
+
+    # async def edit_message(
+    #     self,
+    #     chat_id: str,
+    #     message_id: str,
+    #     text: str,
+    #     **kwargs: Any,
+    # ) -> SendResult:
+    #     """Edit a previously-sent message in place (streaming updates)."""
+    #     ...
+
+    # async def delete_message(
+    #     self,
+    #     chat_id: str,
+    #     message_id: str,
+    #     **kwargs: Any,
+    # ) -> SendResult:
+    #     """Delete a previously-sent message."""
+    #     ...
+
+    # ------------------------------------------------------------------
+    # Optional: download inbound attachments lazily
+    # Add ``PHOTO_IN / DOCUMENT_IN / VOICE_IN`` flags if implemented.
+    # Inbound messages reference attachments as ``"<platform>:<file_id>"``
+    # in MessageEvent.attachments; the agent calls this when it needs the bytes.
+    # ------------------------------------------------------------------
+
+    # async def download_attachment(
+    #     self,
+    #     *,
+    #     file_id: str,
+    #     dest_dir: str | Path,
+    #     **kwargs: Any,
+    # ) -> Path:
+    #     """Resolve a platform-specific file_id to a local file path."""
+    #     ...
 
 
 __all__ = ["{{ class_name }}Adapter"]
