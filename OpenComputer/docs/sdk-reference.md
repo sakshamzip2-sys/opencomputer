@@ -515,6 +515,71 @@ produces it.
 
 ---
 
+## Ingestion / Signal bus (Phase 3.A, F2)
+
+The `plugin_sdk.ingestion` module is the public vocabulary for the
+shared typed-event bus. Publishers emit `SignalEvent` subclass
+instances to `opencomputer.ingestion.bus.default_bus`; subscribers
+attach via `default_bus.subscribe("tool_call", handler)` or
+`default_bus.subscribe_pattern("web_*", handler)`.
+
+### `SignalEvent`
+
+Frozen+slots base dataclass with `event_id: str` (UUID4,
+auto-generated), `event_type: str` (discriminator), `timestamp: float`
+(Unix epoch seconds), `session_id: str | None`, `source: str`,
+`metadata: Mapping[str, Any]`. Every concrete event inherits this
+shape. Subclasses set `event_type` via a default — don't override at
+construction time.
+
+### `ToolCallEvent`
+
+Subclass with `tool_name: str`, `arguments: Mapping[str, Any]`,
+`outcome: Literal["success","failure","blocked","cancelled"]`
+(see `ToolCallOutcome`), `duration_seconds: float`. Emitted by the
+agent loop after each tool invocation settles. `event_type =
+"tool_call"`.
+
+### `WebObservationEvent`
+
+Subclass with `url: str`, `domain: str`, `content_kind: Literal["html",
+"json","text","markdown"]` (see `WebContentKind`), `payload_size_bytes:
+int`. Emitted by web-scraping plugins. `event_type =
+"web_observation"`.
+
+### `FileObservationEvent`
+
+Subclass with `path: str`, `operation: Literal["read","write","stat",
+"delete","list"]` (see `FileOperation`), `size_bytes: int | None`.
+`event_type = "file_observation"`.
+
+### `MessageSignalEvent`
+
+Subclass with `role: Literal["user","assistant","system","tool"]` (see
+`MessageRole`), `content_length: int` (NOT the raw content — privacy
+preservation). Named with the `Signal` infix to avoid shadowing the
+unrelated `MessageEvent` channel-adapter dataclass in `plugin_sdk.core`.
+`event_type = "message"`.
+
+### `HookSignalEvent`
+
+Subclass with `hook_name: str`, `decision: Literal["pass","approve",
+"block"]` (see `HookDecisionKind`), `reason: str`. Named with the
+`Signal` infix to avoid shadowing the unrelated `HookEvent` enum in
+`plugin_sdk.hooks`. `event_type = "hook"`.
+
+### `SignalNormalizer` + `IdentityNormalizer`
+
+Abstract base + concrete pass-through. Subclass `SignalNormalizer` and
+implement `normalize(raw: Any) -> SignalEvent | None` to adapt
+third-party objects into the typed vocabulary; return `None` to skip.
+`IdentityNormalizer` returns the input unchanged when it is already a
+`SignalEvent`. Register custom normalizers via `register_normalizer(
+event_type, normalizer)`; look them up with `get_normalizer(
+event_type)`; `clear_normalizers()` is a test-only reset helper.
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute
