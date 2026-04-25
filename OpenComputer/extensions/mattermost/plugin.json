@@ -1,0 +1,13 @@
+{
+  "id": "mattermost",
+  "name": "Mattermost",
+  "version": "0.1.0",
+  "description": "Mattermost (self-hosted Slack alternative) outbound + reactions / edit / delete via Web API. Inbound: configure Mattermost Outgoing Webhooks → OC webhook adapter (G.3).",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "channel",
+  "entry": "plugin",
+  "single_instance": true,
+  "enabled_by_default": false,
+  "profiles": ["*"]
+}

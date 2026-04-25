@@ -4,6 +4,30 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.18 — Mattermost adapter (Web API outbound), Tier 3.x)
+
+- **`extensions/mattermost/`** — new bundled channel plugin. Mattermost
+  (self-hosted Slack alternative) outbound + reactions / edit / delete via
+  Web API at `/api/v4/...`. Mirrors G.17 Slack pattern: no WebSocket
+  runtime; inbound via Mattermost Outgoing Webhooks → OC webhook adapter
+  (G.3).
+  - `adapter.py::MattermostAdapter` — `connect` verifies token via
+    `users/me` and caches the bot user id (needed for `reactions`). `send`
+    POSTs to `/api/v4/posts` with optional `root_id` for threaded replies.
+    `send_reaction` POSTs to `/api/v4/reactions` with `user_id + post_id +
+    emoji_name`. `edit_message` uses PUT, `delete_message` uses DELETE on
+    `/api/v4/posts/{id}`.
+  - Capability flag = REACTIONS + EDIT_MESSAGE + DELETE_MESSAGE + THREADS.
+  - **Emoji-to-name map duplicated from Slack** (cross-plugin imports are
+    forbidden by `tests/test_cross_plugin_isolation.py`). Same 16 unicode
+    emoji → name mappings as Slack.
+- **Plugin config** via env vars: `MATTERMOST_URL` and `MATTERMOST_TOKEN`
+  (Personal Access Token with `post:write`). Disabled by default.
+- **11 new tests** in `tests/test_mattermost_adapter.py` — capability flag,
+  connect-caches-user-id, invalid-token-rejection, send (basic / threaded /
+  truncate / HTTP error), reactions (emoji mapped + posted to API), edit
+  (PUT) + delete (DELETE).
+
 ### Added (Sub-project G.17 — Slack adapter (Web API outbound), Tier 2.12)
 
 - **`extensions/slack/`** — new bundled channel plugin. Outbound + reactions /
