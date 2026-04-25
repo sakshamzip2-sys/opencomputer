@@ -4,6 +4,18 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Phase 3.B — Behavioral Inference engine, F2 continued)
+
+- **`plugin_sdk/inference.py`** — public `Motif` dataclass + `MotifExtractor` protocol.
+- **`opencomputer/inference/extractors/`** — three extractors:
+  - `TemporalMotifExtractor` — bucket-by-(hour,weekday) recurring usage detector
+  - `TransitionChainExtractor` — 5-minute window adjacent-event transition counter
+  - `ImplicitGoalExtractor` — top-N tool sequence summarizer per session (heuristic; future LLM-judge swap-in)
+- **`opencomputer/inference/storage.py::MotifStore`** — SQLite-backed motif CRUD at `<profile_home>/inference/motifs.sqlite`. WAL + retry-jitter pattern.
+- **`opencomputer/inference/engine.py::BehavioralInferenceEngine`** — attaches to F2 default_bus; buffers events; runs extractors when batch_size or batch_seconds threshold reached; persists motifs.
+- **`opencomputer inference motifs {list,stats,prune,run}` CLI** — visibility + manual flush + retention.
+- **Phase 3.C dependency**: `MotifStore.list(kind=...)` is the read API the user-model graph will consume.
+
 ### Added (Phase 3.F — OS feature flag + invisible-by-default UI)
 
 - **`FullSystemControlConfig`** in `opencomputer/agent/config.py` — typed knob (`enabled`, `log_path`, `menu_bar_indicator`, `json_log_max_size_bytes`); composed into top-level `Config` as `system_control` field. Defaults to disabled — invisible until the user opts in.
