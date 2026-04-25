@@ -25,7 +25,7 @@ class TestTelemetryModulePatch:
         sys.modules.pop("interpreter.core.utils.telemetry", None)
 
         # Import the module (it runs its patch on import)
-        import extensions.oi_capability.subprocess.telemetry_disable as td  # noqa: PLC0415
+        import extensions.coding_harness.oi_bridge.subprocess.telemetry_disable as td  # noqa: PLC0415
 
         assert "interpreter.core.utils.telemetry" in sys.modules
         noop = sys.modules["interpreter.core.utils.telemetry"]
@@ -34,7 +34,7 @@ class TestTelemetryModulePatch:
 
     def test_noop_send_telemetry_returns_none(self):
         """The patched send_telemetry should silently do nothing (return None)."""
-        import extensions.oi_capability.subprocess.telemetry_disable  # noqa: PLC0415
+        import extensions.coding_harness.oi_bridge.subprocess.telemetry_disable  # noqa: PLC0415
 
         noop = sys.modules.get("interpreter.core.utils.telemetry")
         assert noop is not None
@@ -43,7 +43,7 @@ class TestTelemetryModulePatch:
 
     def test_noop_get_distinct_id(self):
         """The patched get_distinct_id should return a non-empty string."""
-        import extensions.oi_capability.subprocess.telemetry_disable  # noqa: PLC0415
+        import extensions.coding_harness.oi_bridge.subprocess.telemetry_disable  # noqa: PLC0415
 
         noop = sys.modules.get("interpreter.core.utils.telemetry")
         assert noop is not None
@@ -57,7 +57,7 @@ class TestTelemetryModulePatch:
         We verify this by calling our patched send_telemetry and confirming it is truly
         a no-op (returns None without doing network I/O).
         """
-        import extensions.oi_capability.subprocess.telemetry_disable  # noqa: PLC0415
+        import extensions.coding_harness.oi_bridge.subprocess.telemetry_disable  # noqa: PLC0415
 
         noop = sys.modules.get("interpreter.core.utils.telemetry")
         assert noop is not None
@@ -85,7 +85,7 @@ class TestLitellmTelemetryDisable:
         litellm_mock.telemetry = True  # start with telemetry ON
 
         with patch.dict(sys.modules, {"litellm": litellm_mock}):
-            from extensions.oi_capability.subprocess.telemetry_disable import (  # noqa: PLC0415
+            from extensions.coding_harness.oi_bridge.subprocess.telemetry_disable import (  # noqa: PLC0415
                 disable_litellm_telemetry,
             )
             disable_litellm_telemetry()
@@ -102,7 +102,7 @@ class TestLitellmTelemetryDisable:
         # Make import fail
         with patch.dict(sys.modules, {"litellm": None}):
             try:
-                from extensions.oi_capability.subprocess.telemetry_disable import (  # noqa: PLC0415
+                from extensions.coding_harness.oi_bridge.subprocess.telemetry_disable import (  # noqa: PLC0415
                     disable_litellm_telemetry,
                 )
                 # Should not raise

@@ -4,7 +4,11 @@ Greps the entire codebase for `import interpreter` or `from interpreter`
 lines outside the allowed path (subprocess/server.py). Any match fails the build.
 
 This is the CI enforcement of the AGPL isolation strategy described in
-extensions/oi-capability/NOTICE and docs/f7/design.md §2.
+extensions/coding-harness/oi_bridge/subprocess/server.py and docs/f7/design.md §2.
+
+PR-3 (2026-04-25): updated allowed path from extensions/oi-capability/subprocess/server.py
+to extensions/coding-harness/oi_bridge/subprocess/server.py after the OI bridge was
+refactored into coding-harness per docs/f7/interweaving-plan.md.
 """
 
 from __future__ import annotations
@@ -19,7 +23,8 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent
 
 # The ONE file that IS allowed to import interpreter (runs in the OI venv subprocess)
-ALLOWED_PATH = PROJECT_ROOT / "extensions" / "oi-capability" / "subprocess" / "server.py"
+# PR-3: path updated from extensions/oi-capability/ to extensions/coding-harness/oi_bridge/
+ALLOWED_PATH = PROJECT_ROOT / "extensions" / "coding-harness" / "oi_bridge" / "subprocess" / "server.py"
 
 # Pattern that would indicate AGPL contamination
 _FORBIDDEN_PATTERN = re.compile(
@@ -66,8 +71,8 @@ class TestAGPLBoundary:
                 "AGPL BOUNDARY VIOLATION — found forbidden `import interpreter` / "
                 "`from interpreter` outside the allowed subprocess boundary:\n"
                 + "".join(report_lines)
-                + "\n\nOnly extensions/oi-capability/subprocess/server.py may import OI. "
-                "See extensions/oi-capability/NOTICE for the isolation strategy."
+                + "\n\nOnly extensions/coding-harness/oi_bridge/subprocess/server.py may import OI. "
+                "See docs/f7/design.md §2 for the isolation strategy."
             )
 
     def test_allowed_file_exists_and_has_oi_import(self):
@@ -78,7 +83,7 @@ class TestAGPLBoundary:
         """
         assert ALLOWED_PATH.exists(), (
             f"Allowed OI import boundary file not found: {ALLOWED_PATH}\n"
-            "Did someone rename or move subprocess/server.py?"
+            "Did someone rename or move extensions/coding-harness/oi_bridge/subprocess/server.py?"
         )
         content = ALLOWED_PATH.read_text(encoding="utf-8")
         has_oi_import = bool(re.search(r"from interpreter import|import interpreter", content))

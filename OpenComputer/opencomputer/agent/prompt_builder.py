@@ -16,6 +16,7 @@ import datetime
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -106,6 +107,58 @@ class PromptBuilder:
             user_profile=ctx.user_profile,
             soul=ctx.soul,
         )
+
+
+    async def build_with_memory(
+        self,
+        *,
+        skills: list[SkillMeta] | None = None,
+        declarative_memory: str = "",
+        user_profile: str = "",
+        soul: str = "",
+        memory_char_limit: int = 4000,
+        user_char_limit: int = 2000,
+        template: str = "base.j2",
+        memory_bridge: Any = None,
+        session_id: str | None = None,
+        enable_ambient_blocks: bool = True,
+        max_ambient_block_chars: int = 800,
+    ) -> str:
+        """Async variant of build() that appends ambient memory blocks.
+
+        PR-6 T2.1 — if ``enable_ambient_blocks`` is True and a
+        ``memory_bridge`` is provided, calls
+        ``memory_bridge.collect_system_prompt_blocks`` and appends the result
+        under a ``## Memory context`` header. The sync ``build()`` signature
+        is unchanged to preserve prefix-cache behaviour for callers that
+        haven't opted in to T2.1 yet.
+
+        The AgentLoop calls this variant when memory is wired in and
+        ``config.memory.enable_ambient_blocks`` is True; callers that pass
+        ``system_prompt_override`` bypass both ``build`` and this method.
+        """
+        base = self.build(
+            skills=skills,
+            declarative_memory=declarative_memory,
+            user_profile=user_profile,
+            soul=soul,
+            memory_char_limit=memory_char_limit,
+            user_char_limit=user_char_limit,
+            template=template,
+        )
+        if not enable_ambient_blocks or memory_bridge is None:
+            return base
+        try:
+            blocks = await memory_bridge.collect_system_prompt_blocks(
+                session_id=session_id,
+                max_per_block=max_ambient_block_chars,
+            )
+        except Exception:
+            # Never break prompt construction over a memory error.
+            return base
+        if blocks:
+            return base + "\n\n## Memory context\n\n" + blocks
+        return base
 
 
 __all__ = ["PromptBuilder", "PromptContext"]

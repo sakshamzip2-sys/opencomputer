@@ -15,12 +15,19 @@ OI method mappings per oi-source-map.md:
   - send_email           → computer.mail.send() (DRAFT MODE ONLY)
 
 Platform notes: Mail, Calendar, Contacts are macOS ONLY (AppleScript).
+
+PR-3 (2026-04-25): moved from extensions/oi-capability/ into
+extensions/coding-harness/oi_bridge/ per docs/f7/interweaving-plan.md.
+capability_claims declared on each class — F1 ConsentGate enforces at dispatch.
+Tier 2 tools use EXPLICIT consent (user clicked "enable" for the source).
+AUDIT_HOOK markers removed: audit happens automatically through the gate (PRs #64/#65).
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
+from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -32,6 +39,13 @@ class ReadEmailMetadataTool(BaseTool):
 
     consent_tier: int = 2
     parallel_safe: bool = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.read_email_metadata",
+            tier_required=ConsentTier.EXPLICIT,
+            human_description="Read email metadata (sender, subject, date) — no body content.",
+        ),
+    )
 
     def __init__(
         self,
@@ -65,8 +79,7 @@ class ReadEmailMetadataTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
-        # if self._consent_gate: await self._consent_gate.require(scope="oi.tier2.read_email_metadata", ...)
+        # F1 ConsentGate enforces capability_claims at dispatch (EXPLICIT tier).
 
         params = {
             "number": call.arguments.get("number", 10),
@@ -90,7 +103,6 @@ class ReadEmailMetadataTool(BaseTool):
         else:
             content = str(result)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=content)
 
 
@@ -99,6 +111,13 @@ class ReadEmailBodiesTool(BaseTool):
 
     consent_tier: int = 2
     parallel_safe: bool = False  # sequential for consent tracking
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.read_email_bodies",
+            tier_required=ConsentTier.EXPLICIT,
+            human_description="Read full email body text — more sensitive than metadata.",
+        ),
+    )
 
     def __init__(
         self,
@@ -133,8 +152,7 @@ class ReadEmailBodiesTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
-        # Stricter than metadata: scope="oi.tier2.read_email_bodies"
+        # F1 ConsentGate enforces capability_claims at dispatch (EXPLICIT tier).
 
         params = {
             "number": call.arguments.get("number", 5),
@@ -146,7 +164,6 @@ class ReadEmailBodiesTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -155,6 +172,13 @@ class ListCalendarEventsTool(BaseTool):
 
     consent_tier: int = 2
     parallel_safe: bool = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.list_calendar_events",
+            tier_required=ConsentTier.EXPLICIT,
+            human_description="List calendar events between two dates via EventKit / AppleScript.",
+        ),
+    )
 
     def __init__(
         self,
@@ -188,7 +212,7 @@ class ListCalendarEventsTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (EXPLICIT tier).
 
         params: dict[str, Any] = {}
         if "start_date" in call.arguments:
@@ -201,7 +225,6 @@ class ListCalendarEventsTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -210,6 +233,13 @@ class ReadContactsTool(BaseTool):
 
     consent_tier: int = 2
     parallel_safe: bool = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.read_contacts",
+            tier_required=ConsentTier.EXPLICIT,
+            human_description="Look up contact information from Contacts.app via AppleScript.",
+        ),
+    )
 
     def __init__(
         self,
@@ -242,7 +272,7 @@ class ReadContactsTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (EXPLICIT tier).
 
         try:
             result = await self._wrapper.call(
@@ -252,7 +282,6 @@ class ReadContactsTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -266,6 +295,13 @@ class SendEmailTool(BaseTool):
 
     consent_tier: int = 2
     parallel_safe: bool = False  # email drafting is always sequential
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.send_email",
+            tier_required=ConsentTier.EXPLICIT,
+            human_description="Save an email draft in Mail.app (DRAFTS ONLY — never auto-sends).",
+        ),
+    )
 
     def __init__(
         self,
@@ -315,7 +351,7 @@ class SendEmailTool(BaseTool):
                 "The draft will be saved to Mail.app for manual review and sending."
             )
 
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (EXPLICIT tier).
 
         params = {
             "to": call.arguments["to"],
@@ -328,7 +364,6 @@ class SendEmailTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(
             tool_call_id=call.id,
             content=f"Draft saved: {result}",

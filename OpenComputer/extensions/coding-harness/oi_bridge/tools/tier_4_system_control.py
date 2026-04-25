@@ -14,14 +14,25 @@ OI method mappings per oi-source-map.md:
 
 ALL Tier 4 tools:
   - consent_tier = 4
-  - SANDBOX_HOOK placeholder present for Phase 5 SandboxStrategy wiring
-  - per-action consent required (never blanket)
+  - capability_claims with PER_ACTION tier (never blanket)
+  - SANDBOX_HOOK: 3.E SandboxStrategy exposes run_sandboxed(argv, config) — not a
+    .guard() method on a strategy instance. Tier 4 tools route through OI subprocess
+    (which is itself the isolation boundary); direct run_sandboxed wiring would require
+    extracting the command from the wrapper call, which is not supported by the
+    current OISubprocessWrapper API. Left as:
+    # SANDBOX_HOOK pending 3.E API match — wrapper call is the subprocess boundary
+
+PR-3 (2026-04-25): moved from extensions/oi-capability/ into
+extensions/coding-harness/oi_bridge/ per docs/f7/interweaving-plan.md.
+capability_claims declared on each class — F1 ConsentGate enforces at dispatch.
+AUDIT_HOOK markers removed: audit happens automatically through the gate (PRs #64/#65).
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
+from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -33,6 +44,13 @@ class EditFileTool(BaseTool):
 
     consent_tier: int = 4
     parallel_safe: bool = False  # mutations are always sequential
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.edit_file",
+            tier_required=ConsentTier.PER_ACTION,
+            human_description="Edit a file by replacing an exact string with new text (per-edit consent).",
+        ),
+    )
 
     def __init__(
         self,
@@ -68,12 +86,11 @@ class EditFileTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
-        # Tier 4: per-action consent — never blanket
-        # if self._consent_gate: await self._consent_gate.require(scope="oi.tier4.edit_file", ...)
-
-        # SANDBOX_HOOK — Session A wires SandboxStrategy.guard here in Phase 5
-        # if self._sandbox: self._sandbox.guard(action="edit_file", path=call.arguments.get("path"))
+        # F1 ConsentGate enforces capability_claims at dispatch (PER_ACTION tier).
+        # SANDBOX_HOOK pending 3.E API match — the OI subprocess is itself the
+        # isolation boundary; direct run_sandboxed wiring requires extracting
+        # the command from the wrapper call (not supported by current wrapper API).
+        # TODO: wire run_sandboxed once wrapper exposes pre-exec hooks.
 
         params = {
             "path": call.arguments["path"],
@@ -86,9 +103,6 @@ class EditFileTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
-        # if self._audit: self._audit.append(actor="oi-capability", action="edit_file", ...)
-
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -97,6 +111,13 @@ class RunShellTool(BaseTool):
 
     consent_tier: int = 4
     parallel_safe: bool = False
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.run_shell",
+            tier_required=ConsentTier.PER_ACTION,
+            human_description="Execute a shell command (per-command consent; sandbox must be configured).",
+        ),
+    )
 
     def __init__(
         self,
@@ -131,11 +152,11 @@ class RunShellTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
-        # if self._consent_gate: await self._consent_gate.require(scope="oi.tier4.run_shell", ...)
-
-        # SANDBOX_HOOK — Session A wires SandboxStrategy.guard here in Phase 5
-        # if self._sandbox: self._sandbox.guard(action="run_shell", command=call.arguments["command"])
+        # F1 ConsentGate enforces capability_claims at dispatch (PER_ACTION tier).
+        # SANDBOX_HOOK pending 3.E API match — the OI subprocess is itself the
+        # isolation boundary; direct run_sandboxed wiring requires extracting
+        # the command from the wrapper call (not supported by current wrapper API).
+        # TODO: wire run_sandboxed once wrapper exposes pre-exec hooks.
 
         params = {
             "language": "shell",
@@ -147,7 +168,6 @@ class RunShellTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -156,6 +176,13 @@ class RunAppleScriptTool(BaseTool):
 
     consent_tier: int = 4
     parallel_safe: bool = False
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.run_applescript",
+            tier_required=ConsentTier.PER_ACTION,
+            human_description="Execute an AppleScript on macOS (per-script consent required).",
+        ),
+    )
 
     def __init__(
         self,
@@ -188,11 +215,9 @@ class RunAppleScriptTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
-        # Tier 4: per-script consent required
-
-        # SANDBOX_HOOK — Session A wires SandboxStrategy.guard here in Phase 5
-        # if self._sandbox: self._sandbox.guard(action="run_applescript", ...)
+        # F1 ConsentGate enforces capability_claims at dispatch (PER_ACTION tier).
+        # SANDBOX_HOOK pending 3.E API match — see RunShellTool comment.
+        # TODO: wire run_sandboxed once wrapper exposes pre-exec hooks.
 
         params = {"script": call.arguments["script"]}
 
@@ -201,7 +226,6 @@ class RunAppleScriptTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -210,6 +234,13 @@ class InjectKeyboardTool(BaseTool):
 
     consent_tier: int = 4
     parallel_safe: bool = False  # keyboard injection is inherently sequential
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.inject_keyboard",
+            tier_required=ConsentTier.PER_ACTION,
+            human_description="Type text into the currently focused application via keyboard injection.",
+        ),
+    )
 
     def __init__(
         self,
@@ -248,11 +279,9 @@ class InjectKeyboardTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
-        # Stricter: user explicitly confirmed text + destination app
-
-        # SANDBOX_HOOK — Session A wires SandboxStrategy.guard here in Phase 5
-        # if self._sandbox: self._sandbox.guard(action="inject_keyboard", ...)
+        # F1 ConsentGate enforces capability_claims at dispatch (PER_ACTION tier).
+        # SANDBOX_HOOK pending 3.E API match — see RunShellTool comment.
+        # TODO: wire run_sandboxed once wrapper exposes pre-exec hooks.
 
         params = {
             "text": call.arguments["text"],
@@ -264,7 +293,6 @@ class InjectKeyboardTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 

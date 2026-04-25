@@ -401,3 +401,89 @@ class MemoryBridge:
                 content=f"Memory provider error: {exc}",
                 is_error=True,
             )
+
+    # ─── PR-6 T2.1 / T2.2 / T2.3 lifecycle collectors ─────────────
+
+    def _iter_active_providers(self):
+        """Yield the single active provider, if any and not disabled.
+
+        The current bridge architecture supports one provider per context.
+        Tests may inject a list via ``bridge._registered_providers`` to
+        exercise multi-provider aggregation paths; this helper handles both
+        shapes so tests and production code use the same collector methods.
+        """
+        # Test shim: if _registered_providers was monkey-patched onto the
+        # instance (as the test suite does), iterate it directly.
+        instance_override = self.__dict__.get("_registered_providers")
+        if instance_override is not None:
+            yield from instance_override
+            return
+        # Production path: single provider from context.
+        provider = self._provider
+        if provider is not None and not self._is_disabled():
+            yield provider
+
+    async def collect_system_prompt_blocks(
+        self,
+        *,
+        session_id: str | None = None,
+        max_per_block: int = 800,
+    ) -> str:
+        """Aggregate all active providers' system_prompt_block. PR-6 T2.1.
+
+        Per-provider failures are logged + isolated (one bad provider doesn't
+        poison the others). Each block is truncated to max_per_block chars
+        before joining. Returns '' if no providers contribute or feature is off.
+        """
+        blocks = []
+        for provider in self._iter_active_providers():
+            try:
+                block = await provider.system_prompt_block(session_id=session_id)
+            except Exception:
+                logger.exception(
+                    "memory provider %s system_prompt_block failed",
+                    getattr(provider, "provider_id", repr(provider)),
+                )
+                continue
+            if block:
+                text = block.strip()
+                if len(text) > max_per_block:
+                    text = text[:max_per_block] + "…[truncated]"
+                blocks.append(f"### From {provider.provider_id}\n\n{text}")
+        return "\n\n".join(blocks)
+
+    async def collect_pre_compress(self, messages: list) -> str:
+        """Aggregate all active providers' on_pre_compress. PR-6 T2.2.
+
+        Returned chunks are wrapped in <KEY-FACTS-DO-NOT-SUMMARIZE> markers
+        by the caller. Per-provider failures isolated.
+        """
+        chunks = []
+        for provider in self._iter_active_providers():
+            try:
+                chunk = await provider.on_pre_compress(messages)
+            except Exception:
+                logger.exception(
+                    "memory provider %s on_pre_compress failed",
+                    getattr(provider, "provider_id", repr(provider)),
+                )
+                continue
+            if chunk:
+                chunks.append(chunk.strip())
+        return "\n\n".join(chunks)
+
+    async def fire_session_end(self, session_id: str) -> None:
+        """Iterate active providers' on_session_end. PR-6 T2.3.
+
+        The hook has been defined in plugin_sdk/memory.py since II.5 but
+        was never actually invoked from the agent loop. This wires it.
+        Per-provider failures isolated.
+        """
+        for provider in self._iter_active_providers():
+            try:
+                await provider.on_session_end(session_id)
+            except Exception:
+                logger.exception(
+                    "memory provider %s on_session_end failed",
+                    getattr(provider, "provider_id", repr(provider)),
+                )
