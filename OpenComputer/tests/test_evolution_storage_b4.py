@@ -62,7 +62,9 @@ def test_b4_migration_schema_version_is_2():
     conn.execute("PRAGMA foreign_keys=ON")
     apply_pending(conn)
     row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
-    assert row[0] == 2
+    # Migration 003 (T2.4 cache-warning column) is now applied after 002;
+    # assert at least 2 (B4) so future migrations don't break this check.
+    assert row[0] >= 2
     conn.close()
 
 

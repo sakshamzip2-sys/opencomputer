@@ -536,6 +536,7 @@ def record_prompt_proposal(
     diff_hint: str,
     insight_json: str,
     proposed_at: float | None = None,
+    cache_invalidation_warning: bool = False,
     conn: sqlite3.Connection | None = None,
 ) -> int:
     """Insert a prompt_proposals row with status='pending'. Returns the new id."""
@@ -544,16 +545,18 @@ def record_prompt_proposal(
         conn = _connect()
     assert conn is not None
     _ts = proposed_at if proposed_at is not None else time.time()
+    _warn = 1 if cache_invalidation_warning else 0
 
     def _do(c: sqlite3.Connection) -> int:
         with c:
             cur = c.execute(
                 """
                 INSERT INTO prompt_proposals
-                    (proposed_at, target, diff_hint, insight_json, status)
-                VALUES (?, ?, ?, ?, 'pending')
+                    (proposed_at, target, diff_hint, insight_json, status,
+                     cache_invalidation_warning)
+                VALUES (?, ?, ?, ?, 'pending', ?)
                 """,
-                (_ts, target, diff_hint, insight_json),
+                (_ts, target, diff_hint, insight_json, _warn),
             )
             return int(cur.lastrowid or 0)
 
