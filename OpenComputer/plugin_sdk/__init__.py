@@ -29,6 +29,11 @@ from plugin_sdk.core import (
     ToolCall,
     ToolResult,
 )
+from plugin_sdk.decay import (
+    DecayConfig,
+    DriftConfig,
+    DriftReport,
+)
 from plugin_sdk.doctor import (
     HealthContribution,
     HealthRunFn,
@@ -89,6 +94,14 @@ from plugin_sdk.sandbox import (
 )
 from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
+from plugin_sdk.user_model import (
+    Edge,
+    EdgeKind,
+    Node,
+    NodeKind,
+    UserModelQuery,
+    UserModelSnapshot,
+)
 
 __all__ = [
     "__version__",
@@ -164,10 +177,21 @@ __all__ = [
     "Motif",
     "MotifExtractor",
     "MotifKind",
+    # user-model graph (Phase 3.C, F4 layer)
+    "Node",
+    "NodeKind",
+    "Edge",
+    "EdgeKind",
+    "UserModelQuery",
+    "UserModelSnapshot",
     # sandbox (Phase 3.E)
     "SandboxConfig",
     "SandboxResult",
     "SandboxStrategy",
     "SandboxStrategyName",
     "SandboxUnavailable",
+    # decay + drift (Phase 3.D, F5 layer)
+    "DecayConfig",
+    "DriftConfig",
+    "DriftReport",
 ]

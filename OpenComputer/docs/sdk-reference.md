@@ -620,6 +620,68 @@ no schema for unknown kinds), and downstream consumers (Phase 3.C).
 
 ---
 
+## User-model graph (Phase 3.C, F4 layer)
+
+The `plugin_sdk.user_model` module is the public vocabulary for the
+user-model graph (nodes + edges) read by the context-assembly path.
+Concrete storage + ranking lives in `opencomputer/user_model/` (internal).
+Edges carry four-factor weights (`salience × confidence × recency_weight
+× source_reliability`) that the `ContextRanker` multiplies for selection.
+
+### `NodeKind`
+
+`Literal["identity", "attribute", "relationship", "goal", "preference"]`
+— alphabet of valid `Node.kind` values. Extending this tuple is a
+**breaking change**; downstream scorers dispatch on the literal.
+
+### `EdgeKind`
+
+`Literal["asserts", "contradicts", "supersedes", "derives_from"]` —
+alphabet of valid `Edge.kind` values. `contradicts` is reserved for
+Phase 3.D drift detection and explicit user statements; motif import
+never emits it.
+
+### `Node`
+
+Frozen+slots dataclass — a stable entity tracked about the user.
+Fields: `node_id: str` (UUID4), `kind: NodeKind`, `value: str`
+(human-readable, e.g. `"prefers Python over JS"`), `confidence: float`
+(node-level prior, updated by aggregation), `created_at: float`,
+`last_seen_at: float` (bumped on repeat assertion), `metadata: Mapping`.
+
+```python
+from plugin_sdk import Node
+Node(kind="goal", value="learn Rust by Q3")
+```
+
+### `Edge`
+
+Frozen+slots dataclass — a typed assertion between two nodes.
+Fields: `edge_id: str` (UUID4), `kind: EdgeKind`, `from_node: str`,
+`to_node: str`, `salience: float`, `confidence: float`,
+`recency_weight: float` (updated by Phase 3.D decay),
+`source_reliability: float` (1.0 explicit user / 0.6 motif / 0.4
+scraped), `decay_rate: float` (per-day, default 0.01),
+`created_at: float`, `evidence: Mapping[str, Any]` (e.g.
+`{"motif_id": "...", "event_ids": [...]}`).
+
+### `UserModelQuery`
+
+Frozen+slots dataclass — the ranker input. Fields: `kinds:
+tuple[NodeKind, ...] | None` (filter), `text: str | None` (FTS5 query),
+`top_k: int = 20`, `token_budget: int | None` (char-approx; 4 chars ≈
+1 token).
+
+### `UserModelSnapshot`
+
+Frozen+slots dataclass — the ranker output. Fields: `nodes:
+tuple[Node, ...]` (ordered, most salient first), `edges:
+tuple[Edge, ...]` (incident edges of selected nodes), `total_score:
+float` (sum of per-node scores), `truncated: bool` (`True` if
+`token_budget` cut selection short).
+
+---
+
 ## Sandbox (Phase 3.E)
 
 The `plugin_sdk.sandbox` module is the public contract for pluggable
@@ -674,6 +736,49 @@ and enforce `config.cpu_seconds_limit` via timeout.
 the host. The `auto` strategy raises this only when **no** strategy is
 available; the message names `SandboxConfig(strategy="none")` as the
 opt-out for trusted internal use.
+
+---
+
+## Temporal decay + drift (Phase 3.D, F5 layer)
+
+Phase 3.D ages out user-model edges and flags distribution shifts in
+the 3.B motif stream. These primitives are the public contract;
+concrete engines live in `opencomputer/user_model/{decay,drift,
+drift_store,scheduler}.py`.
+
+### `DecayConfig`
+
+Frozen+slots dataclass of per-edge-kind half-life knobs for the
+exponential decay formula `weight = 0.5 ** (age_days / half_life)`
+floored at `min_recency_weight`. Fields: `asserts_half_life_days:
+float = 30.0`, `contradicts_half_life_days: float = 14.0`,
+`supersedes_half_life_days: float = 60.0`,
+`derives_from_half_life_days: float = 21.0`, `min_recency_weight:
+float = 0.05` (floor below which decay stops), `default_half_life_days:
+float = 30.0` (fallback for unknown edge kinds).
+
+### `DriftConfig`
+
+Frozen+slots dataclass of knobs for symmetrized-KL drift detection
+over motif distributions. Fields: `recent_window_days: float = 7.0`,
+`min_lifetime_count: int = 5` (drop sparse labels from KL), `kl_significance_threshold:
+float = 0.5` (total_kl above this → `significant=True`),
+`top_changes_count: int = 5` (how many biggest label deltas the report
+carries), `smoothing_epsilon: float = 0.01` (Laplace smoothing for
+zero counts).
+
+### `DriftReport`
+
+Frozen+slots dataclass summarising one drift-detection run. Fields:
+`report_id: str` (UUID4), `created_at: float` (unix epoch seconds),
+`window_seconds: float` (recent window analysed),
+`total_kl_divergence: float`, `per_kind_drift: Mapping[str, float]`
+(KL grouped by motif kind prefix), `recent_distribution: Mapping[str,
+int]`, `lifetime_distribution: Mapping[str, int]`, `top_changes:
+tuple[Mapping[str, Any], ...]` (biggest deltas — each entry carries
+`label`, `recent_count`, `lifetime_count`, `delta_ratio`),
+`significant: bool` (total_kl > threshold). Persisted by
+`opencomputer.user_model.drift_store.DriftStore`.
 
 ---
 
