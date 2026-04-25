@@ -23,6 +23,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _EXT_DIR = _PROJECT_ROOT / "extensions"
 _OI_DIR = _EXT_DIR / "oi-capability"
 _CH_DIR = _EXT_DIR / "coding-harness"
+_BEDROCK_DIR = _EXT_DIR / "aws-bedrock-provider"
 
 
 def _ensure_extensions_pkg() -> None:
@@ -128,5 +129,40 @@ def _register_coding_harness_alias() -> None:
                     spec.loader.exec_module(mod)
 
 
+def _register_aws_bedrock_provider_alias() -> None:
+    """Register extensions.aws_bedrock_provider → extensions/aws-bedrock-provider/.
+
+    PR-C: allows test_bedrock_provider.py to import via the underscore form
+    (Python module name) while the directory keeps the canonical hyphenated name.
+    Mirrors the pattern used for coding_harness above.
+    """
+    _ensure_extensions_pkg()
+
+    if "extensions.aws_bedrock_provider" not in sys.modules:
+        mod = types.ModuleType("extensions.aws_bedrock_provider")
+        mod.__path__ = [str(_BEDROCK_DIR)]
+        mod.__package__ = "extensions.aws_bedrock_provider"
+        sys.modules["extensions.aws_bedrock_provider"] = mod
+
+    # Register transport.py and provider.py as importable sub-modules
+    for sub in ("transport", "provider", "plugin"):
+        full_name = f"extensions.aws_bedrock_provider.{sub}"
+        if full_name not in sys.modules:
+            init = _BEDROCK_DIR / f"{sub}.py"
+            if not init.exists():
+                continue
+            spec = importlib.util.spec_from_file_location(
+                full_name,
+                str(init),
+            )
+            if spec is None or spec.loader is None:
+                continue
+            sub_mod = importlib.util.module_from_spec(spec)
+            sub_mod.__package__ = "extensions.aws_bedrock_provider"
+            sys.modules[full_name] = sub_mod
+            # Do NOT exec yet — tests control when the module loads
+
+
 _register_oi_capability_alias()
 _register_coding_harness_alias()
+_register_aws_bedrock_provider_alias()

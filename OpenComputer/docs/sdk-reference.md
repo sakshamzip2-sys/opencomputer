@@ -804,6 +804,53 @@ tuple[Mapping[str, Any], ...]` (biggest deltas — each entry carries
 
 ---
 
+## Transport ABC (PR-C)
+
+The `plugin_sdk.transports` module is the public contract for the
+**optional** Transport layer — pluggable format conversion + HTTP
+transport extracted from monolithic provider adapters. Ported from
+hermes-agent v0.11 `agent/transports/` (PRs #10549, #13347 etc.).
+
+**Backwards compatible**: existing providers continue to inherit
+`BaseProvider` directly (unchanged). The Transport ABC is a new layer
+that NEW providers (e.g. `aws-bedrock-provider`) opt in to.
+
+### `NormalizedRequest`
+
+Frozen+slots dataclass — provider-agnostic request shape.
+Fields: `model: str`, `messages: list[Message]`, `system: str = ""`,
+`tools: tuple[ToolSchema, ...] = ()`, `max_tokens: int = 4096`,
+`temperature: float = 1.0`, `stream: bool = False`.
+Each `TransportBase` subclass converts this into the provider's native
+API format (Messages API, Chat Completions, Bedrock Converse, etc.).
+
+### `NormalizedResponse`
+
+Frozen+slots dataclass — provider-agnostic response shape.
+Fields: `provider_response: ProviderResponse` (wraps the existing type
+for backwards compat), `raw_native: Any = None` (raw provider payload,
+for debugging). Providers that use `TransportBase` still satisfy
+`BaseProvider.complete() -> ProviderResponse` by returning
+`normalized.provider_response`.
+
+### `TransportBase`
+
+Abstract base class for the Transport layer. Subclasses implement:
+- `format_request(req: NormalizedRequest) -> dict[str, Any]` — convert to provider-native dict.
+- `async send(native_request: dict) -> Any` — send non-streaming request, return raw response.
+- `async send_stream(native_request: dict) -> AsyncIterator[StreamEvent]` — stream events; final event is `kind="done"`.
+- `parse_response(raw: Any) -> NormalizedResponse` — parse native response.
+
+Class attribute `name: str` is a stable transport identifier
+(e.g. `"bedrock"`, `"anthropic"`).
+
+The `aws-bedrock-provider` extension ships `BedrockTransport(TransportBase)`
+as the first concrete implementation. To add a new provider using this
+layer, subclass both `TransportBase` and `BaseProvider`; delegate
+`BaseProvider.complete` to `transport.send + transport.parse_response`.
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute
