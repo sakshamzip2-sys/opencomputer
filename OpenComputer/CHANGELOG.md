@@ -4,6 +4,30 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.4 — Docker support, Tier 2.3 of `~/.claude/plans/toasty-wiggling-eclipse.md`)
+
+- **`Dockerfile`** — multi-stage build (`python:3.13-slim` builder → runtime), non-root `oc` user
+  (uid 1000), `tini` as PID 1 so `docker stop` delivers SIGTERM cleanly. Builder installs the
+  package + deps into `/opt/venv`; runtime stage copies just the venv + source. Webhook port
+  18790 exposed. `OPENCOMPUTER_HOME=/home/oc/.opencomputer` so a single named-volume mount captures
+  config + sessions + cron + consent audit chain. Layer order optimised so dep changes don't
+  invalidate the source layer.
+- **`docker-compose.yml`** — two profiles:
+  - `default` (`gateway` service) — Telegram + Discord + cron + webhook in one container, with
+    webhook port mapped + provider/channel env vars wired.
+  - `cron-only` — light scheduler-only container (no channel adapters).
+  Both use `restart: unless-stopped` and the named volume `opencomputer-data` for persistence.
+- **`.dockerignore`** — excludes `.venv`, `__pycache__`, `.git`, `tests/`, `docs/`, sources tree,
+  IDE files, build artefacts. Keeps images lean.
+- **20 new tests** in `tests/test_docker.py` — structure validations that run without a Docker
+  daemon: multi-stage build, non-root user, webhook port exposed, tini init, persistent home env,
+  compose profiles + named volume + restart policy + provider env vars, dockerignore covers the
+  expected exclude list. Lets us catch Dockerfile drift in CI even though CI doesn't build the image.
+
+Use case unlocked: `docker compose up -d` on a $5/mo VPS → cron jobs and webhook listener run
+24/7 without Saksham's laptop being awake. `docker compose --profile=cron-only up -d` for the
+minimal scheduler-only deployment.
+
 ### Added (Sub-project G.3 — Webhook channel adapter, Tier 1.3 of `~/.claude/plans/toasty-wiggling-eclipse.md`)
 
 - **`extensions/webhook/`** — new bundled channel plugin. HTTP listener for inbound triggers from

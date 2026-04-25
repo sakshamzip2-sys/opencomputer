@@ -1,0 +1,75 @@
+# OpenComputer Docker Compose — single-file dev / VPS deployment.
+#
+# Usage:
+#     # Provide secrets in a .env file (see .env.example pattern)
+#     docker compose up -d                       # start in background
+#     docker compose logs -f                     # follow logs
+#     docker compose exec gateway opencomputer chat   # interactive chat
+#     docker compose down                        # stop (data persists in volume)
+#     docker compose down -v                     # stop + delete volume (DESTRUCTIVE)
+#
+# Two profiles:
+#   - default: gateway (telegram + discord + cron + webhook all in one process)
+#   - cron-only: lighter; no channel adapters, just the cron scheduler
+#
+# Pick one with `docker compose --profile=<name> up`.
+
+version: "3.8"
+
+services:
+  gateway:
+    image: opencomputer:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opencomputer-gateway
+    profiles: ["default", "all"]
+    restart: unless-stopped
+    command: ["opencomputer", "gateway"]
+    ports:
+      # Webhook listener (extensions/webhook/adapter.py)
+      - "${WEBHOOK_PORT:-18790}:18790"
+    volumes:
+      - oc-data:/home/oc/.opencomputer
+    environment:
+      # Provider API keys — add the ones you use
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Channel tokens — leave unset to disable a channel
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
+      # Cron-output delivery target IDs (used by `cron create --notify telegram`)
+      - TELEGRAM_CRON_CHAT_ID=${TELEGRAM_CRON_CHAT_ID:-}
+      - DISCORD_CRON_CHANNEL=${DISCORD_CRON_CHANNEL:-}
+    healthcheck:
+      # `opencomputer doctor --json` should exit 0 when the install is healthy.
+      # Falls back to the simpler `--help` invocation if doctor isn't suitable
+      # for non-interactive use.
+      test: ["CMD", "opencomputer", "--help"]
+      interval: 60s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
+  cron-only:
+    image: opencomputer:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opencomputer-cron
+    profiles: ["cron-only"]
+    restart: unless-stopped
+    command: ["opencomputer", "cron", "daemon", "--interval", "60"]
+    volumes:
+      - oc-data:/home/oc/.opencomputer
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CRON_CHAT_ID=${TELEGRAM_CRON_CHAT_ID:-}
+
+volumes:
+  # Named volume = persists config + sessions + cron jobs + consent audit chain
+  # across container restarts and image rebuilds.
+  oc-data:
+    name: opencomputer-data
