@@ -4,6 +4,36 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.9 — Voice (TTS + STT), Tier 2.10)
+
+- **`opencomputer/voice/`** — new subpackage. Cost-guarded text-to-speech and speech-to-text via
+  OpenAI APIs (`tts-1` / `tts-1-hd` / `whisper-1`):
+  - `synthesize_speech(text, *, cfg, dest_dir)` — TTS to file. Default `opus` format = Telegram
+    voice. Supports `mp3 / aac / flac / wav / pcm` for other channels. 4096 char hard limit
+    enforced locally before API call.
+  - `transcribe_audio(audio_path, *, model, language)` — Whisper STT. WAV duration parsed from
+    header for accurate cost projection; other formats fall back to a 30 s assumption.
+  - `VoiceConfig` dataclass — `model / voice / format / speed`. Voice limited to OpenAI's 6
+    canonical voices (alloy / echo / fable / onyx / nova / shimmer).
+  - Cost helpers: `tts_cost_usd(text, model)` and `stt_cost_usd(duration_s, model)` for budget
+    projection. Pricing constants tagged with `PRICING_VERSION`.
+- **Cost-guard integration** — every synthesize / transcribe call pre-flights via
+  `CostGuard.check_budget("openai", projected_cost_usd=…)` and records actual usage on success
+  with an operation label (`tts:tts-1` / `stt:whisper-1`). `BudgetExceeded` propagates so callers
+  can fall back gracefully (e.g. text-only when voice budget is hit).
+- **`opencomputer voice {synthesize, transcribe, cost-estimate}`** CLI subgroup. `cost-estimate`
+  runs without making an API call so users can preview spend before committing.
+- **22 new tests** in `tests/test_voice.py` — pricing helpers, full TTS path with mocked OpenAI
+  client (request kwargs verification, file output, empty/oversized rejection, voice/format
+  validation, BudgetExceeded blocks the call entirely, API errors wrapped as RuntimeError),
+  STT path (mock client, language hint, missing/oversized file, budget block, WAV duration
+  parsing), CLI smoke for cost-estimate.
+
+This unlocks Saksham's voice-briefing use case: cron job at 8:30 AM runs the
+`stock-market-analysis` skill, agent's text response gets routed through `synthesize_speech` →
+`adapter.send_voice` → Telegram voice message. The cost-guard cap (e.g. `--daily 0.50`) ensures a
+runaway loop can't drain the wallet.
+
 ### Added (Sub-project G.8 — Cost-guard module, Tier 2.17)
 
 - **`opencomputer/cost_guard/`** — new subpackage tracking per-provider USD spend with
