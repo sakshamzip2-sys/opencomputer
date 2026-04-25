@@ -52,6 +52,12 @@ dev = [
 honcho = [
   "httpx>=0.27",
 ]
+# Optional: macOS menu-bar indicator for the 3.F system-control mode.
+# Install with `pip install opencomputer[menubar]` on macOS only; on Linux
+# / Windows the marker simply skips the wheel.
+menubar = [
+  "rumps>=0.4.0; platform_system == 'Darwin'",
+]
 
 [project.scripts]
 opencomputer = "opencomputer.cli:main"

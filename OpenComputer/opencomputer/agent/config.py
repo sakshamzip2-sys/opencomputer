@@ -184,6 +184,37 @@ class ToolsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class FullSystemControlConfig:
+    """3.F — master enable/disable for autonomous full-system-control mode.
+
+    Independent of F1 consent gating: F1 controls per-tool authorization;
+    this controls the whole autonomous-mode personality. When disabled
+    (default), the agent behaves like a standard chat agent.
+
+    Attributes:
+        enabled: Master switch. ``False`` = invisible / standard chat
+            agent. ``True`` = autonomous-mode personality engaged
+            (structured agent log, optional menu-bar indicator).
+        log_path: Where the structured JSON-line agent log is written.
+            Defaults to ``~/.opencomputer/<profile>/agent.log`` via
+            :func:`_home`.
+        menu_bar_indicator: macOS-only best-effort indicator. Activated
+            via the ``--menu-bar`` flag on ``opencomputer system-control
+            enable``; soft-deps on the optional ``rumps`` extra. Stays
+            ``False`` on Linux/Windows even if requested.
+        json_log_max_size_bytes: When the log exceeds this size, the
+            current file is renamed to ``<log_path>.old`` and a fresh
+            file starts. One ``.old`` rolloff only — admins use
+            ``logrotate`` for long retention.
+    """
+
+    enabled: bool = False
+    log_path: Path = field(default_factory=lambda: _home() / "agent.log")
+    menu_bar_indicator: bool = False  # macOS only; best-effort via rumps if installed
+    json_log_max_size_bytes: int = 50 * 1024 * 1024  # 50 MB; rotate after
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Root configuration — composed of small focused configs."""
 
@@ -198,6 +229,10 @@ class Config:
     #: :func:`opencomputer.agent.config_store._parse_hooks_block` and
     #: registered into the global :class:`HookEngine` at CLI startup.
     hooks: tuple[HookCommandConfig, ...] = ()
+    #: 3.F — master enable/disable for autonomous full-system-control mode.
+    #: Defaults to disabled (invisible). When enabled, the structured
+    #: ``agent.log`` collector + optional menu-bar indicator activate.
+    system_control: FullSystemControlConfig = field(default_factory=FullSystemControlConfig)
     home: Path = field(default_factory=_home)
 
 
@@ -217,5 +252,6 @@ __all__ = [
     "HookCommandConfig",
     "ToolsConfig",
     "WebSearchConfig",
+    "FullSystemControlConfig",
     "default_config",
 ]

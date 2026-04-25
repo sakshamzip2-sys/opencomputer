@@ -4,6 +4,15 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Phase 3.F — OS feature flag + invisible-by-default UI)
+
+- **`FullSystemControlConfig`** in `opencomputer/agent/config.py` — typed knob (`enabled`, `log_path`, `menu_bar_indicator`, `json_log_max_size_bytes`); composed into top-level `Config` as `system_control` field. Defaults to disabled — invisible until the user opts in.
+- **`opencomputer/system_control/logger.py::StructuredAgentLogger`** — one-JSON-line-per-call append-only log at `~/.opencomputer/<profile>/home/agent.log`. Includes pid + timestamp; rotates to `.log.old` past `max_size_bytes`; OSError-tolerant (never breaks the agent).
+- **`opencomputer/system_control/bus_listener.py::attach_to_bus`** — subscribes the structured logger to `default_bus` for ALL events when system-control is on. Detachable via the returned `Subscription`.
+- **`opencomputer system-control {enable,disable,status}` CLI** — visible state toggle. `enable --menu-bar` activates a macOS rumps indicator (best-effort; soft-deps on the optional `rumps` extra).
+- **`pyproject.toml`** — new optional extra `[project.optional-dependencies] menubar = ["rumps>=0.4.0; platform_system == 'Darwin'"]`.
+- **Hard-decoupled from F1 consent**: F1 gates individual capabilities; 3.F gates the autonomous-mode personality. Both are required for autonomous tool execution.
+
 ### Added (Phase 3.E — Pluggable Sandbox Strategy)
 
 - **`plugin_sdk/sandbox.py`** — `SandboxStrategy` ABC + `SandboxConfig` + `SandboxResult` + `SandboxUnavailable` public types.
