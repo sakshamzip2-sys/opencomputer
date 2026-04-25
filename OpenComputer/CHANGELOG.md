@@ -4,6 +4,31 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.30 — `opencomputer mcp scaffold` CLI, Tier 4)
+
+- **New CLI command** `opencomputer mcp scaffold <name> [--dir DIR]
+  [--transport stdio|sse|http] [--force]` — generates a runnable
+  Python MCP server skeleton at ``<dir>/<name>/`` with three files:
+  - ``<pkg>/__init__.py`` + ``<pkg>/server.py`` — FastMCP app with
+    one demo tool (``echo``). The package name is the user's name
+    lowercased + hyphens-to-underscores.
+  - ``pyproject.toml`` — runnable via ``python -m <pkg>.server`` or
+    a ``[project.scripts]`` entry. Single dependency: ``mcp>=1.0``.
+  - ``README.md`` — quickstart + the exact ``opencomputer mcp add``
+    command to register the new server with the active config.
+- Validates inputs: name must yield a valid Python identifier (no
+  path separators, lowercase letters/digits/hyphens/underscores);
+  transport must be one of `stdio|sse|http`; existing directory
+  rejected unless `--force`.
+- The generated `server.py` is `compile()`-checked in tests so a
+  future template edit can't ship broken Python.
+- **11 new tests** in `tests/test_mcp_scaffolder.py` — layout (file
+  presence, hyphen → underscore package naming), contents (FastMCP
+  import, pyproject script entry, README register command,
+  transport propagation), validation (bad transport, path-separator
+  in name, existing-dir without `--force`, `--force` overwrites
+  cleanly), and a compile-check on the generated `server.py`.
+
 ### Added (Sub-project G.29 — Home Assistant adapter, Tier 4.x)
 
 - **`extensions/homeassistant/`** — new bundled channel plugin. Talks
