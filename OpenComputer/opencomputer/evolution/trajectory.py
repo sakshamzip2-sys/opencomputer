@@ -211,6 +211,27 @@ def _on_tool_call_event(event: ToolCallEvent) -> None:
             return  # cannot bucket anonymously
 
         # Build the TrajectoryEvent — privacy rule already enforced by TrajectoryEvent.__post_init__
+        metadata: dict[str, Any] = {
+            "duration_seconds": float(event.duration_seconds),
+            # Preserve metadata values that pass the 200-char privacy filter.
+            # T3.1 (PR-8): error_class and error_message_preview are first-class
+            # fields the reflection prompt knows how to render. They are already
+            # truncated to 200 chars by the loop publisher, so the filter below
+            # admits them without further truncation.
+            **{
+                k: v
+                for k, v in (event.metadata or {}).items()
+                if not isinstance(v, str) or len(v) <= 200
+            },
+        }
+        # Explicit setdefault calls below are documentation that these two keys
+        # are intentionally forwarded to the trajectory (they are already covered
+        # by the dict comprehension above; these are no-ops in the normal path).
+        if event.metadata and event.metadata.get("error_class"):
+            metadata.setdefault("error_class", event.metadata["error_class"])
+        if event.metadata and event.metadata.get("error_message_preview"):
+            metadata.setdefault("error_message_preview", event.metadata["error_message_preview"])
+
         traj_event = TrajectoryEvent(
             session_id=event.session_id,
             message_id=None,
@@ -218,16 +239,7 @@ def _on_tool_call_event(event: ToolCallEvent) -> None:
             tool_name=event.tool_name,
             outcome=event.outcome,
             timestamp=event.timestamp,
-            metadata={
-                "duration_seconds": float(event.duration_seconds),
-                # Preserve a small subset of metadata if present; cap each value
-                # to the privacy threshold (200 chars) so the dataclass accepts it
-                **{
-                    k: v
-                    for k, v in (event.metadata or {}).items()
-                    if not isinstance(v, str) or len(v) <= 200
-                },
-            },
+            metadata=metadata,
         )
 
         # Append to open trajectory or start fresh

@@ -99,6 +99,31 @@ class SkillMeta:
     examples: tuple[SkillReference, ...] = field(default_factory=tuple)
 
 
+# ─── bus helper (T3.2 PR-8) ───────────────────────────────────────────
+
+
+def _publish_memory_write_event(*, action: str, target: str, content_size: int) -> None:
+    """Publish a MemoryWriteEvent to the default bus. Exception-isolated.
+
+    Called after each successful declarative-memory write so MemoryBridge
+    subscribers can trigger provider callbacks (audit pattern). Content
+    itself is NOT included — only action, target name, and size.
+    """
+    try:
+        from opencomputer.ingestion.bus import default_bus
+        from plugin_sdk.ingestion import MemoryWriteEvent
+
+        default_bus.publish(MemoryWriteEvent(
+            session_id=None,
+            source="agent_memory",
+            action=action,
+            target=target,
+            content_size=content_size,
+        ))
+    except Exception:  # noqa: BLE001 — must never break a memory write path
+        pass
+
+
 # ─── atomic-write + locking helpers ───────────────────────────────────
 
 
@@ -373,8 +398,15 @@ class MemoryManager:
             if path.exists():
                 shutil.copy2(path, _backup_path(path))
             _write_atomic(path, new_text)
+        # T3.2 (PR-8): publish MemoryWriteEvent after the lock releases.
+        # Privacy: content_size only, NOT the content itself.
+        _publish_memory_write_event(
+            action="append", target=path.name, content_size=len(new_text)
+        )
 
     def _replace(self, path: Path, old: str, new: str, *, limit: int, kind: str) -> bool:
+        replaced = False
+        candidate_size = 0
         with _file_lock(path):
             if not path.exists():
                 return False
@@ -386,9 +418,18 @@ class MemoryManager:
                 raise MemoryTooLargeError(kind, len(candidate), limit)
             shutil.copy2(path, _backup_path(path))
             _write_atomic(path, candidate)
-            return True
+            replaced = True
+            candidate_size = len(candidate)
+        if replaced:
+            # T3.2 (PR-8): publish MemoryWriteEvent after lock releases.
+            _publish_memory_write_event(
+                action="replace", target=path.name, content_size=candidate_size
+            )
+        return replaced
 
     def _remove(self, path: Path, block: str, *, kind: str) -> bool:
+        removed = False
+        candidate_size = 0
         with _file_lock(path):
             if not path.exists():
                 return False
@@ -400,8 +441,16 @@ class MemoryManager:
             while "\n\n\n" in candidate:
                 candidate = candidate.replace("\n\n\n", "\n\n")
             shutil.copy2(path, _backup_path(path))
-            _write_atomic(path, candidate.lstrip("\n"))
-            return True
+            final = candidate.lstrip("\n")
+            _write_atomic(path, final)
+            removed = True
+            candidate_size = len(final)
+        if removed:
+            # T3.2 (PR-8): publish MemoryWriteEvent after lock releases.
+            _publish_memory_write_event(
+                action="remove", target=path.name, content_size=candidate_size
+            )
+        return removed
 
     # ─── procedural (skills) ─────────────────────────────────────
 

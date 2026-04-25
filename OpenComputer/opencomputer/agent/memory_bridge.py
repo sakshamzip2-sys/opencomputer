@@ -275,6 +275,105 @@ class MemoryBridge:
         except Exception as exc:
             logger.debug("sync_turn swallowed exception: %s", exc)
 
+    # ─── T3.2 PR-8: bus subscription ──────────────────────────────────
+
+    def register_with_bus(self, bus=None):
+        """T3.2: subscribe MemoryBridge to F2 bus events that drive provider hooks.
+
+        Subscribes to:
+          - ``turn_start``          → provider.on_turn_start
+          - ``delegation_complete`` → provider.on_delegation
+          - ``memory_write``        → provider.on_memory_write
+
+        Returns a list of 3 :class:`~opencomputer.ingestion.bus.Subscription`
+        handles for clean unregistration (each has an ``unsubscribe()`` method).
+
+        Each handler is exception-isolated per provider so a bad provider
+        never disrupts other subscribers or the main loop.
+
+        If ``bus`` is ``None``, uses the module-level default bus singleton.
+        """
+        if bus is None:
+            from opencomputer.ingestion.bus import get_default_bus
+            bus = get_default_bus()
+        subs = [
+            bus.subscribe("turn_start", self._on_turn_start_event),
+            bus.subscribe("delegation_complete", self._on_delegation_event),
+            bus.subscribe("memory_write", self._on_memory_write_event),
+        ]
+        return subs
+
+    def _on_turn_start_event(self, event) -> None:
+        """Bus handler: fan out TurnStartEvent to provider.on_turn_start."""
+        import asyncio as _asyncio
+
+        provider = self._provider
+        if provider is None or self._is_disabled():
+            return
+        try:
+            coro = provider.on_turn_start(
+                session_id=event.session_id,
+                turn_index=event.turn_index,
+            )
+            try:
+                loop = _asyncio.get_running_loop()
+                loop.create_task(coro)
+            except RuntimeError:
+                _asyncio.run(coro)
+        except Exception:
+            logger.exception(
+                "memory provider %s on_turn_start failed",
+                getattr(provider, "provider_id", repr(provider)),
+            )
+
+    def _on_delegation_event(self, event) -> None:
+        """Bus handler: fan out DelegationCompleteEvent to provider.on_delegation."""
+        import asyncio as _asyncio
+
+        provider = self._provider
+        if provider is None or self._is_disabled():
+            return
+        try:
+            coro = provider.on_delegation(
+                parent_session_id=event.parent_session_id,
+                child_session_id=event.child_session_id,
+                child_outcome=event.child_outcome,
+            )
+            try:
+                loop = _asyncio.get_running_loop()
+                loop.create_task(coro)
+            except RuntimeError:
+                _asyncio.run(coro)
+        except Exception:
+            logger.exception(
+                "memory provider %s on_delegation failed",
+                getattr(provider, "provider_id", repr(provider)),
+            )
+
+    def _on_memory_write_event(self, event) -> None:
+        """Bus handler: fan out MemoryWriteEvent to provider.on_memory_write."""
+        import asyncio as _asyncio
+
+        provider = self._provider
+        if provider is None or self._is_disabled():
+            return
+        try:
+            coro = provider.on_memory_write(
+                action=event.action,
+                target=event.target,
+                content_size=event.content_size,
+            )
+            try:
+                loop = _asyncio.get_running_loop()
+                loop.create_task(coro)
+            except RuntimeError:
+                _asyncio.run(coro)
+        except Exception:
+            logger.exception(
+                "memory provider %s on_memory_write failed",
+                getattr(provider, "provider_id", repr(provider)),
+            )
+
     def get_tool_schemas(self) -> list:
         """Return provider-specific tool schemas, or empty list."""
         provider = self._provider
