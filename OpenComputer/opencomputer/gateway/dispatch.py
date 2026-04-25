@@ -20,7 +20,7 @@ import hashlib
 import logging
 import time
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from opencomputer.agent.loop import AgentLoop
 from plugin_sdk.core import MessageEvent
@@ -29,6 +29,7 @@ from plugin_sdk.runtime_context import RequestContext
 if TYPE_CHECKING:
     from opencomputer.gateway.channel_directory import ChannelDirectory
     from opencomputer.plugins.loader import PluginAPI
+    from plugin_sdk.consent import CapabilityClaim
 
 logger = logging.getLogger("opencomputer.gateway.dispatch")
 
@@ -57,9 +58,32 @@ class Dispatch:
         # send-message tools can resolve friendly names instead of raw
         # numeric ids. ``None`` is fine — record() becomes a no-op.
         self._channel_directory: ChannelDirectory | None = channel_directory
+        # Round 2a P-5 — session ↔ (adapter, chat_id) binding map.
+        # Populated on every inbound ``handle_message`` so a later
+        # consent prompt can find the right channel surface to ask the
+        # user on. Capped implicitly: when a session goes idle and a
+        # new one starts, the entry is overwritten on the next inbound
+        # message. We never grow without bound because session ids are
+        # deterministic per (platform, chat_id).
+        self._session_channels: dict[str, tuple[Any, str]] = {}
+        # Token registry — opaque request tokens minted in the prompt
+        # handler so we don't leak session_id / capability_id onto the
+        # Telegram callback wire. Maps token → (session_id, cap_id).
+        self._approval_tokens: dict[str, tuple[str, str]] = {}
+        # Wire ourselves up as the gate's channel-side prompt handler if
+        # the loop has a gate attached. Idempotent: re-setting later is
+        # safe, and tests can construct Dispatch without a gate.
+        gate = getattr(loop, "_consent_gate", None)
+        if gate is not None and hasattr(gate, "set_prompt_handler"):
+            gate.set_prompt_handler(self._send_approval_prompt)
 
     def register_adapter(self, platform: str, adapter) -> None:
         self._adapters_by_platform[platform] = adapter
+        # Round 2a P-5 — if the adapter exposes the approval-button
+        # surface, route its callbacks through us so we can translate
+        # opaque tokens back into ``ConsentGate.resolve_pending`` calls.
+        if hasattr(adapter, "set_approval_callback"):
+            adapter.set_approval_callback(self._handle_approval_click)
 
     def _session_id_for(self, event: MessageEvent) -> str:
         """Stable session id: hash(platform + chat_id). Keeps history per chat."""
@@ -109,6 +133,15 @@ class Dispatch:
         if not event.text.strip():
             return None
         session_id = self._session_id_for(event)
+        # Round 2a P-5 — record the (adapter, chat_id) binding so a
+        # consent prompt later in this turn can find the right surface
+        # to ask the user on. Best-effort: missing adapter = legacy
+        # CLI/wire path, no harm done.
+        adapter = self._adapters_by_platform.get(
+            event.platform.value if event.platform else ""
+        )
+        if adapter is not None:
+            self._session_channels[session_id] = (adapter, event.chat_id)
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
             # Start a typing heartbeat (Telegram's typing state expires after
@@ -166,6 +199,109 @@ class Dispatch:
                 await asyncio.sleep(4.0)
         except asyncio.CancelledError:
             return
+
+    # ------------------------------------------------------------------
+    # Round 2a P-5 — channel-side approval prompt
+    # ------------------------------------------------------------------
+
+    async def _send_approval_prompt(
+        self,
+        session_id: str,
+        claim: CapabilityClaim,
+        scope: str | None,
+    ) -> bool:
+        """Channel-side ``PromptHandler`` registered on ConsentGate.
+
+        Looks up the (adapter, chat_id) bound to ``session_id``, mints
+        an opaque correlation token, registers it so a later button
+        click can be mapped back to (session_id, capability_id), and
+        asks the adapter to render the approval prompt with inline
+        buttons. Returns True if the prompt was sent successfully so
+        the gate knows to block waiting for the click.
+
+        Adapters without an inline-button surface (no
+        ``send_approval_request`` method) cause this to return False;
+        the gate then auto-denies immediately rather than burning the
+        timeout.
+        """
+        binding = self._session_channels.get(session_id)
+        if binding is None:
+            return False
+        adapter, chat_id = binding
+        if not hasattr(adapter, "send_approval_request"):
+            return False
+
+        gate = getattr(self.loop, "_consent_gate", None)
+        if gate is None:
+            return False
+
+        token = uuid.uuid4().hex[:24]
+        prompt_text = gate.render_prompt(claim, scope)
+        try:
+            result = await adapter.send_approval_request(
+                chat_id=chat_id,
+                prompt_text=prompt_text,
+                request_token=token,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "approval prompt failed for session=%s capability=%s: %s",
+                session_id, claim.capability_id, exc,
+            )
+            return False
+        if result is not None and getattr(result, "success", False) is False:
+            logger.warning(
+                "approval prompt rejected by adapter for session=%s "
+                "capability=%s: %s",
+                session_id, claim.capability_id,
+                getattr(result, "error", "<no detail>"),
+            )
+            return False
+        # Only register the token after the prompt is on the wire;
+        # otherwise a synchronous failure would leave a dangling entry
+        # that a stale click could pick up against a future request.
+        self._approval_tokens[token] = (session_id, claim.capability_id)
+        return True
+
+    async def _handle_approval_click(self, verb: str, token: str) -> None:
+        """Adapter-side approval-callback receiver.
+
+        Translates the opaque ``(verb, token)`` tuple back into a
+        ``ConsentGate.resolve_pending`` call. Stale clicks (token not
+        in the registry) are dropped quietly.
+        """
+        binding = self._approval_tokens.pop(token, None)
+        if binding is None:
+            logger.info(
+                "approval click for unknown token=%s — stale/duplicate, ignored",
+                token,
+            )
+            return
+        session_id, capability_id = binding
+        gate = getattr(self.loop, "_consent_gate", None)
+        if gate is None:
+            return
+        if verb == "once":
+            decision, persist = True, False
+        elif verb == "always":
+            decision, persist = True, True
+        elif verb == "deny":
+            decision, persist = False, False
+        else:
+            logger.warning("approval click unknown verb=%s token=%s", verb, token)
+            return
+        resolved = gate.resolve_pending(
+            session_id=session_id,
+            capability_id=capability_id,
+            decision=decision,
+            persist=persist,
+        )
+        if not resolved:
+            logger.info(
+                "approval click verb=%s session=%s capability=%s "
+                "had no pending request — stale callback",
+                verb, session_id, capability_id,
+            )
 
 
 __all__ = ["Dispatch"]
