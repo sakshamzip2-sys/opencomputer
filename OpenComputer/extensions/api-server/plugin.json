@@ -1,0 +1,23 @@
+{
+  "id": "api-server",
+  "name": "API Server",
+  "version": "0.1.0",
+  "description": "REST API endpoint exposing the agent over HTTP. POST /v1/chat with JSON body. Bind to 127.0.0.1 by default; flip to 0.0.0.0 only when you understand the auth model.",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "channel",
+  "entry": "plugin",
+  "single_instance": true,
+  "enabled_by_default": false,
+  "profiles": ["*"],
+  "setup": {
+    "channels": [
+      {
+        "id": "api-server",
+        "env_vars": ["API_SERVER_HOST", "API_SERVER_PORT", "API_SERVER_TOKEN"],
+        "label": "API Server (REST)",
+        "signup_url": ""
+      }
+    ]
+  }
+}

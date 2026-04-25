@@ -4,6 +4,37 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.28 — API Server adapter via REST endpoint, Tier 4.x)
+
+- **`extensions/api-server/`** — new bundled channel plugin. Exposes
+  the agent over plain JSON-over-HTTP for external systems (CI, cron,
+  curl) that want to drive the agent without a chat UI.
+  - **Endpoint:** ``POST /v1/chat`` with header
+    ``Authorization: Bearer <token>`` and JSON body
+    ``{session_id?, message}``. Response: ``{session_id, response}``.
+  - **Auth:** static Bearer token from ``API_SERVER_TOKEN`` env var.
+    REQUIRED — registration is a no-op without it.
+  - **Default bind:** ``127.0.0.1:18791``. Set
+    ``API_SERVER_HOST=0.0.0.0`` only after understanding the auth
+    model + setting a strong token. Safe-by-default posture.
+  - **Handler injection:** the adapter exposes ``set_handler(callable)``
+    so the host (gateway / custom embed) wires up the per-request
+    agent loop. Without a handler bound, requests return 503. Keeps
+    the SDK boundary clean — adapter doesn't import from
+    ``opencomputer.*``.
+  - **Capability flag = `0`** (request/response, not push). The
+    inherited ``send()`` method returns a clear "this is a REST
+    endpoint, not a push channel" error so callers don't misuse it.
+  - **payload limit** = 100 KB at framework level so a misbehaving
+    caller can't OOM the process.
+- **Setup metadata** (G.25 pattern): ``setup.channels[].id="api-server"``,
+  env_vars ``["API_SERVER_HOST", "API_SERVER_PORT", "API_SERVER_TOKEN"]``.
+- **9 new tests** in `tests/test_api_server_adapter.py` — capability
+  flag = 0, authorized-chat happy path (handler captures session_id +
+  message), missing/wrong auth → 401, invalid JSON → 400, empty
+  message → 400, no handler bound → 503, handler exception → 500
+  with type-name leak, ``send()`` returns clear not-applicable error.
+
 ### Added (Sub-project G.27 — Signal adapter via signal-cli, Tier 4.x)
 
 - **`extensions/signal/`** — new bundled channel plugin. Signal outbound
