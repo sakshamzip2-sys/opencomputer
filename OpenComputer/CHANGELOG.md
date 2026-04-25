@@ -4,6 +4,13 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Phase A3 — F6 OpenCLI Phase 4 wiring, PR-2 of 2026-04-25 Hermes parity plan)
+
+- **`CapabilityClaim` on each C2 tool** — `ScrapeRawTool`, `FetchProfileTool`, and `MonitorPageTool` each declare a `capability_claims: ClassVar[tuple[CapabilityClaim, ...]]` with a `ConsentTier.EXPLICIT` claim namespaced under `opencli_scraper.*`. The agent loop's F1 ConsentGate enforces these claims at dispatch time before any tool executes — plugins do NOT call `ConsentGate.require()` themselves; the gate is invoked automatically by AgentLoop (see §F1 architecture in `opencomputer/agent/consent/`).
+- **F2 bus publish in `_execute_scrape`** — every successful scrape now publishes a `WebObservationEvent` to `default_bus` (metadata-only: `url`, `domain`, `content_kind`, `payload_size_bytes`, `source="opencli-scraper"`, adapter name in `metadata`). Publish is best-effort: bus failure is caught, logged at WARNING, and never breaks the tool's `ToolResult` return.
+- **`plugin.py::register()` wired** — the "awaiting Phase 4" early-return stub is replaced with real registration: constructs one shared `OpenCLIWrapper`, `RateLimiter`, `RobotsCache` and calls `api.register_tool()` for all 3 tools. Tool classes are loaded under a qualified `extensions.opencli_scraper.tools` sys.modules key to prevent name shadowing against other plugins' `tools/` packages.
+- **`plugin.json` unchanged** — `enabled_by_default: false` STAYS until the user completes legal review.
+- **11 new tests** in `tests/test_opencli_consent_integration.py` — capability claim shape, bus publish on success (both `FetchProfileTool` and `ScrapeRawTool`), bus failure isolation, manifest still-disabled check, register() call count + tool name verification.
 ### Added (Phase 3.D — Temporal Decay + Drift Detection, F5 layer)
 
 - **`plugin_sdk/decay.py`** — public `DecayConfig` + `DriftConfig` + `DriftReport` dataclasses.
