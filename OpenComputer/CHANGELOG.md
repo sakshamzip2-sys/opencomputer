@@ -4,6 +4,33 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.17 — Slack adapter (Web API outbound), Tier 2.12)
+
+- **`extensions/slack/`** — new bundled channel plugin. Outbound + reactions /
+  edit / delete via raw httpx calls to the Slack Web API. **No Socket Mode runtime**
+  — keeps the dep footprint small (no `slack_sdk`). Inbound: users configure Slack
+  Outgoing Webhooks pointing at an OC webhook token (G.3) — covers the most common
+  case "agent posts to a Slack channel" without needing a public URL.
+  - `adapter.py::SlackAdapter` — `connect` verifies the bot token via `auth.test`.
+    `send` posts to `chat.postMessage` (with optional `thread_ts` + `broadcast`
+    for threaded replies). `send_reaction` maps unicode emoji → Slack reaction
+    names (👍 → `thumbsup`, ❤️ → `heart`, etc.) and treats `already_reacted` as
+    success (idempotent). `edit_message` / `delete_message` via `chat.update` /
+    `chat.delete`. Capability flag = REACTIONS + EDIT_MESSAGE + DELETE_MESSAGE
+    + THREADS.
+- **Plugin config** via env var: `SLACK_BOT_TOKEN` (must start `xoxb-`).
+  Plugin warns at register time if the token doesn't have the expected prefix.
+  Required scopes: `chat:write`, `reactions:write`, `chat:write.public`.
+- **21 new tests** in `tests/test_slack_adapter.py` — capability flag advertises
+  G.17 set + skips voice/typing, send + thread + broadcast + slack-error,
+  reactions (unicode mapping, bare-name pass-through, already_reacted idempotence),
+  edit + delete, full emoji-to-name mapping (9 parametrised cases incl bare
+  name, mixed-case, empty), connect handles `invalid_auth`.
+
+Use case: agent's daily briefing also gets posted to a #stocks Slack channel for a
+team / community. Slack Outgoing Webhooks → OC webhook adapter handles the
+inbound side without Socket Mode complexity.
+
 ### Added (Sub-project G.16 — iMessage adapter (BlueBubbles bridge), Tier 2.11)
 
 - **`extensions/imessage/`** — new bundled channel plugin. iMessage via the
