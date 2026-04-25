@@ -122,6 +122,17 @@ class DelegateTool(BaseTool):
                             "Omit for default delegation."
                         ),
                     },
+                    # PR-E: file-coordination for concurrent siblings.
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional. Files this delegate will read/write. "
+                            "Used for sibling-coordination — concurrent delegates with overlapping "
+                            "paths serialize; non-overlapping paths run in parallel. Pass empty/null "
+                            "for fire-and-forget delegations with no filesystem coordination."
+                        ),
+                    },
                 },
                 "required": ["task"],
             },
@@ -241,6 +252,23 @@ class DelegateTool(BaseTool):
             if not explicit_allowed and template.tools:
                 allowed = frozenset(template.tools)
 
+        # PR-E: file-coordination for concurrent siblings.
+        # Acquire per-path locks BEFORE the child runs. Released on exit
+        # (success or exception). Empty paths list = no-op.
+        raw_paths = call.arguments.get("paths") or []
+        if not isinstance(raw_paths, list):
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"Error: 'paths' must be a list of strings (got {type(raw_paths).__name__})",
+                is_error=True,
+            )
+
+        # Lazy import to avoid circular dependency on coordinator at module load
+        from opencomputer.tools.delegation_coordinator import (  # noqa: PLC0415
+            DelegationLockTimeout,
+            get_default_coordinator,
+        )
+
         # T1.1: child runtime gets incremented depth
         child_runtime = dataclasses.replace(
             self._current_runtime,
@@ -267,58 +295,69 @@ class DelegateTool(BaseTool):
         # is also explicitly assigned so callers who re-use a loop factory
         # don't inherit a stale allowlist from a prior delegation.
         subagent_loop.allowed_tools = allowed
-        # Propagate the parent's runtime context — plan mode, yolo mode, etc.
-        # must apply to subagents too, otherwise delegating becomes an escape hatch.
-        # III.5: pass the template's system_prompt to the child loop. When
-        # ``template is None`` the kwarg is ``None`` and the child builds
-        # its usual declarative + skills + memory + SOUL prompt (existing
-        # behavior). With a template, the template BODY is the whole
-        # prompt — no further injection on top.
-        result = await subagent_loop.run_conversation(
-            user_message=task,
-            runtime=child_runtime,   # ← was self._current_runtime
-            system_prompt_override=(
-                template.system_prompt if template is not None else None
-            ),
-        )
-        # D7: emit SubagentStop hook when the delegated subagent finishes
-        # so plugins can log / summarize / react. Fire-and-forget.
-        try:
-            from opencomputer.hooks.engine import engine as _hook_engine
-            from plugin_sdk.hooks import HookContext, HookEvent
 
-            _hook_engine.fire_and_forget(
-                HookContext(
-                    event=HookEvent.SUBAGENT_STOP,
-                    session_id=result.session_id,
-                    runtime=child_runtime,
+        coordinator = get_default_coordinator()
+        try:
+            async with coordinator.acquire_paths(raw_paths):
+                # Propagate the parent's runtime context — plan mode, yolo mode,
+                # etc. must apply to subagents too, otherwise delegating becomes
+                # an escape hatch.
+                # III.5: pass the template's system_prompt to the child loop.
+                # When ``template is None`` the kwarg is ``None`` and the child
+                # builds its usual declarative + skills + memory + SOUL prompt
+                # (existing behavior). With a template, the template BODY is the
+                # whole prompt — no further injection on top.
+                result = await subagent_loop.run_conversation(
+                    user_message=task,
+                    runtime=child_runtime,   # ← was self._current_runtime
+                    system_prompt_override=(
+                        template.system_prompt if template is not None else None
+                    ),
                 )
+                # D7: emit SubagentStop hook when the delegated subagent finishes
+                # so plugins can log / summarize / react. Fire-and-forget.
+                try:
+                    from opencomputer.hooks.engine import engine as _hook_engine
+                    from plugin_sdk.hooks import HookContext, HookEvent
+
+                    _hook_engine.fire_and_forget(
+                        HookContext(
+                            event=HookEvent.SUBAGENT_STOP,
+                            session_id=result.session_id,
+                            runtime=child_runtime,
+                        )
+                    )
+                except Exception:
+                    # Hook emission must never break the main delegate flow.
+                    pass
+
+                # T3.2 (PR-8): publish DelegationCompleteEvent so MemoryBridge
+                # subscribers (and any other bus listener) can react. Best-effort.
+                try:
+                    from opencomputer.ingestion.bus import default_bus as _bus
+                    from plugin_sdk.ingestion import DelegationCompleteEvent
+
+                    _child_outcome = "failure" if result.final_message.content is None else "success"
+                    _bus.publish(DelegationCompleteEvent(
+                        session_id=call.id,  # parent tool-call id as session context
+                        source="agent_loop",
+                        parent_session_id="",  # parent session_id unavailable here; set to empty
+                        child_session_id=result.session_id,
+                        child_outcome=_child_outcome,
+                    ))
+                except Exception:
+                    pass
+
+                return ToolResult(
+                    tool_call_id=call.id,
+                    content=result.final_message.content,
+                )
+        except DelegationLockTimeout as exc:
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"Error: {exc}",
+                is_error=True,
             )
-        except Exception:
-            # Hook emission must never break the main delegate flow.
-            pass
-
-        # T3.2 (PR-8): publish DelegationCompleteEvent so MemoryBridge
-        # subscribers (and any other bus listener) can react. Best-effort.
-        try:
-            from opencomputer.ingestion.bus import default_bus as _bus
-            from plugin_sdk.ingestion import DelegationCompleteEvent
-
-            _child_outcome = "failure" if result.final_message.content is None else "success"
-            _bus.publish(DelegationCompleteEvent(
-                session_id=call.id,  # parent tool-call id as session context
-                source="agent_loop",
-                parent_session_id="",  # parent session_id unavailable here; set to empty
-                child_session_id=result.session_id,
-                child_outcome=_child_outcome,
-            ))
-        except Exception:
-            pass
-
-        return ToolResult(
-            tool_call_id=call.id,
-            content=result.final_message.content,
-        )
 
 
 __all__ = ["DelegateTool", "DELEGATE_BLOCKED_TOOLS"]
