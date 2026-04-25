@@ -55,10 +55,9 @@ Both sessions read this file at startup. Both update it after every commit.
 > Sessions update this section after each commit. Keep entries terse (one line each).
 > When a session is idle / between turns, remove its entries.
 
-### Session A — [Idle / active]
+### Session A — active
 
-*No active work entries yet. After each commit Session A writes:*
-*`[YYYY-MM-DD HH:MM] <branch> touched <file-paths>`*
+- `[2026-04-25 13:00] feat/f2-typed-event-bus-3a` touched `plugin_sdk/ingestion.py` (NEW), `plugin_sdk/__init__.py` (re-exports), `opencomputer/ingestion/{__init__,bus}.py` (NEW), `opencomputer/agent/loop.py` (publisher wiring in `_dispatch_tool_calls` + new `_emit_tool_call_event`), `docs/sdk-reference.md` (new Ingestion section), `docs/parallel-sessions.md` (this file — bus API change log entry + active-working entry), `CHANGELOG.md` (append [Unreleased] entry), `tests/test_typed_event_bus.py` (NEW — 22 tests), `tests/test_signal_normalizer.py` (NEW — 8 tests), `tests/test_loop_emits_bus_events.py` (NEW — 5 tests). Full suite at **1734 passing** (was 1699 entering 3.A). Ruff clean. **Session B B3 unblocked** — see Bus API change log below. Worktree at `/tmp/oc-3a`. **Zero Session-B or Session-C reserved files touched.**
 
 ### Session B — active
 
@@ -91,7 +90,7 @@ Phase B3 of the Session B plan subscribes to Session A's TypedEvent bus at `open
 
 *Format: `[YYYY-MM-DD] <change> — <migration-note-for-Session-B>`*
 
-*None yet — Session A has not yet shipped F2 TypedEvent bus.*
+- `[2026-04-25]` Initial bus API shipped (Phase 3.A) — public types in `plugin_sdk/ingestion.py`: `SignalEvent` + 5 subclasses (`ToolCallEvent`, `WebObservationEvent`, `FileObservationEvent`, `MessageSignalEvent`, `HookSignalEvent`) + `SignalNormalizer` ABC + `IdentityNormalizer`. Bus singleton via `opencomputer.ingestion.bus.default_bus` (also reachable through `get_default_bus()`). Sync `publish` + async `apublish`; subscribers via `subscribe(event_type, handler)` / `subscribe_pattern("web_*", handler)` / `subscribe(None, handler)` for wildcard. `Subscription.unsubscribe()` is idempotent. **Session B may now subscribe.** B3's trajectory recorder should attach as `default_bus.subscribe("tool_call", recorder)` and rely on the per-subscription `BackpressurePolicy` enum for backpressure. The two `*SignalEvent` class names (vs `MessageEvent` / `HookEvent`) are an intentional collision-avoidance choice — discriminator strings (`"message"`, `"hook"`) match the original phase-3.A spec naming.
 
 ---
 
