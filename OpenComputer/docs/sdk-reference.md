@@ -580,6 +580,63 @@ event_type)`; `clear_normalizers()` is a test-only reset helper.
 
 ---
 
+## Sandbox (Phase 3.E)
+
+The `plugin_sdk.sandbox` module is the public contract for pluggable
+containment. Concrete strategies live in `opencomputer/sandbox/` (internal
+— may evolve). Plugins import the contract types from here; tools that
+need to spawn untrusted argv use the `run_sandboxed(...)` helper from
+the core.
+
+### `SandboxConfig`
+
+Frozen+slots dataclass describing per-invocation policy. Fields:
+`strategy: SandboxStrategyName = "auto"` (auto / macos_sandbox_exec /
+linux_bwrap / docker / none); `cpu_seconds_limit: int = 60` (wall-clock
+cap, enforced via subprocess timeout); `memory_mb_limit: int = 512`
+(passed to bwrap+docker, ignored by macOS sandbox-exec); `network_allowed:
+bool = False` (default deny); `read_paths: tuple[str, ...] = ()`
+(extra paths the sandboxed process may read); `write_paths: tuple[str,
+...] = ()` (extra writable paths); `allowed_env_vars: tuple[str, ...] =
+("PATH", "HOME", "LANG", "LC_ALL")` (env-var allowlist); `image: str
+= "alpine:latest"` (Docker image — only used by the docker strategy).
+Defaults are conservative: deny network, no extra paths, 60s wall
+clock, 512 MB memory.
+
+### `SandboxResult`
+
+Frozen+slots dataclass returned by every strategy's `run()`. Fields:
+`exit_code: int`, `stdout: str`, `stderr: str`, `duration_seconds:
+float`, `wrapped_command: list[str]` (the actual argv that was
+executed, useful for debugging / auditing), `strategy_name: str`
+(short id of the strategy that produced this result).
+
+### `SandboxStrategy`
+
+Abstract base class for concrete strategies. Subclasses live in
+`opencomputer/sandbox/`. ABC contract: `name: ClassVar[str]`,
+`is_available(self) -> bool` (cheap, cached host capability check),
+`async run(self, argv, *, config, stdin=None, cwd=None) -> SandboxResult`,
+`explain(self, argv, *, config) -> list[str]` (returns the wrapped
+command without running it — useful for `--dry-run`). Implementations
+MUST use `asyncio.create_subprocess_exec` (never the blocking
+`subprocess` module), strip env vars not in `config.allowed_env_vars`,
+and enforce `config.cpu_seconds_limit` via timeout.
+
+### `SandboxStrategyName`
+
+`Literal["auto","macos_sandbox_exec","linux_bwrap","docker","none"]`
+— the alphabet of valid `SandboxConfig.strategy` values.
+
+### `SandboxUnavailable`
+
+`RuntimeError` subclass raised when a requested strategy can't run on
+the host. The `auto` strategy raises this only when **no** strategy is
+available; the message names `SandboxConfig(strategy="none")` as the
+opt-out for trusted internal use.
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute

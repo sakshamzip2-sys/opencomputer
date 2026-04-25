@@ -4,6 +4,14 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Phase 3.E — Pluggable Sandbox Strategy)
+
+- **`plugin_sdk/sandbox.py`** — `SandboxStrategy` ABC + `SandboxConfig` + `SandboxResult` + `SandboxUnavailable` public types.
+- **`opencomputer/sandbox/`** — concrete `MacOSSandboxExecStrategy` (sandbox-exec), `LinuxBwrapStrategy` (bwrap), `DockerStrategy` (docker run), `NoneSandboxStrategy` (opt-out), `auto_strategy()` picks the best available for the host.
+- **`opencomputer/sandbox/runner.py::run_sandboxed`** — one-call async helper used by tools that need containment.
+- **`opencomputer sandbox status / run / explain` CLI** — visibility + dry-run + invocation.
+- **Future F7 wiring**: Session C's OI bridge will route OI's bash + arbitrary-shell tools through `run_sandboxed` per `docs/f7/design.md`. Phase 3.E ships only the primitive — wiring lands in Phase 5 OI integration.
+
 ### Added (Phase B3 — Evolution trajectory auto-collection via TypedEvent bus, parallel Session B)
 
 - **`opencomputer/evolution/trajectory.py::register_with_bus`** — subscribes to Session A's F2 TypedEvent bus (`opencomputer.ingestion.bus.default_bus`, landed in 3.A) for `"tool_call"` events. Each `ToolCallEvent` is converted to a `TrajectoryEvent` and accumulated into an in-memory open trajectory keyed by `session_id`. **Exception-isolated** — any handler exception is logged but never propagates to the bus's other subscribers (defense in depth on top of bus's own per-subscriber try/except).

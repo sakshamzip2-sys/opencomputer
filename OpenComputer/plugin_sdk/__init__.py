@@ -75,6 +75,13 @@ from plugin_sdk.runtime_context import (
     RequestContext,
     RuntimeContext,
 )
+from plugin_sdk.sandbox import (
+    SandboxConfig,
+    SandboxResult,
+    SandboxStrategy,
+    SandboxStrategyName,
+    SandboxUnavailable,
+)
 from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -148,4 +155,10 @@ __all__ = [
     "FileOperation",
     "MessageRole",
     "HookDecisionKind",
+    # sandbox (Phase 3.E)
+    "SandboxConfig",
+    "SandboxResult",
+    "SandboxStrategy",
+    "SandboxStrategyName",
+    "SandboxUnavailable",
 ]
