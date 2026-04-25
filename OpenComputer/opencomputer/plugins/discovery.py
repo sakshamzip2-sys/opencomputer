@@ -25,6 +25,7 @@ from plugin_sdk.core import (
     ModelSupport,
     PluginManifest,
     PluginSetup,
+    SetupChannel,
     SetupProvider,
 )
 
@@ -127,6 +128,17 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
                     signup_url=p.signup_url,
                 )
                 for p in schema.setup.providers
+            ),
+            # G.25 — channel setup metadata (symmetric to providers)
+            channels=tuple(
+                SetupChannel(
+                    id=c.id,
+                    env_vars=tuple(c.env_vars),
+                    label=c.label,
+                    signup_url=c.signup_url,
+                    requires_user_id=c.requires_user_id,
+                )
+                for c in schema.setup.channels
             ),
             requires_runtime=schema.setup.requires_runtime,
         )

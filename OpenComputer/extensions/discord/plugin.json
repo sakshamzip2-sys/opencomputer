@@ -7,5 +7,15 @@
   "license": "MIT",
   "kind": "channel",
   "entry": "plugin",
-  "tool_names": []
+  "tool_names": [],
+  "setup": {
+    "channels": [
+      {
+        "id": "discord",
+        "env_vars": ["DISCORD_BOT_TOKEN"],
+        "label": "Discord",
+        "signup_url": "https://discord.com/developers/applications"
+      }
+    ]
+  }
 }

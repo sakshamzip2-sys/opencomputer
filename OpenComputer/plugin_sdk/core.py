@@ -164,12 +164,57 @@ class SetupProvider:
 
 
 @dataclass(frozen=True, slots=True)
+class SetupChannel:
+    """Cheap setup metadata for one channel id a plugin exposes.
+
+    Sub-project G.25 (Tier 4 OpenClaw port follow-up). Symmetric to
+    :class:`SetupProvider` but for channel plugins (Telegram, Discord,
+    iMessage, etc.). The setup wizard reads this so the user can be
+    walked through each channel's required env vars without core
+    hard-coding the per-channel knowledge.
+    """
+
+    id: str
+    """Channel id surfaced during setup (e.g. ``"telegram"``, ``"discord"``)."""
+
+    env_vars: tuple[str, ...] = ()
+    """Env vars that must be set for the channel to authenticate.
+
+    Order matters: the first env var is treated as the primary
+    credential. Subsequent entries cover supplemental auth (user-id
+    allowlists, webhook secrets, etc.).
+    """
+
+    label: str = ""
+    """Human-readable display name (e.g. ``"Telegram"``).
+
+    Empty string falls back to ``id`` when rendered in the wizard.
+    """
+
+    signup_url: str = ""
+    """URL where the user can obtain the credential (e.g. BotFather).
+
+    Empty string suppresses the hint.
+    """
+
+    requires_user_id: bool = False
+    """``True`` if the channel needs a user-id allowlist (Telegram pattern).
+
+    Telegram bots accept any chat unless restricted via a user-id
+    allowlist. The setup wizard prompts for the user's Telegram id
+    when this is ``True``.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class PluginSetup:
     """Cheap setup metadata exposed before plugin runtime loads.
 
     Sub-project G.23 (Tier 4 OpenClaw port). Mirrors OpenClaw's
     ``PluginManifestSetup`` at
     ``sources/openclaw-2026.4.23/src/plugins/manifest.ts:85-97``.
+    Sub-project G.25 adds ``channels`` for channel-plugin metadata
+    symmetric to ``providers``.
 
     Default-empty fields mean "no declarations" — backwards-compatible
     with existing manifests.
@@ -177,6 +222,9 @@ class PluginSetup:
 
     providers: tuple[SetupProvider, ...] = ()
     """Provider ids this plugin exposes to setup/doctor flows."""
+
+    channels: tuple[SetupChannel, ...] = ()
+    """Channel ids this plugin exposes to setup/doctor flows (G.25)."""
 
     requires_runtime: bool = False
     """``True`` if setup still needs to import the plugin's Python.
@@ -378,6 +426,7 @@ __all__ = [
     "PluginManifest",
     "PluginActivationSource",
     "PluginSetup",
+    "SetupChannel",
     "SetupProvider",
     "VALID_ACTIVATION_SOURCES",
     "StopReason",
