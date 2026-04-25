@@ -841,13 +841,25 @@ class AgentLoop:
                 raise RuntimeError("stream ended without a 'done' event")
             resp = final_response
         else:
-            resp = await self.provider.complete(
-                model=model_name,
-                messages=wire_messages,
-                system=system,
-                tools=tool_schemas,
-                max_tokens=self.config.model.max_tokens,
-                temperature=self.config.model.temperature,
+            # G.31 — wrap the provider call in the fallback router so
+            # transient failures (429 / 5xx / connection refused) walk
+            # the configured ``fallback_models`` chain before raising.
+            from opencomputer.agent.fallback import call_with_fallback
+
+            async def _do_call(active_model: str):
+                return await self.provider.complete(
+                    model=active_model,
+                    messages=wire_messages,
+                    system=system,
+                    tools=tool_schemas,
+                    max_tokens=self.config.model.max_tokens,
+                    temperature=self.config.model.temperature,
+                )
+
+            resp = await call_with_fallback(
+                _do_call,
+                primary_model=model_name,
+                fallback_models=self.config.model.fallback_models,
             )
 
         stop_reason_map = {

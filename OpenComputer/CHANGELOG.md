@@ -4,6 +4,38 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.31 — Smart model fallback routing, Tier 4)
+
+- **`ModelConfig.fallback_models: tuple[str, ...] = ()`** — new config
+  field. Ordered list of model ids to try on transient errors when the
+  primary model fails. Default-empty tuple keeps existing behavior
+  (no fallback).
+- **`opencomputer/agent/fallback.py`** — new module with two functions:
+  - `is_transient_error(exc)` — string-based classifier for HTTP 429,
+    5xx, connection refused, connection reset, timeouts. Conservative:
+    when in doubt, returns False (don't waste quota retrying an
+    unrecoverable error). Mirrors the auth-failure heuristic in
+    ``extensions/anthropic-provider/provider.py``.
+  - `call_with_fallback(call, primary, chain)` — runs the call against
+    each model in turn, stops at the first success. Re-raises the LAST
+    error (most recent diagnostic). Non-transient errors short-circuit
+    so an auth failure doesn't burn three more attempts.
+- **`AgentLoop._run_one_step` (non-streaming path)** wraps the
+  `provider.complete()` call in `call_with_fallback`. The streaming
+  path is intentionally NOT wrapped — once tokens have flowed to the
+  user, the loop is committed to that model. Streaming-mode fallback
+  needs a separate buffering design and lands later.
+- **No cross-provider fallback** — all models in the chain use the
+  same `provider`. Mixing providers mid-turn has subtle implications
+  for tool schemas, streaming shape, and prompt-cache identity; we
+  keep the failure mode predictable.
+- **26 new tests** in `tests/test_model_fallback.py` — `is_transient_error`
+  positives (11 markers including "rate_limit", "overloaded", "timed
+  out") and negatives (auth errors, "code-429-special-day" false-
+  positive guard); `call_with_fallback` happy path / partial failure
+  / full chain exhaustion / non-transient short-circuit / empty-chain
+  collapse; `ModelConfig` field defaults / tuple acceptance / hashability.
+
 ### Added (Sub-project G.30 — `opencomputer mcp scaffold` CLI, Tier 4)
 
 - **New CLI command** `opencomputer mcp scaffold <name> [--dir DIR]
