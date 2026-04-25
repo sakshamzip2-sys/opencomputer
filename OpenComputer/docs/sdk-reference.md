@@ -739,6 +739,49 @@ opt-out for trusted internal use.
 
 ---
 
+## Temporal decay + drift (Phase 3.D, F5 layer)
+
+Phase 3.D ages out user-model edges and flags distribution shifts in
+the 3.B motif stream. These primitives are the public contract;
+concrete engines live in `opencomputer/user_model/{decay,drift,
+drift_store,scheduler}.py`.
+
+### `DecayConfig`
+
+Frozen+slots dataclass of per-edge-kind half-life knobs for the
+exponential decay formula `weight = 0.5 ** (age_days / half_life)`
+floored at `min_recency_weight`. Fields: `asserts_half_life_days:
+float = 30.0`, `contradicts_half_life_days: float = 14.0`,
+`supersedes_half_life_days: float = 60.0`,
+`derives_from_half_life_days: float = 21.0`, `min_recency_weight:
+float = 0.05` (floor below which decay stops), `default_half_life_days:
+float = 30.0` (fallback for unknown edge kinds).
+
+### `DriftConfig`
+
+Frozen+slots dataclass of knobs for symmetrized-KL drift detection
+over motif distributions. Fields: `recent_window_days: float = 7.0`,
+`min_lifetime_count: int = 5` (drop sparse labels from KL), `kl_significance_threshold:
+float = 0.5` (total_kl above this → `significant=True`),
+`top_changes_count: int = 5` (how many biggest label deltas the report
+carries), `smoothing_epsilon: float = 0.01` (Laplace smoothing for
+zero counts).
+
+### `DriftReport`
+
+Frozen+slots dataclass summarising one drift-detection run. Fields:
+`report_id: str` (UUID4), `created_at: float` (unix epoch seconds),
+`window_seconds: float` (recent window analysed),
+`total_kl_divergence: float`, `per_kind_drift: Mapping[str, float]`
+(KL grouped by motif kind prefix), `recent_distribution: Mapping[str,
+int]`, `lifetime_distribution: Mapping[str, int]`, `top_changes:
+tuple[Mapping[str, Any], ...]` (biggest deltas — each entry carries
+`label`, `recent_count`, `lifetime_count`, `delta_ratio`),
+`significant: bool` (total_kl > threshold). Persisted by
+`opencomputer.user_model.drift_store.DriftStore`.
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute

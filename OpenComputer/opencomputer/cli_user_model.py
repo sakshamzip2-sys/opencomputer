@@ -17,6 +17,7 @@ command is the main path for converting 3.B motifs into graph state.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from typing import Annotated
@@ -26,6 +27,9 @@ from rich.console import Console
 from rich.table import Table
 
 from opencomputer.user_model.context import ContextRanker
+from opencomputer.user_model.decay import DecayEngine
+from opencomputer.user_model.drift import DriftDetector
+from opencomputer.user_model.drift_store import DriftStore
 from opencomputer.user_model.importer import MotifImporter
 from opencomputer.user_model.store import UserModelStore
 from plugin_sdk.user_model import NodeKind, UserModelQuery
@@ -49,6 +53,21 @@ edges_app = typer.Typer(
     no_args_is_help=True,
 )
 user_model_app.add_typer(edges_app, name="edges")
+
+# Phase 3.D — decay + drift subapps.
+decay_app = typer.Typer(
+    name="decay",
+    help="Temporal decay — age out edges by per-kind half-life (Phase 3.D).",
+    no_args_is_help=True,
+)
+user_model_app.add_typer(decay_app, name="decay")
+
+drift_app = typer.Typer(
+    name="drift",
+    help="Drift detection — KL divergence on motif distributions (Phase 3.D).",
+    no_args_is_help=True,
+)
+user_model_app.add_typer(drift_app, name="drift")
 
 
 _VALID_NODE_KINDS = ("identity", "attribute", "relationship", "goal", "preference")
@@ -318,6 +337,184 @@ def context(
     for n in snap.nodes:
         table.add_row(n.kind, f"{n.confidence:.2f}", n.value)
     console.print(table)
+
+
+# ─── decay ────────────────────────────────────────────────────────────
+
+
+@decay_app.command("run")
+def decay_run(
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Persist new recency weights; without this, print what would change.",
+        ),
+    ] = False,
+) -> None:
+    """Run the temporal-decay pass over every edge.
+
+    Without ``--apply`` prints per-edge "would update" lines without
+    touching the store — useful for inspecting the effect of a config
+    change before committing. With ``--apply`` walks the full edge set
+    and persists new ``recency_weight`` values via
+    :meth:`UserModelStore.update_edge_recency_weight`.
+    """
+    store = UserModelStore()
+    engine = DecayEngine(store=store)
+    console = Console()
+    if apply:
+        count = engine.apply_decay()
+        console.print(
+            f"[green]✓[/green] decay applied — [bold]{count}[/bold] edge(s) updated"
+        )
+        return
+    # Dry-run: list the would-be updates without persisting.
+    edges = store.list_edges(limit=1000)
+    if not edges:
+        console.print("[dim]no edges in store[/dim]")
+        return
+    table = Table(title=f"decay preview (n={len(edges)}) — use --apply to persist")
+    table.add_column("kind", style="cyan", no_wrap=True)
+    table.add_column("edge", style="dim")
+    table.add_column("age_d", justify="right")
+    table.add_column("old_rec", justify="right")
+    table.add_column("new_rec", justify="right")
+    import time as _time
+    now = _time.time()
+    for e in edges:
+        age_days = max(0.0, (now - e.created_at) / 86400.0)
+        new_w = engine.compute_recency_weight(e, now=now)
+        table.add_row(
+            e.kind,
+            f"{e.edge_id[:8]}…",
+            f"{age_days:.1f}",
+            f"{e.recency_weight:.3f}",
+            f"{new_w:.3f}",
+        )
+    console.print(table)
+
+
+# ─── drift ────────────────────────────────────────────────────────────
+
+
+def _format_report_table(report, title: str) -> Table:
+    """Build a Rich table summarising a :class:`DriftReport`."""
+    table = Table(title=title)
+    table.add_column("field", style="cyan", no_wrap=True)
+    table.add_column("value")
+    table.add_row("report_id", report.report_id)
+    table.add_row("created_at", f"{report.created_at:.0f}")
+    table.add_row("window_seconds", f"{report.window_seconds:.0f}")
+    table.add_row("total_kl", f"{report.total_kl_divergence:.4f}")
+    table.add_row("significant", str(report.significant))
+    if report.per_kind_drift:
+        parts = ", ".join(
+            f"{k}={v:.3f}" for k, v in sorted(report.per_kind_drift.items())
+        )
+        table.add_row("per_kind", parts)
+    if report.top_changes:
+        lines = [
+            (
+                f"{c.get('label')} "
+                f"(recent={c.get('recent_count')} lifetime={c.get('lifetime_count')} "
+                f"ratio={c.get('delta_ratio'):.2f})"
+            )
+            for c in report.top_changes
+        ]
+        table.add_row("top_changes", "\n".join(lines))
+    return table
+
+
+@drift_app.command("detect")
+def drift_detect(
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Persist the resulting report to the drift store.",
+        ),
+    ] = False,
+) -> None:
+    """Run a drift-detection pass and print the report.
+
+    Without ``--apply`` the detector runs in read-only mode and the
+    report is printed but not persisted. With ``--apply`` the report
+    is stashed in :class:`DriftStore` alongside its ``report_id``.
+    """
+    drift_store = DriftStore() if apply else None
+    detector = DriftDetector(drift_store=drift_store)
+    report = detector.detect()
+    console = Console()
+    title = (
+        "drift report (persisted)" if apply else "drift report (dry-run; not persisted)"
+    )
+    console.print(_format_report_table(report, title))
+
+
+@drift_app.command("list")
+def drift_list(
+    significant_only: Annotated[
+        bool,
+        typer.Option("--significant-only", help="Skip reports with significant=False."),
+    ] = False,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Cap on rows returned."),
+    ] = 20,
+) -> None:
+    """List recent drift reports from the archive."""
+    store = DriftStore()
+    rows = store.list(significant_only=significant_only, limit=limit)
+    console = Console()
+    if not rows:
+        console.print("[dim]no drift reports stored[/dim]")
+        return
+    table = Table(title=f"drift reports (n={len(rows)})")
+    table.add_column("report_id", style="dim")
+    table.add_column("created_at", no_wrap=True)
+    table.add_column("total_kl", justify="right")
+    table.add_column("significant")
+    for r in rows:
+        created = time.strftime(
+            "%Y-%m-%d %H:%M:%S",
+            time.localtime(r.created_at),
+        )
+        table.add_row(
+            f"{r.report_id[:8]}…",
+            created,
+            f"{r.total_kl_divergence:.4f}",
+            "[red]yes[/red]" if r.significant else "no",
+        )
+    console.print(table)
+
+
+@drift_app.command("show")
+def drift_show(
+    report_id: Annotated[
+        str,
+        typer.Argument(help="UUID of the report to render (prefix-match is NOT supported)."),
+    ],
+) -> None:
+    """Dump a stored drift report as JSON."""
+    store = DriftStore()
+    report = store.get(report_id)
+    console = Console()
+    if report is None:
+        console.print(f"[bold red]error:[/bold red] no report with id {report_id!r}")
+        raise typer.Exit(1)
+    payload = {
+        "report_id": report.report_id,
+        "created_at": report.created_at,
+        "window_seconds": report.window_seconds,
+        "total_kl_divergence": report.total_kl_divergence,
+        "per_kind_drift": dict(report.per_kind_drift),
+        "recent_distribution": dict(report.recent_distribution),
+        "lifetime_distribution": dict(report.lifetime_distribution),
+        "top_changes": [dict(c) for c in report.top_changes],
+        "significant": report.significant,
+    }
+    console.print_json(json.dumps(payload))
 
 
 __all__ = ["user_model_app"]
