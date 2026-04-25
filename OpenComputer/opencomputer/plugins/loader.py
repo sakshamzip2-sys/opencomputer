@@ -921,12 +921,94 @@ def load_plugin(
     # infrastructure — no extra work at load time beyond one diff call.
     registrations = _compute_plugin_registrations(before_snapshot, after_snapshot)
 
+    # Sub-project G.11 (Tier 2.13): MCP catalog binding. After register()
+    # succeeds, install any preset-MCPs the plugin's manifest declared.
+    # Idempotent — skips servers already in config.yaml. Never blocks load.
+    if manifest.mcp_servers:
+        try:
+            _install_mcp_servers_from_manifest(manifest)
+        except Exception:  # noqa: BLE001 — diagnostic, never block load
+            logger.debug(
+                "MCP catalog binding raised for plugin '%s'; swallowing",
+                manifest.id,
+                exc_info=True,
+            )
+
     logger.info("loaded plugin '%s' v%s", manifest.id, manifest.version)
     return LoadedPlugin(
         candidate=candidate,
         module=module,
         registrations=registrations,
         api=api,
+    )
+
+
+def _install_mcp_servers_from_manifest(manifest) -> None:  # type: ignore[no-untyped-def]
+    """Resolve manifest ``mcp_servers`` (preset slugs) and add them to config.yaml.
+
+    Idempotent: if a server with the same name already exists in config,
+    skip it (don't overwrite — the user may have customised it). Unknown
+    preset slugs are logged at WARNING but don't fail the load.
+
+    Sub-project G.11 (Tier 2.13). See ``opencomputer/mcp/presets.py`` for
+    the preset registry that slugs resolve against.
+    """
+    # Late imports — keep loader.py's import surface narrow + avoid circular
+    # imports through opencomputer.agent.config_store.
+    from opencomputer.agent.config import MCPServerConfig
+    from opencomputer.agent.config_store import load_config, save_config
+    from opencomputer.mcp.presets import get_preset
+
+    cfg = load_config()
+    existing_names = {s.name for s in cfg.mcp.servers}
+    new_servers: list = []
+    for slug in manifest.mcp_servers:
+        preset = get_preset(slug)
+        if preset is None:
+            logger.warning(
+                "plugin '%s' declared MCP slug %r but no such preset exists; skipping",
+                manifest.id,
+                slug,
+            )
+            continue
+        if preset.config.name in existing_names:
+            logger.debug(
+                "plugin '%s' MCP %r already in config — skipping (user customisation respected)",
+                manifest.id,
+                preset.config.name,
+            )
+            continue
+        new_servers.append(
+            MCPServerConfig(
+                name=preset.config.name,
+                transport=preset.config.transport,
+                command=preset.config.command,
+                args=preset.config.args,
+                url=preset.config.url,
+                env=dict(preset.config.env),
+                headers=dict(preset.config.headers),
+                enabled=preset.config.enabled,
+            )
+        )
+        existing_names.add(preset.config.name)
+
+    if not new_servers:
+        return
+
+    # Replace cfg.mcp with the extended servers tuple via dataclasses.replace.
+    import dataclasses
+
+    extended_mcp = dataclasses.replace(
+        cfg.mcp,
+        servers=(*cfg.mcp.servers, *new_servers),
+    )
+    new_cfg = dataclasses.replace(cfg, mcp=extended_mcp)
+    save_config(new_cfg)
+    logger.info(
+        "plugin '%s' auto-installed %d MCP server(s): %s",
+        manifest.id,
+        len(new_servers),
+        ", ".join(s.name for s in new_servers),
     )
 
 

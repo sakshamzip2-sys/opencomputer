@@ -55,6 +55,12 @@ class PluginManifestSchema(BaseModel):
     tool_names: list[str] = Field(default_factory=list)
     # Phase 12b1 Sub-project A — Honcho-as-default
     enabled_by_default: bool = Field(default=False)
+    # Sub-project G.11 (Tier 2.13) — MCP catalog binding. Plugin-declared
+    # MCP server presets that should be installed when this plugin
+    # activates. Each entry is a preset slug from
+    # ``opencomputer.mcp.presets.PRESETS`` (e.g. ``"filesystem"``,
+    # ``"github"``). Default empty list means the plugin needs no MCPs.
+    mcp_servers: list[str] = Field(default_factory=list)
     # Phase 14.M/N — already in use via ProfileConfig/WorkspaceOverlay but
     # manifests often carry a schema_version field. Accept it silently.
     schema_version: int | None = Field(default=None)
