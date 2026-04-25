@@ -4,6 +4,30 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.14 — Email channel adapter (IMAP+SMTP), Tier 2.7)
+
+- **`extensions/email/`** — new bundled channel plugin. IMAP polling for inbound +
+  SMTP for outbound. Stdlib only — no new deps. `enabled_by_default: false`.
+  - `adapter.py::EmailAdapter` — connects via `imaplib.IMAP4_SSL` / `smtplib.SMTP_SSL`
+    wrapped in `asyncio.to_thread` so they don't block the gateway loop.
+    Polling every 60 s by default; fetches `UNSEEN`, marks `\Seen` after parse,
+    parses subject + body (multipart-aware, HTML fallback with stdlib stripping),
+    emits `MessageEvent` with the sender's address as `chat_id`. `allowed_senders`
+    config (case-insensitive) blocks random spam from triggering the agent.
+  - Outbound `send(chat_id, text, subject=, in_reply_to=)` constructs an `EmailMessage`
+    with proper threading headers (`In-Reply-To` + `References`) and ships via SMTP_SSL.
+- **Plugin config** via env vars: `EMAIL_IMAP_HOST` / `EMAIL_USERNAME` / `EMAIL_PASSWORD`
+  required; `EMAIL_SMTP_HOST` / `EMAIL_FROM_ADDRESS` / `EMAIL_POLL_INTERVAL` /
+  `EMAIL_MAILBOX` / `EMAIL_ALLOWED_SENDERS` optional.
+- **17 new tests** in `tests/test_email_adapter.py` — capability flag is NONE, plaintext
+  parsing, subject-only, HTML fallback, no-From rejection, allowed-senders filter
+  (block / allow / case-insensitive / no-filter), SMTP send with threading headers,
+  invalid recipient, SMTP failure wrapping, IMAP login on connect, IMAP poll fetches
+  UNSEEN messages, HTML stripping (3 cases).
+
+Use case: Saksham forwards earnings emails / news articles to his configured address;
+OC analyzes and replies to the original sender. Gmail App Password supported.
+
 ### Added (Sub-project G.13 — OAuth/PAT token store for MCP providers, Tier 2.5 v1)
 
 - **`opencomputer/mcp/oauth.py`** — secure token storage at
