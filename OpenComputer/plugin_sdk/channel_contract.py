@@ -5,25 +5,93 @@ A channel adapter translates between a specific messaging platform
 (Telegram, Discord, Slack, ...) and OpenComputer's common MessageEvent
 format. The gateway is platform-agnostic; adapters absorb all the
 platform-specific weirdness.
+
+## Capabilities (Sub-project G — refactor R1)
+
+Adapters declare which optional features they support via the
+``capabilities`` class attribute (a :class:`ChannelCapabilities` flag).
+The base class provides default no-op or NotImplementedError stubs for
+every optional method; adapters override only the methods their
+``capabilities`` flag advertises.
+
+Callers that need to know whether a feature is supported should check
+``adapter.capabilities & ChannelCapabilities.X`` before calling. The
+gateway uses this to gracefully degrade (e.g., emoji ack → text "✓"
+fallback when the channel doesn't support reactions).
 """
 
 from __future__ import annotations
 
+import enum
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from plugin_sdk.core import MessageEvent, Platform, SendResult
 
 
+class ChannelCapabilities(enum.Flag):
+    """Bitfield of optional features a :class:`BaseChannelAdapter` supports.
+
+    Combine via ``|``: ``ChannelCapabilities.TYPING | ChannelCapabilities.REACTIONS``.
+
+    The base class declares ``NONE`` so adapters that don't override get a
+    safe default. Each adapter sets ``capabilities = ChannelCapabilities.X | ...``
+    matching the optional methods it implements.
+    """
+
+    NONE = 0
+    TYPING = enum.auto()
+    REACTIONS = enum.auto()
+    """Send emoji reactions on messages (e.g., 👀 / ✅ / ⚠️)."""
+
+    VOICE_OUT = enum.auto()
+    """Send voice / audio messages outbound."""
+
+    VOICE_IN = enum.auto()
+    """Receive voice messages inbound (delivered via MessageEvent.attachments)."""
+
+    PHOTO_OUT = enum.auto()
+    """Send images / photos outbound."""
+
+    PHOTO_IN = enum.auto()
+    """Receive photos inbound."""
+
+    DOCUMENT_OUT = enum.auto()
+    """Send arbitrary file documents outbound."""
+
+    DOCUMENT_IN = enum.auto()
+    """Receive arbitrary file documents inbound."""
+
+    EDIT_MESSAGE = enum.auto()
+    """Edit a previously-sent message in place (e.g., live streaming updates)."""
+
+    DELETE_MESSAGE = enum.auto()
+    """Delete a previously-sent message."""
+
+    THREADS = enum.auto()
+    """Threaded / topic-based replies (Discord threads, Slack threads, Matrix replies)."""
+
+
 class BaseChannelAdapter(ABC):
-    """Base class for a messaging channel plugin."""
+    """Base class for a messaging channel plugin.
+
+    Required overrides: :attr:`platform`, :meth:`connect`, :meth:`disconnect`,
+    :meth:`send`. Optional overrides depend on what the platform supports —
+    see :class:`ChannelCapabilities`.
+    """
 
     #: The platform this adapter serves.
     platform: Platform
 
     #: Max message length this platform accepts (in chars unless noted).
     max_message_length: int = 10_000
+
+    #: Optional features this adapter supports. Adapters override this to
+    #: advertise their feature set; the gateway checks before calling
+    #: optional methods.
+    capabilities: ChannelCapabilities = ChannelCapabilities.NONE
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
@@ -60,15 +128,96 @@ class BaseChannelAdapter(ABC):
         """Send a text message to a chat."""
         ...
 
+    # ------------------------------------------------------------------
+    # Optional capabilities — override when ``capabilities`` advertises them.
+    # ------------------------------------------------------------------
+
     async def send_typing(self, chat_id: str) -> None:
-        """Send a typing indicator. Optional — default is a no-op."""
+        """Send a typing indicator. Default is a no-op.
+
+        Adapters with ``ChannelCapabilities.TYPING`` should override.
+        """
         return None
 
     async def send_image(
         self, chat_id: str, image_url: str, caption: str = ""
     ) -> SendResult:
-        """Send an image. Optional — default raises NotImplementedError."""
-        raise NotImplementedError(f"{self.platform} adapter has no image support")
+        """Send an image *by URL* (legacy entry point).
+
+        For local-file paths use :meth:`send_photo`. Default raises
+        ``NotImplementedError``; adapters with ``PHOTO_OUT`` capability must
+        override at least one of these two methods.
+        """
+        raise NotImplementedError(f"{self.platform} adapter has no image-by-URL support")
+
+    async def send_photo(
+        self, chat_id: str, photo_path: str | Path, caption: str = "", **kwargs: Any
+    ) -> SendResult:
+        """Send a photo from a local file path.
+
+        Adapters with ``ChannelCapabilities.PHOTO_OUT`` should override.
+        Default raises ``NotImplementedError``.
+        """
+        raise NotImplementedError(f"{self.platform} adapter has no PHOTO_OUT capability")
+
+    async def send_document(
+        self, chat_id: str, file_path: str | Path, caption: str = "", **kwargs: Any
+    ) -> SendResult:
+        """Send a generic file (PDF, ZIP, etc.) from a local path.
+
+        Adapters with ``ChannelCapabilities.DOCUMENT_OUT`` should override.
+        """
+        raise NotImplementedError(f"{self.platform} adapter has no DOCUMENT_OUT capability")
+
+    async def send_voice(
+        self, chat_id: str, audio_path: str | Path, caption: str = "", **kwargs: Any
+    ) -> SendResult:
+        """Send a voice / audio message from a local path.
+
+        Adapters with ``ChannelCapabilities.VOICE_OUT`` should override.
+        """
+        raise NotImplementedError(f"{self.platform} adapter has no VOICE_OUT capability")
+
+    async def send_reaction(
+        self, chat_id: str, message_id: str, emoji: str, **kwargs: Any
+    ) -> SendResult:
+        """Add an emoji reaction to a previously-sent message.
+
+        Adapters with ``ChannelCapabilities.REACTIONS`` should override.
+        """
+        raise NotImplementedError(f"{self.platform} adapter has no REACTIONS capability")
+
+    async def edit_message(
+        self, chat_id: str, message_id: str, text: str, **kwargs: Any
+    ) -> SendResult:
+        """Edit a previously-sent text message in place.
+
+        Useful for streaming responses (single growing message) and live-updating
+        status. Adapters with ``ChannelCapabilities.EDIT_MESSAGE`` should override.
+        """
+        raise NotImplementedError(f"{self.platform} adapter has no EDIT_MESSAGE capability")
+
+    async def delete_message(
+        self, chat_id: str, message_id: str, **kwargs: Any
+    ) -> SendResult:
+        """Delete a previously-sent message.
+
+        Adapters with ``ChannelCapabilities.DELETE_MESSAGE`` should override.
+        """
+        raise NotImplementedError(f"{self.platform} adapter has no DELETE_MESSAGE capability")
+
+    async def download_attachment(
+        self, *, file_id: str, dest_dir: str | Path, **kwargs: Any
+    ) -> Path:
+        """Download an inbound attachment by platform-specific ``file_id``.
+
+        Returns the local path the file was written to.
+
+        Adapters with any of ``PHOTO_IN`` / ``VOICE_IN`` / ``DOCUMENT_IN`` should
+        override. The agent calls this to materialise attachments referenced in
+        ``MessageEvent.attachments`` when it needs the bytes.
+        """
+        raise NotImplementedError(f"{self.platform} adapter has no attachment-IN capability")
 
     async def send_notification(
         self, chat_id: str, text: str, *, urgent: bool = False
@@ -85,4 +234,4 @@ class BaseChannelAdapter(ABC):
         return await self.send(chat_id, text)
 
 
-__all__ = ["BaseChannelAdapter"]
+__all__ = ["BaseChannelAdapter", "ChannelCapabilities"]

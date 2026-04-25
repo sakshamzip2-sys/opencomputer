@@ -234,6 +234,28 @@ class DummyAdapter(BaseChannelAdapter):
         return SendResult(success=True)
 ```
 
+### `ChannelCapabilities`
+
+`enum.Flag` declaring the optional features an adapter supports
+(typing, reactions, photo/document/voice in/out, edit, delete, threads).
+Adapters set ``capabilities = ChannelCapabilities.X | ChannelCapabilities.Y``;
+callers check via ``adapter.capabilities & ChannelCapabilities.X`` before
+calling optional methods. Default optional methods raise
+``NotImplementedError`` so adapters only override what they actually support.
+
+```python
+from plugin_sdk import BaseChannelAdapter, ChannelCapabilities, Platform
+
+class FullFeaturedAdapter(BaseChannelAdapter):
+    platform = Platform.TELEGRAM
+    capabilities = (
+        ChannelCapabilities.TYPING
+        | ChannelCapabilities.PHOTO_OUT
+        | ChannelCapabilities.REACTIONS
+    )
+    # ... overrides for send_photo, send_reaction
+```
+
 ---
 
 ## Hooks

@@ -4,6 +4,31 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.2 — Telegram file/voice/reaction/edit/delete capabilities, Tier 1.2 + 2.0)
+
+- **`plugin_sdk/channel_contract.py`** — added `ChannelCapabilities` flag enum (TYPING, REACTIONS,
+  PHOTO_IN/OUT, DOCUMENT_IN/OUT, VOICE_IN/OUT, EDIT_MESSAGE, DELETE_MESSAGE, THREADS). `BaseChannelAdapter`
+  gains 7 new optional methods — `send_photo`, `send_document`, `send_voice`, `send_reaction`,
+  `edit_message`, `delete_message`, `download_attachment` — each raising `NotImplementedError` by
+  default so adapters only override what their `capabilities` flag advertises. Self-audit R1 from
+  the integration plan: prevents ~50 method duplications when 10+ adapters land.
+- **`plugin_sdk/__init__.py`** — re-exports `ChannelCapabilities` (now a public type).
+- **`extensions/telegram/adapter.py`** — Telegram now advertises 10 capability flags and implements
+  all 7 optional methods + inbound photo/document/voice attachment parsing into
+  `MessageEvent.attachments`. Uses raw Bot API multipart upload (no python-telegram-bot dep).
+  Bot-API limits enforced locally before request: 10 MB photo, 50 MB document, 20 MB getFile
+  download. `download_attachment` accepts both raw `file_id` and `"telegram:<id>"` reference form.
+- **`docs/sdk-reference.md`** — new section documenting `ChannelCapabilities` + sample adapter.
+- **29 new tests** in `tests/test_channel_capabilities.py` (14 — flag enum + base defaults) and
+  `tests/test_telegram_attachments.py` (15 — capability flag check, send_photo/document/voice
+  request shape, oversized-file local rejection, missing-file error, reaction/edit/delete
+  endpoints, download_attachment round-trip with httpx MockTransport, inbound photo/document/voice
+  parsing into MessageEvent.attachments, metadata-only update skipped). Full suite: **2307 passing**.
+
+Use case unlocked: Saksham forwards a stock chart screenshot to OC via Telegram → adapter
+parses photo file_id into `MessageEvent.attachments` → agent calls `download_attachment(file_id)` →
+analyzes via vision-capable provider → replies with annotated chart via `send_photo()`.
+
 ### Added (Sub-project G.1 — Hermes cron jobs port, Tier 1.1 of `~/.claude/plans/toasty-wiggling-eclipse.md`)
 
 - **`opencomputer/cron/`** — new subpackage porting Hermes's cron infrastructure. Adapted from

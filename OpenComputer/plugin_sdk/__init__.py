@@ -9,7 +9,7 @@ backwards-compatible guarantees across minor releases.
 
 __version__ = "0.1.0"
 
-from plugin_sdk.channel_contract import BaseChannelAdapter
+from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.consent import (
     CapabilityClaim,
     ConsentDecision,
@@ -125,6 +125,7 @@ __all__ = [
     "StreamEvent",
     "Usage",
     "BaseChannelAdapter",
+    "ChannelCapabilities",
     # hooks
     "HookEvent",
     "HookContext",
