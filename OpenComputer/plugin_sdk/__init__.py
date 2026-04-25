@@ -89,6 +89,14 @@ from plugin_sdk.sandbox import (
 )
 from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
+from plugin_sdk.user_model import (
+    Edge,
+    EdgeKind,
+    Node,
+    NodeKind,
+    UserModelQuery,
+    UserModelSnapshot,
+)
 
 __all__ = [
     "__version__",
@@ -164,6 +172,13 @@ __all__ = [
     "Motif",
     "MotifExtractor",
     "MotifKind",
+    # user-model graph (Phase 3.C, F4 layer)
+    "Node",
+    "NodeKind",
+    "Edge",
+    "EdgeKind",
+    "UserModelQuery",
+    "UserModelSnapshot",
     # sandbox (Phase 3.E)
     "SandboxConfig",
     "SandboxResult",
