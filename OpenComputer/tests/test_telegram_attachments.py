@@ -17,7 +17,6 @@ import pytest
 
 from plugin_sdk import ChannelCapabilities
 
-
 # Load TelegramAdapter via the same loader pattern existing tests use,
 # avoiding sibling-name collisions with other plugins' adapter.py files.
 # Path is resolved relative to this test file so it works in CI + local + Docker.
