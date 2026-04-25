@@ -782,12 +782,14 @@ from opencomputer.cli_channels import channels_app  # noqa: E402
 app.add_typer(channels_app, name="channels")
 
 # Sub-project F1 — consent grant/revoke/history/verify-chain
+from opencomputer.cli_adapter import adapter_app  # noqa: E402
 from opencomputer.cli_consent import consent_app  # noqa: E402
 from opencomputer.cli_cost import cost_app  # noqa: E402
 from opencomputer.cli_cron import cron_app  # noqa: E402
 from opencomputer.cli_voice import voice_app  # noqa: E402
 from opencomputer.cli_webhook import webhook_app  # noqa: E402
 
+app.add_typer(adapter_app, name="adapter")
 app.add_typer(consent_app, name="consent")
 app.add_typer(cost_app, name="cost")
 app.add_typer(cron_app, name="cron")

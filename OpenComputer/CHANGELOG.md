@@ -4,6 +4,29 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.10 — Adapter scaffolder + capabilities-aware template, Tier 2.16)
+
+- **`opencomputer/templates/plugin/channel/adapter.py.j2`** — channel adapter template upgraded
+  for G.2's `ChannelCapabilities`. Now imports the flag enum, declares
+  `capabilities = ChannelCapabilities.NONE` by default, and includes commented-out method stubs
+  for every optional capability (`send_typing` / `send_reaction` / `send_photo` / `send_document` /
+  `send_voice` / `edit_message` / `delete_message` / `download_attachment`) with the matching
+  flag-to-uncomment hint. Authors copy what they need rather than guessing the API surface.
+- **`opencomputer/cli_adapter.py`** — new CLI subgroup providing discoverable channel-adapter
+  surface:
+  - `opencomputer adapter new <name>` — alias for `plugin new <name> --kind channel` (more
+    discoverable since channel adapters are the most common third-party plugin type).
+  - `opencomputer adapter capabilities` — Rich table listing all `ChannelCapabilities` flags with
+    the method to override + a one-line description. Reduces "what does VOICE_IN do?" trips to
+    grep.
+- **7 new tests** in `tests/test_adapter_scaffolder.py` — `capabilities` lists all 11 flags +
+  method names; `new` creates plugin dir; template content includes `ChannelCapabilities`,
+  defaults to NONE, has all 8 optional method stubs, PascalCases class names correctly.
+
+This is the force multiplier from the integration plan's self-audit (R2): every future channel
+adapter (Slack / Matrix / WhatsApp / Signal / iMessage) drops from "build from scratch" to
+"uncomment the stubs for the platform's capabilities + fill in the API calls."
+
 ### Added (Sub-project G.9 — Voice (TTS + STT), Tier 2.10)
 
 - **`opencomputer/voice/`** — new subpackage. Cost-guarded text-to-speech and speech-to-text via
