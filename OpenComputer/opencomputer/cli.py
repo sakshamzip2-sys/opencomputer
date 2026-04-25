@@ -281,6 +281,26 @@ def _discover_plugins() -> int:
     return len(loaded)
 
 
+def _apply_model_overrides() -> int:
+    """Round 2A P-11 — replay ``model_overrides.yaml`` against the registry.
+
+    Runs AFTER :func:`_discover_plugins` so user-curated entries
+    (added via ``opencomputer models add``) win over plugin-shipped
+    catalogs. Missing or empty file → 0, no-op. Returns the count of
+    entries applied so the chat banner can surface it.
+
+    Errors loading the file are logged inside ``apply_overrides_file``
+    and treated as 0 entries — fail-safe per plan.
+    """
+    from opencomputer.agent.model_metadata import apply_overrides_file
+
+    try:
+        return apply_overrides_file()
+    except Exception as e:  # noqa: BLE001 — never break startup over overrides
+        _log.warning("model_overrides apply failed: %s", e)
+        return 0
+
+
 def _discover_and_register_agents() -> int:
     """III.5 — scan agent-template dirs and register with DelegateTool.
 
@@ -453,6 +473,7 @@ def chat(
 
     _register_builtin_tools()
     n_plugins = _discover_plugins()
+    _apply_model_overrides()
     n_agents = _discover_and_register_agents()
     n_settings_hooks = _register_settings_hooks(cfg)
     provider = _resolve_provider(cfg.model.provider)
@@ -589,6 +610,7 @@ def wire(
 
     _register_builtin_tools()
     _discover_plugins()
+    _apply_model_overrides()
     _discover_and_register_agents()
     _register_settings_hooks(cfg)
 
@@ -634,6 +656,7 @@ def gateway() -> None:
 
     _register_builtin_tools()
     n_plugins = _discover_plugins()
+    _apply_model_overrides()
     _discover_and_register_agents()
     _register_settings_hooks(cfg)
 
@@ -867,6 +890,11 @@ app.add_typer(inference_app, name="inference")
 from opencomputer.cli_user_model import user_model_app  # noqa: E402
 
 app.add_typer(user_model_app, name="user-model")
+
+# Round 2A P-11 — `models add` curated model-metadata registry
+from opencomputer.cli_models import models_app  # noqa: E402
+
+app.add_typer(models_app, name="models")
 
 
 @config_app.command("show")
