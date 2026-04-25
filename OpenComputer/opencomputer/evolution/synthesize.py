@@ -126,6 +126,17 @@ class SkillSynthesizer:
                     f"create_skill payload missing required field {required!r}"
                 )
 
+        # T1.3 PR-5: pre-write constraint gates. Mirrors Hermes
+        # evolution/core/constraints.py — invalid candidates rejected
+        # BEFORE the atomic tmp+os.replace write reaches disk.
+        from opencomputer.evolution.constraints import (  # noqa: PLC0415
+            ConstraintViolation,  # noqa: F401 — re-exported so callers can catch it
+            validate_synthesized_skill,
+        )
+        validate_synthesized_skill(payload)
+        # ConstraintViolation is a ValueError subclass; existing call sites
+        # already catch ValueError so this integrates cleanly.
+
         dest_root = self._resolve_dest_dir()
         dest_root.mkdir(parents=True, exist_ok=True)
 

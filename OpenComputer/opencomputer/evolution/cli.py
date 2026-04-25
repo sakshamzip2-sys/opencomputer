@@ -198,7 +198,8 @@ def reflect(
                 created.append(path)
                 console.print(f"  [cyan]synthesized[/cyan] {path}")
             except (ValueError, FileExistsError) as exc:
-                console.print(f"  [yellow]skipped insight:[/yellow] {exc}")
+                kind = type(exc).__name__
+                console.print(f"  [yellow]skipped insight ({kind}):[/yellow] {exc}")
     console.print(f"[bold]Synthesized {len(created)} skills.[/bold]")
 
 
