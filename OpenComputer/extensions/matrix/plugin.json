@@ -1,0 +1,13 @@
+{
+  "id": "matrix",
+  "name": "Matrix",
+  "version": "0.1.0",
+  "description": "Matrix channel via the Client-Server API. Text + reactions + edit (m.replace) + redactions. NO end-to-end encryption support — use unencrypted rooms only. Inbound: use webhook adapter (G.3) wired to a Matrix bridge / bot framework.",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "channel",
+  "entry": "plugin",
+  "single_instance": true,
+  "enabled_by_default": false,
+  "profiles": ["*"]
+}

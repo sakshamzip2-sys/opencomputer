@@ -4,6 +4,23 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.19 — Matrix adapter (Client-Server API), Tier 3.x)
+
+- **`extensions/matrix/`** — Matrix channel adapter via the Client-Server API.
+  - `MatrixAdapter` outbound: `m.room.message` text via PUT `/_matrix/client/v3/rooms/{roomId}/send/m.room.message/{txnId}`. Reactions via `m.reaction` events (`m.relates_to.rel_type=m.annotation`). Edits via `m.replace` events with `m.new_content` (the standard Matrix convention). Deletes via `/redact/` endpoint with optional reason.
+  - **No end-to-end encryption** in v1 — works only in unencrypted rooms. E2E
+    needs `matrix-nio` + olm/megolm; deferred until demand.
+  - Inbound NOT in this adapter — use webhook adapter (G.3) wired to a Matrix
+    bridge / appservice / hookshot.
+  - Capability flag: REACTIONS + EDIT_MESSAGE + DELETE_MESSAGE + THREADS.
+- **Plugin config** via env vars: `MATRIX_HOMESERVER` + `MATRIX_ACCESS_TOKEN`.
+  Disabled by default.
+- **14 new tests** in `tests/test_matrix_adapter.py` — capability flag, send
+  (basic / thread root / URL-encoded room id / truncate / HTTP error),
+  reactions (unicode emoji passes through directly per Matrix spec /
+  empty-emoji rejection), edit (m.replace with m.new_content), delete
+  (redact endpoint, with/without reason), connect caches user_id.
+
 ### Added (Sub-project G.18 — Mattermost adapter (Web API outbound), Tier 3.x)
 
 - **`extensions/mattermost/`** — new bundled channel plugin. Mattermost
