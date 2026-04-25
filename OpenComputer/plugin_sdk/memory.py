@@ -150,6 +150,8 @@ class MemoryProvider(ABC):
         important facts survive summarization.
 
         PR-6 of 2026-04-25 Hermes parity plan.
+        """
+        return None
 
     # ─── T3.2 PR-8: bus-driven lifecycle hooks (no-op defaults) ───────
 
