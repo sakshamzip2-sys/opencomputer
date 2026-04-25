@@ -32,6 +32,33 @@ _VERSION_RE = re.compile(r"^\d+(\.\d+){0,2}(?:-[\w.]+)?$")
 PluginKind = Literal["channel", "provider", "tool", "skill", "mixed"]
 
 
+class ModelSupportSchema(BaseModel):
+    """Typed mirror of `plugin_sdk.core.ModelSupport` for validation only.
+
+    Sub-project G.21 (Tier 4 OpenClaw port). Mirrors
+    ``sources/openclaw-2026.4.23/src/plugins/manifest-registry.ts``'s
+    ``modelSupport`` JSON shape. Extra fields rejected — mirrors the
+    parent manifest's ``extra="forbid"``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_prefixes: list[str] = Field(default_factory=list)
+    model_patterns: list[str] = Field(default_factory=list)
+
+    @field_validator("model_prefixes", "model_patterns", mode="before")
+    @classmethod
+    def _drop_empty_strings(cls, v: object) -> object:
+        # OpenClaw's tolerance pattern: silently drop empty / whitespace
+        # entries (they'd match every model id and break prefix
+        # resolution). See sources/openclaw-2026.4.23/src/plugins/
+        # manifest.json5-tolerance.test.ts:84-99 ("normalizes
+        # modelSupport metadata from the manifest").
+        if isinstance(v, list):
+            return [s for s in v if isinstance(s, str) and s.strip()]
+        return v
+
+
 class PluginManifestSchema(BaseModel):
     """Typed mirror of `plugin_sdk.core.PluginManifest` for validation only."""
 
@@ -61,6 +88,11 @@ class PluginManifestSchema(BaseModel):
     # ``opencomputer.mcp.presets.PRESETS`` (e.g. ``"filesystem"``,
     # ``"github"``). Default empty list means the plugin needs no MCPs.
     mcp_servers: list[str] = Field(default_factory=list)
+    # Sub-project G.21 (Tier 4 OpenClaw port) — model-prefix
+    # auto-activation for provider plugins. Default ``None`` means "no
+    # model affinity"; legacy bundled providers without this field stay
+    # backwards-compatible.
+    model_support: ModelSupportSchema | None = Field(default=None)
     # Phase 14.M/N — already in use via ProfileConfig/WorkspaceOverlay but
     # manifests often carry a schema_version field. Accept it silently.
     schema_version: int | None = Field(default=None)
@@ -118,4 +150,4 @@ def validate_manifest(data: dict[str, Any]) -> tuple[PluginManifestSchema | None
         return None, "; ".join(parts)
 
 
-__all__ = ["PluginManifestSchema", "PluginKind", "validate_manifest"]
+__all__ = ["ModelSupportSchema", "PluginManifestSchema", "PluginKind", "validate_manifest"]

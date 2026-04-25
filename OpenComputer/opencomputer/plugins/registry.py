@@ -14,7 +14,11 @@ from typing import Any, Literal
 
 from opencomputer.agent.injection import engine as injection_engine
 from opencomputer.hooks.engine import engine as hook_engine
-from opencomputer.plugins.discovery import PluginCandidate, discover
+from opencomputer.plugins.discovery import (
+    PluginCandidate,
+    discover,
+    find_plugin_ids_for_model,
+)
 from opencomputer.plugins.loader import (
     LoadedPlugin,
     PluginAPI,
@@ -89,7 +93,7 @@ class PluginRegistry:
     ) -> list[LoadedPlugin]:
         """Discover + activate plugins. Returns the successfully loaded ones.
 
-        Filtering stack (Phase 14.C/14.D/14.M):
+        Filtering stack (Phase 14.C/14.D/14.M, G.21):
 
         1. **Layer A — manifest profile scope** (14.C/14.D): if
            ``manifest.profiles`` is set and doesn't contain the active
@@ -98,6 +102,15 @@ class PluginRegistry:
         2. **Layer B — user's enabled_ids filter** (14.M): if
            ``enabled_ids`` is a frozenset, only listed ids pass. ``None``
            or ``"*"`` means "no filter" (backward-compatible default).
+        3. **Layer C — model-prefix auto-activation** (G.21): when
+           ``enabled_ids`` is a frozenset, plugins whose
+           ``manifest.model_support`` matches the active ``cfg.model.model``
+           are silently added to the set even if the user's preset didn't
+           list them. Mirrors OpenClaw's ``applyPluginAutoEnable``
+           (``sources/openclaw-2026.4.23/src/config/plugin-auto-enable.
+           model-support.test.ts``). Solves the friction of "I switched
+           to gpt-4o, why is openai-provider disabled?" — the user named
+           the model, so the matching plugin must come along.
         """
         from opencomputer.profiles import read_active_profile
 
@@ -109,6 +122,35 @@ class PluginRegistry:
         # see their per-request scope via ``api.request_context``.
         self.shared_api = api
         wildcard = enabled_ids is None or enabled_ids == "*"
+
+        # Layer C — model-prefix auto-activation (G.21). Only expands
+        # the set when a filter IS active (wildcard already loads
+        # everything). Wrapped defensively: a malformed config.yaml
+        # mustn't prevent plugin loading.
+        if not wildcard:
+            assert isinstance(enabled_ids, frozenset)
+            try:
+                from opencomputer.agent.config import default_config
+
+                cfg = default_config()
+                model_id = cfg.model.model
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "model-prefix auto-activation skipped: cannot resolve active model",
+                    exc_info=True,
+                )
+                model_id = ""
+            if model_id:
+                matches = find_plugin_ids_for_model(model_id, candidates)
+                additions = [pid for pid in matches if pid not in enabled_ids]
+                if additions:
+                    enabled_ids = enabled_ids | frozenset(additions)
+                    logger.info(
+                        "model-prefix auto-activation: model %r → enabling %s",
+                        model_id,
+                        additions,
+                    )
+
         for cand in candidates:
             # Layer A — manifest scope check
             allowed, reason = _manifest_allows_profile(cand.manifest, active_profile)

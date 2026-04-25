@@ -108,6 +108,26 @@ class SendResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelSupport:
+    """Declares which model ids a provider plugin can serve.
+
+    Sub-project G.21 (Tier 4 OpenClaw port). Mirrors OpenClaw's
+    ``modelSupport`` manifest field at
+    ``sources/openclaw-2026.4.23/src/plugins/providers.ts:316-337``.
+    The matcher tries ``model_patterns`` (regex, ``re.search``) first
+    then ``model_prefixes`` (``str.startswith``); the first hit wins.
+
+    Fields are tuples so the dataclass stays hashable + matches the
+    SDK's "immutable values everywhere" rule. Default-empty tuples mean
+    the plugin declares no model affinity (legacy behavior — caller
+    falls back to explicit ``provider`` selection).
+    """
+
+    model_prefixes: tuple[str, ...] = ()
+    model_patterns: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class PluginManifest:
     """Metadata for a plugin — parsed from plugin.json at discovery time."""
 
@@ -152,6 +172,16 @@ class PluginManifest:
     # so the agent picks them up on next start. Default ``()`` means the
     # plugin needs no MCPs.
     mcp_servers: tuple[str, ...] = ()
+    # Sub-project G.21 (Tier 4 — OpenClaw port). Provider plugins declare
+    # which model ids they can serve (e.g. ``["claude-"]`` for
+    # anthropic-provider, ``["gpt-", "o1", "o3", "o4"]`` for
+    # openai-provider). The plugin loader uses this to auto-activate the
+    # matching provider when the user picks a model whose id matches —
+    # solves the friction of "I changed model to gpt-4o, why doesn't
+    # this work?" when openai-provider was disabled in the active
+    # profile preset. Default ``None`` means the plugin declares no
+    # model affinity (the legacy behavior).
+    model_support: ModelSupport | None = None
 
 
 # ─── Plugin activation source (Task I.7) ───────────────────────────────
@@ -247,6 +277,7 @@ __all__ = [
     "Platform",
     "MessageEvent",
     "SendResult",
+    "ModelSupport",
     "PluginManifest",
     "PluginActivationSource",
     "VALID_ACTIVATION_SOURCES",

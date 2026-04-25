@@ -19,6 +19,7 @@ from plugin_sdk.consent import (
 from plugin_sdk.core import (
     Message,
     MessageEvent,
+    ModelSupport,
     Platform,
     PluginActivationSource,
     PluginManifest,
@@ -114,6 +115,7 @@ __all__ = [
     "Platform",
     "MessageEvent",
     "SendResult",
+    "ModelSupport",
     "PluginManifest",
     "PluginActivationSource",
     "StopReason",
