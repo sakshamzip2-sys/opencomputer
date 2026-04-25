@@ -10,5 +10,14 @@
   "tool_names": [],
   "model_support": {
     "model_prefixes": ["gpt-", "o1", "o3", "o4"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "openai",
+        "auth_methods": ["api_key"],
+        "env_vars": ["OPENAI_API_KEY"]
+      }
+    ]
   }
 }

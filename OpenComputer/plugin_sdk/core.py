@@ -108,6 +108,62 @@ class SendResult:
 
 
 @dataclass(frozen=True, slots=True)
+class SetupProvider:
+    """Cheap setup metadata for one provider id a plugin exposes.
+
+    Sub-project G.23 (Tier 4 OpenClaw port). Mirrors OpenClaw's
+    ``PluginManifestSetupProvider`` at
+    ``sources/openclaw-2026.4.23/src/plugins/manifest.ts:76-83``.
+
+    Lets the setup wizard + ``opencomputer doctor`` know which env vars
+    must be set for a provider plugin to function — without loading the
+    plugin's Python code. Today both pieces of core hard-code this
+    knowledge in a small dict (``cli._check_provider_key``); G.23
+    pushes the source of truth back into the plugin manifest so
+    third-party providers can self-describe.
+    """
+
+    id: str
+    """Provider id surfaced during setup (e.g. ``"anthropic"``, ``"openai"``)."""
+
+    auth_methods: tuple[str, ...] = ()
+    """Auth modes this provider supports (e.g. ``("api_key", "bearer")``)."""
+
+    env_vars: tuple[str, ...] = ()
+    """Env vars that satisfy setup without runtime loading.
+
+    Order matters: the first env var is treated as the canonical one
+    by setup tools — ``opencomputer doctor`` checks the first entry to
+    decide whether the provider is configured. Use additional entries
+    for proxy modes or alternate auth.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class PluginSetup:
+    """Cheap setup metadata exposed before plugin runtime loads.
+
+    Sub-project G.23 (Tier 4 OpenClaw port). Mirrors OpenClaw's
+    ``PluginManifestSetup`` at
+    ``sources/openclaw-2026.4.23/src/plugins/manifest.ts:85-97``.
+
+    Default-empty fields mean "no declarations" — backwards-compatible
+    with existing manifests.
+    """
+
+    providers: tuple[SetupProvider, ...] = ()
+    """Provider ids this plugin exposes to setup/doctor flows."""
+
+    requires_runtime: bool = False
+    """``True`` if setup still needs to import the plugin's Python.
+
+    Currently informational — the wizard reads it before deciding
+    whether to defer plugin activation until after credentials are
+    collected. Default ``False`` matches every existing bundled plugin.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class ModelSupport:
     """Declares which model ids a provider plugin can serve.
 
@@ -192,6 +248,13 @@ class PluginManifest:
     # ``sources/openclaw-2026.4.23/src/plugins/config-state.ts:69-74``.
     # Default ``()`` means the plugin has never been renamed.
     legacy_plugin_ids: tuple[str, ...] = ()
+    # Sub-project G.23 (Tier 4 — OpenClaw port). Cheap setup metadata
+    # exposed before plugin runtime loads. The setup wizard + doctor
+    # read this to know which env vars / auth methods a provider plugin
+    # needs — instead of hard-coding that knowledge in core. Default
+    # ``None`` means "no declarations", and core keeps its legacy
+    # hard-coded behavior for that plugin (backwards-compatible).
+    setup: PluginSetup | None = None
 
 
 # ─── Plugin activation source (Task I.7) ───────────────────────────────
@@ -290,6 +353,8 @@ __all__ = [
     "ModelSupport",
     "PluginManifest",
     "PluginActivationSource",
+    "PluginSetup",
+    "SetupProvider",
     "VALID_ACTIVATION_SOURCES",
     "StopReason",
     "SingleInstanceError",

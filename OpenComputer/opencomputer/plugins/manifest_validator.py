@@ -32,6 +32,37 @@ _VERSION_RE = re.compile(r"^\d+(\.\d+){0,2}(?:-[\w.]+)?$")
 PluginKind = Literal["channel", "provider", "tool", "skill", "mixed"]
 
 
+class SetupProviderSchema(BaseModel):
+    """Typed mirror of `plugin_sdk.core.SetupProvider` for validation only.
+
+    Sub-project G.23 (Tier 4 OpenClaw port). Mirrors OpenClaw's
+    ``PluginManifestSetupProvider`` shape from
+    ``sources/openclaw-2026.4.23/src/plugins/manifest.ts:76-83``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=64)
+    auth_methods: list[str] = Field(default_factory=list)
+    env_vars: list[str] = Field(default_factory=list)
+
+    @field_validator("auth_methods", "env_vars", mode="before")
+    @classmethod
+    def _drop_empty_strings(cls, v: object) -> object:
+        if isinstance(v, list):
+            return [s for s in v if isinstance(s, str) and s.strip()]
+        return v
+
+
+class PluginSetupSchema(BaseModel):
+    """Typed mirror of `plugin_sdk.core.PluginSetup` for validation only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    providers: list[SetupProviderSchema] = Field(default_factory=list)
+    requires_runtime: bool = Field(default=False)
+
+
 class ModelSupportSchema(BaseModel):
     """Typed mirror of `plugin_sdk.core.ModelSupport` for validation only.
 
@@ -97,6 +128,11 @@ class PluginManifestSchema(BaseModel):
     # plugin used to be known by. The loader maps old user-config
     # references to the current id. Default empty list = never renamed.
     legacy_plugin_ids: list[str] = Field(default_factory=list)
+    # Sub-project G.23 (Tier 4 OpenClaw port) — cheap setup metadata so
+    # provider plugins self-describe their env-var / auth-method
+    # requirements. Wizard + doctor read this without loading the
+    # plugin's Python. Default ``None`` means "no declarations".
+    setup: PluginSetupSchema | None = Field(default=None)
     # Phase 14.M/N — already in use via ProfileConfig/WorkspaceOverlay but
     # manifests often carry a schema_version field. Accept it silently.
     schema_version: int | None = Field(default=None)
@@ -163,4 +199,11 @@ def validate_manifest(data: dict[str, Any]) -> tuple[PluginManifestSchema | None
         return None, "; ".join(parts)
 
 
-__all__ = ["ModelSupportSchema", "PluginManifestSchema", "PluginKind", "validate_manifest"]
+__all__ = [
+    "ModelSupportSchema",
+    "PluginKind",
+    "PluginManifestSchema",
+    "PluginSetupSchema",
+    "SetupProviderSchema",
+    "validate_manifest",
+]
