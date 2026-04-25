@@ -4,6 +4,35 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.29 — Home Assistant adapter, Tier 4.x)
+
+- **`extensions/homeassistant/`** — new bundled channel plugin. Talks
+  to Home Assistant's REST API at ``POST /api/services/<domain>/<service>``.
+  Outbound = service calls (turn lights on, send notifications, run
+  scripts/automations). Inbound: webhook adapter (G.3) wired to a Home
+  Assistant automation that POSTs events.
+- **Mapping note:** the ``send`` verb is overloaded for HA. ``chat_id``
+  is parsed as ``<domain>.<service>`` (e.g. ``notify.mobile_app_pixel_8``,
+  ``light.turn_on``, ``script.morning_routine``).
+  - For ``notify.*`` services, ``text`` becomes the ``message`` field.
+  - For other services, callers pass the full payload via
+    ``service_data=...`` kwarg.
+  - Zero-arg services (e.g. ``script.morning_routine``) send an empty
+    body — HA accepts that for trigger-style invocations.
+- **Capabilities = 0** — service calls aren't chat messages, so the
+  chat-shape flags don't apply.
+- **Connect probes `/api/`** to surface bad URL / bad token early with
+  a clear log line; failure is non-fatal so a temporarily-down HA
+  instance doesn't wedge plugin loading.
+- **Setup metadata** (G.25 pattern): ``setup.channels[].id="homeassistant"``,
+  env_vars ``["HOMEASSISTANT_URL", "HOMEASSISTANT_TOKEN"]``, signup_url
+  pointing at HA's long-lived-token docs.
+- **9 new tests** in `tests/test_homeassistant_adapter.py` —
+  capability flag = 0, notify packs `message`, non-notify with
+  `service_data`, zero-arg service call → empty body, chat_id without
+  dot rejected, empty notify message rejected, long notify truncated
+  to 4096, non-dict service_data rejected, HTTP 401 surface.
+
 ### Added (Sub-project G.28 — API Server adapter via REST endpoint, Tier 4.x)
 
 - **`extensions/api-server/`** — new bundled channel plugin. Exposes
