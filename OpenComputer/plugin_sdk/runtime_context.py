@@ -46,6 +46,14 @@ class RuntimeContext:
     #: forcing an SDK version bump.
     custom: dict[str, Any] = field(default_factory=dict)
 
+    delegation_depth: int = 0
+    """How deep we are in the delegation chain. 0 = parent (top of stack).
+    1 = child of a delegated call. Each `DelegateTool.execute` increments this
+    for the child runtime. Used by `DelegateTool` to enforce
+    `LoopConfig.max_delegation_depth` (default 2 = parent → child →
+    grandchild rejected). Mirrors Hermes `MAX_DEPTH` from
+    `sources/hermes-agent/tools/delegate_tool.py`."""
+
 
 #: A sentinel "no flags" default — useful when callers don't care about modes.
 DEFAULT_RUNTIME_CONTEXT = RuntimeContext()

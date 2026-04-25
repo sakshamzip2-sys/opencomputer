@@ -55,6 +55,9 @@ class LoopConfig:
     parallel_tools: bool = True
     iteration_timeout_s: int = 600
     delegation_max_iterations: int = 50
+    max_delegation_depth: int = 2
+    """Cap on `DelegateTool` recursion. 2 = parent (depth 0) → child (depth 1) → grandchild (depth 2) rejected.
+    Mirrors Hermes `MAX_DEPTH = 2` from `sources/hermes-agent/tools/delegate_tool.py`."""
 
 
 @dataclass(frozen=True, slots=True)

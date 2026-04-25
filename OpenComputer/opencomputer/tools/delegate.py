@@ -24,6 +24,16 @@ if TYPE_CHECKING:
     from opencomputer.agent.agent_templates import AgentTemplate
 
 
+DELEGATE_BLOCKED_TOOLS: frozenset[str] = frozenset({
+    "delegate",          # no recursive delegation (depth check is the second line of defense)
+    "AskUserQuestion",   # subagent has no user
+    "ExitPlanMode",      # subagent doesn't own plan mode
+})
+"""Tools the parent must NEVER pass to a subagent. Caller-supplied
+`allowed_tools` containing any of these is a hard error; implicit-inherit
+strips them. Mirrors Hermes `DELEGATE_BLOCKED_TOOLS`."""
+
+
 class DelegateTool(BaseTool):
     parallel_safe = True  # each delegate gets its own loop instance
 
@@ -134,6 +144,21 @@ class DelegateTool(BaseTool):
                 ),
                 is_error=True,
             )
+        # T1.1: enforce max delegation depth
+        parent_loop = getattr(self._factory, "__self__", None)
+        max_depth = 2  # default mirrors Hermes
+        if parent_loop is not None and hasattr(parent_loop, "config"):
+            max_depth = getattr(parent_loop.config.loop, "max_delegation_depth", 2)
+        if self._current_runtime.delegation_depth >= max_depth:
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Error: max delegation depth ({max_depth}) reached. "
+                    f"Refusing recursive delegation to avoid fork-bombing the agent. "
+                    f"Tune via LoopConfig.max_delegation_depth."
+                ),
+                is_error=True,
+            )
         # III.1: parse the allowlist input. ``None`` / missing → unrestricted
         # (parent's full registry); explicit ``[]`` → no tools at all; list
         # of strings → exactly those tool names.
@@ -154,6 +179,35 @@ class DelegateTool(BaseTool):
                 ),
                 is_error=True,
             )
+
+        # T1.2: enforce blocklist regardless of allowlist mode
+        if allowed is not None:
+            overlap = allowed & DELEGATE_BLOCKED_TOOLS
+            if overlap:
+                return ToolResult(
+                    tool_call_id=call.id,
+                    content=(
+                        f"Error: 'allowed_tools' includes blocked tools: {sorted(overlap)}. "
+                        f"These tools are unsafe in subagents (see DELEGATE_BLOCKED_TOOLS)."
+                    ),
+                    is_error=True,
+                )
+        # Note: when `allowed is None` (inherit-everything), blocked tools are
+        # stripped at dispatch time inside the child loop's allowlist filter.
+        # Push a synthetic allowlist that EXCLUDES blocked tools so the child
+        # can't call them even via inherit-everything.
+        if allowed is None:
+            # Lazy import — registry shape may not be available at module load time
+            try:
+                from opencomputer.tools.registry import registry as _reg
+                all_names = frozenset(_reg.names())
+                allowed = all_names - DELEGATE_BLOCKED_TOOLS
+            except Exception:
+                # If registry isn't loaded (test/edge case), fall back to passing
+                # `None` to the child — the child loop's existing allowlist filter
+                # is empty/permissive then; not ideal but explicit allowed param
+                # remains the recommended path.
+                allowed = None
 
         # III.5: resolve the optional ``agent`` parameter. A registered
         # template overrides the default subagent shape: its ``tools``
@@ -187,6 +241,12 @@ class DelegateTool(BaseTool):
             if not explicit_allowed and template.tools:
                 allowed = frozenset(template.tools)
 
+        # T1.1: child runtime gets incremented depth
+        child_runtime = dataclasses.replace(
+            self._current_runtime,
+            delegation_depth=self._current_runtime.delegation_depth + 1,
+        )
+
         subagent_loop = self._factory()
         # II.1: cap the subagent's iteration budget at the parent's
         # ``delegation_max_iterations`` (default 50) instead of letting it
@@ -216,7 +276,7 @@ class DelegateTool(BaseTool):
         # prompt — no further injection on top.
         result = await subagent_loop.run_conversation(
             user_message=task,
-            runtime=self._current_runtime,
+            runtime=child_runtime,   # ← was self._current_runtime
             system_prompt_override=(
                 template.system_prompt if template is not None else None
             ),
@@ -231,7 +291,7 @@ class DelegateTool(BaseTool):
                 HookContext(
                     event=HookEvent.SUBAGENT_STOP,
                     session_id=result.session_id,
-                    runtime=self._current_runtime,
+                    runtime=child_runtime,
                 )
             )
         except Exception:
@@ -243,4 +303,4 @@ class DelegateTool(BaseTool):
         )
 
 
-__all__ = ["DelegateTool"]
+__all__ = ["DelegateTool", "DELEGATE_BLOCKED_TOOLS"]

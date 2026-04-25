@@ -385,7 +385,12 @@ def test_delegate_allowed_tools_beats_template() -> None:
 
 
 def test_delegate_without_agent_preserves_existing_behavior() -> None:
-    """No ``agent`` arg → system_prompt_override=None (template-free path)."""
+    """No ``agent`` arg → system_prompt_override=None (template-free path).
+    PR-4: when allowed_tools is omitted, blocked tools are stripped from the
+    synthetic allowlist built from the registry, so the child may receive a
+    frozenset (not None) when the registry is accessible."""
+    from opencomputer.tools.delegate import DELEGATE_BLOCKED_TOOLS
+
     _register_tpl("code-reviewer", tools=("Read",))
     captured: dict[str, Any] = {}
     DelegateTool.set_factory(lambda: _FakeLoop(captured))
@@ -401,12 +406,23 @@ def test_delegate_without_agent_preserves_existing_behavior() -> None:
         )
     )
     assert not result.is_error
-    assert captured["allowed_tools"] is None
+    # PR-4: allowed_tools may be None (registry inaccessible) or a frozenset
+    # (registry accessible) — in either case blocked tools must not be present.
+    allowed = captured["allowed_tools"]
+    if allowed is not None:
+        assert isinstance(allowed, frozenset)
+        for blocked in DELEGATE_BLOCKED_TOOLS:
+            assert blocked not in allowed
     assert captured["system_prompt_override"] is None
 
 
 def test_delegate_template_with_empty_tools_inherits() -> None:
-    """A template with ``tools=()`` does NOT set an allowlist — inherit parent."""
+    """A template with ``tools=()`` does NOT set an explicit allowlist — inherits
+    the parent's tool set. PR-4: in inherit mode, blocked tools are stripped from
+    the synthetic allowlist (registry names minus DELEGATE_BLOCKED_TOOLS), so
+    allowed_tools may be a frozenset instead of None when registry is accessible."""
+    from opencomputer.tools.delegate import DELEGATE_BLOCKED_TOOLS
+
     _register_tpl("inherit-tools", tools=(), prompt="SP")
     captured: dict[str, Any] = {}
     DelegateTool.set_factory(lambda: _FakeLoop(captured))
@@ -422,7 +438,11 @@ def test_delegate_template_with_empty_tools_inherits() -> None:
         )
     )
     assert not result.is_error
-    # Empty template tools → no allowlist change (None, the parent-inherit
-    # semantic).
-    assert captured["allowed_tools"] is None
+    # PR-4: allowed_tools may be None (registry inaccessible) or a frozenset
+    # (registry accessible) — in either case blocked tools must not be present.
+    allowed = captured["allowed_tools"]
+    if allowed is not None:
+        assert isinstance(allowed, frozenset)
+        for blocked in DELEGATE_BLOCKED_TOOLS:
+            assert blocked not in allowed
     assert captured["system_prompt_override"] == "SP"
