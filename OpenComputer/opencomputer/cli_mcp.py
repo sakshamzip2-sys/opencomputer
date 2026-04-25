@@ -308,4 +308,109 @@ def mcp_serve() -> None:
     serve_main()
 
 
+@mcp_app.command("presets")
+def mcp_presets() -> None:
+    """List bundled MCP presets — vetted one-line installs for common MCPs.
+
+    Use ``opencomputer mcp install <preset>`` to add one to config.yaml.
+    """
+    from opencomputer.mcp.presets import PRESETS
+
+    if not PRESETS:
+        console.print("[dim]No presets bundled.[/dim]")
+        return
+
+    table = Table(title=f"MCP Presets ({len(PRESETS)})")
+    table.add_column("Slug", style="cyan", no_wrap=True)
+    table.add_column("Description")
+    table.add_column("Required env", style="yellow")
+    for slug, p in PRESETS.items():
+        env_str = ", ".join(p.required_env) or "—"
+        table.add_row(slug, p.description, env_str)
+    console.print(table)
+    console.print(
+        "\n[dim]Install: [bold]opencomputer mcp install <slug>[/bold] — "
+        "adds the server to config.yaml.[/dim]"
+    )
+
+
+@mcp_app.command("install")
+def mcp_install(
+    preset: str = typer.Argument(..., help="Preset slug (e.g. filesystem, github, fetch)."),
+    name: str = typer.Option(
+        "",
+        "--name",
+        "-n",
+        help="Override the registered server name (defaults to the preset slug).",
+    ),
+    disabled: bool = typer.Option(
+        False, "--disabled", help="Add but leave disabled until you `enable` it."
+    ),
+) -> None:
+    """Install a bundled MCP preset into config.yaml.
+
+    Examples::
+
+        opencomputer mcp install filesystem    # local file access
+        opencomputer mcp install github        # needs GITHUB_PERSONAL_ACCESS_TOKEN
+        opencomputer mcp install fetch         # web fetcher
+
+    See ``opencomputer mcp presets`` for the full list.
+    """
+    import os
+
+    from opencomputer.mcp.presets import get_preset, list_preset_slugs
+
+    p = get_preset(preset)
+    if p is None:
+        console.print(
+            f"[red]error:[/red] unknown preset {preset!r}. "
+            f"Available: {', '.join(list_preset_slugs())}"
+        )
+        raise typer.Exit(1)
+
+    cfg = load_config()
+    server_name = name or p.config.name
+    if any(s.name == server_name for s in cfg.mcp.servers):
+        console.print(
+            f"[red]error:[/red] server {server_name!r} already exists. "
+            f"Remove first with `opencomputer mcp remove {server_name}` "
+            "or pick a different --name."
+        )
+        raise typer.Exit(1)
+
+    new_server = MCPServerConfig(
+        name=server_name,
+        transport=p.config.transport,
+        command=p.config.command,
+        args=p.config.args,
+        url=p.config.url,
+        env=dict(p.config.env),
+        headers=dict(p.config.headers),
+        enabled=not disabled,
+    )
+
+    new_servers = (*cfg.mcp.servers, new_server)
+    path = _save_servers(new_servers)
+    console.print(
+        f"[green]installed[/green] preset {preset!r} as {server_name!r} → {path}"
+    )
+
+    # Surface env-var prerequisites with a clear status icon.
+    if p.required_env:
+        console.print("\n[bold]Required environment variables:[/bold]")
+        for var in p.required_env:
+            present = bool(os.environ.get(var))
+            icon = "[green]✓[/green]" if present else "[yellow]✗ unset[/yellow]"
+            console.print(f"  {icon}  {var}")
+        if not all(os.environ.get(v) for v in p.required_env):
+            console.print(
+                "\n[yellow]Set the missing vars before the next agent run, "
+                "or the server will fail to start.[/yellow]"
+            )
+
+    if p.homepage:
+        console.print(f"\n[dim]docs: {p.homepage}[/dim]")
+
+
 __all__ = ["mcp_app"]

@@ -4,6 +4,27 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.7 — MCP presets bundle, Tier 2.4)
+
+- **`opencomputer/mcp/presets.py`** — registry of 5 vetted MCP presets:
+  - `filesystem` — local file ops in CWD root (npx, no creds).
+  - `github` — repos / issues / PRs (npx, needs `GITHUB_PERSONAL_ACCESS_TOKEN`).
+  - `fetch` — URL → markdown for the agent (uvx, no creds).
+  - `postgres` — read-only Postgres queries (npx, needs `POSTGRES_URL`).
+  - `brave-search` — web search via Brave API (npx, needs `BRAVE_API_KEY`).
+  Each preset declares `required_env` so the install path can warn when prerequisites are unset.
+- **`opencomputer mcp presets`** — list bundled presets with description + required env vars.
+- **`opencomputer mcp install <slug> [--name N] [--disabled]`** — adds the preset's
+  `MCPServerConfig` to `config.yaml`. Refuses if the server name already exists. After install,
+  prints a checkmark/cross status icon for each `required_env` var so missing creds are surfaced
+  immediately. Includes the preset's homepage URL for further docs.
+- **16 new tests** in `tests/test_mcp_presets.py` — registry shape (5 presets, all stdio,
+  descriptions + homepage), config immutability, install CLI (success / unknown preset / custom
+  name / `--disabled` / duplicate-name error / env-var warning).
+
+Use case unlocked: `opencomputer mcp install fetch` or `opencomputer mcp install github` instead
+of hunting for the right `npx` invocation + manually editing config.yaml.
+
 ### Added (Sub-project G.6 — MCP server mode, Tier 2.2)
 
 - **`opencomputer/mcp/server.py`** — new MCP server using `mcp.server.fastmcp.FastMCP` over stdio.
