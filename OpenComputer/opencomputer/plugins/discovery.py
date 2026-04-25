@@ -14,13 +14,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from opencomputer.plugins.security import _path_is_inside, validate_plugin_root
-from plugin_sdk.core import PluginManifest
+from plugin_sdk.core import ModelSupport, PluginManifest
 
 # I.8 — derivation provenance for a plugin's resolved id.
 #
@@ -92,6 +93,18 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
     if schema is None:
         logger.warning("invalid manifest %s — %s", manifest_path, err)
         return None
+    # Sub-project G.21 — flatten ModelSupportSchema → ModelSupport. None
+    # means "no model affinity declared"; an empty ModelSupport (both
+    # tuples empty) would also be treated as no-affinity by the matcher
+    # but None keeps the wire shape honest about the manifest's intent.
+    model_support = (
+        ModelSupport(
+            model_prefixes=tuple(schema.model_support.model_prefixes),
+            model_patterns=tuple(schema.model_support.model_patterns),
+        )
+        if schema.model_support is not None
+        else None
+    )
     return PluginManifest(
         id=schema.id,
         name=schema.name,
@@ -111,6 +124,8 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
         tool_names=tuple(schema.tool_names),
         # Sub-project G.11 Tier 2.13 — MCP catalog binding
         mcp_servers=tuple(schema.mcp_servers),
+        # Sub-project G.21 (Tier 4 OpenClaw port) — model-prefix auto-activation
+        model_support=model_support,
     )
 
 
@@ -238,6 +253,61 @@ def discover(
     return candidates
 
 
+def find_plugin_ids_for_model(
+    model_id: str,
+    candidates: list[PluginCandidate],
+) -> list[str]:
+    """Return ids of plugins whose ``model_support`` matches ``model_id``.
+
+    Sub-project G.21 (Tier 4 OpenClaw port). Pure function — no
+    filesystem I/O, no plugin loading. Used by the registry to expand
+    ``enabled_ids`` so a user who picks ``gpt-4o`` automatically gets
+    ``openai-provider`` activated even if their profile preset didn't
+    list it.
+
+    Match order mirrors OpenClaw
+    (``sources/openclaw-2026.4.23/src/plugins/providers.ts:316-337``):
+
+    1. ``model_patterns`` first — regex via ``re.search`` (any match
+       anywhere in the id wins). Bad patterns are silently skipped so
+       one malformed manifest doesn't break the rest of the registry.
+    2. ``model_prefixes`` second — ``str.startswith``.
+
+    Empty ``model_id`` returns ``[]`` (the "user hasn't picked a model
+    yet" path — fresh installs go through the setup wizard, not this
+    helper). Result is sorted alphabetically for deterministic ordering;
+    matches OpenClaw's ``dedupeSortedPluginIds``.
+    """
+    if not model_id:
+        return []
+    matches: set[str] = set()
+    for cand in candidates:
+        ms = cand.manifest.model_support
+        if ms is None:
+            continue
+        matched = False
+        for pattern in ms.model_patterns:
+            try:
+                if re.search(pattern, model_id):
+                    matched = True
+                    break
+            except re.error:
+                logger.warning(
+                    "plugin %s declares invalid model_pattern %r — skipping",
+                    cand.manifest.id,
+                    pattern,
+                )
+                continue
+        if not matched:
+            for prefix in ms.model_prefixes:
+                if model_id.startswith(prefix):
+                    matched = True
+                    break
+        if matched:
+            matches.add(cand.manifest.id)
+    return sorted(matches)
+
+
 def standard_search_paths() -> list[Path]:
     """Canonical plugin search-path list, in priority order.
 
@@ -291,4 +361,10 @@ def standard_search_paths() -> list[Path]:
     return search_paths
 
 
-__all__ = ["discover", "IdSource", "PluginCandidate", "standard_search_paths"]
+__all__ = [
+    "discover",
+    "find_plugin_ids_for_model",
+    "IdSource",
+    "PluginCandidate",
+    "standard_search_paths",
+]

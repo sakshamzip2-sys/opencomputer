@@ -77,6 +77,24 @@ plugins rarely construct one by hand. Fields map 1:1 to manifest
 keys — see [`plugin-authors.md`](./plugin-authors.md) §2 for the
 "when to set" table.
 
+### `ModelSupport`
+
+Frozen dataclass declaring which model ids a provider plugin can
+serve. Set on `PluginManifest.model_support` from the JSON
+`"model_support"` key. Two fields, both tuples:
+
+- `model_prefixes` — `tuple[str, ...]` of `str.startswith` prefixes
+  (e.g. `("claude-",)` for Anthropic, `("gpt-", "o1", "o3", "o4")`
+  for OpenAI).
+- `model_patterns` — `tuple[str, ...]` of regex strings tried via
+  `re.search` BEFORE prefixes win.
+
+The plugin loader auto-activates a matching provider plugin even
+when the user's profile preset didn't list it: pick `gpt-4o` and
+`openai-provider` comes along. Mirrors OpenClaw's `modelSupport`
+field at `sources/openclaw-2026.4.23/src/plugins/providers.ts`. See
+[`plugin-authors.md`](./plugin-authors.md) §2 for the JSON shape.
+
 ### `PluginActivationSource`
 
 `Literal` describing WHY the plugin was activated this process. Core

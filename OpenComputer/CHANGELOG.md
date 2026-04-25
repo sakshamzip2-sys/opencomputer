@@ -4,6 +4,41 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.21 — Model-prefix auto-activation, Tier 4 OpenClaw port)
+
+- **`plugin_sdk.ModelSupport`** — frozen dataclass declaring which model ids
+  a provider plugin can serve. Two fields, both tuples: `model_prefixes`
+  (`str.startswith`) and `model_patterns` (`re.search` regex). Mirrors
+  OpenClaw's `modelSupport` field at `sources/openclaw-2026.4.23/src/plugins/
+  providers.ts:316-337`.
+- **`PluginManifest.model_support: ModelSupport | None = None`** — new
+  optional manifest field. Default `None` keeps every existing plugin
+  backwards-compatible.
+- **`opencomputer.plugins.discovery.find_plugin_ids_for_model(model_id,
+  candidates)`** — pure helper, no I/O. Patterns checked first
+  (`re.search`); prefixes second (`str.startswith`). Bad regex silently
+  skipped so one malformed manifest can't break the registry. Result
+  sorted alphabetically for prompt-cache determinism.
+- **`PluginRegistry.load_all` Layer C — model-prefix auto-activation.**
+  When a filter is active (`enabled_ids` is a frozenset, not `"*"`),
+  plugins whose `model_support` matches `cfg.model.model` are silently
+  added to the set. Solves "I switched to gpt-4o, why is openai-provider
+  disabled?" — picking the model implicitly enables the matching plugin.
+- **Bundled provider manifests updated.** `extensions/anthropic-provider/
+  plugin.json` declares `model_support.model_prefixes: ["claude-"]`;
+  `extensions/openai-provider/plugin.json` declares `["gpt-", "o1", "o3",
+  "o4"]`.
+- **Manifest validator schema** — `ModelSupportSchema` mirrors the
+  dataclass with pydantic. Empty / whitespace-only entries silently
+  dropped (OpenClaw tolerance pattern from `manifest.json5-tolerance.test
+  .ts`); typo'd field names rejected loudly via `extra="forbid"`.
+- **15 new tests** in `tests/test_model_prefix_activation.py` —
+  manifest schema parse (omitted / prefixes-only / drops empties /
+  rejects typos), `_parse_manifest` flattening, `find_plugin_ids_for_model`
+  (prefix / pattern / invalid regex / no-support / empty-id / sorted),
+  bundled-manifest regression guard, and end-to-end Layer C activation
+  through `PluginRegistry.load_all`.
+
 ### Added (Sub-project G.19 — Matrix adapter (Client-Server API), Tier 3.x)
 
 - **`extensions/matrix/`** — Matrix channel adapter via the Client-Server API.
