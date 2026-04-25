@@ -1,3 +1,4 @@
+# ruff: noqa: N999
 """OpenCLI Scraper — use-case function libraries.
 
 These are domain helpers that compose the existing tools
