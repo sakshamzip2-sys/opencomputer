@@ -114,13 +114,16 @@ class SetupProvider:
     Sub-project G.23 (Tier 4 OpenClaw port). Mirrors OpenClaw's
     ``PluginManifestSetupProvider`` at
     ``sources/openclaw-2026.4.23/src/plugins/manifest.ts:76-83``.
+    Sub-project G.24 enriches it with display fields used by the
+    interactive setup wizard.
 
     Lets the setup wizard + ``opencomputer doctor`` know which env vars
     must be set for a provider plugin to function — without loading the
     plugin's Python code. Today both pieces of core hard-code this
-    knowledge in a small dict (``cli._check_provider_key``); G.23
-    pushes the source of truth back into the plugin manifest so
-    third-party providers can self-describe.
+    knowledge in a small dict (``cli._check_provider_key``,
+    ``setup_wizard._SUPPORTED_PROVIDERS``); G.23/G.24 push the source
+    of truth back into the plugin manifest so third-party providers
+    can self-describe.
     """
 
     id: str
@@ -136,6 +139,27 @@ class SetupProvider:
     by setup tools — ``opencomputer doctor`` checks the first entry to
     decide whether the provider is configured. Use additional entries
     for proxy modes or alternate auth.
+    """
+
+    label: str = ""
+    """Human-readable display name (e.g. ``"Anthropic (Claude)"``).
+
+    Sub-project G.24. Used by ``opencomputer setup`` when listing
+    provider choices. Empty string falls back to ``id``.
+    """
+
+    default_model: str = ""
+    """Default model id surfaced by the setup wizard (e.g. ``"claude-opus-4-7"``).
+
+    Sub-project G.24. Empty string means "no default" — the wizard
+    prompts the user to enter a model with no pre-fill.
+    """
+
+    signup_url: str = ""
+    """URL where the user can obtain an API key.
+
+    Sub-project G.24. The setup wizard surfaces this so the user knows
+    where to go. Empty string suppresses the hint.
     """
 
 

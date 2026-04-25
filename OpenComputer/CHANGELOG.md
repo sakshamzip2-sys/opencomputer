@@ -4,6 +4,33 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.24 — Setup wizard reads manifest display fields, Tier 4 OpenClaw port follow-up)
+
+- **`SetupProvider` extended with display fields** — `label: str`,
+  `default_model: str`, `signup_url: str`. All default to empty string
+  (no value), keeping every existing manifest backwards-compatible.
+- **`opencomputer setup` wizard now manifest-driven.** The hard-coded
+  `_SUPPORTED_PROVIDERS` dict is renamed to `_BUILTIN_PROVIDER_FALLBACK`
+  and only fires when discovery yields nothing or a manifest doesn't
+  declare the field. New `_discover_supported_providers()` walks plugin
+  candidates, reads each `setup.providers[]` entry, and merges
+  manifest-declared values over the fallback dict.
+- **Third-party provider plugins now self-describe** in the wizard —
+  add a `setup.providers[]` block to your plugin.json and the wizard
+  shows your provider in the menu without core changes.
+- **Bundled provider manifests updated** — anthropic-provider declares
+  `label: "Anthropic (Claude)"`, `default_model: "claude-opus-4-7"`,
+  `signup_url: "https://console.anthropic.com/settings/keys"`;
+  openai-provider declares `label: "OpenAI (GPT)"`,
+  `default_model: "gpt-5.4"`, `signup_url: "https://platform.openai.com/api-keys"`.
+- **9 new tests** in `tests/test_setup_wizard_manifest_driven.py` —
+  schema parses display fields (with empty-default), bundled-manifest
+  regression guard, manifest-over-fallback merge, empty-string preserves
+  fallback, third-party provider added, discovery failure falls back
+  silently, exported helper symbol shape.
+- **Existing test updated** — `test_setup_wizard_provider_catalog_includes_anthropic_and_openai`
+  in `test_phase5.py` now reads via `_get_supported_providers()`.
+
 ### Added (Sub-project G.23 — Plugin setup metadata, Tier 4 OpenClaw port)
 
 - **`plugin_sdk.PluginSetup` + `plugin_sdk.SetupProvider`** — frozen

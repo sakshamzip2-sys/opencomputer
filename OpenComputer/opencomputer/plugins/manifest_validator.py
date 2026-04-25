@@ -38,6 +38,7 @@ class SetupProviderSchema(BaseModel):
     Sub-project G.23 (Tier 4 OpenClaw port). Mirrors OpenClaw's
     ``PluginManifestSetupProvider`` shape from
     ``sources/openclaw-2026.4.23/src/plugins/manifest.ts:76-83``.
+    Sub-project G.24 adds the display fields used by the setup wizard.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -45,6 +46,10 @@ class SetupProviderSchema(BaseModel):
     id: str = Field(min_length=1, max_length=64)
     auth_methods: list[str] = Field(default_factory=list)
     env_vars: list[str] = Field(default_factory=list)
+    # G.24 — wizard display fields. Optional; empty string means "no value".
+    label: str = Field(default="", max_length=128)
+    default_model: str = Field(default="", max_length=128)
+    signup_url: str = Field(default="", max_length=512)
 
     @field_validator("auth_methods", "env_vars", mode="before")
     @classmethod

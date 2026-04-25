@@ -37,9 +37,11 @@ from opencomputer.agent.config_store import (
 console = Console()
 
 
-# Known providers the wizard supports out of the box. Adding a new provider
-# plugin? It'll still work — the user can edit config.yaml by hand.
-_SUPPORTED_PROVIDERS = {
+# Last-resort provider catalog when discovery fails or no plugin
+# manifest declares ``setup.providers``. G.24 pushed this knowledge
+# back into per-plugin manifests so third-party providers can
+# self-describe; the dict only fires when discovery yields nothing.
+_BUILTIN_PROVIDER_FALLBACK = {
     "anthropic": {
         "label": "Anthropic (Claude)",
         "env_key": "ANTHROPIC_API_KEY",
@@ -55,6 +57,56 @@ _SUPPORTED_PROVIDERS = {
 }
 
 
+def _discover_supported_providers() -> dict[str, dict]:
+    """Build the provider catalog from plugin manifests (G.24).
+
+    Walks every discoverable plugin candidate, reads its
+    ``setup.providers`` declarations, and produces the dict the
+    wizard expects. Plugin-declared values override the
+    ``_BUILTIN_PROVIDER_FALLBACK`` entries; if the manifest omits a
+    field (empty string), the fallback fills it in.
+
+    Returns the legacy dict shape on any discovery failure so the
+    wizard can never wedge on a bad filesystem.
+    """
+    catalog = {pid: dict(meta) for pid, meta in _BUILTIN_PROVIDER_FALLBACK.items()}
+    try:
+        from opencomputer.plugins.discovery import discover, standard_search_paths
+
+        for cand in discover(standard_search_paths()):
+            setup = cand.manifest.setup
+            if setup is None:
+                continue
+            for prov in setup.providers:
+                entry = catalog.setdefault(prov.id, {})
+                if prov.label:
+                    entry["label"] = prov.label
+                if prov.default_model:
+                    entry["default_model"] = prov.default_model
+                if prov.signup_url:
+                    entry["signup_url"] = prov.signup_url
+                if prov.env_vars:
+                    # Manifest order is canonical — first env var wins.
+                    entry["env_key"] = prov.env_vars[0]
+                # Sensible defaults so the wizard never crashes on
+                # partial declarations.
+                entry.setdefault("label", prov.id.title())
+                entry.setdefault("env_key", "")
+                entry.setdefault("default_model", "")
+                entry.setdefault("signup_url", "")
+    except Exception:  # noqa: BLE001
+        # Discovery failed — fall back to whatever the dict already has.
+        pass
+    # Drop entries that have no env_key — they can't be set up
+    # interactively, so omitting them keeps the menu clean.
+    return {pid: meta for pid, meta in catalog.items() if meta.get("env_key")}
+
+
+# Built lazily so test fixtures that patch discovery still work.
+def _get_supported_providers() -> dict[str, dict]:
+    return _discover_supported_providers()
+
+
 def _print_banner() -> None:
     console.print("\n[bold cyan]╭─────────────────────────────────────╮[/bold cyan]")
     console.print("[bold cyan]│    OpenComputer — Setup Wizard      │[/bold cyan]")
@@ -63,19 +115,22 @@ def _print_banner() -> None:
 
 
 def _pick_provider() -> tuple[str, dict]:
+    providers = _get_supported_providers()
     console.print("[bold]Step 1 — pick an LLM provider[/bold]")
-    for i, (pid, meta) in enumerate(_SUPPORTED_PROVIDERS.items(), 1):
+    for i, (pid, meta) in enumerate(providers.items(), 1):
         console.print(f"  [cyan]{i}[/cyan]. {meta['label']} — [dim]{pid}[/dim]")
     while True:
         choice = Prompt.ask(
-            "Choose", default="1", choices=[str(i) for i in range(1, len(_SUPPORTED_PROVIDERS) + 1)]
+            "Choose",
+            default="1",
+            choices=[str(i) for i in range(1, len(providers) + 1)],
         )
         try:
             idx = int(choice) - 1
         except ValueError:
             continue
-        pid = list(_SUPPORTED_PROVIDERS.keys())[idx]
-        return pid, _SUPPORTED_PROVIDERS[pid]
+        pid = list(providers.keys())[idx]
+        return pid, providers[pid]
 
 
 def _prompt_model(default_model: str) -> str:

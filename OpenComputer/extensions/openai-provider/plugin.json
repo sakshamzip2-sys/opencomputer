@@ -16,7 +16,10 @@
       {
         "id": "openai",
         "auth_methods": ["api_key"],
-        "env_vars": ["OPENAI_API_KEY"]
+        "env_vars": ["OPENAI_API_KEY"],
+        "label": "OpenAI (GPT)",
+        "default_model": "gpt-5.4",
+        "signup_url": "https://platform.openai.com/api-keys"
       }
     ]
   }
