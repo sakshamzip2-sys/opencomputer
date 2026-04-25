@@ -2,7 +2,7 @@
 
 Usage::
 
-    from extensions.oi_capability.subprocess.venv_bootstrap import ensure_oi_venv
+    from extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap import ensure_oi_venv
     python_bin = ensure_oi_venv()  # returns Path to venv's python
 
 The venv lives at ``<_home() / "oi_capability" / "venv">``.

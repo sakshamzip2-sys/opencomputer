@@ -18,7 +18,7 @@ import inspect
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from extensions.oi_capability.tools.tier_5_advanced import (
+from extensions.coding_harness.oi_bridge.tools.tier_5_advanced import (
     ALL_TOOLS,
     ExtractSelectedTextTool,
     ListRunningProcessesTool,
@@ -58,11 +58,22 @@ class TestAllTier5ToolsList:
                 f"{cls.__name__}.execute() is missing # SANDBOX_HOOK comment."
             )
 
-    def test_all_tools_have_consent_hook_comment(self):
+    def test_all_tools_have_capability_claims(self):
+        """Every Tier 5 tool must declare capability_claims (PR-3: replaces # CONSENT_HOOK marker).
+
+        F1 ConsentGate enforces at dispatch via the class-level capability_claims attr —
+        no in-execute() call needed. The old # CONSENT_HOOK marker has been replaced.
+        """
+        from plugin_sdk.consent import CapabilityClaim  # noqa: PLC0415
         for cls in ALL_TOOLS:
-            source = inspect.getsource(cls.execute)
-            assert "CONSENT_HOOK" in source, (
-                f"{cls.__name__}.execute() is missing # CONSENT_HOOK comment."
+            assert hasattr(cls, "capability_claims"), (
+                f"{cls.__name__} is missing capability_claims class attr"
+            )
+            assert len(cls.capability_claims) >= 1, (
+                f"{cls.__name__}.capability_claims must have at least one CapabilityClaim"
+            )
+            assert all(isinstance(c, CapabilityClaim) for c in cls.capability_claims), (
+                f"{cls.__name__}.capability_claims must contain CapabilityClaim instances"
             )
 
 

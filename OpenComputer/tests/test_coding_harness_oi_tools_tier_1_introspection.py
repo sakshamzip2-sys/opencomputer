@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from extensions.oi_capability.tools.tier_1_introspection import (
+from extensions.coding_harness.oi_bridge.tools.tier_1_introspection import (
     ALL_TOOLS,
     ExtractScreenTextTool,
     ListAppUsageTool,

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from extensions.oi_capability.subprocess.protocol import (
+from extensions.coding_harness.oi_bridge.subprocess.protocol import (
     ErrorCode,
     JSONRPCError,
     JSONRPCRequest,

@@ -23,12 +23,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from extensions.oi_capability.subprocess.protocol import (
+from extensions.coding_harness.oi_bridge.subprocess.protocol import (
     ErrorCode,
     JSONRPCError,
     JSONRPCResponse,
 )
-from extensions.oi_capability.subprocess.wrapper import OISubprocessWrapper
+from extensions.coding_harness.oi_bridge.subprocess.wrapper import OISubprocessWrapper
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -94,9 +94,9 @@ class TestOISubprocessWrapperIsAlive:
         proc = _make_mock_process()
 
         with (
-            patch("extensions.oi_capability.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
             patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
-            patch("extensions.oi_capability.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
         ):
             wrapper = OISubprocessWrapper()
             await wrapper.start()
@@ -147,9 +147,9 @@ class TestOISubprocessWrapperRoundtrip:
         proc.wait = AsyncMock(return_value=0)
 
         with (
-            patch("extensions.oi_capability.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
             patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
-            patch("extensions.oi_capability.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
         ):
             wrapper = OISubprocessWrapper(timeout=5.0)
             await wrapper.start()
@@ -182,9 +182,9 @@ class TestOISubprocessWrapperRoundtrip:
         proc.wait = AsyncMock(return_value=0)
 
         with (
-            patch("extensions.oi_capability.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
             patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
-            patch("extensions.oi_capability.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
         ):
             wrapper = OISubprocessWrapper(timeout=0.1)  # very short timeout
             await wrapper.start()
@@ -226,9 +226,9 @@ class TestOISubprocessWrapperRoundtrip:
         proc.wait = AsyncMock(return_value=0)
 
         with (
-            patch("extensions.oi_capability.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
             patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
-            patch("extensions.oi_capability.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
         ):
             wrapper = OISubprocessWrapper(timeout=5.0)
             await wrapper.start()
@@ -280,9 +280,9 @@ class TestOISubprocessWrapperRoundtrip:
             return proc_instance
 
         with (
-            patch("extensions.oi_capability.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
             patch("asyncio.create_subprocess_exec", new=AsyncMock(side_effect=mock_create_subprocess)),
-            patch("extensions.oi_capability.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
         ):
             wrapper = OISubprocessWrapper(timeout=5.0)
             # Mark as dead without starting
@@ -320,9 +320,9 @@ class TestOISubprocessWrapperRoundtrip:
             return proc
 
         with (
-            patch("extensions.oi_capability.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
             patch("asyncio.create_subprocess_exec", new=AsyncMock(side_effect=mock_create)),
-            patch("extensions.oi_capability.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
         ):
             wrapper = OISubprocessWrapper()
             await wrapper.start()
@@ -358,9 +358,9 @@ class TestOISubprocessWrapperRoundtrip:
             return proc
 
         with (
-            patch("extensions.oi_capability.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
             patch("asyncio.create_subprocess_exec", new=AsyncMock(side_effect=mock_create)),
-            patch("extensions.oi_capability.subprocess.wrapper._log_path", return_value=log_path),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper._log_path", return_value=log_path),
         ):
             wrapper = OISubprocessWrapper()
             await wrapper.start()
@@ -403,9 +403,9 @@ class TestOISubprocessWrapperRoundtrip:
         proc.wait = AsyncMock(return_value=0)
 
         with (
-            patch("extensions.oi_capability.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
             patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
-            patch("extensions.oi_capability.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
         ):
             wrapper = OISubprocessWrapper(timeout=5.0)
             await wrapper.start()
@@ -440,9 +440,9 @@ class TestOISubprocessWrapperRoundtrip:
         proc.wait = AsyncMock(return_value=0)
 
         with (
-            patch("extensions.oi_capability.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper.ensure_oi_venv", return_value=Path("/fake/python")),
             patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
-            patch("extensions.oi_capability.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
+            patch("extensions.coding_harness.oi_bridge.subprocess.wrapper._log_path", return_value=tmp_path / "subprocess.log"),
         ):
             wrapper = OISubprocessWrapper(timeout=60.0)  # long timeout
             await wrapper.start()

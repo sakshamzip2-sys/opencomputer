@@ -1,9 +1,9 @@
 {
-  "id": "oi-capability",
-  "name": "Open Interpreter capability",
+  "id": "oi-capability-deprecated",
+  "name": "OI Capability (DEPRECATED — see coding-harness)",
   "kind": "tools",
   "version": "0.1.0",
   "enabled_by_default": false,
-  "description": "Wraps Open Interpreter as a sandboxed subprocess. AGPL v3 — kept isolated.",
+  "description": "Deprecated standalone OI plugin. Functionality moved to extensions/coding-harness/oi_bridge/. Remove this plugin manifest in next major release.",
   "schema_version": 1
 }

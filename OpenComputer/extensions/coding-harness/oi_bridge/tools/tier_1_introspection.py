@@ -19,13 +19,20 @@ OI method mappings per oi-source-map.md:
   - list_recent_files   → computer.terminal.run("shell", "find ... -newer ...")
   - search_files        → computer.files.search()
   - read_git_log        → inline git log (no OI dependency — design §11.4 carve-out)
+
+PR-3 (2026-04-25): moved from extensions/oi-capability/ into
+extensions/coding-harness/oi_bridge/ per docs/f7/interweaving-plan.md.
+capability_claims declared on each class — F1 ConsentGate enforces at dispatch.
+AUDIT_HOOK markers removed: F1 audit happens automatically through the consent gate
+(PRs #64 and #65).
 """
 
 from __future__ import annotations
 
 import subprocess
-from typing import Any
+from typing import Any, ClassVar
 
+from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -37,6 +44,13 @@ class ReadFileRegionTool(BaseTool):
 
     consent_tier: int = 1
     parallel_safe: bool = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.read_file_region",
+            tier_required=ConsentTier.IMPLICIT,
+            human_description="Read a region of a file (offset + length).",
+        ),
+    )
 
     def __init__(
         self,
@@ -72,16 +86,13 @@ class ReadFileRegionTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
-        # if self._consent_gate: await self._consent_gate.require(scope="oi.tier1.read_file_region", ...)
+        # F1 ConsentGate enforces capability_claims at dispatch (IMPLICIT tier).
+        # Audit is handled automatically by the gate (PRs #64/#65).
 
         try:
             result = await self._wrapper.call("computer.files.read", call.arguments)
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
-
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
-        # if self._audit: self._audit.append(actor="oi-capability", action="read_file_region", ...)
 
         return ToolResult(tool_call_id=call.id, content=str(result))
 
@@ -91,6 +102,13 @@ class ListAppUsageTool(BaseTool):
 
     consent_tier: int = 1
     parallel_safe: bool = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.list_app_usage",
+            tier_required=ConsentTier.IMPLICIT,
+            human_description="List recently-active applications (last N hours).",
+        ),
+    )
 
     def __init__(
         self,
@@ -124,7 +142,7 @@ class ListAppUsageTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (IMPLICIT tier).
 
         try:
             result = await self._wrapper.call(
@@ -134,7 +152,6 @@ class ListAppUsageTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -143,6 +160,13 @@ class ReadClipboardOnceTool(BaseTool):
 
     consent_tier: int = 1
     parallel_safe: bool = False  # clipboard is a singleton
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.read_clipboard_once",
+            tier_required=ConsentTier.IMPLICIT,
+            human_description="Read clipboard contents once (never streamed).",
+        ),
+    )
 
     def __init__(
         self,
@@ -174,14 +198,13 @@ class ReadClipboardOnceTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (IMPLICIT tier).
 
         try:
             result = await self._wrapper.call("computer.clipboard.view", {})
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -190,6 +213,13 @@ class ScreenshotTool(BaseTool):
 
     consent_tier: int = 1
     parallel_safe: bool = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.screenshot",
+            tier_required=ConsentTier.IMPLICIT,
+            human_description="Capture a screenshot of the current screen.",
+        ),
+    )
 
     def __init__(
         self,
@@ -227,7 +257,7 @@ class ScreenshotTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (IMPLICIT tier).
 
         params: dict[str, Any] = {}
         if "quadrant" in call.arguments:
@@ -238,7 +268,6 @@ class ScreenshotTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -247,6 +276,13 @@ class ExtractScreenTextTool(BaseTool):
 
     consent_tier: int = 1
     parallel_safe: bool = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.extract_screen_text",
+            tier_required=ConsentTier.IMPLICIT,
+            human_description="Extract all visible text from the screen using OCR.",
+        ),
+    )
 
     def __init__(
         self,
@@ -278,14 +314,13 @@ class ExtractScreenTextTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (IMPLICIT tier).
 
         try:
             result = await self._wrapper.call("computer.display.ocr", {})
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -294,6 +329,13 @@ class ListRecentFilesTool(BaseTool):
 
     consent_tier: int = 1
     parallel_safe: bool = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.list_recent_files",
+            tier_required=ConsentTier.IMPLICIT,
+            human_description="List files modified in the last N hours.",
+        ),
+    )
 
     def __init__(
         self,
@@ -329,12 +371,11 @@ class ListRecentFilesTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (IMPLICIT tier).
 
         hours = call.arguments.get("hours", 8)
         directory = call.arguments.get("directory", "~")
         limit = call.arguments.get("limit", 50)
-        cmd = f"find {directory} -newer /tmp/.oc_ref -type f 2>/dev/null | head -{limit}"
         minutes = int(hours) * 60
 
         # Use mmin for cross-platform compatibility
@@ -351,7 +392,6 @@ class ListRecentFilesTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -360,6 +400,13 @@ class SearchFilesTool(BaseTool):
 
     consent_tier: int = 1
     parallel_safe: bool = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.search_files",
+            tier_required=ConsentTier.IMPLICIT,
+            human_description="Search for files by name or content using a query string.",
+        ),
+    )
 
     def __init__(
         self,
@@ -394,14 +441,13 @@ class SearchFilesTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (IMPLICIT tier).
 
         try:
             result = await self._wrapper.call("computer.files.search", call.arguments)
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -415,6 +461,13 @@ class ReadGitLogTool(BaseTool):
 
     consent_tier: int = 1
     parallel_safe: bool = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.read_git_log",
+            tier_required=ConsentTier.IMPLICIT,
+            human_description="Read git commit log for a repository (inline, no OI subprocess).",
+        ),
+    )
 
     def __init__(
         self,
@@ -424,7 +477,7 @@ class ReadGitLogTool(BaseTool):
         sandbox: Any | None = None,
         audit: Any | None = None,
     ) -> None:
-        self._wrapper = wrapper  # kept for constructor uniformity (Phase 5 interweaving)
+        self._wrapper = wrapper  # kept for constructor uniformity
         self._consent_gate = consent_gate
         self._sandbox = sandbox
         self._audit = audit
@@ -451,7 +504,7 @@ class ReadGitLogTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (IMPLICIT tier).
 
         repo_path = call.arguments.get("repo_path", ".")
         limit = call.arguments.get("limit", 20)
@@ -488,7 +541,6 @@ class ReadGitLogTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=output)
 
 
