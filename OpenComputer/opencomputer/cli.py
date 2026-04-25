@@ -1069,6 +1069,24 @@ def recall(
         )
 
 
+@app.command(name="acp")
+def acp_serve() -> None:
+    """Start the Agent Client Protocol server over stdio.
+
+    OpenComputer becomes the agent backend for ACP-aware IDEs (Zed,
+    VS Code with the ACP extension, Cursor, Claude Desktop).
+
+    PR-D of ~/.claude/plans/replicated-purring-dewdrop.md.
+    See docs/acp.md for IDE setup instructions.
+    """
+    import asyncio as _asyncio
+
+    from opencomputer.acp import ACPServer
+
+    server = ACPServer()
+    _asyncio.run(server.serve_stdio())
+
+
 @app.command()
 def batch(
     input_path: str = typer.Argument(..., help="Path to JSONL with one prompt per line."),
