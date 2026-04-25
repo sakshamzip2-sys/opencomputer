@@ -43,6 +43,24 @@ from plugin_sdk.hooks import (
     HookHandler,
     HookSpec,
 )
+from plugin_sdk.ingestion import (
+    FileObservationEvent,
+    FileOperation,
+    HookDecisionKind,
+    HookSignalEvent,
+    IdentityNormalizer,
+    MessageRole,
+    MessageSignalEvent,
+    SignalEvent,
+    SignalNormalizer,
+    ToolCallEvent,
+    ToolCallOutcome,
+    WebContentKind,
+    WebObservationEvent,
+    clear_normalizers,
+    get_normalizer,
+    register_normalizer,
+)
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
 from plugin_sdk.interaction import InteractionRequest, InteractionResponse
 from plugin_sdk.memory import MemoryProvider
@@ -113,4 +131,21 @@ __all__ = [
     "CapabilityClaim",
     "ConsentGrant",
     "ConsentDecision",
+    # ingestion / signal bus (Phase 3.A, F2)
+    "SignalEvent",
+    "ToolCallEvent",
+    "WebObservationEvent",
+    "FileObservationEvent",
+    "MessageSignalEvent",
+    "HookSignalEvent",
+    "SignalNormalizer",
+    "IdentityNormalizer",
+    "register_normalizer",
+    "get_normalizer",
+    "clear_normalizers",
+    "ToolCallOutcome",
+    "WebContentKind",
+    "FileOperation",
+    "MessageRole",
+    "HookDecisionKind",
 ]
