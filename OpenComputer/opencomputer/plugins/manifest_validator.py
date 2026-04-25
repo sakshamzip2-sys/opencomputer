@@ -59,12 +59,35 @@ class SetupProviderSchema(BaseModel):
         return v
 
 
+class SetupChannelSchema(BaseModel):
+    """Typed mirror of `plugin_sdk.core.SetupChannel` for validation only.
+
+    Sub-project G.25 (Tier 4 OpenClaw port follow-up).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=64)
+    env_vars: list[str] = Field(default_factory=list)
+    label: str = Field(default="", max_length=128)
+    signup_url: str = Field(default="", max_length=512)
+    requires_user_id: bool = Field(default=False)
+
+    @field_validator("env_vars", mode="before")
+    @classmethod
+    def _drop_empty_strings(cls, v: object) -> object:
+        if isinstance(v, list):
+            return [s for s in v if isinstance(s, str) and s.strip()]
+        return v
+
+
 class PluginSetupSchema(BaseModel):
     """Typed mirror of `plugin_sdk.core.PluginSetup` for validation only."""
 
     model_config = ConfigDict(extra="forbid")
 
     providers: list[SetupProviderSchema] = Field(default_factory=list)
+    channels: list[SetupChannelSchema] = Field(default_factory=list)
     requires_runtime: bool = Field(default=False)
 
 
@@ -209,6 +232,7 @@ __all__ = [
     "PluginKind",
     "PluginManifestSchema",
     "PluginSetupSchema",
+    "SetupChannelSchema",
     "SetupProviderSchema",
     "validate_manifest",
 ]

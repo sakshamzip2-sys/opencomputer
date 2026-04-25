@@ -4,6 +4,30 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.25 — Channel setup metadata, Tier 4 OpenClaw port follow-up)
+
+- **`plugin_sdk.SetupChannel`** — frozen dataclass symmetric to
+  `SetupProvider` (G.23/G.24) but for channel plugins (Telegram,
+  Discord, iMessage, etc.). Fields: `id`, `env_vars`, `label`,
+  `signup_url`, `requires_user_id` (Telegram-style allowlist hint).
+- **`PluginSetup.channels: tuple[SetupChannel, ...] = ()`** — new field
+  on the existing `PluginSetup` dataclass. Default-empty tuple keeps
+  every existing manifest backwards-compatible.
+- **Bundled channel manifests updated** — telegram declares
+  `id: "telegram"`, `env_vars: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_ID"]`,
+  `signup_url: "https://t.me/BotFather"`, `requires_user_id: true`;
+  discord declares `id: "discord"`, `env_vars: ["DISCORD_BOT_TOKEN"]`,
+  `signup_url: "https://discord.com/developers/applications"`.
+- **Manifest validator schema** — `SetupChannelSchema` with
+  `extra="forbid"` (typo detection) and the empty-string drop pattern
+  shared with G.21–G.24.
+- **10 new tests** in `tests/test_channel_setup_metadata.py` —
+  schema parse (minimal / full / drops empties / typo rejection /
+  omitted-channels default), `_parse_manifest` flattening,
+  bundled-manifest regression guard for telegram + discord,
+  backwards-compat (no setup → no channels; providers-only → empty
+  channels tuple).
+
 ### Added (Sub-project G.24 — Setup wizard reads manifest display fields, Tier 4 OpenClaw port follow-up)
 
 - **`SetupProvider` extended with display fields** — `label: str`,

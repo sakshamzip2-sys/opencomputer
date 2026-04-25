@@ -7,5 +7,16 @@
   "license": "MIT",
   "kind": "channel",
   "entry": "plugin",
-  "tool_names": []
+  "tool_names": [],
+  "setup": {
+    "channels": [
+      {
+        "id": "telegram",
+        "env_vars": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_ID"],
+        "label": "Telegram",
+        "signup_url": "https://t.me/BotFather",
+        "requires_user_id": true
+      }
+    ]
+  }
 }

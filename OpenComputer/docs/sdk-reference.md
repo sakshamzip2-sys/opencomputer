@@ -115,16 +115,39 @@ Mirrors OpenClaw's `PluginManifestSetup` at
 
 ### `SetupProvider`
 
-Frozen dataclass for one provider id surfaced during setup. Three
+Frozen dataclass for one provider id surfaced during setup. Six
 fields:
 
 - `id` — provider id (e.g. `"anthropic"`, `"openai"`).
 - `auth_methods` — `tuple[str, ...]` (e.g. `("api_key", "bearer")`).
 - `env_vars` — `tuple[str, ...]`. **Order matters**: the first
   entry is treated as canonical by setup tools.
+- `label` — human-readable name shown in `opencomputer setup`
+  (G.24). Empty string falls back to `id`.
+- `default_model` — model id pre-filled by the wizard (G.24).
+- `signup_url` — where the user can obtain an API key (G.24).
 
 Mirrors OpenClaw's `PluginManifestSetupProvider` at
 `sources/openclaw-2026.4.23/src/plugins/manifest.ts:76-83`.
+
+### `SetupChannel`
+
+Frozen dataclass for one channel id surfaced during setup
+(symmetric to `SetupProvider`, G.25). Five fields:
+
+- `id` — channel id (e.g. `"telegram"`, `"discord"`).
+- `env_vars` — `tuple[str, ...]`. Order matters; first entry is
+  the primary credential, subsequent entries cover supplemental
+  auth (allowlists, webhook secrets).
+- `label` — human-readable name (e.g. `"Telegram"`).
+- `signup_url` — where the user can obtain the credential (e.g.
+  `https://t.me/BotFather`).
+- `requires_user_id` — `bool`. Telegram-style: when `True`, the
+  wizard prompts for a user-id allowlist after the bot token.
+
+Channel plugins now self-describe in `opencomputer setup` —
+add a `setup.channels[]` block to your `plugin.json` and the
+wizard knows how to walk a user through your channel.
 
 ### `PluginActivationSource`
 
