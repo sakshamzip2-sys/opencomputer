@@ -36,6 +36,7 @@ dependencies = [
   "discord.py>=2.3",
   "beautifulsoup4>=4.12",
   "keyring>=24",
+  "croniter>=2.0",
 ]
 
 [project.optional-dependencies]
