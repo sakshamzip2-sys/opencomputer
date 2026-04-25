@@ -770,6 +770,11 @@ from opencomputer.cli_audit import audit_app  # noqa: E402
 
 app.add_typer(audit_app, name="audit")
 
+# Phase 3.G — prompt-injection instruction-detector CLI
+from opencomputer.cli_security import security_app  # noqa: E402
+
+app.add_typer(security_app, name="security")
+
 
 @config_app.command("show")
 def config_show() -> None:

@@ -4,6 +4,13 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Phase 3.G — Instruction-detector for prompt-injection defense)
+
+- **`opencomputer/security/instruction_detector.py`** — `InstructionDetector` runs 7 conservative rules (explicit override, role swap, system-prompt extraction, developer message, token smuggling, imperative swarm, user extra patterns) and returns a `DetectionVerdict` with confidence + triggered_rules + quarantine_recommended.
+- **`opencomputer/security/sanitize.py::sanitize_external_content`** — one-call helper: detects + (optionally) wraps quarantined content in `<quarantined-untrusted-content>` envelope + publishes a `HookEvent` to the F2 bus so audit log + evolution trajectory can record the defense.
+- **`opencomputer consent security check / config show` CLI** — manual sanity check of detector decisions (read file/stdin → exit 0 clean, exit 1 quarantined; `--wrap` prints the envelope form).
+- **Future F6/F7 hookups**: the OpenCLI scraper and OI bridge will pipe their fetched content through `sanitize_external_content` before returning it to the LLM. Phase 3.G ships only the defense primitive — wiring lands when those plugins integrate.
+
 ### Added (Phase 3.A — Signal Normalizer + TypedEvent bus, F2 foundation)
 
 - **`plugin_sdk/ingestion.py`** — public typed-event hierarchy for the shared pub/sub bus. `SignalEvent` base (frozen+slots, `event_id` UUID4 / `event_type` discriminator / `timestamp` / `session_id` / `source` / `metadata`) plus 5 concrete subclasses: `ToolCallEvent`, `WebObservationEvent`, `FileObservationEvent`, `MessageSignalEvent`, `HookSignalEvent`. Plus `SignalNormalizer` ABC, `IdentityNormalizer` pass-through, and a module-level normalizer registry (`register_normalizer` / `get_normalizer` / `clear_normalizers`). The two `*SignalEvent` names avoid shadowing the unrelated `MessageEvent` / `HookEvent` symbols already in `plugin_sdk.core` / `plugin_sdk.hooks` — discriminator strings (`"message"`, `"hook"`) are unaffected.
