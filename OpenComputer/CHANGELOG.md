@@ -11,6 +11,36 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 - **`plugin.py::register()` wired** — the "awaiting Phase 4" early-return stub is replaced with real registration: constructs one shared `OpenCLIWrapper`, `RateLimiter`, `RobotsCache` and calls `api.register_tool()` for all 3 tools. Tool classes are loaded under a qualified `extensions.opencli_scraper.tools` sys.modules key to prevent name shadowing against other plugins' `tools/` packages.
 - **`plugin.json` unchanged** — `enabled_by_default: false` STAYS until the user completes legal review.
 - **11 new tests** in `tests/test_opencli_consent_integration.py` — capability claim shape, bus publish on success (both `FetchProfileTool` and `ScrapeRawTool`), bus failure isolation, manifest still-disabled check, register() call count + tool name verification.
+### Added (Phase 3.D — Temporal Decay + Drift Detection, F5 layer)
+
+- **`plugin_sdk/decay.py`** — public `DecayConfig` + `DriftConfig` + `DriftReport` dataclasses.
+- **`opencomputer/user_model/decay.py::DecayEngine`** — exponential decay with per-edge-kind half-life (asserts 30d, contradicts 14d, supersedes 60d, derives_from 21d). `compute_recency_weight` applies `0.5^(age/half_life)` floored at `min_recency_weight`. `apply_decay` walks the edge table and persists via 3.C's `UserModelStore.update_edge_recency_weight`.
+- **`opencomputer/user_model/drift.py::DriftDetector`** — symmetrized KL divergence between recent (default 7d) and lifetime motif distributions (from 3.B `MotifStore`), with Laplace smoothing. Returns `DriftReport` with `per_kind_drift`, `top_changes`, and a `significant` flag.
+- **`opencomputer/user_model/drift_store.py::DriftStore`** — SQLite-backed report archive at `<profile_home>/user_model/drift_reports.sqlite` with retention helper.
+- **`opencomputer/user_model/scheduler.py::DecayDriftScheduler`** — bus-attached background runner; throttles decay + drift to `decay_interval_seconds` / `drift_interval_seconds` (default daily). Heavy work in daemon thread; never blocks the bus.
+- **`opencomputer user-model {decay run, drift detect, drift list, drift show}` CLI** — manual triggers + visibility.
+- **Phase 3 complete**: 3.A bus + 3.B inference + 3.C graph + 3.D decay/drift form the F2/F4/F5 user-intelligence stack.
+
+### Added (Phase 3.C — User-model graph + context weighting, F4 layer)
+
+- **`plugin_sdk/user_model.py`** — public `Node`, `Edge`, `UserModelQuery`, `UserModelSnapshot` dataclasses + `NodeKind` / `EdgeKind` literals.
+- **`opencomputer/user_model/store.py::UserModelStore`** — SQLite at `<profile_home>/user_model/graph.sqlite` with `nodes` + `edges` + `nodes_fts` (FTS5 with porter+unicode61 tokenizer), idempotent migrations, WAL+retry-jitter.
+- **`opencomputer/user_model/importer.py::MotifImporter`** — converts 3.B `Motif` records into nodes+edges. Temporal → attribute+preference; transition → two attributes + derives_from; implicit_goal → goal + per-top-tool attribute.
+- **`opencomputer/user_model/context.py::ContextRanker`** — scores candidate nodes via `salience × confidence × recency × source_reliability`; top-K cap with optional token budget; returns `UserModelSnapshot`.
+- **`opencomputer user-model {nodes,edges,search,import-motifs,context}` CLI** — visibility + manual import + ranked retrieval.
+- **Phase 3.D dependency**: `UserModelStore.update_edge_recency_weight` is the write API decay/drift will use.
+
+### Added (Phase 3.B — Behavioral Inference engine, F2 continued)
+
+- **`plugin_sdk/inference.py`** — public `Motif` dataclass + `MotifExtractor` protocol.
+- **`opencomputer/inference/extractors/`** — three extractors:
+  - `TemporalMotifExtractor` — bucket-by-(hour,weekday) recurring usage detector
+  - `TransitionChainExtractor` — 5-minute window adjacent-event transition counter
+  - `ImplicitGoalExtractor` — top-N tool sequence summarizer per session (heuristic; future LLM-judge swap-in)
+- **`opencomputer/inference/storage.py::MotifStore`** — SQLite-backed motif CRUD at `<profile_home>/inference/motifs.sqlite`. WAL + retry-jitter pattern.
+- **`opencomputer/inference/engine.py::BehavioralInferenceEngine`** — attaches to F2 default_bus; buffers events; runs extractors when batch_size or batch_seconds threshold reached; persists motifs.
+- **`opencomputer inference motifs {list,stats,prune,run}` CLI** — visibility + manual flush + retention.
+- **Phase 3.C dependency**: `MotifStore.list(kind=...)` is the read API the user-model graph will consume.
 
 ### Added (Phase 3.F — OS feature flag + invisible-by-default UI)
 
