@@ -1,14 +1,14 @@
 """pytest conftest — test infrastructure for all tests in this directory.
 
-This file registers module aliases so the oi-capability plugin (which has a
-hyphenated directory name, `extensions/oi-capability/`) can be imported as
-`extensions.oi_capability` in test code.
+This file registers module aliases so hyphenated extension directories can be
+imported with underscores in test code:
 
-The alias is injected into sys.modules BEFORE any test module is collected,
-so all test_oi_*.py files can use:
+1.  extensions.oi_capability  → extensions/oi-capability/  (compat shim; kept
+    for test_oi_use_cases_*.py which were NOT renamed in PR-3)
+2.  extensions.coding_harness → extensions/coding-harness/  (PR-3; makes the
+    new test_coding_harness_oi_*.py tests importable)
 
-    from extensions.oi_capability.subprocess.protocol import ...
-    from extensions.oi_capability.tools.tier_1_introspection import ...
+The aliases are injected into sys.modules BEFORE any test module is collected.
 """
 
 from __future__ import annotations
@@ -22,16 +22,24 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _EXT_DIR = _PROJECT_ROOT / "extensions"
 _OI_DIR = _EXT_DIR / "oi-capability"
+_CH_DIR = _EXT_DIR / "coding-harness"
 
 
-def _register_oi_capability_alias() -> None:
-    """Register extensions.oi_capability → extensions/oi-capability/ in sys.modules."""
+def _ensure_extensions_pkg() -> None:
+    """Synthesise a namespace package for 'extensions' if not already registered."""
     if "extensions" not in sys.modules:
-        # Synthesise a namespace package for 'extensions'
         ext_pkg = types.ModuleType("extensions")
         ext_pkg.__path__ = [str(_EXT_DIR)]
         ext_pkg.__package__ = "extensions"
         sys.modules["extensions"] = ext_pkg
+
+
+def _register_oi_capability_alias() -> None:
+    """Register extensions.oi_capability → extensions/oi-capability/ in sys.modules.
+
+    Kept for test_oi_use_cases_*.py which use extensions.oi_capability.use_cases.*.
+    """
+    _ensure_extensions_pkg()
 
     if "extensions.oi_capability" not in sys.modules:
         # Load the actual package from the hyphenated directory
@@ -49,23 +57,76 @@ def _register_oi_capability_alias() -> None:
         sys.modules["extensions.oi_capability"] = oi_mod
         spec.loader.exec_module(oi_mod)
 
-    # Register sub-packages: subprocess, tools, and use_cases
-    for sub in ("subprocess", "tools", "use_cases"):
+    # Register sub-packages.
+    # PR-3: subprocess/ and tools/ were moved to coding-harness/oi_bridge/;
+    # the oi_capability.* aliases redirect there so use_cases tests keep working.
+    # use_cases is still in extensions/oi-capability/use_cases/.
+    _OI_BRIDGE_DIR = _CH_DIR / "oi_bridge"
+    _sub_dirs = {
+        "subprocess": _OI_BRIDGE_DIR / "subprocess",
+        "tools": _OI_BRIDGE_DIR / "tools",
+        "use_cases": _OI_DIR / "use_cases",
+    }
+    for sub, sub_dir in _sub_dirs.items():
         full_name = f"extensions.oi_capability.{sub}"
         if full_name not in sys.modules:
-            sub_dir = _OI_DIR / sub
+            init = sub_dir / "__init__.py"
             spec = importlib.util.spec_from_file_location(
                 full_name,
-                str(sub_dir / "__init__.py"),
+                str(init),
                 submodule_search_locations=[str(sub_dir)],
-            )
-            if spec is None or spec.loader is None:
+            ) if init.exists() else None
+            if spec is None or not init.exists():
                 continue
             mod = importlib.util.module_from_spec(spec)
             mod.__package__ = full_name
             mod.__path__ = [str(sub_dir)]
             sys.modules[full_name] = mod
-            spec.loader.exec_module(mod)
+            if spec.loader is not None:
+                spec.loader.exec_module(mod)
+
+
+def _register_coding_harness_alias() -> None:
+    """Register extensions.coding_harness → extensions/coding-harness/ in sys.modules.
+
+    Added in PR-3 (2026-04-25): makes test_coding_harness_oi_*.py importable now that
+    OI tools live at extensions/coding-harness/oi_bridge/ per interweaving-plan.md.
+    Mirrors the pattern used for extensions.oi_capability above.
+    """
+    _ensure_extensions_pkg()
+
+    if "extensions.coding_harness" not in sys.modules:
+        # coding-harness is a plugin dir — no __init__.py at the root; treat as namespace.
+        ch_mod = types.ModuleType("extensions.coding_harness")
+        ch_mod.__path__ = [str(_CH_DIR)]
+        ch_mod.__package__ = "extensions.coding_harness"
+        sys.modules["extensions.coding_harness"] = ch_mod
+
+    # Register the oi_bridge sub-package and its children
+    _oi_bridge_dir = _CH_DIR / "oi_bridge"
+    for rel in ("oi_bridge", "oi_bridge/subprocess", "oi_bridge/tools"):
+        full_name = "extensions.coding_harness." + rel.replace("/", ".")
+        if full_name not in sys.modules:
+            sub_dir = _CH_DIR / rel
+            init = sub_dir / "__init__.py"
+            spec = importlib.util.spec_from_file_location(
+                full_name,
+                str(init),
+                submodule_search_locations=[str(sub_dir)],
+            ) if init.exists() else None
+            if spec is None or not init.exists():
+                mod = types.ModuleType(full_name)
+                mod.__path__ = [str(sub_dir)]
+                mod.__package__ = full_name
+                sys.modules[full_name] = mod
+            else:
+                mod = importlib.util.module_from_spec(spec)
+                mod.__package__ = full_name
+                mod.__path__ = [str(sub_dir)]
+                sys.modules[full_name] = mod
+                if spec.loader is not None:
+                    spec.loader.exec_module(mod)
 
 
 _register_oi_capability_alias()
+_register_coding_harness_alias()

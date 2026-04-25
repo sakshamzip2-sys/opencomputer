@@ -15,7 +15,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from extensions.oi_capability.tools.tier_2_communication import (
+from extensions.coding_harness.oi_bridge.tools.tier_2_communication import (
     ALL_TOOLS,
     ListCalendarEventsTool,
     ReadContactsTool,

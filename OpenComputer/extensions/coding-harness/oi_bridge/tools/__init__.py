@@ -1,9 +1,8 @@
-# ruff: noqa: N999  -- directory 'oi-capability' has a hyphen (required by plugin manifest)
 """OI tools package — 23 tools across 5 risk tiers.
 
-Re-exports ALL_TOOLS lists from each tier module so Phase 5 can iterate:
+Re-exports ALL_TOOLS lists from each tier module so coding-harness/plugin.py can iterate:
 
-    from extensions.oi_capability.tools import ALL_TOOLS_BY_TIER
+    from extensions.coding_harness.oi_bridge.tools import ALL_TOOLS_BY_TIER
     for tier, tools in ALL_TOOLS_BY_TIER.items():
         for tool_cls in tools:
             api.register_tool(tool_cls(wrapper=wrapper, ...))

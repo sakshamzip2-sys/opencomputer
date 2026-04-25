@@ -132,3 +132,34 @@ def register(api) -> None:  # PluginAPI duck-typed
         api.register_slash_command(CheckpointCommand(harness_ctx=ctx))
         api.register_slash_command(DiffCommand(harness_ctx=ctx))
         api.register_slash_command(UndoCommand(harness_ctx=ctx))
+
+    # OI Bridge tools (PR-3 of 2026-04-25 Hermes parity plan; refactored
+    # from the standalone extensions/oi-capability/ per
+    # docs/f7/interweaving-plan.md). Tools have capability_claims on the
+    # class — F1 ConsentGate enforces at dispatch.
+    try:
+        from extensions.coding_harness.oi_bridge.subprocess.wrapper import (  # noqa: PLC0415
+            OISubprocessWrapper,
+        )
+        from extensions.coding_harness.oi_bridge.tools import (  # noqa: PLC0415
+            tier_1_introspection,
+            tier_2_communication,
+            tier_3_browser,
+            tier_4_system_control,
+            tier_5_advanced,
+        )
+        _oi_wrapper = OISubprocessWrapper()
+        for _oi_module in (
+            tier_1_introspection,
+            tier_2_communication,
+            tier_3_browser,
+            tier_4_system_control,
+            tier_5_advanced,
+        ):
+            for _tool_cls in getattr(_oi_module, "ALL_TOOLS", ()):
+                api.register_tool(_tool_cls(wrapper=_oi_wrapper))
+    except Exception as _exc:  # noqa: BLE001
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "OI bridge registration failed (skipping): %s", _exc, exc_info=True,
+        )

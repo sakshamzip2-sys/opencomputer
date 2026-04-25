@@ -12,12 +12,19 @@ OI method mappings per oi-source-map.md:
 
 Platform notes: All platforms for history/bookmarks (browser-specific paths).
 read_browser_dom requires Selenium + ChromeDriver — all platforms.
+
+PR-3 (2026-04-25): moved from extensions/oi-capability/ into
+extensions/coding-harness/oi_bridge/ per docs/f7/interweaving-plan.md.
+capability_claims declared on each class — F1 ConsentGate enforces at dispatch.
+Tier 3 tools use EXPLICIT consent; read_browser_dom uses PER_ACTION (Selenium opens browser).
+AUDIT_HOOK markers removed: audit happens automatically through the gate (PRs #64/#65).
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
+from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -29,6 +36,13 @@ class ReadBrowserHistoryTool(BaseTool):
 
     consent_tier: int = 3
     parallel_safe: bool = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.read_browser_history",
+            tier_required=ConsentTier.EXPLICIT,
+            human_description="Read browser history by querying the browser's sqlite database.",
+        ),
+    )
 
     def __init__(
         self,
@@ -69,7 +83,7 @@ class ReadBrowserHistoryTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (EXPLICIT tier).
 
         limit = call.arguments.get("limit", 50)
         # browser and days params are accepted by schema for user clarity;
@@ -93,7 +107,6 @@ class ReadBrowserHistoryTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -102,6 +115,13 @@ class ReadBrowserBookmarksTool(BaseTool):
 
     consent_tier: int = 3
     parallel_safe: bool = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.read_browser_bookmarks",
+            tier_required=ConsentTier.EXPLICIT,
+            human_description="Read browser bookmarks from the browser's bookmarks file.",
+        ),
+    )
 
     def __init__(
         self,
@@ -141,7 +161,7 @@ class ReadBrowserBookmarksTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (EXPLICIT tier).
 
         # limit param accepted by schema; output is capped via str(data)[:4096] below
         cmd = (
@@ -161,7 +181,6 @@ class ReadBrowserBookmarksTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -170,6 +189,13 @@ class ReadBrowserDomTool(BaseTool):
 
     consent_tier: int = 3
     parallel_safe: bool = False  # Selenium is stateful
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.read_browser_dom",
+            tier_required=ConsentTier.PER_ACTION,
+            human_description="Navigate to a URL and return page DOM/text (opens visible browser via Selenium).",
+        ),
+    )
 
     def __init__(
         self,
@@ -208,8 +234,8 @@ class ReadBrowserDomTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
-        # Stricter: scope="oi.tier3.read_browser_dom" — user sees browser open
+        # F1 ConsentGate enforces capability_claims at dispatch (PER_ACTION tier —
+        # user sees browser open; per-URL consent is required).
 
         url = call.arguments["url"]
 
@@ -221,7 +247,6 @@ class ReadBrowserDomTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
