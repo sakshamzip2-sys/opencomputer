@@ -24,6 +24,7 @@ from opencomputer.sandbox.docker import DockerStrategy
 from opencomputer.sandbox.linux import LinuxBwrapStrategy
 from opencomputer.sandbox.macos import MacOSSandboxExecStrategy
 from opencomputer.sandbox.none_strategy import NoneSandboxStrategy
+from opencomputer.sandbox.ssh import SSHSandboxStrategy
 from plugin_sdk.sandbox import (
     SandboxConfig,
     SandboxResult,
@@ -37,15 +38,17 @@ def _named_strategy(name: str) -> SandboxStrategy:
     if name == "none":
         return NoneSandboxStrategy()
     if name == "macos_sandbox_exec":
-        s = MacOSSandboxExecStrategy()
+        s: SandboxStrategy = MacOSSandboxExecStrategy()
     elif name == "linux_bwrap":
         s = LinuxBwrapStrategy()
     elif name == "docker":
         s = DockerStrategy()
+    elif name == "ssh":
+        s = SSHSandboxStrategy()
     else:
         raise SandboxUnavailable(
             f"unknown sandbox strategy {name!r}; "
-            "valid: auto / macos_sandbox_exec / linux_bwrap / docker / none"
+            "valid: auto / macos_sandbox_exec / linux_bwrap / docker / ssh / none"
         )
     if not s.is_available():
         raise SandboxUnavailable(
