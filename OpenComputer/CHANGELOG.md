@@ -4,6 +4,38 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.32 — Model metadata registry, Tier 4)
+
+- **`opencomputer/agent/model_metadata.py`** — small in-memory registry
+  answering two questions about any model id without hitting an
+  external pricing API:
+  - `context_length(model_id)` → max tokens.
+  - `cost_per_million(model_id)` → `(input_usd, output_usd)` tuple.
+- **`ModelMetadata`** frozen dataclass with `model_id`, optional
+  `context_length`, optional `input_usd_per_million`, optional
+  `output_usd_per_million`. All numeric fields are nullable so callers
+  can distinguish "unknown" from "declared as 0".
+- **Curated default catalog** for the models OC users actually run:
+  Anthropic (`claude-opus-4-7`, `claude-sonnet-4-6`,
+  `claude-haiku-4-5-20251001`) and OpenAI (`gpt-5.4`, `gpt-4o`, `o1`,
+  `o3`, `o4-mini`). Numbers reflect the public pricing pages as of
+  2026-04.
+- **`register_model(meta, *, replace=False)`** lets third-party
+  provider plugins teach core about their models from `register(api)`.
+  Default `replace=False` preserves the curated catalog so a buggy
+  plugin can't silently override known-good entries.
+- **Why this lives in core, not the provider plugin:** the cost-guard
+  module (G.8) and CompactionEngine want context-length / cost without
+  instantiating the provider plugin. Putting the table here keeps
+  those callers cheap.
+- **13 new tests** in `tests/test_model_metadata.py` — curated entries
+  present (Claude family + OpenAI family), unknown returns None, helper
+  functions match, register adds new entries, collision without
+  `replace` preserves curated, collision with `replace=True` overrides,
+  partial cost entries (input only) return `(in, 0.0)`, no-cost entries
+  return `None`, list_models sorted + snapshot-immutable, reset clears
+  third-party entries.
+
 ### Added (Sub-project G.31 — Smart model fallback routing, Tier 4)
 
 - **`ModelConfig.fallback_models: tuple[str, ...] = ()`** — new config
