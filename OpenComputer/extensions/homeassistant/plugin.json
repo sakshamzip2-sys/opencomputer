@@ -1,0 +1,23 @@
+{
+  "id": "homeassistant",
+  "name": "Home Assistant",
+  "version": "0.1.0",
+  "description": "Home Assistant channel via the REST API. Outbound = call_service (turn lights on, send notifications, run scripts). Inbound: webhook adapter (G.3) wired to a Home Assistant automation that POSTs events.",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "channel",
+  "entry": "plugin",
+  "single_instance": true,
+  "enabled_by_default": false,
+  "profiles": ["*"],
+  "setup": {
+    "channels": [
+      {
+        "id": "homeassistant",
+        "env_vars": ["HOMEASSISTANT_URL", "HOMEASSISTANT_TOKEN"],
+        "label": "Home Assistant",
+        "signup_url": "https://www.home-assistant.io/docs/authentication/#your-account-profile"
+      }
+    ]
+  }
+}
