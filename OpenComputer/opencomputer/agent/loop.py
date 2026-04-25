@@ -228,10 +228,28 @@ class AgentLoop:
             user_char_limit=config.memory.user_char_limit,
         )
         self.prompt_builder = prompt_builder or PromptBuilder()
+
+        # Phase 10f.H: memory context + bridge. Bridge wraps an optional
+        # external MemoryProvider (Honcho, Mem0, etc.) with exception safety;
+        # None = built-in memory only. Tools receive the context at init so
+        # they can read/write MEMORY.md, USER.md, and SessionDB without
+        # reaching into globals.
+        # NOTE: constructed BEFORE CompactionEngine so we can pass the bridge
+        # reference to it for PR-6 T2.2 on_pre_compress wiring.
+        self._current_session_id: str = ""
+        self.memory_context = MemoryContext(
+            manager=self.memory,
+            db=self.db,
+            session_id_provider=lambda: self._current_session_id,
+            provider=None,  # plugin registration flips this later
+        )
+        self.memory_bridge = MemoryBridge(self.memory_context)
+
         self.compaction = CompactionEngine(
             provider=provider,
             model=config.model.model,
             disabled=compaction_disabled,
+            memory_bridge=self.memory_bridge,
         )
         # Phase 11d: third-pillar episodic memory. Records one event per
         # completed turn for cross-session "remind me" queries via FTS5.
@@ -254,20 +272,6 @@ class AgentLoop:
         # pre-empting the security boundary. When None, gate is disabled
         # (back-compat: tools without claims are unaffected either way).
         self._consent_gate = consent_gate
-
-        # Phase 10f.H: memory context + bridge. Bridge wraps an optional
-        # external MemoryProvider (Honcho, Mem0, etc.) with exception safety;
-        # None = built-in memory only. Tools receive the context at init so
-        # they can read/write MEMORY.md, USER.md, and SessionDB without
-        # reaching into globals.
-        self._current_session_id: str = ""
-        self.memory_context = MemoryContext(
-            manager=self.memory,
-            db=self.db,
-            session_id_provider=lambda: self._current_session_id,
-            provider=None,  # plugin registration flips this later
-        )
-        self.memory_bridge = MemoryBridge(self.memory_context)
 
         # Register agent-facing memory tools in the global registry. Safe to
         # call repeatedly — the registry's .register() is idempotent on
@@ -426,13 +430,23 @@ class AgentLoop:
                 # Joins the same frozen-prompt lane so drift only lands on
                 # the next session's rebuild, preserving prefix-cache hits.
                 soul = self.memory.read_soul()
-                snapshot = self.prompt_builder.build(
+                # PR-6 T2.1: use build_with_memory so ambient memory blocks
+                # from active providers are appended under '## Memory context'.
+                # Falls back to the sync build() path if ambient blocks are
+                # disabled or no bridge is wired. The snapshot is still frozen
+                # per session — ambient blocks are evaluated once at session
+                # start and cached, matching the prefix-cache invariant.
+                snapshot = await self.prompt_builder.build_with_memory(
                     skills=skills,
                     declarative_memory=declarative,
                     user_profile=user_profile,
                     soul=soul,
                     memory_char_limit=self.config.memory.memory_char_limit,
                     user_char_limit=self.config.memory.user_char_limit,
+                    memory_bridge=self.memory_bridge,
+                    session_id=sid,
+                    enable_ambient_blocks=self.config.memory.enable_ambient_blocks,
+                    max_ambient_block_chars=self.config.memory.max_ambient_block_chars,
                 )
                 # Evict the least-recently-used snapshot if the cache is full
                 # BEFORE inserting, so we never exceed the cap even transiently.
@@ -646,6 +660,31 @@ class AgentLoop:
             input_tokens=total_input,
             output_tokens=total_output,
         )
+
+    # ─── PR-6 T2.3 session lifecycle ───────────────────────────────
+
+    async def aclose(self, session_id: str | None = None) -> None:
+        """Clean shutdown. Fires memory-provider on_session_end hooks.
+
+        PR-6 of 2026-04-25 Hermes parity plan. Wires the on_session_end hook
+        that was defined in plugin_sdk/memory.py but never invoked.
+
+        Parameters
+        ----------
+        session_id:
+            Explicit session to close. If omitted, uses ``_current_session_id``
+            (the most recently active session). If neither is set, the call is
+            a no-op with respect to session-end hooks (bridge still shuts down
+            cleanly via ``shutdown_all`` at process exit).
+        """
+        sid = session_id or self._current_session_id
+        if sid and self.memory_bridge is not None:
+            try:
+                await self.memory_bridge.fire_session_end(sid)
+            except Exception:
+                _log.exception(
+                    "AgentLoop.aclose: fire_session_end failed for session %s", sid
+                )
 
     # ─── allowlist helpers ─────────────────────────────────────────
 

@@ -1,6 +1,10 @@
-# OpenComputer F7 — Open Interpreter Capability Plugin (User Guide)
+# OpenComputer F7 — Open Interpreter Capability (coding-harness OI bridge)
 
-> **Status: C1 (deep-scan + design only).** The `extensions/oi-capability/` plugin is **not yet on disk** — this is the scope/safety doc. C3 ships the plugin skeleton; Session A's Phase 5 wires consent + sandbox + the coding-harness interweaving; only after that is the plugin user-facing.
+> **Phase 5 refactor (PR-3 of 2026-04-25 Hermes parity plan):** OI tools were merged into the
+> coding-harness as `extensions/coding-harness/oi_bridge/` per `docs/f7/interweaving-plan.md`.
+> The standalone `extensions/oi-capability/` plugin is now a deprecated compat shim — remove in next
+> major release. Tools are registered via `extensions/coding-harness/plugin.py`; no separate plugin
+> enable step is needed (coding-harness is enabled by default).
 
 ## What is this?
 
@@ -20,11 +24,11 @@ OI Capability gives OpenComputer the ability to **read your local environment + 
 
 These are the load-bearing rules — verifiable in code:
 
-1. **Disabled by default.** `enabled_by_default: false`; explicit `opencomputer plugin enable oi-capability` required.
+1. **Integrated into coding-harness.** OI tools are registered by `extensions/coding-harness/plugin.py` (PR-3). The bridge starts disabled at the capability level — individual tools require explicit user consent per their tier before executing.
 
-2. **AGPL boundary** — OI is AGPL v3. Our wrapper NEVER imports `interpreter` directly; OI runs only inside `extensions/oi-capability/subprocess/`. **CI test** (`tests/test_oi_agpl_boundary.py`) greps the codebase for `import interpreter` outside the subprocess dir — any match fails the build. Detected on every PR.
+2. **AGPL boundary** — OI is AGPL v3. Our wrapper NEVER imports `interpreter` directly; OI runs only inside `extensions/coding-harness/oi_bridge/subprocess/server.py`. **CI test** (`tests/test_coding_harness_oi_agpl_boundary.py`) greps the codebase for `import interpreter` outside the subprocess dir — any match fails the build. Detected on every PR.
 
-3. **Telemetry kill-switch.** OI ships hardcoded PostHog telemetry (`interpreter/core/utils/telemetry.py`). Our subprocess server replaces the telemetry module with a no-op **before** any OI import via `sys.modules` patching. Belt-and-suspenders: the subprocess also blocks egress to `posthog.com` at the network level. Test: `test_oi_telemetry_disable.py` patches `requests.post` with a fail-loudly assertion and runs the dispatcher — never fires.
+3. **Telemetry kill-switch.** OI ships hardcoded PostHog telemetry (`interpreter/core/utils/telemetry.py`). Our subprocess server replaces the telemetry module with a no-op **before** any OI import via `sys.modules` patching. Belt-and-suspenders: the subprocess also blocks egress to `posthog.com` at the network level. Test: `test_coding_harness_oi_telemetry_disable.py` patches `requests.post` with a fail-loudly assertion and runs the dispatcher — never fires.
 
 4. **Subprocess isolation.** OI runs in a separate Python venv at `<profile_home>/oi_capability/venv`. JSON-RPC over stdin/stdout — zero network exposure even on localhost.
 
@@ -40,24 +44,26 @@ These are the load-bearing rules — verifiable in code:
 
 10. **No auto-install of OI's heavy deps.** Subprocess venv installs OI with a minimal `requirements.txt` (no torch, no opencv) by default. Heavy deps installed only if a tool that needs them is invoked.
 
-## What you can do today (C1)
+## What you can do today (Phase 5 complete)
 
-**Nothing user-facing yet.** Architecture: `docs/f7/design.md`. Upstream deep-scan: `docs/f7/oi-source-map.md` (578 lines, AGPL audit included). Phase 5 refactor contract: `docs/f7/interweaving-plan.md`.
+**23 OI tools are registered via `extensions/coding-harness/plugin.py`** as part of the coding-harness.
+Architecture: `docs/f7/design.md`. Upstream deep-scan: `docs/f7/oi-source-map.md` (578 lines, AGPL
+audit included). Phase 5 refactor contract: `docs/f7/interweaving-plan.md`.
 
 ## Phase status
 
 | Phase | Status | What ships |
 |---|---|---|
-| **C1** | ✅ Landed (this branch) | Deep-scan + design doc + interweaving plan + this README |
-| **C3** | Coming | Plugin skeleton: subprocess wrapper, JSON-RPC protocol, telemetry kill-switch, venv bootstrap, 23 tool stubs, AGPL boundary CI test, ~95-105 tests |
-| **C5** | After C3 | 8 use-case libraries: autonomous code refactoring (marked Session-A-scope for coding-harness wiring), life-admin/calendar, personal-knowledge-management, proactive security monitoring, dev-flow assistant, email triage + draft generation, context-aware code suggestions, temporal pattern recognition |
-| **Session A's Phase 5** | Outside Session C scope | (a) Wire ConsentGate per-tier + SandboxStrategy on Tier 4-5 + AuditLog. (b) **Refactor `extensions/oi-capability/` into `extensions/coding-harness/oi_bridge/`** per master plan §F7 interweaving requirement. (c) Flip `enabled_by_default` (only after legal review). |
+| **C1** | ✅ Landed | Deep-scan + design doc + interweaving plan + this README |
+| **C3** | ✅ Landed | Plugin skeleton: subprocess wrapper, JSON-RPC protocol, telemetry kill-switch, venv bootstrap, 23 tools, AGPL boundary CI test, ~95-105 tests |
+| **C5** | ✅ Landed | 8 use-case libraries: autonomous code refactoring, life-admin/calendar, personal-knowledge-management, proactive security monitoring, dev-flow assistant, email triage + draft generation, context-aware code suggestions, temporal pattern recognition |
+| **Session A Phase 5 (PR-3)** | ✅ **Complete — 2026-04-25** | Wired ConsentGate via `capability_claims` on each tool class (F1 auto-enforces at dispatch). SANDBOX_HOOK pending 3.E wrapper API match (see tier_4/5 comments). Refactored `extensions/oi-capability/` → `extensions/coding-harness/oi_bridge/` per `docs/f7/interweaving-plan.md`. Old plugin is now a compat shim. |
 
-## Setup (post-Phase-5)
+## Setup (Phase 5 complete)
 
 ```bash
-opencomputer plugin enable oi-capability
-# First-use bootstrap creates ~/.opencomputer/oi_capability/venv (~5 min, ~500 MB on Apple Silicon)
+# OI bridge is now part of coding-harness — no separate plugin enable needed.
+# First-use: the subprocess venv is bootstrapped on first tool call.
 opencomputer oi-capability doctor       # verifies bootstrap + telemetry-disabled + AGPL boundary
 ```
 
@@ -85,4 +91,4 @@ rm -rf ~/.opencomputer/oi_capability   # nukes venv + audit log
 
 ---
 
-*Last updated: C1 landing. Updated each phase.*
+*Last updated: 2026-04-25 — Phase 5 refactor complete (PR-3). Updated paths to reflect oi_bridge location.*

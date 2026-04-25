@@ -82,11 +82,14 @@ class CompactionEngine:
         model: str,
         config: CompactionConfig | None = None,
         disabled: bool = False,
+        memory_bridge: object | None = None,
     ) -> None:
         self.provider = provider
         self.model = model
         self.config = config or CompactionConfig()
         self.disabled = disabled
+        #: PR-6 T2.2 — optional MemoryBridge for on_pre_compress key-fact extraction.
+        self._memory_bridge = memory_bridge
         #: Flag the loop checks to suppress hook firing while compaction runs.
         self._in_progress = False
 
@@ -126,6 +129,18 @@ class CompactionEngine:
         old_block = messages[:split_idx]
         recent_block = messages[split_idx:]
 
+        # PR-6 T2.2 — extract key facts from providers BEFORE the aux LLM
+        # summarises (so facts survive compaction). Failures are isolated;
+        # compaction proceeds without facts if the bridge is unavailable.
+        key_facts = ""
+        if self._memory_bridge is not None:
+            try:
+                key_facts = await self._memory_bridge.collect_pre_compress(old_block)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "compaction: collect_pre_compress failed; proceeding without"
+                )
+
         # Try the aux LLM summary
         try:
             summary_text = await asyncio.wait_for(
@@ -134,6 +149,15 @@ class CompactionEngine:
         except Exception as e:  # noqa: BLE001 — fall back on any failure
             logger.warning("compaction aux LLM failed, falling back to truncate: %s", e)
             return self._truncate_fallback(messages, split_idx)
+
+        # Prepend provider key-facts so they survive the compaction summary.
+        if key_facts:
+            summary_text = (
+                "<KEY-FACTS-DO-NOT-SUMMARIZE>\n"
+                f"{key_facts}\n"
+                "</KEY-FACTS-DO-NOT-SUMMARIZE>\n\n"
+                + summary_text
+            )
 
         # Success — replace old_block with one synthetic summary message
         synthetic = Message(

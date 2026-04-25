@@ -4,6 +4,22 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Refactored (Phase A4 — F7 OI interweaving, PR-3 of 2026-04-25 Hermes parity plan)
+
+- **`extensions/coding-harness/oi_bridge/`** — 23 OI tools (5 tiers) moved from the standalone
+  `extensions/oi-capability/` plugin into the coding-harness as a bridge layer, per
+  `docs/f7/interweaving-plan.md`. Tools are registered via `extensions/coding-harness/plugin.py`
+  with a try/except guard (registration failure skips silently).
+- **ConsentGate wiring** — All 23 tool classes now declare `capability_claims` (F1 pattern); the
+  gate enforces at dispatch. `# CONSENT_HOOK` / `# AUDIT_HOOK` markers replaced. `# SANDBOX_HOOK`
+  markers retained as pending-3.E-API-match comments in Tier 4-5 tools (7 tools).
+- **Tests renamed** — 10 `tests/test_oi_*.py` → `tests/test_coding_harness_oi_*.py`. Imports updated
+  to `extensions.coding_harness.oi_bridge.*`. AGPL CI guard path updated to new location.
+- **conftest.py** — Added `extensions.coding_harness` alias (mirrors oi_capability pattern).
+- **Compat shim** — `extensions/oi-capability/` is now a deprecated stub with DeprecationWarning;
+  `plugin.json` marked deprecated; `plugin.py` is a no-op register stub.
+- `docs/f7/README.md`, `docs/f7/design.md` (§16 added), `docs/parallel-sessions.md` updated.
+
 ### Added (Phase A3 — F6 OpenCLI Phase 4 wiring, PR-2 of 2026-04-25 Hermes parity plan)
 
 - **`CapabilityClaim` on each C2 tool** — `ScrapeRawTool`, `FetchProfileTool`, and `MonitorPageTool` each declare a `capability_claims: ClassVar[tuple[CapabilityClaim, ...]]` with a `ConsentTier.EXPLICIT` claim namespaced under `opencli_scraper.*`. The agent loop's F1 ConsentGate enforces these claims at dispatch time before any tool executes — plugins do NOT call `ConsentGate.require()` themselves; the gate is invoked automatically by AgentLoop (see §F1 architecture in `opencomputer/agent/consent/`).

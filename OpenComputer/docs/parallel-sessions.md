@@ -37,7 +37,7 @@ Both sessions read this file at startup. Both update it after every commit.
 ## Reserved files — Session C only (Session A + B must NOT modify)
 
 - `extensions/opencli-scraper/*`
-- `extensions/oi-capability/*` (provisional — Session A's Phase 5 refactors into `extensions/coding-harness/oi_bridge/` per `docs/f7/interweaving-plan.md`)
+- `extensions/oi-capability/*` (deprecated compat shim — refactored into `extensions/coding-harness/oi_bridge/` in PR-3, 2026-04-25; remove on next major version bump)
 - `tests/test_opencli_*.py`, `tests/test_oi_*.py`
 - `docs/f6/*`, `docs/f7/*`
 

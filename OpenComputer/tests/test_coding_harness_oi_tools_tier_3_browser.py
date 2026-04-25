@@ -15,7 +15,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from extensions.oi_capability.tools.tier_3_browser import (
+from extensions.coding_harness.oi_bridge.tools.tier_3_browser import (
     ALL_TOOLS,
     ReadBrowserBookmarksTool,
     ReadBrowserDomTool,

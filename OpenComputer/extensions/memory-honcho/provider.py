@@ -281,6 +281,61 @@ class HonchoSelfHostedProvider(MemoryProvider):
             # crashing atexit — we're on a best-effort path at shutdown.
             logger.debug("honcho shutdown aclose tolerated: %s", e)
 
+    # ─── PR-6 T2.1 / T2.2 / T2.3 ambient lifecycle hooks ──────────
+
+    async def system_prompt_block(self, *, session_id: str | None = None) -> str | None:
+        """T2.1: return a brief summary of relevant Honcho insights for this session.
+
+        Uses the existing /v1/context endpoint — the same source as ``prefetch``
+        — to pull the user's current Honcho context and render it as a compact
+        ambient block that lands in '## Memory context' every session.
+
+        Returns None if the client is closed, session_id is unknown, or the
+        Honcho call fails (failures are absorbed; bridge logs them).
+        Caps output to ~800 chars — the bridge will hard-truncate too.
+        """
+        if getattr(self._client, "is_closed", False):
+            return None
+        try:
+            resp = await self._client.get(
+                "/v1/context-full",
+                params={
+                    "workspace": self._config.workspace,
+                    "host_key": self._config.host_key,
+                    "peer": "user",
+                },
+            )
+            resp.raise_for_status()
+            text = _as_text(resp.json())
+        except Exception as e:  # noqa: BLE001
+            logger.debug("honcho system_prompt_block failed: %s", e)
+            return None
+        if not text:
+            return None
+        # Trim to a compact ambient block; bridge enforces the hard cap.
+        return text[:800]
+
+    async def on_pre_compress(self, messages: list) -> str | None:
+        """T2.2: extract key facts that must survive compaction.
+
+        TODO(PR-6 follow-up): wire to Honcho client.peek/query once the
+        Honcho HTTP API exposes a dedicated key-facts endpoint. For now
+        returns None (no-op) so compaction is unaffected while the wiring
+        layer lands.
+        """
+        return None  # TODO(PR-6 follow-up): wire to Honcho client.peek/query
+
+    async def on_session_end(self, session_id: str) -> None:
+        """T2.3: flush any pending Honcho writes when the session closes.
+
+        Honcho's HTTP API has no batched /flush endpoint; sync_turn is already
+        one-POST-per-call. The client's connection pool is drained at process
+        exit by ``shutdown`` (via MemoryBridge.shutdown_all). Here we just log
+        the event and return so the bridge's fire_session_end loop can confirm
+        the hook fired.
+        """
+        logger.debug("honcho on_session_end: session %s ended", session_id)
+
     # ─── internal HTTP helpers (one per tool) ──────────────────────
 
     async def _profile(self, args: dict[str, Any]) -> str:

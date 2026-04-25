@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from extensions.oi_capability.subprocess.venv_bootstrap import (
+from extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap import (
     OI_VERSION,
     BootstrapError,
     _python_bin,
@@ -30,9 +30,11 @@ from extensions.oi_capability.subprocess.venv_bootstrap import (
 class TestVenvBootstrapHelpers:
     def test_venv_dir_returns_path_under_home(self, tmp_path):
         """Venv directory should be under <home>/oi_capability/venv."""
-        with patch("extensions.oi_capability.subprocess.venv_bootstrap._home", return_value=tmp_path):
+        with patch("extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap._home", return_value=tmp_path):
             # Re-import to get fresh call
-            from extensions.oi_capability.subprocess import venv_bootstrap  # noqa: PLC0415
+            from extensions.coding_harness.oi_bridge.subprocess import (
+                venv_bootstrap,  # noqa: PLC0415
+            )
             vdir = venv_bootstrap._venv_dir()
         assert "oi_capability" in str(vdir)
         assert "venv" in str(vdir)
@@ -65,8 +67,8 @@ class TestEnsureOIVenv:
         fake_python.touch()
 
         with (
-            patch("extensions.oi_capability.subprocess.venv_bootstrap._home", return_value=tmp_path),
-            patch("extensions.oi_capability.subprocess.venv_bootstrap._venv_is_valid", return_value=True),
+            patch("extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap._home", return_value=tmp_path),
+            patch("extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap._venv_is_valid", return_value=True),
         ):
             result = ensure_oi_venv()
         # Should return some Path
@@ -78,8 +80,8 @@ class TestEnsureOIVenv:
 
         # Make venv "already valid" to skip actual creation
         with (
-            patch("extensions.oi_capability.subprocess.venv_bootstrap._home", return_value=tmp_path),
-            patch("extensions.oi_capability.subprocess.venv_bootstrap._venv_is_valid", return_value=True),
+            patch("extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap._home", return_value=tmp_path),
+            patch("extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap._venv_is_valid", return_value=True),
         ):
             result = ensure_oi_venv()
         assert isinstance(result, Path)
@@ -89,10 +91,10 @@ class TestEnsureOIVenv:
         import subprocess  # noqa: PLC0415
 
         with (
-            patch("extensions.oi_capability.subprocess.venv_bootstrap._home", return_value=tmp_path),
-            patch("extensions.oi_capability.subprocess.venv_bootstrap._venv_is_valid", return_value=False),
+            patch("extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap._home", return_value=tmp_path),
+            patch("extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap._venv_is_valid", return_value=False),
             patch(
-                "extensions.oi_capability.subprocess.venv_bootstrap.subprocess.run",
+                "extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap.subprocess.run",
                 side_effect=subprocess.CalledProcessError(1, "venv", stderr=b"permission denied"),
             ),
         ):
@@ -104,9 +106,9 @@ class TestEnsureOIVenv:
         """BootstrapError when pip binary not found inside venv after creation."""
         # Simulate venv created but pip missing
         with (
-            patch("extensions.oi_capability.subprocess.venv_bootstrap._home", return_value=tmp_path),
-            patch("extensions.oi_capability.subprocess.venv_bootstrap._venv_is_valid", return_value=False),
-            patch("extensions.oi_capability.subprocess.venv_bootstrap.subprocess.run"),  # venv creation ok
+            patch("extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap._home", return_value=tmp_path),
+            patch("extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap._venv_is_valid", return_value=False),
+            patch("extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap.subprocess.run"),  # venv creation ok
             # pip binary does not exist — _pip_bin() will return a path that doesn't exist
         ):
             with pytest.raises(BootstrapError) as exc_info:
@@ -125,8 +127,8 @@ class TestEnsureOIVenv:
             return True  # pretend always valid
 
         with (
-            patch("extensions.oi_capability.subprocess.venv_bootstrap._home", return_value=tmp_path),
-            patch("extensions.oi_capability.subprocess.venv_bootstrap._venv_is_valid", side_effect=mock_is_valid),
+            patch("extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap._home", return_value=tmp_path),
+            patch("extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap._venv_is_valid", side_effect=mock_is_valid),
         ):
             r1 = ensure_oi_venv()
             r2 = ensure_oi_venv()

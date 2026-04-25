@@ -437,3 +437,58 @@ C1 design locked. C3 implementation maps 1:1 to §3 architecture sketch and §5 
 - Anthropic `computer_use` routing — accept for Phase 5 or defer?
 - Per-plugin state directory convention (where venv lives).
 - AGPL contamination code-review checklist — does Session A want this in the global PR template?
+
+---
+
+## 16. Phase 5 refactor complete — 2026-04-25 (PR-3)
+
+Session A's Phase 5 was completed on 2026-04-25 as PR-3 of the Hermes parity plan
+(`docs/superpowers/plans/2026-04-25-hermes-parity-and-coordination-items.md`).
+
+### What was done
+
+1. **Files moved** — `extensions/oi-capability/subprocess/` and `extensions/oi-capability/tools/`
+   were moved to `extensions/coding-harness/oi_bridge/` via `git mv`. The oi_bridge `__init__.py`
+   was created separately (worktree already had the moves staged).
+
+2. **Imports updated** — All `extensions.oi_capability.*` references inside moved files were updated
+   to `extensions.coding_harness.oi_bridge.*` via sed. Tier files (tier_1 through tier_5) already had
+   correct relative imports (`from ..subprocess.wrapper import OISubprocessWrapper`).
+
+3. **ConsentGate wiring** — `capability_claims` class attrs were already declared on all 23 tool
+   classes (the branch had this done). F1 ConsentGate auto-enforces at dispatch — no `ConsentGate.require()`
+   call needed in `execute()`. All `# CONSENT_HOOK` and `# AUDIT_HOOK` markers were replaced.
+   Counts: 23 `capability_claims` declarations (8 tier-1, 5 tier-2, 3 tier-3, 4 tier-4, 3 tier-5).
+
+4. **SANDBOX_HOOK status** — All 7 Tier 4-5 tools have `# SANDBOX_HOOK pending 3.E API match`
+   comments explaining why wiring was deferred. The OI subprocess IS the subprocess boundary;
+   direct `run_sandboxed()` wiring would require extracting the argv from inside the JSON-RPC wrapper
+   call, which `OISubprocessWrapper` doesn't expose. Needs `wrapper.pre_exec_hook` in 3.E.
+   Tracking: `docs/f7/sandbox-wiring-todos.md` (create when 3.E exposes the hook).
+
+5. **coding-harness/plugin.py** — OI Bridge section added with try/except guard to register all 23
+   tools via `ALL_TOOLS` lists on each tier module.
+
+6. **Tests moved** — 10 `test_oi_*.py` files renamed to `test_coding_harness_oi_*.py` via `git mv`.
+   Imports updated from `extensions.oi_capability.*` to `extensions.coding_harness.oi_bridge.*`.
+   `test_oi_use_cases_*.py` (8 files) left as-is per spec.
+
+7. **conftest.py** — Added `extensions.coding_harness` → `extensions/coding-harness/` alias
+   (mirrors the `oi_capability` alias pattern). Kept the `oi_capability` alias for use_cases tests.
+
+8. **AGPL CI guard** — `ALLOWED_PATH` updated to point at
+   `extensions/coding-harness/oi_bridge/subprocess/server.py`.
+
+9. **Compat shim** — `extensions/oi-capability/__init__.py` updated with DeprecationWarning.
+   `plugin.py` made a no-op stub. `plugin.json` marked as deprecated.
+
+10. **Docs** — `docs/f7/README.md` updated with new paths + phase-5-complete status. This §16 added.
+
+### What was deferred
+
+- **SANDBOX_HOOK wiring** for all Tier 4-5 tools — pending `OISubprocessWrapper` exposing a pre-exec
+  hook so `run_sandboxed()` can wrap the subprocess call. See comments in `tier_4_system_control.py`
+  and `tier_5_advanced.py`.
+- **Compat shim removal** — scheduled for next major version bump (the `DeprecationWarning` is active).
+- **`test_oi_use_cases_*.py` import updates** — use_cases tests still use `extensions.oi_capability.*`
+  (via conftest alias). Left as-is per spec to keep the diff smaller.

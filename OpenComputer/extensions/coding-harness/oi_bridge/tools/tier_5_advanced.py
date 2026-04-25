@@ -14,12 +14,20 @@ Platform notes:
   - extract_selected_text: macOS initially (requires Cmd+C clipboard trick)
   - list_running_processes: all platforms
   - read_sms_messages: macOS ONLY (chat.db access, iMessage history)
+
+PR-3 (2026-04-25): moved from extensions/oi-capability/ into
+extensions/coding-harness/oi_bridge/ per docs/f7/interweaving-plan.md.
+capability_claims declared on each class — F1 ConsentGate enforces at dispatch.
+Tier 5 tools use PER_ACTION consent (niche, high-sensitivity data).
+SANDBOX_HOOK: same situation as Tier 4 — pending 3.E wrapper API match.
+AUDIT_HOOK markers removed: audit happens automatically through the gate (PRs #64/#65).
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
+from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -31,6 +39,13 @@ class ExtractSelectedTextTool(BaseTool):
 
     consent_tier: int = 5
     parallel_safe: bool = False  # modifies clipboard
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.extract_selected_text",
+            tier_required=ConsentTier.PER_ACTION,
+            human_description="Extract currently selected text via clipboard trick (briefly overwrites clipboard).",
+        ),
+    )
 
     def __init__(
         self,
@@ -62,17 +77,15 @@ class ExtractSelectedTextTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
-        # Tier 5: per-action consent required
-
-        # SANDBOX_HOOK — Session A wires SandboxStrategy.guard here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (PER_ACTION tier).
+        # SANDBOX_HOOK pending 3.E API match — see tier_4_system_control.py comment.
+        # TODO: wire run_sandboxed once wrapper exposes pre-exec hooks.
 
         try:
             result = await self._wrapper.call("computer.os.get_selected_text", {})
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -81,6 +94,13 @@ class ListRunningProcessesTool(BaseTool):
 
     consent_tier: int = 5
     parallel_safe: bool = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.list_running_processes",
+            tier_required=ConsentTier.PER_ACTION,
+            human_description="List currently running processes (read-only, no kill/signal).",
+        ),
+    )
 
     def __init__(
         self,
@@ -114,9 +134,9 @@ class ListRunningProcessesTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
-
-        # SANDBOX_HOOK — Session A wires SandboxStrategy.guard here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (PER_ACTION tier).
+        # SANDBOX_HOOK pending 3.E API match — see tier_4_system_control.py comment.
+        # TODO: wire run_sandboxed once wrapper exposes pre-exec hooks.
 
         limit = call.arguments.get("limit", 50)
         filter_str = call.arguments.get("filter", "")
@@ -134,7 +154,6 @@ class ListRunningProcessesTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
@@ -143,6 +162,13 @@ class ReadSmsMessagesTool(BaseTool):
 
     consent_tier: int = 5
     parallel_safe: bool = False
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="oi_bridge.read_sms_messages",
+            tier_required=ConsentTier.PER_ACTION,
+            human_description="Read iMessage/SMS messages from macOS chat.db (entire iMessage history is sensitive).",
+        ),
+    )
 
     def __init__(
         self,
@@ -178,10 +204,9 @@ class ReadSmsMessagesTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        # CONSENT_HOOK — Session A wires ConsentGate.require here in Phase 5
-        # Strictest consent: scope="oi.tier5.read_sms_messages"
-
-        # SANDBOX_HOOK — Session A wires SandboxStrategy.guard here in Phase 5
+        # F1 ConsentGate enforces capability_claims at dispatch (PER_ACTION tier).
+        # SANDBOX_HOOK pending 3.E API match — see tier_4_system_control.py comment.
+        # TODO: wire run_sandboxed once wrapper exposes pre-exec hooks.
 
         params: dict[str, Any] = {}
         if "contact" in call.arguments:
@@ -196,7 +221,6 @@ class ReadSmsMessagesTool(BaseTool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
 
-        # AUDIT_HOOK — Session A wires AuditLog.append here in Phase 5
         return ToolResult(tool_call_id=call.id, content=str(result))
 
 
