@@ -1,0 +1,23 @@
+{
+  "id": "signal",
+  "name": "Signal",
+  "version": "0.1.0",
+  "description": "Signal channel via signal-cli REST API. Outbound text + reactions. Inbound: poll signal-cli's /receive endpoint or use webhook adapter (G.3) wired to signal-cli's HTTP receiver.",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "channel",
+  "entry": "plugin",
+  "single_instance": true,
+  "enabled_by_default": false,
+  "profiles": ["*"],
+  "setup": {
+    "channels": [
+      {
+        "id": "signal",
+        "env_vars": ["SIGNAL_CLI_URL", "SIGNAL_PHONE_NUMBER"],
+        "label": "Signal (signal-cli)",
+        "signup_url": "https://github.com/AsamK/signal-cli"
+      }
+    ]
+  }
+}

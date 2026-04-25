@@ -4,6 +4,30 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.27 — Signal adapter via signal-cli, Tier 4.x)
+
+- **`extensions/signal/`** — new bundled channel plugin. Signal outbound
+  text + reactions via signal-cli's JSON-RPC HTTP daemon
+  (``signal-cli daemon --http``). Mirrors G.26 (WhatsApp) pattern:
+  outbound + reactions in this adapter; inbound via webhook adapter
+  (G.3) wired to signal-cli's ``/receive`` endpoint or a custom poller.
+- **Capabilities = REACTIONS only.** signal-cli supports edit + delete
+  via newer JSON-RPC methods, but availability is inconsistent across
+  versions; deferred until we add a version detection step.
+- `chat_id` accepts both E.164 phone numbers (``+15551234567``) and
+  Signal group ids (``group.<base64>``).
+- `message_id` is the signal-cli timestamp — used as the
+  ``targetTimestamp`` for reactions; non-numeric ids rejected with a
+  clear error so callers don't pass arbitrary strings.
+- **Setup metadata** (G.25 pattern): ``setup.channels[].id="signal"``,
+  env_vars ``["SIGNAL_CLI_URL", "SIGNAL_PHONE_NUMBER"]``, signup_url
+  pointing at AsamK's signal-cli repo.
+- **9 new tests** in `tests/test_signal_adapter.py` — capability flag,
+  basic send (JSON-RPC envelope shape), group-id send, truncation,
+  empty-body rejection, signal-cli error surface, reaction payload
+  (timestamp coercion to int), empty-emoji rejection, non-numeric
+  message_id rejection.
+
 ### Added (Sub-project G.26 — WhatsApp adapter via Cloud API, Tier 4.x)
 
 - **`extensions/whatsapp/`** — new bundled channel plugin. WhatsApp
