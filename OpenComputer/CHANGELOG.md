@@ -4,6 +4,15 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Phase 3.A — Signal Normalizer + TypedEvent bus, F2 foundation)
+
+- **`plugin_sdk/ingestion.py`** — public typed-event hierarchy for the shared pub/sub bus. `SignalEvent` base (frozen+slots, `event_id` UUID4 / `event_type` discriminator / `timestamp` / `session_id` / `source` / `metadata`) plus 5 concrete subclasses: `ToolCallEvent`, `WebObservationEvent`, `FileObservationEvent`, `MessageSignalEvent`, `HookSignalEvent`. Plus `SignalNormalizer` ABC, `IdentityNormalizer` pass-through, and a module-level normalizer registry (`register_normalizer` / `get_normalizer` / `clear_normalizers`). The two `*SignalEvent` names avoid shadowing the unrelated `MessageEvent` / `HookEvent` symbols already in `plugin_sdk.core` / `plugin_sdk.hooks` — discriminator strings (`"message"`, `"hook"`) are unaffected.
+- **`opencomputer/ingestion/bus.py`** — `TypedEventBus` with sync `publish` + async `apublish`, type-discriminator + glob-pattern subscribers, exception-isolated fanout (one bad subscriber cannot poison others — logs WARNING + continues), bounded queue + drop-oldest backpressure (default `maxlen=10000`, throttled WARN + `dropped_count` counter), thread-safe subscriber list (snapshot-on-publish), per-subscription `BackpressurePolicy.{block,drop,log_and_drop}`, plus a module-level `default_bus` singleton + `get_default_bus()` / `reset_default_bus()` helpers. In-memory only at this stage — Phase 3.D may add SQLite persistence.
+- **`AgentLoop._dispatch_tool_calls`** publishes a `ToolCallEvent` after each tool invocation (via the new `_emit_tool_call_event` helper). Outcomes mapped: `success` (clean ToolResult) / `failure` (`is_error=True` or raised exception) / `blocked` (consent gate, PreToolUse hook block, or allowlist refusal) / `cancelled` (asyncio cancellation). Sync, exception-isolated; a broken bus never breaks the loop.
+- **Documentation** — `docs/sdk-reference.md` extended with a new "Ingestion / Signal bus" section covering every new export. `docs/parallel-sessions.md` "Bus API change log" entry announcing initial bus shipping.
+- **Session B unblocked**: B3 (the trajectory subscriber, parked since Session B's worktree shipped because the bus didn't exist on `main`) can now subscribe directly to `default_bus.subscribe("tool_call", ...)`.
+- **Tests**: 35 new across 3 files (`test_typed_event_bus.py` 22 / `test_signal_normalizer.py` 8 / `test_loop_emits_bus_events.py` 5). Full suite at 1734 passing (was 1699 entering 3.A). Ruff clean.
+
 ### Added (Phase C3 — F7 Open Interpreter capability plugin skeleton, parallel Session C)
 
 - **`extensions/oi-capability/` plugin scaffold** — wraps upstream Open Interpreter (AGPL v3) via strict subprocess isolation. Per `docs/f7/design.md`. **Tools NOT registered yet** — plugin.py stub returns early; Session A wires consent + sandbox + AuditLog and **refactors the entire plugin into `extensions/coding-harness/oi_bridge/`** in Phase 5 per `docs/f7/interweaving-plan.md`.

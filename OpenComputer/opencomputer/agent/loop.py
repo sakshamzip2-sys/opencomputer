@@ -903,16 +903,25 @@ class AgentLoop:
             _allow_names, _allow_patterns = frozenset(), []
 
         async def _run_one(c: ToolCall):
+            import time as _time
+            start = _time.monotonic()
             if c.id in blocked:
-                return ToolResult(
+                result = ToolResult(
                     tool_call_id=c.id,
                     content=f"[blocked by PreToolUse hook: {blocked[c.id]}]",
                     is_error=True,
                 )
+                self._emit_tool_call_event(
+                    call=c,
+                    outcome="blocked",
+                    duration_seconds=_time.monotonic() - start,
+                    session_id=session_id,
+                )
+                return result
             if allow is not None and not self._is_call_allowed_for_dispatch(
                 c.name, c.arguments, _allow_names, _allow_patterns
             ):
-                return ToolResult(
+                result = ToolResult(
                     tool_call_id=c.id,
                     content=(
                         f"Error: tool {c.name!r} is not allowed in this "
@@ -920,12 +929,47 @@ class AgentLoop:
                     ),
                     is_error=True,
                 )
-            return await registry.dispatch(
-                c,
-                session_id=session_id,
-                turn_index=turn_index,
-                demand_tracker=self.demand_tracker,
-            )
+                self._emit_tool_call_event(
+                    call=c,
+                    outcome="blocked",
+                    duration_seconds=_time.monotonic() - start,
+                    session_id=session_id,
+                )
+                return result
+            try:
+                result = await registry.dispatch(
+                    c,
+                    session_id=session_id,
+                    turn_index=turn_index,
+                    demand_tracker=self.demand_tracker,
+                )
+            except asyncio.CancelledError:
+                self._emit_tool_call_event(
+                    call=c,
+                    outcome="cancelled",
+                    duration_seconds=_time.monotonic() - start,
+                    session_id=session_id,
+                )
+                raise
+            except Exception:
+                self._emit_tool_call_event(
+                    call=c,
+                    outcome="failure",
+                    duration_seconds=_time.monotonic() - start,
+                    session_id=session_id,
+                )
+                raise
+            else:
+                outcome = (
+                    "failure" if getattr(result, "is_error", False) else "success"
+                )
+                self._emit_tool_call_event(
+                    call=c,
+                    outcome=outcome,
+                    duration_seconds=_time.monotonic() - start,
+                    session_id=session_id,
+                )
+                return result
 
         if self.config.loop.parallel_tools and self._all_parallel_safe(calls):
             results = await asyncio.gather(*(_run_one(c) for c in calls))
@@ -941,6 +985,46 @@ class AgentLoop:
             )
             for r in results
         ]
+
+    def _emit_tool_call_event(
+        self,
+        *,
+        call: ToolCall,
+        outcome: str,
+        duration_seconds: float,
+        session_id: str,
+    ) -> None:
+        """Publish a :class:`ToolCallEvent` after a tool call settles.
+
+        Phase 3.A / F2 — emits to :data:`opencomputer.ingestion.bus.default_bus`
+        AFTER the existing ``PostToolUse``-eligible path runs. This is
+        the thin publisher wiring that Session B's B3 trajectory
+        subscriber depends on.
+
+        Exception-isolated: a broken bus MUST NOT break the agent loop.
+        Import is lazy (inside the function) so a hypothetical import
+        failure can't take down ``_dispatch_tool_calls`` either — the
+        warning is logged and dispatch continues.
+        """
+        try:
+            from opencomputer.ingestion.bus import default_bus
+            from plugin_sdk.ingestion import ToolCallEvent
+
+            event = ToolCallEvent(
+                session_id=session_id or None,
+                source="agent_loop",
+                tool_name=call.name,
+                arguments=dict(call.arguments or {}),
+                outcome=outcome,  # type: ignore[arg-type]
+                duration_seconds=max(0.0, duration_seconds),
+            )
+            default_bus.publish(event)
+        except Exception:  # noqa: BLE001 — bus must never break the loop
+            _log.warning(
+                "bus: ToolCallEvent publish failed for tool=%s — continuing",
+                call.name,
+                exc_info=True,
+            )
 
     def _all_parallel_safe(self, calls: list[ToolCall]) -> bool:
         """Decide whether a batch of tool calls is safe to run in parallel.
