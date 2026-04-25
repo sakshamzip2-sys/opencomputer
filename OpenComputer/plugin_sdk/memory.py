@@ -123,5 +123,35 @@ class MemoryProvider(ABC):
         """
         return None
 
+    async def system_prompt_block(self, *, session_id: str | None = None) -> str | None:
+        """Optional: contribute a section to the agent's system prompt.
+
+        Default: no-op (returns None). Providers that override this should
+        return a 200-1500 char string that summarizes their relevant memory
+        for the current session. The bridge aggregates blocks from all active
+        providers; the prompt builder appends them under '## Memory context'.
+
+        PR-6 of 2026-04-25 Hermes parity plan. Mirrors Hermes
+        MemoryProvider.system_prompt_block from
+        sources/hermes-agent/agent/memory_provider.py.
+
+        PRIVACY NOTE: returned text is sent to the LLM provider on every
+        turn. Providers should respect privacy + token budget; default cap
+        is enforced by config (MemoryConfig.max_ambient_block_chars).
+        """
+        return None
+
+    async def on_pre_compress(self, messages: list) -> str | None:
+        """Optional: extract key facts BEFORE the loop compacts the message
+        history. Default: no-op (returns None).
+
+        Return value is wrapped in <KEY-FACTS-DO-NOT-SUMMARIZE>...</KEY-FACTS-
+        DO-NOT-SUMMARIZE> markers and prepended to the compaction summary so
+        important facts survive summarization.
+
+        PR-6 of 2026-04-25 Hermes parity plan.
+        """
+        return None
+
 
 __all__ = ["MemoryProvider"]
