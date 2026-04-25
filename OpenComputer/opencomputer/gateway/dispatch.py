@@ -33,6 +33,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger("opencomputer.gateway.dispatch")
 
 
+def session_id_for(platform: str, chat_id: str) -> str:
+    """Derive the stable per-chat session id used by :class:`Dispatch`.
+
+    Public helper extracted from :meth:`Dispatch._session_id_for` so
+    channel adapters can compute the same id without a live ``Dispatch``
+    handle — needed by P-2 ``/steer`` interception in the Telegram
+    adapter (the adapter's per-chat decisions key on the same id the
+    dispatcher would have generated for the same inbound event).
+
+    Stable across processes: ``sha256(platform:chat_id)`` truncated to
+    32 hex chars. Two adapters seeing the same ``(platform, chat_id)``
+    pair always produce identical session ids — so a nudge submitted
+    via wire / CLI lands in the same per-session bucket the agent loop
+    will later consume.
+    """
+    h = hashlib.sha256(f"{platform}:{chat_id}".encode())
+    return h.hexdigest()[:32]
+
+
 class Dispatch:
     """Map channel messages to agent-loop runs, keeping per-chat sessions separate."""
 
@@ -63,8 +82,7 @@ class Dispatch:
 
     def _session_id_for(self, event: MessageEvent) -> str:
         """Stable session id: hash(platform + chat_id). Keeps history per chat."""
-        h = hashlib.sha256(f"{event.platform.value}:{event.chat_id}".encode())
-        return h.hexdigest()[:32]
+        return session_id_for(event.platform.value, event.chat_id)
 
     async def handle_message(self, event: MessageEvent) -> str | None:
         """
@@ -168,4 +186,4 @@ class Dispatch:
             return
 
 
-__all__ = ["Dispatch"]
+__all__ = ["Dispatch", "session_id_for"]

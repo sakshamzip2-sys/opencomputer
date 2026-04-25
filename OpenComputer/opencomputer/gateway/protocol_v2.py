@@ -44,6 +44,7 @@ from opencomputer.gateway.protocol import (
     METHOD_SEARCH,
     METHOD_SESSION_LIST,
     METHOD_SKILLS_LIST,
+    METHOD_STEER_SUBMIT,
     WireEvent,
     WireRequest,
     WireResponse,
@@ -116,6 +117,26 @@ class SkillsListResult(_StrictModel):
     skills: tuple[dict[str, Any], ...]
 
 
+class SteerSubmitParams(_StrictModel):
+    """Round 2a P-2 — submit a mid-run nudge to a session.
+
+    Latest-wins: a fresh submit replaces any pending nudge for the
+    same ``session_id``. The agent loop consumes the nudge between
+    turns and prepends it to the next LLM request as a synthetic
+    user message.
+    """
+
+    session_id: str
+    prompt: str
+
+
+class SteerSubmitResult(_StrictModel):
+    session_id: str
+    #: True if a previous (now-discarded) nudge was already pending.
+    had_pending: bool
+    queued_chars: int
+
+
 # Map method name → (params schema, result schema). Wire dispatchers can
 # look this up to validate both directions of any RPC call.
 METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
@@ -124,6 +145,7 @@ METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
     METHOD_SESSION_LIST: (SessionListParams, SessionListResult),
     METHOD_SEARCH: (SearchParams, SearchResult),
     METHOD_SKILLS_LIST: (SkillsListParams, SkillsListResult),
+    METHOD_STEER_SUBMIT: (SteerSubmitParams, SteerSubmitResult),
 }
 
 
@@ -187,6 +209,7 @@ __all__ = [
     "METHOD_SESSION_LIST",
     "METHOD_SEARCH",
     "METHOD_SKILLS_LIST",
+    "METHOD_STEER_SUBMIT",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",
@@ -204,6 +227,8 @@ __all__ = [
     "SearchResult",
     "SkillsListParams",
     "SkillsListResult",
+    "SteerSubmitParams",
+    "SteerSubmitResult",
     "METHOD_SCHEMAS",
     # v2 event schemas
     "TurnBeginPayload",
