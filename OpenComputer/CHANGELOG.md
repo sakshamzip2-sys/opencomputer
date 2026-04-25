@@ -4,6 +4,33 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.33 — `opencomputer session` CLI, Tier 4)
+
+- **New `opencomputer session` command group** — surfaces existing
+  `SessionDB` storage with four subcommands:
+  - `session list [--limit N]` — table of recent sessions (id,
+    started, platform, model, msgs, title) for the active profile.
+  - `session show <id> [--head N]` — print session metadata + the
+    first N messages as a content preview. Default head=5; pass `0`
+    for metadata-only.
+  - `session fork <id> [--title T]` — clone a session's messages
+    into a fresh UUID. Lets you branch a conversation without
+    polluting the source. Default title gets a `(fork)` suffix.
+  - `session resume <id>` — print the exact `opencomputer chat
+    --resume <id>` command. Doesn't spawn `chat` itself because
+    typer-inside-typer has rough edges; the user copy-pastes.
+- **Implementation** in `opencomputer/cli_session.py`. Uses
+  `SessionDB.create_session` + `append_messages_batch` for atomic
+  fork; `_home()` drives the per-profile DB path so each profile
+  sees its own sessions.
+- **12 new tests** in `tests/test_cli_session.py` covering empty
+  profile (shows hint, no error), seeded profile (id renders
+  through Rich's table wrapping), limit clamp, show errors
+  on unknown id, show with default head + head=0, fork errors on
+  unknown id, fork clones session+messages, fork explicit title,
+  fork default-title `(fork)` suffix, resume unknown returns error,
+  resume prints expected chat-resume command.
+
 ### Added (Sub-project G.32 — Model metadata registry, Tier 4)
 
 - **`opencomputer/agent/model_metadata.py`** — small in-memory registry
