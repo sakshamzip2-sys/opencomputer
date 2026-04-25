@@ -1,0 +1,9 @@
+{
+  "id": "aws-bedrock-provider",
+  "name": "AWS Bedrock provider",
+  "kind": "provider",
+  "version": "0.1.0",
+  "description": "AWS Bedrock provider via Converse API. Uses boto3. Optional install with [bedrock] extra.",
+  "enabled_by_default": false,
+  "schema_version": 1
+}

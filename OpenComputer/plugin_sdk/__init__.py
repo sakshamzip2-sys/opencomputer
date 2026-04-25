@@ -94,6 +94,7 @@ from plugin_sdk.sandbox import (
 )
 from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
+from plugin_sdk.transports import NormalizedRequest, NormalizedResponse, TransportBase
 from plugin_sdk.user_model import (
     Edge,
     EdgeKind,
@@ -195,4 +196,8 @@ __all__ = [
     "DecayConfig",
     "DriftConfig",
     "DriftReport",
+    # transport ABC (PR-C)
+    "NormalizedRequest",
+    "NormalizedResponse",
+    "TransportBase",
 ]
