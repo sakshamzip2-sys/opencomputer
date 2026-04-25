@@ -41,6 +41,8 @@ from opencomputer.tools.recall import RecallTool
 from opencomputer.tools.registry import registry
 from opencomputer.tools.skill import SkillTool
 from opencomputer.tools.skill_manage import SkillManageTool
+from opencomputer.tools.voice_synthesize import VoiceSynthesizeTool
+from opencomputer.tools.voice_transcribe import VoiceTranscribeTool
 from opencomputer.tools.web_fetch import WebFetchTool
 from opencomputer.tools.web_search import WebSearchTool
 from opencomputer.tools.write import WriteTool
@@ -208,6 +210,12 @@ def _register_builtin_tools() -> None:
     # ~/.claude/plans/toasty-wiggling-eclipse.md). Capability-claimed
     # through F1 ConsentGate so the agent can self-schedule with consent.
     registry.register(CronTool())
+    # Phase 1.1 of catch-up plan — voice as agent-invocable tools.
+    # The opencomputer.voice module already shipped (cost-guarded TTS/STT);
+    # these expose it explicitly so the agent can synthesize / transcribe
+    # without going through a channel-specific path.
+    registry.register(VoiceSynthesizeTool())
+    registry.register(VoiceTranscribeTool())
 
 
 def _resolve_plugin_filter():

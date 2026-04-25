@@ -9,6 +9,9 @@ from plugin_sdk import ConsentTier
 F1_CAPABILITIES: dict[str, ConsentTier] = {
     "consent.grant": ConsentTier.EXPLICIT,
     "consent.revoke": ConsentTier.IMPLICIT,
+    # F8 (voice — Phase 1.1 of catch-up plan)
+    "voice.synthesize": ConsentTier.IMPLICIT,
+    "voice.transcribe": ConsentTier.IMPLICIT,
 }
 
 # Reserved for later phases (documented, not enforced here):
