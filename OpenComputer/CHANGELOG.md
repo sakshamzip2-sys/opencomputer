@@ -1,6 +1,14 @@
 # Changelog
 
-All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions, [semver](https://semver.org/).
+All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
+
+## [2026.4.26] — switch to date-versioned releases
+
+### Changed
+
+- Switched release cadence from semver (`0.x.y`) to date-stamped tags (`YYYY.M.D`). Future releases land whenever there's something to ship rather than waiting for a "minor bump" milestone. The `plugin_sdk/` surface is still the only stability commitment — breaking changes there will be called out explicitly in the changelog regardless of date.
+- `opencomputer.__version__` now derives from `importlib.metadata` so it cannot drift from `pyproject.toml`.
+- New helper module `opencomputer.release.version` exposes `current_version()`, `parse_date_version()`, `today_version()` for tooling that needs to reason about the version string.
 
 ## [Unreleased]
 
