@@ -4,6 +4,38 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.34 — FastMCP authoring skill, Tier 4)
+
+- **New bundled skill** at `opencomputer/skills/fastmcp-authoring/` —
+  curated path for users who want to author their own MCP servers in
+  Python without writing a full OC plugin. Covers the FastMCP
+  decorator API (`@server.tool()` / `@server.resource()` /
+  `@server.prompt()`), transport choice (stdio / sse / http), and the
+  three-phase request lifecycle. Composes with G.30 (`opencomputer
+  mcp scaffold`) — the skill points at the scaffolder as the fastest
+  path; the scaffolder generates a working skeleton; the skill
+  explains the parts.
+- **`SKILL.md`** — full authoring guide: when to author an MCP vs an
+  OC plugin (different surfaces), the three primitives, transports,
+  registration with OC, and common gotchas (stdio servers can't
+  print to stdout, tool-name namespace collisions, heavy module
+  imports slowing cold-start).
+- **`examples/minimal_server.py`** — runnable mini-MCP exposing a
+  single `add(a: int, b: int) -> int` tool. Copy-paste starting
+  point.
+- **`references/transports.md`** — decision matrix (stdio vs http vs
+  sse) with cold-start trade-offs + the dual-mode `if "--http" in
+  sys.argv` pattern for servers that want to ship one file but run
+  two ways.
+- **`references/lifecycle.md`** — four-phase walkthrough
+  (initialize → list_tools → call_tool → shutdown) with debugging
+  tips ("opencomputer mcp test" + tail-stderr loop).
+- **12 new tests** in `tests/test_fastmcp_skill_bundle.py` — folder
+  layout, frontmatter (name + description + version + trigger
+  phrases + scaffolder cross-link), example compiles + uses
+  FastMCP + has main entry, references cover three transports +
+  four lifecycle phases.
+
 ### Added (Sub-project G.33 — `opencomputer session` CLI, Tier 4)
 
 - **New `opencomputer session` command group** — surfaces existing
