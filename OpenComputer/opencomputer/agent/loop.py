@@ -391,7 +391,9 @@ class AgentLoop:
             )
             messages.append(user_msg)
             messages.append(assistant_msg)
+            self._emit_before_message_write(session_id=sid, message=user_msg)
             self.db.append_message(sid, user_msg)
+            self._emit_before_message_write(session_id=sid, message=assistant_msg)
             self.db.append_message(sid, assistant_msg)
             self.db.end_session(sid)
             return ConversationResult(
@@ -420,6 +422,26 @@ class AgentLoop:
         else:
             snapshot = self._prompt_snapshots.get(sid)
             if snapshot is None:
+                # Round 2A P-1: BEFORE_PROMPT_BUILD — observers know a fresh
+                # system prompt is about to be assembled. Fired BEFORE the
+                # build call so handlers can be sure they're seeing every
+                # session's first turn (subsequent turns hit the cache and
+                # never reach this branch). modified_message support for
+                # appending a system reminder is documented in the SDK; the
+                # loop does NOT consume it today (template author owns the
+                # body). A future PR can splice modified_message into the
+                # rendered snapshot per the plan.
+                from opencomputer.hooks.engine import engine as _hook_engine_pb
+                from plugin_sdk.hooks import HookContext as _HookContextPB
+                from plugin_sdk.hooks import HookEvent as _HookEventPB
+
+                _hook_engine_pb.fire_and_forget(
+                    _HookContextPB(
+                        event=_HookEventPB.BEFORE_PROMPT_BUILD,
+                        session_id=sid,
+                        runtime=self._runtime,
+                    )
+                )
                 skills = self.memory.list_skills()
                 # Phase 10f.C: read MEMORY.md + USER.md and render them into
                 # the FROZEN base prompt. Mid-session edits don't rebuild
@@ -479,6 +501,7 @@ class AgentLoop:
         # Append user message + persist
         user_msg = Message(role="user", content=user_message)
         messages.append(user_msg)
+        self._emit_before_message_write(session_id=sid, message=user_msg)
         self.db.append_message(sid, user_msg)
         # Track where this turn's messages start so episodic recording can
         # walk only the new tool messages (not the whole prior history).
@@ -555,9 +578,39 @@ class AgentLoop:
                             runtime=self._runtime,
                         )
                     )
+                    # Round 2A P-1: BEFORE_COMPACTION carries the messages
+                    # snapshot the summariser is about to consume. Distinct
+                    # from PRE_COMPACT (kept for back-compat) — the new event
+                    # exposes the actual context to handlers.
+                    _hook_engine.fire_and_forget(
+                        HookContext(
+                            event=HookEvent.BEFORE_COMPACTION,
+                            session_id=sid,
+                            runtime=self._runtime,
+                            messages=list(messages),
+                        )
+                    )
                 result = await self.compaction.maybe_run(messages, self._last_input_tokens)
                 if result.did_compact:
                     messages = result.messages
+                    # Round 2A P-1: AFTER_COMPACTION fires only when
+                    # compaction actually ran (did_compact=True). The handler
+                    # sees the post-compaction message list (synthetic
+                    # summary + recent block).
+                    from opencomputer.hooks.engine import engine as _hook_engine_ac
+                    from plugin_sdk.hooks import (
+                        HookContext as _HookContextAC,
+                    )
+                    from plugin_sdk.hooks import HookEvent as _HookEventAC
+
+                    _hook_engine_ac.fire_and_forget(
+                        _HookContextAC(
+                            event=_HookEventAC.AFTER_COMPACTION,
+                            session_id=sid,
+                            runtime=self._runtime,
+                            messages=list(messages),
+                        )
+                    )
                     # Re-collect injections with the new message list. Reuse
                     # the same ``turn_index`` computed at turn-start — the
                     # logical turn number doesn't change just because we
@@ -577,6 +630,7 @@ class AgentLoop:
                 system=system,
                 stream_callback=stream_callback,
                 model=model_for_turn,
+                session_id=sid,
             )
             self._last_input_tokens = step.input_tokens
             total_input += step.input_tokens
@@ -585,6 +639,9 @@ class AgentLoop:
             if not step.should_continue:
                 # No tool calls — safe to persist the assistant message alone. (PR #1)
                 messages.append(step.assistant_message)
+                self._emit_before_message_write(
+                    session_id=sid, message=step.assistant_message
+                )
                 self.db.append_message(sid, step.assistant_message)
                 # Record an episodic event for this completed turn — pass the
                 # tool messages this turn produced so file paths get extracted. (PR #6)
@@ -656,6 +713,8 @@ class AgentLoop:
             )
             turn_messages: list[Message] = [step.assistant_message, *tool_results]
             messages.extend(turn_messages)
+            for _msg in turn_messages:
+                self._emit_before_message_write(session_id=sid, message=_msg)
             self.db.append_messages_batch(sid, turn_messages)
 
         # Budget exhausted
@@ -664,6 +723,7 @@ class AgentLoop:
             content="[loop iteration budget exhausted — agent did not finish]",
         )
         messages.append(final)
+        self._emit_before_message_write(session_id=sid, message=final)
         self.db.append_message(sid, final)
         self.db.end_session(sid)
         return ConversationResult(
@@ -806,6 +866,7 @@ class AgentLoop:
         system: str,
         stream_callback=None,
         model: str | None = None,
+        session_id: str = "",
     ) -> StepOutcome:
         """One LLM call + classification of the result.
 
@@ -823,6 +884,25 @@ class AgentLoop:
         # earlier this turn, collapse adjacent text-only users into one
         # so the API sees a clean sequence. No-op in the common case.
         wire_messages = merge_adjacent_user_messages(messages)
+
+        # Round 2A P-1: PRE_LLM_CALL — fire-and-forget so handlers can read
+        # the message list and model name before we hit the wire. Hook returns
+        # are intentionally ignored: this is an observation event, not a gate
+        # (use PreToolUse if you want to block).
+        from opencomputer.hooks.engine import engine as _hook_engine
+        from plugin_sdk.hooks import HookContext as _HookContext
+        from plugin_sdk.hooks import HookEvent as _HookEvent
+
+        _hook_engine.fire_and_forget(
+            _HookContext(
+                event=_HookEvent.PRE_LLM_CALL,
+                session_id=session_id,
+                runtime=self._runtime,
+                messages=list(wire_messages),
+                model=model_name,
+            )
+        )
+
         if stream_callback is not None:
             final_response = None
             async for event in self.provider.stream_complete(
@@ -913,6 +993,19 @@ class AgentLoop:
                     else msg.codex_reasoning_items
                 ),
             )
+
+        # Round 2A P-1: POST_LLM_CALL — observers see the response message and
+        # token usage. Same fire-and-forget contract as PRE_LLM_CALL.
+        _hook_engine.fire_and_forget(
+            _HookContext(
+                event=_HookEvent.POST_LLM_CALL,
+                session_id=session_id,
+                runtime=self._runtime,
+                message=msg,
+                messages=list(wire_messages),
+                model=model_name,
+            )
+        )
 
         return StepOutcome(
             stop_reason=stop,
@@ -1058,6 +1151,32 @@ class AgentLoop:
                     session_id=session_id,
                     result=result if outcome == "failure" else None,
                 )
+                # Round 2A P-1: TRANSFORM_TOOL_RESULT — handlers may rewrite
+                # the result text the model is about to see. This is a
+                # blocking hook because the rewrite must complete before the
+                # tool message is constructed. A handler returning
+                # ``modified_message`` replaces ``result.content`` verbatim.
+                # No handler / pass / empty modified_message → unchanged.
+                result = await _maybe_transform_tool_result(
+                    result=result,
+                    call=c,
+                    session_id=session_id,
+                    runtime=self._runtime,
+                )
+                # Round 2A P-1: TRANSFORM_TERMINAL_OUTPUT — same shape but
+                # scoped to Bash-style tools. Streaming-bash hasn't landed
+                # yet, so this fires once with the full ToolResult content
+                # rather than per stream-chunk; the handler contract is
+                # identical and a future PR can move the emit point into a
+                # streaming bash adapter without breaking handlers.
+                # TODO: relocate to streaming bash chunks once that infra exists.
+                if c.name == "Bash":
+                    result = await _maybe_transform_terminal_output(
+                        result=result,
+                        call=c,
+                        session_id=session_id,
+                        runtime=self._runtime,
+                    )
                 return result
 
         if self.config.loop.parallel_tools and self._all_parallel_safe(calls):
@@ -1074,6 +1193,31 @@ class AgentLoop:
             )
             for r in results
         ]
+
+    def _emit_before_message_write(
+        self, *, session_id: str, message: Message
+    ) -> None:
+        """Round 2A P-1: BEFORE_MESSAGE_WRITE — fires before each db persist.
+
+        Observation hook only (fire-and-forget). Returns are ignored: this is
+        the bookkeeping seam for memory backends and audit loggers, not a
+        veto point. See P-14 (trajectory export) for the consumer.
+        """
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine
+            from plugin_sdk.hooks import HookContext as _HookContext
+            from plugin_sdk.hooks import HookEvent as _HookEvent
+
+            _hook_engine.fire_and_forget(
+                _HookContext(
+                    event=_HookEvent.BEFORE_MESSAGE_WRITE,
+                    session_id=session_id,
+                    runtime=self._runtime,
+                    message=message,
+                )
+            )
+        except Exception:  # noqa: BLE001 — never break the loop over a hook
+            _log.warning("BEFORE_MESSAGE_WRITE emit failed", exc_info=True)
 
     def _emit_tool_call_event(
         self,
@@ -1262,6 +1406,80 @@ class AgentLoop:
                 exc_info=True,
             )
             return _NoOpDemandTracker()
+
+
+async def _maybe_transform_tool_result(
+    *,
+    result: Any,
+    call: ToolCall,
+    session_id: str,
+    runtime: RuntimeContext,
+) -> Any:
+    """Round 2A P-1: invoke TRANSFORM_TOOL_RESULT and apply ``modified_message``.
+
+    Returns either the original ``result`` or a new
+    :class:`~plugin_sdk.core.ToolResult` whose ``content`` is the handler's
+    rewrite. Failures are isolated — any exception in a handler leaves the
+    original result untouched (the engine logs it).
+    """
+    from opencomputer.hooks.engine import engine as _hook_engine
+    from plugin_sdk.core import ToolResult as _ToolResult
+    from plugin_sdk.hooks import HookContext as _HookContext
+    from plugin_sdk.hooks import HookEvent as _HookEvent
+
+    ctx = _HookContext(
+        event=_HookEvent.TRANSFORM_TOOL_RESULT,
+        session_id=session_id,
+        tool_call=call,
+        tool_result=result,
+        runtime=runtime,
+    )
+    decision = await _hook_engine.fire_blocking(ctx)
+    if decision is None or not decision.modified_message:
+        return result
+    # Rewrite the content; preserve everything else on the result.
+    return _ToolResult(
+        tool_call_id=result.tool_call_id,
+        content=decision.modified_message,
+        is_error=getattr(result, "is_error", False),
+    )
+
+
+async def _maybe_transform_terminal_output(
+    *,
+    result: Any,
+    call: ToolCall,
+    session_id: str,
+    runtime: RuntimeContext,
+) -> Any:
+    """Round 2A P-1: invoke TRANSFORM_TERMINAL_OUTPUT for Bash-like tools.
+
+    Same contract as :func:`_maybe_transform_tool_result` but uses the
+    ``streamed_chunk`` field on HookContext so handlers can distinguish
+    "this is a terminal stream chunk" from "this is a structured tool
+    result". A handler returning ``modified_message`` replaces the chunk.
+    """
+    from opencomputer.hooks.engine import engine as _hook_engine
+    from plugin_sdk.core import ToolResult as _ToolResult
+    from plugin_sdk.hooks import HookContext as _HookContext
+    from plugin_sdk.hooks import HookEvent as _HookEvent
+
+    ctx = _HookContext(
+        event=_HookEvent.TRANSFORM_TERMINAL_OUTPUT,
+        session_id=session_id,
+        tool_call=call,
+        tool_result=result,
+        streamed_chunk=getattr(result, "content", "") or "",
+        runtime=runtime,
+    )
+    decision = await _hook_engine.fire_blocking(ctx)
+    if decision is None or not decision.modified_message:
+        return result
+    return _ToolResult(
+        tool_call_id=result.tool_call_id,
+        content=decision.modified_message,
+        is_error=getattr(result, "is_error", False),
+    )
 
 
 def _extract_scope(call: ToolCall) -> str | None:

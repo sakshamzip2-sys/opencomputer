@@ -383,12 +383,14 @@ def test_cli_registers_settings_hooks(
     assert n == 2
 
     # Internal peek — the engine should carry exactly two registrations.
+    # Round 2A P-1: ``_hooks`` entries are ``(priority, seq, spec)`` tuples
+    # so the engine can sort by priority while keeping HookSpec frozen.
     pre = fresh._hooks.get(HookEvent.PRE_TOOL_USE, [])
     stop = fresh._hooks.get(HookEvent.STOP, [])
     assert len(pre) == 1
     assert len(stop) == 1
-    assert pre[0].matcher == "Edit"
-    assert stop[0].matcher is None
+    assert pre[0][2].matcher == "Edit"
+    assert stop[0][2].matcher is None
 
 
 def test_cli_skips_unknown_event_names(
