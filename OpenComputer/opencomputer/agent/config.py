@@ -37,6 +37,15 @@ class ModelConfig:
     temperature: float = 1.0
     api_key_env: str = "ANTHROPIC_API_KEY"
     cheap_model: str | None = None
+    # G.31 — smart model fallback routing. Ordered list of model ids to
+    # try on transient errors (429 / 5xx / connection refused) when the
+    # primary ``model`` fails. Empty tuple = no fallback (today's
+    # behavior). Each fallback uses the same ``provider`` configured
+    # above; cross-provider fallback is intentionally NOT supported here
+    # to keep the failure mode predictable (mixing providers mid-turn
+    # has subtle implications for tool schemas, streaming shape, prompt
+    # cache identity).
+    fallback_models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
