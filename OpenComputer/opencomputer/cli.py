@@ -51,20 +51,36 @@ _log = logging.getLogger("opencomputer.cli")
 
 
 def _memory_shutdown_atexit() -> None:
-    """Drain ``MemoryBridge.shutdown_all`` from the CLI atexit hook (II.5).
+    """Drain memory-provider shutdown + fire-and-forget hooks at CLI exit.
+
+    Two responsibilities:
+
+    1. ``MemoryBridge.shutdown_all()`` (II.5 from Hermes parity) — close memory
+       provider connections cleanly.
+    2. ``hooks.runner.drain_pending()`` (G.5 / Tier 2.6) — await any in-flight
+       fire-and-forget hooks (e.g. F1 audit-log writers) before exit so the
+       audit chain doesn't develop gaps at SIGTERM time.
 
     Runs outside any event loop (atexit fires after the last loop closes),
     so this helper spins up a fresh ``asyncio.run`` call. Every exception
     is swallowed — atexit handlers that raise become scary tracebacks for
-    users at exit time, and memory-provider shutdown is best-effort.
+    users at exit time, and these are best-effort cleanup paths.
 
     Mirrors Hermes' ``_run_cleanup`` atexit at
     ``sources/hermes-agent/cli.py:717-723``.
     """
     try:
-        asyncio.run(MemoryBridge.shutdown_all())
+        from opencomputer.hooks.runner import drain_pending
+
+        async def _drain_all() -> None:
+            # Drain pending hooks BEFORE memory shutdown so any audit-log
+            # writes triggered by hooks land before connections close.
+            await drain_pending(timeout=5.0)
+            await MemoryBridge.shutdown_all()
+
+        asyncio.run(_drain_all())
     except Exception as e:  # noqa: BLE001 — atexit must never propagate
-        _log.debug("memory-provider atexit shutdown swallowed: %s", e)
+        _log.debug("atexit cleanup swallowed: %s", e)
 
 
 # Register once at import time so every CLI subcommand + the gateway
