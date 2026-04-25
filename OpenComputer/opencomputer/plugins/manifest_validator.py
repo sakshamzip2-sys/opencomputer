@@ -93,9 +93,22 @@ class PluginManifestSchema(BaseModel):
     # model affinity"; legacy bundled providers without this field stay
     # backwards-compatible.
     model_support: ModelSupportSchema | None = Field(default=None)
+    # Sub-project G.22 (Tier 4 OpenClaw port) — historical ids this
+    # plugin used to be known by. The loader maps old user-config
+    # references to the current id. Default empty list = never renamed.
+    legacy_plugin_ids: list[str] = Field(default_factory=list)
     # Phase 14.M/N — already in use via ProfileConfig/WorkspaceOverlay but
     # manifests often carry a schema_version field. Accept it silently.
     schema_version: int | None = Field(default=None)
+
+    @field_validator("legacy_plugin_ids", mode="before")
+    @classmethod
+    def _drop_empty_legacy_ids(cls, v: object) -> object:
+        # Same OpenClaw tolerance: empty / whitespace entries are bugs
+        # that would silently match every empty id elsewhere. Drop them.
+        if isinstance(v, list):
+            return [s for s in v if isinstance(s, str) and s.strip()]
+        return v
 
     @field_validator("id")
     @classmethod

@@ -4,6 +4,38 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.22 — Legacy plugin id normalization, Tier 4 OpenClaw port)
+
+- **`PluginManifest.legacy_plugin_ids: tuple[str, ...] = ()`** — new
+  optional field for plugins to declare ids they used to be known by.
+  When OpenComputer renames `anthropic-provider` → `claude-provider`,
+  the new manifest declares `legacy_plugin_ids: ["anthropic-provider"]`
+  and existing user `profile.yaml` references silently map to the new
+  id. Mirrors OpenClaw's `legacyPluginIds` at
+  `sources/openclaw-2026.4.23/src/plugins/manifest-registry.ts:100`.
+- **`opencomputer.plugins.discovery.build_legacy_id_lookup(candidates)`**
+  — pure helper, no I/O. Returns `{legacy_id: current_id}` after applying
+  three conflict policies: self-aliases dropped silently (a typo),
+  legacy ids that collide with another current id skipped + warned,
+  duplicate claims by multiple plugins last-write-wins + warned.
+- **`opencomputer.plugins.discovery.normalize_plugin_id(plugin_id,
+  candidates)`** — single-id wrapper around the lookup, returns
+  unchanged ids untouched. Mirrors OpenClaw's `normalizePluginId` at
+  `sources/openclaw-2026.4.23/src/plugins/config-state.ts:83-91`.
+- **`PluginRegistry.load_all` Layer B′ — legacy-id normalization.**
+  Runs before Layer C (G.21 model-prefix) so a renamed provider plugin's
+  current id is what model-prefix matching adds to (avoids double-adding
+  legacy + current ids). Each entry in `enabled_ids` is rewritten through
+  the legacy lookup before the activation check.
+- **Manifest validator schema** — `legacy_plugin_ids: list[str]` field
+  with the same empty-string-drop tolerance as `model_support` (G.21).
+- **16 new tests** in `tests/test_legacy_plugin_ids.py` — schema parse
+  (omitted / list / drops empties / dataclass flattening),
+  `build_legacy_id_lookup` (simple / multiple / no-legacy / self-alias /
+  alias-collides / duplicate-claim with warning), `normalize_plugin_id`
+  (unknown / legacy / current-id passthrough), and end-to-end
+  `PluginRegistry.load_all` activation via legacy ids in `enabled_ids`.
+
 ### Added (Sub-project G.21 — Model-prefix auto-activation, Tier 4 OpenClaw port)
 
 - **`plugin_sdk.ModelSupport`** — frozen dataclass declaring which model ids
