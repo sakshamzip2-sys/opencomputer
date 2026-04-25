@@ -16,6 +16,13 @@ Five tools exposed (G.6 / Tier 2.2 minimum slice):
 - ``recall_search(query, limit=20)`` — FTS5 search across session history.
 - ``consent_history(capability=None, limit=50)`` — F1 audit-log entries.
 
+Deviation from Hermes ``mcp_serve.py`` (10 tools): OC ships read-only first
+because that's the bridges-OC-to-Claude-Code use case; the bidirectional
+slice (``messages_send`` / ``events_poll`` / ``events_wait`` /
+``permissions_respond`` / ``attachments_fetch`` / ``channels_list``) is
+deferred to Phase 12m / a G.6.x follow-up so we don't ship a
+write-capable MCP surface before F1 consent has been live for a while.
+
 Pattern: high-level ``mcp.server.fastmcp.FastMCP`` decorators (clean +
 type-checked) over ``mcp.server.stdio.stdio_server()`` transport
 (matches Claude Code MCP spec).
