@@ -463,6 +463,71 @@ def skills_record_invocation(
     )
 
 
+# --- trajectories group (B3) ---
+
+trajectories_app = typer.Typer(
+    name="trajectories",
+    help="View captured agent-loop trajectories (B3 auto-collection).",
+    no_args_is_help=True,
+)
+evolution_app.add_typer(trajectories_app, name="trajectories")
+
+
+@trajectories_app.command("show")
+def trajectories_show(
+    limit: int = typer.Option(50, "--limit", help="Number of recent trajectories to show"),
+) -> None:
+    """List recent captured trajectories with their event counts and rewards."""
+    conn = init_db()
+    records = list_recent(limit=limit, conn=conn)
+    if not records:
+        console.print(
+            "[dim]No trajectories captured yet. Enable collection with `opencomputer evolution enable`.[/dim]"
+        )
+        return
+    table = Table(title=f"Recent trajectories (last {len(records)})")
+    table.add_column("id", style="cyan")
+    table.add_column("session_id")
+    table.add_column("events")
+    table.add_column("started")
+    table.add_column("completed")
+    for r in records:
+        table.add_row(
+            str(r.id),
+            r.session_id[:24] + ("..." if len(r.session_id) > 24 else ""),
+            str(len(r.events)),
+            _fmt_ts(r.started_at),
+            "✓" if r.completion_flag else "✗",
+        )
+    console.print(table)
+
+
+@evolution_app.command("enable")
+def enable() -> None:
+    """Turn on auto-collection of trajectories (subscribes to the F2 bus on next startup)."""
+    from opencomputer.evolution.trajectory import register_with_bus, set_collection_enabled
+
+    set_collection_enabled(True)
+    # Also register immediately for the current process (so the change is observed without restart)
+    register_with_bus()
+    console.print(
+        "[green]Evolution auto-collection enabled.[/green] "
+        "Restart any running agent to pick up the change globally."
+    )
+
+
+@evolution_app.command("disable")
+def disable() -> None:
+    """Turn off auto-collection. Existing trajectories remain stored."""
+    from opencomputer.evolution.trajectory import set_collection_enabled
+
+    set_collection_enabled(False)
+    console.print(
+        "[yellow]Evolution auto-collection disabled.[/yellow] "
+        "Existing trajectories remain. Run `opencomputer evolution reset --yes` to wipe them."
+    )
+
+
 __all__ = [
     "skills_list",
     "skills_promote",
@@ -474,4 +539,7 @@ __all__ = [
     "prompts_apply",
     "prompts_reject",
     "dashboard",
+    "trajectories_show",
+    "enable",
+    "disable",
 ]

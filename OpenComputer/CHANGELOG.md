@@ -4,6 +4,16 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Phase B3 — Evolution trajectory auto-collection via TypedEvent bus, parallel Session B)
+
+- **`opencomputer/evolution/trajectory.py::register_with_bus`** — subscribes to Session A's F2 TypedEvent bus (`opencomputer.ingestion.bus.default_bus`, landed in 3.A) for `"tool_call"` events. Each `ToolCallEvent` is converted to a `TrajectoryEvent` and accumulated into an in-memory open trajectory keyed by `session_id`. **Exception-isolated** — any handler exception is logged but never propagates to the bus's other subscribers (defense in depth on top of bus's own per-subscriber try/except).
+- **Privacy-preserving event conversion** — only tool_name + outcome + a small subset of metadata (with the design doc §4.1 200-char filter applied) are stored. Raw prompt text from `event.metadata` is dropped if it would violate the trajectory privacy rule. `session_id=None` events are dropped silently (cannot bucket anonymously).
+- **`_on_session_end(session_id)`** — persists the open trajectory to SQLite via `insert_record`, computes reward via the B1 `RuleBasedRewardFunction`, and updates `reward_score`. Returns the inserted row id. Also exception-isolated.
+- **Auto-collection flag** — `<_home() / "evolution" / "enabled">` file marker. `is_collection_enabled()` reads it; `set_collection_enabled(bool)` toggles it; `bootstrap_if_enabled()` is the startup-time helper that auto-registers the subscriber when the flag is set. (Wiring `bootstrap_if_enabled()` into AgentLoop startup is Session A's call — it lives in their reserved `agent/loop.py` territory; for now users invoke it manually or via the new `enable` CLI.)
+- **CLI extensions** in `opencomputer/evolution/cli.py`: new `trajectories` subapp with `show [--limit 50]`; top-level `enable` (creates flag + registers subscriber in current process) and `disable` (removes flag; existing trajectories preserved).
+- **16 new tests** across 2 files (`tests/test_evolution_b3_{subscriber,cli}.py`). Full suite: **1860 passing** (was 1844 entering B3). Ruff clean.
+- **Plan reference**: `~/.claude/plans/hermes-self-evolution-plan.md` §B3 — completes the Session B plan (B1-B4 all merged + B3 now ships).
+
 ### Added (Phase C4 — F6 OpenCLI use-case libraries, parallel Session C)
 
 - **`extensions/opencli-scraper/use_cases/` library** — 5 domain-specific function libraries that compose the C2 tools (`ScrapeRawTool`, `FetchProfileTool`, `MonitorPageTool`) into higher-level patterns. **NOT registered as tools** — these are helper APIs that Session A's Phase 4 wiring or user code can call directly:
