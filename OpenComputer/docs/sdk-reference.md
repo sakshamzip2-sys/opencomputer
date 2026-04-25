@@ -580,6 +580,46 @@ event_type)`; `clear_normalizers()` is a test-only reset helper.
 
 ---
 
+## Behavioral inference (Phase 3.B)
+
+The `plugin_sdk.inference` module is the public vocabulary for the
+behavioral-inference engine. Phase 3.B ships three heuristic
+extractors that subscribe to the F2 bus, derive structured "things we
+noticed" patterns, and persist them as `Motif` records to a SQLite
+store under `<profile_home>/inference/motifs.sqlite`. Phase 3.C
+user-model graph reads from `MotifStore.list(kind=...)`.
+
+### `Motif`
+
+Frozen+slots dataclass — one observed pattern. Fields: `motif_id: str`
+(UUID4 default factory); `kind: MotifKind` discriminator
+(`"temporal"`, `"transition"`, `"implicit_goal"`); `confidence: float`
+in `[0.0, 1.0]`; `support: int` (events that contributed); `summary:
+str` (one-line human-readable, safe for direct display); `payload:
+Mapping[str, Any]` (kind-specific JSON-serialisable structured data);
+`evidence_event_ids: tuple[str, ...]` (bus event ids); `created_at:
+float`; `session_id: str | None` (set only for per-session motifs
+like `"implicit_goal"`).
+
+### `MotifExtractor`
+
+`runtime_checkable` Protocol. Required class vars: `name: ClassVar[str]`
+(stable id), `kind: ClassVar[MotifKind]` (discriminator emitted on
+the resulting motifs). One method: `extract(self, events:
+Sequence[SignalEvent]) -> list[Motif]` — pure, no side effects.
+`opencomputer.inference.engine.BehavioralInferenceEngine` is the
+internal default-bus subscriber that runs configured extractors over
+event batches and persists results.
+
+### `MotifKind`
+
+`Literal["temporal", "transition", "implicit_goal"]` — alphabet of
+valid `Motif.kind` values. Adding a new kind is a coordinated change
+across the SDK (this Literal), the storage schema (`MotifStore` knows
+no schema for unknown kinds), and downstream consumers (Phase 3.C).
+
+---
+
 ## Sandbox (Phase 3.E)
 
 The `plugin_sdk.sandbox` module is the public contract for pluggable

@@ -43,6 +43,11 @@ from plugin_sdk.hooks import (
     HookHandler,
     HookSpec,
 )
+from plugin_sdk.inference import (
+    Motif,
+    MotifExtractor,
+    MotifKind,
+)
 from plugin_sdk.ingestion import (
     FileObservationEvent,
     FileOperation,
@@ -155,6 +160,10 @@ __all__ = [
     "FileOperation",
     "MessageRole",
     "HookDecisionKind",
+    # behavioral inference (Phase 3.B, F2 continued)
+    "Motif",
+    "MotifExtractor",
+    "MotifKind",
     # sandbox (Phase 3.E)
     "SandboxConfig",
     "SandboxResult",

@@ -790,6 +790,11 @@ from opencomputer.cli_system_control import system_control_app  # noqa: E402
 
 app.add_typer(system_control_app, name="system-control")
 
+# Phase 3.B — behavioral inference engine + motif store CLI
+from opencomputer.cli_inference import inference_app  # noqa: E402
+
+app.add_typer(inference_app, name="inference")
+
 
 @config_app.command("show")
 def config_show() -> None:
