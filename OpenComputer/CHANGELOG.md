@@ -4,6 +4,40 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.3 — Webhook channel adapter, Tier 1.3 of `~/.claude/plans/toasty-wiggling-eclipse.md`)
+
+- **`extensions/webhook/`** — new bundled channel plugin. HTTP listener for inbound triggers from
+  TradingView, Zapier, n8n, GitHub Actions, custom services. Per-token HMAC-SHA256 auth via
+  ``X-Webhook-Signature`` header. Plugin is `enabled_by_default: false` because it opens an inbound
+  network port — must be explicitly enabled per profile.
+  - `adapter.py::WebhookAdapter` — aiohttp-based HTTP server on configurable host/port (default
+    `127.0.0.1:18790`). Routes: `POST /webhook/<token_id>` (signed) and `GET /webhook/health`.
+    Per-token sliding-window rate limit (60 req/min default). 1 MB body cap. Signature verification
+    via constant-time `hmac.compare_digest`. Capabilities: `ChannelCapabilities.NONE` (inbound-only,
+    no typing / reactions / outbound — `send()` returns clear error). Payload coercion accepts
+    `text` / `alert` / `message` / `body` / `content` keys (TradingView ships `alert`).
+  - `tokens.py` — token registry at `<profile_home>/webhook_tokens.json` (mode 0600). Atomic writes
+    via tmp + os.replace. CRUD: `create_token`, `get_token`, `list_tokens` (strips `secret`),
+    `revoke_token`, `remove_token`, `mark_used`. HMAC verify helper.
+  - `plugin.py` — registers WebhookAdapter when env vars `WEBHOOK_HOST` / `WEBHOOK_PORT` are
+    set or defaults to `127.0.0.1:18790`.
+- **`opencomputer/cli_webhook.py`** — new `opencomputer webhook {list,create,revoke,remove,info}`
+  subcommand group. `create` prints the secret ONCE with copy-paste curl example.
+- **`aiohttp>=3.9`** added to `pyproject.toml::dependencies` for the webhook HTTP listener.
+- **28 new tests** in `tests/test_webhook_{tokens,adapter}.py`:
+  - tokens: create returns id+secret of correct length, list excludes revoked, list strips secret,
+    revoke marks flag, remove deletes entry, mark_used updates timestamp, HMAC verify accepts
+    valid + rejects wrong/empty/unprefixed signatures, file mode 0600, profile-isolated path.
+  - adapter: real aiohttp server on ephemeral port via `TestServer`. Health endpoint no-auth.
+    Auth: unknown token 401, invalid signature 403, revoked token 401. Dispatch: valid signature
+    fires MessageEvent with text + metadata + platform=web. Plain-text body accepted. Rate limit
+    blocks burst after threshold. `send()` returns inbound-only error. Capabilities flag is NONE.
+    Payload coercion: text > alert > flatten.
+
+Use case unlocked: TradingView alert → POST → OC dispatches to agent (with the token's
+`scopes` + `notify` channel hint in event metadata) → agent runs the configured skill → notifies
+back via Telegram. Or: GitHub Actions "build failed" → OC investigates and pings Saksham.
+
 ### Added (Sub-project G.2 — Telegram file/voice/reaction/edit/delete capabilities, Tier 1.2 + 2.0)
 
 - **`plugin_sdk/channel_contract.py`** — added `ChannelCapabilities` flag enum (TYPING, REACTIONS,
