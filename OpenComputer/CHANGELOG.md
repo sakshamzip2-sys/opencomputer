@@ -4,6 +4,26 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.15 — Doctor checks for G subsystems, Tier 2.15)
+
+- **`opencomputer doctor`** now reports the state of every Sub-project G subsystem
+  alongside the existing core checks. Read-only — no state mutation. Surfaces:
+  - **cron storage** — pass with job count, skip when no jobs file, warn on
+    corrupted JSON.
+  - **webhook tokens** — pass with active/total counts, skip when no tokens file.
+  - **cost-guard limits** — pass when caps set, **warn when usage tracked but no
+    caps configured** (voice / paid MCPs unguarded — actionable signal).
+  - **voice TTS/STT key** — pass when `OPENAI_API_KEY` set, skip otherwise.
+  - **oauth store** — pass with token count, warn on permission drift (dir mode
+    not 0700).
+- **10 new tests** in `tests/test_doctor_g_subsystems.py` — empty-profile all-skip,
+  each subsystem's pass / skip / warn paths.
+
+Setup wizard (Tier 2.14) intentionally not extended — OC's existing 320-LOC wizard
+covers the new G subsystems via env-var prompts that the user can address as needed;
+adding per-subsystem sections would create sprawl. Doctor surfacing the gaps is
+sufficient onboarding signal.
+
 ### Added (Sub-project G.14 — Email channel adapter (IMAP+SMTP), Tier 2.7)
 
 - **`extensions/email/`** — new bundled channel plugin. IMAP polling for inbound +

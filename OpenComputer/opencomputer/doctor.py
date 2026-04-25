@@ -389,6 +389,117 @@ async def _run_contributions(fix: bool) -> list[Check]:
     return out
 
 
+def _check_g_subsystems() -> list[Check]:
+    """Health checks for Sub-project G subsystems (cron / cost-guard / oauth /
+    voice / webhook). Read-only — surfaces state without modifying anything.
+
+    Each subsystem returns a single Check showing whether it's set up and
+    in a sensible state. Missing subsystems are ``skip`` not ``fail``;
+    visible problems (e.g. cron file unreadable) are ``warn`` so they
+    show up but don't block the rest of the doctor run.
+    """
+    from opencomputer.agent.config import _home
+
+    checks: list[Check] = []
+    home = _home()
+
+    # G.1 — cron
+    cron_dir = home / "cron"
+    cron_jobs = cron_dir / "jobs.json"
+    if not cron_dir.exists():
+        checks.append(Check("cron storage", "skip", "no jobs scheduled"))
+    elif not cron_jobs.exists():
+        checks.append(Check("cron storage", "skip", "no jobs file"))
+    else:
+        try:
+            import json as _json
+
+            data = _json.loads(cron_jobs.read_text(encoding="utf-8"))
+            n = len(data.get("jobs", []))
+            checks.append(Check("cron storage", "pass", f"{n} job(s) at {cron_jobs}"))
+        except Exception as e:  # noqa: BLE001
+            checks.append(Check("cron storage", "warn", f"unreadable: {e}"))
+
+    # G.3 — webhook tokens
+    webhook_tokens = home / "webhook_tokens.json"
+    if not webhook_tokens.exists():
+        checks.append(Check("webhook tokens", "skip", "none issued"))
+    else:
+        try:
+            import json as _json
+
+            data = _json.loads(webhook_tokens.read_text(encoding="utf-8"))
+            tokens = data.get("tokens", {})
+            active = sum(1 for t in tokens.values() if not t.get("revoked"))
+            checks.append(
+                Check("webhook tokens", "pass", f"{active} active / {len(tokens)} total")
+            )
+        except Exception as e:  # noqa: BLE001
+            checks.append(Check("webhook tokens", "warn", f"unreadable: {e}"))
+
+    # G.8 — cost-guard
+    cost_file = home / "cost_guard.json"
+    if not cost_file.exists():
+        checks.append(Check("cost-guard limits", "skip", "no limits configured"))
+    else:
+        try:
+            from opencomputer.cost_guard import get_default_guard
+
+            usages = get_default_guard().current_usage()
+            n_with_limits = sum(
+                1 for u in usages if u.daily_limit is not None or u.monthly_limit is not None
+            )
+            if n_with_limits:
+                checks.append(
+                    Check(
+                        "cost-guard limits",
+                        "pass",
+                        f"{n_with_limits} provider(s) with caps",
+                    )
+                )
+            else:
+                checks.append(
+                    Check(
+                        "cost-guard limits",
+                        "warn",
+                        "usage tracked but no caps set — voice / paid MCPs are unguarded",
+                    )
+                )
+        except Exception as e:  # noqa: BLE001
+            checks.append(Check("cost-guard limits", "warn", f"read failed: {e}"))
+
+    # G.9 — voice (just check if OPENAI_API_KEY is present for TTS/STT)
+    if os.environ.get("OPENAI_API_KEY"):
+        checks.append(Check("voice TTS/STT key", "pass", "OPENAI_API_KEY set"))
+    else:
+        checks.append(
+            Check("voice TTS/STT key", "skip", "OPENAI_API_KEY unset — voice CLI will fail")
+        )
+
+    # G.13 — OAuth / PAT store
+    oauth = home / "mcp_oauth"
+    if not oauth.exists():
+        checks.append(Check("oauth store", "skip", "no tokens stored"))
+    else:
+        try:
+            n = len(list(oauth.glob("*.json")))
+            mode = oct(oauth.stat().st_mode)[-3:] if os.name != "nt" else "n/a"
+            if mode != "n/a" and mode != "700":
+                checks.append(
+                    Check(
+                        "oauth store",
+                        "warn",
+                        f"{n} token(s) but dir mode is {mode} (should be 700)",
+                    )
+                )
+            else:
+                checks.append(Check("oauth store", "pass", f"{n} token(s) at {oauth}"))
+        except Exception as e:  # noqa: BLE001
+            checks.append(Check("oauth store", "warn", f"read failed: {e}"))
+
+    return checks
+
+
 def run_doctor(fix: bool = False) -> int:
     """Run all checks and print a report. Returns the number of failed checks.
 
@@ -420,6 +531,9 @@ def run_doctor(fix: bool = False) -> int:
     except RuntimeError:
         mcp_checks = []
     checks.extend(mcp_checks)
+
+    # Sub-project G subsystems — surface their state at a glance.
+    checks.extend(_check_g_subsystems())
 
     # Plugin-contributed checks + repairs (run last so plugins see a fully-
     # loaded registry, config, and DB-writable environment).
