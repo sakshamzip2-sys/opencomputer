@@ -55,8 +55,7 @@ def sanitize_external_content(
     source:
         Short identifier for the emitter, propagated to the
         :class:`HookSignalEvent` ``source`` field. Convention:
-        ``"opencli_scraper"``, ``"oi_bridge"``, ``"web_fetch"``,
-        ``"file_read"``, etc.
+        ``"oi_bridge"``, ``"web_fetch"``, ``"file_read"``, etc.
     session_id:
         The active agent session id, propagated to the bus event so
         per-session subscribers can correlate. Pass ``None`` for

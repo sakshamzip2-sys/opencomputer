@@ -140,7 +140,7 @@ def build_server() -> FastMCP:
 
         Args:
             capability: Optional filter — only entries for this capability_id
-                (e.g. ``"cron.create"``, ``"opencli_scraper.scrape_raw"``).
+                (e.g. ``"cron.create"``, ``"oi_bridge.screenshot"``).
             limit: Max entries to return.
 
         Returns:

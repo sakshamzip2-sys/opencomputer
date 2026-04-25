@@ -4,7 +4,7 @@ Tiers 2-5 were removed in OC's OI-trim cleanup (2026-04-25) because each
 overlapped with a feature OpenComputer already provides:
 
 * Tier 2 (email/SMS/Slack/Discord) → covered by channel adapters + MCP.
-* Tier 3 (browser) → covered by ``extensions/opencli-scraper/``.
+* Tier 3 (browser) → covered by built-in ``WebFetchTool``.
 * Tier 4 (system control: run / kill process, system commands) → covered
   by the built-in ``BashTool``.
 * Tier 5 (schedule task, custom code) → covered by ``opencomputer cron``

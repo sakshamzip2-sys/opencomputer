@@ -4,6 +4,43 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Removed (OpenCLI scraper plugin removed entirely, 2026-04-25)
+
+User-directed removal after honest re-evaluation of value vs cost.
+The plugin's three tools were either redundant or off-target:
+
+- **`ScrapeRawTool`** — bit-for-bit duplicate of the built-in
+  `WebFetchTool` (10e, 2026-04-23). No unique value.
+- **`FetchProfileTool`** — supports 12 platforms (github, reddit,
+  linkedin, twitter, hackernews, stackoverflow, youtube, medium,
+  bluesky, arxiv). None match the user's actual workflow (Indian
+  stock sites — screener.in, marketsmojo.com, scanx.trade — and
+  stock research via the investor-agent / stockflow MCP servers).
+  The platform list is calibrated for OSINT-on-developers, not for
+  the user's domain.
+- **`MonitorPageTool`** — page-change detection. Reproducible with
+  `cron` (G.1) + `WebFetch` + a manual diff. Marginal value.
+
+Removed:
+- `extensions/opencli-scraper/` — entire plugin directory (~1,580 LOC)
+- 12 `tests/test_opencli_*.py` files
+- `docs/f6/` — design + source-map docs for the plugin
+- Cleaned up incidental references in `opencomputer/security/sanitize.py`,
+  `opencomputer/mcp/server.py`, `extensions/coding-harness/plugin.py`,
+  `extensions/coding-harness/oi_bridge/tools/__init__.py`,
+  `tests/test_instruction_detector.py`, `docs/parallel-sessions.md`.
+
+**Net:** ~2,000 LOC + 12 test files removed. Test count drops from
+2727 → 2510 (-217 OpenCLI-specific tests). Zero regressions in
+remaining tests.
+
+The `WebFetchTool` (built-in) + `cron` (G.1) + MCP servers cover every
+real use case the OpenCLI plugin was supposed to address. Saksham's
+"build a profile of myself by scanning laptop + scraping web" vision
+is **not implemented by either OI or OpenCLI** — that needs a separate
+design built on top of the existing User Model system (F4); to be
+discussed separately.
+
 ### Added (Sub-project G.34 — FastMCP authoring skill, Tier 4)
 
 - **New bundled skill** at `opencomputer/skills/fastmcp-authoring/` —
