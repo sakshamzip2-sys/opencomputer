@@ -4,6 +4,24 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.5 — Pending-task drain on shutdown, Tier 2.6)
+
+- **`opencomputer/hooks/runner.py::drain_pending(timeout=5.0)`** — async helper that awaits all
+  in-flight `fire_and_forget` tasks (e.g. F1 audit-log writers) on graceful shutdown, with bounded
+  timeout. Returns `(completed, cancelled)`. Tasks exceeding the timeout are cancelled so a stuck
+  handler doesn't hang exit. Closes the F1 audit-chain integrity gap that occurred when the process
+  was terminated mid-write.
+- **`opencomputer/hooks/runner.py::pending_count()`** — sync introspection helper for status / tests.
+- **`opencomputer/cli.py::_memory_shutdown_atexit`** — now drains pending hooks BEFORE memory
+  provider shutdown so audit writes triggered from hooks land before connections close. Single
+  `asyncio.run` covers both phases.
+- **9 new tests** in `tests/test_hooks_drain.py` — quick-task completion, stuck-task cancellation,
+  mixed quick+stuck, exception swallowing, concurrent-fire integrity (50 simultaneous), pending_count
+  semantics, empty-drain idempotence.
+
+Source pattern: Kimi CLI's `_pending_fire_and_forget` set + drain. The drain timing was tuned for
+OC's specific mix of audit-log (sub-millisecond) + Telegram-notify (1-3 s) hooks.
+
 ### Added (Sub-project G.4 — Docker support, Tier 2.3 of `~/.claude/plans/toasty-wiggling-eclipse.md`)
 
 - **`Dockerfile`** — multi-stage build (`python:3.13-slim` builder → runtime), non-root `oc` user
