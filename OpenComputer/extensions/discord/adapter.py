@@ -5,6 +5,9 @@ Uses discord.py's event-driven client: on_message → MessageEvent →
 gateway dispatch. Sends replies via message.channel.send. Handles the
 2000-char message limit with split-on-line-boundary chunking.
 
+Capabilities (G.12 — Tier 2.8): typing, reactions, edit, delete.
+Discord supports more (file uploads, threads) but those land separately.
+
 Connects via DISCORD_BOT_TOKEN env var. Requires the "message_content"
 intent — enable it in the bot's settings on Discord Developer Portal.
 """
@@ -18,7 +21,7 @@ from typing import Any
 
 import discord
 
-from plugin_sdk.channel_contract import BaseChannelAdapter
+from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import MessageEvent, Platform, SendResult
 
 logger = logging.getLogger("opencomputer.ext.discord")
@@ -56,6 +59,13 @@ def _chunk_2000(text: str, limit: int = 2000) -> list[str]:
 class DiscordAdapter(BaseChannelAdapter):
     platform = Platform.DISCORD
     max_message_length = 2000
+    capabilities = (
+        ChannelCapabilities.TYPING
+        | ChannelCapabilities.REACTIONS
+        | ChannelCapabilities.EDIT_MESSAGE
+        | ChannelCapabilities.DELETE_MESSAGE
+        | ChannelCapabilities.THREADS
+    )
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
@@ -155,6 +165,108 @@ class DiscordAdapter(BaseChannelAdapter):
             await channel.typing().__aenter__()  # fire the typing indicator once
         except Exception:
             pass  # best effort
+
+    # ------------------------------------------------------------------
+    # G.12 — reactions, edit, delete (ChannelCapabilities)
+    # ------------------------------------------------------------------
+
+    async def send_reaction(
+        self,
+        chat_id: str,
+        message_id: str,
+        emoji: str,
+        **kwargs: Any,
+    ) -> SendResult:
+        """Add an emoji reaction to a message via ``message.add_reaction``.
+
+        Discord accepts unicode emoji directly (e.g. ``"👍"``) and custom
+        guild emoji as ``"<:name:id>"``. Bot needs ``MANAGE_MESSAGES`` to
+        add reactions on channels where it isn't the message author.
+        """
+        try:
+            channel = await self._resolve_channel(chat_id)
+            if channel is None:
+                return SendResult(success=False, error=f"channel {chat_id} not found")
+            msg = await channel.fetch_message(int(message_id))
+            await msg.add_reaction(emoji)
+            return SendResult(success=True)
+        except discord.NotFound:
+            return SendResult(success=False, error=f"message {message_id} not found")
+        except discord.Forbidden as e:
+            return SendResult(success=False, error=f"forbidden: {e}")
+        except Exception as e:  # noqa: BLE001
+            return SendResult(success=False, error=f"{type(e).__name__}: {e}")
+
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        **kwargs: Any,
+    ) -> SendResult:
+        """Edit a previously-sent text message in place via ``message.edit``.
+
+        Discord allows the bot to edit only its OWN messages; editing other
+        users' messages requires admin and isn't supported here. No time
+        window restriction (unlike Telegram's 48h).
+        """
+        try:
+            channel = await self._resolve_channel(chat_id)
+            if channel is None:
+                return SendResult(success=False, error=f"channel {chat_id} not found")
+            msg = await channel.fetch_message(int(message_id))
+            await msg.edit(content=text[: self.max_message_length])
+            return SendResult(success=True, message_id=str(msg.id))
+        except discord.NotFound:
+            return SendResult(success=False, error=f"message {message_id} not found")
+        except discord.Forbidden as e:
+            return SendResult(
+                success=False,
+                error=f"forbidden (bot can only edit its own messages): {e}",
+            )
+        except Exception as e:  # noqa: BLE001
+            return SendResult(success=False, error=f"{type(e).__name__}: {e}")
+
+    async def delete_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        **kwargs: Any,
+    ) -> SendResult:
+        """Delete a message via ``message.delete``.
+
+        Bots can delete their own messages without special permissions;
+        deleting others' messages requires ``MANAGE_MESSAGES``.
+        """
+        try:
+            channel = await self._resolve_channel(chat_id)
+            if channel is None:
+                return SendResult(success=False, error=f"channel {chat_id} not found")
+            msg = await channel.fetch_message(int(message_id))
+            await msg.delete()
+            return SendResult(success=True)
+        except discord.NotFound:
+            return SendResult(success=False, error=f"message {message_id} not found")
+        except discord.Forbidden as e:
+            return SendResult(success=False, error=f"forbidden: {e}")
+        except Exception as e:  # noqa: BLE001
+            return SendResult(success=False, error=f"{type(e).__name__}: {e}")
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    async def _resolve_channel(self, chat_id: str) -> discord.abc.Messageable | None:
+        """Look up a channel by id, falling back to fetch_channel + caching."""
+        channel = self._channel_cache.get(chat_id)
+        if channel is not None:
+            return channel
+        try:
+            channel = await self._client.fetch_channel(int(chat_id))
+            self._channel_cache[chat_id] = channel
+            return channel
+        except Exception:
+            return None
 
 
 __all__ = ["DiscordAdapter", "_chunk_2000"]

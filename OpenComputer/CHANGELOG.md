@@ -4,6 +4,26 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.12 — Discord reactions + edit + delete, Tier 2.8 / 2.9)
+
+- **`extensions/discord/adapter.py`** — DiscordAdapter now declares
+  `ChannelCapabilities.{TYPING, REACTIONS, EDIT_MESSAGE, DELETE_MESSAGE, THREADS}` and implements:
+  - `send_reaction(chat_id, message_id, emoji)` — uses `message.add_reaction`. Accepts unicode
+    emoji (`👍`) or custom guild emoji (`<:name:id>`). Surfaces Discord's `Forbidden` cleanly.
+  - `edit_message(chat_id, message_id, text)` — `message.edit`. Bots can only edit their own
+    messages; clear error message on `Forbidden`. No 48 h time window (unlike Telegram). Truncates
+    to `max_message_length` (2000).
+  - `delete_message(chat_id, message_id)` — `message.delete`. Own messages free; others' need
+    `MANAGE_MESSAGES`.
+  - Internal `_resolve_channel(chat_id)` helper — cache-aware fetch with graceful failure.
+- **11 new tests** in `tests/test_discord_capabilities.py` — capability flag advertises
+  G.12 set + does not advertise unimplemented (voice / photo / document), reactions add via
+  discord.py + handles NotFound, edit truncates + handles Forbidden, delete handles missing
+  message, channel resolution caches + falls back to fetch.
+
+Mirrors the G.2 pattern from Telegram but with Discord's quirks (own-message-only edit, no time
+window, fetch-message-then-method approach).
+
 ### Added (Sub-project G.11 — MCP catalog binding via plugin manifest, Tier 2.13)
 
 - **`PluginManifest.mcp_servers: tuple[str, ...]`** — new optional manifest field. List of MCP
