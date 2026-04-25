@@ -304,6 +304,21 @@ class AgentLoop:
         except Exception:  # never break agent startup over an evolution bug
             self._evolution_subscription = None
 
+        # Phase 3.F — when system-control is on at construction time,
+        # attach the structured-logger bus listener so SignalEvents are
+        # mirrored to ``agent.log``. Best-effort: a missing system_control
+        # attribute on legacy Configs (rare) is fine; a broken attach
+        # never breaks the loop.
+        try:
+            if getattr(getattr(config, "system_control", None), "enabled", False):
+                from opencomputer.system_control.bus_listener import (
+                    attach_to_bus as _sc_attach,
+                )
+
+                _sc_attach()
+        except Exception as e:  # noqa: BLE001 — defensive
+            _log.warning("system-control attach_to_bus skipped: %s", e)
+
     # ─── the loop ──────────────────────────────────────────────────
 
     async def run_conversation(

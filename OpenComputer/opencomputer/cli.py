@@ -785,6 +785,11 @@ from opencomputer.evolution.entrypoint import evolution_app  # noqa: E402
 
 app.add_typer(evolution_app, name="evolution")
 
+# Phase 3.F — autonomous full-system-control mode toggle
+from opencomputer.cli_system_control import system_control_app  # noqa: E402
+
+app.add_typer(system_control_app, name="system-control")
+
 
 @config_app.command("show")
 def config_show() -> None:
