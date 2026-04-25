@@ -16,6 +16,7 @@ from opencomputer.agent.injection import engine as injection_engine
 from opencomputer.hooks.engine import engine as hook_engine
 from opencomputer.plugins.discovery import (
     PluginCandidate,
+    build_legacy_id_lookup,
     discover,
     find_plugin_ids_for_model,
 )
@@ -93,7 +94,7 @@ class PluginRegistry:
     ) -> list[LoadedPlugin]:
         """Discover + activate plugins. Returns the successfully loaded ones.
 
-        Filtering stack (Phase 14.C/14.D/14.M, G.21):
+        Filtering stack (Phase 14.C/14.D/14.M, G.21, G.22):
 
         1. **Layer A — manifest profile scope** (14.C/14.D): if
            ``manifest.profiles`` is set and doesn't contain the active
@@ -102,7 +103,14 @@ class PluginRegistry:
         2. **Layer B — user's enabled_ids filter** (14.M): if
            ``enabled_ids`` is a frozenset, only listed ids pass. ``None``
            or ``"*"`` means "no filter" (backward-compatible default).
-        3. **Layer C — model-prefix auto-activation** (G.21): when
+        3. **Layer B′ — legacy id normalization** (G.22): before B
+           runs, each entry in ``enabled_ids`` is mapped through the
+           ``legacy_plugin_ids`` aliases declared on current manifests.
+           A user's ``profile.yaml`` written before a plugin rename
+           still hits the renamed plugin. Mirrors OpenClaw's
+           ``normalizePluginId`` (``sources/openclaw-2026.4.23/src/
+           plugins/config-state.ts:83-91``).
+        4. **Layer C — model-prefix auto-activation** (G.21): when
            ``enabled_ids`` is a frozenset, plugins whose
            ``manifest.model_support`` matches the active ``cfg.model.model``
            are silently added to the set even if the user's preset didn't
@@ -122,6 +130,28 @@ class PluginRegistry:
         # see their per-request scope via ``api.request_context``.
         self.shared_api = api
         wildcard = enabled_ids is None or enabled_ids == "*"
+
+        # Layer B′ — legacy id normalization (G.22). Runs before Layer C
+        # so a renamed provider plugin's current id is what model-prefix
+        # matching adds to (avoids double-adding the legacy + current ids).
+        if not wildcard:
+            assert isinstance(enabled_ids, frozenset)
+            legacy_lookup = build_legacy_id_lookup(candidates)
+            if legacy_lookup:
+                normalized = frozenset(
+                    legacy_lookup.get(pid, pid) for pid in enabled_ids
+                )
+                if normalized != enabled_ids:
+                    rewrites = sorted(
+                        (legacy, legacy_lookup[legacy])
+                        for legacy in enabled_ids
+                        if legacy in legacy_lookup
+                    )
+                    logger.info(
+                        "legacy plugin id normalization: %s",
+                        ", ".join(f"{old!r}→{new!r}" for old, new in rewrites),
+                    )
+                    enabled_ids = normalized
 
         # Layer C — model-prefix auto-activation (G.21). Only expands
         # the set when a filter IS active (wildcard already loads

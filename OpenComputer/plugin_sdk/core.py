@@ -182,6 +182,16 @@ class PluginManifest:
     # profile preset. Default ``None`` means the plugin declares no
     # model affinity (the legacy behavior).
     model_support: ModelSupport | None = None
+    # Sub-project G.22 (Tier 4 — OpenClaw port). Historical ids this
+    # plugin used to be known by. When the user's profile.yaml or
+    # workspace overlay still references an old id (because they wrote
+    # the config before the rename), the loader transparently maps the
+    # old id to ``self.id``. Mirrors OpenClaw's ``legacyPluginIds``
+    # field at ``sources/openclaw-2026.4.23/src/plugins/manifest-
+    # registry.ts:100`` and the ``normalizePluginId`` lookup at
+    # ``sources/openclaw-2026.4.23/src/plugins/config-state.ts:69-74``.
+    # Default ``()`` means the plugin has never been renamed.
+    legacy_plugin_ids: tuple[str, ...] = ()
 
 
 # ─── Plugin activation source (Task I.7) ───────────────────────────────

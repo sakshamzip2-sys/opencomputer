@@ -126,6 +126,8 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
         mcp_servers=tuple(schema.mcp_servers),
         # Sub-project G.21 (Tier 4 OpenClaw port) — model-prefix auto-activation
         model_support=model_support,
+        # Sub-project G.22 (Tier 4 OpenClaw port) — legacy id aliases
+        legacy_plugin_ids=tuple(schema.legacy_plugin_ids),
     )
 
 
@@ -308,6 +310,74 @@ def find_plugin_ids_for_model(
     return sorted(matches)
 
 
+def build_legacy_id_lookup(candidates: list[PluginCandidate]) -> dict[str, str]:
+    """Return ``{legacy_id: current_id}`` for batch normalization.
+
+    Sub-project G.22 (Tier 4 OpenClaw port). Mirrors the lookup at
+    ``sources/openclaw-2026.4.23/src/plugins/config-state.ts:69-74``
+    (``getBundledPluginAliasLookup``).
+
+    Collision policy: when two candidates both claim the same legacy id
+    (e.g. ``alpha`` and ``beta`` both list ``oldname`` as legacy), the
+    second wins last-write — but a WARNING is logged so an honest
+    rename conflict surfaces in the operator's log. We don't raise
+    because one bad manifest mustn't block the rest of the registry.
+
+    Self-aliasing (a candidate listing its own current id in
+    ``legacy_plugin_ids``) is silently ignored — it's a manifest typo,
+    not a useful renames mapping. Same for legacy ids that match a
+    different candidate's CURRENT id (would create an alias loop).
+    """
+    current_ids: set[str] = {c.manifest.id for c in candidates}
+    lookup: dict[str, str] = {}
+    for cand in candidates:
+        for legacy in cand.manifest.legacy_plugin_ids:
+            if legacy == cand.manifest.id:
+                # Self-alias is a typo — drop silently, no useful behavior.
+                continue
+            if legacy in current_ids:
+                # Legacy id collides with another plugin's current id —
+                # would create a confusing routing situation. Log + skip.
+                logger.warning(
+                    "plugin %r declares %r as a legacy id, but another "
+                    "plugin currently uses that id — skipping the alias",
+                    cand.manifest.id,
+                    legacy,
+                )
+                continue
+            existing = lookup.get(legacy)
+            if existing is not None and existing != cand.manifest.id:
+                logger.warning(
+                    "legacy plugin id %r claimed by multiple current plugins "
+                    "(%r and %r) — last-write wins, %r takes the alias",
+                    legacy,
+                    existing,
+                    cand.manifest.id,
+                    cand.manifest.id,
+                )
+            lookup[legacy] = cand.manifest.id
+    return lookup
+
+
+def normalize_plugin_id(
+    plugin_id: str,
+    candidates: list[PluginCandidate],
+) -> str:
+    """Map ``plugin_id`` to the current id if it's a legacy alias.
+
+    Sub-project G.22 (Tier 4 OpenClaw port). Mirrors OpenClaw's
+    ``normalizePluginId`` at
+    ``sources/openclaw-2026.4.23/src/plugins/config-state.ts:83-91``.
+
+    Returns ``plugin_id`` unchanged if it's not in the legacy lookup —
+    callers don't have to special-case unknown ids. For batch
+    normalization (e.g. ``frozenset`` over ``enabled_ids``), prefer
+    ``build_legacy_id_lookup(candidates)`` and lookup directly so the
+    candidate scan is paid once.
+    """
+    return build_legacy_id_lookup(candidates).get(plugin_id, plugin_id)
+
+
 def standard_search_paths() -> list[Path]:
     """Canonical plugin search-path list, in priority order.
 
@@ -362,9 +432,11 @@ def standard_search_paths() -> list[Path]:
 
 
 __all__ = [
+    "build_legacy_id_lookup",
     "discover",
     "find_plugin_ids_for_model",
     "IdSource",
+    "normalize_plugin_id",
     "PluginCandidate",
     "standard_search_paths",
 ]
