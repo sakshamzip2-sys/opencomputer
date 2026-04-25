@@ -4,6 +4,17 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Phase C4 — F6 OpenCLI use-case libraries, parallel Session C)
+
+- **`extensions/opencli-scraper/use_cases/` library** — 5 domain-specific function libraries that compose the C2 tools (`ScrapeRawTool`, `FetchProfileTool`, `MonitorPageTool`) into higher-level patterns. **NOT registered as tools** — these are helper APIs that Session A's Phase 4 wiring or user code can call directly:
+  - `research_automation.py` — `fetch_arxiv_paper_metadata`, `build_citation_graph` (depth-limited BFS — note: arXiv adapter has no native citations endpoint, so this uses title-based search as a proxy; documented in code), `search_by_topic`
+  - `content_monitoring.py` — `PageMonitor` class (snapshot/diff/clear stateful API) + `monitor_loop` convenience function (default `max_iterations=1` so tests can't hang). Real polling deferred to user's cron/scheduler.
+  - `context_enrichment.py` — regex `MENTION_PATTERN = r"@(\w+)\s+on\s+(\w+)"`; `extract_mentions` parses user prompts; `enrich_mentions` fetches profiles via `FetchProfileTool` flow (capped at `max_fetches=3`); `format_for_context` renders enriched data as markdown for system-prompt injection
+  - `competitor_research.py` — `scan_company_page` (homepage + about/blog/pricing); `compare_companies` (side-by-side aggregation); **PUBLIC-only enforcement** — refuses `linkedin.com`, `facebook.com`, `x.com`, `instagram.com` (above-board competitor research only)
+  - `market_signals.py` — `MarketSignalsCollector` (HN + Reddit aggregation, trending-keyword frequency count); explicit `MARKET_SIGNALS_LEGAL_NOTICE` constant (Phase 4 surfaces this in a separate consent tier — module docstring flags "don't enable without legal review")
+- **76 new tests** across 5 files (`tests/test_opencli_use_cases_{research,monitoring,enrichment,competitor,market}.py`). All external dependencies mocked via `Mock(spec=OpenCLIWrapper)` + `AsyncMock`. Full suite: **1775 passing** (was 1604 entering C4 + Session A's F1 also landed in this window adding more tests).
+- **Note**: `trending_keywords` test uses Reddit posts (not HN) because the HN field whitelist excludes `title`; documented in test docstring. Behavioral detail of the C2 fail-closed whitelist design.
+
 ### Added (Phase 3.G — Instruction-detector for prompt-injection defense)
 
 - **`opencomputer/security/instruction_detector.py`** — `InstructionDetector` runs 7 conservative rules (explicit override, role swap, system-prompt extraction, developer message, token smuggling, imperative swarm, user extra patterns) and returns a `DetectionVerdict` with confidence + triggered_rules + quarantine_recommended.
