@@ -1,8 +1,8 @@
 {
   "id": "coding-harness",
   "name": "Coding Harness",
-  "version": "0.2.0",
-  "description": "Coding agent toolkit — Edit, MultiEdit, TodoWrite, background process tools, plan mode, and OI Bridge (23 Open Interpreter tools across 5 risk tiers). PR-3: OI bridge interwoven per docs/f7/interweaving-plan.md.",
+  "version": "0.3.0",
+  "description": "Coding agent toolkit — Edit, MultiEdit, TodoWrite, background process tools, plan mode, and OI Bridge Tier 1 (introspection). Tiers 2-5 removed in 2026-04-25 trim cleanup because each overlapped with native OC features (channels+MCP, OpenCLI, BashTool, cron).",
   "author": "OpenComputer Contributors",
   "license": "MIT",
   "kind": "mixed",
@@ -25,21 +25,6 @@
     "extract_screen_text",
     "list_recent_files",
     "search_files",
-    "read_git_log",
-    "read_email_metadata",
-    "read_email_bodies",
-    "list_calendar_events",
-    "read_contacts",
-    "send_email",
-    "read_browser_history",
-    "read_browser_bookmarks",
-    "read_browser_dom",
-    "edit_file",
-    "run_shell",
-    "run_applescript",
-    "inject_keyboard",
-    "extract_selected_text",
-    "list_running_processes",
-    "read_sms_messages"
+    "read_git_log"
   ]
 }
