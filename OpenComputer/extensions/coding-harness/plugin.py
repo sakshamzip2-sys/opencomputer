@@ -139,7 +139,7 @@ def register(api) -> None:  # PluginAPI duck-typed
     # each overlapped with a feature OpenComputer already provides:
     #
     # * Tier 2 (email/SMS/Slack/Discord) → channel adapters + MCP.
-    # * Tier 3 (browser) → extensions/opencli-scraper/.
+    # * Tier 3 (browser) → built-in WebFetchTool covers raw fetches.
     # * Tier 4 (system control) → built-in BashTool.
     # * Tier 5 (schedule task / custom code) → ``opencomputer cron`` (G.1)
     #   + BashTool.

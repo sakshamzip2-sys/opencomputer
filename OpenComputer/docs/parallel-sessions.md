@@ -36,10 +36,16 @@ Both sessions read this file at startup. Both update it after every commit.
 
 ## Reserved files — Session C only (Session A + B must NOT modify)
 
-- `extensions/opencli-scraper/*`
 - `extensions/oi-capability/*` (deprecated compat shim — refactored into `extensions/coding-harness/oi_bridge/` in PR-3, 2026-04-25; remove on next major version bump)
-- `tests/test_opencli_*.py`, `tests/test_oi_*.py`
-- `docs/f6/*`, `docs/f7/*`
+- `tests/test_oi_*.py`
+- `docs/f7/*`
+
+**Note (2026-04-25):** OpenCLI scraper plugin (`extensions/opencli-scraper/`,
+`tests/test_opencli_*.py`, `docs/f6/*`) was REMOVED per user direction —
+3 tools were redundant with built-in `WebFetchTool` + `cron` + manual diff,
+and the 12 curated platforms (github / reddit / linkedin / etc.) didn't
+match Saksham's stock-research workflow. Session C reservations on those
+paths no longer apply.
 
 ## Shared files (coordinate)
 
