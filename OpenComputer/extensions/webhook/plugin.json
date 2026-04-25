@@ -1,0 +1,13 @@
+{
+  "id": "webhook",
+  "name": "Webhook",
+  "version": "0.1.0",
+  "description": "Generic HTTP webhook channel — receive events from TradingView, Zapier, n8n, GitHub Actions, etc. via signed POST requests.",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "channel",
+  "entry": "plugin",
+  "single_instance": true,
+  "enabled_by_default": false,
+  "profiles": ["*"]
+}
