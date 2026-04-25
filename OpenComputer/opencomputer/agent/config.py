@@ -99,6 +99,16 @@ class MemoryConfig:
     # absent so subsequent runs don't keep trying to spin up the stack.
     provider: str = "memory-honcho"
     fallback_to_builtin: bool = True  # non-negotiable; here for docs
+    enable_ambient_blocks: bool = True
+    """When True (default), MemoryBridge.collect_system_prompt_blocks queries
+    all active providers and the prompt builder injects their content under
+    '## Memory context'. Disable to opt out without unloading the providers.
+    PR-6 of 2026-04-25 Hermes parity plan."""
+    max_ambient_block_chars: int = 800
+    """Per-provider cap on system_prompt_block return value. Stays well under
+    typical Anthropic prompt cache breakpoints. Provider implementations
+    SHOULD respect this; bridge truncates if they don't.
+    PR-6 of 2026-04-25 Hermes parity plan."""
 
 
 @dataclass(frozen=True, slots=True)
