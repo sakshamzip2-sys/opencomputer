@@ -1,32 +1,28 @@
-"""Tests for Tier 1 introspection tools (8 tools).
+"""Tests for Tier 1 introspection tools (5 tools, post-trim 2026-04-25).
 
 Covers:
 - Schema correctness (name, description, required params)
 - execute() delegates to wrapper with correct OI method
 - consent_tier == 1 for all tools
-- ReadGitLogTool uses inline git (no wrapper call)
-- ReadGitLogTool handles git not found gracefully
-- ReadGitLogTool handles git error returncode
 - Wrapper errors propagated as ToolResult(is_error=True)
+
+Removed in 2026-04-25 trim — tests deleted along with the classes:
+- ReadFileRegionTool — duplicated built-in Read tool
+- SearchFilesTool    — duplicated built-in Grep + Glob
+- ReadGitLogTool     — duplicated BashTool running `git log`
 """
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 from extensions.coding_harness.oi_bridge.tools.tier_1_introspection import (
     ALL_TOOLS,
     ExtractScreenTextTool,
     ListAppUsageTool,
     ListRecentFilesTool,
     ReadClipboardOnceTool,
-    ReadFileRegionTool,
-    ReadGitLogTool,
     ScreenshotTool,
-    SearchFilesTool,
 )
 
 from plugin_sdk.core import ToolCall
@@ -53,8 +49,10 @@ def _make_call(name: str, arguments: dict) -> ToolCall:
 # ---------------------------------------------------------------------------
 
 class TestAllToolsList:
-    def test_all_tools_has_8_entries(self):
-        assert len(ALL_TOOLS) == 8
+    def test_all_tools_has_5_entries(self):
+        # Post-trim 2026-04-25: read_file_region / search_files / read_git_log
+        # removed because they duplicated built-in Read / Grep+Glob / Bash.
+        assert len(ALL_TOOLS) == 5
 
     def test_all_tools_have_consent_tier_1(self):
         wrapper = _make_wrapper()
@@ -62,35 +60,18 @@ class TestAllToolsList:
             tool = cls(wrapper=wrapper)
             assert tool.consent_tier == 1, f"{cls.__name__} should have consent_tier=1"
 
-
-# ---------------------------------------------------------------------------
-# ReadFileRegionTool
-# ---------------------------------------------------------------------------
-
-class TestReadFileRegionTool:
-    def test_schema_name(self):
-        tool = ReadFileRegionTool(wrapper=_make_wrapper())
-        assert tool.schema.name == "read_file_region"
-
-    def test_schema_has_path_required(self):
-        tool = ReadFileRegionTool(wrapper=_make_wrapper())
-        assert "path" in tool.schema.parameters["required"]
-
-    async def test_execute_calls_wrapper_with_correct_method(self):
-        wrapper = _make_wrapper(result={"content": "hello"})
-        tool = ReadFileRegionTool(wrapper=wrapper)
-        call = _make_call("read_file_region", {"path": "/tmp/test.txt", "offset": 0, "length": 100})
-        result = await tool.execute(call)
-        wrapper.call.assert_awaited_once_with("computer.files.read", call.arguments)
-        assert not result.is_error
-
-    async def test_execute_returns_error_on_wrapper_exception(self):
-        wrapper = _make_wrapper(raises=RuntimeError("subprocess error"))
-        tool = ReadFileRegionTool(wrapper=wrapper)
-        call = _make_call("read_file_region", {"path": "/tmp/test.txt"})
-        result = await tool.execute(call)
-        assert result.is_error
-        assert "Error" in result.content
+    def test_all_tools_are_macos_unique_capabilities(self):
+        # Sanity: every surviving tool has a name that signals OI's
+        # genuine macOS-unique value (clipboard / screen / app / file
+        # listing). Guards against accidentally re-adding a duplicate.
+        names = {cls.__name__ for cls in ALL_TOOLS}
+        assert names == {
+            "ListAppUsageTool",
+            "ReadClipboardOnceTool",
+            "ScreenshotTool",
+            "ExtractScreenTextTool",
+            "ListRecentFilesTool",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -202,102 +183,3 @@ class TestListRecentFilesTool:
         assert method == "computer.terminal.run"
         assert not result.is_error
 
-
-# ---------------------------------------------------------------------------
-# SearchFilesTool
-# ---------------------------------------------------------------------------
-
-class TestSearchFilesTool:
-    def test_schema_name(self):
-        tool = SearchFilesTool(wrapper=_make_wrapper())
-        assert tool.schema.name == "search_files"
-
-    def test_schema_requires_query(self):
-        tool = SearchFilesTool(wrapper=_make_wrapper())
-        assert "query" in tool.schema.parameters["required"]
-
-    async def test_execute_calls_files_search(self):
-        wrapper = _make_wrapper(result=["file1.py", "file2.py"])
-        tool = SearchFilesTool(wrapper=wrapper)
-        call = _make_call("search_files", {"query": "agent"})
-        result = await tool.execute(call)
-        wrapper.call.assert_awaited_once_with("computer.files.search", call.arguments)
-        assert not result.is_error
-
-
-# ---------------------------------------------------------------------------
-# ReadGitLogTool — carve-out: no OI subprocess
-# ---------------------------------------------------------------------------
-
-class TestReadGitLogTool:
-    def test_schema_name(self):
-        tool = ReadGitLogTool(wrapper=_make_wrapper())
-        assert tool.schema.name == "read_git_log"
-
-    def test_schema_no_required_params(self):
-        tool = ReadGitLogTool(wrapper=_make_wrapper())
-        assert tool.schema.parameters["required"] == []
-
-    async def test_execute_does_not_call_wrapper(self):
-        """ReadGitLogTool must NOT call the OI subprocess wrapper — it's the carve-out tool."""
-        wrapper = _make_wrapper()
-        tool = ReadGitLogTool(wrapper=wrapper)
-        call = _make_call("read_git_log", {"repo_path": ".", "limit": 5})
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="abc123 Initial commit\n", stderr="")
-            result = await tool.execute(call)
-
-        # Wrapper should NOT have been called
-        wrapper.call.assert_not_awaited()
-        assert not result.is_error
-
-    async def test_execute_returns_git_log_output(self):
-        wrapper = _make_wrapper()
-        tool = ReadGitLogTool(wrapper=wrapper)
-        call = _make_call("read_git_log", {"repo_path": ".", "limit": 3, "format": "oneline"})
-
-        expected_output = "abc123 feat: add feature\ndef456 fix: bugfix\n"
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout=expected_output, stderr="")
-            result = await tool.execute(call)
-
-        assert expected_output in result.content
-        assert not result.is_error
-
-    async def test_execute_handles_git_not_found(self):
-        wrapper = _make_wrapper()
-        tool = ReadGitLogTool(wrapper=wrapper)
-        call = _make_call("read_git_log", {})
-
-        with patch("subprocess.run", side_effect=FileNotFoundError("git not found")):
-            result = await tool.execute(call)
-
-        assert result.is_error
-        assert "git" in result.content.lower()
-
-    async def test_execute_handles_git_error_returncode(self):
-        wrapper = _make_wrapper()
-        tool = ReadGitLogTool(wrapper=wrapper)
-        call = _make_call("read_git_log", {"repo_path": "/not/a/repo"})
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=128, stdout="", stderr="fatal: not a git repository"
-            )
-            result = await tool.execute(call)
-
-        assert result.is_error
-        assert "fatal" in result.content.lower() or "error" in result.content.lower()
-
-    async def test_execute_handles_timeout(self):
-        wrapper = _make_wrapper()
-        tool = ReadGitLogTool(wrapper=wrapper)
-        call = _make_call("read_git_log", {})
-
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 30)):
-            result = await tool.execute(call)
-
-        assert result.is_error
-        assert "timed out" in result.content.lower() or "timeout" in result.content.lower()

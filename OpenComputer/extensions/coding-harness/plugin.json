@@ -1,8 +1,8 @@
 {
   "id": "coding-harness",
   "name": "Coding Harness",
-  "version": "0.3.0",
-  "description": "Coding agent toolkit — Edit, MultiEdit, TodoWrite, background process tools, plan mode, and OI Bridge Tier 1 (introspection). Tiers 2-5 removed in 2026-04-25 trim cleanup because each overlapped with native OC features (channels+MCP, OpenCLI, BashTool, cron).",
+  "version": "0.4.0",
+  "description": "Coding agent toolkit — Edit, MultiEdit, TodoWrite, background process tools, plan mode, and OI Bridge Tier 1 (5 macOS-unique introspection tools: app usage / clipboard / screenshot / OCR / recent files). Tiers 2-5 removed in 2026-04-25 trim because each overlapped with native OC features. Three Tier-1 tools (read_file_region / search_files / read_git_log) also removed as redundant with built-in Read / Grep+Glob / BashTool.",
   "author": "OpenComputer Contributors",
   "license": "MIT",
   "kind": "mixed",
@@ -18,13 +18,10 @@
     "Rewind",
     "CheckpointDiff",
     "RunTests",
-    "read_file_region",
     "list_app_usage",
     "read_clipboard_once",
     "screenshot",
     "extract_screen_text",
-    "list_recent_files",
-    "search_files",
-    "read_git_log"
+    "list_recent_files"
   ]
 }

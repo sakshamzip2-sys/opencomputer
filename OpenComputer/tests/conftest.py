@@ -3,8 +3,11 @@
 This file registers module aliases so hyphenated extension directories can be
 imported with underscores in test code:
 
-1.  extensions.oi_capability  → extensions/oi-capability/  (compat shim; kept
-    for test_oi_use_cases_*.py which were NOT renamed in PR-3)
+1.  extensions.oi_capability  → extensions/oi-capability/  (legacy compat
+    shim left in place after the 2026-04-25 trim; the use_cases sub-package
+    that used to live here was deleted along with its tests since the OI
+    Tier 1 tools it depended on were also removed as redundant. The shim
+    itself can be deleted on the next major version bump.)
 2.  extensions.coding_harness → extensions/coding-harness/  (PR-3; makes the
     new test_coding_harness_oi_*.py tests importable)
 
@@ -38,7 +41,13 @@ def _ensure_extensions_pkg() -> None:
 def _register_oi_capability_alias() -> None:
     """Register extensions.oi_capability → extensions/oi-capability/ in sys.modules.
 
-    Kept for test_oi_use_cases_*.py which use extensions.oi_capability.use_cases.*.
+    Legacy compat shim retained after the 2026-04-25 trim. The
+    ``use_cases`` sub-package was deleted along with its tests when the
+    Tier 1 tools it depended on (read_file_region, search_files,
+    read_git_log) were removed as redundant with built-in OC tools.
+    The remaining alias still maps subprocess + tools sub-packages so
+    test fixtures referring to ``extensions.oi_capability.tools.*``
+    keep resolving — those names live at coding-harness/oi_bridge/.
     """
     _ensure_extensions_pkg()
 
@@ -59,14 +68,15 @@ def _register_oi_capability_alias() -> None:
         spec.loader.exec_module(oi_mod)
 
     # Register sub-packages.
-    # PR-3: subprocess/ and tools/ were moved to coding-harness/oi_bridge/;
-    # the oi_capability.* aliases redirect there so use_cases tests keep working.
-    # use_cases is still in extensions/oi-capability/use_cases/.
+    # PR-3 (2026-04-25): subprocess/ and tools/ were moved to
+    # coding-harness/oi_bridge/; the oi_capability.* aliases redirect
+    # there so any legacy test that still imports from the old path
+    # keeps resolving. The use_cases sub-package was deleted in the
+    # 2026-04-25 trim along with its tests — no alias needed.
     _OI_BRIDGE_DIR = _CH_DIR / "oi_bridge"
     _sub_dirs = {
         "subprocess": _OI_BRIDGE_DIR / "subprocess",
         "tools": _OI_BRIDGE_DIR / "tools",
-        "use_cases": _OI_DIR / "use_cases",
     }
     for sub, sub_dir in _sub_dirs.items():
         full_name = f"extensions.oi_capability.{sub}"
