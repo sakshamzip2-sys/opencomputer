@@ -1,0 +1,46 @@
+# Faster Docker builds + smaller images: skip the things we never need
+# at build time. Mirror .gitignore for "source not in image" excludes,
+# plus tooling-specific cruft.
+
+# Python / pip / build artefacts
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+
+# Local state — never bake user data into images
+.opencomputer/
+~/.opencomputer
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# CI / Git
+.git/
+.github/
+.gitignore
+
+# Tests + docs — not needed at runtime
+tests/
+docs/
+CHANGELOG.md
+
+# Build / dev tooling
+Makefile
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# Sources tree (reference repos only — never goes into the image)
+../sources/
+sources/
