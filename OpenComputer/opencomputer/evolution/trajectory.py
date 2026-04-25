@@ -180,3 +180,134 @@ def with_event(record: TrajectoryRecord, event: TrajectoryEvent) -> TrajectoryRe
     ``dataclasses.replace`` to copy all fields except ``events``.
     """
     return dataclasses.replace(record, events=(*record.events, event))
+
+
+# ---------------------------------------------------------------------------
+# Bus subscriber (B3) — auto-collect trajectories from the F2 TypedEvent bus
+# ---------------------------------------------------------------------------
+# ruff: noqa: E402 — stdlib-only imports appended to leaf module per design
+import logging  # noqa: E402
+from typing import TYPE_CHECKING  # noqa: E402
+
+if TYPE_CHECKING:
+    from opencomputer.ingestion.bus import Subscription, TypedEventBus  # noqa: F401
+    from plugin_sdk.ingestion import ToolCallEvent  # noqa: F401
+
+logger = logging.getLogger(__name__)
+
+# In-memory "open trajectory per session_id" — events accumulate until session ends
+_open_trajectories: dict[str, TrajectoryRecord] = {}
+
+
+def _on_tool_call_event(event: ToolCallEvent) -> None:
+    """Bus handler — converts a ToolCallEvent into a TrajectoryEvent and either
+    appends to an open trajectory (same session_id) or starts a new one.
+
+    NEVER raises — exceptions are logged + swallowed so the bus's
+    exception-isolated fanout protects unrelated subscribers.
+    """
+    try:
+        if event.session_id is None:
+            return  # cannot bucket anonymously
+
+        # Build the TrajectoryEvent — privacy rule already enforced by TrajectoryEvent.__post_init__
+        traj_event = TrajectoryEvent(
+            session_id=event.session_id,
+            message_id=None,
+            action_type="tool_call",
+            tool_name=event.tool_name,
+            outcome=event.outcome,
+            timestamp=event.timestamp,
+            metadata={
+                "duration_seconds": float(event.duration_seconds),
+                # Preserve a small subset of metadata if present; cap each value
+                # to the privacy threshold (200 chars) so the dataclass accepts it
+                **{
+                    k: v
+                    for k, v in (event.metadata or {}).items()
+                    if not isinstance(v, str) or len(v) <= 200
+                },
+            },
+        )
+
+        # Append to open trajectory or start fresh
+        existing = _open_trajectories.get(event.session_id)
+        if existing is None:
+            existing = new_record(event.session_id, started_at=event.timestamp)
+        existing = with_event(existing, traj_event)
+        _open_trajectories[event.session_id] = existing
+
+    except Exception:
+        logger.exception("evolution: trajectory subscriber failed for event %r", event)
+
+
+def _on_session_end(session_id: str) -> int | None:
+    """Mark an open trajectory as ended + persist it. Returns the inserted id, or None
+    if no trajectory was open for that session.
+    """
+    try:
+        import time as _time
+        from dataclasses import replace as dc_replace
+
+        from opencomputer.evolution.reward import RuleBasedRewardFunction
+        from opencomputer.evolution.storage import insert_record, update_reward
+
+        record = _open_trajectories.pop(session_id, None)
+        if record is None:
+            return None
+
+        ended = dc_replace(record, ended_at=_time.time(), completion_flag=True)
+        record_id = insert_record(ended)
+
+        # Compute reward (RuleBasedRewardFunction default) + persist it
+        reward = RuleBasedRewardFunction().score(ended)
+        if reward is not None:
+            update_reward(record_id, reward)
+
+        return record_id
+    except Exception:
+        logger.exception("evolution: session-end persistence failed for session %r", session_id)
+        return None
+
+
+def register_with_bus(bus: TypedEventBus | None = None) -> Subscription:
+    """Subscribe `_on_tool_call_event` to the TypedEvent bus.
+
+    If `bus` is None, uses `get_default_bus()`. Returns the Subscription for later
+    unregistration. Idempotent — safe to call multiple times (multiple subscriptions
+    will fire — caller is responsible for deduping via the returned handle).
+    """
+    if bus is None:
+        from opencomputer.ingestion.bus import get_default_bus
+
+        bus = get_default_bus()
+    return bus.subscribe("tool_call", _on_tool_call_event)
+
+
+def is_collection_enabled() -> bool:
+    """Check the on-disk flag at <evolution_home() / 'enabled'>."""
+    from opencomputer.evolution.storage import evolution_home
+
+    return (evolution_home() / "enabled").exists()
+
+
+def set_collection_enabled(enabled: bool) -> None:
+    """Toggle the on-disk flag."""
+    from opencomputer.evolution.storage import evolution_home
+
+    flag = evolution_home() / "enabled"
+    if enabled:
+        flag.touch()
+    elif flag.exists():
+        flag.unlink()
+
+
+def bootstrap_if_enabled() -> Subscription | None:
+    """Auto-register the bus subscriber if the on-disk flag is set.
+
+    Callers (e.g. AgentLoop initialization, opencomputer CLI startup) can invoke
+    this to opt into auto-collection. Returns the Subscription, or None if not enabled.
+    """
+    if not is_collection_enabled():
+        return None
+    return register_with_bus()
