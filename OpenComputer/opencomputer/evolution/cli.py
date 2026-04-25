@@ -307,16 +307,23 @@ def prompts_list(
     table.add_column("id", style="cyan")
     table.add_column("target")
     table.add_column("status")
+    table.add_column("cache?")
     table.add_column("diff_hint", overflow="fold")
     for p in proposals:
-        table.add_row(str(p.id), p.target, p.status, p.diff_hint[:120])
+        cache_cell = "[red]CACHE INVALIDATES[/red]" if p.cache_invalidation_warning else ""
+        table.add_row(str(p.id), p.target, p.status, cache_cell, p.diff_hint[:120])
     console.print(table)
 
 
 @prompts_app.command("apply")
 def prompts_apply(
-    proposal_id: int = typer.Argument(..., help="Proposal id (from `prompts list`)"),
-    reason: str = typer.Option("", "--reason", help="Optional reason for the decision"),
+    proposal_id: int = typer.Argument(...),
+    reason: str = typer.Option("", "--reason"),
+    force_cache_invalidation: bool = typer.Option(
+        False,
+        "--force-cache-invalidation",
+        help="Apply even if the proposal flagged a cache-invalidation warning",
+    ),
 ) -> None:
     """Mark a prompt proposal as applied. The actual prompt-file edit is your responsibility —
     this command persists the decision only.
@@ -325,14 +332,21 @@ def prompts_apply(
 
     pe = PromptEvolver()
     try:
-        p = pe.apply(proposal_id, reason=reason)
+        proposal = pe.get(proposal_id)
     except KeyError:
         console.print(f"[red]No proposal with id={proposal_id}[/red]")
         raise typer.Exit(code=1)
-    console.print(
-        f"[green]Marked proposal {p.id} as applied.[/green] "
-        "(You still need to edit the target prompt file.)"
-    )
+    if proposal.cache_invalidation_warning and not force_cache_invalidation:
+        confirm = typer.confirm(
+            "Proposal flagged: applying it mid-session will invalidate the "
+            "Anthropic prompt cache (≈3x cost spike for the rest of the session). "
+            "Apply anyway?",
+        )
+        if not confirm:
+            console.print("[dim]Cancelled.[/dim]")
+            raise typer.Exit(code=0)
+    p = pe.apply(proposal_id, reason=reason)
+    console.print(f"[green]Marked proposal {p.id} as applied.[/green]")
 
 
 @prompts_app.command("reject")

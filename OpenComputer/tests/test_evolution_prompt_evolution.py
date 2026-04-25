@@ -109,12 +109,13 @@ def test_propose_rejects_non_edit_prompt_action(isolated_evolver):
         isolated_evolver.propose(insight)
 
 
-def test_propose_rejects_invalid_target(isolated_evolver):
+def test_propose_rejects_empty_target(isolated_evolver):
+    """target must be non-empty; unknown targets are allowed (no cache warning)."""
     insight = Insight(
         observation="Obs",
         evidence_refs=(),
         action_type="edit_prompt",
-        payload={"target": "unknown", "diff_hint": "some hint"},
+        payload={"target": "", "diff_hint": "some hint"},
         confidence=0.5,
     )
     with pytest.raises(ValueError, match="payload.target"):

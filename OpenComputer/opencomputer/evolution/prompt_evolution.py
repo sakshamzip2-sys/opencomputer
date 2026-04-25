@@ -37,6 +37,7 @@ class PromptProposal:
     status: str             # "pending" | "applied" | "rejected"
     decided_at: float | None = None
     decided_reason: str | None = None
+    cache_invalidation_warning: bool = False
 
 
 class PromptEvolver:
@@ -52,13 +53,23 @@ class PromptEvolver:
             return self._dest_dir
         return evolution_home() / "prompt_proposals"
 
-    def propose(self, insight: Insight) -> PromptProposal:
+    def propose(
+        self,
+        insight: Insight,
+        *,
+        active_session_id: str | None = None,
+    ) -> PromptProposal:
         """Persist an edit_prompt Insight as a pending proposal.
 
         Returns the persisted PromptProposal (with id assigned). Writes:
           - row in `prompt_proposals` table
           - sidecar `<dest_dir>/<id>.diff` containing the diff_hint text
             (atomic: tmp + os.replace)
+
+        When *active_session_id* is provided and the insight targets "system" or
+        "tool_spec", the proposal is flagged with cache_invalidation_warning=True
+        to notify the user that applying it mid-session will invalidate the
+        Anthropic prompt cache (~3x cost spike for the rest of the session).
         """
         if insight.action_type != "edit_prompt":
             raise ValueError(
@@ -66,11 +77,17 @@ class PromptEvolver:
             )
         payload = dict(insight.payload)
         target = str(payload.get("target", ""))
-        if target not in {"system", "tool_spec"}:
-            raise ValueError(f"payload.target must be 'system' or 'tool_spec', got {target!r}")
+        if not target:
+            raise ValueError("payload.target must be a non-empty string")
         diff_hint = str(payload.get("diff_hint", "")).strip()
         if not diff_hint:
             raise ValueError("payload.diff_hint must be a non-empty string")
+
+        cache_invalidation_warning = (
+            active_session_id is not None
+            and insight.action_type == "edit_prompt"
+            and target in {"system", "tool_spec"}
+        )
 
         # Ensure DB is initialised before writing proposals
         init_db()
@@ -81,6 +98,7 @@ class PromptEvolver:
             diff_hint=diff_hint,
             insight_json=_insight_to_json(insight),
             proposed_at=time.time(),
+            cache_invalidation_warning=cache_invalidation_warning,
         )
 
         # Sidecar atomic write
@@ -133,6 +151,7 @@ class PromptEvolver:
             status=row["status"],
             decided_at=row["decided_at"],
             decided_reason=row["decided_reason"],
+            cache_invalidation_warning=bool(row["cache_invalidation_warning"]),
         )
 
 
