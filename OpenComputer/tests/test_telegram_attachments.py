@@ -20,10 +20,16 @@ from plugin_sdk import ChannelCapabilities
 
 # Load TelegramAdapter via the same loader pattern existing tests use,
 # avoiding sibling-name collisions with other plugins' adapter.py files.
+# Path is resolved relative to this test file so it works in CI + local + Docker.
+_TELEGRAM_ADAPTER_PATH = (
+    Path(__file__).resolve().parent.parent / "extensions" / "telegram" / "adapter.py"
+)
+
+
 def _load_telegram() -> tuple[Any, Any]:
     spec = importlib.util.spec_from_file_location(
         "telegram_adapter_test_g2",
-        "/Users/saksham/Vscode/claude/OpenComputer/extensions/telegram/adapter.py",
+        str(_TELEGRAM_ADAPTER_PATH),
     )
     assert spec is not None
     mod = importlib.util.module_from_spec(spec)
