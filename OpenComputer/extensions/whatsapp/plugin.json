@@ -1,0 +1,23 @@
+{
+  "id": "whatsapp",
+  "name": "WhatsApp",
+  "version": "0.1.0",
+  "description": "WhatsApp channel via Meta's Cloud API (Graph API). Outbound text + reactions. Inbound: use webhook adapter (G.3) wired to a Cloud API webhook.",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "channel",
+  "entry": "plugin",
+  "single_instance": true,
+  "enabled_by_default": false,
+  "profiles": ["*"],
+  "setup": {
+    "channels": [
+      {
+        "id": "whatsapp",
+        "env_vars": ["WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID"],
+        "label": "WhatsApp (Cloud API)",
+        "signup_url": "https://developers.facebook.com/docs/whatsapp/cloud-api/get-started"
+      }
+    ]
+  }
+}
