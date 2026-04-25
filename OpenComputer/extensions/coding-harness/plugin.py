@@ -133,31 +133,30 @@ def register(api) -> None:  # PluginAPI duck-typed
         api.register_slash_command(DiffCommand(harness_ctx=ctx))
         api.register_slash_command(UndoCommand(harness_ctx=ctx))
 
-    # OI Bridge tools (PR-3 of 2026-04-25 Hermes parity plan; refactored
-    # from the standalone extensions/oi-capability/ per
-    # docs/f7/interweaving-plan.md). Tools have capability_claims on the
-    # class — F1 ConsentGate enforces at dispatch.
+    # OI Bridge tools — Tier 1 (introspection) only.
+    #
+    # Tiers 2-5 were removed in the 2026-04-25 OI-trim cleanup because
+    # each overlapped with a feature OpenComputer already provides:
+    #
+    # * Tier 2 (email/SMS/Slack/Discord) → channel adapters + MCP.
+    # * Tier 3 (browser) → extensions/opencli-scraper/.
+    # * Tier 4 (system control) → built-in BashTool.
+    # * Tier 5 (schedule task / custom code) → ``opencomputer cron`` (G.1)
+    #   + BashTool.
+    #
+    # What remains is Tier 1's unique value: read file regions, list apps,
+    # clipboard, screenshot, screen text, search, git log. F1 ConsentGate
+    # enforces capability claims at dispatch.
     try:
         from extensions.coding_harness.oi_bridge.subprocess.wrapper import (  # noqa: PLC0415
             OISubprocessWrapper,
         )
         from extensions.coding_harness.oi_bridge.tools import (  # noqa: PLC0415
             tier_1_introspection,
-            tier_2_communication,
-            tier_3_browser,
-            tier_4_system_control,
-            tier_5_advanced,
         )
         _oi_wrapper = OISubprocessWrapper()
-        for _oi_module in (
-            tier_1_introspection,
-            tier_2_communication,
-            tier_3_browser,
-            tier_4_system_control,
-            tier_5_advanced,
-        ):
-            for _tool_cls in getattr(_oi_module, "ALL_TOOLS", ()):
-                api.register_tool(_tool_cls(wrapper=_oi_wrapper))
+        for _tool_cls in getattr(tier_1_introspection, "ALL_TOOLS", ()):
+            api.register_tool(_tool_cls(wrapper=_oi_wrapper))
     except Exception as _exc:  # noqa: BLE001
         import logging as _logging
         _logging.getLogger(__name__).warning(

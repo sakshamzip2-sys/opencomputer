@@ -4,6 +4,64 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Removed (OI tier-trim cleanup, 2026-04-25)
+
+User-directed cleanup after audit of duplicate functionality between
+Open Interpreter (OI) tiers and OC's native features:
+
+- **OI Tier 2 — communication tools removed.** Email / SMS / Slack /
+  Discord / browser-notification surfaces overlap with OC's channel
+  adapter ecosystem (telegram, discord, slack, mattermost, matrix,
+  email — all bundled) and the MCP server bridge. Native channels
+  carry richer capability flags (reactions, edits, threads, voice)
+  than OI's wrappers, so we delete the duplicates rather than maintain
+  parallel surfaces.
+- **OI Tier 3 — browser tools removed.** Navigate / extract content /
+  browser screenshot overlap with `extensions/opencli-scraper/`'s
+  3-tool web stack (`ScrapeRaw` / `FetchProfile` / `MonitorPage`),
+  which now ships enabled-by-default (see below). OpenCLI's HTTP
+  layer covers Saksham's stock-research workflow; full browser
+  control via OI was speculative.
+- **OI Tier 4 — system control removed.** Run / kill process / system
+  command / restart app overlap with the built-in `BashTool`. Bash
+  already supports any shell command, including process management.
+- **OI Tier 5 — advanced removed.** Schedule task overlaps with the
+  G.1 cron subsystem; custom-code execution overlaps with `BashTool`.
+- **Dependent use_case modules + tests removed.** Six use_cases under
+  `extensions/oi-capability/use_cases/` (`dev_flow_assistant`,
+  `autonomous_refactor`, `life_admin`, `email_triage`,
+  `proactive_security_monitoring`, `temporal_pattern_recognition`)
+  imported the removed tier modules; deleted along with their test
+  fixtures. The two tier-1-only use_cases stay:
+  `context_aware_code_suggestions` + `personal_knowledge_management`.
+
+**What stays:** OI Tier 1 (introspection) — read file regions, list
+apps, clipboard, screenshot, screen text, recent files, search, git
+log. Eight tools that OC's core does NOT have natively. These remain
+wired through F1 ConsentGate at dispatch.
+
+`extensions/coding-harness/plugin.json` `tool_names` shrunk from 33
+to 18 entries; description + version bumped to 0.3.0 to mark the
+breaking surface change.
+
+### Changed (OpenCLI scraper enabled by default, 2026-04-25)
+
+- **`extensions/opencli-scraper/plugin.json`** flipped
+  `enabled_by_default` from `false` → `true` per user instruction
+  after legal review. Safety stack (rate limiting + robots.txt cache +
+  field whitelist + F1 ConsentGate capability claims + F2 bus audit)
+  remains intact — the scraper is still tightly bounded; it just no
+  longer needs an explicit per-install opt-in.
+- **Latent manifest bug fixed.** `kind: "tools"` (invalid — schema
+  rejects it) corrected to `kind: "tool"`. The manifest had been
+  silently failing pydantic validation since landing, so the plugin
+  was never actually loading. The flip-to-default + the bug fix land
+  together; otherwise the toggle would have had no effect.
+- Updated `tests/test_opencli_consent_integration.py::
+  test_plugin_manifest_still_disabled_by_default` →
+  `test_plugin_manifest_enabled_by_default` to reflect the new
+  posture.
+
 ### Added (Sub-project G.25 — Channel setup metadata, Tier 4 OpenClaw port follow-up)
 
 - **`plugin_sdk.SetupChannel`** — frozen dataclass symmetric to

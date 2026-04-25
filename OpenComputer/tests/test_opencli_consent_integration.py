@@ -222,15 +222,22 @@ async def test_bus_publish_failure_does_not_break_tool():
     assert not result.is_error, f"Tool crashed when bus failed: {result.content}"
 
 
-# ── 4. plugin.json still disabled by default ─────────────────────────────────────
+# ── 4. plugin.json — enabled by default (user opted in 2026-04-25) ──────────────
 
 
-def test_plugin_manifest_still_disabled_by_default():
-    """enabled_by_default MUST stay false until user's legal review."""
+def test_plugin_manifest_enabled_by_default():
+    """enabled_by_default flipped to True per user instruction (2026-04-25).
+
+    The original PR-2 wording said "stay false until user's legal review";
+    the user has now reviewed and explicitly directed us to enable. The
+    safety stack (rate limiting + robots.txt + capability claims +
+    consent gate) means the scraper is still tightly bounded — it just
+    no longer needs an explicit per-install opt-in.
+    """
     manifest_path = _PLUGIN_DIR / "plugin.json"
     manifest = json.loads(manifest_path.read_text())
-    assert manifest.get("enabled_by_default") is False, (
-        "PR-2 explicitly leaves enabled_by_default=false until user's legal review"
+    assert manifest.get("enabled_by_default") is True, (
+        "User opted in to OpenCLI scraper as a bundled default on 2026-04-25"
     )
 
 
