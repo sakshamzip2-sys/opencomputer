@@ -4,6 +4,33 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.16 — iMessage adapter (BlueBubbles bridge), Tier 2.11)
+
+- **`extensions/imessage/`** — new bundled channel plugin. iMessage via the
+  BlueBubbles self-hosted Mac bridge (https://bluebubbles.app). Mac-tied —
+  doesn't work in the Linux Docker image; users running on a Mac can enable it.
+  - `adapter.py::IMessageAdapter` — polls BlueBubbles `GET /api/v1/message/query`
+    every 10 s by default. Tracks the highest ROWID seen so polling is idempotent
+    (no replay of old messages on restart). Skips `isFromMe` echoes. Emits
+    MessageEvent with chat GUID as `chat_id`, sender phone/email as `user_id`.
+  - Outbound: `send` POSTs to `/api/v1/message/text`. `send_reaction` maps emoji
+    to BlueBubbles tapback names (love / like / dislike / laugh / emphasize / question);
+    unmappable emoji return a clear local error without hitting the network.
+  - Capability flag: `REACTIONS` only. Edit / voice / file attachments deferred
+    to G.16.x follow-ups.
+- **Plugin config** via env vars: `BLUEBUBBLES_URL` + `BLUEBUBBLES_PASSWORD` required;
+  `BLUEBUBBLES_POLL_INTERVAL` (default 10 s) optional. Disabled by default.
+- **22 new tests** in `tests/test_imessage_adapter.py` — capability flag, send text
+  with chat GUID, length truncation, HTTP error handling, reactions (supported
+  emoji posts to react endpoint, ❤️ → love, unmappable emoji errors locally),
+  polling (filters echoes, skips seen ROWIDs, chronological order, empty/no-chat
+  message rejection), full tapback emoji map (9 cases).
+
+Use case: Saksham chats with OC over iMessage from his iPhone while away from his
+laptop. The BlueBubbles bridge runs on his always-on Mac. Hybrid deployment:
+gateway on Mac for iMessage + on VPS for cron/webhook (different profiles, both
+sharing the agent loop).
+
 ### Added (Sub-project G.15 — Doctor checks for G subsystems, Tier 2.15)
 
 - **`opencomputer doctor`** now reports the state of every Sub-project G subsystem
