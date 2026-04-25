@@ -4,6 +4,15 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Phase 3.C — User-model graph + context weighting, F4 layer)
+
+- **`plugin_sdk/user_model.py`** — public `Node`, `Edge`, `UserModelQuery`, `UserModelSnapshot` dataclasses + `NodeKind` / `EdgeKind` literals.
+- **`opencomputer/user_model/store.py::UserModelStore`** — SQLite at `<profile_home>/user_model/graph.sqlite` with `nodes` + `edges` + `nodes_fts` (FTS5 with porter+unicode61 tokenizer), idempotent migrations, WAL+retry-jitter.
+- **`opencomputer/user_model/importer.py::MotifImporter`** — converts 3.B `Motif` records into nodes+edges. Temporal → attribute+preference; transition → two attributes + derives_from; implicit_goal → goal + per-top-tool attribute.
+- **`opencomputer/user_model/context.py::ContextRanker`** — scores candidate nodes via `salience × confidence × recency × source_reliability`; top-K cap with optional token budget; returns `UserModelSnapshot`.
+- **`opencomputer user-model {nodes,edges,search,import-motifs,context}` CLI** — visibility + manual import + ranked retrieval.
+- **Phase 3.D dependency**: `UserModelStore.update_edge_recency_weight` is the write API decay/drift will use.
+
 ### Added (Phase 3.B — Behavioral Inference engine, F2 continued)
 
 - **`plugin_sdk/inference.py`** — public `Motif` dataclass + `MotifExtractor` protocol.
