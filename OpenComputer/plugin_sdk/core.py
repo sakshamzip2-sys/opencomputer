@@ -140,6 +140,18 @@ class PluginManifest:
     # without loading them. Default ``()`` means the plugin registers no
     # tools (provider-only / channel-only / memory-only plugins).
     tool_names: tuple[str, ...] = ()
+    # Sub-project G.11 (Tier 2.13): MCP servers this plugin needs in order
+    # to function. Each entry is either:
+    #   - a preset slug (e.g. ``"filesystem"``, ``"github"``) — resolved
+    #     against ``opencomputer.mcp.presets.PRESETS`` at activation
+    #     time, or
+    #   - the literal string ``"<plugin_root>/.mcp.json"`` — load custom
+    #     servers declared in the plugin's own ``.mcp.json`` file.
+    # When the plugin's ``register()`` runs, the loader installs these
+    # MCPs into ``config.yaml`` (idempotent — skips if already present)
+    # so the agent picks them up on next start. Default ``()`` means the
+    # plugin needs no MCPs.
+    mcp_servers: tuple[str, ...] = ()
 
 
 # ─── Plugin activation source (Task I.7) ───────────────────────────────

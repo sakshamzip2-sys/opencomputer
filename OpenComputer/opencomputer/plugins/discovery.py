@@ -109,6 +109,8 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
         enabled_by_default=schema.enabled_by_default,
         # Phase 12b5 Sub-project E — tool_names for demand-driven activation
         tool_names=tuple(schema.tool_names),
+        # Sub-project G.11 Tier 2.13 — MCP catalog binding
+        mcp_servers=tuple(schema.mcp_servers),
     )
 
 

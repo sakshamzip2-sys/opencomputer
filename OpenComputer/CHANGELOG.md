@@ -4,6 +4,23 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.11 — MCP catalog binding via plugin manifest, Tier 2.13)
+
+- **`PluginManifest.mcp_servers: tuple[str, ...]`** — new optional manifest field. List of MCP
+  preset slugs (from G.7's `PRESETS`) the plugin needs. Validator + parser threaded through
+  `manifest_validator.PluginManifestSchema` + `discovery._parse_manifest`.
+- **`opencomputer/plugins/loader.py::_install_mcp_servers_from_manifest`** — runs after the
+  plugin's `register()` succeeds. Resolves each slug → `MCPServerConfig` → appends to
+  `config.yaml`. Idempotent (skips servers with names already in config — respects user
+  customisation), logs WARNING on unknown slug but never blocks load.
+- **9 new tests** in `tests/test_mcp_catalog_binding.py` — validator accepts + defaults to empty,
+  parser threads field, install round-trip, idempotence, unknown-slug warns, multiple presets,
+  empty list no-op, user customisation respected.
+
+Use case: a plugin that depends on `filesystem` MCP can declare `"mcp_servers": ["filesystem"]`
+in its `plugin.json`, and the user gets the MCP added automatically when the plugin activates —
+no separate `opencomputer mcp install filesystem` step.
+
 ### Added (Sub-project G.10 — Adapter scaffolder + capabilities-aware template, Tier 2.16)
 
 - **`opencomputer/templates/plugin/channel/adapter.py.j2`** — channel adapter template upgraded
