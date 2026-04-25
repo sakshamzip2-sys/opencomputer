@@ -287,4 +287,25 @@ def test_server(name: str = typer.Argument(..., help="Server name to test.")) ->
         raise typer.Exit(rc)
 
 
+@mcp_app.command("serve")
+def mcp_serve() -> None:
+    """Start an MCP server exposing OpenComputer's session history over stdio.
+
+    Run this from another MCP client (Claude Code, Cursor, …) to query OC's
+    sessions, search across past conversations, and read F1 consent audit
+    entries.
+
+    Tools exposed: ``sessions_list``, ``session_get``, ``messages_read``,
+    ``recall_search``, ``consent_history``.
+
+    Saksham use case: Claude Code while coding can call ``recall_search``
+    to surface past Telegram discussions about a stock or codebase decision.
+
+    The server runs until stdin/stdout closes (SIGINT also exits cleanly).
+    """
+    from opencomputer.mcp.server import main as serve_main
+
+    serve_main()
+
+
 __all__ = ["mcp_app"]

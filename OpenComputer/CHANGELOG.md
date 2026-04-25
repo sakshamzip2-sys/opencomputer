@@ -4,6 +4,26 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.6 — MCP server mode, Tier 2.2)
+
+- **`opencomputer/mcp/server.py`** — new MCP server using `mcp.server.fastmcp.FastMCP` over stdio.
+  Exposes 5 tools so external MCP clients (Claude Code, Cursor) can query OC's session history:
+  - `sessions_list(limit=20)` — recent sessions across all platforms.
+  - `session_get(session_id)` — single session metadata.
+  - `messages_read(session_id, limit=100)` — message log including tool_calls.
+  - `recall_search(query, limit=20)` — FTS5 search across all sessions.
+  - `consent_history(capability=None, limit=50)` — F1 audit-log entries
+    (gracefully returns `[]` for pre-F1 / fresh profiles).
+  Builds the server fresh per CLI invocation so `opencomputer -p <profile> mcp serve` resolves
+  the correct profile via `_home()`.
+- **`opencomputer mcp serve`** — new CLI subcommand. Runs the MCP server until stdin/stdout closes.
+- **12 new tests** in `tests/test_mcp_server.py` — server construction, tool count + names,
+  description and inputSchema invariants, empty-DB returns for each of the 5 tools, CLI wiring.
+
+Use case unlocked: while coding in Claude Code, Saksham can ask "what did we discuss about
+GUJALKALI yesterday?" and Claude Code calls `recall_search` against OC's session DB to surface
+the Telegram conversation. Bridges OC ↔ Claude Code without any manual export step.
+
 ### Added (Sub-project G.5 — Pending-task drain on shutdown, Tier 2.6)
 
 - **`opencomputer/hooks/runner.py::drain_pending(timeout=5.0)`** — async helper that awaits all
