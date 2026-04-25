@@ -1,0 +1,13 @@
+{
+  "id": "slack",
+  "name": "Slack",
+  "version": "0.1.0",
+  "description": "Slack outbound + reactions / edit / delete via Web API. Inbound: configure Slack Outgoing Webhooks → OC webhook adapter (G.3). Avoids the heavyweight Socket Mode dependency for v1.",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "channel",
+  "entry": "plugin",
+  "single_instance": true,
+  "enabled_by_default": false,
+  "profiles": ["*"]
+}
