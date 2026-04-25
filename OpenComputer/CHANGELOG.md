@@ -4,6 +4,31 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.8 — Cost-guard module, Tier 2.17)
+
+- **`opencomputer/cost_guard/`** — new subpackage tracking per-provider USD spend with
+  daily + monthly caps. Prevents runaway costs from a misconfigured cron / voice loop / agent
+  retry storm. Storage at `<profile_home>/cost_guard.json` (mode 0600, atomic writes,
+  90-day retention).
+  - `CostGuard.record_usage(provider, cost_usd, operation)` — log a paid API call.
+  - `CostGuard.check_budget(provider, projected_cost_usd)` → `BudgetDecision` with
+    `allowed`, `reason`, daily/monthly used + limit. Caller-driven (not enforced via interceptor)
+    so providers can decide their own fallback strategy when budget hits.
+  - `CostGuard.set_limit(provider, daily, monthly)` — `None` clears, float sets cap.
+  - `CostGuard.current_usage(provider=None)` — `ProviderUsage` summary with per-operation breakdown.
+  - `CostGuard.reset(provider=None)` — clear recorded usage (limits stay).
+  - `BudgetExceeded` exception for callers that prefer exception flow.
+  - `get_default_guard()` — process-wide singleton rooted at the active profile.
+- **`opencomputer cost {show,set-limit,reset}`** CLI subgroup. `show` renders a Rich table with
+  daily/monthly used vs. limit + per-operation breakdown for the current day.
+- **27 new tests** in `tests/test_cost_guard.py` — record/check round-trips, negative-cost
+  rejection, lowercase normalisation, operation-label surfacing, daily/monthly caps blocking,
+  no-limits-always-allowed, set/clear-limits, retention pruning (90-day cutoff), 0600 file mode,
+  profile isolation, singleton, frozen dataclasses, full CLI smoke (set-limit + show + reset).
+
+This unblocks Tier 2.10 voice (TTS @ $0.015/1k chars + Whisper @ $0.006/min) — the cost-guard
+will pre-flight check budget on every voice op so a runaway can't drain a wallet.
+
 ### Added (Sub-project G.7 — MCP presets bundle, Tier 2.4)
 
 - **`opencomputer/mcp/presets.py`** — registry of 5 vetted MCP presets:
