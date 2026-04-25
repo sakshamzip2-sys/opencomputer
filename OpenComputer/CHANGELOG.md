@@ -4,6 +4,34 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.26 — WhatsApp adapter via Cloud API, Tier 4.x)
+
+- **`extensions/whatsapp/`** — new bundled channel plugin. WhatsApp
+  outbound text + reactions via Meta's Cloud API (Graph API
+  `/v18.0/{phone_number_id}/messages`).
+  - **No edit / delete.** WhatsApp Cloud API does not support those
+    operations on outbound messages from a business account, so the
+    adapter declines those flags. Capability flag = REACTIONS only.
+  - **No inbound.** Cloud API delivers inbound by webhook POST — use
+    the webhook adapter (G.3) wired to a Cloud API webhook callback
+    URL. The pattern matches G.17 (Slack), G.18 (Mattermost), G.19
+    (Matrix): outbound + reactions in this adapter, inbound via the
+    generic webhook adapter.
+  - `chat_id` is the recipient's E.164 phone number (e.g.
+    `+919876543210`); the adapter strips the leading `+` per Cloud
+    API expectation. `max_message_length=4096` per Meta's docs.
+  - **Setup metadata** declared on the manifest (G.23/G.24/G.25
+    pattern): `setup.channels[].id="whatsapp"`, env_vars
+    `["WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID"]`,
+    signup_url pointing at Meta's Cloud API quickstart.
+- **8 new tests** in `tests/test_whatsapp_adapter.py` — capability
+  flag (reactions only, no edit/delete/voice), basic send (E.164
+  stripping, payload shape), path target (phone_number_id in URL),
+  truncation to 4096, empty-body rejection, HTTP error surface,
+  reaction payload shape, empty-emoji rejection (Cloud API would
+  CLEAR reactions on empty emoji; the adapter rejects to prevent
+  accidental clears).
+
 ### Removed (OI tier-trim cleanup, 2026-04-25)
 
 User-directed cleanup after audit of duplicate functionality between
