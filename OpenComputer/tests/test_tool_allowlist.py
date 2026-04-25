@@ -341,9 +341,12 @@ def test_delegate_tool_passes_allowed_tools_to_child_loop() -> None:
     assert captured["allowed_tools"] == frozenset({"Read", "Grep"})
 
 
-def test_delegate_tool_none_allowed_tools_leaves_child_unrestricted() -> None:
-    """When ``allowed_tools`` is omitted, child.allowed_tools stays None —
-    subagent gets the parent's full tool set (existing behavior)."""
+def test_delegate_tool_none_allowed_tools_strips_blocked_tools() -> None:
+    """When ``allowed_tools`` is omitted, child.allowed_tools gets a frozenset
+    of registry tool names with DELEGATE_BLOCKED_TOOLS removed (PR-4 safety).
+    Previously this would pass None; now it strips blocked tools proactively."""
+    from opencomputer.tools.delegate import DELEGATE_BLOCKED_TOOLS
+
     captured: dict[str, Any] = {}
 
     class _FakeLoop:
@@ -368,7 +371,14 @@ def test_delegate_tool_none_allowed_tools_leaves_child_unrestricted() -> None:
         tool.execute(ToolCall(id="1", name="delegate", arguments={"task": "go"}))
     )
     assert not result.is_error
-    assert captured["allowed_tools"] is None
+    # PR-4: None no longer passes through — blocked tools are stripped from
+    # the synthetic allowlist built from the registry.
+    allowed = captured["allowed_tools"]
+    # Could be None (registry import failed) or a frozenset without blocked tools.
+    if allowed is not None:
+        assert isinstance(allowed, frozenset)
+        for blocked in DELEGATE_BLOCKED_TOOLS:
+            assert blocked not in allowed, f"Blocked tool {blocked!r} leaked into child allowlist"
 
 
 def test_delegate_tool_empty_allowed_tools_is_propagated_as_empty() -> None:

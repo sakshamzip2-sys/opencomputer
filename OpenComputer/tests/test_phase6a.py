@@ -309,5 +309,8 @@ def test_delegate_inherits_parent_runtime() -> None:
         tool.execute(ToolCall(id="1", name="delegate", arguments={"task": "go"}))
     )
     assert not result.is_error
-    assert captured["runtime"] is parent_runtime
+    # PR-4: child_runtime is a new object (delegation_depth is incremented),
+    # so identity check is intentionally relaxed — verify field propagation instead.
     assert captured["runtime"].plan_mode is True
+    assert captured["runtime"].custom == {"token": "abc"}
+    assert captured["runtime"].delegation_depth == 1
