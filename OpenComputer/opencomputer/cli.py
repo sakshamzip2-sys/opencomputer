@@ -780,6 +780,11 @@ from opencomputer.cli_sandbox import sandbox_app  # noqa: E402
 
 app.add_typer(sandbox_app, name="sandbox")
 
+# PR-1 — evolution self-improvement CLI
+from opencomputer.evolution.entrypoint import evolution_app  # noqa: E402
+
+app.add_typer(evolution_app, name="evolution")
+
 
 @config_app.command("show")
 def config_show() -> None:
