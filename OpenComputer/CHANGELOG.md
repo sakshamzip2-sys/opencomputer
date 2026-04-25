@@ -16,21 +16,18 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ### Added (Phase C4 — F6 OpenCLI use-case libraries, parallel Session C)
 
-- **`extensions/opencli-scraper/use_cases/` library** — 5 domain-specific function libraries that compose the C2 tools (`ScrapeRawTool`, `FetchProfileTool`, `MonitorPageTool`) into higher-level patterns. **NOT registered as tools** — these are helper APIs that Session A's Phase 4 wiring or user code can call directly:
-  - `research_automation.py` — `fetch_arxiv_paper_metadata`, `build_citation_graph` (depth-limited BFS — note: arXiv adapter has no native citations endpoint, so this uses title-based search as a proxy; documented in code), `search_by_topic`
-  - `content_monitoring.py` — `PageMonitor` class (snapshot/diff/clear stateful API) + `monitor_loop` convenience function (default `max_iterations=1` so tests can't hang). Real polling deferred to user's cron/scheduler.
-  - `context_enrichment.py` — regex `MENTION_PATTERN = r"@(\w+)\s+on\s+(\w+)"`; `extract_mentions` parses user prompts; `enrich_mentions` fetches profiles via `FetchProfileTool` flow (capped at `max_fetches=3`); `format_for_context` renders enriched data as markdown for system-prompt injection
-  - `competitor_research.py` — `scan_company_page` (homepage + about/blog/pricing); `compare_companies` (side-by-side aggregation); **PUBLIC-only enforcement** — refuses `linkedin.com`, `facebook.com`, `x.com`, `instagram.com` (above-board competitor research only)
-  - `market_signals.py` — `MarketSignalsCollector` (HN + Reddit aggregation, trending-keyword frequency count); explicit `MARKET_SIGNALS_LEGAL_NOTICE` constant (Phase 4 surfaces this in a separate consent tier — module docstring flags "don't enable without legal review")
-- **76 new tests** across 5 files (`tests/test_opencli_use_cases_{research,monitoring,enrichment,competitor,market}.py`). All external dependencies mocked via `Mock(spec=OpenCLIWrapper)` + `AsyncMock`. Full suite: **1775 passing** (was 1604 entering C4 + Session A's F1 also landed in this window adding more tests).
-- **Note**: `trending_keywords` test uses Reddit posts (not HN) because the HN field whitelist excludes `title`; documented in test docstring. Behavioral detail of the C2 fail-closed whitelist design.
-
-### Added (Phase 3.G — Instruction-detector for prompt-injection defense)
-
-- **`opencomputer/security/instruction_detector.py`** — `InstructionDetector` runs 7 conservative rules (explicit override, role swap, system-prompt extraction, developer message, token smuggling, imperative swarm, user extra patterns) and returns a `DetectionVerdict` with confidence + triggered_rules + quarantine_recommended.
-- **`opencomputer/security/sanitize.py::sanitize_external_content`** — one-call helper: detects + (optionally) wraps quarantined content in `<quarantined-untrusted-content>` envelope + publishes a `HookEvent` to the F2 bus so audit log + evolution trajectory can record the defense.
-- **`opencomputer consent security check / config show` CLI** — manual sanity check of detector decisions (read file/stdin → exit 0 clean, exit 1 quarantined; `--wrap` prints the envelope form).
-- **Future F6/F7 hookups**: the OpenCLI scraper and OI bridge will pipe their fetched content through `sanitize_external_content` before returning it to the LLM. Phase 3.G ships only the defense primitive — wiring lands when those plugins integrate.
+- **`extensions/oi-capability/use_cases/` library** — 8 domain-specific function libraries that compose the C3 OI tools (23 across 5 tiers) into higher-level patterns. **NOT registered as tools** — these are helper APIs callable from tests, Session A's eventual Phase 5 wiring (interweaving plan), or user code:
+  - `autonomous_refactor.py` — `plan_refactor` (uses `search_files` Tier 1 to find candidates), `execute_refactor_dry_run` (uses `read_file_region` + simulates edits), `execute_refactor` (REQUIRES `confirm=True` else raises ValueError; calls `edit_file` Tier 4 for each planned change). **Module docstring marks integration with `extensions/coding-harness/*` as Session A's Phase 5 scope** per `docs/f7/interweaving-plan.md`.
+  - `life_admin.py` — `upcoming_events`, `todays_schedule`, `find_free_slots` (09:00–18:00 working window, merges overlapping busy blocks via `list_calendar_events` Tier 2)
+  - `personal_knowledge_management.py` — `index_recent_notes` (filters .md/.txt/.org via `list_recent_files` Tier 1), `search_notes` (uses `search_files` Tier 1), `extract_action_items` (regex for unchecked checkboxes + inline TODOs)
+  - `proactive_security_monitoring.py` — `SUSPICIOUS_PROCESSES` + `SUSPICIOUS_DOMAINS` frozensets; `scan_processes` (uses `list_running_processes` Tier 5); `check_recent_browser_history` (uses `read_browser_history` Tier 3); `sweep` (combined report)
+  - `dev_flow_assistant.py` — `morning_standup` (composes 3 calls: `read_git_log` + `list_recent_files` + `read_email_metadata`), `eod_summary`, `detect_focus_distractions` (`list_app_usage` count threshold)
+  - `email_triage.py` — `classify_emails` (5 buckets: urgent/newsletters/personal/work/other based on sender + subject heuristics); `generate_draft_response` (template-based stub, NEVER calls send_email — drafts only)
+  - `context_aware_code_suggestions.py` — `gather_code_context` (target + N neighbor files), `git_blame_context` (inline `git blame` subprocess, porcelain parse). **Module docstring notes Phase 5 coding-harness integration scope.**
+  - `temporal_pattern_recognition.py` — `daily_activity_heatmap` (7-day × 24-hour dict), `commit_cadence` (daily/weekday/weekend avg + longest streak), `meeting_density` (per-week avg + longest meeting-free block hours)
+- **`tests/conftest.py`** — single-line addition: `"use_cases"` added to the sub-package alias loop so `extensions.oi_capability.use_cases.X` resolves correctly.
+- **85 new tests** across 8 files (`tests/test_oi_use_cases_*.py`). Full suite: **1819 passing** (was 1734 entering C5). Ruff clean.
+- **AGPL boundary holds** — these use-cases never `import interpreter`; they only compose tool wrappers (which themselves only call into the subprocess via JSON-RPC). C3's CI guard verifies.
 
 ### Added (Phase 3.A — Signal Normalizer + TypedEvent bus, F2 foundation)
 
