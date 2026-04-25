@@ -49,8 +49,8 @@ def _register_oi_capability_alias() -> None:
         sys.modules["extensions.oi_capability"] = oi_mod
         spec.loader.exec_module(oi_mod)
 
-    # Register sub-packages: subprocess and tools
-    for sub in ("subprocess", "tools"):
+    # Register sub-packages: subprocess, tools, and use_cases
+    for sub in ("subprocess", "tools", "use_cases"):
         full_name = f"extensions.oi_capability.{sub}"
         if full_name not in sys.modules:
             sub_dir = _OI_DIR / sub

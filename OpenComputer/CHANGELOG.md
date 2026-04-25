@@ -4,6 +4,21 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Phase C5 — F7 Open Interpreter use-case libraries, parallel Session C)
+
+- **`extensions/oi-capability/use_cases/` library** — 8 domain-specific function libraries that compose the C3 OI tools (23 across 5 tiers) into higher-level patterns. **NOT registered as tools** — these are helper APIs callable from tests, Session A's eventual Phase 5 wiring (interweaving plan), or user code:
+  - `autonomous_refactor.py` — `plan_refactor` (uses `search_files` Tier 1 to find candidates), `execute_refactor_dry_run` (uses `read_file_region` + simulates edits), `execute_refactor` (REQUIRES `confirm=True` else raises ValueError; calls `edit_file` Tier 4 for each planned change). **Module docstring marks integration with `extensions/coding-harness/*` as Session A's Phase 5 scope** per `docs/f7/interweaving-plan.md`.
+  - `life_admin.py` — `upcoming_events`, `todays_schedule`, `find_free_slots` (09:00–18:00 working window, merges overlapping busy blocks via `list_calendar_events` Tier 2)
+  - `personal_knowledge_management.py` — `index_recent_notes` (filters .md/.txt/.org via `list_recent_files` Tier 1), `search_notes` (uses `search_files` Tier 1), `extract_action_items` (regex for unchecked checkboxes + inline TODOs)
+  - `proactive_security_monitoring.py` — `SUSPICIOUS_PROCESSES` + `SUSPICIOUS_DOMAINS` frozensets; `scan_processes` (uses `list_running_processes` Tier 5); `check_recent_browser_history` (uses `read_browser_history` Tier 3); `sweep` (combined report)
+  - `dev_flow_assistant.py` — `morning_standup` (composes 3 calls: `read_git_log` + `list_recent_files` + `read_email_metadata`), `eod_summary`, `detect_focus_distractions` (`list_app_usage` count threshold)
+  - `email_triage.py` — `classify_emails` (5 buckets: urgent/newsletters/personal/work/other based on sender + subject heuristics); `generate_draft_response` (template-based stub, NEVER calls send_email — drafts only)
+  - `context_aware_code_suggestions.py` — `gather_code_context` (target + N neighbor files), `git_blame_context` (inline `git blame` subprocess, porcelain parse). **Module docstring notes Phase 5 coding-harness integration scope.**
+  - `temporal_pattern_recognition.py` — `daily_activity_heatmap` (7-day × 24-hour dict), `commit_cadence` (daily/weekday/weekend avg + longest streak), `meeting_density` (per-week avg + longest meeting-free block hours)
+- **`tests/conftest.py`** — single-line addition: `"use_cases"` added to the sub-package alias loop so `extensions.oi_capability.use_cases.X` resolves correctly.
+- **85 new tests** across 8 files (`tests/test_oi_use_cases_*.py`). Full suite: **1819 passing** (was 1734 entering C5). Ruff clean.
+- **AGPL boundary holds** — these use-cases never `import interpreter`; they only compose tool wrappers (which themselves only call into the subprocess via JSON-RPC). C3's CI guard verifies.
+
 ### Added (Phase 3.A — Signal Normalizer + TypedEvent bus, F2 foundation)
 
 - **`plugin_sdk/ingestion.py`** — public typed-event hierarchy for the shared pub/sub bus. `SignalEvent` base (frozen+slots, `event_id` UUID4 / `event_type` discriminator / `timestamp` / `session_id` / `source` / `metadata`) plus 5 concrete subclasses: `ToolCallEvent`, `WebObservationEvent`, `FileObservationEvent`, `MessageSignalEvent`, `HookSignalEvent`. Plus `SignalNormalizer` ABC, `IdentityNormalizer` pass-through, and a module-level normalizer registry (`register_normalizer` / `get_normalizer` / `clear_normalizers`). The two `*SignalEvent` names avoid shadowing the unrelated `MessageEvent` / `HookEvent` symbols already in `plugin_sdk.core` / `plugin_sdk.hooks` — discriminator strings (`"message"`, `"hook"`) are unaffected.
