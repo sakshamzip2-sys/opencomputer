@@ -107,11 +107,16 @@ def test_doctor_run_returns_failure_count_zero_on_clean_env(tmp_path: Path) -> N
 
 
 def test_setup_wizard_provider_catalog_includes_anthropic_and_openai() -> None:
-    from opencomputer.setup_wizard import _SUPPORTED_PROVIDERS
+    # G.24: catalog now built from plugin manifests via
+    # _discover_supported_providers; the legacy _BUILTIN_PROVIDER_FALLBACK
+    # acts as a backstop. Either way, anthropic + openai must be present
+    # because both are bundled provider plugins shipping setup metadata.
+    from opencomputer.setup_wizard import _get_supported_providers
 
-    assert "anthropic" in _SUPPORTED_PROVIDERS
-    assert "openai" in _SUPPORTED_PROVIDERS
-    for pid, meta in _SUPPORTED_PROVIDERS.items():
+    catalog = _get_supported_providers()
+    assert "anthropic" in catalog
+    assert "openai" in catalog
+    for _pid, meta in catalog.items():
         assert "env_key" in meta
         assert "default_model" in meta
         assert "signup_url" in meta

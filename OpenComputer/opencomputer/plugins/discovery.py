@@ -121,6 +121,10 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
                     id=p.id,
                     auth_methods=tuple(p.auth_methods),
                     env_vars=tuple(p.env_vars),
+                    # G.24 — wizard display fields
+                    label=p.label,
+                    default_model=p.default_model,
+                    signup_url=p.signup_url,
                 )
                 for p in schema.setup.providers
             ),
