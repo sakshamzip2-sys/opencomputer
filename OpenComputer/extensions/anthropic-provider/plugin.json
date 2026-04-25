@@ -10,5 +10,14 @@
   "tool_names": [],
   "model_support": {
     "model_prefixes": ["claude-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "anthropic",
+        "auth_methods": ["api_key", "bearer"],
+        "env_vars": ["ANTHROPIC_API_KEY"]
+      }
+    ]
   }
 }

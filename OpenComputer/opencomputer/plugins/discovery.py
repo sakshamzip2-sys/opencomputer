@@ -21,7 +21,12 @@ from pathlib import Path
 from typing import Literal
 
 from opencomputer.plugins.security import _path_is_inside, validate_plugin_root
-from plugin_sdk.core import ModelSupport, PluginManifest
+from plugin_sdk.core import (
+    ModelSupport,
+    PluginManifest,
+    PluginSetup,
+    SetupProvider,
+)
 
 # I.8 — derivation provenance for a plugin's resolved id.
 #
@@ -105,6 +110,25 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
         if schema.model_support is not None
         else None
     )
+    # Sub-project G.23 — flatten PluginSetupSchema → PluginSetup +
+    # SetupProvider tuple. None means "no setup declarations"; core
+    # falls back to its legacy hard-coded provider knowledge for that
+    # plugin (backwards-compatible).
+    setup = (
+        PluginSetup(
+            providers=tuple(
+                SetupProvider(
+                    id=p.id,
+                    auth_methods=tuple(p.auth_methods),
+                    env_vars=tuple(p.env_vars),
+                )
+                for p in schema.setup.providers
+            ),
+            requires_runtime=schema.setup.requires_runtime,
+        )
+        if schema.setup is not None
+        else None
+    )
     return PluginManifest(
         id=schema.id,
         name=schema.name,
@@ -128,6 +152,8 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
         model_support=model_support,
         # Sub-project G.22 (Tier 4 OpenClaw port) — legacy id aliases
         legacy_plugin_ids=tuple(schema.legacy_plugin_ids),
+        # Sub-project G.23 (Tier 4 OpenClaw port) — cheap setup metadata
+        setup=setup,
     )
 
 
@@ -378,6 +404,34 @@ def normalize_plugin_id(
     return build_legacy_id_lookup(candidates).get(plugin_id, plugin_id)
 
 
+def find_setup_env_vars_for_provider(
+    provider_id: str,
+    candidates: list[PluginCandidate],
+) -> tuple[str, ...]:
+    """Return the env vars declared for ``provider_id`` across candidates.
+
+    Sub-project G.23 (Tier 4 OpenClaw port). Pure helper — no
+    filesystem I/O, no plugin loading. The setup wizard +
+    ``opencomputer doctor`` use this to know "what env var must be
+    set so this provider works?" without reaching into the plugin's
+    Python code.
+
+    Returns the env_vars tuple from the FIRST matching candidate
+    (manifest-id-sorted iteration is the caller's responsibility if
+    they pass a deterministic list). Empty tuple if no candidate
+    declares this provider id — caller falls back to whatever
+    default knowledge core has.
+    """
+    for cand in candidates:
+        setup = cand.manifest.setup
+        if setup is None:
+            continue
+        for prov in setup.providers:
+            if prov.id == provider_id:
+                return prov.env_vars
+    return ()
+
+
 def standard_search_paths() -> list[Path]:
     """Canonical plugin search-path list, in priority order.
 
@@ -435,6 +489,7 @@ __all__ = [
     "build_legacy_id_lookup",
     "discover",
     "find_plugin_ids_for_model",
+    "find_setup_env_vars_for_provider",
     "IdSource",
     "normalize_plugin_id",
     "PluginCandidate",

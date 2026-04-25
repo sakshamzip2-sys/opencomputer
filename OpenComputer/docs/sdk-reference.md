@@ -95,6 +95,37 @@ when the user's profile preset didn't list it: pick `gpt-4o` and
 field at `sources/openclaw-2026.4.23/src/plugins/providers.ts`. See
 [`plugin-authors.md`](./plugin-authors.md) §2 for the JSON shape.
 
+### `PluginSetup`
+
+Frozen dataclass holding cheap setup metadata exposed before the
+plugin's Python is imported. Used by the setup wizard +
+`opencomputer doctor` so provider plugins self-describe their
+env-var / auth-method requirements rather than core hard-coding the
+knowledge. Two fields:
+
+- `providers` — `tuple[SetupProvider, ...]` of provider ids this
+  plugin exposes during setup.
+- `requires_runtime` — `bool`. Default `False` matches every
+  bundled plugin; set `True` if setup needs to import the plugin to
+  finish.
+
+Mirrors OpenClaw's `PluginManifestSetup` at
+`sources/openclaw-2026.4.23/src/plugins/manifest.ts:85-97`. Default
+`PluginManifest.setup` is `None` (no declarations).
+
+### `SetupProvider`
+
+Frozen dataclass for one provider id surfaced during setup. Three
+fields:
+
+- `id` — provider id (e.g. `"anthropic"`, `"openai"`).
+- `auth_methods` — `tuple[str, ...]` (e.g. `("api_key", "bearer")`).
+- `env_vars` — `tuple[str, ...]`. **Order matters**: the first
+  entry is treated as canonical by setup tools.
+
+Mirrors OpenClaw's `PluginManifestSetupProvider` at
+`sources/openclaw-2026.4.23/src/plugins/manifest.ts:76-83`.
+
 ### `PluginActivationSource`
 
 `Literal` describing WHY the plugin was activated this process. Core

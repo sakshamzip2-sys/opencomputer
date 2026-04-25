@@ -4,6 +4,42 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.23 — Plugin setup metadata, Tier 4 OpenClaw port)
+
+- **`plugin_sdk.PluginSetup` + `plugin_sdk.SetupProvider`** — frozen
+  dataclasses declaring cheap setup metadata before plugin runtime
+  loads. `PluginManifest.setup: PluginSetup | None` is the new manifest
+  field; default `None` keeps every existing manifest backwards-
+  compatible. Mirrors OpenClaw's `PluginManifestSetup` /
+  `PluginManifestSetupProvider` at
+  `sources/openclaw-2026.4.23/src/plugins/manifest.ts:76-97`.
+- **`SetupProvider`** declares one provider id with `auth_methods` (e.g.
+  `("api_key", "bearer")`) and `env_vars` (e.g. `("ANTHROPIC_API_KEY",)`).
+  Order matters in `env_vars`: the first entry is canonical for setup
+  tools.
+- **`opencomputer.plugins.discovery.find_setup_env_vars_for_provider`**
+  — pure helper, no I/O. Resolves a provider id (e.g. `"anthropic"`) to
+  its declared env-var tuple by walking candidates' `setup.providers`.
+  Returns `()` when nothing matches so callers can fall back gracefully.
+- **`cli._check_provider_key` refactor** — reads env-var requirements
+  from manifests first, then falls back to a legacy hard-coded dict
+  (`{anthropic, openai}`) only when discovery yields nothing. Push of
+  knowledge from core back into plugin manifests; third-party providers
+  can now self-describe.
+- **Bundled provider manifests updated** — anthropic-provider declares
+  `setup.providers[0]: {id: "anthropic", auth_methods: ["api_key",
+  "bearer"], env_vars: ["ANTHROPIC_API_KEY"]}`; openai-provider declares
+  `{id: "openai", auth_methods: ["api_key"], env_vars: ["OPENAI_API_KEY"]}`.
+- **Manifest validator schemas** — `SetupProviderSchema` +
+  `PluginSetupSchema` mirror the dataclasses with `extra="forbid"` (typo
+  detection) and the empty-string drop pattern shared with G.21/G.22.
+- **15 new tests** in `tests/test_plugin_setup_metadata.py` —
+  schema parse (omitted / minimal / drops empties / typo rejection /
+  requires_runtime default), `_parse_manifest` flattening,
+  `find_setup_env_vars_for_provider` (declared / unknown / no-metadata
+  / first-wins), bundled-manifest regression guard, and
+  `cli._check_provider_key` reading manifest first vs. fallback.
+
 ### Added (Sub-project G.22 — Legacy plugin id normalization, Tier 4 OpenClaw port)
 
 - **`PluginManifest.legacy_plugin_ids: tuple[str, ...] = ()`** — new

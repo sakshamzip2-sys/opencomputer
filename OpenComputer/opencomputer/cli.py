@@ -380,12 +380,47 @@ def default(
         chat()
 
 
+_BUILTIN_PROVIDER_ENV_FALLBACK = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+"""Last-resort env-var lookup for provider plugins shipped before G.23.
+
+Sub-project G.23 pushes this knowledge into ``plugin.json::setup.providers``.
+The fallback dict only fires when discovery fails or the bundled plugin
+manifest does not yet declare ``setup.providers`` — keep it minimal so
+new providers must self-describe via manifest rather than core."""
+
+
 def _check_provider_key(provider_name: str) -> None:
-    """Verify the right env var is set for the configured provider."""
-    key_env = {
-        "anthropic": "ANTHROPIC_API_KEY",
-        "openai": "OPENAI_API_KEY",
-    }.get(provider_name)
+    """Verify the right env var is set for the configured provider.
+
+    Reads the env-var requirement from the active plugin manifests
+    (Sub-project G.23) and falls back to the legacy hard-coded dict
+    only when discovery yields nothing — e.g. plugin not installed or
+    ``setup.providers`` not yet declared on the manifest.
+    """
+    key_env: str | None = None
+    try:
+        from opencomputer.plugins.discovery import (
+            discover,
+            find_setup_env_vars_for_provider,
+            standard_search_paths,
+        )
+
+        env_vars = find_setup_env_vars_for_provider(
+            provider_name, discover(standard_search_paths())
+        )
+        if env_vars:
+            # Manifest order is canonical — first env var is what setup
+            # tools consider the "primary" credential source.
+            key_env = env_vars[0]
+    except Exception:  # noqa: BLE001
+        # Discovery failed (filesystem permission, etc.). Fall through
+        # to the hard-coded fallback rather than blocking startup.
+        _log.debug("provider env-var discovery failed; using fallback", exc_info=True)
+    if key_env is None:
+        key_env = _BUILTIN_PROVIDER_ENV_FALLBACK.get(provider_name)
     if key_env and not os.environ.get(key_env):
         console.print(
             f"[bold red]error:[/bold red] {key_env} not set.\n"
