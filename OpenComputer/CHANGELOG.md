@@ -4,6 +4,37 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Sub-project G.13 — OAuth/PAT token store for MCP providers, Tier 2.5 v1)
+
+- **`opencomputer/mcp/oauth.py`** — secure token storage at
+  `<profile_home>/mcp_oauth/<provider>.json` (mode 0600, dir 0700, atomic writes).
+  - `OAuthToken` frozen dataclass — `access_token`, `token_type`, `expires_at`,
+    `scope`, `refresh_token`, `created_at`, `provider`.
+  - `OAuthTokenStore` — `put / get / list / revoke`. Lowercase-normalises provider
+    names. Skips expired tokens automatically. Corrupted files return `None`
+    rather than raise.
+  - `paste_token(...)` convenience for the most common case (PAT pasted from a
+    provider's settings page).
+  - `get_token_for_env_lookup(provider, env_var)` — fallback chain used by MCP
+    server-config rendering: env-var first, then OAuth store, then `None`.
+- **`opencomputer mcp oauth-paste / oauth-list / oauth-revoke`** CLI subcommands.
+  `oauth-paste` prompts for the token securely on stdin (hidden input) when
+  `--token` isn't passed. `oauth-list` never prints token values.
+- **26 new tests** in `tests/test_mcp_oauth.py` — round-trip, normalisation,
+  overwrite, revoke, list, expiry filtering, file-mode 0600 / dir-mode 0700,
+  corrupted-file handling, paste validation + stripping, env-fallback chain
+  (4 cases), CLI smoke (5 cases incl token redaction in listing).
+
+What's NOT here yet (deferred to G.13.x follow-ups): browser-based OAuth dance
+with callback server + provider-specific flows for github/google/notion.
+The storage layer is forward-compatible: those flows will call
+`OAuthTokenStore.put(...)` and everything downstream works.
+
+Use case: `opencomputer mcp install github` (G.7) declares the github MCP needs
+`GITHUB_PERSONAL_ACCESS_TOKEN`. Saksham can either set the env var OR paste
+the PAT once with `opencomputer mcp oauth-paste github` and the MCP launch
+falls back to the stored value.
+
 ### Added (Sub-project G.12 — Discord reactions + edit + delete, Tier 2.8 / 2.9)
 
 - **`extensions/discord/adapter.py`** — DiscordAdapter now declares

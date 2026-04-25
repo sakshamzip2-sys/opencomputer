@@ -334,6 +334,111 @@ def mcp_presets() -> None:
     )
 
 
+@mcp_app.command("oauth-paste")
+def mcp_oauth_paste(
+    provider: str = typer.Argument(..., help="Provider slug (github / google / notion / etc.)"),
+    token: str = typer.Option(
+        "",
+        "--token",
+        "-t",
+        help="Token value. If omitted, prompts securely on stdin (hidden input).",
+    ),
+    token_type: str = typer.Option(
+        "Personal Access Token",
+        "--type",
+        help="Bearer / Personal Access Token / etc.",
+    ),
+    scope: str = typer.Option(
+        "", "--scope", "-s", help="Space-separated scope string (optional)."
+    ),
+) -> None:
+    """Paste an OAuth token / PAT for an MCP provider into the secure store.
+
+    For GitHub: create a PAT at github.com/settings/tokens, then::
+
+        opencomputer mcp oauth-paste github
+
+    The token is read from stdin (hidden) and written to
+    ``<profile_home>/mcp_oauth/github.json`` (mode 0600). Subsequent
+    MCP launches that reference ``${GITHUB_PERSONAL_ACCESS_TOKEN}`` will
+    fall back to this stored token when the env var is unset.
+    """
+    from opencomputer.mcp.oauth import paste_token
+
+    if not token:
+        token = typer.prompt("token", hide_input=True)
+    if not token.strip():
+        console.print("[red]error:[/red] token must be non-empty")
+        raise typer.Exit(1)
+
+    try:
+        path = paste_token(
+            provider=provider,
+            access_token=token,
+            token_type=token_type,
+            scope=scope or None,
+        )
+    except ValueError as exc:
+        console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    console.print(f"[green]stored[/green] token for {provider!r} → {path}")
+    console.print("[dim]Token file is mode 0600 (owner-only).[/dim]")
+
+
+@mcp_app.command("oauth-list")
+def mcp_oauth_list() -> None:
+    """Show all OAuth/PAT tokens currently stored. Token values are NEVER printed."""
+    from opencomputer.mcp.oauth import OAuthTokenStore
+
+    tokens = OAuthTokenStore().list()
+    if not tokens:
+        console.print("[dim]No OAuth tokens stored.[/dim]")
+        console.print(
+            "[dim]Add one with `opencomputer mcp oauth-paste <provider>`.[/dim]"
+        )
+        return
+
+    from rich.table import Table
+
+    table = Table(title=f"OAuth Tokens ({len(tokens)})")
+    table.add_column("Provider", style="cyan")
+    table.add_column("Type")
+    table.add_column("Scope")
+    table.add_column("Expires")
+    table.add_column("Created")
+    for t in tokens:
+        expires = (
+            "never"
+            if t.expires_at is None
+            else f"{(t.expires_at - __import__('time').time()) / 86400:.0f}d"
+        )
+        created = "—" if not t.created_at else f"{t.created_at:.0f}"
+        table.add_row(t.provider, t.token_type, t.scope or "—", expires, created)
+    console.print(table)
+
+
+@mcp_app.command("oauth-revoke")
+def mcp_oauth_revoke(
+    provider: str = typer.Argument(..., help="Provider slug to delete the token for."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+) -> None:
+    """Delete a stored OAuth/PAT token. Doesn't revoke at the provider — caller does that."""
+    from opencomputer.mcp.oauth import OAuthTokenStore
+
+    if not yes and not typer.confirm(f"Delete stored token for {provider!r}?"):
+        typer.echo("Cancelled.")
+        raise typer.Exit(0)
+    if not OAuthTokenStore().revoke(provider):
+        console.print(f"[yellow]not found:[/yellow] {provider}")
+        raise typer.Exit(1)
+    console.print(f"[green]revoked[/green] {provider}")
+    console.print(
+        "[dim]Note: this only deletes the local file. Revoke at the provider too "
+        "(github.com/settings/tokens for GitHub PATs).[/dim]"
+    )
+
+
 @mcp_app.command("install")
 def mcp_install(
     preset: str = typer.Argument(..., help="Preset slug (e.g. filesystem, github, fetch)."),
