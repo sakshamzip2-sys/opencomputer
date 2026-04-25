@@ -297,6 +297,13 @@ class AgentLoop:
         self._prompt_snapshots: OrderedDict[str, str] = OrderedDict()
         self._prompt_snapshot_cache_max = prompt_snapshot_cache_max
 
+        # B3 auto-collection: subscribe to F2 bus iff <_home() / "evolution" / "enabled"> exists
+        try:
+            from opencomputer.evolution.trajectory import bootstrap_if_enabled
+            self._evolution_subscription = bootstrap_if_enabled()
+        except Exception:  # never break agent startup over an evolution bug
+            self._evolution_subscription = None
+
     # ─── the loop ──────────────────────────────────────────────────
 
     async def run_conversation(
