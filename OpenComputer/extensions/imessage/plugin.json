@@ -1,0 +1,13 @@
+{
+  "id": "imessage",
+  "name": "iMessage (BlueBubbles)",
+  "version": "0.1.0",
+  "description": "iMessage channel via the BlueBubbles bridge. Requires the BlueBubbles app running on a Mac. Mac-tied — won't work in Docker on Linux/Windows.",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "channel",
+  "entry": "plugin",
+  "single_instance": true,
+  "enabled_by_default": false,
+  "profiles": ["*"]
+}
