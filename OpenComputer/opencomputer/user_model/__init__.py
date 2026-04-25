@@ -17,11 +17,19 @@ is internal and may change without warning.
 """
 
 from opencomputer.user_model.context import ContextRanker
+from opencomputer.user_model.decay import DecayEngine
+from opencomputer.user_model.drift import DriftDetector
+from opencomputer.user_model.drift_store import DriftStore
 from opencomputer.user_model.importer import MotifImporter
+from opencomputer.user_model.scheduler import DecayDriftScheduler
 from opencomputer.user_model.store import UserModelStore
 
 __all__ = [
     "ContextRanker",
+    "DecayDriftScheduler",
+    "DecayEngine",
+    "DriftDetector",
+    "DriftStore",
     "MotifImporter",
     "UserModelStore",
 ]

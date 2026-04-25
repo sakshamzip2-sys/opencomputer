@@ -4,6 +4,16 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Phase 3.D — Temporal Decay + Drift Detection, F5 layer)
+
+- **`plugin_sdk/decay.py`** — public `DecayConfig` + `DriftConfig` + `DriftReport` dataclasses.
+- **`opencomputer/user_model/decay.py::DecayEngine`** — exponential decay with per-edge-kind half-life (asserts 30d, contradicts 14d, supersedes 60d, derives_from 21d). `compute_recency_weight` applies `0.5^(age/half_life)` floored at `min_recency_weight`. `apply_decay` walks the edge table and persists via 3.C's `UserModelStore.update_edge_recency_weight`.
+- **`opencomputer/user_model/drift.py::DriftDetector`** — symmetrized KL divergence between recent (default 7d) and lifetime motif distributions (from 3.B `MotifStore`), with Laplace smoothing. Returns `DriftReport` with `per_kind_drift`, `top_changes`, and a `significant` flag.
+- **`opencomputer/user_model/drift_store.py::DriftStore`** — SQLite-backed report archive at `<profile_home>/user_model/drift_reports.sqlite` with retention helper.
+- **`opencomputer/user_model/scheduler.py::DecayDriftScheduler`** — bus-attached background runner; throttles decay + drift to `decay_interval_seconds` / `drift_interval_seconds` (default daily). Heavy work in daemon thread; never blocks the bus.
+- **`opencomputer user-model {decay run, drift detect, drift list, drift show}` CLI** — manual triggers + visibility.
+- **Phase 3 complete**: 3.A bus + 3.B inference + 3.C graph + 3.D decay/drift form the F2/F4/F5 user-intelligence stack.
+
 ### Added (Phase 3.C — User-model graph + context weighting, F4 layer)
 
 - **`plugin_sdk/user_model.py`** — public `Node`, `Edge`, `UserModelQuery`, `UserModelSnapshot` dataclasses + `NodeKind` / `EdgeKind` literals.

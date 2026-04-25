@@ -29,6 +29,11 @@ from plugin_sdk.core import (
     ToolCall,
     ToolResult,
 )
+from plugin_sdk.decay import (
+    DecayConfig,
+    DriftConfig,
+    DriftReport,
+)
 from plugin_sdk.doctor import (
     HealthContribution,
     HealthRunFn,
@@ -185,4 +190,8 @@ __all__ = [
     "SandboxStrategy",
     "SandboxStrategyName",
     "SandboxUnavailable",
+    # decay + drift (Phase 3.D, F5 layer)
+    "DecayConfig",
+    "DriftConfig",
+    "DriftReport",
 ]
