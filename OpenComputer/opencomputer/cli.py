@@ -775,6 +775,11 @@ from opencomputer.cli_security import security_app  # noqa: E402
 
 app.add_typer(security_app, name="security")
 
+# Phase 3.E — pluggable sandbox strategy CLI
+from opencomputer.cli_sandbox import sandbox_app  # noqa: E402
+
+app.add_typer(sandbox_app, name="sandbox")
+
 
 @config_app.command("show")
 def config_show() -> None:
