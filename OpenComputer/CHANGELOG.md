@@ -4,6 +4,53 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Removed (OI Tier 1 trimmed from 8 to 5 tools, 2026-04-25)
+
+User-directed cleanup. Three Tier 1 tools were redundant with
+built-in OC tools and added no unique value:
+
+- **`ReadFileRegionTool`** — duplicated built-in `Read` tool. The
+  built-in is line-based (LLM-friendly with line numbers) vs OI's
+  byte-based slice; agents almost never need byte-precise reads.
+- **`SearchFilesTool`** — used aifs (semantic file search) but
+  agents' typical "find file by content" task is covered by `Grep`
+  (regex) + `Glob` (pattern). The aifs path requires extra infra
+  (embedding model) that wasn't in active use.
+- **`ReadGitLogTool`** — code comment confirmed the implementation
+  is "INLINE — does NOT use OI subprocess" — literally
+  `subprocess.run(['git', 'log', ...])`. `BashTool` does this
+  identically.
+
+What stays — 5 macOS-unique tools:
+- `screenshot` — display capture
+- `extract_screen_text` — OCR via Tesseract
+- `read_clipboard_once` — single clipboard read
+- `list_app_usage` — running-apps list
+- `list_recent_files` — recently-modified files
+
+These are the genuine value OI adds that OC's core lacks.
+
+Cleanup details:
+- `extensions/coding-harness/oi_bridge/tools/tier_1_introspection.py`
+  — 3 classes removed (~270 LOC), `ALL_TOOLS` + `__all__` updated.
+- `extensions/coding-harness/plugin.json` — `tool_names` cut from
+  18 to 15 entries; version bumped to 0.4.0.
+- `tests/test_coding_harness_oi_tools_tier_1_introspection.py` —
+  3 test classes removed, `TestAllToolsList` updated to assert
+  `len(ALL_TOOLS) == 5` + new sanity test guarding the macOS-unique
+  set.
+- `extensions/oi-capability/use_cases/{personal_knowledge_management,
+  context_aware_code_suggestions}.py` + their tests — deleted.
+  Both depended on the removed Tier 1 tools and were documentation/
+  example modules per the original audit, not runtime code.
+- `tests/conftest.py` — dropped the `use_cases` sub-package alias
+  since the directory is gone; updated docstring to reflect the
+  trim.
+
+**Net:** ~600 LOC removed (270 tool code + 250 docs/example +
+80 test + conftest). Test count 2727 → 2647 (-80, all expected
+from removed surfaces). Zero regressions.
+
 ### Removed (OpenCLI scraper plugin removed entirely, 2026-04-25)
 
 User-directed removal after honest re-evaluation of value vs cost.
