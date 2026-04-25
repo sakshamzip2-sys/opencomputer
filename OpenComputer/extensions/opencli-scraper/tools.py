@@ -13,7 +13,15 @@ Execute flow:
     2. Robots.txt allow check for the target URL.
     3. Spawn opencli subprocess via the wrapper.
     4. Filter output through the per-adapter field whitelist.
-    5. Return ``ToolResult``.
+    5. Publish WebObservationEvent to the F2 default_bus (best-effort).
+    6. Return ``ToolResult``.
+
+Phase 4 wiring (PR-2 of 2026-04-25 Hermes parity plan):
+    - CapabilityClaim declared on each tool class so AgentLoop's
+      ConsentGate can enforce consent at dispatch time.
+    - Successful scrapes publish WebObservationEvent to default_bus so
+      downstream subscribers (audit log, evolution trajectory, etc.)
+      receive the signal.
 """
 
 from __future__ import annotations
@@ -22,6 +30,7 @@ import hashlib
 import json
 import logging
 import time
+from typing import ClassVar
 from urllib.parse import urlparse
 
 from field_whitelist import filter_output  # type: ignore[import-not-found]
@@ -29,7 +38,9 @@ from rate_limiter import RateLimiter  # type: ignore[import-not-found]
 from robots_cache import RobotsCache  # type: ignore[import-not-found]
 from wrapper import OpenCLIWrapper  # type: ignore[import-not-found]
 
+from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
+from plugin_sdk.ingestion import WebObservationEvent
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 log = logging.getLogger(__name__)
@@ -97,6 +108,17 @@ class ScrapeRawTool(BaseTool):
     """
 
     parallel_safe = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="opencli_scraper.scrape_raw",
+            tier_required=ConsentTier.EXPLICIT,
+            human_description=(
+                "Run an OpenCLI adapter directly and return filtered output. "
+                "Requires an explicit per-adapter consent grant."
+            ),
+            data_scope="adapter:{adapter}",
+        ),
+    )
 
     def __init__(
         self,
@@ -175,6 +197,18 @@ class FetchProfileTool(BaseTool):
     """
 
     parallel_safe = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="opencli_scraper.fetch_profile",
+            tier_required=ConsentTier.EXPLICIT,
+            human_description=(
+                "Fetch a public user profile from a supported platform "
+                "(GitHub, Reddit, LinkedIn, etc.) via OpenCLI. "
+                "Requires an explicit per-platform consent grant."
+            ),
+            data_scope="platform:{platform}",
+        ),
+    )
 
     def __init__(
         self,
@@ -267,6 +301,18 @@ class MonitorPageTool(BaseTool):
     """
 
     parallel_safe = True
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
+        CapabilityClaim(
+            capability_id="opencli_scraper.monitor_page",
+            tier_required=ConsentTier.EXPLICIT,
+            human_description=(
+                "Fetch a URL and return a content-hash + timestamp for "
+                "change detection. Requires an explicit per-domain "
+                "consent grant."
+            ),
+            data_scope="domain:{domain}",
+        ),
+    )
 
     def __init__(
         self,
@@ -408,6 +454,24 @@ async def _execute_scrape(
     # raw may be wrapped in {ok, data} envelope — unwrap data if present.
     data = raw.get("data", raw) if isinstance(raw, dict) else raw
     filtered = filter_output(adapter, data)
+
+    # 5. Publish WebObservationEvent to the F2 bus (best-effort).
+    # Bus failure MUST NOT break the scrape — wrap in try/except.
+    try:
+        from opencomputer.ingestion.bus import get_default_bus
+
+        payload_bytes = len(json.dumps(filtered).encode("utf-8")) if filtered else 0
+        event = WebObservationEvent(
+            url=url,
+            domain=domain,
+            content_kind="json",
+            payload_size_bytes=payload_bytes,
+            source="opencli-scraper",
+            metadata={"adapter": adapter, "rate_limited": False, "robots_allowed": True},
+        )
+        get_default_bus().publish(event)
+    except Exception:
+        log.warning("opencli-scraper: bus publish failed", exc_info=True)
 
     return ToolResult(
         tool_call_id=call_id,
