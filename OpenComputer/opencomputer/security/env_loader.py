@@ -214,10 +214,75 @@ def load_env_file(
     return _parse(text)
 
 
+def load_for_profile(
+    profile_name: str | None = None,
+    *,
+    apply_to_environ: bool = True,
+) -> dict[str, str]:
+    """Load env vars for the active profile, with global fallback.
+
+    Round 4 Item 5 — per-profile credential isolation. Resolution
+    order (first hit wins per key):
+
+    1. ``$OPENCOMPUTER_HOME/<profile_name>/.env`` — profile-local
+       (when ``profile_name`` is set and not ``"default"``).
+    2. ``~/.opencomputer/<profile_name>/.env`` — same as above when
+       ``$OPENCOMPUTER_HOME`` is unset.
+    3. ``~/.opencomputer/.env`` — global fallback. Backwards-compat
+       for users who set up before per-profile creds existed.
+
+    Existing ``os.environ`` entries always win — shell-set vars take
+    precedence over file-loaded ones (matches dotenv convention).
+    Pass ``apply_to_environ=False`` to inspect what would be loaded
+    without mutating the process env (used by tests).
+
+    Returns the merged dict (everything that would have been applied,
+    even when ``apply_to_environ=False``). Errors during file load
+    are logged at debug and the layer is skipped — never crashes
+    startup.
+    """
+    import os
+
+    candidates: list[Path] = []
+
+    home_override = os.environ.get("OPENCOMPUTER_HOME")
+    oc_home = Path(home_override) if home_override else Path.home() / ".opencomputer"
+
+    if profile_name and profile_name != "default":
+        candidates.append(oc_home / "profiles" / profile_name / ".env")
+    candidates.append(oc_home / ".env")
+
+    merged: dict[str, str] = {}
+    # Walk in reverse so earlier (higher-priority) entries override
+    # later (lower-priority). Equivalent to "first match wins" without
+    # the bookkeeping of skipping later duplicates.
+    for path in reversed(candidates):
+        try:
+            loaded = load_env_file(path)
+        except Exception as exc:  # noqa: BLE001 — startup must not crash
+            logger.debug(
+                "load_for_profile: skipping %s (%s: %s)",
+                path,
+                type(exc).__name__,
+                exc,
+            )
+            continue
+        merged.update(loaded)
+
+    if apply_to_environ:
+        for k, v in merged.items():
+            # Shell-set vars win — don't clobber what the user explicitly
+            # exported in their session.
+            os.environ.setdefault(k, v)
+
+    return merged
+
+
 __all__ = [
     "LOOSE_PERMS_MASK",
     "LoosePermissionError",
     "get_process_allow_loose_perms",
     "load_env_file",
+    "load_for_profile",
     "set_process_allow_loose_perms",
 ]
