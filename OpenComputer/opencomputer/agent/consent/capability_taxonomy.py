@@ -36,6 +36,15 @@ F1_CAPABILITIES: dict[str, ConsentTier] = {
     # Default localhost-only; non-localhost binding requires this capability.
     # Tier EXPLICIT means user opted in once; we don't re-prompt every start.
     "dashboard.bind_external": ConsentTier.EXPLICIT,
+    # MVP — Layered Awareness ingestion sources (2026-04-26).
+    # Per-source consent so user can revoke any single ingestion path
+    # via `opencomputer consent revoke <id>` without affecting others.
+    "ingestion.recent_files": ConsentTier.IMPLICIT,
+    "ingestion.git_log": ConsentTier.IMPLICIT,
+    "ingestion.calendar": ConsentTier.EXPLICIT,
+    "ingestion.browser_history": ConsentTier.EXPLICIT,
+    "ingestion.messages": ConsentTier.EXPLICIT,
+    "ingestion.browser_extension": ConsentTier.EXPLICIT,
 }
 
 # Reserved for later phases (documented, not enforced here):
