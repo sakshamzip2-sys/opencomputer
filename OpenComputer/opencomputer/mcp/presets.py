@@ -140,6 +140,298 @@ PRESETS: dict[str, Preset] = {
         required_env=("BRAVE_API_KEY",),
         homepage="https://github.com/modelcontextprotocol/servers/tree/main/src/brave-search",
     ),
+    # ─── Round 4 catalog expansion (15 entries) ────────────────────────
+    # Picked from the official modelcontextprotocol/servers repo plus
+    # high-volume third-party MCPs commonly requested. Order: official
+    # first, then community. Each must have a public install path
+    # (npm/pypi) and clear required_env. Slugs match the canonical
+    # short name used in MCP-server READMEs to keep `mcp install <name>`
+    # discoverable.
+    "sqlite": Preset(
+        slug="sqlite",
+        description=(
+            "Run SQL queries against a local SQLite database. "
+            "Pass --db-path to point at your file at install time."
+        ),
+        config=MCPServerConfig(
+            name="sqlite",
+            transport="stdio",
+            command="uvx",
+            args=("mcp-server-sqlite", "--db-path", "${SQLITE_DB_PATH}"),
+            url="",
+            env={"SQLITE_DB_PATH": "${SQLITE_DB_PATH}"},
+            headers={},
+            enabled=True,
+        ),
+        required_env=("SQLITE_DB_PATH",),
+        homepage="https://github.com/modelcontextprotocol/servers/tree/main/src/sqlite",
+    ),
+    "gitlab": Preset(
+        slug="gitlab",
+        description=(
+            "Browse GitLab repos, issues, MRs. "
+            "Requires GITLAB_PERSONAL_ACCESS_TOKEN."
+        ),
+        config=MCPServerConfig(
+            name="gitlab",
+            transport="stdio",
+            command="npx",
+            args=("-y", "@modelcontextprotocol/server-gitlab"),
+            url="",
+            env={
+                "GITLAB_PERSONAL_ACCESS_TOKEN": "${GITLAB_PERSONAL_ACCESS_TOKEN}",
+                "GITLAB_API_URL": "${GITLAB_API_URL:-https://gitlab.com/api/v4}",
+            },
+            headers={},
+            enabled=True,
+        ),
+        required_env=("GITLAB_PERSONAL_ACCESS_TOKEN",),
+        homepage="https://github.com/modelcontextprotocol/servers/tree/main/src/gitlab",
+    ),
+    "google-drive": Preset(
+        slug="google-drive",
+        description=(
+            "Read/search files in Google Drive via OAuth. "
+            "Run the included auth helper after install to grant access."
+        ),
+        config=MCPServerConfig(
+            name="google-drive",
+            transport="stdio",
+            command="npx",
+            args=("-y", "@modelcontextprotocol/server-gdrive"),
+            url="",
+            env={},
+            headers={},
+            enabled=True,
+        ),
+        homepage="https://github.com/modelcontextprotocol/servers/tree/main/src/gdrive",
+    ),
+    "slack": Preset(
+        slug="slack",
+        description=(
+            "Read Slack channels + send messages. Requires SLACK_BOT_TOKEN "
+            "(starts with xoxb-) and SLACK_TEAM_ID."
+        ),
+        config=MCPServerConfig(
+            name="slack",
+            transport="stdio",
+            command="npx",
+            args=("-y", "@modelcontextprotocol/server-slack"),
+            url="",
+            env={
+                "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}",
+                "SLACK_TEAM_ID": "${SLACK_TEAM_ID}",
+            },
+            headers={},
+            enabled=True,
+        ),
+        required_env=("SLACK_BOT_TOKEN", "SLACK_TEAM_ID"),
+        homepage="https://github.com/modelcontextprotocol/servers/tree/main/src/slack",
+    ),
+    "memory": Preset(
+        slug="memory",
+        description=(
+            "Knowledge-graph memory persisted to a local JSON file. "
+            "Lets the agent build long-term notes across sessions."
+        ),
+        config=MCPServerConfig(
+            name="memory",
+            transport="stdio",
+            command="npx",
+            args=("-y", "@modelcontextprotocol/server-memory"),
+            url="",
+            env={},
+            headers={},
+            enabled=True,
+        ),
+        homepage="https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
+    ),
+    "puppeteer": Preset(
+        slug="puppeteer",
+        description=(
+            "Headless-Chrome browser control: navigate, screenshot, click, fill forms. "
+            "Pulls Chromium on first run (~150MB)."
+        ),
+        config=MCPServerConfig(
+            name="puppeteer",
+            transport="stdio",
+            command="npx",
+            args=("-y", "@modelcontextprotocol/server-puppeteer"),
+            url="",
+            env={},
+            headers={},
+            enabled=True,
+        ),
+        homepage="https://github.com/modelcontextprotocol/servers/tree/main/src/puppeteer",
+    ),
+    "sequential-thinking": Preset(
+        slug="sequential-thinking",
+        description=(
+            "Adds a structured 'think step by step' tool the agent can call "
+            "to break down hard problems. Stateless; no env vars."
+        ),
+        config=MCPServerConfig(
+            name="sequential-thinking",
+            transport="stdio",
+            command="npx",
+            args=("-y", "@modelcontextprotocol/server-sequential-thinking"),
+            url="",
+            env={},
+            headers={},
+            enabled=True,
+        ),
+        homepage="https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
+    ),
+    "time": Preset(
+        slug="time",
+        description=(
+            "Current time + timezone conversion as a tool. "
+            "Useful for cross-zone scheduling chats."
+        ),
+        config=MCPServerConfig(
+            name="time",
+            transport="stdio",
+            command="uvx",
+            args=("mcp-server-time",),
+            url="",
+            env={},
+            headers={},
+            enabled=True,
+        ),
+        homepage="https://github.com/modelcontextprotocol/servers/tree/main/src/time",
+    ),
+    "everart": Preset(
+        slug="everart",
+        description=(
+            "Image generation via EverArt's API. Requires EVERART_API_KEY."
+        ),
+        config=MCPServerConfig(
+            name="everart",
+            transport="stdio",
+            command="npx",
+            args=("-y", "@modelcontextprotocol/server-everart"),
+            url="",
+            env={"EVERART_API_KEY": "${EVERART_API_KEY}"},
+            headers={},
+            enabled=True,
+        ),
+        required_env=("EVERART_API_KEY",),
+        homepage="https://github.com/modelcontextprotocol/servers/tree/main/src/everart",
+    ),
+    # ─── Community / third-party ──────────────────────────────────────
+    "notion": Preset(
+        slug="notion",
+        description=(
+            "Read/write Notion pages + databases via the official API. "
+            "Requires NOTION_API_TOKEN — create at notion.so/profile/integrations."
+        ),
+        config=MCPServerConfig(
+            name="notion",
+            transport="stdio",
+            command="npx",
+            args=("-y", "@notionhq/notion-mcp-server"),
+            url="",
+            env={
+                "OPENAPI_MCP_HEADERS": '{"Authorization": "Bearer ${NOTION_API_TOKEN}", "Notion-Version": "2022-06-28"}',
+            },
+            headers={},
+            enabled=True,
+        ),
+        required_env=("NOTION_API_TOKEN",),
+        homepage="https://github.com/makenotion/notion-mcp-server",
+    ),
+    "linear": Preset(
+        slug="linear",
+        description=(
+            "Linear issues + projects. Requires LINEAR_API_KEY from "
+            "linear.app/settings/api."
+        ),
+        config=MCPServerConfig(
+            name="linear",
+            transport="stdio",
+            command="npx",
+            args=("-y", "@linear/mcp-server-linear"),
+            url="",
+            env={"LINEAR_API_KEY": "${LINEAR_API_KEY}"},
+            headers={},
+            enabled=True,
+        ),
+        required_env=("LINEAR_API_KEY",),
+        homepage="https://github.com/linear/mcp",
+    ),
+    "sentry": Preset(
+        slug="sentry",
+        description=(
+            "Pull Sentry issue details + stack traces into the agent. "
+            "Requires SENTRY_AUTH_TOKEN."
+        ),
+        config=MCPServerConfig(
+            name="sentry",
+            transport="stdio",
+            command="uvx",
+            args=("mcp-server-sentry", "--auth-token", "${SENTRY_AUTH_TOKEN}"),
+            url="",
+            env={"SENTRY_AUTH_TOKEN": "${SENTRY_AUTH_TOKEN}"},
+            headers={},
+            enabled=True,
+        ),
+        required_env=("SENTRY_AUTH_TOKEN",),
+        homepage="https://github.com/modelcontextprotocol/servers/tree/main/src/sentry",
+    ),
+    "context7": Preset(
+        slug="context7",
+        description=(
+            "Up-to-date library docs lookup (Upstash Context7). "
+            "Free tier; no API key required."
+        ),
+        config=MCPServerConfig(
+            name="context7",
+            transport="stdio",
+            command="npx",
+            args=("-y", "@upstash/context7-mcp"),
+            url="",
+            env={},
+            headers={},
+            enabled=True,
+        ),
+        homepage="https://github.com/upstash/context7-mcp",
+    ),
+    "perplexity": Preset(
+        slug="perplexity",
+        description=(
+            "Perplexity AI search as a tool. Requires PERPLEXITY_API_KEY."
+        ),
+        config=MCPServerConfig(
+            name="perplexity",
+            transport="stdio",
+            command="npx",
+            args=("-y", "perplexity-mcp"),
+            url="",
+            env={"PERPLEXITY_API_KEY": "${PERPLEXITY_API_KEY}"},
+            headers={},
+            enabled=True,
+        ),
+        required_env=("PERPLEXITY_API_KEY",),
+        homepage="https://github.com/jaacob/perplexity-mcp",
+    ),
+    "docker": Preset(
+        slug="docker",
+        description=(
+            "Manage local Docker containers + images via the daemon. "
+            "Daemon must be running; no API key needed."
+        ),
+        config=MCPServerConfig(
+            name="docker",
+            transport="stdio",
+            command="uvx",
+            args=("docker-mcp",),
+            url="",
+            env={},
+            headers={},
+            enabled=True,
+        ),
+        homepage="https://github.com/QuantGeekDev/docker-mcp",
+    ),
 }
 
 

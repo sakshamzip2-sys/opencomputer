@@ -4,6 +4,33 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (MCP catalog expansion: 5 → 20 entries + `mcp catalog` synonym)
+
+Round 4 Item 2. The bundled `mcp/presets.py` shipped 5 entries; we
+extend to 20 covering the most-requested MCPs.
+
+- `opencomputer/mcp/presets.py` — 15 new presets:
+  **Official MCP servers:** `sqlite`, `gitlab`, `google-drive`, `slack`,
+  `memory` (knowledge graph), `puppeteer`, `sequential-thinking`,
+  `time`, `everart`.
+  **Community / third-party:** `notion`, `linear`, `sentry`, `context7`,
+  `perplexity`, `docker`.
+  Each preset declares `slug`, `description`, runtime config (npx /
+  uvx), `required_env`, and `homepage` for user verification.
+- `opencomputer/cli_mcp.py` — new `opencomputer mcp catalog` command
+  as a friendlier-named synonym for the existing `mcp presets`. Both
+  print the same listing; `presets` retained for backwards compat.
+- 9 new tests in `tests/test_mcp_catalog_expansion.py`: ≥15 entries
+  bundled, major third-party servers (notion/linear/sentry/sqlite/
+  gitlab/context7) present, every preset has a homepage URL, every
+  preset has a description ≥20 chars, secret-requiring presets explain
+  where to get the credential, both `catalog` and `presets` commands
+  list the same entries, no duplicate slugs.
+- 1 existing test updated (`test_five_presets_bundled` → `test_original_
+  five_presets_still_present`) — relaxes equality to subset check so
+  the original 5 are guaranteed present + count ≥15. Backwards-compat
+  guard for any third-party scripts pinning to the original 5 slugs.
+
 ### Changed (`memory dream-on` registers a cron job; `dream-off` removes it)
 
 Round 4 Item 4. Closes the gap where `dream-on --interval daily` only

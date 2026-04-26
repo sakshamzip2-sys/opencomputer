@@ -22,14 +22,20 @@ def isolate_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class TestPresetRegistry:
-    def test_five_presets_bundled(self) -> None:
-        assert set(list_preset_slugs()) == {
-            "filesystem",
-            "github",
-            "fetch",
-            "postgres",
-            "brave-search",
-        }
+    def test_original_five_presets_still_present(self) -> None:
+        # The original five slugs from v0.1.x must remain — third-party
+        # tooling pinned to ``mcp install <slug>`` would break otherwise.
+        # Round 4 expanded the catalog to ≥15 entries; the assertion is
+        # now a subset check rather than equality.
+        slugs = set(list_preset_slugs())
+        original = {"filesystem", "github", "fetch", "postgres", "brave-search"}
+        assert original <= slugs, (
+            f"original presets removed; backwards compat broken. Missing: "
+            f"{original - slugs}"
+        )
+        assert len(slugs) >= 15, (
+            f"Round 4 catalog expansion expects ≥15 entries; got {len(slugs)}"
+        )
 
     def test_each_preset_has_a_command(self) -> None:
         for slug, p in PRESETS.items():
