@@ -444,6 +444,25 @@ def default(
         chat()
 
 
+def _print_update_hint_if_any() -> None:
+    """Print the upgrade hint at chat exit when one is ready.
+
+    Hermes parity (``hermes_cli/main.py:4399`` consumes
+    ``check_for_updates()`` similarly). We swallow every error so a
+    background thread crash, network blip, or PyPI outage can never
+    leak into the user's bye message — the worst case is a silently
+    skipped hint, which the user will see on the next session.
+    """
+    try:
+        from opencomputer.cli_update_check import get_update_hint
+
+        hint = get_update_hint(timeout=0.2)
+        if hint:
+            console.print(f"[dim cyan]ℹ {hint}[/dim cyan]")
+    except Exception as e:  # noqa: BLE001 — bye message must always succeed
+        _log.debug("update-hint print failed: %s", e)
+
+
 _BUILTIN_PROVIDER_ENV_FALLBACK = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
@@ -604,6 +623,12 @@ def chat(
     _configure_logging_once()
     if not config_file_path().exists() and not _has_any_provider_configured():
         _offer_setup_or_exit("No OpenComputer config found")
+    try:
+        from opencomputer.cli_update_check import prefetch_update_check
+
+        prefetch_update_check()
+    except Exception as e:  # noqa: BLE001 — update check must never crash startup
+        _log.debug("update-check prefetch failed: %s", e)
     cfg = load_config()
     # Follow-up #25 — one-shot hint if Docker became available after setup.
     from opencomputer.cli_hints import maybe_print_docker_toggle_hint
@@ -704,9 +729,11 @@ def chat(
             user_input = console.input("[bold green]you ›[/bold green] ")
         except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]bye.[/dim]")
+            _print_update_hint_if_any()
             return
         if user_input.strip().lower() in {"exit", "quit", ":q"}:
             console.print("[dim]bye.[/dim]")
+            _print_update_hint_if_any()
             return
         if not user_input.strip():
             continue
