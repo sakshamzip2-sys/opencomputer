@@ -12,6 +12,23 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (background PyPI update check — hermes parity)
+
+- `opencomputer/cli_update_check.py` — non-blocking PyPI update check.
+  Mirrors hermes' `prefetch_update_check` / `check_for_updates` pair
+  at `sources/hermes-agent-2026.4.23/hermes_cli/banner.py:126,267`,
+  but adapted for OC's pip-distributed model — hermes does
+  `git fetch origin/main` because hermes ships via git clone; OC
+  hits `https://pypi.org/pypi/opencomputer/json` and compares
+  `info.version` against the running `__version__`. Daemon thread
+  fires at chat start; result printed at chat exit so it never
+  disturbs the prompt. Cached at `~/.opencomputer/.update_check.json`
+  (atomic .tmp + os.replace) for 24h (cache misses + offline are
+  silent). Response capped at 1 MB to defend against hostile mirrors.
+  Opt out via `OPENCOMPUTER_NO_UPDATE_CHECK=1`. Treats the
+  `0.0.0+unknown` placeholder (broken install) as "don't nag" —
+  those users have bigger problems than version drift.
+
 ### Added (CLI quality-of-life — hermes parity)
 
 Two paper-cut commands ported from hermes-agent's CLI surface.
