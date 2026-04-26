@@ -15,6 +15,7 @@ Provider resolution note (B2):
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -543,6 +544,65 @@ def disable() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# export-trajectory (P-14)
+# ---------------------------------------------------------------------------
+
+
+@evolution_app.command("export-trajectory")
+def export_trajectory(
+    session_id: str = typer.Argument(..., help="Session id to export"),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help=(
+            "Output ZIP path. Defaults to "
+            "<profile_home>/trajectory_exports/<session_id>_<unix_ts>.zip"
+        ),
+    ),
+    max_bundle_size: int = typer.Option(
+        50,
+        "--max-bundle-size",
+        help="Soft cap (MB) per ZIP file; bigger trajectories split into _part2.zip, …",
+    ),
+) -> None:
+    """Bundle a session's trajectory records into a redacted ZIP.
+
+    Bundle contents (per ZIP):
+      manifest.json   — session_id, schema_version, per-record summary, part info
+      events.jsonl    — one TrajectoryEvent per line, JSON-serialised, redaction-applied
+      redaction.json  — per-pattern hit counts (NO raw matches)
+
+    Five regex patterns are applied to short string-valued metadata fields
+    (the schema-level 200-char privacy rule already prevents large bodies
+    from being stored): API keys, ``/Users/<name>/`` paths, emails, IPs,
+    Bearer tokens.
+    """
+    # Local import — keeps CLI startup cheap when this command isn't used.
+    from opencomputer.evolution.export import bundle
+
+    try:
+        paths = bundle(
+            session_id,
+            output_path=output,
+            max_bundle_size_mb=max_bundle_size,
+        )
+    except ValueError as exc:
+        console.print(f"[red]Cannot export trajectory:[/red] {exc}")
+        raise typer.Exit(code=2)
+
+    if len(paths) == 1:
+        console.print(f"[green]Exported[/green] → {paths[0]}")
+    else:
+        console.print(
+            f"[green]Exported {len(paths)} parts (split on "
+            f"--max-bundle-size={max_bundle_size}MB):[/green]"
+        )
+        for p in paths:
+            console.print(f"  • {p}")
+
+
 __all__ = [
     "skills_list",
     "skills_promote",
@@ -557,4 +617,5 @@ __all__ = [
     "trajectories_show",
     "enable",
     "disable",
+    "export_trajectory",
 ]
