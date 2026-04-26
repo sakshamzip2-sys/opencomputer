@@ -48,6 +48,6 @@ def decode_stream(data: Any) -> str:
         return ""
     if isinstance(data, str):
         return data
-    if isinstance(data, (bytes, bytearray)):
+    if isinstance(data, bytes | bytearray):
         return data.decode("utf-8", errors="replace")
     return str(data)

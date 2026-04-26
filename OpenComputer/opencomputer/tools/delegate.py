@@ -178,7 +178,7 @@ class DelegateTool(BaseTool):
         explicit_allowed = False
         if raw_allowed is None:
             allowed = None
-        elif isinstance(raw_allowed, (list, tuple, set, frozenset)):
+        elif isinstance(raw_allowed, list | tuple | set | frozenset):
             allowed = frozenset(str(x) for x in raw_allowed)
             explicit_allowed = True
         else:
