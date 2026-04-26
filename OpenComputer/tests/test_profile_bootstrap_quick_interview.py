@@ -2,8 +2,8 @@
 from opencomputer.profile_bootstrap.identity_reflex import IdentityFacts
 from opencomputer.profile_bootstrap.quick_interview import (
     QUICK_INTERVIEW_QUESTIONS,
-    render_questions,
     parse_answers,
+    render_questions,
 )
 
 

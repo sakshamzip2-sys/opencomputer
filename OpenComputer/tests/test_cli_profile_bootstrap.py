@@ -63,9 +63,9 @@ def test_bootstrap_then_prompt_includes_user_facts(tmp_path: Path, monkeypatch):
     """E2E: bootstrap → graph populated → prompt builder injects facts."""
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
     # Run the real orchestrator (no mock) with a tightly-scoped scope.
+    from opencomputer.agent.prompt_builder import PromptBuilder
     from opencomputer.profile_bootstrap.orchestrator import run_bootstrap
     from opencomputer.user_model.store import UserModelStore
-    from opencomputer.agent.prompt_builder import PromptBuilder
 
     graph_path = tmp_path / "user_model" / "graph.sqlite"
     graph_path.parent.mkdir(parents=True)

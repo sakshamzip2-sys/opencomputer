@@ -1,5 +1,6 @@
-import pytest
 from unittest.mock import patch
+
+import pytest
 
 from opencomputer.profile_bootstrap.identity_reflex import (
     IdentityFacts,

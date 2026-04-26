@@ -84,7 +84,7 @@ def parse_answers(raw_answers: list[str]) -> dict[str, str]:
     only maps what it receives.
     """
     parsed: dict[str, str] = {}
-    for (key, _), answer in zip(QUICK_INTERVIEW_QUESTIONS, raw_answers):
+    for (key, _), answer in zip(QUICK_INTERVIEW_QUESTIONS, raw_answers, strict=False):
         cleaned = answer.strip()
         if cleaned:
             parsed[key] = cleaned

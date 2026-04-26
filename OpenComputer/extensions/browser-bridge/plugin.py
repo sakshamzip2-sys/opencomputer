@@ -4,9 +4,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from plugin_sdk import PluginManifest
-
 from extensions.browser_bridge.adapter import BrowserBridgeAdapter, generate_token
+
+from plugin_sdk import PluginManifest
 
 _log = logging.getLogger("extensions.browser_bridge.plugin")
 

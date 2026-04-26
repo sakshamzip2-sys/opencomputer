@@ -1,5 +1,6 @@
 """Layered Awareness MVP — bridge CLI subcommand tests."""
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
@@ -31,9 +32,6 @@ def test_bridge_token_rotate(tmp_path: Path, monkeypatch):
         profile_app, ["bridge", "token", "--rotate"]
     ).stdout.strip().splitlines()[-1]
     assert first != second
-
-
-from unittest.mock import MagicMock, patch
 
 
 def test_bridge_status_reports_reachable(tmp_path: Path, monkeypatch):

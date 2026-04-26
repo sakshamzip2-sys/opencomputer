@@ -11,6 +11,7 @@ import pytest
 
 async def test_browser_bridge_accepts_post_and_publishes_event():
     from extensions.browser_bridge.adapter import BrowserBridgeAdapter
+
     from opencomputer.ingestion.bus import TypedEventBus
 
     bus = TypedEventBus()
@@ -47,6 +48,7 @@ async def test_browser_bridge_accepts_post_and_publishes_event():
 
 async def test_browser_bridge_rejects_missing_token():
     from extensions.browser_bridge.adapter import BrowserBridgeAdapter
+
     from opencomputer.ingestion.bus import TypedEventBus
 
     bus = TypedEventBus()
@@ -66,6 +68,7 @@ async def test_browser_bridge_rejects_missing_token():
 async def test_browser_bridge_handles_port_in_use():
     """If the port is already bound, raise a clean OSError with actionable msg."""
     from extensions.browser_bridge.adapter import BrowserBridgeAdapter
+
     from opencomputer.ingestion.bus import TypedEventBus
 
     bus = TypedEventBus()
