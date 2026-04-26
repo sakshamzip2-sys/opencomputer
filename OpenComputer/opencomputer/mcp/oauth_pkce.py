@@ -140,8 +140,15 @@ def _build_callback_server(
 
     # ``allow_reuse_address`` lets an immediate re-run rebind even if
     # the kernel hasn't fully released the previous ephemeral port.
-    socketserver.TCPServer.allow_reuse_address = True
-    return socketserver.TCPServer(("127.0.0.1", 0), _Handler)
+    # Subclass instead of mutating the base class — the previous code
+    # set ``socketserver.TCPServer.allow_reuse_address = True`` on the
+    # CLASS, leaking the change to every other TCPServer instantiation
+    # in the process (e.g. the dashboard server). Subclass scopes it
+    # to *this* server only.
+    class _ReusableTCPServer(socketserver.TCPServer):
+        allow_reuse_address = True
+
+    return _ReusableTCPServer(("127.0.0.1", 0), _Handler)
 
 
 # ─── Top-level entry point ────────────────────────────────────────

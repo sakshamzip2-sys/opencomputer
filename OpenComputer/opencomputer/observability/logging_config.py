@@ -134,6 +134,22 @@ def configure(home: Path) -> None:
         ("opencomputer.gateway", "gateway.log"),
         ("opencomputer.errors", "errors.log"),
     ]:
+        logger = logging.getLogger(name)
+        # Idempotence: drop any of OUR previously-attached
+        # RotatingFileHandlers writing to the same path. Without this,
+        # calling configure() twice doubles handlers and every record
+        # is emitted N times — verified via runtime test in /ultrareview.
+        # Only remove handlers we own (RotatingFileHandler whose
+        # baseFilename matches what we'd attach now); leave any other
+        # handler (e.g. user's own console handler) in place.
+        target_path = str((logs_dir / fname).resolve())
+        for existing in list(logger.handlers):
+            if (
+                isinstance(existing, RotatingFileHandler)
+                and Path(existing.baseFilename).resolve() == Path(target_path)
+            ):
+                logger.removeHandler(existing)
+                existing.close()
         h = RotatingFileHandler(
             logs_dir / fname,
             maxBytes=10 * 1024 * 1024,
@@ -141,7 +157,7 @@ def configure(home: Path) -> None:
         )
         h.setFormatter(fmt)
         h.addFilter(fltr)
-        logging.getLogger(name).addHandler(h)
+        logger.addHandler(h)
     # Errors channel is restricted; the agent / gateway trees keep
     # whatever the root level is (typically WARNING via Python defaults).
     logging.getLogger("opencomputer.errors").setLevel(logging.ERROR)
