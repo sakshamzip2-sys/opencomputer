@@ -18,6 +18,18 @@ session/message storage to the user via four subcommands:
 Storage is the per-profile ``sessions.db`` resolved via
 ``opencomputer.agent.config._home()``. The CLI never touches profile
 state directly — it just reads/writes through ``SessionDB``.
+
+Round 2B P-12 adds three slim filters to ``session list``:
+
+* ``--label`` — case-insensitive substring match on title.
+* ``--agent`` — switch the source DB to a named profile's
+                ``sessions.db`` (profiles are per-directory, so
+                ``meta.profile_name`` maps to which DB we open).
+* ``--search`` — FTS5 query across messages; returns sessions whose
+                 messages contained matches. User input is wrapped in
+                 a quoted phrase so ``:``, ``*``, ``(``, ``)`` etc.
+                 stay literal instead of getting parsed as FTS5
+                 operators.
 """
 
 from __future__ import annotations
@@ -31,6 +43,11 @@ from rich.table import Table
 
 from opencomputer.agent.config import _home
 from opencomputer.agent.state import SessionDB
+from opencomputer.profiles import (
+    ProfileNameError,
+    get_profile_dir,
+    validate_profile_name,
+)
 
 session_app = typer.Typer(
     name="session", help="Inspect, fork, and resume saved sessions."
@@ -42,6 +59,43 @@ def _db() -> SessionDB:
     """Construct a SessionDB rooted at the active profile."""
     db_path: Path = _home() / "sessions.db"
     return SessionDB(db_path)
+
+
+def _db_for_profile(profile: str) -> SessionDB:
+    """Construct a SessionDB rooted at *profile*'s directory.
+
+    Used by ``--agent`` to read sessions belonging to a different
+    profile than the active one. Sessions in OpenComputer are isolated
+    per-profile by directory (each profile has its own
+    ``sessions.db``), so "filter by agent" maps directly to "open the
+    other profile's DB". Validation is delegated to
+    :func:`opencomputer.profiles.validate_profile_name` so the same
+    rules apply that ``profiles.py`` enforces elsewhere.
+    """
+    validate_profile_name(profile)
+    db_path: Path = get_profile_dir(profile) / "sessions.db"
+    return SessionDB(db_path)
+
+
+def _escape_fts5(query: str) -> str:
+    """Wrap *query* as a quoted FTS5 phrase so special chars are literal.
+
+    FTS5 reserves a handful of characters that have meaning in its
+    mini query language: ``:`` (column qualifier), ``*`` (prefix
+    operator), ``(``/``)`` (grouping), ``"`` (phrase delimiter), and
+    operators like ``AND``/``OR``/``NOT``. User-supplied search text
+    almost never wants those semantics — a query like ``a:b`` should
+    look for the literal string ``a:b``, not "match column a against
+    b".
+
+    Wrapping in double quotes turns the whole thing into a single
+    phrase token where the only metacharacter that survives is ``"``
+    itself, which FTS5 escapes by doubling (``""``). That matches the
+    pattern :meth:`SessionDB.search_episodic` already uses for its
+    own FTS5 escaping.
+    """
+    safe = query.replace('"', '""')
+    return f'"{safe}"'
 
 
 def _format_started(started_at: float | int | None) -> str:
@@ -60,11 +114,105 @@ def session_list(
     limit: int = typer.Option(
         20, "--limit", "-n", help="Max sessions to show (1-200).", min=1, max=200,
     ),
+    label: str | None = typer.Option(
+        None,
+        "--label",
+        help=(
+            "Case-insensitive substring match on session title. "
+            "Combine with --agent / --search."
+        ),
+    ),
+    agent: str | None = typer.Option(
+        None,
+        "--agent",
+        help=(
+            "Profile (agent) name whose sessions.db to read. Defaults to "
+            "the active profile. Profiles are per-directory in OpenComputer "
+            "so this switches which DB we open."
+        ),
+    ),
+    search: str | None = typer.Option(
+        None,
+        "--search",
+        help=(
+            "FTS5 query against message text. Returns sessions whose "
+            "messages contained matches. Special chars (`:`, `*`, "
+            "parens, etc.) are treated literally."
+        ),
+    ),
 ) -> None:
-    """List recent sessions in the active profile."""
-    rows = _db().list_sessions(limit=limit)
+    """List recent sessions in the active profile.
+
+    Round 2B P-12 added ``--label``, ``--agent``, and ``--search``
+    filters. They compose: ``--label foo --search bar`` returns
+    sessions whose title contains "foo" AND whose messages contain
+    "bar". When ``--search`` is set we ask FTS5 for matching messages,
+    map those back to session ids, then post-filter with
+    title/agent locally — keeping a single SessionDB query path
+    (avoids forking a parallel SQL builder).
+    """
+    if agent is not None:
+        try:
+            db = _db_for_profile(agent)
+        except ProfileNameError as e:
+            console.print(f"[red]error:[/red] {e}")
+            raise typer.Exit(1) from None
+    else:
+        db = _db()
+
+    if search is not None and search.strip():
+        # Walk FTS5 results → distinct session ids in match order, then
+        # re-fetch each session's metadata so the table shape stays
+        # identical to the no-filter path. Pull a generous batch from
+        # FTS5 (limit * 5) so post-filtering by --label still has room
+        # to reach `limit` sessions even when many messages match the
+        # same session.
+        #
+        # ``phrase=True`` opt-in: SessionDB.search() defaults to legacy
+        # behaviour (caller responsible for FTS5 syntax) so existing
+        # callers (mcp/server.py, tools/recall.py) keep working. P-12
+        # is the user-facing CLI entry point — we want raw user input
+        # treated literally, so the FTS5 reserved characters in
+        # ``_escape_fts5``'s docstring (``:``, ``*``, ``(``, ``)``,
+        # ``"``) cannot be interpreted as operators.
+        try:
+            matches = db.search(
+                search, limit=max(limit * 5, limit), phrase=True
+            )
+        except Exception as e:  # noqa: BLE001 — surface FTS5 errors
+            console.print(f"[red]error:[/red] search failed: {e}")
+            raise typer.Exit(1) from None
+        seen_ids: list[str] = []
+        seen_set: set[str] = set()
+        for m in matches:
+            sid = m.get("session_id") or ""
+            if sid and sid not in seen_set:
+                seen_set.add(sid)
+                seen_ids.append(sid)
+        rows: list[dict] = []
+        for sid in seen_ids:
+            meta = db.get_session(sid)
+            if meta is not None:
+                rows.append(meta)
+    else:
+        # Pull more than `limit` so post-filtering by --label can still
+        # reach the cap. 200 is the SessionDB list_sessions max.
+        fetch_limit = limit if label is None else max(limit, 200)
+        rows = db.list_sessions(limit=fetch_limit)
+
+    if label is not None:
+        needle = label.lower()
+        rows = [r for r in rows if needle in (r.get("title", "") or "").lower()]
+
+    rows = rows[:limit]
+
     if not rows:
-        console.print("[dim]no sessions yet — run `opencomputer chat` first.[/dim]")
+        if search is not None or label is not None or agent is not None:
+            console.print("[dim]no sessions match the filters.[/dim]")
+        else:
+            console.print(
+                "[dim]no sessions yet — run `opencomputer chat` first.[/dim]"
+            )
         return
     t = Table(show_lines=False)
     t.add_column("id", style="cyan", overflow="fold")

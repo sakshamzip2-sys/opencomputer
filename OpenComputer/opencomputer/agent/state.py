@@ -530,12 +530,32 @@ class SessionDB:
 
     # ─── FTS5 search ──────────────────────────────────────────────
 
-    def search(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
-        """Full-text search across all messages. Returns snippet + metadata."""
-        # Simple sanitization — let FTS5 reject truly malformed queries
-        safe_q = query.replace('"', '""').strip()
-        if not safe_q:
+    def search(
+        self, query: str, limit: int = 20, *, phrase: bool = False
+    ) -> list[dict[str, Any]]:
+        """Full-text search across all messages. Returns snippet + metadata.
+
+        ``phrase=False`` (default) preserves the legacy behaviour: caller
+        is responsible for FTS5 syntax. Internal escaping only doubles
+        embedded ``"`` so the input doesn't break the SQL parser.
+        Existing callers (``mcp/server.py`` documents "FTS5 syntax";
+        ``tools/recall.py``) rely on this — changing the default would
+        be a silent behaviour change.
+
+        ``phrase=True`` wraps the entire query as a single FTS5 phrase
+        (``"…"``) so reserved characters (``:``, ``*``, ``(``, ``)``,
+        ``AND``/``OR``/``NOT``) are treated as literal text. Use this
+        for direct user input (e.g. CLI ``--search`` flag, P-12).
+        Mirrors the pattern :meth:`search_episodic` already uses.
+        """
+        stripped = query.strip()
+        if not stripped:
             return []
+        # phrase=True: wrap as `"…"` so FTS5 reserved chars stay literal.
+        # phrase=False: legacy — only escape internal `"` for SQL safety;
+        # FTS5 will reject malformed queries.
+        escaped = stripped.replace('"', '""')
+        safe_q = f'"{escaped}"' if phrase else escaped
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT m.session_id, m.role, m.timestamp, "

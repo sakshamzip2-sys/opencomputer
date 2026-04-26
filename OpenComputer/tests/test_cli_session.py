@@ -174,3 +174,304 @@ class TestResume:
         assert "opencomputer chat" in result.stdout
         assert "--resume" in result.stdout
         assert "abc-resumable" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Round 2B P-12: --label / --agent / --search filters
+# ---------------------------------------------------------------------------
+
+
+def _seed_titled(
+    home: Path,
+    session_id: str,
+    title: str,
+    *,
+    messages: list[tuple[str, str]] | None = None,
+) -> None:
+    """Drop a session with a custom title + arbitrary message texts."""
+    db = SessionDB(home / "sessions.db")
+    db.create_session(
+        session_id, platform="cli", model="claude-opus-4-7", title=title
+    )
+    if messages:
+        for role, content in messages:
+            db.append_message(session_id, Message(role=role, content=content))
+
+
+def _ids_in_output(output: str, candidates: list[str]) -> set[str]:
+    """Return which candidate ids appear in *output* (Rich-table-safe)."""
+    flat = "".join(c for c in output if c.isalnum())
+    return {cid for cid in candidates if cid.replace("-", "") in flat}
+
+
+class TestListFilters:
+    """P-12: --label / --agent / --search filters for session list."""
+
+    # --- --label ------------------------------------------------------
+
+    def test_label_substring_match(self, isolated_home: Path) -> None:
+        _seed_titled(isolated_home, "id-alpha", "Stock research notes")
+        _seed_titled(isolated_home, "id-beta", "Cooking ideas")
+        _seed_titled(isolated_home, "id-gamma", "Vacation planning")
+        result = runner.invoke(session_app, ["list", "--label", "stock"])
+        assert result.exit_code == 0
+        seen = _ids_in_output(result.stdout, ["id-alpha", "id-beta", "id-gamma"])
+        assert seen == {"id-alpha"}
+
+    def test_label_case_insensitive(self, isolated_home: Path) -> None:
+        _seed_titled(isolated_home, "id-mixed", "Q1 Report Draft")
+        result = runner.invoke(session_app, ["list", "--label", "REPORT"])
+        assert result.exit_code == 0
+        assert "id-mixed" in "".join(c for c in result.stdout if c.isalnum() or c == "-")
+
+    def test_label_no_match_returns_empty(self, isolated_home: Path) -> None:
+        _seed_titled(isolated_home, "id-x", "alpha")
+        _seed_titled(isolated_home, "id-y", "beta")
+        result = runner.invoke(session_app, ["list", "--label", "zeta"])
+        assert result.exit_code == 0
+        assert "no sessions match" in result.stdout.lower()
+        assert "id-x" not in result.stdout
+        assert "id-y" not in result.stdout
+
+    # --- --agent ------------------------------------------------------
+
+    def test_agent_switches_profile_db(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--agent <name>`` reads sessions from that profile's DB."""
+        # Arrange a two-profile world. Active profile = "default" (root).
+        # Named profile = "coder" under <root>/profiles/coder/.
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+        # Seed the default profile.
+        _seed_titled(tmp_path, "default-sess", "default profile work")
+        # Seed the coder profile.
+        coder_dir = tmp_path / "profiles" / "coder"
+        coder_dir.mkdir(parents=True, exist_ok=True)
+        _seed_titled(coder_dir, "coder-sess", "coder profile work")
+
+        # Without --agent we see the default profile's session.
+        result_default = runner.invoke(session_app, ["list"])
+        assert result_default.exit_code == 0
+        seen = _ids_in_output(
+            result_default.stdout, ["default-sess", "coder-sess"]
+        )
+        assert "default-sess" in seen
+        assert "coder-sess" not in seen
+
+        # With --agent coder we see only the coder profile's session.
+        result_coder = runner.invoke(session_app, ["list", "--agent", "coder"])
+        assert result_coder.exit_code == 0
+        seen2 = _ids_in_output(
+            result_coder.stdout, ["default-sess", "coder-sess"]
+        )
+        assert "coder-sess" in seen2
+        assert "default-sess" not in seen2
+
+    def test_agent_invalid_profile_name_errors(
+        self, isolated_home: Path
+    ) -> None:
+        # Uppercase / reserved names are rejected by validate_profile_name.
+        result = runner.invoke(session_app, ["list", "--agent", "BADNAME"])
+        assert result.exit_code == 1
+        assert "error" in result.stdout.lower()
+
+    # --- --search -----------------------------------------------------
+
+    def test_search_returns_sessions_with_matches(
+        self, isolated_home: Path
+    ) -> None:
+        _seed_titled(
+            isolated_home,
+            "match-sess",
+            "any title",
+            messages=[("user", "tell me about pancakes please")],
+        )
+        _seed_titled(
+            isolated_home,
+            "miss-sess",
+            "another title",
+            messages=[("user", "we should buy waffles")],
+        )
+        result = runner.invoke(session_app, ["list", "--search", "pancakes"])
+        assert result.exit_code == 0
+        seen = _ids_in_output(result.stdout, ["match-sess", "miss-sess"])
+        assert seen == {"match-sess"}
+
+    def test_search_no_match_returns_empty(self, isolated_home: Path) -> None:
+        _seed_titled(
+            isolated_home,
+            "id-1",
+            "title",
+            messages=[("user", "hello world")],
+        )
+        result = runner.invoke(
+            session_app, ["list", "--search", "zzz_no_such_token"]
+        )
+        assert result.exit_code == 0
+        assert "no sessions match" in result.stdout.lower()
+
+    def test_search_dedupes_multiple_message_matches(
+        self, isolated_home: Path
+    ) -> None:
+        # The same session has multiple matching messages — should
+        # appear ONCE in the output, not once per matched message.
+        _seed_titled(
+            isolated_home,
+            "dup-sess",
+            "title",
+            messages=[
+                ("user", "pancakes are great"),
+                ("assistant", "pancakes are indeed great"),
+                ("user", "more pancakes"),
+            ],
+        )
+        result = runner.invoke(session_app, ["list", "--search", "pancakes"])
+        assert result.exit_code == 0
+        flat = "".join(c for c in result.stdout if c.isalnum() or c == "-")
+        # 3 matching messages → only 1 row in the table.
+        assert flat.count("dup-sess") == 1
+
+    # --- FTS5 special-char inputs ------------------------------------
+
+    def test_search_handles_colon_literally(self, isolated_home: Path) -> None:
+        # `:` is the FTS5 column qualifier — without phrase wrapping
+        # this query would be parsed as "column a, term b" and fail.
+        _seed_titled(
+            isolated_home,
+            "colon-sess",
+            "x",
+            messages=[("user", "the ratio is a:b for the test")],
+        )
+        result = runner.invoke(session_app, ["list", "--search", "a:b"])
+        assert result.exit_code == 0, result.stdout
+        assert "colon-sess" in "".join(
+            c for c in result.stdout if c.isalnum() or c == "-"
+        )
+
+    def test_search_handles_double_quote(self, isolated_home: Path) -> None:
+        # Embedded `"` must be escaped as `""` by _escape_fts5.
+        _seed_titled(
+            isolated_home,
+            "quote-sess",
+            "x",
+            messages=[("user", 'the literal a"b appears here')],
+        )
+        result = runner.invoke(session_app, ["list", "--search", 'a"b'])
+        assert result.exit_code == 0, result.stdout
+        assert "quote-sess" in "".join(
+            c for c in result.stdout if c.isalnum() or c == "-"
+        )
+
+    def test_search_handles_asterisk(self, isolated_home: Path) -> None:
+        # `*` is the FTS5 prefix operator — phrase wrapping makes it
+        # literal so we don't accidentally do a prefix search.
+        _seed_titled(
+            isolated_home,
+            "star-sess",
+            "x",
+            messages=[("user", "see commit a*b for details")],
+        )
+        result = runner.invoke(session_app, ["list", "--search", "a*b"])
+        assert result.exit_code == 0, result.stdout
+        # The FTS5 tokenizer may strip `*` from indexed text, so we
+        # only assert exit_code success — i.e. the query did not
+        # syntax-error. That's the load-bearing property of escaping.
+
+    # --- Combinations -------------------------------------------------
+
+    def test_label_plus_search_intersection(self, isolated_home: Path) -> None:
+        _seed_titled(
+            isolated_home,
+            "both-sess",
+            "alpha report",
+            messages=[("user", "discussing widgets")],
+        )
+        _seed_titled(
+            isolated_home,
+            "label-only",
+            "alpha summary",
+            messages=[("user", "discussing gadgets")],  # no widgets
+        )
+        _seed_titled(
+            isolated_home,
+            "search-only",
+            "beta report",
+            messages=[("user", "discussing widgets")],  # title lacks alpha
+        )
+        result = runner.invoke(
+            session_app,
+            ["list", "--label", "alpha", "--search", "widgets"],
+        )
+        assert result.exit_code == 0
+        seen = _ids_in_output(
+            result.stdout, ["both-sess", "label-only", "search-only"]
+        )
+        assert seen == {"both-sess"}
+
+    def test_agent_plus_search_combine(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+        monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+        # Seed coder profile with two sessions, only one matching the search.
+        coder_dir = tmp_path / "profiles" / "coder"
+        coder_dir.mkdir(parents=True, exist_ok=True)
+        _seed_titled(
+            coder_dir,
+            "coder-other",
+            "x",
+            messages=[("user", "discussing pandas dataframes")],
+        )
+        _seed_titled(
+            coder_dir,
+            "coder-match",
+            "x",
+            messages=[("user", "matplotlib syntax help")],
+        )
+        # Default profile also contains "matplotlib" — should NOT leak in.
+        _seed_titled(
+            tmp_path,
+            "default-match",
+            "x",
+            messages=[("user", "matplotlib question")],
+        )
+        result = runner.invoke(
+            session_app,
+            ["list", "--agent", "coder", "--search", "matplotlib"],
+        )
+        assert result.exit_code == 0
+        seen = _ids_in_output(
+            result.stdout,
+            ["coder-other", "coder-match", "default-match"],
+        )
+        assert seen == {"coder-match"}
+
+
+# ---------------------------------------------------------------------------
+# Direct unit test for the FTS5 escaping helper
+# ---------------------------------------------------------------------------
+
+
+class TestEscapeFts5:
+    """Targeted unit test for _escape_fts5 — the load-bearing helper."""
+
+    def test_wraps_in_quotes(self) -> None:
+        from opencomputer.cli_session import _escape_fts5
+
+        assert _escape_fts5("hello") == '"hello"'
+
+    def test_doubles_internal_quotes(self) -> None:
+        from opencomputer.cli_session import _escape_fts5
+
+        assert _escape_fts5('a"b') == '"a""b"'
+
+    def test_passes_special_chars_inside_quotes(self) -> None:
+        from opencomputer.cli_session import _escape_fts5
+
+        # `:` `*` `(` `)` survive untouched inside the phrase wrapper —
+        # FTS5 sees them as literal text, not operators.
+        for ch in (":", "*", "(", ")", "AND", "NOT"):
+            wrapped = _escape_fts5(f"x{ch}y")
+            assert wrapped.startswith('"') and wrapped.endswith('"')
+            assert ch in wrapped

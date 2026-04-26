@@ -12,6 +12,40 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Round 2B P-12 — session-list filters)
+
+- **Three new options on `opencomputer session list`**, building on
+  G.33's title + preview support without touching display/preview
+  rendering:
+  - `--label <text>` — case-insensitive substring match against the
+    session title. Combine with `--agent` / `--search`.
+  - `--agent <profile-name>` — read sessions from a named profile's
+    `sessions.db` instead of the active profile. OpenComputer
+    profiles are per-directory so "filter by agent" maps to "open
+    that profile's DB" via `get_profile_dir(name) / "sessions.db"`.
+    Profile-name validation is delegated to `validate_profile_name`
+    so the same rules apply that `profiles.py` enforces elsewhere.
+  - `--search <text>` — FTS5 query against message text; returns
+    sessions whose messages contained matches (deduped: a session
+    with N matching messages still only appears once). Reuses the
+    existing `SessionDB.search()` path — no parallel SQL builder.
+- **FTS5 escaping** lives in `opencomputer/cli_session.py` as
+  `_escape_fts5(query)` and is mirrored by a new opt-in
+  `SessionDB.search(..., phrase=True)` parameter. User input is
+  wrapped as a single FTS5 phrase (`"…"`) so reserved chars (`:`,
+  `*`, `(`, `)`, `AND`/`OR`/`NOT`) stay literal instead of being
+  parsed as operators. The legacy `SessionDB.search()` default
+  (`phrase=False`) is unchanged so existing callers (`mcp/server.py`
+  documents the param as "FTS5 syntax", `tools/recall.py`) keep
+  working.
+- **16 new tests** in `tests/test_cli_session.py`
+  (`TestListFilters` + `TestEscapeFts5`) covering: each filter in
+  isolation, label case-insensitivity, agent profile-DB switching,
+  agent invalid-name rejection, search dedupe, FTS5 special-char
+  inputs (`a:b`, `a"b`, `a*b`), no-match returns the empty hint,
+  label+search intersection, agent+search composition, and direct
+  unit tests for the escape helper.
+
 ### Added (Round 2B P-10 — plugin auto-install in setup wizard)
 
 The first-run setup wizard now offers to enable any plugin a user's
@@ -50,7 +84,6 @@ Tests: `tests/test_setup_wizard_p10_auto_enable.py` (13 tests).
 Cases (a)–(e) from the plan, plus a typer.Exit safety-net case, a
 wildcard (`enabled: "*"`) no-op case, and the no-network regression
 guard.
-
 ### Removed (OI Tier 1 trimmed from 8 to 5 tools, 2026-04-25)
 
 User-directed cleanup. Three Tier 1 tools were redundant with
