@@ -59,6 +59,27 @@ def test_bootstrap_force_reruns(tmp_path: Path, monkeypatch):
     assert m.called
 
 
+def test_bootstrap_cli_displays_calendar_browser_counters(
+    tmp_path: Path, monkeypatch,
+):
+    """V2.A-T5 — CLI must surface the calendar + browser counters."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    with patch("opencomputer.cli_profile.run_bootstrap") as m:
+        m.return_value.identity_nodes_written = 0
+        m.return_value.interview_nodes_written = 0
+        m.return_value.files_scanned = 0
+        m.return_value.git_commits_scanned = 0
+        m.return_value.calendar_events_scanned = 5
+        m.return_value.browser_visits_scanned = 12
+        m.return_value.elapsed_seconds = 0.1
+        result = runner.invoke(profile_app, ["bootstrap", "--skip-interview"])
+    assert result.exit_code == 0
+    assert "Calendar events scanned" in result.stdout
+    assert "5" in result.stdout
+    assert "Browser visits scanned" in result.stdout
+    assert "12" in result.stdout
+
+
 def test_bootstrap_then_prompt_includes_user_facts(tmp_path: Path, monkeypatch):
     """E2E: bootstrap → graph populated → prompt builder injects facts."""
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))

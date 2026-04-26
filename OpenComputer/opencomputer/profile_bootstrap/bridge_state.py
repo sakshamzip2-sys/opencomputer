@@ -9,6 +9,7 @@ is a destructive operation — old token is immediately invalid.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -44,4 +45,5 @@ def load_or_create(*, rotate: bool = False) -> BridgeState:
     state = BridgeState(token=secrets.token_urlsafe(32), port=18791)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(asdict(state)))
+    os.chmod(p, 0o600)  # restrict to owner only — token grants HTTP authority
     return state

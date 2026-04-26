@@ -113,11 +113,13 @@ def profile_bootstrap(
 
     typer.echo("")
     typer.echo("Bootstrap complete:")
-    typer.echo(f"  Identity nodes written:  {result.identity_nodes_written}")
-    typer.echo(f"  Interview nodes written: {result.interview_nodes_written}")
-    typer.echo(f"  Files scanned:           {result.files_scanned}")
-    typer.echo(f"  Git commits scanned:     {result.git_commits_scanned}")
-    typer.echo(f"  Elapsed:                 {result.elapsed_seconds:.1f}s")
+    typer.echo(f"  Identity nodes written:    {result.identity_nodes_written}")
+    typer.echo(f"  Interview nodes written:   {result.interview_nodes_written}")
+    typer.echo(f"  Files scanned:             {result.files_scanned}")
+    typer.echo(f"  Git commits scanned:       {result.git_commits_scanned}")
+    typer.echo(f"  Calendar events scanned:   {result.calendar_events_scanned}")
+    typer.echo(f"  Browser visits scanned:    {result.browser_visits_scanned}")
+    typer.echo(f"  Elapsed:                   {result.elapsed_seconds:.1f}s")
 
 
 def _detect_git_repos(max_repos: int = 50) -> list:
