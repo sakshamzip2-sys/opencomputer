@@ -278,6 +278,50 @@ def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
         pass
 
 
+#: Columns that historically arrived via numbered ALTER migrations.
+#: We re-assert their presence on every connect so a DB whose
+#: schema_version row was bumped without the corresponding ALTER firing
+#: (cause: a partial migration on an older build, or hand-edited
+#: schema_version) self-heals on next open instead of crashing the first
+#: write that touches the missing column.
+_EXPECTED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("messages", "reasoning_details", "TEXT"),
+    ("messages", "codex_reasoning_items", "TEXT"),
+    ("episodic_events", "dreamed_into", "INTEGER"),
+)
+
+
+def _self_heal_columns(conn: sqlite3.Connection) -> None:
+    """Ensure every column in :data:`_EXPECTED_COLUMNS` exists.
+
+    Defence-in-depth against stored ``schema_version`` lying about the
+    physical schema. ``ALTER TABLE ADD COLUMN`` is fast and
+    non-destructive on SQLite (no table rewrite). We skip cleanly when:
+
+    - the target table doesn't exist yet (legacy DBs that pre-date a
+      table — the relevant numbered migration will create it on next
+      bump, not this self-heal), or
+    - the column already exists ("duplicate column name").
+
+    Any other ``OperationalError`` propagates so genuine schema bugs
+    surface in tests instead of being masked.
+    """
+    for table, column, sql_type in _EXPECTED_COLUMNS:
+        cur = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        )
+        if cur.fetchone() is None:
+            continue
+        try:
+            conn.execute(
+                f'ALTER TABLE "{table}" ADD COLUMN "{column}" {sql_type}'
+            )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+
+
 def apply_migrations(conn: sqlite3.Connection) -> None:
     """Advance DB from stored schema_version to SCHEMA_VERSION. Idempotent."""
     current = _read_schema_version(conn)
@@ -286,6 +330,7 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
         globals()[fn_name](conn)
         _bump_schema_version(conn, current + 1)
         current += 1
+    _self_heal_columns(conn)
     conn.commit()
 
 

@@ -12,6 +12,21 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Fixed
+
+- `opencomputer/agent/state.py` — `apply_migrations()` now self-heals
+  the `messages.reasoning_details` / `messages.codex_reasoning_items` /
+  `episodic_events.dreamed_into` columns on every connect, regardless
+  of stored `schema_version`. Closes a real failure mode where a DB
+  whose `schema_version` row was bumped without the corresponding
+  ALTER firing (cause: a partial migration on an older build, or
+  hand-edited `schema_version`) would crash the first assistant turn
+  with `OperationalError: table messages has no column named
+  reasoning_details`. Self-heal is bounded to known column names,
+  skips tables that don't exist yet, and only swallows "duplicate
+  column name" errors so genuine schema bugs still surface in tests.
+  Regression test in `tests/test_state_self_heal_columns.py`.
+
 ### Added (Round 2B P-16 — security hardening)
 
 Two surfaces tightened against the most common credential-leak +
