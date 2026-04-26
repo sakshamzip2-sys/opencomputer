@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
 from extensions.coding_harness.oi_bridge.subprocess.protocol import (
     ErrorCode,
     JSONRPCError,

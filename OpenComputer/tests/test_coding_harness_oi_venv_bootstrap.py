@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 from extensions.coding_harness.oi_bridge.subprocess.venv_bootstrap import (
     OI_VERSION,
     BootstrapError,

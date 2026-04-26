@@ -56,7 +56,7 @@ def test_log_includes_timestamp_and_pid(tmp_path: Path) -> None:
     lg.log(kind="tool_call", tool_name="Read")
     line = log_path.read_text(encoding="utf-8").strip()
     record = json.loads(line)
-    assert "timestamp" in record and isinstance(record["timestamp"], (int, float))
+    assert "timestamp" in record and isinstance(record["timestamp"], int | float)
     assert record["pid"] == os.getpid()
 
 

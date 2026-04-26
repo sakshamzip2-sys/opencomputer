@@ -170,7 +170,7 @@ def parse_agent_template(path: Path, source: str) -> AgentTemplate:
         tools = ()
     elif isinstance(tools_raw, str):
         tools = tuple(s.strip() for s in tools_raw.split(",") if s.strip())
-    elif isinstance(tools_raw, (list, tuple)):
+    elif isinstance(tools_raw, list | tuple):
         tools = tuple(str(s).strip() for s in tools_raw if str(s).strip())
     else:
         raise ValueError(
