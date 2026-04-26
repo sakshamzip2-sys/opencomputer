@@ -12,6 +12,49 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Round 2B P-6 — MCP OAuth 2.1 PKCE flow)
+
+Adds an OAuth 2.1 Authorization-Code-with-PKCE flow for MCP servers, with
+every defense in depth turned on. Builds on the G.13 token storage layer
+shipped earlier (`OAuthTokenStore.put` / `get`) — the new flow simply
+hands its token response to that store.
+
+- **New module `opencomputer/mcp/oauth_pkce.py`** — `run_pkce_flow(...)`
+  drives the full dance end-to-end. Designed so callers don't have to
+  think about the security primitives; they're encoded into the function:
+  - `code_verifier` is `secrets.token_urlsafe(64)` — 256-bit entropy,
+    well above RFC 7636's 43-char minimum.
+  - `code_challenge` is the S256 derivation
+    (`base64.urlsafe_b64encode(sha256(verifier)).rstrip(b"=")`).
+  - CSRF `state` is `secrets.token_urlsafe(32)` and validated with
+    `secrets.compare_digest` (constant-time, never `==`).
+  - Callback server binds **`127.0.0.1` only** — never `0.0.0.0`,
+    never `localhost` (which can resolve to IPv6 on some hosts and
+    silently break the redirect).
+  - Bound to ephemeral port `("127.0.0.1", 0)` — kernel picks; the
+    redirect URI is constructed from `server.server_address[1]`.
+  - 5-minute default callback timeout (`OAuthFlowTimeout`); shorter
+    values honoured for tests.
+  - `try/finally` shuts the listening socket down even on exception
+    (`server.shutdown() + server.server_close()`).
+  - `webbrowser.open()` returning False does NOT crash — the URL is
+    printed to stdout for manual paste (works in headless / SSH).
+- **New CLI: `opencomputer mcp oauth-login <provider>`** — orchestrates
+  the flow, then persists the response via the existing
+  `OAuthTokenStore.put(...)`. `--authorization-url`, `--token-url`, and
+  `--client-id` are required CLI options because the MCP server-config
+  schema does not yet carry OAuth manifest fields; users paste the
+  three URLs directly from their provider's docs.
+- **New tests `tests/test_mcp_oauth_pkce.py`** — 19 cases. None launch
+  a real browser: `webbrowser.open` is monkeypatched and the callback
+  is fired by a side thread that GETs the redirect URL. Coverage:
+  PKCE primitive correctness (incl. RFC 7636 Appendix B test vector),
+  bind to `127.0.0.1`, ephemeral port, happy path, state mismatch
+  raises (and the token endpoint is NOT called), timeout raises,
+  browser-open failure prints the URL, malformed callback (missing
+  `code`) raises, scope omission, extra authorize params, input
+  validation, and CLI-level integration with the token store.
+
 ### Added (Round 2B P-7 — OSV malware scanning)
 
 Pre-flight vulnerability scan against `OSV.dev` for every stdio MCP
