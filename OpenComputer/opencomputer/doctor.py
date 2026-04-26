@@ -389,6 +389,65 @@ async def _run_contributions(fix: bool) -> list[Check]:
     return out
 
 
+def check_ollama_available() -> Check:
+    """V2.B-T10 — check whether Ollama is on PATH.
+
+    Ollama is required for Layer 3 LLM-based artifact extraction during
+    profile deepening. ``fail`` (not warn) when missing because deepening
+    silently degrades without it.
+
+    Lazy import: probe lives in :mod:`opencomputer.profile_bootstrap.llm_extractor`
+    so the optional deepening deps don't get pulled in at doctor-import time.
+    """
+    from opencomputer.profile_bootstrap.llm_extractor import is_ollama_available
+
+    if is_ollama_available():
+        return Check(name="ollama", status="pass", detail="ollama on PATH")
+    return Check(
+        name="ollama",
+        status="fail",
+        detail=(
+            "Ollama not found. Install via 'brew install ollama' (macOS) "
+            "or follow https://ollama.com — required for Layer 3 deepening."
+        ),
+    )
+
+
+def check_embedding_available() -> Check:
+    """V2.B-T10 — check whether sentence-transformers is importable.
+
+    Required for Layer 4 semantic search over deepening artifacts. ``fail``
+    when missing so the doctor surfaces it; install via the
+    ``opencomputer[deepening]`` extra.
+    """
+    from opencomputer.profile_bootstrap.embedding import is_embedding_available
+
+    if is_embedding_available():
+        return Check(name="sentence-transformers", status="pass", detail="importable")
+    return Check(
+        name="sentence-transformers",
+        status="fail",
+        detail="Install via 'pip install opencomputer[deepening]'",
+    )
+
+
+def check_chroma_available() -> Check:
+    """V2.B-T10 — check whether chromadb is importable.
+
+    Required for the deepening vector store. ``fail`` when missing; install
+    via the ``opencomputer[deepening]`` extra.
+    """
+    from opencomputer.profile_bootstrap.vector_store import is_chroma_available
+
+    if is_chroma_available():
+        return Check(name="chromadb", status="pass", detail="importable")
+    return Check(
+        name="chromadb",
+        status="fail",
+        detail="Install via 'pip install opencomputer[deepening]'",
+    )
+
+
 def _check_g_subsystems() -> list[Check]:
     """Health checks for Sub-project G subsystems (cron / cost-guard / oauth /
     voice / webhook). Read-only — surfaces state without modifying anything.

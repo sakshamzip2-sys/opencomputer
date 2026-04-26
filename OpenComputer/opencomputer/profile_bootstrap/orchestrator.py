@@ -285,3 +285,50 @@ def run_bootstrap(
         marker_path.write_text(json.dumps({**asdict(result), "completed_at": time.time()}))
 
     return result
+
+
+def extract_and_emit_motif(
+    *,
+    content: str,
+    kind: str,
+    source_path: str,
+    bus: Any | None = None,
+) -> bool:
+    """Run LLM extraction on an artifact and emit a motif on the F2 bus.
+
+    Returns True if a motif was emitted; False if Ollama is unavailable
+    or the extraction was empty. Best-effort — never raises.
+    """
+    from opencomputer.profile_bootstrap.llm_extractor import (
+        ArtifactExtraction,
+        OllamaUnavailableError,
+        extract_artifact,
+    )
+    try:
+        extraction = extract_artifact(content)
+    except OllamaUnavailableError:
+        return False
+    if extraction == ArtifactExtraction():
+        # All defaults → nothing extracted.
+        return False
+
+    if bus is None:
+        from opencomputer.ingestion.bus import get_default_bus
+        bus = get_default_bus()
+
+    from plugin_sdk.ingestion import SignalEvent
+
+    bus.publish(SignalEvent(
+        event_type="layered_awareness.artifact_extraction",
+        source="profile_bootstrap.orchestrator",
+        metadata={
+            "kind": kind,
+            "source_path": source_path,
+            "topic": extraction.topic,
+            "people": list(extraction.people),
+            "intent": extraction.intent,
+            "sentiment": extraction.sentiment,
+            "timestamp": extraction.timestamp,
+        },
+    ))
+    return True

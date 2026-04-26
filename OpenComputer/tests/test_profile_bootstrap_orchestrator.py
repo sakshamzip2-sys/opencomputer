@@ -448,3 +448,64 @@ def test_bootstrap_zero_counters_when_consent_denied(
         )
     assert result.calendar_events_scanned == 0
     assert result.browser_visits_scanned == 0
+
+
+# ─── V2.B-T7 — extract_and_emit_motif helper ─────────────────────────
+
+
+def test_extract_and_emit_motif_returns_false_when_ollama_unavailable():
+    from unittest.mock import MagicMock, patch
+
+    from opencomputer.profile_bootstrap.llm_extractor import OllamaUnavailableError
+    from opencomputer.profile_bootstrap.orchestrator import extract_and_emit_motif
+
+    bus = MagicMock()
+    with patch(
+        "opencomputer.profile_bootstrap.llm_extractor.extract_artifact",
+        side_effect=OllamaUnavailableError("test"),
+    ):
+        emitted = extract_and_emit_motif(
+            content="x", kind="file", source_path="/a", bus=bus,
+        )
+    assert emitted is False
+    bus.publish.assert_not_called()
+
+
+def test_extract_and_emit_motif_publishes_when_extraction_nonempty():
+    from unittest.mock import MagicMock, patch
+
+    from opencomputer.profile_bootstrap.llm_extractor import ArtifactExtraction
+    from opencomputer.profile_bootstrap.orchestrator import extract_and_emit_motif
+
+    bus = MagicMock()
+    fake = ArtifactExtraction(topic="stocks", sentiment="neutral")
+    with patch(
+        "opencomputer.profile_bootstrap.llm_extractor.extract_artifact",
+        return_value=fake,
+    ):
+        emitted = extract_and_emit_motif(
+            content="x", kind="file", source_path="/a", bus=bus,
+        )
+    assert emitted is True
+    bus.publish.assert_called_once()
+    event = bus.publish.call_args[0][0]
+    assert event.event_type == "layered_awareness.artifact_extraction"
+    assert event.metadata["topic"] == "stocks"
+
+
+def test_extract_and_emit_motif_returns_false_when_extraction_blank():
+    from unittest.mock import MagicMock, patch
+
+    from opencomputer.profile_bootstrap.llm_extractor import ArtifactExtraction
+    from opencomputer.profile_bootstrap.orchestrator import extract_and_emit_motif
+
+    bus = MagicMock()
+    with patch(
+        "opencomputer.profile_bootstrap.llm_extractor.extract_artifact",
+        return_value=ArtifactExtraction(),
+    ):
+        emitted = extract_and_emit_motif(
+            content="x", kind="file", source_path="/a", bus=bus,
+        )
+    assert emitted is False
+    bus.publish.assert_not_called()

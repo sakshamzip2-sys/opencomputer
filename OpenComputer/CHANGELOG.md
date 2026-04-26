@@ -224,6 +224,49 @@ dreaming, multi-channel onboarding).
   tooling that needs to reason about the version string.
 
 
+### Added (Layered Awareness V2.B — Background Deepening, 2026-04-27)
+
+Layer 3 of the Layered Awareness design ships as a separate orchestrator
+that progressively ingests historical data over expanding time windows.
+
+- **Ollama LLM extractor** (`profile_bootstrap/llm_extractor.py`) —
+  was deferred from V1 MVP. Subprocess wrapper around `ollama run`
+  that turns artifacts into structured `ArtifactExtraction` records
+  (topic, people, intent, sentiment, timestamp). Falls back gracefully
+  when Ollama isn't installed.
+- **Content-addressed raw artifact store**
+  (`profile_bootstrap/raw_store.py`) — SHA256 hashing, two-level fanout
+  (`<aa>/<bb>/<full-sha>.json`), idempotent writes.
+- **BGE-small embedding helper** (`profile_bootstrap/embedding.py`) —
+  via sentence-transformers (optional `[deepening]` dep). Module-level
+  model cache so first call is slow but subsequent calls are fast.
+- **Chroma vector store wrapper** (`profile_bootstrap/vector_store.py`) —
+  PersistentClient in sqlite mode, single collection per profile.
+  Narrow API: upsert + query → list[VectorMatch].
+- **Spotlight FTS via mdfind** (`profile_bootstrap/spotlight.py`) —
+  zero-cost FTS surface on macOS; queries the same index Spotlight
+  already maintains. Returns SpotlightHit records.
+- **psutil-based idle detection** (`profile_bootstrap/idle.py`) —
+  CPU<20% AND plugged-in (or no battery sensor) → idle. Fail-safe to
+  not-idle when psutil unavailable.
+- **Deepening loop** (`profile_bootstrap/deepening.py`) — window
+  progression (7d → 30d → 90d → 365d → all-time), cursor persistence
+  at `<profile_home>/profile_bootstrap/deepening_cursor.json`,
+  per-call advance. Idle-gated unless `--force`.
+- **`extract_and_emit_motif` helper** in orchestrator —
+  feeds `layered_awareness.artifact_extraction` SignalEvents onto the
+  F2 bus for downstream graph importers.
+- **`opencomputer profile deepen [--force --max-artifacts N]`** CLI.
+- **Doctor checks** for Ollama, sentence-transformers, chromadb.
+- **`pyproject.toml [deepening]` extras**: `psutil>=5.9`,
+  `chromadb>=0.5`, `sentence-transformers>=3.0`.
+
+V2.C (life-event detector + plural personas) ships separately.
+
+Spec: `docs/superpowers/specs/2026-04-26-layered-awareness-design.md`
+Plan: `docs/superpowers/plans/2026-04-27-layered-awareness-v2b-deepening.md`
+
+
 ### Added (Layered Awareness V2.A — V1 follow-ups, 2026-04-26)
 
 Six follow-up fixes from the PR #143 V1 review backlog. Each shipped
