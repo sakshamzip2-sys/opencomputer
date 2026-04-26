@@ -42,6 +42,15 @@ dependencies = [
 
 [project.optional-dependencies]
 bedrock = ["boto3>=1.35.0"]
+# Optional: Layer 3 deepening pipeline (BGE embeddings + Chroma vector
+# store + psutil resource probes). Install with
+#   pip install opencomputer[deepening]
+# Heavy weights download on first BGE load. See profile_bootstrap/.
+deepening = [
+  "psutil>=5.9",
+  "chromadb>=0.5",
+  "sentence-transformers>=3.0",
+]
 dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.24",
