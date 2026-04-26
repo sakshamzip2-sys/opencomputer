@@ -24,6 +24,7 @@ from extensions.coding_harness.oi_bridge.tools.tier_1_introspection import (
     ReadClipboardOnceTool,
     ScreenshotTool,
 )
+
 from plugin_sdk.core import ToolCall
 
 # ---------------------------------------------------------------------------
