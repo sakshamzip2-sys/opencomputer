@@ -27,9 +27,12 @@ from plugin_sdk.core import Message, ToolCall
 #: via :func:`apply_migrations`. v1 = baseline (sessions/messages/FTS/
 #: episodic). v2 = II.6 reasoning-chain metadata columns on ``messages``.
 #: v3 = F1 consent layer tables (consent_grants, consent_counters,
-#: audit_log). Existing rows keep their data — new columns default to
-#: NULL.
-SCHEMA_VERSION = 3
+#: audit_log). v4 = Round 2A P-18 episodic-memory dreaming column
+#: (``dreamed_into`` on ``episodic_events`` — points an entry that has
+#: been folded into a consolidation row at the row id of that
+#: consolidation). Existing rows keep their data — new columns default
+#: to NULL.
+SCHEMA_VERSION = 4
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -94,13 +97,19 @@ END;
 -- events are denormalised summaries optimised for "remind me what we decided
 -- about X" queries across many sessions.
 CREATE TABLE IF NOT EXISTS episodic_events (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  TEXT NOT NULL,
-    turn_index  INTEGER NOT NULL,
-    summary     TEXT NOT NULL,
-    tools_used  TEXT,         -- comma-separated tool names
-    file_paths  TEXT,         -- comma-separated paths the turn touched
-    timestamp   REAL NOT NULL,
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    TEXT NOT NULL,
+    turn_index    INTEGER NOT NULL,
+    summary       TEXT NOT NULL,
+    tools_used    TEXT,         -- comma-separated tool names
+    file_paths    TEXT,         -- comma-separated paths the turn touched
+    timestamp     REAL NOT NULL,
+    -- Round 2A P-18: when this row has been folded into a dreaming
+    -- consolidation, ``dreamed_into`` points at the consolidation's
+    -- ``episodic_events.id``. NULL = not yet dreamed (re-run candidate).
+    -- Consolidation rows themselves keep ``dreamed_into = NULL`` so they
+    -- can be re-summarised in a later pass if desired.
+    dreamed_into  INTEGER,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
@@ -192,6 +201,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (0, 1): "_migrate_v0_to_v1",
     (1, 2): "_migrate_v1_to_v2",
     (2, 3): "_migrate_v2_to_v3",
+    (3, 4): "_migrate_v3_to_v4",
 }
 
 
@@ -246,6 +256,26 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
 def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
     """F1: add consent_grants, consent_counters, audit_log tables + triggers."""
     conn.executescript(V3_CONSENT_DDL)
+
+
+def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
+    """Round 2A P-18: add ``dreamed_into`` column to ``episodic_events``.
+
+    Pre-P18 DBs only carry the (id, session_id, turn_index, summary,
+    tools_used, file_paths, timestamp) columns. ``dreamed_into`` is
+    NULLable so legacy rows are unaffected — every existing entry is
+    "not yet dreamed", which is the correct semantic on first run of
+    ``opencomputer memory dream-now`` after upgrade.
+
+    Wrapped in try/except so fresh DBs already built from the v1 DDL
+    that includes the new column (per the P-18 DDL update) get a silent
+    no-op.
+    """
+    try:
+        conn.execute("ALTER TABLE episodic_events ADD COLUMN dreamed_into INTEGER")
+    except sqlite3.OperationalError:
+        # Column already exists (fresh DB; or partial migration).
+        pass
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -527,6 +557,81 @@ class SessionDB:
                     (limit,),
                 ).fetchall()
             return [dict(r) for r in rows]
+
+    # ─── episodic dreaming (Round 2A P-18) ────────────────────────
+
+    def list_undreamed_episodic(
+        self, session_id: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Return episodic rows with ``dreamed_into IS NULL`` ordered oldest-first.
+
+        Oldest-first ordering matters for clustering: dreaming groups by
+        date bucket + topic-keyword overlap, so we want chronologically
+        adjacent entries to land in the same cluster naturally.
+
+        Consolidation rows themselves (``turn_index = -1``) are
+        excluded so they aren't re-summarised into super-summaries on
+        every subsequent ``dream-now`` pass — a recursive consolidation
+        path is left open for a future "compact" sub-feature with its
+        own knobs.
+        """
+        with self._connect() as conn:
+            if session_id is not None:
+                rows = conn.execute(
+                    "SELECT * FROM episodic_events "
+                    "WHERE session_id = ? AND dreamed_into IS NULL "
+                    "AND turn_index >= 0 "
+                    "ORDER BY timestamp ASC LIMIT ?",
+                    (session_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM episodic_events "
+                    "WHERE dreamed_into IS NULL "
+                    "AND turn_index >= 0 "
+                    "ORDER BY timestamp ASC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def record_dream_consolidation(
+        self,
+        *,
+        session_id: str,
+        summary: str,
+        source_event_ids: list[int],
+        tools_used: list[str] | None = None,
+        file_paths: list[str] | None = None,
+    ) -> int:
+        """Atomically write a consolidation row and stamp originals with ``dreamed_into``.
+
+        The consolidation row itself is a regular ``episodic_events`` entry
+        with ``dreamed_into = NULL`` (so it stays searchable via the
+        existing FTS5 index) but its ``turn_index`` is set to ``-1`` to
+        flag it as agent-generated rather than a recorded user turn.
+
+        ``source_event_ids`` are updated in the same transaction so a
+        crash mid-way leaves the originals undreamed (idempotent re-run
+        will pick them up).
+        """
+        tools_str = ",".join(tools_used) if tools_used else None
+        files_str = ",".join(file_paths) if file_paths else None
+        with self._txn() as conn:
+            cur = conn.execute(
+                "INSERT INTO episodic_events "
+                "(session_id, turn_index, summary, tools_used, file_paths, timestamp, dreamed_into) "
+                "VALUES (?, ?, ?, ?, ?, ?, NULL)",
+                (session_id, -1, summary, tools_str, files_str, time.time()),
+            )
+            consolidation_id = int(cur.lastrowid or 0)
+            if source_event_ids:
+                placeholders = ",".join("?" * len(source_event_ids))
+                conn.execute(
+                    f"UPDATE episodic_events SET dreamed_into = ? "
+                    f"WHERE id IN ({placeholders})",
+                    (consolidation_id, *source_event_ids),
+                )
+            return consolidation_id
 
     # ─── FTS5 search ──────────────────────────────────────────────
 

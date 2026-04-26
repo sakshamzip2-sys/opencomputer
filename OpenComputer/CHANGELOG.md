@@ -12,6 +12,17 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Round 2A P-18 — episodic-memory dreaming, EXPERIMENTAL)
+
+- **Background dreaming turn** that consolidates recent episodic-memory
+  entries into per-cluster summary rows so FTS5 cross-session search
+  stays useful as the corpus grows. OFF by default; enabled per-profile
+  via `MemoryConfig.dreaming_enabled` (settable through `opencomputer
+  memory dream-on`). Uses the cheap auxiliary model when configured;
+  cluster heuristic is a no-embedding KISS path (ISO-week bucket + ≥1
+  shared file basename or ≥2 shared topic tokens). Idempotent + retries
+  once on LLM failure without losing originals.
+
 ### Added (Round 2B P-12 — session-list filters)
 
 - **Three new options on `opencomputer session list`**, building on
@@ -167,7 +178,6 @@ real use case the OpenCLI plugin was supposed to address. Saksham's
 is **not implemented by either OI or OpenCLI** — that needs a separate
 design built on top of the existing User Model system (F4); to be
 discussed separately.
-
 ### Added (Sub-project G.34 — FastMCP authoring skill, Tier 4)
 
 - **New bundled skill** at `opencomputer/skills/fastmcp-authoring/` —
