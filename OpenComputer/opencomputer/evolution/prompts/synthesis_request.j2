@@ -1,0 +1,39 @@
+You observed a repeated pattern in this user's session.
+
+Pattern: {{ proposal.pattern_summary }}
+Pattern key: {{ proposal.pattern_key }}
+Sample tool arguments:
+{%- for s in proposal.sample_arguments %}
+  - {{ s }}
+{%- endfor %}
+
+Draft a SKILL.md that codifies a *reusable* workflow for this pattern.
+
+Hard rules:
+
+1. **Frontmatter** (YAML, between two `---` lines):
+   - `name`: slug-style, lowercase, hyphenated. Distinctive — must NOT
+     duplicate any of these existing skill names: {{ existing_names | join(", ") }}.
+   - `description`: ONE line, ≤ 100 characters. Must contain
+     distinctive trigger tokens so the activation matcher fires on
+     relevant prompts. Lead with "Use when...".
+
+2. **Body** (markdown after the closing `---`):
+   - `# Title` heading (Title Case, matches the slug).
+   - `## When to use` — 2-4 bullets, situation-shaped.
+   - `## Steps` — numbered list, imperative voice. ≤ 8 steps.
+   - `## Notes` — gotchas / caveats. Optional.
+
+3. **Total length** must be **under {{ max_chars }} characters**, INCLUDING
+   the frontmatter. Concise + opinionated > verbose + hedged.
+
+4. **Must NOT include**:
+   - Any specific user data, file paths, or session content from the
+     samples above.
+   - Shell commands that delete data (`rm -rf`, `format`, `eject`, etc.).
+   - Personally identifying info from the samples (names, emails,
+     IPs, secrets).
+
+5. Output ONLY the SKILL.md content, nothing else (no preamble, no
+   ```markdown fences, no explanation). The very first character of
+   your output must be `-`.
