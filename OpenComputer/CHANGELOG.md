@@ -12,6 +12,41 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Round 2B P-7 — OSV malware scanning)
+
+Pre-flight vulnerability scan against `OSV.dev` for every stdio MCP
+server launched via `npx` or `uvx`. Hits emit a typed
+`mcp_security.osv_hit` event on the F2 bus so audit / trajectory
+subscribers see every advisory the agent encounters during startup.
+
+- `opencomputer/mcp/osv_check.py` — `check_package(name, ecosystem)`
+  with a 24h on-disk cache at `~/.opencomputer/cache/osv.json`
+  (cache directory pinned to mode 0700). Network failures are
+  fail-open: empty `vulns` + warning, so an OSV outage cannot
+  break MCP startup.
+- `opencomputer/mcp/client.py` — `MCPConnection.connect()` now runs
+  the pre-flight gate before spawning a stdio process. HIGH /
+  CRITICAL severity advisories trigger the bus event in both
+  warn-and-allow (default) and fail-closed modes; `fail_closed`
+  additionally refuses the launch and surfaces the advisory IDs in
+  `last_error`.
+- `opencomputer/agent/config.py` — `MCPConfig.osv_check_enabled`
+  (default `True`) and `MCPConfig.osv_check_fail_closed` (default
+  `False`). The chat / gateway / `mcp status` CLIs plumb both flags
+  through to `MCPManager.connect_all`.
+- New `MCPLaunchBlockedError` exception type (exported from
+  `opencomputer.mcp.client`) for downstream callers that wrap the
+  connect path and want a typed handle on the block reason.
+- New typed event `_OSVSecurityEvent` (discriminator
+  `mcp_security.osv_hit`) carries package coords, severity flag,
+  advisory IDs, and a `blocked` boolean. Subscribers can `subscribe_pattern("mcp_security.*", ...)`
+  for forward-compat with future security signals.
+
+Tests: `tests/test_osv_check.py` adds 27 cases covering clean
+package, fail-open + fail-closed vuln paths, network-error fail-open,
+TTL fresh + stale cache hits, package extraction across npx/uvx
+shapes, severity-detection helpers, and the `osv_check_enabled` short-
+circuit. Total suite: 2846 passing.
 ### Added (Round 2B P-3 — inactivity-based loop timeout)
 
 - New `LoopConfig.inactivity_timeout_s` (default 300s) — wall-clock

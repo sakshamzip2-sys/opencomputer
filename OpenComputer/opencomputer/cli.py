@@ -507,7 +507,13 @@ def chat(
     # Connect MCP servers synchronously in chat mode (simpler — no event loop yet)
     n_mcp_tools = 0
     if cfg.mcp.servers:
-        n_mcp_tools = asyncio.run(mcp_mgr.connect_all(list(cfg.mcp.servers)))
+        n_mcp_tools = asyncio.run(
+            mcp_mgr.connect_all(
+                list(cfg.mcp.servers),
+                osv_check_enabled=cfg.mcp.osv_check_enabled,
+                osv_check_fail_closed=cfg.mcp.osv_check_fail_closed,
+            )
+        )
 
     session_id = resume or str(uuid.uuid4())
     console.print(f"[bold cyan]OpenComputer v{__version__}[/bold cyan]")
@@ -708,7 +714,13 @@ def gateway() -> None:
 
     async def _run():
         if cfg.mcp.servers:
-            asyncio.create_task(mcp_mgr.connect_all(list(cfg.mcp.servers)))
+            asyncio.create_task(
+                mcp_mgr.connect_all(
+                    list(cfg.mcp.servers),
+                    osv_check_enabled=cfg.mcp.osv_check_enabled,
+                    osv_check_fail_closed=cfg.mcp.osv_check_fail_closed,
+                )
+            )
         try:
             await gw.serve_forever()
         finally:
