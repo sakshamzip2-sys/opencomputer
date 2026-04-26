@@ -23,6 +23,12 @@ You have tools available. Use them to accomplish what the user asks.
 </user-profile>
 
 {% endif %}
+{% if user_facts -%}
+## What I know about you
+
+{{ user_facts }}
+
+{% endif %}
 {% if skills -%}
 ## Skills available
 

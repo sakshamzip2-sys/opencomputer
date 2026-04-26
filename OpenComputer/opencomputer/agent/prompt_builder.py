@@ -59,6 +59,11 @@ class PromptContext:
     #: Phase 14.F / C3 — per-profile personality from ``SOUL.md``. Empty
     #: means "no profile identity" and the section is omitted.
     soul: str = ""
+    #: Layered Awareness MVP — pre-formatted top-K user-model facts built
+    #: via :meth:`PromptBuilder.build_user_facts` from the F4 graph. Empty
+    #: string means "no user-model knowledge yet" — base.j2 omits the
+    #: section accordingly.
+    user_facts: str = ""
 
 
 class PromptBuilder:
@@ -82,6 +87,7 @@ class PromptBuilder:
         declarative_memory: str = "",
         user_profile: str = "",
         soul: str = "",
+        user_facts: str = "",
         memory_char_limit: int = 4000,
         user_char_limit: int = 2000,
         template: str = "base.j2",
@@ -96,6 +102,7 @@ class PromptBuilder:
             memory=memory,
             user_profile=profile,
             soul=soul,
+            user_facts=user_facts,
         )
         tpl = self.env.get_template(template)
         return tpl.render(
@@ -106,8 +113,43 @@ class PromptBuilder:
             memory=ctx.memory,
             user_profile=ctx.user_profile,
             soul=ctx.soul,
+            user_facts=ctx.user_facts,
         )
 
+    def build_user_facts(
+        self,
+        *,
+        store: "UserModelStore | None" = None,
+        top_k: int = 20,
+    ) -> str:
+        """Return a pre-formatted top-K user-facts block, or empty string.
+
+        Pulls Identity + Goal + Preference + Attribute nodes from the
+        F4 user-model graph, sorted by kind priority then descending
+        confidence. Truncates to ~80 chars per fact for prompt token
+        economy. Returns ``""`` when the graph is empty so that
+        ``base.j2`` can omit the section via ``{% if user_facts %}``.
+        """
+        from opencomputer.user_model.store import UserModelStore
+
+        s = store if store is not None else UserModelStore()
+        # Bumped from default 100 to 500 so a fresh bootstrap (which
+        # may write 50-200 nodes) leaves headroom for ranking before
+        # the top-K cut.
+        nodes = s.list_nodes(
+            kinds=("identity", "goal", "preference", "attribute"),
+            limit=500,
+        )
+        # Rank: identity > goal > preference > attribute, then by confidence
+        kind_order = {"identity": 0, "goal": 1, "preference": 2, "attribute": 3}
+        nodes_ranked = sorted(
+            nodes,
+            key=lambda n: (kind_order.get(n.kind, 99), -n.confidence),
+        )[:top_k]
+        if not nodes_ranked:
+            return ""
+        lines = [f"- ({n.kind}) {n.value[:80]}" for n in nodes_ranked]
+        return "\n".join(lines)
 
     async def build_with_memory(
         self,
@@ -116,6 +158,7 @@ class PromptBuilder:
         declarative_memory: str = "",
         user_profile: str = "",
         soul: str = "",
+        user_facts: str = "",
         memory_char_limit: int = 4000,
         user_char_limit: int = 2000,
         template: str = "base.j2",
@@ -142,6 +185,7 @@ class PromptBuilder:
             declarative_memory=declarative_memory,
             user_profile=user_profile,
             soul=soul,
+            user_facts=user_facts,
             memory_char_limit=memory_char_limit,
             user_char_limit=user_char_limit,
             template=template,
