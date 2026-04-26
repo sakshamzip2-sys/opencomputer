@@ -364,6 +364,18 @@ class SessionDB:
                 "UPDATE sessions SET ended_at = ? WHERE id = ?",
                 (time.time(), session_id),
             )
+        # Clear the observability ContextVar so the next session in this
+        # coroutine doesn't inherit our id — verified via /ultrareview
+        # runtime test that the gateway daemon's per-message
+        # ``handle_message`` coroutine reuses the same context across
+        # sessions, leaking session_id into subsequent logs without this
+        # reset. Mirrors the create_session/set_session_id pattern.
+        try:
+            from opencomputer.observability.logging_config import set_session_id
+
+            set_session_id(None)
+        except Exception:  # noqa: BLE001 — never let logging glue break sessions
+            pass
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
