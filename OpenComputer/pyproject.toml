@@ -124,3 +124,6 @@ target-version = ["py312"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+  "benchmark: opt-in slow benchmark tests requiring a live LLM provider (run via `pytest -m benchmark`)",
+]
