@@ -1,4 +1,5 @@
 """Layered Awareness MVP — bridge CLI subcommand tests."""
+import stat as _stat
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -89,6 +90,39 @@ def test_bridge_start_no_token_errors(tmp_path: Path, monkeypatch):
     assert result.exit_code == 1
     combined = (result.stdout or "") + (result.stderr or "")
     assert "No token configured" in combined
+
+
+def test_bridge_state_file_is_owner_readable_only(tmp_path: Path, monkeypatch):
+    """bridge.json must be chmod 0o600 — token shouldn't leak via world-readable file."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    from opencomputer.profile_bootstrap.bridge_state import (
+        load_or_create,
+        state_path,
+    )
+
+    load_or_create()  # creates the state file
+    p = state_path()
+    mode = _stat.S_IMODE(p.stat().st_mode)
+    assert mode == 0o600
+
+
+def test_bridge_state_rotate_restores_permissions(tmp_path: Path, monkeypatch):
+    """Rotating the token must re-chmod the file."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    from opencomputer.profile_bootstrap.bridge_state import (
+        load_or_create,
+        state_path,
+    )
+
+    load_or_create()
+    # Manually weaken perms to verify rotation re-tightens them
+    import os
+    p = state_path()
+    os.chmod(p, 0o644)
+    assert _stat.S_IMODE(p.stat().st_mode) == 0o644
+
+    load_or_create(rotate=True)
+    assert _stat.S_IMODE(p.stat().st_mode) == 0o600
 
 
 def test_bridge_stop_no_listener(tmp_path: Path, monkeypatch):
