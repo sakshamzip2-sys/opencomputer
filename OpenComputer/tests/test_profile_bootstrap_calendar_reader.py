@@ -63,13 +63,14 @@ def test_read_upcoming_events_requests_access_when_not_determined():
     store.predicateForEventsWithStartDate_endDate_calendars_.return_value = "predicate"
     store.eventsMatchingPredicate_.return_value = []
 
+    fake_foundation = MagicMock()
+
     with patch(
         "opencomputer.profile_bootstrap.calendar_reader._import_event_kit",
         return_value=fake_ek,
     ), patch(
-        "Foundation.NSDate",
-        create=True,
-        new=MagicMock(),
+        "opencomputer.profile_bootstrap.calendar_reader._import_foundation",
+        return_value=fake_foundation,
     ):
         events = read_upcoming_events(days=7)
 

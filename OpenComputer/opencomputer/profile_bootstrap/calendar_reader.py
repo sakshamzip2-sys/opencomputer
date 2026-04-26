@@ -44,6 +44,12 @@ def _import_event_kit() -> Any:
     return EventKit
 
 
+def _import_foundation() -> Any:
+    """Indirect import so tests can patch easily."""
+    import Foundation  # type: ignore[import-not-found]
+    return Foundation
+
+
 def _request_calendar_access(
     store: Any, ek: Any, timeout_seconds: float = 60.0,
 ) -> bool:
@@ -118,7 +124,8 @@ def read_upcoming_events(*, days: int = 7) -> list[CalendarEventSummary]:
             _log.info("Calendar access not granted (status=%s)", status)
             return []
 
-        from Foundation import NSDate  # type: ignore[import-not-found]
+        foundation = _import_foundation()
+        NSDate = foundation.NSDate
 
         now = NSDate.date()
         end = NSDate.dateWithTimeIntervalSinceNow_(days * 24 * 3600)
