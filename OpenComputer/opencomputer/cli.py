@@ -956,13 +956,7 @@ def auth() -> None:
     for env_var, label in candidates:
         value = os.environ.get(env_var, "")
         if value:
-            if env_var.endswith("_URL"):
-                # URLs are not secrets — print the whole thing so the user
-                # can confirm they targeted the right proxy.
-                shown = value
-            else:
-                tail = value[-4:] if len(value) >= 4 else value
-                shown = f"…{tail}"
+            shown = _redact_for_auth(env_var, value)
             console.print(
                 f"  [green]✓[/green] {env_var:<24} [dim]({label})[/dim]  {shown}"
             )
@@ -971,6 +965,39 @@ def auth() -> None:
                 f"  [yellow]·[/yellow] {env_var:<24} [dim]({label})[/dim]  not set"
             )
     console.print()
+
+
+def _redact_for_auth(env_var: str, value: str) -> str:
+    """Decide how a credential value is shown by ``opencomputer auth``.
+
+    Two reviewer-driven safeguards over the naive last-4 echo:
+
+    1. **Minimum length before tail-echo (8 chars).** A real Anthropic
+       key is ~108 chars, OpenAI ~51, etc. — so 8 is a comfortable
+       floor. Anything shorter is treated as "(set)" rather than
+       echoing the entire value, which would otherwise leak the whole
+       secret on a tiny test fixture or a misconfigured proxy key.
+    2. **URL values: scheme://host only, no path / query.** A URL
+       env var name (``*_URL``) usually points at a proxy or service
+       endpoint and isn't sensitive — but a presigned URL or a URL
+       with a token in the path / query string IS sensitive. We strip
+       to ``scheme://host`` so the user can verify the host without
+       leaking any token-bearing component.
+    """
+    if env_var.endswith("_URL"):
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(value)
+            if parsed.scheme and parsed.netloc:
+                return f"{parsed.scheme}://{parsed.netloc}"
+        except ValueError:
+            pass
+        return "(set)"
+
+    if len(value) >= 8:
+        return f"…{value[-4:]}"
+    return "(set)"
 
 
 @app.command()
@@ -1200,12 +1227,21 @@ def config_edit() -> None:
         )
         raise typer.Exit(1)
 
+    import shlex
+
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    # Reviewer fix #2: shlex.split so $EDITOR values like ``code -w``,
+    # ``emacs -nw``, ``subl -w``, ``nvim -p`` work — the canonical POSIX
+    # $EDITOR gotcha. Without this we'd pass the entire string as
+    # argv[0] and FileNotFoundError on the missing literal binary.
+    editor_argv = shlex.split(editor)
+    if not editor_argv:
+        editor_argv = ["vi"]
     try:
-        result = subprocess.run([editor, str(cfg_path)], check=False)
+        result = subprocess.run([*editor_argv, str(cfg_path)], check=False)
     except FileNotFoundError as exc:
         console.print(
-            f"[bold red]error:[/bold red] editor '{editor}' not found "
+            f"[bold red]error:[/bold red] editor '{editor_argv[0]}' not found "
             f"({exc.strerror}).\n"
             f"[dim]Set $EDITOR to a command on your PATH.[/dim]"
         )

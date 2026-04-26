@@ -177,9 +177,99 @@ def test_auth_includes_anthropic_base_url_when_set(
     from opencomputer import cli
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://claude-router.example.com")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "abcd")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-abcdefghij1234567890")
 
     result = runner.invoke(cli.app, ["auth"])
 
     assert result.exit_code == 0
     assert "claude-router.example.com" in result.stdout
+
+
+# ── Reviewer-driven regression tests ──────────────────────────────────
+
+
+def test_auth_short_secret_does_not_echo_full_value(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer fix #1: a value <8 chars must not be echoed in full.
+
+    Without this guard, a fixture / misconfigured proxy key short
+    enough to fail the previous ``len(value) >= 4`` check would print
+    the entire secret in the ``auth`` output.
+    """
+    from opencomputer import cli
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "abc")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+    result = runner.invoke(cli.app, ["auth"])
+
+    assert result.exit_code == 0
+    assert "abc" not in result.stdout, (
+        "short secret leaked — auth must not echo values <8 chars"
+    )
+    assert "(set)" in result.stdout
+
+
+def test_auth_strips_query_and_path_from_url(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer fix #3: a URL with token-bearing path/query must not
+    be echoed in full.
+
+    A presigned S3 URL or webhook URL with a token in the path is
+    still a secret even though its env-var name ends in ``_URL``.
+    Stripping to ``scheme://host`` keeps the proxy-host verification
+    use case while not leaking the token.
+    """
+    from opencomputer import cli
+
+    monkeypatch.setenv(
+        "ANTHROPIC_BASE_URL",
+        "https://router.example.com/secret-token/api?key=DO-NOT-LEAK",
+    )
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    result = runner.invoke(cli.app, ["auth"])
+
+    assert result.exit_code == 0
+    assert "router.example.com" in result.stdout
+    assert "DO-NOT-LEAK" not in result.stdout
+    assert "secret-token" not in result.stdout
+
+
+def test_config_edit_handles_editor_with_flags(
+    tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer fix #2: $EDITOR='code -w' splits via shlex.
+
+    Common editor commands include flags (``code -w``, ``emacs -nw``,
+    ``subl -w``, ``nvim -p``). Without shlex.split, these all fail
+    with FileNotFoundError on the literal `code -w` string.
+    """
+    from opencomputer import cli
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("model:\n  provider: anthropic\n")
+    monkeypatch.setattr(cli, "config_file_path", lambda: cfg_path)
+    monkeypatch.setenv("EDITOR", "code -w")
+    monkeypatch.delenv("VISUAL", raising=False)
+
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = runner.invoke(cli.app, ["config", "edit"])
+
+    assert result.exit_code == 0
+    assert captured == [["code", "-w", str(cfg_path)]]
