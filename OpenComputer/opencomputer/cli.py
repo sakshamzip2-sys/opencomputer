@@ -37,6 +37,7 @@ from opencomputer.tools.glob import GlobTool
 from opencomputer.tools.grep import GrepTool
 from opencomputer.tools.notebook_edit import NotebookEditTool
 from opencomputer.tools.push_notification import PushNotificationTool
+from opencomputer.tools.python_exec import PythonExec
 from opencomputer.tools.read import ReadTool
 from opencomputer.tools.recall import RecallTool
 from opencomputer.tools.registry import registry
@@ -218,6 +219,7 @@ def _register_builtin_tools() -> None:
     registry.register(ReadTool())
     registry.register(WriteTool())
     registry.register(BashTool())
+    registry.register(PythonExec())
     registry.register(GrepTool())
     registry.register(GlobTool())
     registry.register(SkillManageTool())
