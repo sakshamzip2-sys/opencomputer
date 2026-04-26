@@ -1,9 +1,9 @@
-"""Tests for opencomputer.evolution.pattern_synthesizer (Phase 5.2).
+"""Tests for opencomputer.evolution.pattern_synthesizer (Phase 5.2 + 5.B-1).
 
 Distinct from ``test_evolution_synthesizer`` which exercises the older
 ``synthesize.SkillSynthesizer`` (reflection-Insight based). This file
-covers the pattern-detection-driven synthesizer added by the catch-up
-plan.
+covers the pattern-detection-driven synthesizer that composes with
+``QuarantineWriter`` (5.B-1) for hierarchical-layout writes.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from opencomputer.evolution.pattern_synthesizer import (
 from opencomputer.evolution.store import (
     approved_dir,
     discard_draft,
+    ensure_dirs,
     is_archived,
     list_approved,
     list_drafts,
@@ -67,6 +68,14 @@ def _proposal() -> SkillDraftProposal:
     )
 
 
+def _make_quarantined_skill(home, slug: str, body: str = "# x") -> None:
+    """Helper: create a quarantine entry in the new hierarchical layout."""
+    ensure_dirs(home)
+    skill_dir = quarantine_dir(home) / slug
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(f"---\nname: {slug}\n---\n{body}")
+
+
 # ---------- Happy path ----------
 
 
@@ -74,7 +83,8 @@ def _proposal() -> SkillDraftProposal:
 async def test_synthesize_writes_draft_to_quarantine(tmp_path):
     s = PatternSynthesizer(home=tmp_path, provider=_FakeProvider(_GOOD_DRAFT))
     path = await s.synthesize(_proposal())
-    assert path == quarantine_dir(tmp_path) / "pytest-rerun.md"
+    # New hierarchical layout: <quarantine>/<slug>/SKILL.md
+    assert path == quarantine_dir(tmp_path) / "pytest-rerun" / "SKILL.md"
     assert path.exists()
     assert "pytest" in path.read_text().lower()
 
@@ -90,6 +100,19 @@ async def test_prompt_passes_proposal_and_existing_names(tmp_path):
     # Existing bundled skills are listed in the prompt so the model
     # can avoid collisions.
     assert "code-review" in p or "test-driven-development" in p
+
+
+@pytest.mark.asyncio
+async def test_synthesize_collision_auto_resolves(tmp_path):
+    """If <slug> already exists in quarantine, writer appends -2."""
+    s = PatternSynthesizer(home=tmp_path, provider=_FakeProvider(_GOOD_DRAFT))
+    first = await s.synthesize(_proposal())
+    # Reset the in-memory PatternDetector-side dedup but make a new
+    # synthesis call — second slug should be auto-resolved by the writer.
+    s2 = PatternSynthesizer(home=tmp_path, provider=_FakeProvider(_GOOD_DRAFT))
+    second = await s2.synthesize(_proposal())
+    assert first != second
+    assert "pytest-rerun-2" in str(second)
 
 
 # ---------- Validation ----------
@@ -145,15 +168,15 @@ async def test_slug_collision_with_bundled_rejected(tmp_path):
         await s.synthesize(_proposal())
 
 
-# ---------- Store helpers ----------
+# ---------- Store helpers (hierarchical layout) ----------
 
 
 def test_list_drafts_returns_quarantined_files(tmp_path):
-    quarantine_dir(tmp_path).mkdir(parents=True)
-    (quarantine_dir(tmp_path) / "a.md").write_text("a")
-    (quarantine_dir(tmp_path) / "b.md").write_text("b")
+    _make_quarantined_skill(tmp_path, "alpha")
+    _make_quarantined_skill(tmp_path, "beta")
     drafts = list_drafts(tmp_path)
     assert len(drafts) == 2
+    assert all(p.name == "SKILL.md" for p in drafts)
 
 
 def test_list_drafts_returns_empty_when_no_quarantine(tmp_path):
@@ -161,14 +184,12 @@ def test_list_drafts_returns_empty_when_no_quarantine(tmp_path):
 
 
 def test_approve_moves_to_approved_dir(tmp_path):
-    quarantine_dir(tmp_path).mkdir(parents=True)
-    src = quarantine_dir(tmp_path) / "my-skill.md"
-    src.write_text("---\nname: my-skill\n---\n# x")
+    _make_quarantined_skill(tmp_path, "my-skill")
     from opencomputer.evolution.store import approve_draft
     dest = approve_draft(tmp_path, "my-skill")
     assert dest == approved_dir(tmp_path) / "my-skill" / "SKILL.md"
     assert dest.exists()
-    assert not src.exists()
+    assert not (quarantine_dir(tmp_path) / "my-skill").exists()
     assert len(list_approved(tmp_path)) == 1
 
 
@@ -179,20 +200,18 @@ def test_approve_missing_draft_raises(tmp_path):
 
 
 def test_approve_existing_dir_raises(tmp_path):
-    from opencomputer.evolution.store import approve_draft, ensure_dirs
-    ensure_dirs(tmp_path)
-    (quarantine_dir(tmp_path) / "x.md").write_text("---\nname: x\n---\n# x")
-    (approved_dir(tmp_path) / "x").mkdir()
+    from opencomputer.evolution.store import approve_draft
+    _make_quarantined_skill(tmp_path, "x")
+    (approved_dir(tmp_path) / "x").mkdir(parents=True)
     with pytest.raises(FileExistsError):
         approve_draft(tmp_path, "x")
 
 
 def test_discard_moves_to_archive(tmp_path):
-    quarantine_dir(tmp_path).mkdir(parents=True)
-    (quarantine_dir(tmp_path) / "x.md").write_text("x")
-    discard_draft(tmp_path, "x")
-    assert is_archived(tmp_path, "x") is True
-    assert not (quarantine_dir(tmp_path) / "x.md").exists()
+    _make_quarantined_skill(tmp_path, "junk")
+    discard_draft(tmp_path, "junk")
+    assert is_archived(tmp_path, "junk") is True
+    assert not (quarantine_dir(tmp_path) / "junk").exists()
 
 
 def test_discard_missing_draft_raises(tmp_path):

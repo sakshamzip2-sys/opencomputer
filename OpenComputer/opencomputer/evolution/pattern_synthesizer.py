@@ -1,12 +1,10 @@
 """Generate a SKILL.md draft from a SkillDraftProposal.
 
-Phase 5.2 of catch-up plan. The synthesizer is intentionally provider-
-agnostic — pass anything with an awaitable ``complete(prompt: str)``
-method that returns the model's text output. Tests use a fake; the
-production wiring (Phase 5.4) calls the real LLM via the existing
-provider registry.
+Phase 5.2 of catch-up plan, refactored at Phase 5.B-1 to compose with
+:class:`opencomputer.evolution.quarantine_writer.QuarantineWriter` so
+both synthesizers share the persistence path.
 
-What the synthesizer does:
+What this module does:
 
 1. Loads the Jinja2 template at ``prompts/synthesis_request.j2``.
 2. Substitutes the proposal + the list of existing skill names so the
@@ -17,32 +15,41 @@ What the synthesizer does:
    - Has a ``name:`` slug field (lowercase, hyphenated)
    - Total length ≤ ``max_chars``
    - Slug is not already in approved skills + bundled skills
-5. Writes the draft to ``<home>/evolution/quarantine/<slug>.md``.
-6. Returns the path.
+5. Hands a :class:`QuarantinedSkill` to a :class:`QuarantineWriter` for
+   atomic write + slug-collision auto-resolution.
 
 What it does NOT do (deliberately):
 
 - Activate the skill — quarantine is staging only, user explicitly
-  approves via Phase 5.3 CLI.
-- Hit the consent gate — that's Phase 5.4 plumbing.
-- Apply rate limits — Phase 5.3 wraps this and gates by limiter.
-- Audit-log the draft — Phase 5.4.
+  approves via the CLI (Phase 5.B-3).
+- Hit the consent gate — caller wraps this with the gate (5.B-3).
+- Apply rate limits — caller calls the limiter (5.B-3).
+- Audit-log the draft — caller logs (5.B-3).
 
 The synthesizer is the simplest possible component; layered guards
 go around it, not inside.
+
+Distinct from the older
+:class:`opencomputer.evolution.synthesize.SkillSynthesizer` which
+writes from reflection ``Insight`` payloads. Both now compose with
+the same writer.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
 from jinja2 import Environment, FileSystemLoader
 
 from opencomputer.evolution.pattern_detector import SkillDraftProposal
+from opencomputer.evolution.quarantine_writer import (
+    QuarantinedSkill,
+    QuarantineWriter,
+)
 from opencomputer.evolution.store import ensure_dirs, quarantine_dir
 
 _FRONTMATTER_NAME = re.compile(r"^name:\s*([a-z0-9][a-z0-9-]*[a-z0-9])\s*$", re.MULTILINE)
@@ -55,22 +62,23 @@ class _Provider(Protocol):
     def complete(self, prompt: str) -> Awaitable[str]: ...
 
 
-class SynthesisError(ValueError):
+class SynthesisError(ValueError):  # noqa: N818 — domain term, not exception suffix
     """The model output failed validation."""
 
 
 @dataclass
 class PatternSynthesizer:
-    """Pattern-detector → SKILL.md synthesizer (Phase 5 of catch-up plan).
+    """Pattern-detector → SKILL.md synthesizer.
 
-    Distinct from the older :class:`opencomputer.evolution.synthesize.SkillSynthesizer`
-    (which writes from reflection ``Insight``s). This one writes from
-    :class:`SkillDraftProposal` produced by tool-use repetition.
+    Distinct from the older
+    :class:`opencomputer.evolution.synthesize.SkillSynthesizer`. Both
+    compose with :class:`QuarantineWriter` for persistence.
     """
 
     home: Path
     provider: _Provider
     max_chars: int = 5000
+    writer: QuarantineWriter | None = field(default=None)
 
     def __post_init__(self) -> None:
         prompts_dir = Path(__file__).parent / "prompts"
@@ -79,6 +87,9 @@ class PatternSynthesizer:
             autoescape=False,
             keep_trailing_newline=True,
         )
+        if self.writer is None:
+            ensure_dirs(self.home)
+            self.writer = QuarantineWriter(dest_root=quarantine_dir(self.home))
 
     def _existing_skill_names(self) -> list[str]:
         """Bundled skill names + already-approved profile-local skills."""
@@ -122,8 +133,9 @@ class PatternSynthesizer:
                 f"slug {slug!r} collides with existing skill"
             )
 
-        # ── Persist ──
-        ensure_dirs(self.home)
-        dest = quarantine_dir(self.home) / f"{slug}.md"
-        dest.write_text(text)
-        return dest
+        # ── Persist via shared writer ──
+        skill = QuarantinedSkill(slug=slug, skill_md_content=text)
+        # ``writer`` is set in __post_init__; assert is for type-narrowing.
+        assert self.writer is not None
+        skill_dir = self.writer.write(skill)
+        return skill_dir / "SKILL.md"

@@ -25,6 +25,13 @@ F1_CAPABILITIES: dict[str, ConsentTier] = {
     # is defence-in-depth, NOT the primary gate (consent is).
     "gui.point_click": ConsentTier.PER_ACTION,
     "gui.applescript_run": ConsentTier.PER_ACTION,
+    # Phase 5.B-3 of catch-up plan — procedural-memory loop.
+    # The agent observes its own tool-use patterns and drafts new
+    # SKILL.md files for repeated patterns. Drafts go to quarantine;
+    # the user must explicitly approve via the CLI before activation.
+    # EXPLICIT tier means user opted in once (revocable); per-draft
+    # approval is a *separate* user action, not consent-gate enforced.
+    "procedural_memory.write_skill": ConsentTier.EXPLICIT,
 }
 
 # Reserved for later phases (documented, not enforced here):
