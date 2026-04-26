@@ -4,7 +4,17 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from extensions.browser_bridge.adapter import BrowserBridgeAdapter, generate_token
+# Plugin-loader mode: sibling modules are importable by plain name (the
+# loader puts the plugin's directory on sys.path and imports plugin.py
+# directly). Package mode (e.g. tests using the conftest alias fixture):
+# falls through to ``extensions.browser_bridge.adapter``.
+try:
+    from adapter import BrowserBridgeAdapter, generate_token  # plugin-loader mode
+except ImportError:  # pragma: no cover - exercised via conftest alias fixture
+    from extensions.browser_bridge.adapter import (  # type: ignore[no-redef]
+        BrowserBridgeAdapter,
+        generate_token,
+    )
 
 from plugin_sdk import PluginManifest
 
@@ -21,7 +31,7 @@ def register(api: Any) -> PluginManifest:
             "Receives tab activity from the OpenComputer browser extension "
             "and fans events into the F2 SignalEvent bus."
         ),
-        kind="tools",
+        kind="tool",
     )
 
 

@@ -5,7 +5,7 @@
   "description": "Receives tab activity from the OpenComputer browser extension and fans events into the F2 SignalEvent bus. Layer 4 (minimal) of Layered Awareness.",
   "author": "OpenComputer Contributors",
   "license": "MIT",
-  "kind": "tools",
+  "kind": "tool",
   "entry": "plugin",
   "tool_names": []
 }

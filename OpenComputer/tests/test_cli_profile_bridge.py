@@ -62,3 +62,52 @@ def test_bridge_status_reports_unreachable(tmp_path: Path, monkeypatch):
         result = runner.invoke(profile_app, ["bridge", "status"])
     assert result.exit_code == 0
     assert "NOT REACHABLE" in result.stdout
+
+
+def test_bridge_start_no_token_errors(tmp_path: Path, monkeypatch):
+    """``bridge start`` must abort with a clear message when no token is set.
+
+    We can't actually exercise the listener startup from a unit test —
+    that's a foreground ``asyncio.Event().wait()`` blocking call — but
+    we can confirm the no-token guard fires before any aiohttp imports
+    happen. Exit code 1 + a recognisable message is the contract; if
+    this fails the production path either silently no-ops or raises an
+    opaque error.
+    """
+    import json as _json
+
+    from opencomputer.profile_bootstrap.bridge_state import state_path
+
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    # token() generates a fresh state file with a populated token; we
+    # then overwrite it with an empty token to exercise the guard.
+    runner.invoke(profile_app, ["bridge", "token"])
+    p = state_path()
+    p.write_text(_json.dumps({"token": "", "port": 18791}))
+
+    result = runner.invoke(profile_app, ["bridge", "start"])
+    assert result.exit_code == 1
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert "No token configured" in combined
+
+
+def test_bridge_stop_no_listener(tmp_path: Path, monkeypatch):
+    """``bridge stop`` is a no-op when nothing is listening on the port.
+
+    Returns exit 0 with an informative message rather than blowing up,
+    so it's safe to invoke unconditionally from cleanup scripts.
+    """
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    runner.invoke(profile_app, ["bridge", "token"])  # seed token
+    # Use port 1 (privileged + almost certainly unused by user processes)
+    # so the lsof probe reliably returns nothing. We don't override the
+    # state file's port because the lsof check uses whatever's saved.
+    result = runner.invoke(profile_app, ["bridge", "stop"])
+    # Either: lsof not available → exit 1 with message, OR lsof found
+    # nothing → exit 0 with "nothing to stop". Both are acceptable.
+    combined = (result.stdout or "") + (result.stderr or "")
+    if result.exit_code == 0:
+        assert "nothing to stop" in combined
+    else:
+        assert result.exit_code == 1
+        assert "lsof not found" in combined

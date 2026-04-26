@@ -63,6 +63,20 @@ class BrowserBridgeAdapter:
         _log.info("browser-bridge listening on %s:%s", self._bind, self._port)
         return runner
 
+    async def stop(self) -> None:
+        """Tear down the listener. Idempotent — safe to call when not started.
+
+        Wraps :meth:`aiohttp.web.AppRunner.cleanup` so callers (the CLI
+        ``bridge start`` foreground loop, future supervisors, tests) have
+        a stable shutdown verb that doesn't reach into the aiohttp
+        internals. After ``stop`` the adapter can be discarded; ``start``
+        on the same instance is not supported and would re-bind the port.
+        """
+        if self._runner is None:
+            return
+        runner, self._runner = self._runner, None
+        await runner.cleanup()
+
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 

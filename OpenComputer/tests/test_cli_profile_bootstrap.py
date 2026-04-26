@@ -90,3 +90,37 @@ def test_bootstrap_then_prompt_includes_user_facts(tmp_path: Path, monkeypatch):
     rendered = pb.build(user_facts=facts_block)
     assert "Layered Awareness MVP" in rendered
     assert "concise" in rendered
+
+
+def test_loop_wires_user_facts_into_build_with_memory():
+    """Regression for C4: ``AgentLoop`` must call ``build_user_facts`` and
+    pass the result to ``build_with_memory``. A grep-style structural check
+    is the cheapest defensible test — full loop integration would pull in
+    the provider stack. If this fails, the new "What I know about you"
+    block is permanently empty in production despite the slot being
+    plumbed through ``PromptBuilder``.
+    """
+    import inspect
+
+    from opencomputer.agent import loop as loop_module
+
+    src = inspect.getsource(loop_module)
+    # Both must appear: the call to build_user_facts AND the
+    # forward of the result as the user_facts kwarg of
+    # build_with_memory. Order matters (former precedes latter).
+    bf_idx = src.find("build_user_facts(")
+    bm_idx = src.find("user_facts=user_facts")
+    bwm_idx = src.find("build_with_memory(")
+    assert bf_idx != -1, (
+        "AgentLoop must call build_user_facts() so the "
+        "production prompt picks up F4 user-model nodes."
+    )
+    assert bm_idx != -1, (
+        "AgentLoop must forward the computed user_facts into "
+        "build_with_memory(user_facts=...) — the slot is otherwise empty."
+    )
+    assert bwm_idx != -1
+    assert bf_idx < bwm_idx, (
+        "build_user_facts() must be called BEFORE build_with_memory(); "
+        "otherwise the forwarded value is stale or undefined."
+    )

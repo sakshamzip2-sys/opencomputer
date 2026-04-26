@@ -184,6 +184,152 @@ def bridge_status() -> None:
         sock.close()
 
 
+def _load_browser_bridge_adapter() -> type:
+    """Resolve ``BrowserBridgeAdapter`` across plugin-loader / package modes.
+
+    The hyphenated directory ``extensions/browser-bridge/`` is not a
+    real Python package, so we can't rely on a single import path:
+
+    * Tests register an ``extensions.browser_bridge`` alias via the
+      conftest fixture and import as a package.
+    * Production users invoke the CLI without that alias — fall back
+      to ``importlib`` against the ``adapter.py`` file directly so the
+      command works whether or not the plugin loader has run.
+    """
+    try:
+        from extensions.browser_bridge.adapter import BrowserBridgeAdapter
+
+        return BrowserBridgeAdapter
+    except ImportError:
+        import importlib.util
+
+        adapter_path = (
+            Path(__file__).resolve().parent.parent
+            / "extensions"
+            / "browser-bridge"
+            / "adapter.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "browser_bridge_adapter", str(adapter_path)
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(
+                f"browser-bridge adapter not found at {adapter_path}; "
+                "is the install corrupted?"
+            ) from None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.BrowserBridgeAdapter
+
+
+@bridge_app.command("start")
+def bridge_start(
+    bind: str = typer.Option(
+        "127.0.0.1", "--bind", help="Address to bind (default 127.0.0.1)"
+    ),
+) -> None:
+    """Start the browser-bridge HTTP listener (foreground; Ctrl-C to stop).
+
+    Uses the token + port from ``<profile_home>/profile_bootstrap/bridge.json``
+    (run ``opencomputer profile bridge token`` first to seed it). The
+    listener publishes ``browser_visit`` events to the module-level
+    :data:`opencomputer.ingestion.bus.default_bus`, which is the shared
+    singleton subscribed to by every in-process consumer (B3 trajectory,
+    F2 inference, etc.). A fresh bus would be silently isolated, so we
+    must use the singleton.
+    """
+    import asyncio
+
+    from opencomputer.ingestion.bus import get_default_bus
+
+    state = load_or_create()
+    if not state.token:
+        typer.echo(
+            "No token configured. Run 'opencomputer profile bridge token' first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    BrowserBridgeAdapter = _load_browser_bridge_adapter()
+    bus = get_default_bus()
+    adapter = BrowserBridgeAdapter(
+        bus=bus, port=state.port, token=state.token, bind=bind
+    )
+
+    async def _run() -> None:
+        try:
+            await adapter.start()
+        except OSError as e:
+            typer.echo(
+                f"Failed to bind {bind}:{state.port} — {e}.\n"
+                f"  hint: lsof -ti:{state.port} | xargs kill -9",
+                err=True,
+            )
+            raise typer.Exit(1) from None
+        typer.echo(
+            f"Browser-bridge listening on http://{bind}:{state.port}\n"
+            "Press Ctrl-C to stop."
+        )
+        try:
+            await asyncio.Event().wait()  # block forever until Ctrl-C
+        finally:
+            await adapter.stop()
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        typer.echo("\nShutdown.")
+
+
+@bridge_app.command("stop")
+def bridge_stop() -> None:
+    """Stop a running browser-bridge listener bound to the configured port.
+
+    Foreground ``bridge start`` exits on Ctrl-C; this command is for the
+    case where the listener was started under a supervisor (launchd /
+    systemd / nohup). It connects to the listener's port and forces a
+    clean shutdown via OS signal — ``lsof`` is the simplest portable
+    discovery path.
+    """
+    import os
+    import shutil
+    import subprocess
+
+    state = load_or_create()
+    lsof = shutil.which("lsof")
+    if lsof is None:
+        typer.echo(
+            "lsof not found on PATH; cannot locate the bridge process. "
+            "Stop it manually (Ctrl-C in the foreground terminal, or your "
+            "supervisor's stop command).",
+            err=True,
+        )
+        raise typer.Exit(1)
+    try:
+        out = subprocess.check_output(
+            [lsof, "-ti", f":{state.port}"], text=True, stderr=subprocess.DEVNULL
+        )
+    except subprocess.CalledProcessError:
+        typer.echo(
+            f"No process listening on port {state.port}; nothing to stop."
+        )
+        return
+    pids = [p.strip() for p in out.splitlines() if p.strip()]
+    if not pids:
+        typer.echo(
+            f"No process listening on port {state.port}; nothing to stop."
+        )
+        return
+    import signal
+
+    for pid in pids:
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+            typer.echo(f"Sent SIGTERM to pid {pid}.")
+        except (ProcessLookupError, PermissionError, ValueError) as e:
+            typer.echo(f"Could not signal pid {pid}: {e}", err=True)
+
+
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
 

@@ -523,6 +523,19 @@ class AgentLoop:
                 # Joins the same frozen-prompt lane so drift only lands on
                 # the next session's rebuild, preserving prefix-cache hits.
                 soul = self.memory.read_soul()
+                # Layered Awareness MVP — pre-format the top-K user-model
+                # facts block from the F4 graph. Empty string on a fresh
+                # profile (no bootstrap yet) → ``base.j2`` omits the
+                # section. Computed inside the ``snapshot is None`` branch
+                # so it runs ONCE per session and lands on the frozen
+                # base prompt, preserving prefix-cache hits on turn 2+.
+                # A graph read failure must NEVER break agent startup,
+                # so swallow exceptions and degrade to "no facts".
+                try:
+                    user_facts = self.prompt_builder.build_user_facts()
+                except Exception:  # noqa: BLE001 — defensive: never break loop
+                    _log.debug("build_user_facts failed; degrading to empty", exc_info=True)
+                    user_facts = ""
                 # PR-6 T2.1: use build_with_memory so ambient memory blocks
                 # from active providers are appended under '## Memory context'.
                 # Falls back to the sync build() path if ambient blocks are
@@ -534,6 +547,7 @@ class AgentLoop:
                     declarative_memory=declarative,
                     user_profile=user_profile,
                     soul=soul,
+                    user_facts=user_facts,
                     memory_char_limit=self.config.memory.memory_char_limit,
                     user_char_limit=self.config.memory.user_char_limit,
                     memory_bridge=self.memory_bridge,

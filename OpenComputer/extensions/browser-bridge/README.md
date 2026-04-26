@@ -26,13 +26,26 @@ click "Service worker" under OpenComputer Browser Bridge):
 chrome.storage.local.set({ ocBridgeToken: '<paste-token-here>' })
 ```
 
-The extension immediately starts forwarding visits. Verify via:
+## Start the local listener
+
+The Python listener runs as a foreground process. From a terminal:
+
+```bash
+opencomputer profile bridge start
+```
+
+It binds `127.0.0.1:18791` and stays attached to the terminal — leave
+it running while you browse. Stop with `Ctrl-C` (or, if running under
+a supervisor, `opencomputer profile bridge stop`).
+
+Verify it's healthy from another terminal:
 
 ```bash
 opencomputer profile bridge status
 ```
 
-You should see `Listener: REACHABLE`.
+You should see `Listener: REACHABLE`. The extension immediately starts
+forwarding visits once both pieces are up.
 
 ## What gets sent
 
