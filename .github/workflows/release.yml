@@ -85,7 +85,10 @@ jobs:
           from opencomputer.plugins.discovery import discover, standard_search_paths
           ids = sorted(c.manifest.id for c in discover(standard_search_paths()))
           print('discovered plugins:', ids)
-          required = {'anthropic', 'openai', 'telegram'}
+          # Plugin ids match the bundled directory names verbatim
+          # (anthropic-provider not anthropic, etc). The first iteration
+          # of this guard used short-form ids and caught its own typo.
+          required = {'anthropic-provider', 'openai-provider', 'telegram'}
           missing = required - set(ids)
           if missing:
               raise SystemExit(

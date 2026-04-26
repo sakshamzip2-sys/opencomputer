@@ -2,6 +2,14 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
+## [2026.4.26.post3] — vision-completion ship + release-CI typo fix
+
+post2 was tagged but never published — the new wheel-smoke guard from
+PR #148 caught its own typo (used short-form plugin ids `anthropic`
+when the real ids are `anthropic-provider`). Working as intended:
+the guard fired and stopped a release before publish. Fixed in
+release.yml; this `post3` is the actual ship.
+
 ## [2026.4.26.post2] — vision-completion ship: Honcho default-on, agent auto-knows-user, launchd, --resume picker
 
 Five PRs in a single session covering the user's explicit vision
