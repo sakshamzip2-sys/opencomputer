@@ -36,7 +36,28 @@ from typing import Any
 
 
 def _config_from_env():
-    from .provider import HonchoConfig
+    # Same hyphen-vs-underscore alias issue as register() below — but
+    # _config_from_env runs FIRST (called from register()), so the alias
+    # registration must precede this import too. The alias setup is
+    # idempotent, so it's safe to call here as well even though
+    # register() also installs it. Cleaner to do it once at module
+    # entry, but that would mean adding it at import time which fires
+    # on every plugin discovery scan. Per-call here is the cheap path.
+    import sys as _sys
+    import types as _types
+    from pathlib import Path as _Path
+
+    if "extensions" not in _sys.modules:
+        _ext_pkg = _types.ModuleType("extensions")
+        _ext_pkg.__path__ = [str(_Path(__file__).resolve().parent.parent)]
+        _sys.modules["extensions"] = _ext_pkg
+    if "extensions.memory_honcho" not in _sys.modules:
+        _mh_pkg = _types.ModuleType("extensions.memory_honcho")
+        _mh_pkg.__path__ = [str(_Path(__file__).resolve().parent)]
+        _mh_pkg.__package__ = "extensions.memory_honcho"
+        _sys.modules["extensions.memory_honcho"] = _mh_pkg
+
+    from extensions.memory_honcho.provider import HonchoConfig
 
     def _int(key: str, default: int) -> int:
         raw = os.environ.get(key, "").strip()
@@ -88,16 +109,32 @@ def register(api: Any) -> None:
     ``register_memory_provider`` yet — logs a warning and skips so the
     agent keeps working on baseline memory.
     """
-    # KNOWN BUG (2026-04-26 smoke test): plugin loader uses
-    # ``importlib.util.spec_from_file_location`` with a synthetic name,
-    # so the ``from .provider`` relative import has no parent package
-    # and fails at runtime. Tests pass because conftest pre-registers
-    # the package; fresh installs fail. Quick fix attempts via
-    # ``module_from_spec`` triggered a separate ``slots=True``
-    # incompatibility. Real fix is in the plugin loader (register a
-    # synthesised parent package before the entry import). Tracked as
-    # a follow-up; honcho memory is opt-in so this isn't a hot blocker.
-    from .provider import HonchoSelfHostedProvider
+    # The plugin loader uses ``importlib.util.spec_from_file_location``
+    # with a synthetic name, so a relative ``from .provider`` import has
+    # no parent package and fails at runtime. Tests pass because
+    # ``tests/conftest.py`` pre-registers the package; production needs
+    # the same alias *here*. Honcho is ``enabled_by_default=true`` for
+    # all profiles, so without this every fresh install would silently
+    # lose Honcho memory behind a single WARN line. Mirrors the
+    # coding-harness + aws-bedrock-provider patterns.
+    import sys as _sys
+    import types as _types
+    from pathlib import Path as _Path
+
+    if "extensions" not in _sys.modules:
+        _ext_pkg = _types.ModuleType("extensions")
+        _ext_pkg.__path__ = [str(_Path(__file__).resolve().parent.parent)]
+        _sys.modules["extensions"] = _ext_pkg
+    if "extensions.memory_honcho" not in _sys.modules:
+        _mh_pkg = _types.ModuleType("extensions.memory_honcho")
+        _mh_pkg.__path__ = [str(_Path(__file__).resolve().parent)]
+        _mh_pkg.__package__ = "extensions.memory_honcho"
+        _sys.modules["extensions.memory_honcho"] = _mh_pkg
+
+    # Use the absolute alias path rather than ``from .provider`` — the
+    # synthetic loader-created module's ``__package__`` is empty, so
+    # relative imports raise. This route resolves through the alias above.
+    from extensions.memory_honcho.provider import HonchoSelfHostedProvider
 
     provider = HonchoSelfHostedProvider(_config_from_env())
     register_fn = getattr(api, "register_memory_provider", None)
