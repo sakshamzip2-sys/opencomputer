@@ -287,6 +287,18 @@ class AgentLoop:
         )
         self.memory_bridge = MemoryBridge(self.memory_context)
 
+        # Round 2B P-8 — wire the bg-notify session provider so the
+        # coding-harness ``StartProcess`` tool can stamp the active session
+        # onto each watcher task. Idempotent across multiple AgentLoop
+        # instantiations: the latest constructor wins, which matches how
+        # the rest of the registry singletons behave.
+        try:
+            from opencomputer.agent.bg_notify import set_session_id_provider as _set_bg_provider
+
+            _set_bg_provider(lambda: self._current_session_id)
+        except Exception:  # noqa: BLE001 — never break agent startup
+            _log.debug("bg_notify provider wiring skipped", exc_info=True)
+
         self.compaction = CompactionEngine(
             provider=provider,
             model=config.model.model,
@@ -692,6 +704,36 @@ class AgentLoop:
                         sid,
                         exc_info=True,
                     )
+
+            # Round 2B P-8 — drain pending background-process exit notices
+            # for this session and inject them as system messages so the
+            # next provider call sees the completion. Drained on EVERY
+            # iteration (including iter 0) because a long-running bg proc
+            # may finish during the user's typing window and we want the
+            # very first model turn to know about it. Persist so a resumed
+            # session keeps the bg-exit context visible.
+            try:
+                from opencomputer.agent.bg_notify import (
+                    drain_for_session as _drain_bg,
+                )
+
+                bg_notices = _drain_bg(sid)
+                for body in bg_notices:
+                    bg_msg = Message(role="system", content=body)
+                    messages.append(bg_msg)
+                    self.db.append_message(sid, bg_msg)
+                if bg_notices:
+                    _log.debug(
+                        "bg-notify: applied %d pending bg exit notice(s) for session %s",
+                        len(bg_notices),
+                        sid,
+                    )
+            except Exception:  # noqa: BLE001 — never break the loop
+                _log.warning(
+                    "bg-notify: drain failed for session %s — continuing",
+                    sid,
+                    exc_info=True,
+                )
 
             # Compaction check — uses REAL measured tokens from prior turn.
             # First iteration (no prior measurement) skips the check.

@@ -12,6 +12,49 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Round 2B P-8 — bg auto-notifications)
+
+Background processes started via `StartProcess` now fire a typed
+`Notification` hook the moment they exit, and the coding-harness
+registers a default subscriber that surfaces the completion to the
+agent on its next turn. Long-running work (`npm run dev`, watchers,
+test runners) no longer require the agent to remember to poll
+`CheckOutput` — it sees the exit reflected in its context.
+
+- `opencomputer/agent/bg_notify.py` — new module. Defines the
+  `BgProcessExit` payload (tool_call_id, exit_code, tail_stdout,
+  tail_stderr, duration_seconds) plus the per-session pending-message
+  store the agent loop drains between turns. `make_hook_context` /
+  `decode_payload` encode the payload onto the otherwise-unused
+  `HookContext.message` slot, with a `BG_PROCESS_EXIT_MARKER` so other
+  Notification subscribers (Telegram mirroring, audit) can disambiguate
+  bg-exit notifications from user-facing alerts and ignore on mismatch.
+- `extensions/coding-harness/tools/background.py` — `StartProcessTool`
+  now stamps each `_BgEntry` with the originating call id, the active
+  session id (via `bg_notify.current_session_id`), and the start
+  timestamp, then spawns a `_watch_and_notify` watcher task. The
+  watcher awaits `proc.wait()` plus the read-drain tasks, builds the
+  payload (last 200 chars of each stream), and fires the Notification
+  hook. `_cleanup_all` (SessionEnd) cancels in-flight watchers so a
+  dead session never delivers a stale system message.
+- `extensions/coding-harness/plugin.py` — registers the bg-notify
+  default subscriber alongside the other harness hooks. Defensive
+  import — failure disables auto-notifications without breaking
+  activation.
+- `opencomputer/agent/loop.py` — wires `set_session_id_provider` so the
+  `StartProcess` tool can read the active session id. The between-turn
+  drain runs on EVERY iteration (not just `_iter > 0`) so a process
+  that finishes during the user's typing window is visible to the very
+  first model turn.
+
+Tests: `tests/test_bg_auto_notify.py` adds 15 cases covering
+(a) clean-exit Notification firing with the expected payload,
+(b) error-exit firing with the non-zero exit_code,
+(c) the default subscriber appending the formatted system message,
+(d) the fire-and-forget contract (a raising peer subscriber must not
+prevent other subscribers from firing or the watcher from completing),
+plus pending-store mechanics, decode-payload defenses, and the
+`tail_chars` helper.
 ### Added (Round 2B P-4 — centralized rotated logging)
 
 - New `opencomputer/observability/logging_config.py` wires three rotating

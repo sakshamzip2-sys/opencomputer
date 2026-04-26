@@ -112,15 +112,32 @@ def register(api) -> None:  # PluginAPI duck-typed
     api.register_injection_provider(AcceptEditsModeInjectionProvider())
     api.register_injection_provider(ReviewModeInjectionProvider())
 
-    # Hooks — 6 total. Scope-check runs first (most deny-ey), then plan-block,
+    # Hooks — 7 total. Scope-check runs first (most deny-ey), then plan-block,
     # then auto-checkpoint, then post-edit-review. Session bootstrap / cleanup
-    # are on their own events.
+    # are on their own events. The bg-notify subscriber listens on
+    # Notification — it stashes a system message every time a background
+    # process started via StartProcess exits so the agent loop can surface
+    # the completion on its next turn (P-8).
     api.register_hook(build_scope_check_hook_spec())
     api.register_hook(build_plan_mode_hook_spec())
     api.register_hook(build_auto_checkpoint_hook_spec(harness_ctx=ctx))
     api.register_hook(build_post_edit_review_hook_spec(harness_ctx=ctx))
     api.register_hook(build_session_bootstrap_hook_spec(harness_ctx=ctx))
     api.register_hook(build_cleanup_session_hook_spec())
+
+    # Round 2B P-8 — bg-process auto-notifications. Defensive import so a
+    # missing core (extreme test fixtures) doesn't break harness load.
+    try:
+        from opencomputer.agent.bg_notify import build_default_subscriber_spec
+
+        api.register_hook(build_default_subscriber_spec())
+    except Exception:  # noqa: BLE001 — never break activation
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "bg-notify subscriber registration failed; auto-notifications disabled",
+            exc_info=True,
+        )
 
     # Slash commands — 6 total. Phase 12b6 Task D8 formalization. Only
     # register if the host's PluginAPI supports it — older cores without
