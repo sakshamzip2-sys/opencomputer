@@ -21,10 +21,12 @@ from __future__ import annotations
 from opencomputer.profile_bootstrap.identity_reflex import IdentityFacts
 
 #: Ordered tuple of (key, prompt-template) pairs. Order matters — the
-#: CLI presents them sequentially. Adding a new question is fine;
-#: removing or reordering breaks the parser contract (``parse_answers``
-#: uses ``zip(QUICK_INTERVIEW_QUESTIONS, raw_answers)`` so positional
-#: order is the key-to-answer mapping).
+#: CLI presents them sequentially. ``parse_answers`` uses
+#: ``zip(QUICK_INTERVIEW_QUESTIONS, raw_answers)``, so positional order
+#: IS the key-to-answer mapping. Adding, removing, or reordering changes
+#: the contract — update the count assertion in
+#: ``test_default_question_set_has_five`` AND audit any callers of
+#: ``parse_answers`` for shape assumptions.
 QUICK_INTERVIEW_QUESTIONS: tuple[tuple[str, str], ...] = (
     (
         "current_focus",
@@ -50,18 +52,15 @@ QUICK_INTERVIEW_QUESTIONS: tuple[tuple[str, str], ...] = (
 
 
 def render_questions(facts: IdentityFacts) -> list[str]:
-    """Return [greeting, q1, q2, q3, q4, q5] strings ready for the CLI to present.
+    """Return [greeting, q1, q2, ...] strings ready for the CLI to present.
 
-    Index 0 is always the greeting; indices 1–5 are the question prompts
-    in the same order as :data:`QUICK_INTERVIEW_QUESTIONS`.
-
-    The greeting is personalized with ``facts.name`` when available.
-    Both greeting variants are exactly two lines separated by ``\\n``:
-    line 1 is the salutation, line 2 is the transition sentence.
+    Index 0 is the personalized (or anonymous) greeting; indices 1-5
+    are the question prompts in :data:`QUICK_INTERVIEW_QUESTIONS` order.
     """
-    if facts.name:
+    name = (facts.name or "").strip()
+    if name:
         greeting = (
-            f"Hi {facts.name}! I'm OpenComputer — your local agent.\n"
+            f"Hi {name}! I'm OpenComputer — your local agent.\n"
             "Five quick questions so I can be useful from the get-go:"
         )
     else:

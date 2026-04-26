@@ -29,3 +29,14 @@ def test_parse_answers_returns_dict():
     assert parsed["current_focus"] == "focus: stocks"
     assert parsed["tone_preference"] == "concise"
     assert "context" not in parsed or parsed["context"] == ""
+
+
+def test_render_questions_anonymous_when_name_is_whitespace_only():
+    """A whitespace-only name should not produce 'Hi    !'."""
+    facts = IdentityFacts(name="   ")
+    rendered = render_questions(facts)
+    # Greeting should NOT contain the literal whitespace name
+    assert "Hi    !" not in rendered[0]
+    assert "Hi !" not in rendered[0]
+    # Should fall through to the anonymous form
+    assert "Hi!" in rendered[0]
