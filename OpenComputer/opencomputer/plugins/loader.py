@@ -351,7 +351,18 @@ def _snapshot_registrations(api: PluginAPI) -> _RegistrationSnapshot:
     hook_specs: list[Any] = []
     if isinstance(hooks_dict, dict):
         for specs in hooks_dict.values():
-            hook_specs.extend(specs)
+            for entry in specs:
+                # Round 2A P-1: HookEngine now stores entries as
+                # ``(priority, seq, spec)`` tuples so it can sort by priority
+                # while keeping HookSpec frozen. Extract the spec so the
+                # identity-diff in :func:`_compute_plugin_registrations`
+                # still matches what the plugin handed in. Older shapes (a
+                # bare ``HookSpec``) are handled defensively for stub
+                # engines used in tests.
+                if isinstance(entry, tuple) and len(entry) == 3:
+                    hook_specs.append(entry[2])
+                else:
+                    hook_specs.append(entry)
     # Injection engine stores providers in ``_providers`` dict keyed by
     # provider_id. Duck-type so stub engines (no ``_providers``) don't
     # break the diagnostic path.
@@ -1095,11 +1106,21 @@ def teardown_loaded_plugin(
                             exc_info=True,
                         )
         # Hooks — identity-match remove from each event's list.
+        # Round 2A P-1: ``_hooks`` entries are ``(priority, seq, spec)``
+        # tuples; match the spec at index 2 against ``regs.hook_specs``
+        # (which stored bare specs at snapshot time).
         hooks_dict = getattr(target_api.hooks, "_hooks", None)
         if isinstance(hooks_dict, dict) and regs.hook_specs:
             target_ids = {id(s) for s in regs.hook_specs}
             for event, specs in list(hooks_dict.items()):
-                remaining = [s for s in specs if id(s) not in target_ids]
+                remaining = [
+                    s
+                    for s in specs
+                    if id(
+                        s[2] if isinstance(s, tuple) and len(s) == 3 else s
+                    )
+                    not in target_ids
+                ]
                 if len(remaining) != len(specs):
                     hooks_dict[event] = remaining
         # Doctor contributions — remove the most recent N entries we added.

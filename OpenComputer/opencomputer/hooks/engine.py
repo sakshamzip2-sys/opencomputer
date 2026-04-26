@@ -4,6 +4,11 @@ Hook engine — dispatches lifecycle events to registered handlers.
 Registration pattern mirrors the tool registry. Plugins call
 `engine.register(HookSpec(...))` at load time. At runtime the agent
 loop emits events via `engine.fire(HookEvent.X, ctx)`.
+
+Round 2A P-1: handlers are sorted by ``(priority, registration_index)``
+so lower priorities run first and FIFO is preserved within a bucket. The
+engine assigns a monotonic ``_next_seq`` at register time and resorts the
+per-event list once; firing is then a straight iteration.
 """
 
 from __future__ import annotations
@@ -22,16 +27,33 @@ class HookEngine:
     """Central dispatcher for lifecycle events."""
 
     def __init__(self) -> None:
-        self._hooks: dict[HookEvent, list[HookSpec]] = defaultdict(list)
+        # Each entry is ``(priority, seq, spec)`` so we can stable-sort by
+        # the priority/sequence pair without mutating the immutable
+        # ``HookSpec`` itself. ``seq`` is monotonically assigned at register
+        # time; sorting by ``(priority, seq)`` gives lower-priority-first
+        # with FIFO within the same priority bucket.
+        self._hooks: dict[HookEvent, list[tuple[int, int, HookSpec]]] = defaultdict(
+            list
+        )
+        self._next_seq: int = 0
 
     def register(self, spec: HookSpec) -> None:
-        self._hooks[spec.event].append(spec)
+        seq = self._next_seq
+        self._next_seq += 1
+        bucket = self._hooks[spec.event]
+        bucket.append((spec.priority, seq, spec))
+        # Sort once at register time so fire paths are O(n) iteration only.
+        bucket.sort(key=lambda entry: (entry[0], entry[1]))
 
     def unregister_all(self, event: HookEvent | None = None) -> None:
         if event is None:
             self._hooks.clear()
         else:
             self._hooks[event] = []
+
+    def _ordered_specs(self, event: HookEvent) -> list[HookSpec]:
+        """Return the priority-ordered specs for ``event`` (helper for tests)."""
+        return [spec for _, _, spec in self._hooks.get(event, [])]
 
     def _matches(self, spec: HookSpec, ctx: HookContext) -> bool:
         if spec.matcher is None:
@@ -51,8 +73,9 @@ class HookEngine:
         """Fire a hook event and WAIT for decisions (for PreToolUse approvals).
 
         Returns the first non-pass decision, or None if all hooks passed.
+        Handlers run in priority order — lower priority first.
         """
-        for spec in self._hooks.get(ctx.event, []):
+        for _, _, spec in self._hooks.get(ctx.event, []):
             if not self._matches(spec, ctx):
                 continue
             try:
@@ -66,8 +89,13 @@ class HookEngine:
         return None
 
     def fire_and_forget(self, ctx: HookContext) -> None:
-        """Fire a hook event without waiting. Used for PostToolUse logging etc."""
-        for spec in self._hooks.get(ctx.event, []):
+        """Fire a hook event without waiting. Used for PostToolUse logging etc.
+
+        Handlers are scheduled in priority order, but because fire-and-forget
+        tasks run concurrently the runtime order is not guaranteed; the
+        ``priority`` field controls SCHEDULING order only.
+        """
+        for _, _, spec in self._hooks.get(ctx.event, []):
             if not self._matches(spec, ctx):
                 continue
             fire_and_forget(spec.handler(ctx))

@@ -44,8 +44,8 @@ def test_three_new_hook_events_exist_and_are_in_all_hook_events() -> None:
     assert HookEvent.PRE_COMPACT in ALL_HOOK_EVENTS
     assert HookEvent.SUBAGENT_STOP in ALL_HOOK_EVENTS
     assert HookEvent.NOTIFICATION in ALL_HOOK_EVENTS
-    # Sanity: 9 total events as documented in CLAUDE.md
-    assert len(ALL_HOOK_EVENTS) == 9
+    # Phase 11b shipped 9 events; Round 2A P-1 adds 8 more for 17 total.
+    assert len(ALL_HOOK_EVENTS) == 17
 
 
 async def test_base_channel_adapter_send_notification_default_routes_to_send() -> None:
