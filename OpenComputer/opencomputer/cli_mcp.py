@@ -338,6 +338,17 @@ def mcp_presets() -> None:
     )
 
 
+@mcp_app.command("catalog")
+def mcp_catalog() -> None:
+    """List bundled MCP catalog entries (alias for ``mcp presets``).
+
+    ``catalog`` is the friendlier name for users coming from package
+    managers (pip, npm, brew). Functionally identical to ``presets``;
+    both stay so existing scripts keep working.
+    """
+    mcp_presets()
+
+
 @mcp_app.command("oauth-paste")
 def mcp_oauth_paste(
     provider: str = typer.Argument(..., help="Provider slug (github / google / notion / etc.)"),
