@@ -43,6 +43,19 @@ from `sources/hermes-agent-2026.4.23/hermes_cli/{main,setup}.py`.
   the first prompt. New shared helper `cli._require_tty(command)`
   ported from hermes' `main.py::_require_tty`.
 
+### Added (one-line installer — hermes parity)
+
+- `scripts/install.sh` — POSIX-bash one-line installer. Mirrors hermes'
+  `scripts/install.sh` shape but tighter: detects pipx → pip --user →
+  managed venv (PEP 668 fallback) automatically, refuses Python <3.13
+  with clear per-OS install hints, supports `--dev` (editable mode from
+  local clone), `--dry-run` (preview-only), `--no-user` (system-wide),
+  `--use-pipx` (force pipx). Usage in README:
+  `curl -fsSL https://raw.githubusercontent.com/sakshamzip2-sys/opencomputer/main/scripts/install.sh | bash`.
+  Closes the "no one-liner install" deployment-mode gap; `pip install
+  opencomputer`, Docker / docker-compose, and PyPI install were
+  already covered.
+
 ### Added (Round 2B P-16 — security hardening)
 
 Two surfaces tightened against the most common credential-leak +

@@ -20,7 +20,17 @@ Pre-alpha (0.1.0). Core architecture stable. 114 tests passing. Adding features 
 
 ## Install
 
-Requires **Python 3.12+**.
+Requires **Python 3.13+**.
+
+**One-line install** (macOS / Linux / Termux):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sakshamzip2-sys/opencomputer/main/scripts/install.sh | bash
+```
+
+The installer auto-detects pipx / pip --user / venv and falls back gracefully on PEP 668 ("externally managed") Python distributions. Pass `--dry-run` to preview, `--dev` to install from a local clone in editable mode, `--use-pipx` to force pipx.
+
+**Manual install:**
 
 ```bash
 pip install opencomputer
