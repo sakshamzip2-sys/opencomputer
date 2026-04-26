@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "opencomputer"
-version = "2026.4.26"
+version = "2026.4.26.post1"
 description = "Personal AI agent framework — plugin-first, self-improving, multi-channel"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -76,6 +76,16 @@ oc = "opencomputer.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["opencomputer", "plugin_sdk"]
+
+# Bundle the discoverable plugin tree into the wheel. ``extensions/`` is
+# NOT a Python import root (no ``__init__.py``) — it's the runtime
+# discovery target that ``opencomputer.plugins.discovery._bundled_
+# extensions_root()`` computes as ``<wheel install root>/extensions``.
+# Without this force-include, the wheel ships zero providers / channels
+# and ``opencomputer chat`` errors with "Provider 'anthropic' is not
+# available" on first use. Caught by the v2026.4.26 E2E install test.
+[tool.hatch.build.targets.wheel.force-include]
+"extensions" = "extensions"
 
 [tool.ruff]
 line-length = 100

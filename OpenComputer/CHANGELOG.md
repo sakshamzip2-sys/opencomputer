@@ -2,6 +2,28 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
+## [2026.4.26.post1] — hotfix: bundle `extensions/` in the wheel
+
+Critical hotfix on the same-day v2026.4.26 release. The wheel only
+shipped `opencomputer/` and `plugin_sdk/`, omitting the `extensions/`
+plugin tree — so `pip install opencomputer==2026.4.26` produced an
+unusable agent that errored with "Provider 'anthropic' is not
+available" on first chat. Caught by the post-release E2E install test.
+
+Fix: added `[tool.hatch.build.targets.wheel.force-include]` mapping
+`"extensions" = "extensions"` to `pyproject.toml`. The wheel now ships
+all 21 bundled plugins (anthropic-provider, openai-provider,
+aws-bedrock-provider, telegram, discord, slack, matrix, mattermost,
+imessage, signal, whatsapp, webhook, homeassistant, email,
+api-server, coding-harness, dev-tools, memory-honcho, oi-capability,
+opencli-scraper, weather-example).
+
+Verified end-to-end: clean venv + `pip install opencomputer==
+2026.4.26.post1` → `opencomputer chat` round-trip through Claude
+Router returns a real LLM response.
+
+`v2026.4.26` should be yanked on PyPI.
+
 ## [2026.4.26] — first date-versioned release; v1.0-quality UX + hermes parity
 
 This is OpenComputer's first ship under the new date-versioned cadence.
