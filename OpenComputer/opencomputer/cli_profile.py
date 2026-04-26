@@ -27,6 +27,7 @@ from rich.console import Console
 from rich.table import Table
 
 from opencomputer.profile_bootstrap.bridge_state import load_or_create
+from opencomputer.profile_bootstrap.deepening import run_deepening  # noqa: F401
 from opencomputer.profile_bootstrap.orchestrator import run_bootstrap
 from opencomputer.profiles import (
     ProfileExistsError,
@@ -120,6 +121,48 @@ def profile_bootstrap(
     typer.echo(f"  Calendar events scanned:   {result.calendar_events_scanned}")
     typer.echo(f"  Browser visits scanned:    {result.browser_visits_scanned}")
     typer.echo(f"  Elapsed:                   {result.elapsed_seconds:.1f}s")
+
+
+@profile_app.command("deepen")
+def profile_deepen(
+    force: bool = typer.Option(
+        False, "--force", help="Bypass idle check; run regardless of CPU/battery"
+    ),
+    max_artifacts: int = typer.Option(
+        500, "--max-artifacts", help="Cap artifacts processed in this window"
+    ),
+) -> None:
+    """Run one deepening pass (Layer 3 of Layered Awareness).
+
+    Walks the current window from the cursor, extracts motifs via Ollama,
+    and advances to the next window. With --force, ignores idle gating.
+    """
+    from pathlib import Path
+
+    home_dirs = [
+        Path.home() / "Documents",
+        Path.home() / "Desktop",
+        Path.home() / "Downloads",
+    ]
+    git_repos = _detect_git_repos()  # already exists from V1
+
+    result = run_deepening(
+        scan_roots=[d for d in home_dirs if d.exists()],
+        git_repos=git_repos,
+        max_artifacts_per_window=max_artifacts,
+        force=force,
+    )
+
+    if result.skipped_reason:
+        typer.echo(f"Deepening skipped: {result.skipped_reason}")
+        typer.echo("Use --force to run anyway.")
+        return
+
+    typer.echo("Deepening pass complete:")
+    typer.echo(f"  Window processed (days):    {result.window_processed_days}")
+    typer.echo(f"  Artifacts processed:        {result.artifacts_processed}")
+    typer.echo(f"  Motifs emitted:             {result.motifs_emitted}")
+    typer.echo(f"  Elapsed:                    {result.elapsed_seconds:.1f}s")
 
 
 def _detect_git_repos(max_repos: int = 50) -> list:
