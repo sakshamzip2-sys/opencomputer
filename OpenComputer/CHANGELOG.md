@@ -4,6 +4,24 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (`opencomputer chat --resume {last,pick}` magic spellings)
+
+CLAUDE.md §5 Phase 15.A — checkpoint table shipped, CLI surface was
+missing. Without this, `--resume` only worked when the user had
+copied a UUID from `opencomputer sessions`. Now:
+
+- `opencomputer chat --resume last` — resumes the most-recent
+  session by `started_at`. Falls back to a fresh session (with a
+  dim notice) when there are none yet.
+- `opencomputer chat --resume pick` — interactive picker showing the
+  last 10 sessions (id prefix, platform, message count, title);
+  prompt accepts a number or blank-for-fresh.
+- Existing `--resume <session-id>` keeps working unchanged.
+
+New `opencomputer.cli._resolve_resume_target(spec)` helper handles
+both magic spellings and is unit-tested. 6 new tests in
+`tests/test_chat_resume_picker.py`.
+
 ### Added (macOS LaunchAgent for `opencomputer gateway`)
 
 Standard macOS pattern for "always-on" services. CLAUDE.md user-prefs
