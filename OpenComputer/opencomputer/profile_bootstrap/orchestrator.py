@@ -3,6 +3,33 @@
 Called by the ``opencomputer profile bootstrap`` CLI subcommand. Each
 layer is independent and best-effort — a failure in one does not
 block subsequent layers.
+
+## V2.A-T1 — F1 consent enforcement on Layer 2 readers
+
+Each Layer 2 ingestion site consults the F1 :class:`ConsentGate`
+*before* invoking its reader. If the relevant ``ingestion.*``
+capability has been revoked (or never granted at the required tier),
+the reader is skipped and a single info-level log line is emitted —
+the rest of the bootstrap continues uninterrupted.
+
+Layers 0 and 1 are not gated: Layer 0 reads only system-identity
+facts (no third-party data), and Layer 1 stores answers the user
+just typed into the interview, which is implicit consent by act of
+typing.
+
+The gate is loaded lazily via :func:`_get_consent_gate`. When no
+gate is wired (during tests, or in environments where F1 has not been
+provisioned) the helper returns ``None`` and every check defaults to
+"allowed" — the orchestrator falls back to its pre-V2 behavior so we
+do not break first-run installs that have not yet seen the consent
+schema. When the gate itself raises, :func:`_consent_allows` catches
+and returns ``False`` (fail closed for forensic-trail integrity)
+because a misbehaving gate is more dangerous than a missing one.
+
+The browser-extension and messages capabilities are intentionally
+NOT enforced here: ``ingestion.browser_extension`` gates the
+:class:`BrowserBridgeAdapter` HTTP path which runs in a separate
+process, and ``ingestion.messages`` has no reader yet.
 """
 from __future__ import annotations
 
@@ -11,6 +38,7 @@ import logging
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 from opencomputer.profile_bootstrap.identity_reflex import gather_identity
 from opencomputer.profile_bootstrap.persistence import (
@@ -37,6 +65,118 @@ class BootstrapResult:
     elapsed_seconds: float = 0.0
 
 
+def _get_consent_gate() -> Any | None:
+    """Build (or return) a :class:`ConsentGate` bound to the active profile.
+
+    Returns ``None`` on any failure path — missing F1 schema, missing
+    keyring, anything else. Callers must treat ``None`` as "no gate
+    configured, allow by default" so that a profile that has never
+    been touched by the consent CLI still bootstraps successfully.
+
+    The function is module-level (rather than a closure inside
+    :func:`run_bootstrap`) so tests can monkey-patch it via
+    ``patch("opencomputer.profile_bootstrap.orchestrator._get_consent_gate")``
+    without having to construct a real SQLite DB + keyring.
+
+    Lazy imports keep the orchestrator import-time graph clean — the
+    consent module pulls in ``opencomputer.agent.state`` which does
+    SQLite migrations, and we don't want that to run at import time
+    of the bootstrap path (which is also reachable from CLI doctor /
+    plugin loaders).
+    """
+    try:
+        import os
+        import sqlite3
+
+        from opencomputer.agent.config import _home
+        from opencomputer.agent.consent import (
+            AuditLogger,
+            ConsentGate,
+            ConsentStore,
+            KeyringAdapter,
+        )
+        from opencomputer.agent.state import apply_migrations
+
+        home = _home()
+        db_path = home / "sessions.db"
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        apply_migrations(conn)
+
+        kr = KeyringAdapter(service="opencomputer-consent", fallback_dir=home)
+        key_hex = kr.get("hmac-chain")
+        if key_hex is None:
+            key_bytes = os.urandom(32)
+            kr.set("hmac-chain", key_bytes.hex())
+        else:
+            key_bytes = bytes.fromhex(key_hex)
+
+        store = ConsentStore(conn)
+        audit = AuditLogger(conn, hmac_key=key_bytes)
+        return ConsentGate(store=store, audit=audit)
+    except Exception:  # noqa: BLE001
+        # Any failure → no gate configured. Caller treats as "allow by
+        # default". This is the deliberate fallback documented in the
+        # module docstring and V2.A-T1 plan; do not tighten it without
+        # also updating that documentation.
+        _log.debug("consent gate unavailable; ingestion proceeds ungated", exc_info=True)
+        return None
+
+
+def _consent_allows(gate: Any | None, capability_id: str) -> bool:
+    """Ask the gate whether ``capability_id`` is currently authorized.
+
+    Returns:
+        ``True``  — gate is None (open-by-default fallback) OR gate
+                    returned an allow decision OR bypass is active.
+        ``False`` — gate denied OR gate raised (fail closed).
+
+    The :class:`CapabilityClaim` is built on the fly from the F1
+    taxonomy: ingestion.* capabilities have well-known tier
+    requirements (recent_files / git_log are IMPLICIT, calendar /
+    browser_history are EXPLICIT). We don't pass a scope because
+    bootstrap reads are coarse-grained — the capability is a binary
+    "may we touch this source" per the V2.A-T1 plan.
+    """
+    if gate is None:
+        return True
+
+    try:
+        # Bypass is treated separately so an emergency-bypass user
+        # still sees a single info-level log per skipped site rather
+        # than a flood of "denied" entries — the gate.check call
+        # would still allow under bypass but the audit chain semantics
+        # differ. Honor it explicitly here.
+        from opencomputer.agent.consent.bypass import BypassManager
+        if BypassManager.is_active():
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from opencomputer.agent.consent.capability_taxonomy import F1_CAPABILITIES
+        from plugin_sdk import CapabilityClaim, ConsentTier
+
+        tier = F1_CAPABILITIES.get(capability_id, ConsentTier.EXPLICIT)
+        claim = CapabilityClaim(
+            capability_id=capability_id,
+            tier_required=tier,
+            human_description=f"profile bootstrap reads {capability_id}",
+        )
+        decision = gate.check(claim, scope=None, session_id=None)
+        return bool(getattr(decision, "allowed", False))
+    except Exception:  # noqa: BLE001
+        # Fail closed — a broken gate must not silently allow data
+        # reads. Log so an operator can investigate. The bootstrap
+        # continues without this reader; the user can re-run after
+        # fixing the gate (or set OPENCOMPUTER_CONSENT_BYPASS=1 to
+        # unbrick).
+        _log.exception(
+            "consent gate raised on check(%s); treating as denied",
+            capability_id,
+        )
+        return False
+
+
 def run_bootstrap(
     *,
     interview_answers: dict[str, str],
@@ -51,43 +191,65 @@ def run_bootstrap(
 
     Marker write at the end is the "bootstrap completed" signal the CLI
     checks on subsequent runs.
+
+    V2.A-T1: each Layer 2 ingestion site is gated on the matching
+    ``ingestion.*`` consent capability. A revoked or unset grant
+    causes the orchestrator to skip that reader (and log it) without
+    failing the rest of the run.
     """
     started = time.monotonic()
     s = store if store is not None else UserModelStore()
 
-    # Layer 0
+    gate = _get_consent_gate()
+
+    # Layer 0 — system-identity facts (not gated; non-third-party data).
     facts = gather_identity()
     identity_n = write_identity_to_graph(facts, store=s)
 
-    # Layer 1
+    # Layer 1 — interview answers (not gated; user just typed them).
     interview_n = write_interview_answers_to_graph(interview_answers, store=s)
 
-    # Layer 2 — files
-    files = scan_recent_files(roots=scan_roots, days=7) if scan_roots else []
+    # Layer 2 — files. Gated on ingestion.recent_files.
+    files: list = []
+    if scan_roots:
+        if _consent_allows(gate, "ingestion.recent_files"):
+            files = scan_recent_files(roots=scan_roots, days=7)
+        else:
+            _log.info("Skipping recent_files: consent not granted")
 
-    # Layer 2 — git
-    commits = scan_git_log(repo_paths=git_repos, days=7) if git_repos else []
+    # Layer 2 — git. Gated on ingestion.git_log.
+    commits: list = []
+    if git_repos:
+        if _consent_allows(gate, "ingestion.git_log"):
+            commits = scan_git_log(repo_paths=git_repos, days=7)
+        else:
+            _log.info("Skipping git_log: consent not granted")
 
-    # Layer 2 — calendar / browser are passed through here in MVP only as
-    # counters; the LLM-extraction-and-importer wiring lands in V2 to
-    # avoid blocking MVP on Ollama install. For MVP we simply log + count.
+    # Layer 2 — calendar. Gated on ingestion.calendar.
     if include_calendar:
-        try:
-            from opencomputer.profile_bootstrap.calendar_reader import (
-                read_upcoming_events,
-            )
-            _ = read_upcoming_events(days=7)
-        except Exception:  # noqa: BLE001
-            _log.exception("calendar read failed")
+        if _consent_allows(gate, "ingestion.calendar"):
+            try:
+                from opencomputer.profile_bootstrap.calendar_reader import (
+                    read_upcoming_events,
+                )
+                _ = read_upcoming_events(days=7)
+            except Exception:  # noqa: BLE001
+                _log.exception("calendar read failed")
+        else:
+            _log.info("Skipping calendar: consent not granted")
 
+    # Layer 2 — browser history. Gated on ingestion.browser_history.
     if include_browser_history:
-        try:
-            from opencomputer.profile_bootstrap.browser_history import (
-                read_chrome_history,
-            )
-            _ = read_chrome_history(days=7)
-        except Exception:  # noqa: BLE001
-            _log.exception("browser history read failed")
+        if _consent_allows(gate, "ingestion.browser_history"):
+            try:
+                from opencomputer.profile_bootstrap.browser_history import (
+                    read_chrome_history,
+                )
+                _ = read_chrome_history(days=7)
+            except Exception:  # noqa: BLE001
+                _log.exception("browser history read failed")
+        else:
+            _log.info("Skipping browser_history: consent not granted")
 
     elapsed = time.monotonic() - started
     result = BootstrapResult(
