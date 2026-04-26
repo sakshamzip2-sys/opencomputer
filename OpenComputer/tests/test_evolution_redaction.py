@@ -22,13 +22,25 @@ from opencomputer.evolution.redaction import (
 
 
 def test_pattern_names_stable_order():
-    """PATTERN_NAMES is a public, stable contract — keep this order."""
+    """PATTERN_NAMES is a public, stable contract — keep this order.
+
+    The original P-14 pattern set sat in slots 0-4. P-16 appended five
+    more secret-token patterns AT THE END so existing trajectory
+    files (which serialise the dict by name, not position) keep
+    parsing — and reading code that asserts names is in a known
+    range still works.
+    """
     assert PATTERN_NAMES == (
         "api_key",
         "file_path",
         "email",
         "ip",
         "bearer_token",
+        "slack_token",
+        "telegram_token",
+        "anthropic_key",
+        "openai_key",
+        "aws_akid",
     )
 
 
@@ -44,19 +56,30 @@ def test_empty_counts_zero_for_each_pattern():
 
 
 @pytest.mark.parametrize(
-    "raw",
+    "raw,expected_counter",
     [
-        "use sk-abcdef0123456789abcdef0123 to call",
-        "anthropic-ABCDEF0123456789012345xyz",
-        "github_pat_11ABCDEF0123456789012345",
-        "header: ghp_abcdefghij0123456789ABCDEF",
-        "ghs_abcdefghij0123456789ABCDEF",
+        # The OpenAI-shaped sk- key now lands in the more specific
+        # ``openai_key`` slot (P-16). Older trajectories that included
+        # an ``sk-...`` will tally under ``openai_key`` going forward.
+        ("use sk-abcdef0123456789abcdef0123 to call", "openai_key"),
+        # The legacy generic patterns still feed the ``api_key`` slot.
+        ("anthropic-ABCDEF0123456789012345xyz", "api_key"),
+        ("github_pat_11ABCDEF0123456789012345", "api_key"),
+        ("header: ghp_abcdefghij0123456789ABCDEF", "api_key"),
+        ("ghs_abcdefghij0123456789ABCDEF", "api_key"),
     ],
 )
-def test_redact_api_key_hit(raw):
+def test_redact_api_key_hit(raw, expected_counter):
     out, counts = redact(raw)
-    assert "<API_KEY_REDACTED>" in out
-    assert counts["api_key"] == 1
+    # Either label proves the secret was scrubbed; assert exact counter
+    # placement so a future re-shuffle of pattern order doesn't quietly
+    # move the count to a different slot.
+    assert counts[expected_counter] == 1
+    assert counts["api_key"] + counts["openai_key"] == 1
+    if expected_counter == "api_key":
+        assert "<API_KEY_REDACTED>" in out
+    else:
+        assert "<OPENAI_KEY_REDACTED>" in out
 
 
 def test_redact_api_key_miss_short_string():
@@ -196,15 +219,21 @@ def test_redact_all_patterns_at_once():
     out, counts = redact(raw)
     assert "<EMAIL_REDACTED>" in out
     assert "/Users/REDACTED/" in out
-    assert "<API_KEY_REDACTED>" in out
+    # P-16: ``sk-...`` now lands in the more-specific openai_key slot.
+    assert "<OPENAI_KEY_REDACTED>" in out
     assert "<IP_REDACTED>" in out
     assert "Bearer <REDACTED>" in out
     assert counts == {
-        "api_key": 1,
+        "api_key": 0,
         "file_path": 1,
         "email": 1,
         "ip": 1,
         "bearer_token": 1,
+        "slack_token": 0,
+        "telegram_token": 0,
+        "anthropic_key": 0,
+        "openai_key": 1,
+        "aws_akid": 0,
     }
 
 
@@ -255,6 +284,13 @@ def test_merge_counts_sums_each_pattern():
         "email": 3,
         "ip": 1,
         "bearer_token": 1,
+        # P-16 added pattern names default to 0 — partial dicts that
+        # predate them still merge cleanly.
+        "slack_token": 0,
+        "telegram_token": 0,
+        "anthropic_key": 0,
+        "openai_key": 0,
+        "aws_akid": 0,
     }
 
 

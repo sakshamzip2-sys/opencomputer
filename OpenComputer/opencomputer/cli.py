@@ -1395,10 +1395,42 @@ def batch(
     console.print(f"[green]✓[/green] batch finished ({final_status}) — {n} result(s) → {out_path}")
 
 
+def _apply_loose_env_perms_flag() -> None:
+    """Intercept ``--allow-loose-env-perms`` from sys.argv (Round 2B P-16).
+
+    Strips the flag from argv before Typer parses it (otherwise every
+    subcommand would have to declare the option) and flips the
+    process-wide flag consumed by
+    :func:`opencomputer.security.env_loader.load_env_file`. The override
+    deliberately requires explicit opt-in: a user who edits a ``.env``
+    file with the wrong umask will see a clear refusal at first load,
+    and can pass this flag to override after auditing the file.
+
+    Safe to call multiple times. Re-derives argv from ``sys.argv`` and
+    overwrites it in place.
+    """
+    argv = sys.argv
+    if not argv:
+        return
+    new_argv: list[str] = [argv[0]]
+    seen = False
+    for arg in argv[1:]:
+        if arg == "--allow-loose-env-perms":
+            seen = True
+            continue
+        new_argv.append(arg)
+    if seen:
+        from opencomputer.security.env_loader import set_process_allow_loose_perms
+
+        set_process_allow_loose_perms(True)
+        sys.argv = new_argv
+
+
 def main() -> None:
     # Profile routing runs here (not at import time) so tests and library
     # consumers can import this module without their argv being mutated.
     _apply_profile_override()
+    _apply_loose_env_perms_flag()
     app()
 
 
