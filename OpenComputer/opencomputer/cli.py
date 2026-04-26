@@ -444,6 +444,18 @@ def default(
         chat()
 
 
+_BUILTIN_PROVIDER_ENV_FALLBACK = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+"""Last-resort env-var lookup for provider plugins shipped before G.23.
+
+Sub-project G.23 pushes this knowledge into ``plugin.json::setup.providers``.
+The fallback dict only fires when discovery fails or the bundled plugin
+manifest does not yet declare ``setup.providers`` — keep it minimal so
+new providers must self-describe via manifest rather than core."""
+
+
 def _require_tty(command_name: str) -> None:
     """Exit with a clear stderr message when stdin is not a terminal.
 
@@ -508,15 +520,24 @@ def _offer_setup_or_exit(reason: str) -> None:
     static guidance + exit 1 in that case). On 'y' / Enter we hand off
     to :func:`opencomputer.setup_wizard.run_setup` and exit cleanly so
     the user re-runs ``opencomputer`` after setup writes config + env.
+
+    Diagnostic / guidance text goes to stderr so a piped stdout (CI,
+    ``opencomputer chat | grep …``) doesn't get polluted with the
+    error banner.
     """
     import sys as _sys
 
-    print(f"\n! {reason} — looks like a first-run install.")
-    print()
+    print(
+        f"\n! {reason} — looks like a first-run install.",
+        file=_sys.stderr,
+    )
     stdin = getattr(_sys, "stdin", None)
     is_tty = bool(stdin is not None and stdin.isatty())
     if not is_tty:
-        print("Run `opencomputer setup` to configure.")
+        print(
+            "Run `opencomputer setup` to configure.",
+            file=_sys.stderr,
+        )
         raise typer.Exit(1)
     try:
         reply = input("Run `opencomputer setup` now? [Y/n] ").strip().lower()
@@ -527,20 +548,11 @@ def _offer_setup_or_exit(reason: str) -> None:
 
         run_setup()
         raise typer.Exit(0)
-    print("\nYou can run `opencomputer setup` at any time to configure.")
+    print(
+        "\nYou can run `opencomputer setup` at any time to configure.",
+        file=_sys.stderr,
+    )
     raise typer.Exit(1)
-
-
-_BUILTIN_PROVIDER_ENV_FALLBACK = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-}
-"""Last-resort env-var lookup for provider plugins shipped before G.23.
-
-Sub-project G.23 pushes this knowledge into ``plugin.json::setup.providers``.
-The fallback dict only fires when discovery fails or the bundled plugin
-manifest does not yet declare ``setup.providers`` — keep it minimal so
-new providers must self-describe via manifest rather than core."""
 
 
 def _check_provider_key(provider_name: str) -> None:

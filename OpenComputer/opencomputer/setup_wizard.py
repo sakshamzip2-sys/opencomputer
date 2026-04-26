@@ -337,18 +337,19 @@ def _optional_channel(cfg: Config) -> None:
         "Skip if you only want the CLI for now.[/dim]\n"
     )
 
-    pre_configured: list[str] = []
     for label, env_var, _plugin_id in _CHANNEL_PLATFORMS:
         is_set = bool(os.environ.get(env_var))
         suffix = "  [green][configured][/green]" if is_set else ""
         console.print(f"  [cyan]{label}[/cyan]  [dim]({env_var})[/dim]{suffix}")
-        if is_set:
-            pre_configured.append(label)
 
-    default = " ".join(pre_configured)
+    # Default is intentionally empty — ``[configured]`` is informational
+    # only. Pre-filling with already-configured channels would silently
+    # re-run ``_auto_enable_plugins_for_channels`` on every Enter,
+    # which is surprising for returning users in Quick mode who just
+    # want to skip the step.
     raw = Prompt.ask(
         "\nChannels to enable (space-separated, blank to skip)",
-        default=default,
+        default="",
     )
     selected = [c.strip().lower() for c in raw.split() if c.strip()]
     selected = [c for c in selected if c in _CHANNEL_PLUGIN_MAP]

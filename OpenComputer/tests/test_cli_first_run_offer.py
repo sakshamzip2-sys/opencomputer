@@ -117,8 +117,10 @@ def test_offer_setup_inline_no_exits_with_hint(
     with pytest.raises(typer.Exit) as exc:
         cli._offer_setup_or_exit("Config not found")
     assert exc.value.exit_code == 1
-    out = capsys.readouterr().out
-    assert "opencomputer setup" in out
+    captured = capsys.readouterr()
+    # Reviewer fix #3: guidance prints to stderr so a piped stdout
+    # (CI, ``opencomputer chat | grep …``) stays clean.
+    assert "opencomputer setup" in captured.err
 
 
 def test_offer_setup_in_non_tty_prints_static_guidance(
@@ -130,5 +132,5 @@ def test_offer_setup_in_non_tty_prints_static_guidance(
     with pytest.raises(typer.Exit) as exc:
         cli._offer_setup_or_exit("Config not found")
     assert exc.value.exit_code == 1
-    out = capsys.readouterr().out
-    assert "opencomputer setup" in out
+    captured = capsys.readouterr()
+    assert "opencomputer setup" in captured.err
