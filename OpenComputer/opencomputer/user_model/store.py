@@ -32,7 +32,8 @@ from plugin_sdk.user_model import Edge, EdgeKind, Node, NodeKind
 #: Incremented when the SQLite schema is extended. Migrations advance
 #: the DB from its stored version to :data:`SCHEMA_VERSION` via
 #: :func:`apply_migrations`. v1 = baseline (nodes + edges + FTS5).
-SCHEMA_VERSION = 1
+#: v2 (Phase 4 of catch-up plan) = adds ``edges.source`` provenance column.
+SCHEMA_VERSION = 2
 
 
 DDL_V1 = """
@@ -117,6 +118,7 @@ END;
 
 MIGRATIONS: dict[tuple[int, int], str] = {
     (0, 1): "_migrate_v0_to_v1",
+    (1, 2): "_migrate_v1_to_v2",
 }
 
 
@@ -138,6 +140,30 @@ def _bump_schema_version(conn: sqlite3.Connection, v: int) -> None:
 def _migrate_v0_to_v1(conn: sqlite3.Connection) -> None:
     """Apply the v1 baseline DDL — nodes + edges + FTS5 + triggers. Idempotent."""
     conn.executescript(DDL_V1)
+
+
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Add ``edges.source`` provenance column for Phase 4 hybrid cycle-prevention.
+
+    Default value 'unknown' so existing rows carry forward without
+    rewriting. New writes must specify a meaningful source
+    ('motif_importer', 'honcho_synthesis', 'user_explicit', etc.) — the
+    importer was updated in the same change to do so.
+
+    Idempotent: re-runs are no-ops because ALTER TABLE ADD COLUMN with
+    DEFAULT and NOT NULL is single-shot. We use a try/except sentinel
+    to handle the "column already exists" case (which can happen if a
+    user migrated mid-flight).
+    """
+    cur = conn.execute("PRAGMA table_info(edges)")
+    cols = {row[1] for row in cur.fetchall()}
+    if "source" not in cols:
+        conn.execute(
+            "ALTER TABLE edges ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'"
+        )
+    # Index even if the column was already there — IF NOT EXISTS makes
+    # it safe.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source)")
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -417,13 +443,15 @@ class UserModelStore:
             float(e.decay_rate),
             float(e.created_at),
             json.dumps(dict(e.evidence)),
+            e.source,
         )
 
     _INSERT_EDGE_SQL = (
         "INSERT OR REPLACE INTO edges "
         "(edge_id, kind, from_node, to_node, salience, confidence, "
-        "recency_weight, source_reliability, decay_rate, created_at, evidence_json) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "recency_weight, source_reliability, decay_rate, created_at, "
+        "evidence_json, source) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
 
     def insert_edge(self, edge: Edge) -> None:
@@ -549,6 +577,12 @@ class UserModelStore:
             evidence = json.loads(row["evidence_json"]) if row["evidence_json"] else {}
         except (json.JSONDecodeError, TypeError):
             evidence = {}
+        # Phase 4: ``source`` may be missing on rows written before the
+        # v1→v2 migration ran in this process; fall back to "unknown".
+        try:
+            source = row["source"] or "unknown"
+        except (IndexError, KeyError):
+            source = "unknown"
         return Edge(
             edge_id=row["edge_id"],
             kind=row["kind"],
@@ -561,6 +595,7 @@ class UserModelStore:
             decay_rate=float(row["decay_rate"]),
             created_at=float(row["created_at"]),
             evidence=evidence,
+            source=source,
         )
 
 
