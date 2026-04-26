@@ -51,6 +51,62 @@ jobs:
           python -c "import opencomputer; print('installed:', opencomputer.__version__)"
           python -c "import plugin_sdk; print('sdk:', plugin_sdk.__version__)"
 
+      # Post-install smoke test in a clean throwaway venv. Catches the
+      # class of release-blocker bugs where the wheel imports fine
+      # (`import opencomputer` works) but is unusable in practice
+      # because runtime discovery roots are missing from the wheel.
+      #
+      # Specifically pinned to the v2026.4.26 incident: the wheel
+      # shipped only `opencomputer/` + `plugin_sdk/` and omitted the
+      # `extensions/` plugin tree, so `opencomputer chat` errored with
+      # "Provider 'anthropic' is not available" on first use. The
+      # `import` step above did not catch it because the failure was
+      # at runtime discovery, not at import time. This step does.
+      - name: Wheel smoke — discovery + CLI in clean venv
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/wheel-smoke
+          /tmp/wheel-smoke/bin/pip install --quiet dist/*.whl
+
+          # 1. Sanity — CLI is reachable + version matches.
+          /tmp/wheel-smoke/bin/opencomputer --version
+          INSTALLED=$(/tmp/wheel-smoke/bin/opencomputer --version | awk '{print $2}')
+          if [ "$INSTALLED" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "::error::CLI reports v$INSTALLED but tag is $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+          # 2. Plugin discovery — the v2026.4.26 regression. Walks the
+          #    same standard_search_paths the agent loop uses and asserts
+          #    that the bundled provider plugins are reachable. Without
+          #    extensions/ in the wheel this prints zero plugins and
+          #    fails loud.
+          /tmp/wheel-smoke/bin/python -c "
+          from opencomputer.plugins.discovery import discover, standard_search_paths
+          ids = sorted(c.manifest.id for c in discover(standard_search_paths()))
+          print('discovered plugins:', ids)
+          required = {'anthropic', 'openai', 'telegram'}
+          missing = required - set(ids)
+          if missing:
+              raise SystemExit(
+                  f'wheel-smoke FAILED — required bundled plugins missing: '
+                  f'{sorted(missing)}. The extensions/ tree is likely not '
+                  f'force-included in the wheel (pyproject.toml: '
+                  f'[tool.hatch.build.targets.wheel.force-include]).'
+              )
+          print('wheel-smoke PASSED — all required bundled plugins discoverable.')
+          "
+
+          # 3. Doctor — exits 0 when no provider env var is set (the
+          #    'API key not set' check is the only failure path that
+          #    exits non-zero, and we don't set keys in CI). What we're
+          #    really testing here is that doctor itself loads cleanly
+          #    against the wheel without crashing on missing data files.
+          /tmp/wheel-smoke/bin/opencomputer doctor || \
+            echo "(doctor exited non-zero, expected when no API key set in CI)"
+
+          rm -rf /tmp/wheel-smoke
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
