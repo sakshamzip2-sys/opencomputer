@@ -2,6 +2,20 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
+## [Unreleased]
+
+### Changed (release CI hardening)
+
+- `.github/workflows/release.yml` — added a wheel-smoke step that runs
+  AFTER build but BEFORE publish. Installs the freshly built wheel
+  into a clean venv, runs `opencomputer --version` (asserts version ==
+  tag), then walks `discover(standard_search_paths())` and asserts the
+  required bundled plugins (`anthropic`, `openai`, `telegram`) are
+  discoverable. Pinned to the v2026.4.26 incident, where the wheel
+  imported fine but had no `extensions/` tree and was unusable in
+  practice. The previous `import opencomputer` check could not catch
+  this; the new step does, and fails the release before publish.
+
 ## [2026.4.26.post1] — hotfix: bundle `extensions/` in the wheel
 
 Critical hotfix on the same-day v2026.4.26 release. The wheel only

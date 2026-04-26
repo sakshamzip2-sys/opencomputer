@@ -13,7 +13,13 @@ from opencomputer.release.version import (
 
 
 def test_current_version_is_date_format():
-    assert re.fullmatch(r"\d{4}\.\d{1,2}\.\d{1,2}", current_version())
+    # ``YYYY.M.D`` for normal releases, optionally ``YYYY.M.D.postN``
+    # for same-day hotfixes (per RELEASE.md). Both shapes are valid;
+    # the older strict ``\d{4}\.\d{1,2}\.\d{1,2}`` regex rejected
+    # the v2026.4.26.post1 hotfix on disk and broke the suite.
+    assert re.fullmatch(
+        r"\d{4}\.\d{1,2}\.\d{1,2}(\.post\d+)?", current_version()
+    )
 
 
 def test_parse_date_version_round_trip():
