@@ -19,6 +19,7 @@ import os
 from dataclasses import replace
 from pathlib import Path
 
+import yaml
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
@@ -35,6 +36,44 @@ from opencomputer.agent.config_store import (
 )
 
 console = Console()
+
+
+# Round 2B P-10 — channel selection → required-plugin id mapping.
+#
+# The setup wizard's channel step only writes config.yaml; nothing in
+# core wires channel selection to plugin activation. P-10 closes that
+# loop by auto-enabling the plugin that backs each chosen channel so
+# new users don't have to discover ``opencomputer plugin enable
+# <id>`` separately.
+#
+# HARD CONSTRAINT (Phase 5.B identity): we ONLY enable plugins that
+# are already discoverable on disk (bundled ``extensions/`` or
+# ``~/.opencomputer/plugins/``). Nothing here downloads, fetches, or
+# pip-installs anything. ``cli_plugin.plugin_enable`` already
+# validates ids against ``discover()`` so unknown ids fail loud.
+#
+# Keys are user-facing channel names; values are the plugin ids those
+# channels actually live under in ``extensions/``. The dict is
+# intentionally permissive — any channel name not in the map is
+# silently ignored (lets users type free-form names without crashing
+# the wizard).
+_CHANNEL_PLUGIN_MAP: dict[str, str] = {
+    "telegram": "telegram",
+    "discord": "discord",
+    "slack": "slack",
+    "matrix": "matrix",
+    "mattermost": "mattermost",
+    "imessage": "imessage",
+    "signal": "signal",
+    "whatsapp": "whatsapp",
+    "webhook": "webhook",
+    # Bundled directory is ``extensions/homeassistant/`` but operators
+    # commonly type ``home-assistant`` (matches Home Assistant's own
+    # branding) — accept both spellings, route to the same plugin id.
+    "home-assistant": "homeassistant",
+    "homeassistant": "homeassistant",
+    "email": "email",
+}
 
 
 # Last-resort provider catalog when discovery fails or no plugin
@@ -157,9 +196,110 @@ def _prompt_api_key(env_key: str, signup_url: str) -> None:
     console.print("[dim]Tip: add it to ~/.zshrc or ~/.bashrc to persist across sessions.[/dim]")
 
 
+def _required_plugins_for_channels(channels: list[str]) -> set[str]:
+    """Map channel names → plugin ids needed to back them (Round 2B P-10).
+
+    Channel names that don't appear in ``_CHANNEL_PLUGIN_MAP`` are
+    silently dropped — channel selection is free-form input, so a
+    typo or future channel id mustn't crash the wizard. Returns a
+    plain ``set`` so callers can do trivial ``- enabled`` math.
+    """
+    out: set[str] = set()
+    for name in channels:
+        plugin_id = _CHANNEL_PLUGIN_MAP.get(name)
+        if plugin_id is not None:
+            out.add(plugin_id)
+    return out
+
+
+def _currently_enabled_plugin_ids() -> set[str]:
+    """Read the active profile's ``plugins.enabled`` list (P-10 helper).
+
+    Returns the set of plugin ids currently enabled for the active
+    profile. Empty set when ``profile.yaml`` is absent, malformed, or
+    declares the wildcard ``"*"`` (which means "all discovered
+    plugins" — the auto-enable prompt is then a no-op because the
+    needed channel plugin is already loaded). Never raises — config
+    issues fall through to "nothing enabled" so the wizard can still
+    offer to enable.
+    """
+    try:
+        from opencomputer.cli_plugin import _active_profile_yaml_path
+
+        path, _profile_name = _active_profile_yaml_path()
+        if not path.exists():
+            return set()
+        raw = yaml.safe_load(path.read_text()) or {}
+    except Exception:  # noqa: BLE001
+        return set()
+    if not isinstance(raw, dict):
+        return set()
+    plugins_block = raw.get("plugins")
+    if not isinstance(plugins_block, dict):
+        return set()
+    enabled = plugins_block.get("enabled")
+    if enabled == "*":
+        # Wildcard means everything is loaded — treat as "all needed
+        # plugins are already on" so the auto-enable prompt no-ops.
+        return set(_CHANNEL_PLUGIN_MAP.values())
+    if not isinstance(enabled, list):
+        return set()
+    return {pid for pid in enabled if isinstance(pid, str)}
+
+
+def _auto_enable_plugins_for_channels(channels: list[str]) -> None:
+    """Prompt user to enable plugins required by their selected channels.
+
+    Round 2B P-10. Compares the channels the user opted into against
+    the active profile's enabled plugins and offers a single combined
+    confirmation to enable any that are missing. Honours the hard
+    constraint: only plugins already discoverable via
+    ``cli_plugin.plugin_enable`` (bundled ``extensions/`` or
+    ``~/.opencomputer/plugins/``) get touched — nothing is downloaded,
+    pip-installed, or fetched from a remote registry. Errors raised
+    by ``plugin_enable`` (typer.Exit codes for unknown ids, etc.)
+    surface as a yellow warning rather than crashing the wizard.
+    """
+    needed = _required_plugins_for_channels(channels)
+    if not needed:
+        return
+    missing = needed - _currently_enabled_plugin_ids()
+    if not missing:
+        return
+
+    from opencomputer import cli_plugin
+
+    pretty = ", ".join(sorted(missing))
+    console.print(
+        f"\n[dim]These channels need plugins that aren't yet enabled: "
+        f"{pretty}[/dim]"
+    )
+    if not Confirm.ask(
+        f"Enable required channel plugins ({pretty})?",
+        default=True,
+    ):
+        return
+    for pid in sorted(missing):
+        try:
+            cli_plugin.plugin_enable(pid)
+        except SystemExit:
+            # typer.Exit subclasses SystemExit. plugin_enable raises
+            # exit-0 on "already enabled" no-op (benign) and exit-1
+            # on unknown ids (worth surfacing). Either way, swallow
+            # so one missing plugin doesn't kill the wizard.
+            continue
+        except Exception as exc:  # noqa: BLE001
+            console.print(
+                f"[yellow]![/yellow] could not enable '{pid}': "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+
 def _optional_channel(cfg: Config) -> None:
     console.print("\n[bold]Step 4 — messaging channel (optional)[/bold]")
     console.print("[dim]Skip if you only want to use the CLI for now.[/dim]")
+
+    selected_channels: list[str] = []
 
     want_telegram = Confirm.ask("Set up Telegram?", default=False)
     if want_telegram:
@@ -173,6 +313,12 @@ def _optional_channel(cfg: Config) -> None:
             "[dim]Then run `opencomputer gateway` — the Telegram plugin "
             "picks up the token automatically.[/dim]"
         )
+        selected_channels.append("telegram")
+
+    # Round 2B P-10 — auto-enable plugins for any channels the user
+    # picked. Pure no-op when nothing was selected.
+    if selected_channels:
+        _auto_enable_plugins_for_channels(selected_channels)
 
 
 def _optional_mcp(cfg: Config) -> Config:
@@ -372,4 +518,8 @@ def _optional_honcho() -> None:
     _downgrade_memory_provider_to_empty()
 
 
-__all__ = ["run_setup"]
+__all__ = [
+    "_auto_enable_plugins_for_channels",
+    "_required_plugins_for_channels",
+    "run_setup",
+]

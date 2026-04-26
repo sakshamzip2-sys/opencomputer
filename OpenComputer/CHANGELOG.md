@@ -12,6 +12,45 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Round 2B P-10 — plugin auto-install in setup wizard)
+
+The first-run setup wizard now offers to enable any plugin a user's
+chosen channels need, instead of silently writing a config that
+references a disabled plugin and then failing at gateway startup.
+
+- New helper `opencomputer.setup_wizard._required_plugins_for_channels`
+  maps user-facing channel names → bundled plugin ids via the new
+  module-level `_CHANNEL_PLUGIN_MAP` constant. Covers the 11 bundled
+  channel plugins (telegram, discord, slack, matrix, mattermost,
+  imessage, signal, whatsapp, webhook, homeassistant, email) plus
+  the `home-assistant` spelling alias.
+- New helper `opencomputer.setup_wizard._auto_enable_plugins_for_channels`
+  reads the active profile's `profile.yaml` `plugins.enabled` list,
+  diffs it against the channels the user selected, and prompts once
+  with a combined `Confirm.ask` to enable everything that's missing.
+  On accept, delegates to `cli_plugin.plugin_enable` per id (which
+  itself validates against discovered plugins + writes profile.yaml
+  atomically). `typer.Exit` from one id (unknown plugin, etc.)
+  doesn't short-circuit the rest.
+- `_optional_channel` now collects the user's channel selections and
+  invokes the auto-enable helper after the channel step. Pure no-op
+  when the user skips channels.
+
+**Hard constraint preserved:** the wizard NEVER downloads, fetches,
+or pip-installs a plugin. Only plugins already present on disk
+(bundled `extensions/` or `~/.opencomputer/plugins/`) can be
+enabled — `cli_plugin.plugin_enable`'s discovery validation enforces
+this, and a regression test (`TestNoNetworkInstall`) inspects the
+helper source for forbidden tokens (`subprocess`, `pip `, `urllib`,
+`requests`, `httpx`, `shutil`) so a future "auto-install"
+temptation would fail loudly. Maintains the Phase 5.B "no unsigned
+skill registry" identity.
+
+Tests: `tests/test_setup_wizard_p10_auto_enable.py` (13 tests).
+Cases (a)–(e) from the plan, plus a typer.Exit safety-net case, a
+wildcard (`enabled: "*"`) no-op case, and the no-network regression
+guard.
+
 ### Removed (OI Tier 1 trimmed from 8 to 5 tools, 2026-04-25)
 
 User-directed cleanup. Three Tier 1 tools were redundant with
