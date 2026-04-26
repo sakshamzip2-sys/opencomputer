@@ -2,7 +2,19 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
-## [Unreleased]
+## [2026.4.26.post2] — vision-completion ship: Honcho default-on, agent auto-knows-user, launchd, --resume picker
+
+Five PRs in a single session covering the user's explicit vision
+("the chat llm should know about the user before the user even
+starts using it" + "honcho should be on by default") plus the
+operational polish that makes OC actually usable as a daily tool.
+Includes: #150 (Honcho default-on with daemon auto-start), #152
+(auto-bootstrap profile on first chat), #149 (Telegram scoped lock
++ 409 retry, shipped in this release window), #153 (macOS LaunchAgent
+for the gateway daemon), #154 (chat resume picker), #148 (release.yml
+wheel-smoke step). Plus archit-2's #151 (Layered Awareness V2.A
+follow-ups: consent enforcement, calendar permission handling,
+multi-browser support).
 
 ### Added (`opencomputer chat --resume {last,pick}` magic spellings)
 
