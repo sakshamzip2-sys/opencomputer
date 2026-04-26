@@ -456,6 +456,105 @@ manifest does not yet declare ``setup.providers`` — keep it minimal so
 new providers must self-describe via manifest rather than core."""
 
 
+def _require_tty(command_name: str) -> None:
+    """Exit with a clear stderr message when stdin is not a terminal.
+
+    Ported from hermes-agent's ``hermes_cli/main.py::_require_tty`` —
+    interactive wizards that depend on ``input()`` / Rich prompts spin
+    or hang when stdin is a pipe. Calling this at the top of a wizard
+    entry point catches accidental ``opencomputer setup < something.txt``
+    invocations early with a helpful error.
+    """
+    import sys as _sys
+
+    stdin = getattr(_sys, "stdin", None)
+    if stdin is None or not stdin.isatty():
+        print(
+            f"Error: 'opencomputer {command_name}' requires an interactive terminal.\n"
+            f"It cannot be run through a pipe or non-interactive subprocess.\n"
+            f"Run it directly in your terminal instead.",
+            file=_sys.stderr,
+        )
+        _sys.exit(1)
+
+
+def _has_any_provider_configured() -> bool:
+    """Return True if at least one provider plugin's primary env var is set.
+
+    Ported from hermes-agent's ``hermes_cli/main.py::
+    _has_any_provider_configured``. We check three layers in order:
+
+    1. Process env — what ``os.environ`` knows right now.
+    2. Plugin manifests' declared ``setup.providers[*].env_vars`` — so a
+       freshly added provider plugin doesn't need a code change here.
+    3. Fallback set (``_BUILTIN_PROVIDER_ENV_FALLBACK``) — last resort
+       for the bundled providers shipped before G.23 self-description.
+
+    Returns True on the first match. Used to gate the inline first-run
+    setup offer in :func:`chat`.
+    """
+    candidate_env_vars: set[str] = set(_BUILTIN_PROVIDER_ENV_FALLBACK.values())
+    candidate_env_vars.add("ANTHROPIC_BASE_URL")
+    try:
+        from opencomputer.plugins.discovery import discover, standard_search_paths
+
+        for cand in discover(standard_search_paths()):
+            setup = cand.manifest.setup
+            if setup is None:
+                continue
+            for prov in setup.providers:
+                for env_var in prov.env_vars:
+                    if env_var:
+                        candidate_env_vars.add(env_var)
+    except Exception:  # noqa: BLE001
+        pass
+    return any(os.environ.get(v) for v in candidate_env_vars)
+
+
+def _offer_setup_or_exit(reason: str) -> None:
+    """Inline first-run helper — print reason, then offer to launch the wizard.
+
+    Mirrors hermes-agent's first-run offer at ``hermes_cli/main.py:1082-1112``.
+    Uses raw stdlib ``input()`` (not Rich) so the prompt looks identical
+    on every terminal and never hangs on a non-TTY (we short-circuit to
+    static guidance + exit 1 in that case). On 'y' / Enter we hand off
+    to :func:`opencomputer.setup_wizard.run_setup` and exit cleanly so
+    the user re-runs ``opencomputer`` after setup writes config + env.
+
+    Diagnostic / guidance text goes to stderr so a piped stdout (CI,
+    ``opencomputer chat | grep …``) doesn't get polluted with the
+    error banner.
+    """
+    import sys as _sys
+
+    print(
+        f"\n! {reason} — looks like a first-run install.",
+        file=_sys.stderr,
+    )
+    stdin = getattr(_sys, "stdin", None)
+    is_tty = bool(stdin is not None and stdin.isatty())
+    if not is_tty:
+        print(
+            "Run `opencomputer setup` to configure.",
+            file=_sys.stderr,
+        )
+        raise typer.Exit(1)
+    try:
+        reply = input("Run `opencomputer setup` now? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        reply = "n"
+    if reply in ("", "y", "yes"):
+        from opencomputer.setup_wizard import run_setup
+
+        run_setup()
+        raise typer.Exit(0)
+    print(
+        "\nYou can run `opencomputer setup` at any time to configure.",
+        file=_sys.stderr,
+    )
+    raise typer.Exit(1)
+
+
 def _check_provider_key(provider_name: str) -> None:
     """Verify the right env var is set for the configured provider.
 
@@ -486,11 +585,7 @@ def _check_provider_key(provider_name: str) -> None:
     if key_env is None:
         key_env = _BUILTIN_PROVIDER_ENV_FALLBACK.get(provider_name)
     if key_env and not os.environ.get(key_env):
-        console.print(
-            f"[bold red]error:[/bold red] {key_env} not set.\n"
-            f"[dim]export {key_env}=your-key to continue.[/dim]"
-        )
-        raise typer.Exit(1)
+        _offer_setup_or_exit(f"{key_env} is not set in your environment")
 
 
 @app.command()
@@ -507,6 +602,8 @@ def chat(
 ) -> None:
     """Start an interactive chat session."""
     _configure_logging_once()
+    if not config_file_path().exists() and not _has_any_provider_configured():
+        _offer_setup_or_exit("No OpenComputer config found")
     cfg = load_config()
     # Follow-up #25 — one-shot hint if Docker became available after setup.
     from opencomputer.cli_hints import maybe_print_docker_toggle_hint

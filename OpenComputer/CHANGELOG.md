@@ -12,20 +12,36 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
-### Fixed
+### Changed (onboarding UX — hermes parity)
 
-- `opencomputer/agent/state.py` — `apply_migrations()` now self-heals
-  the `messages.reasoning_details` / `messages.codex_reasoning_items` /
-  `episodic_events.dreamed_into` columns on every connect, regardless
-  of stored `schema_version`. Closes a real failure mode where a DB
-  whose `schema_version` row was bumped without the corresponding
-  ALTER firing (cause: a partial migration on an older build, or
-  hand-edited `schema_version`) would crash the first assistant turn
-  with `OperationalError: table messages has no column named
-  reasoning_details`. Self-heal is bounded to known column names,
-  skips tables that don't exist yet, and only swallows "duplicate
-  column name" errors so genuine schema bugs still surface in tests.
-  Regression test in `tests/test_state_self_heal_columns.py`.
+Brings OC's first-run experience up to hermes-agent parity for the
+gaps that materially affect new users. Hermes patterns ported directly
+from `sources/hermes-agent-2026.4.23/hermes_cli/{main,setup}.py`.
+
+- `opencomputer chat` now detects a missing config or unset provider
+  env var on first run and offers an inline `Run \`opencomputer setup\`
+  now? [Y/n]`, exactly like hermes' `_has_any_provider_configured` /
+  first-run prompt at `main.py:1082-1112`. On `Y`/Enter the wizard
+  runs and we exit cleanly so the user re-runs `opencomputer` with
+  fresh env. Non-TTY stdin short-circuits to a static hint so CI
+  pipelines don't hang.
+- `opencomputer setup` channel step now shows every entry in the new
+  `_CHANNEL_PLATFORMS` registry (Telegram, Discord, Slack, Matrix,
+  Mattermost, Signal, iMessage, WhatsApp, Webhook, HomeAssistant,
+  Email) with `[configured]` next to the ones whose primary env var
+  is already set. Mirrors hermes' `_GATEWAY_PLATFORMS` registry at
+  `setup.py:2210-2256`. Input is space-separated channel ids; unknown
+  ids are silently dropped so typos don't crash the wizard.
+- `opencomputer setup` against an existing config now offers a
+  Welcome Back menu (Quick / Full / Exit) — `quick` only re-prompts
+  for items that are still missing, `full` reconfigures everything,
+  `exit` aborts cleanly. Replaces the destructive `Overwrite? [y/N]`
+  Y/N prompt. Mirrors hermes' returning-user menu at
+  `setup.py:2982-3018`.
+- `opencomputer setup` refuses to run in non-TTY contexts (CI,
+  redirected stdin) with a clear stderr error instead of hanging on
+  the first prompt. New shared helper `cli._require_tty(command)`
+  ported from hermes' `main.py::_require_tty`.
 
 ### Added (Round 2B P-16 — security hardening)
 

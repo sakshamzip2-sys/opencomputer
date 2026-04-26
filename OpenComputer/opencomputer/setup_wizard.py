@@ -76,6 +76,33 @@ _CHANNEL_PLUGIN_MAP: dict[str, str] = {
 }
 
 
+# Onboarding UX — channel platform registry (hermes parity).
+#
+# Mirrors hermes-agent's ``_GATEWAY_PLATFORMS`` at
+# ``hermes_cli/setup.py:2210-2229``. Tuple shape:
+# ``(label, primary_env_var, plugin_id)``. ``label`` is what the user
+# sees in the surfaced list; ``primary_env_var`` is the credential we
+# probe to detect "already configured" so the wizard can show
+# ``[configured]`` next to those rows; ``plugin_id`` matches the
+# bundled ``extensions/<id>/`` directory and is what
+# ``_auto_enable_plugins_for_channels`` uses.
+#
+# Order is the order the user sees in the prompt — most-popular first.
+_CHANNEL_PLATFORMS: list[tuple[str, str, str]] = [
+    ("telegram", "TELEGRAM_BOT_TOKEN", "telegram"),
+    ("discord", "DISCORD_BOT_TOKEN", "discord"),
+    ("slack", "SLACK_BOT_TOKEN", "slack"),
+    ("matrix", "MATRIX_ACCESS_TOKEN", "matrix"),
+    ("mattermost", "MATTERMOST_TOKEN", "mattermost"),
+    ("signal", "SIGNAL_HTTP_URL", "signal"),
+    ("imessage", "IMESSAGE_DB_PATH", "imessage"),
+    ("whatsapp", "WHATSAPP_ENABLED", "whatsapp"),
+    ("webhook", "WEBHOOK_ENABLED", "webhook"),
+    ("homeassistant", "HASS_TOKEN", "homeassistant"),
+    ("email", "SMTP_HOST", "email"),
+]
+
+
 # Last-resort provider catalog when discovery fails or no plugin
 # manifest declares ``setup.providers``. G.24 pushed this knowledge
 # back into per-plugin manifests so third-party providers can
@@ -296,29 +323,40 @@ def _auto_enable_plugins_for_channels(channels: list[str]) -> None:
 
 
 def _optional_channel(cfg: Config) -> None:
-    console.print("\n[bold]Step 4 — messaging channel (optional)[/bold]")
-    console.print("[dim]Skip if you only want to use the CLI for now.[/dim]")
+    """Walk the user through enabling messaging channel plugins.
 
-    selected_channels: list[str] = []
+    Hermes parity (``hermes_cli/setup.py:2232-2256``): show every
+    platform in :data:`_CHANNEL_PLATFORMS` with a ``[configured]`` mark
+    next to the ones whose primary env var is already set, then accept
+    space-separated channel ids. Unknown ids are silently dropped so
+    typos don't crash the wizard.
+    """
+    console.print("\n[bold]Step 4 — messaging channels (optional)[/bold]")
+    console.print(
+        "[dim]Select any channels you want enabled. "
+        "Skip if you only want the CLI for now.[/dim]\n"
+    )
 
-    want_telegram = Confirm.ask("Set up Telegram?", default=False)
-    if want_telegram:
-        console.print(
-            "1. Open Telegram → message @BotFather → /newbot\n"
-            "2. Name the bot, get the token.\n"
-            "3. Export the token:"
-        )
-        console.print("   [bold]export TELEGRAM_BOT_TOKEN=123:ABC...[/bold]")
-        console.print(
-            "[dim]Then run `opencomputer gateway` — the Telegram plugin "
-            "picks up the token automatically.[/dim]"
-        )
-        selected_channels.append("telegram")
+    for label, env_var, _plugin_id in _CHANNEL_PLATFORMS:
+        is_set = bool(os.environ.get(env_var))
+        suffix = "  [green][configured][/green]" if is_set else ""
+        console.print(f"  [cyan]{label}[/cyan]  [dim]({env_var})[/dim]{suffix}")
 
-    # Round 2B P-10 — auto-enable plugins for any channels the user
-    # picked. Pure no-op when nothing was selected.
-    if selected_channels:
-        _auto_enable_plugins_for_channels(selected_channels)
+    # Default is intentionally empty — ``[configured]`` is informational
+    # only. Pre-filling with already-configured channels would silently
+    # re-run ``_auto_enable_plugins_for_channels`` on every Enter,
+    # which is surprising for returning users in Quick mode who just
+    # want to skip the step.
+    raw = Prompt.ask(
+        "\nChannels to enable (space-separated, blank to skip)",
+        default="",
+    )
+    selected = [c.strip().lower() for c in raw.split() if c.strip()]
+    selected = [c for c in selected if c in _CHANNEL_PLUGIN_MAP]
+    if not selected:
+        return
+
+    _auto_enable_plugins_for_channels(selected)
 
 
 def _optional_mcp(cfg: Config) -> Config:
@@ -386,36 +424,70 @@ async def _test_provider(provider_id: str, env_key: str) -> bool:
 
 
 def run_setup() -> None:
-    """Interactive setup wizard entry point."""
+    """Interactive setup wizard entry point.
+
+    Hermes parity:
+
+    - TTY guard up-front (``hermes_cli/main.py::_require_tty``) — we
+      refuse with a clear stderr message when stdin is a pipe so a
+      ``opencomputer setup < something.txt`` invocation doesn't hang.
+    - On existing config, returning users see a Welcome Back menu
+      (Quick / Full / individual section / Exit) instead of the
+      destructive Overwrite? Y/N. Mirrors hermes' menu at
+      ``hermes_cli/setup.py:2982-3018``.
+    """
+    from opencomputer.cli import _require_tty
+
+    _require_tty("setup")
+
     _print_banner()
 
-    existing = config_file_path().exists()
-    if existing:
-        console.print(
-            f"[yellow]![/yellow] Existing config found at [dim]{config_file_path()}[/dim]"
-        )
-        if not Confirm.ask("Overwrite?", default=False):
-            console.print("[dim]Aborted.[/dim]")
-            return
+    if config_file_path().exists():
+        return _setup_returning_user()
+    _run_full_setup(default_config())
 
-    cfg = load_config() if existing else default_config()
+
+def _setup_returning_user() -> None:
+    console.print(
+        f"[yellow]![/yellow] Existing config at [dim]{config_file_path()}[/dim]"
+    )
+    mode = Prompt.ask(
+        "Quick (only fix what's missing), Full (reconfigure everything), "
+        "or Exit?",
+        choices=["quick", "full", "exit"],
+        default="quick",
+    )
+    if mode == "exit":
+        console.print("[dim]Aborted.[/dim]")
+        return
+    cfg = load_config()
+    if mode == "full":
+        _run_full_setup(cfg)
+    else:
+        _quick_setup(cfg)
+
+
+def _run_full_setup(cfg: Config) -> None:
     provider_id, meta = _pick_provider()
     model = _prompt_model(meta["default_model"])
-    new_model_cfg = ModelConfig(
-        provider=provider_id,
-        model=model,
-        api_key_env=meta["env_key"],
+    cfg = replace(
+        cfg,
+        model=ModelConfig(
+            provider=provider_id,
+            model=model,
+            api_key_env=meta["env_key"],
+        ),
     )
-    cfg = replace(cfg, model=new_model_cfg)
 
     _prompt_api_key(meta["env_key"], meta["signup_url"])
     _optional_channel(cfg)
     cfg = _optional_mcp(cfg)
 
     save_config(cfg)
-    console.print(f"\n[green]✓[/green] wrote config → [dim]{config_file_path()}[/dim]")
+    console.print(
+        f"\n[green]✓[/green] wrote config → [dim]{config_file_path()}[/dim]"
+    )
 
-    # Phase 10f.N — optional Honcho memory overlay
     _optional_honcho()
 
     console.print("\n[bold]Step 6 — test the provider connection[/bold]")
@@ -423,8 +495,52 @@ def run_setup() -> None:
         asyncio.run(_test_provider(provider_id, meta["env_key"]))
 
     console.print(
-        "\n[bold green]Setup complete.[/bold green] Run [bold]opencomputer[/bold] to chat."
+        "\n[bold green]Setup complete.[/bold green] "
+        "Run [bold]opencomputer[/bold] to chat."
     )
+
+
+def _quick_setup(cfg: Config) -> None:
+    """Only re-prompt for items that are still missing.
+
+    Mirrors hermes' ``_run_quick_setup`` at ``hermes_cli/setup.py:3156``
+    — checks the provider's env var first (the only "required" item),
+    then offers to add channels / MCP servers as opt-in. No destructive
+    overwrite of any setting the user already has.
+    """
+    provider_id = cfg.model.provider
+    env_key = cfg.model.api_key_env or _get_supported_providers().get(
+        provider_id, {}
+    ).get("env_key", "")
+    signup_url = (
+        _get_supported_providers().get(provider_id, {}).get("signup_url", "")
+    )
+
+    actions_taken = 0
+
+    if env_key and not os.environ.get(env_key):
+        _prompt_api_key(env_key, signup_url)
+        actions_taken += 1
+
+    if Confirm.ask("Add or change channels?", default=False):
+        _optional_channel(cfg)
+        actions_taken += 1
+
+    if Confirm.ask("Add or change MCP servers?", default=False):
+        cfg = _optional_mcp(cfg)
+        save_config(cfg)
+        actions_taken += 1
+
+    if actions_taken == 0:
+        console.print(
+            "[dim]Nothing to fix. "
+            "Run setup again and pick `full` to reconfigure from scratch.[/dim]"
+        )
+    else:
+        console.print(
+            f"\n[bold green]Quick setup done.[/bold green] "
+            f"{actions_taken} item(s) updated."
+        )
 
 
 def _load_honcho_bootstrap():
