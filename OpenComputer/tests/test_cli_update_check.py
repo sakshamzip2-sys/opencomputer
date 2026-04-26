@@ -163,3 +163,61 @@ def test_fetch_failure_returns_none_silently(
 
     cli_update_check.prefetch_update_check()
     assert cli_update_check.get_update_hint(timeout=2.0) is None
+
+
+# ── Reviewer-driven regression tests ─────────────────────────────────
+
+
+def test_save_cache_uses_atomic_replace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Reviewer fix: write goes via .tmp + os.replace so a daemon-thread
+    interruption mid-write can't leave a corrupt cache file on disk."""
+    import os as _os
+
+    from opencomputer import cli_update_check
+
+    cache_file = tmp_path / ".update_check.json"
+    monkeypatch.setattr(cli_update_check, "_cache_path", lambda: cache_file)
+
+    seen_replaces: list[tuple[str, str]] = []
+    real_replace = _os.replace
+
+    def spy_replace(src: object, dst: object) -> None:
+        seen_replaces.append((str(src), str(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr("opencomputer.cli_update_check.os.replace", spy_replace)
+
+    cli_update_check._save_cache("2030.1.1")
+
+    assert seen_replaces, "expected os.replace to be used for atomic write"
+    src, dst = seen_replaces[0]
+    assert src.endswith(".tmp")
+    assert dst == str(cache_file)
+    assert json.loads(cache_file.read_text())["latest"] == "2030.1.1"
+
+
+def test_fetch_pypi_latest_caps_oversized_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reviewer fix: a hostile mirror streaming MB-sized JSON gets bailed
+    on rather than swallowed into memory and parsed."""
+    from opencomputer import cli_update_check
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self, n: int) -> bytes:
+            return b"X" * (cli_update_check._MAX_RESPONSE_BYTES + 100)
+
+    monkeypatch.setattr(
+        "opencomputer.cli_update_check.urllib.request.urlopen",
+        lambda *a, **k: FakeResp(),
+    )
+
+    assert cli_update_check._fetch_pypi_latest() is None

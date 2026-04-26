@@ -75,22 +75,42 @@ def _load_cache() -> tuple[str | None, float]:
 
 
 def _save_cache(latest: str | None) -> None:
+    """Atomically persist the latest-version probe.
+
+    Reviewer fix: daemon threads are killed mid-syscall on process
+    exit, so a naive ``write_text`` could leave a truncated /
+    half-empty JSON file on disk. Next session would still recover
+    (``_load_cache`` swallows ``JSONDecodeError`` and re-fetches),
+    but the corruption-then-refetch breaks the 24h cache contract.
+    Write to ``.tmp`` then ``os.replace()`` — atomic on POSIX, and
+    Windows-safe since Python 3.3.
+    """
     try:
         path = _cache_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
             json.dumps({"latest": latest, "ts": time.time()}),
             encoding="utf-8",
         )
+        os.replace(tmp, path)
     except OSError as exc:
         _log.debug("update-check cache write failed: %s", exc)
+
+
+#: Maximum bytes we'll read from the PyPI JSON response before
+#: bailing. Real PyPI ``/pypi/<pkg>/json`` payloads land in the
+#: 50-200 KB range; 1 MB is ~5x that. A hostile / buggy mirror
+#: that streams MB into memory would otherwise cause silent
+#: memory pressure on the daemon thread before json.loads errors.
+_MAX_RESPONSE_BYTES = 1_048_576
 
 
 def _fetch_pypi_latest() -> str | None:
     """Hit PyPI's JSON endpoint and return the latest published version.
 
     Returns ``None`` on any failure (offline, timeout, 404, malformed
-    response). Never raises.
+    response, oversize body). Never raises.
     """
     try:
         req = urllib.request.Request(
@@ -98,7 +118,18 @@ def _fetch_pypi_latest() -> str | None:
             headers={"User-Agent": f"opencomputer/{__version__} (+update-check)"},
         )
         with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            # Reviewer fix: cap the read so a hostile mirror or MITM
+            # on a misconfigured corp proxy can't stream MBs into the
+            # daemon thread before json.loads complains. Read +1 byte
+            # over the cap so we can detect truncation and bail loudly
+            # rather than silently parsing a partial document.
+            body = resp.read(_MAX_RESPONSE_BYTES + 1)
+        if len(body) > _MAX_RESPONSE_BYTES:
+            _log.debug(
+                "PyPI response exceeded %d bytes — bailing", _MAX_RESPONSE_BYTES
+            )
+            return None
+        data = json.loads(body.decode("utf-8"))
         version = (data.get("info") or {}).get("version")
         return str(version) if version else None
     except Exception as exc:  # noqa: BLE001 — must never crash startup
