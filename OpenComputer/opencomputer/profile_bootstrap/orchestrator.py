@@ -56,12 +56,22 @@ _log = logging.getLogger("opencomputer.profile_bootstrap.orchestrator")
 
 @dataclass(frozen=True, slots=True)
 class BootstrapResult:
-    """Summary of one bootstrap pass for CLI display + audit log."""
+    """Summary of one bootstrap pass for CLI display + audit log.
+
+    V2.A-T5 added ``calendar_events_scanned`` and
+    ``browser_visits_scanned`` so the CLI display + JSON marker can
+    surface what the calendar / browser-history readers actually saw.
+    Before T5 those reads were silent (the result was discarded); now
+    every Layer 2 source has a counter, including the consent-denied
+    path where the value naturally stays at 0.
+    """
 
     identity_nodes_written: int = 0
     interview_nodes_written: int = 0
     files_scanned: int = 0
     git_commits_scanned: int = 0
+    calendar_events_scanned: int = 0
+    browser_visits_scanned: int = 0
     elapsed_seconds: float = 0.0
 
 
@@ -225,27 +235,32 @@ def run_bootstrap(
         else:
             _log.info("Skipping git_log: consent not granted")
 
-    # Layer 2 — calendar. Gated on ingestion.calendar.
+    # Layer 2 — calendar. Gated on ingestion.calendar. Capture the
+    # event list so the count surfaces in BootstrapResult; consent
+    # denial leaves the local at [] and the counter at 0 naturally.
+    calendar_events: list = []
     if include_calendar:
         if _consent_allows(gate, "ingestion.calendar"):
             try:
                 from opencomputer.profile_bootstrap.calendar_reader import (
                     read_upcoming_events,
                 )
-                _ = read_upcoming_events(days=7)
+                calendar_events = read_upcoming_events(days=7) or []
             except Exception:  # noqa: BLE001
                 _log.exception("calendar read failed")
         else:
             _log.info("Skipping calendar: consent not granted")
 
     # Layer 2 — browser history. Gated on ingestion.browser_history.
+    # Same capture pattern as calendar above.
+    browser_visits: list = []
     if include_browser_history:
         if _consent_allows(gate, "ingestion.browser_history"):
             try:
                 from opencomputer.profile_bootstrap.browser_history import (
                     read_chrome_history,
                 )
-                _ = read_chrome_history(days=7)
+                browser_visits = read_chrome_history(days=7) or []
             except Exception:  # noqa: BLE001
                 _log.exception("browser history read failed")
         else:
@@ -257,6 +272,8 @@ def run_bootstrap(
         interview_nodes_written=interview_n,
         files_scanned=len(files),
         git_commits_scanned=len(commits),
+        calendar_events_scanned=len(calendar_events),
+        browser_visits_scanned=len(browser_visits),
         elapsed_seconds=elapsed,
     )
 

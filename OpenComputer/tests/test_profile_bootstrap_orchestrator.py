@@ -350,3 +350,101 @@ def test_bootstrap_treats_gate_exception_as_denied(
         )
 
     mock_calendar.assert_not_called()
+
+
+# ─── V2.A-T5 — calendar + browser visit counters ─────────────────────
+
+
+def test_bootstrap_counts_calendar_events(store, tmp_path, monkeypatch):
+    """When calendar consent is granted, the count surfaces in the result."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    from opencomputer.profile_bootstrap.calendar_reader import (
+        CalendarEventSummary,
+    )
+
+    fake_events = [CalendarEventSummary(title=f"event{i}") for i in range(5)]
+
+    fake_gate = _selective_gate({})  # all caps allowed
+
+    with patch(
+        "opencomputer.profile_bootstrap.orchestrator.gather_identity",
+        return_value=IdentityFacts(),
+    ), patch(
+        "opencomputer.profile_bootstrap.orchestrator._get_consent_gate",
+        return_value=fake_gate,
+    ), patch(
+        "opencomputer.profile_bootstrap.calendar_reader.read_upcoming_events",
+        return_value=fake_events,
+    ):
+        result = run_bootstrap(
+            interview_answers={},
+            scan_roots=[],
+            git_repos=[],
+            include_calendar=True,
+            include_browser_history=False,
+            store=store,
+        )
+    assert result.calendar_events_scanned == 5
+    assert result.browser_visits_scanned == 0
+
+
+def test_bootstrap_counts_browser_visits(store, tmp_path, monkeypatch):
+    """When browser-history consent is granted, the count surfaces in the result."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    from opencomputer.profile_bootstrap.browser_history import (
+        BrowserVisitSummary,
+    )
+
+    fake_visits = [BrowserVisitSummary(url=f"https://e{i}.com") for i in range(3)]
+
+    fake_gate = _selective_gate({})  # all caps allowed
+
+    with patch(
+        "opencomputer.profile_bootstrap.orchestrator.gather_identity",
+        return_value=IdentityFacts(),
+    ), patch(
+        "opencomputer.profile_bootstrap.orchestrator._get_consent_gate",
+        return_value=fake_gate,
+    ), patch(
+        "opencomputer.profile_bootstrap.browser_history.read_chrome_history",
+        return_value=fake_visits,
+    ):
+        result = run_bootstrap(
+            interview_answers={},
+            scan_roots=[],
+            git_repos=[],
+            include_calendar=False,
+            include_browser_history=True,
+            store=store,
+        )
+    assert result.browser_visits_scanned == 3
+    assert result.calendar_events_scanned == 0
+
+
+def test_bootstrap_zero_counters_when_consent_denied(
+    store, tmp_path, monkeypatch,
+):
+    """Consent revocation must zero the counters (no reads happened)."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+
+    fake_gate = _selective_gate(
+        {"ingestion.calendar": False, "ingestion.browser_history": False}
+    )
+
+    with patch(
+        "opencomputer.profile_bootstrap.orchestrator.gather_identity",
+        return_value=IdentityFacts(),
+    ), patch(
+        "opencomputer.profile_bootstrap.orchestrator._get_consent_gate",
+        return_value=fake_gate,
+    ):
+        result = run_bootstrap(
+            interview_answers={},
+            scan_roots=[],
+            git_repos=[],
+            include_calendar=True,
+            include_browser_history=True,
+            store=store,
+        )
+    assert result.calendar_events_scanned == 0
+    assert result.browser_visits_scanned == 0
