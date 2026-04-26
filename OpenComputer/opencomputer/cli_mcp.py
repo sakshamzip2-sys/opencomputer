@@ -390,6 +390,102 @@ def mcp_oauth_paste(
     console.print("[dim]Token file is mode 0600 (owner-only).[/dim]")
 
 
+@mcp_app.command("oauth-login")
+def mcp_oauth_login(
+    provider: str = typer.Argument(
+        ..., help="Provider slug (e.g. github / notion / google)."
+    ),
+    authorization_url: str = typer.Option(
+        ..., "--authorization-url", "-A", help="OAuth /authorize endpoint URL."
+    ),
+    token_url: str = typer.Option(
+        ..., "--token-url", "-T", help="OAuth /token endpoint URL."
+    ),
+    client_id: str = typer.Option(
+        ..., "--client-id", "-i", help="OAuth client id registered with the provider."
+    ),
+    scope: str = typer.Option(
+        "", "--scope", "-s", help="Space-separated scope string (provider-specific)."
+    ),
+    timeout_s: int = typer.Option(
+        300, "--timeout", help="Seconds to wait for the browser callback."
+    ),
+) -> None:
+    """Run the OAuth 2.1 PKCE flow against an MCP provider's OAuth endpoints.
+
+    Opens the user's browser to the authorization URL, hosts an ephemeral
+    HTTP callback server on ``127.0.0.1`` (kernel-picked port), and on
+    success exchanges the authorization code for a token via the token
+    endpoint, then persists the result via :class:`OAuthTokenStore`.
+
+    ``--authorization-url`` and ``--token-url`` are required because the
+    MCP server-config schema does not yet carry OAuth manifest fields;
+    callers paste them directly from the provider's docs.
+
+    Security defenses (every one is intentional):
+        - PKCE verifier is 256-bit (``secrets.token_urlsafe(64)``).
+        - ``state`` (CSRF) compared in constant time.
+        - Callback bound to ``127.0.0.1`` ONLY (never ``0.0.0.0``).
+        - 5-minute default timeout with clean shutdown.
+        - Token persisted to mode-0600 file via the existing store.
+    """
+    import time
+
+    from opencomputer.mcp.oauth import OAuthToken, OAuthTokenStore
+    from opencomputer.mcp.oauth_pkce import (
+        OAuthCallbackError,
+        OAuthFlowTimeout,
+        OAuthStateMismatch,
+        run_pkce_flow,
+    )
+
+    console.print(
+        f"[cyan]Starting OAuth 2.1 PKCE flow for {provider!r}…[/cyan]"
+    )
+    try:
+        token_response = run_pkce_flow(
+            authorization_url=authorization_url,
+            token_url=token_url,
+            client_id=client_id,
+            scope=scope,
+            timeout_s=timeout_s,
+        )
+    except OAuthFlowTimeout as exc:
+        console.print(f"[red]timeout:[/red] {exc}")
+        raise typer.Exit(2) from exc
+    except OAuthStateMismatch as exc:
+        console.print(f"[red]CSRF / state mismatch:[/red] {exc}")
+        raise typer.Exit(3) from exc
+    except OAuthCallbackError as exc:
+        console.print(f"[red]callback error:[/red] {exc}")
+        raise typer.Exit(4) from exc
+
+    access_token = token_response.get("access_token")
+    if not access_token:
+        console.print(
+            "[red]error:[/red] token endpoint did not return an 'access_token' field. "
+            f"Got keys: {sorted(token_response.keys())!r}"
+        )
+        raise typer.Exit(5)
+
+    expires_in = token_response.get("expires_in")
+    expires_at: float | None
+    expires_at = time.time() + float(expires_in) if isinstance(expires_in, int | float) else None
+
+    stored = OAuthToken(
+        provider=provider.strip().lower(),
+        access_token=str(access_token),
+        token_type=str(token_response.get("token_type") or "Bearer"),
+        expires_at=expires_at,
+        scope=token_response.get("scope") or (scope or None),
+        refresh_token=token_response.get("refresh_token"),
+        created_at=time.time(),
+    )
+    path = OAuthTokenStore().put(stored)
+    console.print(f"[green]stored[/green] token for {provider!r} → {path}")
+    console.print("[dim]Token file is mode 0600 (owner-only).[/dim]")
+
+
 @mcp_app.command("oauth-list")
 def mcp_oauth_list() -> None:
     """Show all OAuth/PAT tokens currently stored. Token values are NEVER printed."""
