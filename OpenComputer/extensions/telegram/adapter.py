@@ -141,7 +141,38 @@ class TelegramAdapter(BaseChannelAdapter):
         # working set small.
         self._seen_callback_ids: OrderedDict[str, None] = OrderedDict()
 
+    #: Scope name for the per-bot-token machine-local lock. Mirrors
+    #: hermes' ``"telegram-bot-token"`` scope so a future cross-tool
+    #: convention could be uniformly recognised by tooling.
+    _LOCK_SCOPE = "telegram-bot-token"
+
     async def connect(self) -> bool:
+        # Hermes parity (gateway/status.py:464): take a machine-local
+        # lock on the bot token BEFORE we open any HTTP connection.
+        # Telegram's getUpdates long-poll only delivers each update to
+        # ONE polling client — so two processes silently steal updates
+        # from each other. The lock turns that into a fail-fast refusal
+        # that names the holding PID.
+        from opencomputer.security.scope_lock import acquire_scoped_lock
+
+        ok, holder = acquire_scoped_lock(
+            self._LOCK_SCOPE,
+            self.token,
+            metadata={"adapter": "telegram"},
+        )
+        if not ok:
+            holder_pid = (holder or {}).get("pid", "unknown")
+            logger.error(
+                "telegram bot token already in use by PID %s — "
+                "stop that process or run with a different bot token. "
+                "Lock file: %s",
+                holder_pid,
+                self._scope_lock_path(),
+            )
+            self._lock_held = False
+            return False
+        self._lock_held = True
+
         self._client = httpx.AsyncClient(timeout=35.0)
         # getMe to verify token and cache our bot id
         try:
@@ -150,6 +181,7 @@ class TelegramAdapter(BaseChannelAdapter):
             data = resp.json()
             if not data.get("ok"):
                 logger.error("telegram getMe failed: %s", data)
+                self._release_lock()
                 return False
             self._bot_id = data["result"]["id"]
             logger.info(
@@ -159,10 +191,27 @@ class TelegramAdapter(BaseChannelAdapter):
             )
         except Exception as e:  # noqa: BLE001
             logger.error("telegram connect failed: %s", e)
+            self._release_lock()
             return False
         # start long-polling loop
         self._polling_task = asyncio.create_task(self._poll_forever())
         return True
+
+    def _scope_lock_path(self) -> str:
+        from opencomputer.security.scope_lock import _get_scope_lock_path
+
+        return str(_get_scope_lock_path(self._LOCK_SCOPE, self.token))
+
+    def _release_lock(self) -> None:
+        if not getattr(self, "_lock_held", False):
+            return
+        try:
+            from opencomputer.security.scope_lock import release_scoped_lock
+
+            release_scoped_lock(self._LOCK_SCOPE, self.token)
+        except Exception as exc:  # noqa: BLE001 — release is best-effort
+            logger.debug("telegram lock release failed: %s", exc)
+        self._lock_held = False
 
     async def disconnect(self) -> None:
         self._stop_event.set()
@@ -174,9 +223,17 @@ class TelegramAdapter(BaseChannelAdapter):
                 pass
         if self._client is not None:
             await self._client.aclose()
+        self._release_lock()
 
     async def _poll_forever(self) -> None:
         assert self._client is not None
+        # OpenClaw parity (CHANGELOG #69873): a 409 "Conflict" from
+        # getUpdates means another client snatched the long-poll
+        # subscription out from under us — the lock prevents this
+        # locally, but cross-machine duplicates can still happen. Log
+        # loudly + back off so we don't spam Telegram with rapid
+        # re-polls if the conflict persists.
+        consecutive_409s = 0
         while not self._stop_event.is_set():
             try:
                 # Round 2a P-5 — also subscribe to ``callback_query``
@@ -187,6 +244,18 @@ class TelegramAdapter(BaseChannelAdapter):
                     "allowed_updates": ["message", "callback_query"],
                 }
                 resp = await self._client.get(f"{self.base_url}/getUpdates", params=params)
+                if resp.status_code == 409:
+                    consecutive_409s += 1
+                    backoff = min(30, 2 ** min(consecutive_409s, 4))
+                    logger.warning(
+                        "telegram getUpdates returned 409 Conflict — another "
+                        "process is also polling this bot's updates. "
+                        "Sleeping %ss (attempt #%d). Stop the other client "
+                        "or use a different bot token.",
+                        backoff, consecutive_409s,
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
                 if resp.status_code != 200:
                     await asyncio.sleep(2)
                     continue
@@ -194,6 +263,7 @@ class TelegramAdapter(BaseChannelAdapter):
                 if not data.get("ok"):
                     await asyncio.sleep(2)
                     continue
+                consecutive_409s = 0
                 for update in data.get("result", []):
                     self._offset = max(self._offset, int(update["update_id"]) + 1)
                     await self._handle_update(update)

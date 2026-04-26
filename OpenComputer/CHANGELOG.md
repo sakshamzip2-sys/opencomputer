@@ -4,6 +4,42 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Telegram token-conflict prevention — hermes parity)
+
+Direct port of hermes' scoped-lock pattern at
+`sources/hermes-agent-2026.4.23/gateway/status.py:464`. Pinned to the
+v2026.4.26 Telegram E2E incident: Claude Code's Telegram channel
+adapter (PID 45409) was already polling `@Terraform_368Bot`, OC's
+gateway tried the same bot, Telegram serves long-poll updates to
+whoever asked first, and OC silently saw zero traffic with no log
+indication that anything was wrong.
+
+- `opencomputer/security/scope_lock.py` (new) — machine-local scoped
+  locks. `acquire_scoped_lock(scope, identity, metadata=None)` returns
+  `(True, prior)` on success or `(False, holding_record)` on conflict
+  so the caller can name the holding PID. Stale-lock detection covers
+  three layers: corrupt JSON, dead PID (`os.kill(pid, 0)`), and
+  PID-recycled (Linux `/proc/<pid>/stat` start_time mismatch). Lock
+  files live at `~/.opencomputer/locks/<scope>-<sha256(identity)>.lock`
+  (override via `OPENCOMPUTER_LOCK_DIR`); the identity is hashed so
+  the bot token never appears on disk in plaintext.
+- `extensions/telegram/adapter.py` — `connect()` now acquires
+  `("telegram-bot-token", token)` BEFORE opening any HTTP. On
+  conflict: clear error log naming the holding PID and the lock-file
+  path, then returns False. `disconnect()` releases. Failed-getMe
+  releases too so a retry isn't refused by our own stale lock.
+- `extensions/telegram/adapter.py` — `_poll_forever` now detects HTTP
+  409 Conflict from `getUpdates` (cross-machine duplicate that the
+  local lock can't catch) with explicit logging + exponential
+  back-off (2s → 4s → 8s → 16s → 30s cap). Mirrors openclaw CHANGELOG
+  #69873 ("rebuild polling HTTP transport after getUpdates 409
+  conflicts"). Reset to 0 on first successful poll.
+
+13 new tests across `tests/test_scope_lock.py` (9: stale-detection,
+re-acquire, plaintext-leak guard, idempotent release) and
+`tests/test_telegram_token_lock.py` (4: connect happy path, refusal
+with holding PID in log, disconnect-releases, failed-getMe-releases).
+
 ### Changed (release CI hardening)
 
 - `.github/workflows/release.yml` — added a wheel-smoke step that runs
