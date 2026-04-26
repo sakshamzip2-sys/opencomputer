@@ -4,6 +4,37 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Changed (Honcho on by default — auto-start Docker daemon)
+
+Pinned to this session's incident: a user installed Docker Desktop
+but never opened the app; the wizard's `_optional_honcho()` saw the
+docker binary, called `bootstrap.ensure_started`, which timed out at
+120s trying to reach a dead socket, and the user got silently
+downgraded to baseline memory with no clear path forward.
+
+- `extensions/memory-honcho/bootstrap.py` — new `is_docker_daemon_running()`
+  (cheap `docker info --format {{.ID}}` probe), `try_start_docker_daemon()`
+  (`open -a Docker` on macOS; returns False elsewhere), and
+  `wait_for_docker_daemon(timeout_s=60.0)` (polling helper). Bootstrap
+  now distinguishes "binary missing" from "binary present, daemon down".
+- `extensions/memory-honcho/bootstrap.py::_compose()` — `timeout` is
+  now a kwarg (default 120s for cheap ops); `honcho_up()` passes
+  `timeout=300` so first-pull on a cold Docker (postgres + redis +
+  api ≈ 600 MB) doesn't trip the original 120s ceiling.
+- `opencomputer/setup_wizard.py::_optional_honcho()` — when daemon is
+  dead and platform is macOS, calls `try_start_docker_daemon()` then
+  `wait_for_docker_daemon()` before proceeding to compose-up. On
+  Linux/Termux (where we can't sudo systemctl on the user's behalf),
+  prints a clear `sudo systemctl start docker` hint and downgrades
+  cleanly. Wizard's compose timeout bumped 60s → 180s for the same
+  first-pull tolerance reasoning.
+- 7 new tests in `tests/test_honcho_default_on.py` cover: daemon-dead
+  → start-attempt path; 180s timeout passed to ensure_started; graceful
+  downgrade when daemon won't come up; Linux fallback message; macOS
+  open-fails fallback; legacy bootstrap module without daemon helpers
+  (defence-in-depth); and source-text assertion that 300s is wired
+  into honcho_up.
+
 ### Added (Telegram token-conflict prevention — hermes parity)
 
 Direct port of hermes' scoped-lock pattern at
