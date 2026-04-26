@@ -8,12 +8,15 @@ from plugin_sdk import ConsentTier
 
 
 def test_ingestion_capabilities_registered():
-    assert F1_CAPABILITIES["ingestion.recent_files"] == ConsentTier.IMPLICIT
-    assert F1_CAPABILITIES["ingestion.calendar"] == ConsentTier.EXPLICIT
-    assert F1_CAPABILITIES["ingestion.browser_history"] == ConsentTier.EXPLICIT
-    assert F1_CAPABILITIES["ingestion.git_log"] == ConsentTier.IMPLICIT
-    assert F1_CAPABILITIES["ingestion.messages"] == ConsentTier.EXPLICIT
-    assert F1_CAPABILITIES["ingestion.browser_extension"] == ConsentTier.EXPLICIT
+    # Use `is` (identity) not `==` for enum checks: ConsentTier is IntEnum, so
+    # ``0 == ConsentTier.IMPLICIT`` evaluates True even if the dict accidentally
+    # holds a bare integer. Identity check catches that class of accident.
+    assert F1_CAPABILITIES["ingestion.recent_files"] is ConsentTier.IMPLICIT
+    assert F1_CAPABILITIES["ingestion.calendar"] is ConsentTier.EXPLICIT
+    assert F1_CAPABILITIES["ingestion.browser_history"] is ConsentTier.EXPLICIT
+    assert F1_CAPABILITIES["ingestion.git_log"] is ConsentTier.IMPLICIT
+    assert F1_CAPABILITIES["ingestion.messages"] is ConsentTier.EXPLICIT
+    assert F1_CAPABILITIES["ingestion.browser_extension"] is ConsentTier.EXPLICIT
 
 
 def test_ingestion_capabilities_all_present():

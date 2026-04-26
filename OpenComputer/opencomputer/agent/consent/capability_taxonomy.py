@@ -55,5 +55,6 @@ F1_CAPABILITIES: dict[str, ConsentTier] = {
 # Reserved for later phases (documented, not enforced here):
 # F2: read_files.metadata, read_files.content
 # F6: scrape.github, scrape.linkedin, scrape.reddit, scrape.twitter, scrape.open_license
-# F7: read_clipboard, read_screen.motif, read_mail.metadata, read_browser_history, exec_applescript
+# F7: read_clipboard, read_screen.motif, read_mail.metadata, exec_applescript
+#     (read_browser_history is now realized as ingestion.browser_history above)
 # F9: exec_shell, exec_network, write_file
