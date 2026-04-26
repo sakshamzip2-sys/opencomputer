@@ -79,6 +79,47 @@ hands its token response to that store.
   `code`) raises, scope omission, extra authorize params, input
   validation, and CLI-level integration with the token store.
 
+### Added (Round 2B P-9 — forked-context subagent delegation)
+
+Optional context fork for the `delegate` tool. When the parent calls
+`delegate(..., forked_context=true)` the spawned child loop is seeded
+with a snapshot of the parent's recent message history (last 5 by
+default) instead of starting from an empty conversation. Lets a
+subagent answer follow-on questions that depend on the parent's
+context without re-fetching everything via tools.
+
+- `plugin_sdk/runtime_context.py` — new `RuntimeContext.parent_messages`
+  field (immutable tuple, defaults to `()`). Carries the parent's
+  message snapshot through to `DelegateTool` without bumping any
+  existing SDK call site.
+- `opencomputer/agent/loop.py` — `AgentLoop` now snapshots its
+  in-progress `messages` list onto the runtime immediately before
+  dispatching tool calls (i.e. before the assistant message containing
+  the `delegate` tool_use is appended, so the snapshot ends at a clean
+  turn boundary). Adds a new `initial_messages` kwarg on
+  `run_conversation` so a fresh-session child loop can be pre-seeded;
+  seeded messages are persisted via `SessionDB.append_messages_batch`
+  so resume-from-disk reproduces the same starting state.
+- `opencomputer/tools/delegate.py` — schema gains `forked_context:
+  boolean` (default `false`). When true, `DelegateTool.execute` reads
+  `runtime.parent_messages`, asks
+  `CompactionEngine._safe_split_index(messages, 5)` for a safe
+  boundary that does NOT split a `tool_use` from its `tool_result`
+  (Anthropic 400s otherwise), filters out `system` messages (the
+  child has its own), and threads the result through as
+  `initial_messages`. The child runtime is also rewritten to
+  `parent_messages=()` so a grandchild's own forked-context call sees
+  ITS parent's snapshot, not the original grandparent's.
+
+Tests: `tests/test_delegate_forked_context.py` adds 11 cases
+covering default-false unchanged, explicit-false unchanged, last-5
+non-system seeded happy path, orphan-tool_use boundary safety
+(6-message corpus where the naive `messages[-5:]` slice would split
+a pair), empty parent history no-op, schema declaration, child
+runtime snapshot clear, undersized parent history, and the new
+`RuntimeContext.parent_messages` field defaults / accepts. Total
+suite: 2906 passing (+11).
+
 ### Added (Round 2B P-7 — OSV malware scanning)
 
 Pre-flight vulnerability scan against `OSV.dev` for every stdio MCP
