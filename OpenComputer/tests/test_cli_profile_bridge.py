@@ -31,3 +31,36 @@ def test_bridge_token_rotate(tmp_path: Path, monkeypatch):
         profile_app, ["bridge", "token", "--rotate"]
     ).stdout.strip().splitlines()[-1]
     assert first != second
+
+
+from unittest.mock import MagicMock, patch
+
+
+def test_bridge_status_reports_reachable(tmp_path: Path, monkeypatch):
+    """Status REACHABLE when localhost connect succeeds."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    runner.invoke(profile_app, ["bridge", "token"])  # seed token
+
+    fake_sock = MagicMock()
+    fake_sock.connect.return_value = None  # connect succeeds (returns None)
+
+    with patch("socket.socket", return_value=fake_sock):
+        result = runner.invoke(profile_app, ["bridge", "status"])
+    assert result.exit_code == 0
+    assert "REACHABLE" in result.stdout
+    assert "NOT REACHABLE" not in result.stdout
+    assert "Bind port: 18791" in result.stdout
+
+
+def test_bridge_status_reports_unreachable(tmp_path: Path, monkeypatch):
+    """Status NOT REACHABLE when localhost connect raises OSError."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    runner.invoke(profile_app, ["bridge", "token"])  # seed token
+
+    fake_sock = MagicMock()
+    fake_sock.connect.side_effect = OSError("connection refused")
+
+    with patch("socket.socket", return_value=fake_sock):
+        result = runner.invoke(profile_app, ["bridge", "status"])
+    assert result.exit_code == 0
+    assert "NOT REACHABLE" in result.stdout

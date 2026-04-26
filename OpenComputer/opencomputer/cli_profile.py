@@ -19,12 +19,14 @@ Subcommands:
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
+from opencomputer.profile_bootstrap.bridge_state import load_or_create
 from opencomputer.profiles import (
     ProfileExistsError,
     ProfileNameError,
@@ -61,8 +63,6 @@ def bridge_token(
     ),
 ) -> None:
     """Print the bridge auth token. Generates one on first call."""
-    from opencomputer.profile_bootstrap.bridge_state import load_or_create
-
     state = load_or_create(rotate=rotate)
     typer.echo(
         "Paste this into the browser extension's DevTools console:\n"
@@ -74,10 +74,6 @@ def bridge_token(
 @bridge_app.command("status")
 def bridge_status() -> None:
     """Show bridge config + whether port is reachable."""
-    import socket
-
-    from opencomputer.profile_bootstrap.bridge_state import load_or_create
-
     state = load_or_create()
     typer.echo(f"Token configured: {'yes' if state.token else 'no'}")
     typer.echo(f"Bind port: {state.port}")
