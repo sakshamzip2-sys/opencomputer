@@ -162,7 +162,7 @@ def test_bootstrap_skips_browser_history_when_consent_revoked(
         "opencomputer.profile_bootstrap.orchestrator._get_consent_gate",
         return_value=fake_gate,
     ), patch(
-        "opencomputer.profile_bootstrap.browser_history.read_chrome_history",
+        "opencomputer.profile_bootstrap.browser_history.read_all_browser_history",
     ) as mock_history:
         run_bootstrap(
             interview_answers={},
@@ -406,7 +406,7 @@ def test_bootstrap_counts_browser_visits(store, tmp_path, monkeypatch):
         "opencomputer.profile_bootstrap.orchestrator._get_consent_gate",
         return_value=fake_gate,
     ), patch(
-        "opencomputer.profile_bootstrap.browser_history.read_chrome_history",
+        "opencomputer.profile_bootstrap.browser_history.read_all_browser_history",
         return_value=fake_visits,
     ):
         result = run_bootstrap(

@@ -252,15 +252,18 @@ def run_bootstrap(
             _log.info("Skipping calendar: consent not granted")
 
     # Layer 2 — browser history. Gated on ingestion.browser_history.
-    # Same capture pattern as calendar above.
+    # Same capture pattern as calendar above. V2.A-T6: scan ALL
+    # installed Chromium-family browsers (Chrome / Brave / Edge /
+    # Vivaldi / Arc / Chromium) across all their profiles, not just
+    # Chrome's Default profile.
     browser_visits: list = []
     if include_browser_history:
         if _consent_allows(gate, "ingestion.browser_history"):
             try:
                 from opencomputer.profile_bootstrap.browser_history import (
-                    read_chrome_history,
+                    read_all_browser_history,
                 )
-                browser_visits = read_chrome_history(days=7) or []
+                browser_visits = read_all_browser_history(days=7) or []
             except Exception:  # noqa: BLE001
                 _log.exception("browser history read failed")
         else:
