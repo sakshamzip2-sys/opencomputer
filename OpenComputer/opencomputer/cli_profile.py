@@ -46,6 +46,51 @@ profile_app = typer.Typer(
 )
 _console = Console()
 
+# ─── Bridge subapp ────────────────────────────────────────────────────────
+
+bridge_app = typer.Typer(
+    help="Browser-bridge controls (Layer 4 of Layered Awareness)",
+)
+profile_app.add_typer(bridge_app, name="bridge")
+
+
+@bridge_app.command("token")
+def bridge_token(
+    rotate: bool = typer.Option(
+        False, "--rotate", help="Generate a fresh token (invalidates old)"
+    ),
+) -> None:
+    """Print the bridge auth token. Generates one on first call."""
+    from opencomputer.profile_bootstrap.bridge_state import load_or_create
+
+    state = load_or_create(rotate=rotate)
+    typer.echo(
+        "Paste this into the browser extension's DevTools console:\n"
+        f"  chrome.storage.local.set({{ ocBridgeToken: '{state.token}' }})\n"
+    )
+    typer.echo(state.token)
+
+
+@bridge_app.command("status")
+def bridge_status() -> None:
+    """Show bridge config + whether port is reachable."""
+    import socket
+
+    from opencomputer.profile_bootstrap.bridge_state import load_or_create
+
+    state = load_or_create()
+    typer.echo(f"Token configured: {'yes' if state.token else 'no'}")
+    typer.echo(f"Bind port: {state.port}")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1.0)
+    try:
+        sock.connect(("127.0.0.1", state.port))
+        typer.echo("Listener: REACHABLE")
+    except (OSError, socket.timeout):
+        typer.echo("Listener: NOT REACHABLE (run 'opencomputer profile bridge start')")
+    finally:
+        sock.close()
+
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
