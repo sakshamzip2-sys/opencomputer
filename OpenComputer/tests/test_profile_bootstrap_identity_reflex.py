@@ -1,10 +1,12 @@
+import pytest
+from unittest.mock import patch
+
 from opencomputer.profile_bootstrap.identity_reflex import (
     IdentityFacts,
     _read_git_config_emails,
     _read_macos_contacts_me_name,
     gather_identity,
 )
-from unittest.mock import patch
 
 
 def test_identity_facts_defaults():
@@ -15,7 +17,6 @@ def test_identity_facts_defaults():
 
 
 def test_identity_facts_immutable():
-    import pytest
     f = IdentityFacts(name="Saksham")
     with pytest.raises(AttributeError):
         f.name = "Other"
