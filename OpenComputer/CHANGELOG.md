@@ -4,6 +4,46 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (LLM-mediated recall synthesis — Round 4 Item 1)
+
+User asked: "think of something better than strict keyword pattern
+matching." Hermes (`tools/session_search_tool.py`) proves the
+pattern: keep FTS5 retrieval (cheap), but post-process the top
+candidates through a cheap LLM that synthesises a focused answer
+with citations. We port that pattern using `claude-haiku-4-5`.
+
+- `opencomputer/agent/recall_synthesizer.py` (new) — given a query +
+  list of FTS5 candidates, calls a cheap-model LLM to produce a 1-3
+  sentence answer with bracket-style citations (`[N]`) anchored to
+  the candidate indexes. Citation guard rejects out-of-range
+  references so the synthesizer can't hallucinate non-existent
+  sessions. Skips silently when: <3 candidates (raw is short
+  enough), `OPENCOMPUTER_RECALL_SYNTHESIS=0`, `synthesize=False`
+  arg, or any LLM failure (network, auth, etc.). Returns `None` on
+  any skip/failure path so callers fall back to raw FTS5 — synthesis
+  is never substitutive, only additive.
+- `opencomputer/tools/recall.py::_do_search` — after gathering FTS5
+  hits, calls `_maybe_synthesize()` and prepends a `## Synthesis`
+  section before the existing `## Episodic` / `## Messages` blocks
+  when synthesis succeeds. Per-call opt-out via `synthesize: false`
+  argument.
+- 12 new tests in `tests/test_recall_synthesis.py`: skip-when-too-few-
+  candidates, skip-when-explicit-false, skip-on-env-opt-out, happy
+  path with citation, citation guard rejects out-of-range, accepts
+  no-citation answers ("no matching memory found"), provider raises
+  → return None, empty response → return None, citation guard unit
+  tests (4 cases).
+
+Why this is the right "10x better" answer (per the audit + plan):
+- Hermes proves the pattern is meaningfully better than raw FTS5
+  for open-ended recall ("when did I ask about X?").
+- Zero new dependencies — no 400 MB sentence-transformers download.
+- Inherits the user's existing provider config (Claude Router proxy,
+  Anthropic-compatible endpoints, etc.) — no new setup.
+- Composable upgrade path: if 2 weeks of dogfood show FTS5
+  retrieval is the actual bottleneck, ADD a vector layer next.
+  The synthesis layer doesn't change.
+
 ### Added (per-profile credential isolation — Phase 14.F / Round 4 Item 5)
 
 Closes the gap where credentials lived only in the global

@@ -159,6 +159,12 @@ class RecallTool(BaseTool):
                 is_error=True,
             )
         limit = int(call.arguments.get("limit", DEFAULT_SEARCH_LIMIT))
+        # Round 4 Item 1 — opt-out per call. Default is None which lets
+        # the synthesizer respect OPENCOMPUTER_RECALL_SYNTHESIS env var.
+        synthesize_arg = call.arguments.get("synthesize")
+        synthesize: bool | None = (
+            None if synthesize_arg is None else bool(synthesize_arg)
+        )
 
         # Prefer episodic hits — they're denser per-row than raw messages.
         episodic = self._db.search_episodic(query, limit=limit)
@@ -180,7 +186,68 @@ class RecallTool(BaseTool):
                 lines.append("")
             lines.append(f"## Messages ({len(message_hits)})")
             lines.extend(_format_message_hit(h) for h in message_hits)
-        return ToolResult(tool_call_id=call.id, content="\n".join(lines))
+        raw_content = "\n".join(lines)
+
+        # Synthesis pass — converts the raw FTS5 dump into a focused
+        # 1-3 sentence answer with citations. Returns None when:
+        # disabled, <3 candidates, LLM unreachable, or citations
+        # don't validate. None means "show raw" — never silent loss.
+        synthesis = self._maybe_synthesize(query, episodic, message_hits, synthesize)
+        content = (
+            "## Synthesis\n" + synthesis + "\n\n" + raw_content
+            if synthesis
+            else raw_content
+        )
+        return ToolResult(tool_call_id=call.id, content=content)
+
+    def _maybe_synthesize(
+        self,
+        query: str,
+        episodic: list[dict],
+        message_hits: list[dict],
+        synthesize: bool | None,
+    ) -> str | None:
+        """Build candidate list + run the synthesizer. Returns the
+        synthesised string or None on any skip/failure path. Never
+        raises — the recall tool keeps working even if the synthesizer
+        module isn't importable (e.g. broken install)."""
+        try:
+            from opencomputer.agent.recall_synthesizer import (
+                RecallCandidate,
+                synthesize_recall,
+            )
+        except Exception:  # noqa: BLE001 — defence-in-depth
+            return None
+
+        candidates: list = []
+        for h in episodic:
+            candidates.append(
+                RecallCandidate(
+                    kind="episodic",
+                    id=str(h.get("id", "")),
+                    session_id=str(h.get("session_id", "")),
+                    turn_index=(
+                        int(h["turn_index"]) if h.get("turn_index") is not None else None
+                    ),
+                    text=str(h.get("summary", "")),
+                )
+            )
+        for h in message_hits:
+            sid = str(h.get("session_id", ""))
+            ts = h.get("timestamp", 0)
+            candidates.append(
+                RecallCandidate(
+                    kind="message",
+                    id=f"{sid[:8]}@{ts}",
+                    session_id=sid,
+                    turn_index=None,
+                    text=str(h.get("snippet", "")),
+                )
+            )
+        try:
+            return synthesize_recall(query, candidates, synthesize=synthesize)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _do_note(self, call: ToolCall) -> ToolResult:
         text = str(call.arguments.get("text", "")).strip()
