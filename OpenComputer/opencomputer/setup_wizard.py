@@ -614,9 +614,48 @@ def _optional_honcho() -> None:
         _downgrade_memory_provider_to_empty()
         return
 
+    # Honcho-on-by-default: if Docker is installed but the daemon is
+    # not running yet (the Mac-Desktop-just-installed case), try to
+    # start it ourselves before declaring defeat. The previous version
+    # silently fell through to "compose up timeout" → baseline memory,
+    # which trapped users who installed Docker Desktop but never
+    # opened the app — exactly what happened in this session's E2E.
+    if hasattr(bootstrap, "is_docker_daemon_running") and not bootstrap.is_docker_daemon_running():
+        console.print("[dim]Docker Desktop is installed but not running — starting it…[/dim]")
+        if hasattr(bootstrap, "try_start_docker_daemon") and bootstrap.try_start_docker_daemon():
+            console.print("[dim]Waiting for Docker daemon (up to 60s)…[/dim]")
+            if not bootstrap.wait_for_docker_daemon(timeout_s=60.0):
+                console.print(
+                    "[yellow]![/yellow] Docker daemon didn't come up in time. "
+                    "Continuing on baseline memory; once Docker Desktop is "
+                    "running, run [cyan]opencomputer memory setup[/cyan] to enable Honcho."
+                )
+                _downgrade_memory_provider_to_empty()
+                return
+        else:
+            # Linux/Termux fallback: we can't start the daemon for the
+            # user (would need sudo); print the right invocation and
+            # bail to baseline.
+            import sys as _sys
+
+            cmd = (
+                "open -a Docker"
+                if _sys.platform == "darwin"
+                else "sudo systemctl start docker"
+            )
+            console.print(
+                f"[yellow]![/yellow] Docker daemon is not running — please start it "
+                f"([cyan]{cmd}[/cyan]) and re-run [cyan]opencomputer memory setup[/cyan]."
+            )
+            _downgrade_memory_provider_to_empty()
+            return
+
     console.print("[dim]Starting Honcho memory stack…[/dim]")
+    # Bumped from 60s → 180s to tolerate first-pull on slow networks
+    # (postgres + redis + honcho-api images are ~600 MB combined; the
+    # original 60s timeout was the dominant failure mode in the field).
     try:
-        ok, msg = bootstrap.ensure_started(timeout_s=60)
+        ok, msg = bootstrap.ensure_started(timeout_s=180)
     except Exception as exc:  # noqa: BLE001
         ok, msg = False, f"{type(exc).__name__}: {exc}"
 

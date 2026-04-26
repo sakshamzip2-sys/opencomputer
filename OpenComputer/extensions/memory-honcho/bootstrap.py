@@ -67,15 +67,97 @@ def detect_docker() -> tuple[bool, bool]:
         return (True, False)
 
 
-def _compose(*args: str, env: dict | None = None) -> subprocess.CompletedProcess:
-    """Run ``docker compose -f <plugin>/docker-compose.yml <args>``."""
+def is_docker_daemon_running() -> bool:
+    """Cheap probe — is the docker daemon currently reachable?
+
+    ``detect_docker`` only checks the binary + compose plugin; on a
+    fresh Mac install Docker Desktop ships those but the daemon doesn't
+    start until the user opens the app. The v2026.4.26 incident traced
+    here: ``ensure_started`` would call ``docker compose up`` which
+    would hang for the full 120s timeout trying to reach the dead
+    daemon, then the wizard would fall back to baseline memory.
+
+    ``docker info`` exits non-zero immediately when the socket is
+    unreachable, so this is a sub-second check we can do BEFORE
+    paying compose's startup cost.
+    """
+    if not shutil.which("docker"):
+        return False
+    try:
+        r = subprocess.run(
+            ["docker", "info", "--format", "{{.ID}}"],
+            capture_output=True,
+            timeout=5,
+        )
+        return r.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def try_start_docker_daemon() -> bool:
+    """Attempt to start the Docker daemon non-interactively.
+
+    macOS: ``open -a Docker`` launches Docker Desktop. The daemon
+    becomes reachable ~10-30s after that on a typical machine.
+
+    Linux: we don't try systemctl — many distros require sudo, and
+    a sudo prompt mid-wizard would be a worse UX than a clear
+    "please start docker" message. Caller falls back to instructing
+    the user.
+
+    Returns True if a start attempt was made (caller should then poll
+    :func:`is_docker_daemon_running` for up to ~60s). Returns False
+    when the platform is unsupported or the launcher is missing.
+    """
+    import sys
+
+    if sys.platform != "darwin":
+        return False
+    if not shutil.which("open"):
+        return False
+    try:
+        subprocess.run(
+            ["open", "-a", "Docker"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        return True
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def wait_for_docker_daemon(timeout_s: float = 60.0, poll_interval: float = 2.0) -> bool:
+    """Poll :func:`is_docker_daemon_running` until True or timeout.
+
+    Used after :func:`try_start_docker_daemon` — Docker Desktop's
+    daemon takes 10-30s to come up cold, so a fixed sleep is wrong
+    (too short on a slow machine, too long on a fast one).
+    """
+    deadline = time.monotonic() + float(timeout_s)
+    while time.monotonic() < deadline:
+        if is_docker_daemon_running():
+            return True
+        time.sleep(poll_interval)
+    return False
+
+
+def _compose(
+    *args: str, env: dict | None = None, timeout: int = 120
+) -> subprocess.CompletedProcess:
+    """Run ``docker compose -f <plugin>/docker-compose.yml <args>``.
+
+    ``timeout`` defaults to 120s (fits ``ps`` / ``down`` / cached
+    ``up``); pass a longer value for ``up -d`` on a fresh install
+    where 600 MB of images need pulling — see :func:`honcho_up`.
+    """
     cmd = ["docker", "compose", "-f", str(COMPOSE_FILE), *args]
     return subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         env=env,
-        timeout=120,
+        timeout=timeout,
     )
 
 
@@ -104,7 +186,10 @@ def honcho_up() -> tuple[bool, str]:
             "Install docker-compose-plugin or upgrade Docker Desktop.",
         )
     try:
-        r = _compose("up", "-d", env=_compose_env())
+        # 300s tolerates the first-pull case (postgres + redis + api
+        # ~600 MB on a fresh install). Cached up-d returns in <5s, so
+        # the longer ceiling has no observable cost on subsequent runs.
+        r = _compose("up", "-d", env=_compose_env(), timeout=300)
     except (subprocess.TimeoutExpired, OSError) as e:
         return (False, f"docker compose up failed: {e}")
     if r.returncode != 0:
