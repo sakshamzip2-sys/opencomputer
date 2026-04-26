@@ -36,20 +36,22 @@ From now on, tagging `vX.Y.Z` and pushing the tag automatically publishes.
 
 ## Cutting a release
 
-### 3. Bump the version
+### 3. Bump the version (date-stamped)
 
-Edit the two places that track the version:
+OpenComputer uses **date-versioned releases** (`YYYY.M.D`, no zero-padding). Pick today's date as the version. Bump only the one place that tracks it:
 
-- `OpenComputer/pyproject.toml` — `version = "X.Y.Z"`
-- `OpenComputer/opencomputer/__init__.py` — `__version__ = "X.Y.Z"`
+- `OpenComputer/pyproject.toml` — `version = "YYYY.M.D"`
 
-Follow semver:
+(`opencomputer.__version__` is auto-derived from `importlib.metadata` and stays in sync.)
 
-| Change | Bump |
-|---|---|
-| Breaking API change to `plugin_sdk/*` | MAJOR |
-| New tool / channel / provider / feature | MINOR |
-| Bug fix, doc update, internal refactor | PATCH |
+```bash
+python -c "from opencomputer.release.version import today_version; print(today_version())"
+# → 2026.4.27   ← copy this into pyproject.toml
+```
+
+Two-or-more releases on the same day → append `.postN` (e.g. `2026.4.27.post1`). Don't reuse a date+post combo.
+
+**Stability commitment:** the `plugin_sdk/*` surface is the contract. Date versioning does not weaken that — any breaking change to `plugin_sdk` is announced explicitly in `CHANGELOG.md` regardless of date.
 
 ### 4. Update CHANGELOG
 
@@ -65,15 +67,15 @@ pytest tests/
 
 # From the PARENT repo root
 cd ..
+VERSION=$(python -c "from opencomputer.release.version import today_version; print(today_version())")
 git add OpenComputer/pyproject.toml \
-        OpenComputer/opencomputer/__init__.py \
         OpenComputer/CHANGELOG.md
-git commit -m "Release vX.Y.Z"
+git commit -m "Release v$VERSION"
 git push
 
 # Tag and push the tag (triggers the release.yml workflow)
-git tag vX.Y.Z
-git push origin vX.Y.Z
+git tag "v$VERSION"
+git push origin "v$VERSION"
 ```
 
 GitHub Actions will:
@@ -109,7 +111,7 @@ Only promote to PyPI once TestPyPI looks good.
 
 ## Version strategy
 
-- **0.x.y**: pre-1.0. Breaking changes allowed in MINOR bumps. Be clear in CHANGELOG.
-- **1.0.0**: first stable release. `plugin_sdk/*` surface is now stable — breaking
-  changes to it require MAJOR bump after this.
-- **1.x.y**: stable. Plugins written against `plugin_sdk` v1 will keep working.
+- **`YYYY.M.D`** (date-stamped): every release. Cadence is ship-when-ready.
+- **`plugin_sdk/*` is the only stability commitment.** Breaking changes there are called out explicitly in CHANGELOG so plugin authors can pin pre-break versions if needed.
+- **Two releases on one day:** suffix the second with `.postN` (e.g. `2026.4.27.post1`).
+- **Yanking:** if a release is bad, yank on PyPI (don't delete) and tag a new date version. Never reuse a date+post combo.

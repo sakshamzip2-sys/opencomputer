@@ -7,9 +7,17 @@ from pathlib import Path
 
 
 def test_package_imports() -> None:
+    import re
+
     import opencomputer
 
-    assert opencomputer.__version__ == "0.1.0"
+    # Date-versioned releases (Phase 0 of catch-up plan) — format: YYYY.M.D
+    # with optional ``.postN`` suffix for same-day re-releases. We don't
+    # hardcode the value because the version bumps every release; the
+    # shape check is what we actually want to assert here.
+    assert re.fullmatch(
+        r"\d{4}\.\d{1,2}\.\d{1,2}(?:\.post\d+)?", opencomputer.__version__,
+    ), f"unexpected version: {opencomputer.__version__!r}"
 
 
 def test_cli_module_imports() -> None:
