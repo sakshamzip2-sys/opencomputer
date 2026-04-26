@@ -1,9 +1,10 @@
 {
   "id": "oi-capability-deprecated",
   "name": "OI Capability (DEPRECATED — see coding-harness)",
-  "kind": "tools",
+  "kind": "tool",
   "version": "0.1.0",
-  "enabled_by_default": false,
+  "entry": "plugin",
   "description": "Deprecated standalone OI plugin. Functionality moved to extensions/coding-harness/oi_bridge/. Remove this plugin manifest in next major release.",
+  "enabled_by_default": false,
   "schema_version": 1
 }

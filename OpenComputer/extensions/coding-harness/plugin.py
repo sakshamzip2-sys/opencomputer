@@ -165,6 +165,27 @@ def register(api) -> None:  # PluginAPI duck-typed
     # clipboard, screenshot, screen text, search, git log. F1 ConsentGate
     # enforces capability claims at dispatch.
     try:
+        # The dir is named ``coding-harness`` (hyphen) so Python can't
+        # import it as ``extensions.coding_harness`` natively. tests/conftest.py
+        # registers an alias for the test runner; production needs the
+        # same alias *here*, before the imports below are attempted.
+        # Without this, OI Tier-1 introspection tools (screenshot, OCR,
+        # clipboard, app usage, recent files) silently fail to load on
+        # fresh installs.
+        import sys as _sys  # noqa: PLC0415
+        import types as _types  # noqa: PLC0415
+        from pathlib import Path as _Path  # noqa: PLC0415
+
+        if "extensions" not in _sys.modules:
+            _ext_pkg = _types.ModuleType("extensions")
+            _ext_pkg.__path__ = [str(_Path(__file__).resolve().parent.parent)]
+            _sys.modules["extensions"] = _ext_pkg
+        if "extensions.coding_harness" not in _sys.modules:
+            _ch_pkg = _types.ModuleType("extensions.coding_harness")
+            _ch_pkg.__path__ = [str(_Path(__file__).resolve().parent)]
+            _ch_pkg.__package__ = "extensions.coding_harness"
+            _sys.modules["extensions.coding_harness"] = _ch_pkg
+
         from extensions.coding_harness.oi_bridge.subprocess.wrapper import (  # noqa: PLC0415
             OISubprocessWrapper,
         )

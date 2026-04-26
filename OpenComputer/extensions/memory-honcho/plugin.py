@@ -88,6 +88,15 @@ def register(api: Any) -> None:
     ``register_memory_provider`` yet — logs a warning and skips so the
     agent keeps working on baseline memory.
     """
+    # KNOWN BUG (2026-04-26 smoke test): plugin loader uses
+    # ``importlib.util.spec_from_file_location`` with a synthetic name,
+    # so the ``from .provider`` relative import has no parent package
+    # and fails at runtime. Tests pass because conftest pre-registers
+    # the package; fresh installs fail. Quick fix attempts via
+    # ``module_from_spec`` triggered a separate ``slots=True``
+    # incompatibility. Real fix is in the plugin loader (register a
+    # synthesised parent package before the entry import). Tracked as
+    # a follow-up; honcho memory is opt-in so this isn't a hot blocker.
     from .provider import HonchoSelfHostedProvider
 
     provider = HonchoSelfHostedProvider(_config_from_env())
