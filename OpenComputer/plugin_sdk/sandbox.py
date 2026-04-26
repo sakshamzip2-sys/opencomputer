@@ -50,6 +50,7 @@ SandboxStrategyName = Literal[
     "macos_sandbox_exec",
     "linux_bwrap",
     "docker",
+    "ssh",
     "none",
 ]
 
@@ -83,6 +84,11 @@ class SandboxConfig:
     """Env-var allowlist; everything else is stripped before exec."""
     image: str = "alpine:latest"
     """Image used by the Docker strategy. Ignored by other strategies."""
+
+    ssh_host: str | None = None
+    """Target for the ``"ssh"`` strategy in ``user@host`` form (host alone
+    is also accepted). Ignored by other strategies. Validated against a
+    strict regex before use; metacharacters refused outright."""
 
     # Reserved for future expansion (e.g. seccomp profile, syscall allowlist).
     # Kept frozen so callers can hash + compare configs.

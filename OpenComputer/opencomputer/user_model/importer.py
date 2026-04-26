@@ -146,6 +146,7 @@ class MotifImporter:
             confidence=motif.confidence,
             source_reliability=0.6,
             evidence={"motif_id": motif.motif_id, "kind": "temporal"},
+            source="motif_importer",
         )
         self.store.insert_edge(edge)
         return 1
@@ -187,6 +188,7 @@ class MotifImporter:
                 "kind": "transition",
                 "probability": payload.get("probability"),
             },
+            source="motif_importer",
         )
         self.store.insert_edge(edge)
         return 1
@@ -234,6 +236,7 @@ class MotifImporter:
                     "kind": "implicit_goal",
                     "rank": i,
                 },
+                source="motif_importer",
             )
             self.store.insert_edge(edge)
             edges_added += 1

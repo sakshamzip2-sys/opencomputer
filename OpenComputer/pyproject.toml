@@ -61,6 +61,14 @@ honcho = [
 menubar = [
   "rumps>=0.4.0; platform_system == 'Darwin'",
 ]
+# Optional: native macOS GUI control (Phase 2.1 of catch-up plan).
+# Enables PointAndClickTool's Quartz CGEvent path (faster + supports
+# right-click). Without this extra, PointAndClick falls back to
+# osascript which is left-click-only. macOS only — Linux/Windows skip
+# the wheel via the platform marker.
+gui = [
+  "pyobjc-framework-Quartz>=10.0; platform_system == 'Darwin'",
+]
 
 [project.scripts]
 opencomputer = "opencomputer.cli:main"

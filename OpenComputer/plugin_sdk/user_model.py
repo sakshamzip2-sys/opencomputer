@@ -158,6 +158,17 @@ class Edge:
     edge_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: float = field(default_factory=time.time)
     evidence: Mapping[str, Any] = field(default_factory=dict)
+    source: str = "unknown"
+    """Provenance tag for cycle prevention in the F4↔Honcho hybrid (Phase 4
+    of the catch-up plan). Common values:
+
+    * ``"motif_importer"`` — derived deterministically from a Phase 3.B motif.
+    * ``"honcho_synthesis"`` — materialised back from a Honcho dialectic
+      claim. The motif importer skips edges with a ``"honcho_"`` prefix
+      to break the synthesis-feeds-itself loop.
+    * ``"user_explicit"`` — the user said it directly in chat.
+    * ``"unknown"`` (default) — pre-Phase-4 edges and tests that don't care.
+    """
 
 
 @dataclass(frozen=True, slots=True)

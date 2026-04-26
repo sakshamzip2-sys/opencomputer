@@ -41,6 +41,8 @@ from opencomputer.tools.recall import RecallTool
 from opencomputer.tools.registry import registry
 from opencomputer.tools.skill import SkillTool
 from opencomputer.tools.skill_manage import SkillManageTool
+from opencomputer.tools.voice_synthesize import VoiceSynthesizeTool
+from opencomputer.tools.voice_transcribe import VoiceTranscribeTool
 from opencomputer.tools.web_fetch import WebFetchTool
 from opencomputer.tools.web_search import WebSearchTool
 from opencomputer.tools.write import WriteTool
@@ -208,6 +210,21 @@ def _register_builtin_tools() -> None:
     # ~/.claude/plans/toasty-wiggling-eclipse.md). Capability-claimed
     # through F1 ConsentGate so the agent can self-schedule with consent.
     registry.register(CronTool())
+    # Phase 1.1 of catch-up plan — voice as agent-invocable tools.
+    # The opencomputer.voice module already shipped (cost-guarded TTS/STT);
+    # these expose it explicitly so the agent can synthesize / transcribe
+    # without going through a channel-specific path.
+    registry.register(VoiceSynthesizeTool())
+    registry.register(VoiceTranscribeTool())
+    # Phase 2.1 + 2.2 of catch-up plan — GUI tools (macOS only).
+    # PointAndClickTool: programmatic mouse click via Quartz/osascript.
+    # AppleScriptRunTool: AppleScript snippet runner with denylist guard.
+    # Both gated PER_ACTION; only registered on darwin.
+    if sys.platform == "darwin":
+        from opencomputer.tools.applescript_run import AppleScriptRunTool
+        from opencomputer.tools.point_click import PointAndClickTool
+        registry.register(PointAndClickTool())
+        registry.register(AppleScriptRunTool())
 
 
 def _resolve_plugin_filter():
@@ -844,6 +861,7 @@ from opencomputer.cli_adapter import adapter_app  # noqa: E402
 from opencomputer.cli_consent import consent_app  # noqa: E402
 from opencomputer.cli_cost import cost_app  # noqa: E402
 from opencomputer.cli_cron import cron_app  # noqa: E402
+from opencomputer.cli_pair import pair_app  # noqa: E402
 from opencomputer.cli_session import session_app  # noqa: E402
 from opencomputer.cli_voice import voice_app  # noqa: E402
 from opencomputer.cli_webhook import webhook_app  # noqa: E402
@@ -852,6 +870,7 @@ app.add_typer(adapter_app, name="adapter")
 app.add_typer(consent_app, name="consent")
 app.add_typer(cost_app, name="cost")
 app.add_typer(cron_app, name="cron")
+app.add_typer(pair_app, name="pair")
 app.add_typer(session_app, name="session")
 app.add_typer(voice_app, name="voice")
 app.add_typer(webhook_app, name="webhook")

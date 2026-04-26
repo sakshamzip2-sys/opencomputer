@@ -9,6 +9,29 @@ from plugin_sdk import ConsentTier
 F1_CAPABILITIES: dict[str, ConsentTier] = {
     "consent.grant": ConsentTier.EXPLICIT,
     "consent.revoke": ConsentTier.IMPLICIT,
+    # F8 (voice — Phase 1.1 of catch-up plan)
+    "voice.synthesize": ConsentTier.IMPLICIT,
+    "voice.transcribe": ConsentTier.IMPLICIT,
+    # F9 (channels — Phase 1.3 of catch-up plan).
+    # Auto-granted by `opencomputer pair <platform>` after format + live
+    # check pass. Tier EXPLICIT means: user-confirmed but not per-message.
+    "channel.send.telegram": ConsentTier.EXPLICIT,
+    "channel.send.discord": ConsentTier.EXPLICIT,
+    "channel.send.slack": ConsentTier.EXPLICIT,
+    # F7 (GUI control — Phase 2.1 + 2.2 of catch-up plan).
+    # macOS-only. Tier PER_ACTION because each click / script can mutate
+    # arbitrary OS state — confirm every call until user explicitly
+    # promotes the grant. Destructive-keyword denylist on AppleScript
+    # is defence-in-depth, NOT the primary gate (consent is).
+    "gui.point_click": ConsentTier.PER_ACTION,
+    "gui.applescript_run": ConsentTier.PER_ACTION,
+    # Phase 5.B-3 of catch-up plan — procedural-memory loop.
+    # The agent observes its own tool-use patterns and drafts new
+    # SKILL.md files for repeated patterns. Drafts go to quarantine;
+    # the user must explicitly approve via the CLI before activation.
+    # EXPLICIT tier means user opted in once (revocable); per-draft
+    # approval is a *separate* user action, not consent-gate enforced.
+    "procedural_memory.write_skill": ConsentTier.EXPLICIT,
 }
 
 # Reserved for later phases (documented, not enforced here):

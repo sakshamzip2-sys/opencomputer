@@ -18,6 +18,9 @@ Strategies
   on Linux. Memory cap via ``prlimit`` when available.
 * :class:`DockerStrategy` — cross-platform; runs argv in a transient
   container (``docker run --rm ...``).
+* :class:`SSHSandboxStrategy` — runs argv on a remote host via ``ssh``.
+  *Not* a containment sandbox; the remote host is trusted by the user
+  who configured ``ssh_host``. Phase 1.2 of catch-up plan.
 * :class:`NoneSandboxStrategy` — no containment. For trusted internal
   callers and tests. Logs a WARNING on every invocation.
 
@@ -44,12 +47,14 @@ from opencomputer.sandbox.linux import LinuxBwrapStrategy
 from opencomputer.sandbox.macos import MacOSSandboxExecStrategy
 from opencomputer.sandbox.none_strategy import NoneSandboxStrategy
 from opencomputer.sandbox.runner import run_sandboxed
+from opencomputer.sandbox.ssh import SSHSandboxStrategy
 
 __all__ = [
     "DockerStrategy",
     "LinuxBwrapStrategy",
     "MacOSSandboxExecStrategy",
     "NoneSandboxStrategy",
+    "SSHSandboxStrategy",
     "auto_strategy",
     "run_sandboxed",
 ]
