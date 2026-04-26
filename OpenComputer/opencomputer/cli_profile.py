@@ -90,7 +90,7 @@ def profile_bootstrap(
     if not skip_interview:
         rendered = render_questions(facts)
         typer.echo(rendered[0])  # greeting
-        for (key, _), prompt in zip(QUICK_INTERVIEW_QUESTIONS, rendered[1:]):
+        for (key, _), prompt in zip(QUICK_INTERVIEW_QUESTIONS, rendered[1:], strict=True):
             answer = typer.prompt(prompt, default="", show_default=False)
             if answer.strip():
                 answers[key] = answer.strip()
@@ -178,7 +178,7 @@ def bridge_status() -> None:
     try:
         sock.connect(("127.0.0.1", state.port))
         typer.echo("Listener: REACHABLE")
-    except (OSError, socket.timeout):
+    except (OSError, TimeoutError):
         typer.echo("Listener: NOT REACHABLE (run 'opencomputer profile bridge start')")
     finally:
         sock.close()

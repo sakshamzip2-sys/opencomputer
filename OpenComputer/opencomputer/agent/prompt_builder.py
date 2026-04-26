@@ -16,7 +16,10 @@ import datetime
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from opencomputer.user_model.store import UserModelStore
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -119,7 +122,7 @@ class PromptBuilder:
     def build_user_facts(
         self,
         *,
-        store: "UserModelStore | None" = None,
+        store: UserModelStore | None = None,
         top_k: int = 20,
     ) -> str:
         """Return a pre-formatted top-K user-facts block, or empty string.
