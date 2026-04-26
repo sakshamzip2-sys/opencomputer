@@ -213,7 +213,11 @@ def status_servers() -> None:
         # want the snapshot, not to register tools.
         mgr = MCPManager(tool_registry=ToolRegistry())
         try:
-            await mgr.connect_all(enabled)
+            await mgr.connect_all(
+                enabled,
+                osv_check_enabled=cfg.mcp.osv_check_enabled,
+                osv_check_fail_closed=cfg.mcp.osv_check_fail_closed,
+            )
             return mgr.status_snapshot()
         finally:
             await mgr.shutdown()

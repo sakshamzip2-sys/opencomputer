@@ -283,7 +283,7 @@ def test_mcp_status_cli_renders_table_with_headers(
     # Stub connect so the CLI doesn't actually hit the network.
     from opencomputer.mcp import client as client_mod
 
-    async def _fake_connect(self) -> bool:
+    async def _fake_connect(self, **kwargs) -> bool:  # noqa: ARG001
         self.session = MagicMock()
         self.state = "connected"
         self.version = "9.9.9"

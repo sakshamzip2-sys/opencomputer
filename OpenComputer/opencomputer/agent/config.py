@@ -209,11 +209,29 @@ class MCPServerConfig:
 
 @dataclass(frozen=True, slots=True)
 class MCPConfig:
-    """MCP integration — list of servers + global toggles."""
+    """MCP integration — list of servers + global toggles.
+
+    OSV scanning (Round 2B P-7)
+    ---------------------------
+    Before spawning a stdio MCP server via ``npx``/``uvx``, the
+    launcher consults the public OSV.dev advisory database for the
+    package. Hits are emitted on the F2 bus as ``mcp_security.osv_hit``
+    events for audit subscribers.
+
+    * ``osv_check_enabled`` — master switch. ``True`` (default) runs
+      the pre-flight check; ``False`` skips it entirely (no network,
+      no cache touches).
+    * ``osv_check_fail_closed`` — when ``True``, a HIGH-severity hit
+      causes the launcher to refuse the spawn (raises). Default
+      ``False`` keeps the warn-and-allow posture so an OSV outage
+      can't break MCP startup.
+    """
 
     servers: tuple[MCPServerConfig, ...] = ()
     # Connect servers in the background after startup (kimi-cli pattern).
     deferred: bool = True
+    osv_check_enabled: bool = True
+    osv_check_fail_closed: bool = False
 
 
 @dataclass(frozen=True, slots=True)

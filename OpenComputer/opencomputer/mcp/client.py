@@ -22,8 +22,10 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
 from opencomputer.agent.config import MCPServerConfig
+from opencomputer.mcp.osv_check import check_package, has_high_severity
 from opencomputer.tools.registry import ToolRegistry
 from plugin_sdk.core import ToolCall, ToolResult
+from plugin_sdk.ingestion import SignalEvent
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 #: Narrowed connection lifecycle used by ``status_snapshot``. Mirrors
@@ -31,6 +33,66 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 ConnectionState = Literal["connected", "disconnected", "error"]
 
 logger = logging.getLogger("opencomputer.mcp.client")
+
+
+class MCPLaunchBlockedError(RuntimeError):
+    """Raised when an OSV pre-flight scan blocks an MCP launch.
+
+    Only thrown when :attr:`MCPConfig.osv_check_fail_closed` is set —
+    the default fail-open posture logs + warns instead. Carries the
+    triggering vuln list so callers can surface a useful error
+    message.
+    """
+
+    def __init__(self, package: str, ecosystem: str, vulns: list[Any]) -> None:
+        self.package = package
+        self.ecosystem = ecosystem
+        self.vulns = vulns
+        ids = [v.get("id", "?") for v in vulns if isinstance(v, dict)]
+        super().__init__(
+            f"OSV block: {ecosystem}/{package} flagged HIGH/CRITICAL "
+            f"(advisories: {', '.join(ids) or 'unknown'})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _OSVSecurityEvent(SignalEvent):
+    """F2 bus event emitted when OSV finds a vuln on an MCP launch path.
+
+    Discriminator ``mcp_security.osv_hit`` lets audit subscribers
+    glob-match ``mcp_security.*`` for any future security signals.
+    Privacy posture: carries the package coordinates + advisory IDs +
+    severity flag — never raw dependency manifests.
+    """
+
+    event_type: str = "mcp_security.osv_hit"
+    package: str = ""
+    ecosystem: str = ""
+    server_name: str = ""
+    high_severity: bool = False
+    vuln_ids: tuple[str, ...] = ()
+    blocked: bool = False
+
+
+def _extract_package(cfg: MCPServerConfig) -> tuple[str, str] | None:
+    """Best-effort (package, ecosystem) extraction for a stdio MCP launch.
+
+    npx args land in shapes like ``("-y", "@scope/pkg", "...rest")`` —
+    the first non-flag argument is the package. uvx args look like
+    ``("pkg-name", ...)`` — the first arg is the package, ecosystem
+    PyPI. Returns ``None`` when the command isn't a recognised
+    package-runner so the launcher skips the check (e.g.
+    user-supplied ``python my-server.py``).
+    """
+    cmd = (cfg.command or "").strip().lower()
+    if cmd not in {"npx", "uvx"}:
+        return None
+    ecosystem = "npm" if cmd == "npx" else "PyPI"
+    for arg in cfg.args:
+        if arg.startswith("-"):
+            continue
+        return arg, ecosystem
+    return None
 
 
 # ─── MCPTool — one tool exposed via MCP ────────────────────────────
@@ -113,11 +175,110 @@ class MCPConnection:
     #: Latest connect-time error message, ``None`` when healthy.
     last_error: str | None = None
 
-    async def connect(self) -> bool:
-        """Spin up the server process / HTTP session, initialize, cache tool list."""
+    def _osv_pre_flight(self, *, fail_closed: bool) -> str | None:
+        """Run the OSV pre-flight check; return an error string if blocking.
+
+        Returns ``None`` when the launch should proceed (clean OR
+        fail-open warn-and-allow). Returns a short error message when
+        ``fail_closed`` is set and a HIGH-severity advisory matched.
+
+        Always emits ``mcp_security.osv_hit`` on the F2 bus when any
+        vulns are found, regardless of severity, so audit subscribers
+        get visibility on every signal — not just the blocking ones.
+        """
+        package_info = _extract_package(self.config)
+        if package_info is None:
+            return None
+        package, ecosystem = package_info
+        try:
+            result = check_package(package, ecosystem)
+        except Exception as exc:  # noqa: BLE001 — must not break launch
+            logger.warning(
+                "OSV pre-flight raised for %s/%s: %s — fail-open",
+                ecosystem,
+                package,
+                exc,
+            )
+            return None
+        vulns = result.get("vulns", []) or []
+        if not vulns:
+            return None
+        high = has_high_severity(vulns)
+        ids = tuple(v.get("id", "?") for v in vulns if isinstance(v, dict))
+        # Lazy bus import — keeps a broken bus singleton from poisoning
+        # MCP module imports during pytest collection.
+        try:
+            from opencomputer.ingestion.bus import default_bus
+
+            default_bus.publish(
+                _OSVSecurityEvent(
+                    source="mcp.client",
+                    package=package,
+                    ecosystem=ecosystem,
+                    server_name=self.config.name,
+                    high_severity=high,
+                    vuln_ids=ids,
+                    blocked=bool(high and fail_closed),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OSV bus publish failed (continuing): %s", exc)
+        if high and fail_closed:
+            return (
+                f"OSV blocked launch: {ecosystem}/{package} "
+                f"({', '.join(ids) or 'unknown'})"
+            )
+        if high:
+            logger.warning(
+                "OSV pre-flight HIGH severity for %s/%s (%s) — allowing "
+                "(fail-open posture; set MCPConfig.osv_check_fail_closed "
+                "to refuse)",
+                ecosystem,
+                package,
+                ", ".join(ids),
+            )
+        else:
+            logger.info(
+                "OSV pre-flight non-high advisory for %s/%s (%s) — allowing",
+                ecosystem,
+                package,
+                ", ".join(ids),
+            )
+        return None
+
+    async def connect(
+        self,
+        *,
+        osv_check_enabled: bool = True,
+        osv_check_fail_closed: bool = False,
+    ) -> bool:
+        """Spin up the server process / HTTP session, initialize, cache tool list.
+
+        Parameters
+        ----------
+        osv_check_enabled:
+            When ``True`` (default) and the server is launched via
+            ``npx``/``uvx``, run an OSV pre-flight scan of the package.
+            HIGH/CRITICAL hits emit a ``mcp_security.osv_hit`` event on
+            the F2 bus.
+        osv_check_fail_closed:
+            When ``True``, a HIGH-severity OSV hit refuses the launch
+            (returns ``False`` after recording an error). Default
+            ``False`` (warn-and-allow) keeps a transient OSV outage
+            from breaking MCP startup.
+        """
         self.exit_stack = AsyncExitStack()
         try:
             if self.config.transport == "stdio":
+                if osv_check_enabled:
+                    blocked = self._osv_pre_flight(fail_closed=osv_check_fail_closed)
+                    if blocked is not None:
+                        # blocked == True means fail-closed refused the
+                        # launch; surface as a connect error and bail.
+                        self.state = "error"
+                        self.last_error = blocked
+                        await self.disconnect(_preserve_error_state=True)
+                        return False
                 params = StdioServerParameters(
                     command=self.config.command,
                     args=list(self.config.args),
@@ -218,14 +379,29 @@ class MCPManager:
         self.tool_registry = tool_registry
         self.connections: list[MCPConnection] = []
 
-    async def connect_all(self, servers: list[MCPServerConfig]) -> int:
-        """Connect to every enabled server + register its tools. Returns tool count."""
+    async def connect_all(
+        self,
+        servers: list[MCPServerConfig],
+        *,
+        osv_check_enabled: bool = True,
+        osv_check_fail_closed: bool = False,
+    ) -> int:
+        """Connect to every enabled server + register its tools. Returns tool count.
+
+        ``osv_check_enabled`` and ``osv_check_fail_closed`` are passed
+        straight through to each :meth:`MCPConnection.connect` call so
+        callers can plumb :class:`MCPConfig` flags without per-server
+        threading.
+        """
         total = 0
         for cfg in servers:
             if not cfg.enabled:
                 continue
             conn = MCPConnection(config=cfg)
-            ok = await conn.connect()
+            ok = await conn.connect(
+                osv_check_enabled=osv_check_enabled,
+                osv_check_fail_closed=osv_check_fail_closed,
+            )
             if not ok:
                 continue
             self.connections.append(conn)
@@ -245,9 +421,21 @@ class MCPManager:
             await conn.disconnect()
         self.connections.clear()
 
-    def schedule_deferred_connect(self, servers: list[MCPServerConfig]) -> asyncio.Task[int]:
+    def schedule_deferred_connect(
+        self,
+        servers: list[MCPServerConfig],
+        *,
+        osv_check_enabled: bool = True,
+        osv_check_fail_closed: bool = False,
+    ) -> asyncio.Task[int]:
         """Start connecting in the background (kimi-cli pattern) — returns the Task."""
-        return asyncio.create_task(self.connect_all(servers))
+        return asyncio.create_task(
+            self.connect_all(
+                servers,
+                osv_check_enabled=osv_check_enabled,
+                osv_check_fail_closed=osv_check_fail_closed,
+            )
+        )
 
     def status_snapshot(self) -> list[dict[str, Any]]:
         """Return a diagnostic snapshot of every tracked MCP connection (IV.4).
@@ -306,4 +494,10 @@ class MCPManager:
         return snap
 
 
-__all__ = ["MCPTool", "MCPConnection", "MCPManager", "ConnectionState"]
+__all__ = [
+    "MCPTool",
+    "MCPConnection",
+    "MCPManager",
+    "ConnectionState",
+    "MCPLaunchBlockedError",
+]
