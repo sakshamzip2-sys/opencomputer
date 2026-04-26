@@ -9,6 +9,10 @@ from plugin_sdk import ConsentTier
 F1_CAPABILITIES: dict[str, ConsentTier] = {
     "consent.grant": ConsentTier.EXPLICIT,
     "consent.revoke": ConsentTier.IMPLICIT,
+    # Phase 8.A of catch-up plan — web UI dashboard.
+    # Default localhost-only; non-localhost binding requires this capability.
+    # Tier EXPLICIT means user opted in once; we don't re-prompt every start.
+    "dashboard.bind_external": ConsentTier.EXPLICIT,
 }
 
 # Reserved for later phases (documented, not enforced here):
