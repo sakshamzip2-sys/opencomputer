@@ -22,6 +22,8 @@ import asyncio
 import logging
 import re
 import time
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,19 @@ from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import MessageEvent, Platform, SendResult
 
 logger = logging.getLogger("opencomputer.ext.telegram")
+
+# Round 2a P-5 — inline-button callback prefix. The callback_data field
+# in CallbackQuery is limited to 64 bytes by the Bot API, so we keep the
+# format compact: ``"oc:approve:<verb>:<request_token>"``. Verb is one
+# of ``once`` / ``always`` / ``deny``; request_token is opaque (UUID4
+# hex truncated) so the backend can map it to (session_id, capability_id)
+# without leaking those onto the wire.
+_APPROVAL_CALLBACK_PREFIX = "oc:approve:"
+# Maximum number of recently-seen callback_query ids we remember to
+# de-duplicate double-clicks. Telegram retries deliveries that don't get
+# answerCallbackQuery'd in time, so we MUST remember at least the last
+# few hundred to absorb retries cleanly. 1024 is overkill but cheap.
+_CALLBACK_DEDUPE_CAPACITY = 1024
 
 
 #: P-2 round 2a — leading prefix that routes a Telegram message into the
@@ -105,6 +120,26 @@ class TelegramAdapter(BaseChannelAdapter):
         self._offset: int = 0
         self._polling_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+        # Round 2a P-5 — inline approval-button bookkeeping.
+        # ``_approval_callback`` is the function the gateway / agent loop
+        # registers via :meth:`set_approval_callback` to receive button
+        # clicks. The adapter intentionally doesn't import ConsentGate —
+        # it routes raw ``(verb, token)`` tuples and lets the gateway
+        # translate to (session_id, capability_id, decision, persist).
+        self._approval_callback: (
+            Callable[[str, str], Awaitable[None]] | None
+        ) = None
+        # ``_approval_tokens`` maps the opaque request_token we sent in
+        # callback_data back to the chat_id + message_id we posted the
+        # buttons in, so the callback handler can edit the message to
+        # show the resolution ("✓ Allowed once" etc.) and stop accepting
+        # further clicks for the same request.
+        self._approval_tokens: dict[str, dict[str, Any]] = {}
+        # Bounded dedupe set keyed on Telegram callback_query.id —
+        # absorbs retries from the Bot API and double-clicks within a
+        # single response window. Insertion order eviction keeps the
+        # working set small.
+        self._seen_callback_ids: OrderedDict[str, None] = OrderedDict()
 
     async def connect(self) -> bool:
         self._client = httpx.AsyncClient(timeout=35.0)
@@ -144,7 +179,13 @@ class TelegramAdapter(BaseChannelAdapter):
         assert self._client is not None
         while not self._stop_event.is_set():
             try:
-                params = {"timeout": 30, "offset": self._offset, "allowed_updates": ["message"]}
+                # Round 2a P-5 — also subscribe to ``callback_query``
+                # so inline-keyboard button clicks reach the adapter.
+                params = {
+                    "timeout": 30,
+                    "offset": self._offset,
+                    "allowed_updates": ["message", "callback_query"],
+                }
                 resp = await self._client.get(f"{self.base_url}/getUpdates", params=params)
                 if resp.status_code != 200:
                     await asyncio.sleep(2)
@@ -163,6 +204,13 @@ class TelegramAdapter(BaseChannelAdapter):
                 await asyncio.sleep(5)
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
+        # Round 2a P-5 — route inline-button clicks to the callback path
+        # before checking for a regular message. Telegram delivers each
+        # update with at most one of these populated.
+        cbq = update.get("callback_query")
+        if cbq is not None:
+            await self._handle_callback_query(cbq)
+            return
         msg = update.get("message")
         if msg is None:
             return
@@ -570,6 +618,222 @@ class TelegramAdapter(BaseChannelAdapter):
         out_path = dest_dir_path / out_name
         out_path.write_bytes(download_resp.content)
         return out_path.resolve()
+
+    # ------------------------------------------------------------------
+    # Round 2a P-5 — F1 consent inline-approval buttons
+    # ------------------------------------------------------------------
+
+    def set_approval_callback(
+        self, callback: Callable[[str, str], Awaitable[None]]
+    ) -> None:
+        """Register the coroutine that receives ``(verb, request_token)`` clicks.
+
+        ``verb`` is one of ``"once"``, ``"always"``, ``"deny"``;
+        ``request_token`` is the opaque token the caller minted when it
+        invoked :meth:`send_approval_request`. The gateway is responsible
+        for translating those back into a ``ConsentGate.resolve_pending``
+        call (it owns the session_id ↔ token map).
+
+        Replaces any previously-registered callback.
+        """
+        self._approval_callback = callback
+
+    async def send_approval_request(
+        self,
+        chat_id: str,
+        prompt_text: str,
+        request_token: str,
+        **kwargs: Any,
+    ) -> SendResult:
+        """Post an inline-keyboard approval prompt with three buttons.
+
+        ``prompt_text`` SHOULD be the result of
+        ``ConsentGate.render_prompt(claim, scope)`` so we don't introduce
+        a parallel risk classifier (per "no regex layer" / "F1 owns
+        tier model" rule).
+
+        ``request_token`` is the opaque correlation id the caller
+        provides; the same token shows up on the resulting
+        ``callback_query`` so the gateway can map clicks back to the
+        original (session_id, capability_id) pair without leaking those
+        onto the wire.
+
+        The button layout is a single row of three buttons:
+        ``[✓ Allow once] [✓ Allow always] [✗ Deny]``. Each
+        ``callback_data`` is ``"oc:approve:<verb>:<token>"`` where
+        ``<verb>`` is ``once`` / ``always`` / ``deny`` — under the 64-byte
+        Telegram limit even for long-ish tokens (UUID4 hex = 32 chars,
+        so total ≤ 50 chars).
+        """
+        if self._client is None:
+            return SendResult(success=False, error="adapter not connected")
+
+        # Compose buttons. Each button's callback_data is opaque; the
+        # gateway maps token → (session_id, capability_id) via its own
+        # registry. We never put the session id on the wire.
+        keyboard = [
+            [
+                {
+                    "text": "✓ Allow once",
+                    "callback_data": f"{_APPROVAL_CALLBACK_PREFIX}once:{request_token}",
+                },
+                {
+                    "text": "✓ Allow always",
+                    "callback_data": f"{_APPROVAL_CALLBACK_PREFIX}always:{request_token}",
+                },
+                {
+                    "text": "✗ Deny",
+                    "callback_data": f"{_APPROVAL_CALLBACK_PREFIX}deny:{request_token}",
+                },
+            ]
+        ]
+        try:
+            resp = await self._client.post(
+                f"{self.base_url}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": prompt_text,
+                    "reply_markup": {"inline_keyboard": keyboard},
+                },
+            )
+            if resp.status_code != 200:
+                return SendResult(
+                    success=False,
+                    error=(
+                        f"telegram sendMessage HTTP {resp.status_code}: "
+                        f"{resp.text[:200]}"
+                    ),
+                )
+            data = resp.json()
+            if not data.get("ok"):
+                return SendResult(success=False, error=str(data))
+            # Stash chat_id + message_id so the callback handler can edit
+            # the message in place after resolution (removes buttons,
+            # confirms what was clicked).
+            sent_msg = data.get("result") or {}
+            self._approval_tokens[request_token] = {
+                "chat_id": chat_id,
+                "message_id": sent_msg.get("message_id"),
+            }
+            return SendResult(success=True)
+        except Exception as exc:  # noqa: BLE001
+            return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+
+    async def _handle_callback_query(self, cbq: dict[str, Any]) -> None:
+        """Dispatch an inline-button click to the registered approval callback.
+
+        Dedupe by ``callback_query.id`` — Telegram retries deliveries
+        until we ``answerCallbackQuery``, and a fast double-click sends
+        two distinct ids in quick succession so we ALSO key on the
+        underlying request_token to drop the second click.
+        """
+        cbq_id = cbq.get("id")
+        if not cbq_id:
+            return
+
+        # Drop already-seen callback ids (Telegram retry).
+        if cbq_id in self._seen_callback_ids:
+            return
+        self._seen_callback_ids[cbq_id] = None
+        # Bound the dedupe set so it doesn't grow unbounded over a long
+        # uptime; eviction in insertion order is fine because the only
+        # thing we need to remember is "very recent ids".
+        while len(self._seen_callback_ids) > _CALLBACK_DEDUPE_CAPACITY:
+            self._seen_callback_ids.popitem(last=False)
+
+        # Always ack the callback so the user's button stops spinning,
+        # even if the data is malformed or stale.
+        await self._answer_callback_query(cbq_id)
+
+        data = cbq.get("data") or ""
+        if not data.startswith(_APPROVAL_CALLBACK_PREFIX):
+            return  # not for us — silently ignore
+        rest = data[len(_APPROVAL_CALLBACK_PREFIX):]
+        try:
+            verb, token = rest.split(":", 1)
+        except ValueError:
+            logger.warning("telegram approval callback malformed data: %r", data)
+            return
+
+        # Token-level dedupe: once a verb has been processed for a token,
+        # subsequent clicks (even with new callback_query ids) must not
+        # re-fire the callback. We pop the token from the registry on
+        # first successful dispatch.
+        token_meta = self._approval_tokens.pop(token, None)
+        if token_meta is None:
+            logger.info(
+                "telegram approval click for unknown token=%s — stale callback ignored",
+                token,
+            )
+            return
+
+        if self._approval_callback is None:
+            logger.warning(
+                "telegram approval click for token=%s but no callback registered",
+                token,
+            )
+            return
+
+        try:
+            await self._approval_callback(verb, token)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "telegram approval callback raised for verb=%s token=%s: %s",
+                verb, token, exc,
+            )
+            # Re-register the token so a retry could resolve it; safer
+            # than leaving the user staring at a half-broken UI.
+            self._approval_tokens[token] = token_meta
+            return
+
+        # Best-effort UI confirmation: edit the original message to remove
+        # the buttons and append the resolution. Failures here are
+        # logged-only — the consent decision has already been routed.
+        chat_id = token_meta.get("chat_id")
+        message_id = token_meta.get("message_id")
+        if chat_id is not None and message_id is not None:
+            label = {
+                "once": "✓ Allowed once",
+                "always": "✓ Allowed always",
+                "deny": "✗ Denied",
+            }.get(verb, verb)
+            try:
+                await self._client.post(  # type: ignore[union-attr]
+                    f"{self.base_url}/editMessageReplyMarkup",
+                    json={
+                        "chat_id": chat_id,
+                        "message_id": int(message_id),
+                        "reply_markup": {"inline_keyboard": []},
+                    },
+                )
+                await self._client.post(  # type: ignore[union-attr]
+                    f"{self.base_url}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": f"Decision recorded: {label}",
+                        "reply_to_message_id": int(message_id),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "telegram approval UI confirmation failed (non-fatal): %s", exc,
+                )
+
+    async def _answer_callback_query(self, cbq_id: str) -> None:
+        """Tell Telegram we received the callback so the spinner stops.
+
+        Best-effort — failures are swallowed because the underlying
+        consent flow doesn't depend on the ack.
+        """
+        if self._client is None:
+            return
+        try:
+            await self._client.post(
+                f"{self.base_url}/answerCallbackQuery",
+                json={"callback_query_id": cbq_id},
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------------------

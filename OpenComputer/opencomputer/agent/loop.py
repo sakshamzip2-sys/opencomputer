@@ -1084,6 +1084,7 @@ class AgentLoop:
 
         if self._consent_gate is not None:
             from opencomputer.agent.consent.bypass import BypassManager
+            from plugin_sdk.consent import ConsentTier
             if not BypassManager.is_active():
                 for c in calls:
                     tool = registry.get(c.name)
@@ -1095,6 +1096,45 @@ class AgentLoop:
                         decision = self._consent_gate.check(
                             claim, scope=scope, session_id=session_id,
                         )
+                        # Round 2a P-5 — when consent is denied for a
+                        # Tier-2 (PER_ACTION) claim AND the gate has a
+                        # channel-side prompt handler bound (Telegram
+                        # adapter wired in by the gateway), pause the
+                        # dispatch and ask the user via inline buttons.
+                        # The handler delivers the prompt; the gate
+                        # blocks until ``resolve_pending`` is called or
+                        # the 5-minute timeout elapses (auto-deny per
+                        # L3). Tier-0/1/3 claims keep the legacy
+                        # behavior — no prompt, just deny.
+                        if (
+                            not decision.allowed
+                            and claim.tier_required == ConsentTier.PER_ACTION
+                            and self._consent_gate._prompt_handler is not None
+                            and session_id is not None
+                        ):
+                            try:
+                                approval = await self._consent_gate.request_approval(
+                                    claim=claim,
+                                    scope=scope,
+                                    session_id=session_id,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                _log.warning(
+                                    "consent request_approval raised for "
+                                    "session=%s capability=%s: %s",
+                                    session_id, claim.capability_id, exc,
+                                )
+                                approval = None
+                            if approval is not None and approval.allowed:
+                                # User approved — re-check (in case
+                                # ``allow_always`` persisted a grant)
+                                # and proceed with this claim.
+                                decision = approval
+                            else:
+                                # User denied or timed out — fall
+                                # through to the deny path below.
+                                if approval is not None:
+                                    decision = approval
                         if not decision.allowed:
                             blocked[c.id] = f"consent denied: {decision.reason}"
                             break
