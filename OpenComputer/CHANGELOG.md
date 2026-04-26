@@ -4,6 +4,36 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (per-profile credential isolation — Phase 14.F / Round 4 Item 5)
+
+Closes the gap where credentials lived only in the global
+`~/.opencomputer/.env`, so two profiles (e.g. `work` and `personal`)
+shared the same `ANTHROPIC_API_KEY`. Now per-profile `.env` files
+take precedence, with global as fallback for backwards compat.
+
+- `opencomputer/security/env_loader.py` — new `load_for_profile(name)`
+  helper. Resolution: profile-local `<oc_home>/profiles/<name>/.env`
+  → global `<oc_home>/.env`. Existing shell-set vars always win
+  (dotenv convention). Errors during load are swallowed at debug —
+  startup never crashes on a malformed .env.
+- `opencomputer/cli.py::main()` — wires `load_for_profile()` into
+  the startup sequence right after `_apply_profile_override()`. Users
+  no longer need to manually `source` their .env before every
+  `opencomputer` invocation.
+- 8 new tests in `tests/test_per_profile_env.py`: global-only loads
+  (default profile path), profile-local overrides global, profile-local
+  falls back to global for unset keys, default profile skips
+  `profiles/default/.env` (the root IS default), shell-set vars
+  beat file-loaded ones, brand-new install (no .env files) is empty
+  not a crash, loose-perm .env doesn't crash startup (env_loader
+  fail-closed but caller swallows).
+
+Backwards compat: existing global `~/.opencomputer/.env` continues
+to work for users with a single profile. Migration is opportunistic —
+the day a user creates a second profile and writes
+`~/.opencomputer/profiles/work/.env`, that file's values shadow
+global for the `work` profile only.
+
 ### Added (MCP catalog expansion: 5 → 20 entries + `mcp catalog` synonym)
 
 Round 4 Item 2. The bundled `mcp/presets.py` shipped 5 entries; we

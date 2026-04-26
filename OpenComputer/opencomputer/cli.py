@@ -1760,6 +1760,20 @@ def main() -> None:
     # consumers can import this module without their argv being mutated.
     _apply_profile_override()
     _apply_loose_env_perms_flag()
+    # Round 4 Item 5 — auto-load per-profile .env (with global fallback)
+    # so users don't have to source it manually before every invocation.
+    # Profile already resolved into OPENCOMPUTER_HOME by the override
+    # above; we read the active profile name from there. Wrapped in
+    # try/except so a malformed .env never crashes startup — env_loader
+    # itself fail-closed on loose perms but we want the CLI to keep
+    # working even on file-load weirdness.
+    try:
+        from opencomputer.profiles import read_active_profile
+        from opencomputer.security.env_loader import load_for_profile
+
+        load_for_profile(read_active_profile())
+    except Exception as e:  # noqa: BLE001 — never crash startup on env load
+        _log.debug("per-profile env load failed: %s", e)
     app()
 
 
