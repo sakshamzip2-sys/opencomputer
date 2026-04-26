@@ -82,6 +82,10 @@ def test_session_id_default_is_dash() -> None:
     ``%(session_id)s`` unconditionally; falling back to ``-`` keeps it
     safe everywhere.
     """
+    # ContextVar state can leak across tests in the same coroutine context
+    # (and SessionDB.create_session sets it as a side effect since P-4).
+    # Reset explicitly so the default-fallback assertion is honest.
+    set_session_id(None)
     fltr = SessionContextFilter()
     rec = logging.LogRecord(
         name="t", level=logging.INFO, pathname="", lineno=0,
