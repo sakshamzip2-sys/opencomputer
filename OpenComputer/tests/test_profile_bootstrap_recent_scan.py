@@ -75,3 +75,34 @@ def test_scan_git_log_skips_non_repo(tmp_path: Path):
     not_repo.mkdir()
     commits = scan_git_log(repo_paths=[not_repo], days=7)
     assert commits == []
+
+
+def test_scan_recent_files_does_not_descend_into_git_dir(tmp_path: Path):
+    """Files inside .git/ must not appear in results."""
+    (tmp_path / ".git" / "objects").mkdir(parents=True)
+    (tmp_path / ".git" / "objects" / "abc123").write_text("content")
+    (tmp_path / "doc.md").write_text("Hello")
+    found = scan_recent_files(roots=[tmp_path], days=7)
+    paths = [f.path for f in found]
+    assert any("doc.md" in p for p in paths)
+    assert not any(".git" in p for p in paths)
+
+
+def test_scan_recent_files_does_not_descend_into_cache_dir(tmp_path: Path):
+    """Files inside .cache/ must not appear in results."""
+    (tmp_path / ".cache" / "subfolder").mkdir(parents=True)
+    (tmp_path / ".cache" / "subfolder" / "secret.txt").write_text("token")
+    found = scan_recent_files(roots=[tmp_path], days=7)
+    paths = [f.path for f in found]
+    assert not any("secret.txt" in p for p in paths)
+
+
+def test_scan_recent_files_skips_nested_dotted_dirs(tmp_path: Path):
+    """A dotted dir at any depth prunes the subtree."""
+    (tmp_path / "Projects" / "myrepo" / ".git").mkdir(parents=True)
+    (tmp_path / "Projects" / "myrepo" / ".git" / "HEAD").write_text("ref")
+    (tmp_path / "Projects" / "myrepo" / "README.md").write_text("readme")
+    found = scan_recent_files(roots=[tmp_path], days=7)
+    paths = [f.path for f in found]
+    assert any("README.md" in p for p in paths)
+    assert not any(".git" in p for p in paths)

@@ -14,6 +14,7 @@ orchestrator (Task 9) feeds into the F4 user-model graph.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import time
@@ -58,6 +59,11 @@ def scan_recent_files(
     Skips dotfiles, symlinks, files in :data:`_SKIP_NAMES`, and files
     with extensions in :data:`_SKIP_EXTENSIONS`. Caps at ``max_files``
     to keep the scan time bounded.
+
+    Uses ``os.walk`` with in-place ``dirnames[:]`` mutation to prune dotted
+    directories (e.g. ``.git/``, ``.cache/``, ``.npm/``) at the source so
+    they are never enumerated, avoiding the performance, privacy, and noise
+    problems caused by walking into those trees.
     """
     cutoff = time.time() - (days * 24 * 3600)
     out: list[RecentFileSummary] = []
@@ -65,30 +71,35 @@ def scan_recent_files(
         if not root.exists():
             continue
         try:
-            for f in root.rglob("*"):
-                if not f.is_file() or f.is_symlink():
-                    continue
-                if f.name.startswith("."):
-                    continue
-                if f.name in _SKIP_NAMES:
-                    continue
-                if f.suffix.lower() in _SKIP_EXTENSIONS:
-                    continue
-                try:
-                    stat = f.stat()
-                except OSError:
-                    continue
-                if stat.st_mtime < cutoff:
-                    continue
-                out.append(
-                    RecentFileSummary(
-                        path=str(f.resolve()),
-                        mtime=stat.st_mtime,
-                        size_bytes=stat.st_size,
+            for dirpath, dirnames, filenames in os.walk(str(root)):
+                # Prune dotted directories in-place so os.walk never recurses
+                # into them (e.g. .git/, .cache/, .npm/, .idea/).
+                dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+                for fname in filenames:
+                    if fname.startswith("."):
+                        continue
+                    if fname in _SKIP_NAMES:
+                        continue
+                    p = Path(dirpath) / fname
+                    if p.suffix.lower() in _SKIP_EXTENSIONS:
+                        continue
+                    if p.is_symlink():
+                        continue
+                    try:
+                        stat = p.stat()
+                    except OSError:
+                        continue
+                    if stat.st_mtime < cutoff:
+                        continue
+                    out.append(
+                        RecentFileSummary(
+                            path=str(p.resolve()),
+                            mtime=stat.st_mtime,
+                            size_bytes=stat.st_size,
+                        )
                     )
-                )
-                if len(out) >= max_files:
-                    return out
+                    if len(out) >= max_files:
+                        return out
         except (OSError, PermissionError):
             continue
     return out
