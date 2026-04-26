@@ -216,6 +216,15 @@ def _register_builtin_tools() -> None:
     # without going through a channel-specific path.
     registry.register(VoiceSynthesizeTool())
     registry.register(VoiceTranscribeTool())
+    # Phase 2.1 + 2.2 of catch-up plan — GUI tools (macOS only).
+    # PointAndClickTool: programmatic mouse click via Quartz/osascript.
+    # AppleScriptRunTool: AppleScript snippet runner with denylist guard.
+    # Both gated PER_ACTION; only registered on darwin.
+    if sys.platform == "darwin":
+        from opencomputer.tools.applescript_run import AppleScriptRunTool
+        from opencomputer.tools.point_click import PointAndClickTool
+        registry.register(PointAndClickTool())
+        registry.register(AppleScriptRunTool())
 
 
 def _resolve_plugin_filter():

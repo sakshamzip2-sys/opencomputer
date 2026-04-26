@@ -18,6 +18,13 @@ F1_CAPABILITIES: dict[str, ConsentTier] = {
     "channel.send.telegram": ConsentTier.EXPLICIT,
     "channel.send.discord": ConsentTier.EXPLICIT,
     "channel.send.slack": ConsentTier.EXPLICIT,
+    # F7 (GUI control — Phase 2.1 + 2.2 of catch-up plan).
+    # macOS-only. Tier PER_ACTION because each click / script can mutate
+    # arbitrary OS state — confirm every call until user explicitly
+    # promotes the grant. Destructive-keyword denylist on AppleScript
+    # is defence-in-depth, NOT the primary gate (consent is).
+    "gui.point_click": ConsentTier.PER_ACTION,
+    "gui.applescript_run": ConsentTier.PER_ACTION,
 }
 
 # Reserved for later phases (documented, not enforced here):
