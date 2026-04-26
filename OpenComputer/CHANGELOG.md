@@ -4,6 +4,35 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (macOS LaunchAgent for `opencomputer gateway`)
+
+Standard macOS pattern for "always-on" services. CLAUDE.md user-prefs
+notes Telegram is the user's primary surface; a laptop reboot
+shouldn't kill the gateway.
+
+- `scripts/launchd/com.opencomputer.gateway.plist.template` (new) —
+  LaunchAgent plist with `RunAtLoad=true`, `KeepAlive=true`,
+  `ThrottleInterval=60` (no busy-restart loops), explicit
+  `EnvironmentVariables.PATH` (LaunchAgent inherits a sparse PATH),
+  `ProcessType=Interactive` (defeats App Nap when foregrounded
+  elsewhere), and log paths under `~/.opencomputer/logs/`.
+- `scripts/launchd/install.sh` (new) — substitutes the absolute
+  `opencomputer` path resolved at install time (LaunchAgent's PATH
+  can't find it from the bare name), writes the plist, runs
+  `launchctl unload ; launchctl load`, verifies the job is listed.
+  Idempotent. Refuses with a clear error on non-macOS.
+- `scripts/launchd/uninstall.sh` (new) — `launchctl unload` + delete
+  the plist. Idempotent.
+- `scripts/launchd/README.md` — install / verify / uninstall docs +
+  behavioural notes (sparse PATH, env vars not from dotfiles, etc.).
+- 9 new tests in `tests/test_launchd_plist.py`: template XML validity,
+  load-bearing keys present (KeepAlive / RunAtLoad / ThrottleInterval),
+  install.sh syntax + `set -euo pipefail` + macOS guard + binary
+  resolution, dry-run renders both placeholders.
+
+Linux/VPS users keep using `docker compose up -d` against the bundled
+`docker-compose.yml`; systemd unit files land in a future PR.
+
 ### Added (auto-trigger profile bootstrap on first chat — user vision)
 
 User said verbatim this session: "the chat llm should know about the
