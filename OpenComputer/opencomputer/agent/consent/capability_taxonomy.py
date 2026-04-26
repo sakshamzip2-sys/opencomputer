@@ -32,6 +32,10 @@ F1_CAPABILITIES: dict[str, ConsentTier] = {
     # EXPLICIT tier means user opted in once (revocable); per-draft
     # approval is a *separate* user action, not consent-gate enforced.
     "procedural_memory.write_skill": ConsentTier.EXPLICIT,
+    # Phase 8.A of catch-up plan — web UI dashboard.
+    # Default localhost-only; non-localhost binding requires this capability.
+    # Tier EXPLICIT means user opted in once; we don't re-prompt every start.
+    "dashboard.bind_external": ConsentTier.EXPLICIT,
 }
 
 # Reserved for later phases (documented, not enforced here):
