@@ -118,6 +118,24 @@ class MemoryConfig:
     typical Anthropic prompt cache breakpoints. Provider implementations
     SHOULD respect this; bridge truncates if they don't.
     PR-6 of 2026-04-25 Hermes parity plan."""
+    # Round 2A P-18 — episodic-memory dreaming. EXPERIMENTAL. OFF by default.
+    # When enabled, an isolated lightweight LLM turn periodically clusters
+    # recent episodic events and writes a per-cluster consolidation summary
+    # back to episodic_events. Manual trigger: `opencomputer memory dream-now`.
+    # Auto trigger: `opencomputer memory dream-on --interval daily|hourly` —
+    # consult docs/memory_dreaming.md before promoting to default.
+    dreaming_enabled: bool = False
+    """When True, ``opencomputer memory dream-now`` (and any future
+    scheduler) consolidates recent episodic-memory entries into per-cluster
+    summaries. Originals stay readable but get tagged with a
+    ``dreamed_into`` link to the consolidation row, so re-runs only process
+    NEW entries."""
+    dreaming_interval: str = "daily"
+    """Cadence hint for ``opencomputer memory dream-on``. One of
+    ``"daily"`` or ``"hourly"``. The CLI persists the chosen interval into
+    config.yaml; today's CLI does not start a background scheduler — users
+    drive consolidation via cron/launchd/systemd or by running
+    ``dream-now`` manually."""
 
 
 @dataclass(frozen=True, slots=True)

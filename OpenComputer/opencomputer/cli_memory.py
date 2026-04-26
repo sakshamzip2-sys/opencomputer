@@ -430,6 +430,20 @@ def _doctor_provider_row() -> tuple[str, str]:
     return ("active", name)
 
 
+def _doctor_dreaming_row() -> tuple[str, str]:
+    """(status, detail) for episodic-memory dreaming (Round 2A P-18)."""
+    try:
+        cfg = load_config().memory
+    except Exception as e:  # noqa: BLE001 — diagnostic must survive
+        return ("disabled", f"config read error: {e}")
+    if not cfg.dreaming_enabled:
+        return ("disabled", "EXPERIMENTAL — see docs/memory_dreaming.md")
+    return (
+        "enabled",
+        f"interval={cfg.dreaming_interval} (EXPERIMENTAL — see docs/memory_dreaming.md)",
+    )
+
+
 @memory_app.command("doctor")
 def memory_doctor() -> None:
     """Health report for every memory layer — baseline, episodic, docker,
@@ -473,6 +487,13 @@ def memory_doctor() -> None:
         p_status, p_detail = "fallback", f"error: {e}"
     rows.append(("provider", p_status, p_detail))
 
+    # Dreaming (Round 2A P-18, EXPERIMENTAL)
+    try:
+        d_status, d_detail = _doctor_dreaming_row()
+    except Exception as e:  # noqa: BLE001
+        d_status, d_detail = "disabled", f"error: {e}"
+    rows.append(("dreaming", d_status, d_detail))
+
     table = Table(title="Memory doctor")
     table.add_column("Layer", style="bold cyan", no_wrap=True)
     table.add_column("Status", no_wrap=True)
@@ -482,12 +503,14 @@ def memory_doctor() -> None:
         "ok": "green",
         "healthy": "green",
         "active": "green",
+        "enabled": "yellow",  # P-18 dreaming is EXPERIMENTAL even when on
         "missing": "red",
         "empty": "yellow",
         "no-compose-v2": "yellow",
         "down": "yellow",
         "n/a": "dim",
         "fallback": "yellow",
+        "disabled": "dim",
     }
 
     for layer, status, detail in rows:
@@ -496,3 +519,127 @@ def memory_doctor() -> None:
 
     console.print(table)
     # Diagnostic, not gate — always exit 0 implicitly.
+
+
+# ─── Round 2A P-18 — episodic-memory dreaming (EXPERIMENTAL) ────────────
+
+
+def _build_dream_runner():
+    """Construct a DreamRunner using the active config + plugin registry.
+
+    Lazily imports the provider-resolution helper from ``cli`` so this
+    module stays import-light at process startup (the ``opencomputer``
+    CLI imports ``cli_memory`` unconditionally).
+    """
+    from opencomputer.agent.dreaming import DreamRunner
+    from opencomputer.cli import _resolve_provider
+
+    cfg = load_config()
+    provider = _resolve_provider(cfg.model.provider)
+    return DreamRunner.from_config(cfg, provider), cfg
+
+
+@memory_app.command("dream-now")
+def memory_dream_now(
+    session_id: str = typer.Option(
+        None,
+        "--session-id",
+        help="Restrict consolidation to one session id (default: all sessions).",
+    ),
+    fetch_limit: int = typer.Option(
+        50,
+        "--limit",
+        "-n",
+        help="Maximum undreamed entries to read in this pass (1-500).",
+    ),
+) -> None:
+    """EXPERIMENTAL — consolidate undreamed episodic memories now.
+
+    Reads up to ``--limit`` undreamed rows from ``episodic_events``,
+    clusters them by date bucket + topic-keyword overlap, and writes
+    one consolidation row per cluster of two-or-more entries. See
+    ``docs/memory_dreaming.md`` for the dogfood + promotion gate.
+    """
+    fetch_limit = max(1, min(fetch_limit, 500))
+    runner, cfg = _build_dream_runner()
+    runner.fetch_limit = fetch_limit
+    if not cfg.memory.dreaming_enabled:
+        console.print(
+            "[yellow]dreaming is disabled (running anyway because you asked).[/yellow]\n"
+            "[dim]To enable scheduled runs: opencomputer memory dream-on[/dim]"
+        )
+    report = runner.run_once(session_id=session_id)
+    console.print(
+        f"[green]✓[/green] dream-now finished: "
+        f"fetched={report.fetched}, clusters={report.clusters_total}, "
+        f"written={report.consolidations_written}, "
+        f"skipped={report.clusters_skipped_small}, "
+        f"failed={report.clusters_failed}"
+    )
+
+
+@memory_app.command("dream-on")
+def memory_dream_on(
+    interval: str = typer.Option(
+        "daily",
+        "--interval",
+        "-i",
+        help="Cadence hint: 'daily' or 'hourly'. Persisted to config.yaml.",
+    ),
+) -> None:
+    """EXPERIMENTAL — enable episodic-memory dreaming + persist the cadence.
+
+    Today this only writes the config flag; an external scheduler
+    (cron / launchd / systemd) drives ``dream-now`` on the chosen
+    cadence. A built-in scheduler is intentionally deferred until the
+    EXPERIMENTAL gate flips (see ``docs/memory_dreaming.md``).
+    """
+    interval = interval.strip().lower()
+    if interval not in {"daily", "hourly"}:
+        console.print(
+            f"[red]invalid interval {interval!r}[/red]. Use 'daily' or 'hourly'."
+        )
+        raise typer.Exit(code=1)
+
+    from opencomputer.agent.config_store import (
+        config_file_path,
+        load_config,
+        save_config,
+        set_value,
+    )
+
+    cfg = load_config()
+    cfg = set_value(cfg, "memory.dreaming_enabled", True)
+    cfg = set_value(cfg, "memory.dreaming_interval", interval)
+    save_config(cfg)
+    console.print(
+        f"[green]✓[/green] dreaming enabled (interval={interval})\n"
+        f"[dim]saved to {config_file_path()}[/dim]\n"
+        "[yellow]Note:[/yellow] EXPERIMENTAL — see docs/memory_dreaming.md.\n"
+        "[dim]Schedule via cron/launchd/systemd: "
+        "`opencomputer memory dream-now`[/dim]"
+    )
+
+
+@memory_app.command("dream-off")
+def memory_dream_off() -> None:
+    """EXPERIMENTAL — disable episodic-memory dreaming.
+
+    Only writes the config flag; existing consolidation rows in
+    ``episodic_events`` are left intact. Use ``opencomputer memory
+    search`` to inspect what was written before turning off.
+    """
+    from opencomputer.agent.config_store import (
+        config_file_path,
+        load_config,
+        save_config,
+        set_value,
+    )
+
+    cfg = load_config()
+    cfg = set_value(cfg, "memory.dreaming_enabled", False)
+    save_config(cfg)
+    console.print(
+        f"[green]✓[/green] dreaming disabled\n"
+        f"[dim]saved to {config_file_path()}[/dim]"
+    )
