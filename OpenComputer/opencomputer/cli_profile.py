@@ -19,12 +19,15 @@ Subcommands:
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
+from opencomputer.profile_bootstrap.bridge_state import load_or_create
+from opencomputer.profile_bootstrap.orchestrator import run_bootstrap
 from opencomputer.profiles import (
     ProfileExistsError,
     ProfileNameError,
@@ -45,6 +48,286 @@ profile_app = typer.Typer(
     invoke_without_command=True,
 )
 _console = Console()
+
+# ─── bootstrap (Layered Awareness MVP install-time flow) ─────────────────
+
+
+@profile_app.command("bootstrap")
+def profile_bootstrap(
+    skip_interview: bool = typer.Option(
+        False, "--skip-interview", help="Skip the 5-question quick interview"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Re-run even if already completed"
+    ),
+    days: int = typer.Option(
+        7, "--days", help="Look-back window for Layer 2 file/git scan"
+    ),
+) -> None:
+    """Run the install-time bootstrap (Layered Awareness MVP, Layers 0-2).
+
+    Reads system identity, asks 5 quick questions, scans the last 7 days
+    of recent files + git activity. Total time: under 6 minutes.
+    """
+    from pathlib import Path
+
+    from opencomputer.agent.config import _home
+    from opencomputer.profile_bootstrap.identity_reflex import gather_identity
+    from opencomputer.profile_bootstrap.quick_interview import (
+        QUICK_INTERVIEW_QUESTIONS,
+        render_questions,
+    )
+
+    home = _home()
+    marker = home / "profile_bootstrap" / "complete.json"
+    if marker.exists() and not force:
+        typer.echo("Bootstrap already complete. Use --force to re-run.")
+        raise typer.Exit(0)
+
+    facts = gather_identity()
+
+    answers: dict[str, str] = {}
+    if not skip_interview:
+        rendered = render_questions(facts)
+        typer.echo(rendered[0])  # greeting
+        for (key, _), prompt in zip(QUICK_INTERVIEW_QUESTIONS, rendered[1:], strict=True):
+            answer = typer.prompt(prompt, default="", show_default=False)
+            if answer.strip():
+                answers[key] = answer.strip()
+
+    home_dirs = [
+        Path.home() / "Documents",
+        Path.home() / "Desktop",
+        Path.home() / "Downloads",
+    ]
+    git_repos = _detect_git_repos()
+
+    result = run_bootstrap(
+        interview_answers=answers,
+        scan_roots=[d for d in home_dirs if d.exists()],
+        git_repos=git_repos,
+        include_calendar=True,
+        include_browser_history=True,
+        marker_path=marker,
+    )
+
+    typer.echo("")
+    typer.echo("Bootstrap complete:")
+    typer.echo(f"  Identity nodes written:  {result.identity_nodes_written}")
+    typer.echo(f"  Interview nodes written: {result.interview_nodes_written}")
+    typer.echo(f"  Files scanned:           {result.files_scanned}")
+    typer.echo(f"  Git commits scanned:     {result.git_commits_scanned}")
+    typer.echo(f"  Elapsed:                 {result.elapsed_seconds:.1f}s")
+
+
+def _detect_git_repos(max_repos: int = 50) -> list:
+    """Find candidate git repos in common locations. Best-effort, capped."""
+    from pathlib import Path
+
+    candidates = [
+        Path.home() / "Vscode",
+        Path.home() / "Projects",
+        Path.home() / "Code",
+        Path.home() / "src",
+    ]
+    repos = []
+    for root in candidates:
+        if not root.exists():
+            continue
+        for entry in root.iterdir():
+            if not entry.is_dir():
+                continue
+            if (entry / ".git").exists():
+                repos.append(entry)
+                if len(repos) >= max_repos:
+                    return repos
+    return repos
+
+
+# ─── Bridge subapp ────────────────────────────────────────────────────────
+
+bridge_app = typer.Typer(
+    help="Browser-bridge controls (Layer 4 of Layered Awareness)",
+)
+profile_app.add_typer(bridge_app, name="bridge")
+
+
+@bridge_app.command("token")
+def bridge_token(
+    rotate: bool = typer.Option(
+        False, "--rotate", help="Generate a fresh token (invalidates old)"
+    ),
+) -> None:
+    """Print the bridge auth token. Generates one on first call."""
+    state = load_or_create(rotate=rotate)
+    typer.echo(
+        "Paste this into the browser extension's DevTools console:\n"
+        f"  chrome.storage.local.set({{ ocBridgeToken: '{state.token}' }})\n"
+    )
+    typer.echo(state.token)
+
+
+@bridge_app.command("status")
+def bridge_status() -> None:
+    """Show bridge config + whether port is reachable."""
+    state = load_or_create()
+    typer.echo(f"Token configured: {'yes' if state.token else 'no'}")
+    typer.echo(f"Bind port: {state.port}")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1.0)
+    try:
+        sock.connect(("127.0.0.1", state.port))
+        typer.echo("Listener: REACHABLE")
+    except (OSError, TimeoutError):
+        typer.echo("Listener: NOT REACHABLE (run 'opencomputer profile bridge start')")
+    finally:
+        sock.close()
+
+
+def _load_browser_bridge_adapter() -> type:
+    """Resolve ``BrowserBridgeAdapter`` across plugin-loader / package modes.
+
+    The hyphenated directory ``extensions/browser-bridge/`` is not a
+    real Python package, so we can't rely on a single import path:
+
+    * Tests register an ``extensions.browser_bridge`` alias via the
+      conftest fixture and import as a package.
+    * Production users invoke the CLI without that alias — fall back
+      to ``importlib`` against the ``adapter.py`` file directly so the
+      command works whether or not the plugin loader has run.
+    """
+    try:
+        from extensions.browser_bridge.adapter import BrowserBridgeAdapter
+
+        return BrowserBridgeAdapter
+    except ImportError:
+        import importlib.util
+
+        adapter_path = (
+            Path(__file__).resolve().parent.parent
+            / "extensions"
+            / "browser-bridge"
+            / "adapter.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "browser_bridge_adapter", str(adapter_path)
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(
+                f"browser-bridge adapter not found at {adapter_path}; "
+                "is the install corrupted?"
+            ) from None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.BrowserBridgeAdapter
+
+
+@bridge_app.command("start")
+def bridge_start(
+    bind: str = typer.Option(
+        "127.0.0.1", "--bind", help="Address to bind (default 127.0.0.1)"
+    ),
+) -> None:
+    """Start the browser-bridge HTTP listener (foreground; Ctrl-C to stop).
+
+    Uses the token + port from ``<profile_home>/profile_bootstrap/bridge.json``
+    (run ``opencomputer profile bridge token`` first to seed it). The
+    listener publishes ``browser_visit`` events to the module-level
+    :data:`opencomputer.ingestion.bus.default_bus`, which is the shared
+    singleton subscribed to by every in-process consumer (B3 trajectory,
+    F2 inference, etc.). A fresh bus would be silently isolated, so we
+    must use the singleton.
+    """
+    import asyncio
+
+    from opencomputer.ingestion.bus import get_default_bus
+
+    state = load_or_create()
+    if not state.token:
+        typer.echo(
+            "No token configured. Run 'opencomputer profile bridge token' first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    BrowserBridgeAdapter = _load_browser_bridge_adapter()
+    bus = get_default_bus()
+    adapter = BrowserBridgeAdapter(
+        bus=bus, port=state.port, token=state.token, bind=bind
+    )
+
+    async def _run() -> None:
+        try:
+            await adapter.start()
+        except OSError as e:
+            typer.echo(
+                f"Failed to bind {bind}:{state.port} — {e}.\n"
+                f"  hint: lsof -ti:{state.port} | xargs kill -9",
+                err=True,
+            )
+            raise typer.Exit(1) from None
+        typer.echo(
+            f"Browser-bridge listening on http://{bind}:{state.port}\n"
+            "Press Ctrl-C to stop."
+        )
+        try:
+            await asyncio.Event().wait()  # block forever until Ctrl-C
+        finally:
+            await adapter.stop()
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        typer.echo("\nShutdown.")
+
+
+@bridge_app.command("stop")
+def bridge_stop() -> None:
+    """Stop a running browser-bridge listener bound to the configured port.
+
+    Foreground ``bridge start`` exits on Ctrl-C; this command is for the
+    case where the listener was started under a supervisor (launchd /
+    systemd / nohup). It connects to the listener's port and forces a
+    clean shutdown via OS signal — ``lsof`` is the simplest portable
+    discovery path.
+    """
+    import os
+    import shutil
+    import subprocess
+
+    state = load_or_create()
+    lsof = shutil.which("lsof")
+    if lsof is None:
+        typer.echo(
+            "lsof not found on PATH; cannot locate the bridge process. "
+            "Stop it manually (Ctrl-C in the foreground terminal, or your "
+            "supervisor's stop command).",
+            err=True,
+        )
+        raise typer.Exit(1)
+    try:
+        out = subprocess.check_output(
+            [lsof, "-ti", f":{state.port}"], text=True, stderr=subprocess.DEVNULL
+        )
+    except subprocess.CalledProcessError:
+        typer.echo(
+            f"No process listening on port {state.port}; nothing to stop."
+        )
+        return
+    pids = [p.strip() for p in out.splitlines() if p.strip()]
+    if not pids:
+        typer.echo(
+            f"No process listening on port {state.port}; nothing to stop."
+        )
+        return
+    import signal
+
+    for pid in pids:
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+            typer.echo(f"Sent SIGTERM to pid {pid}.")
+        except (ProcessLookupError, PermissionError, ValueError) as e:
+            typer.echo(f"Could not signal pid {pid}: {e}", err=True)
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────

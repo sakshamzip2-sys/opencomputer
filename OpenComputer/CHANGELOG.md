@@ -1719,6 +1719,53 @@ All 488 tests green on this branch.
 - +62 tests in `tests/test_phase10f.py`, all green.
 - Full suite: 336 passing.
 
+### Added (Layered Awareness MVP, 2026-04-26)
+
+First-pass implementation of "agent already knows the user" via four
+overlapping layers running at different cadences. Implements the MVP
+of the Sub-project F vision (see `docs/superpowers/specs/2026-04-26-layered-awareness-design.md`).
+
+- **Layer 0 — Identity Reflex.** Reads `$USER`, git config, macOS
+  Contacts.app `me` card, system locale. <1s, no consent prompts.
+- **Layer 1 — Quick Interview.** Five install-time questions
+  (current focus, concerns, tone preference, do-not-do, free-form).
+  Persisted as user-explicit user-model edges with confidence 1.0.
+- **Layer 2 — Recent Context Scan.** 7-day window over files in
+  `~/Documents` / `~/Desktop` / `~/Downloads`, git log across
+  detected repos in `~/Vscode` / `~/Projects` / etc., calendar
+  events (FDA-gated PyObjC EventKit), Chrome browser history (read
+  via tempfile copy to bypass SQLite lock).
+- **Layer 4 minimal — Browser Bridge.** Chrome MV3 extension +
+  Python aiohttp listener at `127.0.0.1:18791`. Forwards every tab
+  navigation as a `browser_visit` SignalEvent into the F2 bus.
+
+CLI:
+- `opencomputer profile bootstrap` runs Layers 0-2 sequentially.
+  `--skip-interview` runs Layer 0 only. `--force` re-runs after
+  the marker has been written.
+- `opencomputer profile bridge token [--rotate]` prints the auth
+  token used by the browser extension.
+- `opencomputer profile bridge status` checks listener reachability.
+
+Prompt builder gains a `user_facts` slot pulling top-20 nodes from
+the F4 user-model graph (Identity > Goal > Preference > Attribute,
+ranked by confidence, truncated to 80 chars per fact). Block omitted
+if graph empty. The slot is also wired through `build_with_memory()`
+so the production agent loop sees it.
+
+F1 capability claims added: `ingestion.recent_files` (IMPLICIT,
+metadata-only — scope-locked by docstring), `ingestion.git_log`
+(IMPLICIT), `ingestion.calendar` (EXPLICIT), `ingestion.browser_history`
+(EXPLICIT), `ingestion.messages` (EXPLICIT), `ingestion.browser_extension`
+(EXPLICIT).
+
+V2/V3/V4 of Layered Awareness (background deepening, life-event
+detector, plural personas, curious companion) ship in subsequent
+plans after MVP dogfood.
+
+Spec: `docs/superpowers/specs/2026-04-26-layered-awareness-design.md`
+Plan: `docs/superpowers/plans/2026-04-26-layered-awareness-mvp.md`
+
 ## [0.1.0] — 2026-04-21 (pre-alpha)
 
 ### Added

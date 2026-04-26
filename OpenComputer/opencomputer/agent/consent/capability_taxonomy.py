@@ -36,10 +36,25 @@ F1_CAPABILITIES: dict[str, ConsentTier] = {
     # Default localhost-only; non-localhost binding requires this capability.
     # Tier EXPLICIT means user opted in once; we don't re-prompt every start.
     "dashboard.bind_external": ConsentTier.EXPLICIT,
+    # MVP — Layered Awareness ingestion sources (2026-04-26).
+    # Per-source consent so user can revoke any single ingestion path
+    # via `opencomputer consent revoke <id>` without affecting others.
+    #
+    # ingestion.recent_files is IMPLICIT because it reads only file
+    # metadata (path, mtime, size_bytes) — never content. Implementations
+    # under this grant MUST NOT open file contents; that requires a
+    # separate EXPLICIT capability (added when content reads are wired).
+    "ingestion.recent_files": ConsentTier.IMPLICIT,
+    "ingestion.git_log": ConsentTier.IMPLICIT,
+    "ingestion.calendar": ConsentTier.EXPLICIT,
+    "ingestion.browser_history": ConsentTier.EXPLICIT,
+    "ingestion.messages": ConsentTier.EXPLICIT,
+    "ingestion.browser_extension": ConsentTier.EXPLICIT,
 }
 
 # Reserved for later phases (documented, not enforced here):
 # F2: read_files.metadata, read_files.content
 # F6: scrape.github, scrape.linkedin, scrape.reddit, scrape.twitter, scrape.open_license
-# F7: read_clipboard, read_screen.motif, read_mail.metadata, read_browser_history, exec_applescript
+# F7: read_clipboard, read_screen.motif, read_mail.metadata, exec_applescript
+#     (read_browser_history is now realized as ingestion.browser_history above)
 # F9: exec_shell, exec_network, write_file
