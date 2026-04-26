@@ -444,6 +444,51 @@ def default(
         chat()
 
 
+def _resolve_resume_target(spec: str) -> str | None:
+    """Resolve a magic ``--resume`` value to a concrete session id.
+
+    Supports two magic spellings:
+
+    - ``last`` → most-recent session by ``started_at``
+    - ``pick`` → interactive prompt listing the last 10 sessions
+
+    Returns the resolved id, or ``None`` when there are no sessions to
+    pick from (caller falls back to a fresh session). Reuses
+    :meth:`SessionDB.list_sessions` — no duplicate query path.
+    """
+    from opencomputer.agent.config import default_config
+    from opencomputer.agent.state import SessionDB
+
+    cfg = default_config()
+    db = SessionDB(cfg.session.db_path)
+    rows = db.list_sessions(limit=10)
+    if not rows:
+        return None
+    if spec == "last":
+        return str(rows[0]["id"])
+
+    # spec == "pick" — show numbered list, accept index.
+    console.print("\n[bold]Recent sessions[/bold]")
+    for i, row in enumerate(rows, 1):
+        title = row.get("title") or "(no title)"
+        platform = row.get("platform", "?")
+        msgs = row.get("message_count", 0)
+        console.print(
+            f"  [cyan]{i:>2}[/cyan]. [dim]{row['id'][:8]}[/dim] "
+            f"{platform:<8} {msgs:>3} msgs  [white]{title}[/white]"
+        )
+    from rich.prompt import Prompt
+
+    choice = Prompt.ask(
+        "Pick a session (number, or blank for fresh)",
+        default="",
+        choices=[""] + [str(i) for i in range(1, len(rows) + 1)],
+    )
+    if not choice:
+        return None
+    return str(rows[int(choice) - 1]["id"])
+
+
 def _print_update_hint_if_any() -> None:
     """Print the upgrade hint at chat exit when one is ready.
 
@@ -610,7 +655,13 @@ def _check_provider_key(provider_name: str) -> None:
 @app.command()
 def chat(
     resume: str = typer.Option(
-        "", "--resume", "-r", help="Resume a session by id (latest if empty)."
+        "",
+        "--resume",
+        "-r",
+        help=(
+            "Resume a session. Pass a session id, or `last` for the most "
+            "recent, or `pick` for an interactive picker of the last 10."
+        ),
     ),
     plan: bool = typer.Option(
         False, "--plan", help="Plan mode — agent describes actions, refuses destructive tools."
@@ -681,6 +732,11 @@ def chat(
             )
         )
 
+    if resume in ("last", "pick"):
+        resume = _resolve_resume_target(resume)
+        if resume is None:
+            console.print("[dim]No prior sessions to resume; starting fresh.[/dim]")
+            resume = ""
     session_id = resume or str(uuid.uuid4())
     # P-4 — bind session id onto the ContextVar so log records emitted
     # during this chat are stamped with it. SessionDB.create_session
