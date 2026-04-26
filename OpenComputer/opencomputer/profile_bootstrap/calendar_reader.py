@@ -12,6 +12,7 @@ separate, OS-level grant that we cannot bypass.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,6 +44,47 @@ def _import_event_kit() -> Any:
     return EventKit
 
 
+def _request_calendar_access(
+    store: Any, ek: Any, timeout_seconds: float = 60.0,
+) -> bool:
+    """Trigger macOS Calendar permission dialog and block until decided.
+
+    Returns True if granted, False if denied or timed out.
+
+    The 60s timeout is generous because the user has to physically click
+    the dialog button — they may take their time. PyObjC dispatches the
+    completion callback on EventKit's serial queue (a different thread),
+    so ``threading.Event`` is the correct synchronization primitive.
+
+    Caveat: macOS Privacy dialogs require an active CFRunLoop on the
+    main thread to display. For the CLI ``opencomputer profile bootstrap``
+    flow this holds (we run synchronously on the main thread). When this
+    helper is called from a worker thread the dialog may not appear and
+    the request silently times out; the caller treats that as "denied".
+    """
+    event = threading.Event()
+    result = {"granted": False}
+
+    def completion(granted: Any, error: Any) -> None:
+        # PyObjC translates Objective-C bool → Python bool.
+        result["granted"] = bool(granted)
+        if error is not None:
+            _log.warning("Calendar access request error: %s", error)
+        event.set()
+
+    # Trigger the dialog — fires the callback when the user decides.
+    store.requestAccessToEntityType_completion_(0, completion)
+
+    # Block until callback fires or timeout elapses.
+    if not event.wait(timeout=timeout_seconds):
+        _log.warning(
+            "Calendar access request timed out after %ss", timeout_seconds,
+        )
+        return False
+
+    return result["granted"]
+
+
 def read_upcoming_events(*, days: int = 7) -> list[CalendarEventSummary]:
     """Read calendar events for the next ``days`` from macOS Calendar.
 
@@ -60,6 +102,18 @@ def read_upcoming_events(*, days: int = 7) -> list[CalendarEventSummary]:
         # directly to avoid coupling to a PyObjC-exposed constant
         # name (which has changed across PyObjC versions).
         status = store.authorizationStatusForEntityType_(0)
+
+        # Status 0 = NotDetermined — actively request access so the user
+        # gets the macOS Privacy & Security dialog. Subsequent runs won't
+        # re-prompt (macOS persists the user's decision).
+        if int(status) == 0:
+            granted = _request_calendar_access(store, ek)
+            if not granted:
+                _log.info("Calendar access denied by user")
+                return []
+            # Re-read status after grant — should now be Authorized.
+            status = store.authorizationStatusForEntityType_(0)
+
         if int(status) not in _AUTHORIZED_STATUSES:
             _log.info("Calendar access not granted (status=%s)", status)
             return []
