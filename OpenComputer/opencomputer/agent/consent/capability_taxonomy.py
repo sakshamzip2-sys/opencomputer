@@ -12,6 +12,12 @@ F1_CAPABILITIES: dict[str, ConsentTier] = {
     # F8 (voice — Phase 1.1 of catch-up plan)
     "voice.synthesize": ConsentTier.IMPLICIT,
     "voice.transcribe": ConsentTier.IMPLICIT,
+    # F9 (channels — Phase 1.3 of catch-up plan).
+    # Auto-granted by `opencomputer pair <platform>` after format + live
+    # check pass. Tier EXPLICIT means: user-confirmed but not per-message.
+    "channel.send.telegram": ConsentTier.EXPLICIT,
+    "channel.send.discord": ConsentTier.EXPLICIT,
+    "channel.send.slack": ConsentTier.EXPLICIT,
 }
 
 # Reserved for later phases (documented, not enforced here):
