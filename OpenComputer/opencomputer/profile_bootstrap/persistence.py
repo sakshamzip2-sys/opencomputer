@@ -1,9 +1,11 @@
 """Persistence — translate Layer 0/1/2 outputs into F4 user-model edges.
 
 Mirrors :class:`opencomputer.user_model.importer.MotifImporter` shape;
-each writer is idempotent via ``UserModelStore.upsert_node``. The
-``source`` column on every edge tags provenance for the
-F4↔Honcho cycle-prevention path (Phase 4.A schema v2).
+each writer is idempotent via ``UserModelStore.upsert_node``. Node
+persistence here does not tag edge provenance — the F4↔Honcho
+cycle-prevention path applies only when edges are inserted (e.g., by
+the motif importer). MVP persistence writes Identity / Goal / Preference
+/ Attribute nodes only.
 """
 from __future__ import annotations
 
@@ -23,20 +25,26 @@ def write_identity_to_graph(
     """
     s = store if store is not None else UserModelStore()
     written = 0
-    if facts.name:
-        s.upsert_node(kind="identity", value=f"name: {facts.name}", confidence=1.0)
+    if facts.name and facts.name.strip():
+        s.upsert_node(kind="identity", value=f"name: {facts.name.strip()}", confidence=1.0)
         written += 1
     for email in facts.emails:
-        s.upsert_node(kind="identity", value=f"email: {email}", confidence=1.0)
+        e = email.strip()
+        if not e:
+            continue
+        s.upsert_node(kind="identity", value=f"email: {e}", confidence=1.0)
         written += 1
     for phone in facts.phones:
-        s.upsert_node(kind="identity", value=f"phone: {phone}", confidence=1.0)
+        p = phone.strip()
+        if not p:
+            continue
+        s.upsert_node(kind="identity", value=f"phone: {p}", confidence=1.0)
         written += 1
-    if facts.github_handle:
-        s.upsert_node(kind="identity", value=f"github: {facts.github_handle}", confidence=1.0)
+    if facts.github_handle and facts.github_handle.strip():
+        s.upsert_node(kind="identity", value=f"github: {facts.github_handle.strip()}", confidence=1.0)
         written += 1
-    if facts.city:
-        s.upsert_node(kind="identity", value=f"city: {facts.city}", confidence=1.0)
+    if facts.city and facts.city.strip():
+        s.upsert_node(kind="identity", value=f"city: {facts.city.strip()}", confidence=1.0)
         written += 1
     return written
 
@@ -53,6 +61,10 @@ def write_interview_answers_to_graph(
     Returns the number of nodes upserted.
     """
     s = store if store is not None else UserModelStore()
+    # Quick-interview answer keys → F4 NodeKind. NodeKind is a closed
+    # literal (identity/attribute/relationship/goal/preference); we map
+    # `current_concerns` to "goal" rather than adding a new "concern" kind
+    # because adding a NodeKind member is a breaking SDK change.
     kind_map = {
         "current_focus": "goal",
         "current_concerns": "goal",
@@ -62,12 +74,13 @@ def write_interview_answers_to_graph(
     }
     written = 0
     for question_key, answer in answers.items():
-        if not answer:
+        a = (answer or "").strip()
+        if not a:
             continue
         kind = kind_map.get(question_key, "attribute")
         s.upsert_node(
             kind=kind,
-            value=f"{question_key}: {answer}",
+            value=f"{question_key}: {a}",
             confidence=1.0,
         )
         written += 1
