@@ -27,6 +27,7 @@ from rich.console import Console
 from rich.table import Table
 
 from opencomputer.profile_bootstrap.bridge_state import load_or_create
+from opencomputer.profile_bootstrap.orchestrator import run_bootstrap
 from opencomputer.profiles import (
     ProfileExistsError,
     ProfileNameError,
@@ -47,6 +48,101 @@ profile_app = typer.Typer(
     invoke_without_command=True,
 )
 _console = Console()
+
+# ─── bootstrap (Layered Awareness MVP install-time flow) ─────────────────
+
+
+@profile_app.command("bootstrap")
+def profile_bootstrap(
+    skip_interview: bool = typer.Option(
+        False, "--skip-interview", help="Skip the 5-question quick interview"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Re-run even if already completed"
+    ),
+    days: int = typer.Option(
+        7, "--days", help="Look-back window for Layer 2 file/git scan"
+    ),
+) -> None:
+    """Run the install-time bootstrap (Layered Awareness MVP, Layers 0-2).
+
+    Reads system identity, asks 5 quick questions, scans the last 7 days
+    of recent files + git activity. Total time: under 6 minutes.
+    """
+    from pathlib import Path
+
+    from opencomputer.agent.config import _home
+    from opencomputer.profile_bootstrap.identity_reflex import gather_identity
+    from opencomputer.profile_bootstrap.quick_interview import (
+        QUICK_INTERVIEW_QUESTIONS,
+        render_questions,
+    )
+
+    home = _home()
+    marker = home / "profile_bootstrap" / "complete.json"
+    if marker.exists() and not force:
+        typer.echo("Bootstrap already complete. Use --force to re-run.")
+        raise typer.Exit(0)
+
+    facts = gather_identity()
+
+    answers: dict[str, str] = {}
+    if not skip_interview:
+        rendered = render_questions(facts)
+        typer.echo(rendered[0])  # greeting
+        for (key, _), prompt in zip(QUICK_INTERVIEW_QUESTIONS, rendered[1:]):
+            answer = typer.prompt(prompt, default="", show_default=False)
+            if answer.strip():
+                answers[key] = answer.strip()
+
+    home_dirs = [
+        Path.home() / "Documents",
+        Path.home() / "Desktop",
+        Path.home() / "Downloads",
+    ]
+    git_repos = _detect_git_repos()
+
+    result = run_bootstrap(
+        interview_answers=answers,
+        scan_roots=[d for d in home_dirs if d.exists()],
+        git_repos=git_repos,
+        include_calendar=True,
+        include_browser_history=True,
+        marker_path=marker,
+    )
+
+    typer.echo("")
+    typer.echo("Bootstrap complete:")
+    typer.echo(f"  Identity nodes written:  {result.identity_nodes_written}")
+    typer.echo(f"  Interview nodes written: {result.interview_nodes_written}")
+    typer.echo(f"  Files scanned:           {result.files_scanned}")
+    typer.echo(f"  Git commits scanned:     {result.git_commits_scanned}")
+    typer.echo(f"  Elapsed:                 {result.elapsed_seconds:.1f}s")
+
+
+def _detect_git_repos(max_repos: int = 50) -> list:
+    """Find candidate git repos in common locations. Best-effort, capped."""
+    from pathlib import Path
+
+    candidates = [
+        Path.home() / "Vscode",
+        Path.home() / "Projects",
+        Path.home() / "Code",
+        Path.home() / "src",
+    ]
+    repos = []
+    for root in candidates:
+        if not root.exists():
+            continue
+        for entry in root.iterdir():
+            if not entry.is_dir():
+                continue
+            if (entry / ".git").exists():
+                repos.append(entry)
+                if len(repos) >= max_repos:
+                    return repos
+    return repos
+
 
 # ─── Bridge subapp ────────────────────────────────────────────────────────
 
