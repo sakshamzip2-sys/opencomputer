@@ -629,6 +629,22 @@ def chat(
         prefetch_update_check()
     except Exception as e:  # noqa: BLE001 — update check must never crash startup
         _log.debug("update-check prefetch failed: %s", e)
+    # User vision: agent should know about the user before they start.
+    # PR #143 shipped the bootstrap orchestrator; this fires it
+    # automatically (background, quick mode) on first chat so users
+    # don't have to discover ``opencomputer profile bootstrap``.
+    try:
+        from opencomputer.profile_bootstrap.auto_trigger import (
+            kick_off_in_background,
+        )
+
+        if kick_off_in_background() is not None:
+            console.print(
+                "[dim]Building your profile in background "
+                "(identity + recent code) — won't interrupt this session.[/dim]"
+            )
+    except Exception as e:  # noqa: BLE001 — must never crash the chat loop
+        _log.debug("auto-bootstrap kick-off failed: %s", e)
     cfg = load_config()
     # Follow-up #25 — one-shot hint if Docker became available after setup.
     from opencomputer.cli_hints import maybe_print_docker_toggle_hint

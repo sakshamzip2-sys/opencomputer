@@ -4,6 +4,35 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (auto-trigger profile bootstrap on first chat — user vision)
+
+User said verbatim this session: "the chat llm should know about the
+user before the user even starts using it." PR #143 shipped the
+`profile_bootstrap.orchestrator` (identity scan + git history scan +
+calendar + browser history) but as a manual `opencomputer profile
+bootstrap` invocation. Most users would never discover it, so on
+first chat the agent had no identity facts in context.
+
+- `opencomputer/profile_bootstrap/auto_trigger.py` (new) — small
+  policy module + background-thread runner. `should_auto_bootstrap()`
+  returns False when: marker file exists (already done), stdin not
+  TTY (CI / piped), or `OPENCOMPUTER_NO_AUTO_BOOTSTRAP=1` is set.
+  `kick_off_in_background()` runs the orchestrator in a daemon thread
+  with quick-mode args (identity + git only — no calendar / browser
+  since those need entitlements on macOS Sequoia and can be slow on
+  power users with thousands of history entries).
+- `opencomputer/cli.py::chat()` — calls `kick_off_in_background()`
+  right after the update-check prefetch. When it fires, prints a
+  one-line dim notice ("Building your profile in background — won't
+  interrupt this session") so the user knows what's happening but
+  doesn't wait. Bootstrap result lands in `user_model/graph.sqlite`
+  for the NEXT prompt-builder pass to pull from.
+- 8 new tests in `tests/test_profile_bootstrap_auto_trigger.py`:
+  policy yes-on-first-run / skip-on-marker / skip-on-non-TTY /
+  skip-on-opt-out, kick-off returns None vs Thread per policy,
+  errors swallowed silently, marker path matches cli_profile's
+  single-source-of-truth location.
+
 ### Changed (Honcho on by default — auto-start Docker daemon)
 
 Pinned to this session's incident: a user installed Docker Desktop
