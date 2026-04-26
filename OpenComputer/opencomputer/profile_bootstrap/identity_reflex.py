@@ -16,11 +16,34 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class IdentityFacts:
-    """Output of :func:`gather_identity`. Frozen for safety."""
+    """Output of :func:`gather_identity`. Frozen for safety.
+
+    Attributes
+    ----------
+    name:
+        Display name from macOS Contacts.app ``me`` card; falls back
+        to ``$USER`` env var. Empty string only if both are absent.
+    emails:
+        All ``user.email`` values from git's global config, deduped.
+        Empty tuple if git is unavailable. First entry is first-in-file
+        (NOT necessarily git's effective email).
+    phones:
+        Reserved for V2/V3 readers. Always ``()`` in the MVP.
+    github_handle:
+        Reserved for V2 readers (e.g. parsing ~/.config/gh). ``None`` in MVP.
+    city:
+        Reserved for V2 readers (e.g. macOS CoreLocation). ``None`` in MVP.
+    primary_language:
+        From the ``LANG`` env var (split on ``.`` to drop the codeset).
+        Defaults to ``"en_US"``.
+    hostname:
+        From :func:`socket.gethostname`. Empty string only on
+        hardened containers with empty net namespace.
+    """
 
     name: str = ""
     emails: tuple[str, ...] = ()
-    phones: tuple[str, ...] = ()
+    phones: tuple[str, ...] = ()  # populated by Layer 2/3 (V2); always () in MVP
     github_handle: str | None = None
     city: str | None = None
     primary_language: str = "en_US"
@@ -39,6 +62,7 @@ def _read_git_config_emails() -> tuple[str, ...]:
             ["git", "config", "--list", "--global"],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=2.0,
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -49,7 +73,7 @@ def _read_git_config_emails() -> tuple[str, ...]:
     for line in result.stdout.splitlines():
         if line.startswith("user.email="):
             emails.append(line.split("=", 1)[1].strip())
-    return tuple(dict.fromkeys(emails))  # de-dup, preserve order
+    return tuple(dict.fromkeys(emails))  # de-dup; first-occurrence-wins (NOT git's "last value wins" semantics)
 
 
 def _read_macos_contacts_me_name() -> str | None:
@@ -71,6 +95,7 @@ def _read_macos_contacts_me_name() -> str | None:
             ["osascript", "-e", script],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=30.0,  # generous: first call shows a permission dialog
         )
     except (subprocess.TimeoutExpired, OSError):

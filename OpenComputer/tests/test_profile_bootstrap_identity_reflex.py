@@ -29,7 +29,9 @@ def test_identity_facts_with_emails():
 
 def test_read_git_config_emails_returns_email():
     fake_output = "user.email=saksham@example.com\nuser.name=Saksham\n"
-    with patch("subprocess.run") as mock:
+    with patch(
+        "opencomputer.profile_bootstrap.identity_reflex.subprocess.run"
+    ) as mock:
         mock.return_value.stdout = fake_output
         mock.return_value.returncode = 0
         emails = _read_git_config_emails()
@@ -37,13 +39,21 @@ def test_read_git_config_emails_returns_email():
 
 
 def test_read_git_config_emails_handles_missing_git():
-    with patch("shutil.which", return_value=None):
+    with patch(
+        "opencomputer.profile_bootstrap.identity_reflex.shutil.which",
+        return_value=None,
+    ):
         emails = _read_git_config_emails()
     assert emails == ()
 
 
 def test_read_macos_contacts_returns_name():
-    with patch("subprocess.run") as mock:
+    with patch(
+        "opencomputer.profile_bootstrap.identity_reflex.shutil.which",
+        return_value="/usr/bin/osascript",
+    ), patch(
+        "opencomputer.profile_bootstrap.identity_reflex.subprocess.run",
+    ) as mock:
         mock.return_value.stdout = "Saksham\n"
         mock.return_value.returncode = 0
         name = _read_macos_contacts_me_name()
@@ -51,7 +61,12 @@ def test_read_macos_contacts_returns_name():
 
 
 def test_read_macos_contacts_returns_none_on_failure():
-    with patch("subprocess.run") as mock:
+    with patch(
+        "opencomputer.profile_bootstrap.identity_reflex.shutil.which",
+        return_value="/usr/bin/osascript",
+    ), patch(
+        "opencomputer.profile_bootstrap.identity_reflex.subprocess.run",
+    ) as mock:
         mock.return_value.returncode = 1
         mock.return_value.stdout = ""
         name = _read_macos_contacts_me_name()
@@ -65,8 +80,11 @@ def test_gather_identity_combines_sources():
     ), patch(
         "opencomputer.profile_bootstrap.identity_reflex._read_macos_contacts_me_name",
         return_value="Saksham",
+    ), patch(
+        "opencomputer.profile_bootstrap.identity_reflex.socket.gethostname",
+        return_value="test-host",
     ):
         facts = gather_identity()
     assert facts.name == "Saksham"
     assert "a@b.com" in facts.emails
-    assert facts.hostname  # set from socket.gethostname()
+    assert facts.hostname == "test-host"
