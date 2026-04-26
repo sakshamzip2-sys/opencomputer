@@ -12,6 +12,19 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Round 2B P-3 — inactivity-based loop timeout)
+
+- New `LoopConfig.inactivity_timeout_s` (default 300s) — wall-clock
+  guard that resets on every LLM round-trip and tool dispatch
+  (success or failure). Catches hung providers / silent stalls
+  without false-positive on long-running tools that periodically
+  report progress. Uses `time.monotonic()` so NTP slews can't trip it.
+- `LoopConfig.iteration_timeout_s` is now actually enforced (it was
+  declared but never checked). Default raised from 600s to 1800s
+  to act as an absolute upper bound rather than a routine cap.
+- New typed exceptions in `opencomputer.agent.loop`:
+  `InactivityTimeout`, `IterationTimeout`, both subclassing
+  `LoopTimeout` so callers can catch one base class.
 ### Added (Round 2A P-18 — episodic-memory dreaming, EXPERIMENTAL)
 
 - **Background dreaming turn** that consolidates recent episodic-memory

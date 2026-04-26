@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -50,6 +51,40 @@ from plugin_sdk.tool_matcher import matches as _pattern_matches
 from plugin_sdk.tool_matcher import parse as _parse_pattern
 
 _log = logging.getLogger("opencomputer.agent.loop")
+
+
+class LoopTimeout(Exception):  # noqa: N818 — public name is the load-bearing one (no Error suffix per project style)
+    """Base class for agent-loop wall-clock timeout exceptions.
+
+    Round 2B P-3 — split into two concrete subclasses so callers can
+    distinguish "no progress for a while" (``InactivityTimeout``) from
+    "absolute cap exceeded" (``IterationTimeout``). Catching ``LoopTimeout``
+    handles both. Both raise out of ``run_conversation``; the in-flight
+    iteration's tool calls are NOT awaited to completion (asyncio shields
+    nothing here on purpose — the user wants to bail).
+    """
+
+
+class InactivityTimeout(LoopTimeout):  # noqa: N818
+    """No LLM/tool activity for ``LoopConfig.inactivity_timeout_s`` seconds.
+
+    The activity timer resets on every successful LLM round-trip and
+    every tool dispatch (whether the tool succeeded or raised). Streaming
+    output that never finishes a request will eventually trip this; the
+    common case it catches is a hung provider call or a hook that swallows
+    progress without surfacing it.
+    """
+
+
+class IterationTimeout(LoopTimeout):  # noqa: N818
+    """Absolute wall-clock cap from loop entry exceeded.
+
+    Independent of activity — even an agent that's busy the whole time
+    will trip this once ``LoopConfig.iteration_timeout_s`` has elapsed
+    since ``run_conversation`` was entered. Defends against pathological
+    fast-iteration loops (1000 sub-second tool calls in a row would never
+    trip ``InactivityTimeout``).
+    """
 
 
 class _NoOpDemandTracker:
@@ -218,6 +253,13 @@ class AgentLoop:
         # every turn. Declared here so direct callers of ``_dispatch_tool_calls``
         # (tests, harness hooks) don't hit AttributeError before the first run.
         self._runtime: RuntimeContext = DEFAULT_RUNTIME_CONTEXT
+        # Round 2B P-3: wall-clock timeout bookkeeping. Re-initialised at the
+        # top of each ``run_conversation`` call; declared here so direct
+        # callers of ``_dispatch_tool_calls`` (tests, harness hooks) that
+        # bypass ``run_conversation`` don't hit AttributeError when the
+        # per-call activity bump fires.
+        self._loop_started_at: float = time.monotonic()
+        self._last_activity_at: float = self._loop_started_at
         self.db = db or SessionDB(config.session.db_path)
         self.memory = memory or MemoryManager(
             declarative_path=config.memory.declarative_path,
@@ -526,8 +568,37 @@ class AgentLoop:
         total_output = 0
         iterations = 0
 
+        # Round 2B P-3: wall-clock timeouts. ``_loop_started_at`` is fixed at
+        # entry; ``_last_activity_at`` is bumped on every LLM call return and
+        # tool dispatch. Both use ``time.monotonic()`` so a system-clock
+        # adjustment mid-loop (NTP slew, manual ``date -s ...``) cannot mask
+        # an inactivity stall or trigger a spurious timeout. Stored as
+        # instance attrs so ``_dispatch_tool_calls`` can refresh activity
+        # without threading another arg through every call site.
+        self._loop_started_at = time.monotonic()
+        self._last_activity_at = self._loop_started_at
+
         for _iter in range(self.config.loop.max_iterations):
             iterations += 1
+
+            # Round 2B P-3: enforce both timeouts at the top of each iteration.
+            # Inactivity check first (the more useful signal); absolute cap
+            # second. Both raise out of run_conversation — no synthetic
+            # assistant message: the caller (CLI / gateway) decides how to
+            # surface the timeout to the user.
+            now = time.monotonic()
+            if now - self._last_activity_at > self.config.loop.inactivity_timeout_s:
+                raise InactivityTimeout(
+                    f"no LLM/tool activity for "
+                    f"{self.config.loop.inactivity_timeout_s}s "
+                    f"(last activity {now - self._last_activity_at:.1f}s ago)"
+                )
+            if now - self._loop_started_at > self.config.loop.iteration_timeout_s:
+                raise IterationTimeout(
+                    f"loop wall-clock cap of "
+                    f"{self.config.loop.iteration_timeout_s}s exceeded "
+                    f"(elapsed {now - self._loop_started_at:.1f}s)"
+                )
 
             # T3.2 (PR-8): publish TurnStartEvent at the top of each iteration.
             # Best-effort + exception-isolated so a broken bus never stalls the loop.
@@ -675,6 +746,11 @@ class AgentLoop:
                 model=model_for_turn,
                 session_id=sid,
             )
+            # Round 2B P-3: a returned LLM response is activity. Bump BEFORE
+            # the early-return path below so an end-turn turn that took 290s
+            # still resets the timer for any caller that resumes the same
+            # AgentLoop on the same session.
+            self._last_activity_at = time.monotonic()
             self._last_input_tokens = step.input_tokens
             total_input += step.input_tokens
             total_output += step.output_tokens
@@ -754,6 +830,12 @@ class AgentLoop:
                 session_id=sid,
                 turn_index=iterations,
             )
+            # Round 2B P-3: tool dispatch finished — count both successful and
+            # error results as activity (the agent did *something*, that's
+            # what the inactivity timer cares about). ``_dispatch_tool_calls``
+            # also bumps per-call internally so a long parallel batch keeps
+            # the timer fresh between calls.
+            self._last_activity_at = time.monotonic()
             turn_messages: list[Message] = [step.assistant_message, *tool_results]
             messages.extend(turn_messages)
             for _msg in turn_messages:
@@ -1215,6 +1297,10 @@ class AgentLoop:
                 )
                 raise
             except Exception as _exc:
+                # Round 2B P-3: a tool that raised is still activity — the
+                # agent did *something*. Bump before re-raising so the next
+                # iteration's inactivity check measures from the right point.
+                self._last_activity_at = _time.monotonic()
                 self._emit_tool_call_event(
                     call=c,
                     outcome="failure",
@@ -1224,6 +1310,10 @@ class AgentLoop:
                 )
                 raise
             else:
+                # Round 2B P-3: per-call activity bump. Long parallel batches
+                # (gather of 10 tools that take 30s each) keep the inactivity
+                # timer fresh as each call settles, not just at batch end.
+                self._last_activity_at = _time.monotonic()
                 outcome = (
                     "failure" if getattr(result, "is_error", False) else "success"
                 )
@@ -1585,6 +1675,9 @@ __all__ = [
     "AgentLoop",
     "ConversationResult",
     "HARDCODED_NEVER_PARALLEL",
+    "InactivityTimeout",
+    "IterationTimeout",
+    "LoopTimeout",
     "PATH_SCOPED",
     "merge_adjacent_user_messages",
 ]

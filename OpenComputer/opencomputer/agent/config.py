@@ -58,11 +58,30 @@ class LoopConfig:
     ``IterationBudget.__init__`` lines 185-196): parent gets its full
     ``max_iterations``, subagents get a tighter cap so runaway chains
     can't exhaust the parent's token budget.
+
+    Two timeouts apply to a single ``run_conversation`` call (Round 2B P-3):
+
+    * ``inactivity_timeout_s`` — wall-clock seconds since the last
+      *activity* event (LLM request returning OR a tool dispatch
+      finishing, success or failure). Resets every time the agent does
+      something. Default 300s = 5 min. This is the timeout you usually
+      want: a streaming bash that takes 20 minutes still proves the
+      agent is alive every time another tool runs.
+    * ``iteration_timeout_s`` — absolute wall-clock cap from when
+      ``run_conversation`` is entered, regardless of activity.
+      Default 1800s = 30 min. Prevents a pathological loop where the
+      agent stays "active" forever (e.g. runs 1000 cheap tool calls).
+
+    Both checks use ``time.monotonic()`` (clock-jump safe). Either
+    timeout firing raises a typed exception (``InactivityTimeout`` /
+    ``IterationTimeout``) — both subclass ``LoopTimeout`` so callers can
+    catch one or the other.
     """
 
     max_iterations: int = 50
     parallel_tools: bool = True
-    iteration_timeout_s: int = 600
+    inactivity_timeout_s: int = 300
+    iteration_timeout_s: int = 1800
     delegation_max_iterations: int = 50
     max_delegation_depth: int = 2
     """Cap on `DelegateTool` recursion. 2 = parent (depth 0) → child (depth 1) → grandchild (depth 2) rejected.

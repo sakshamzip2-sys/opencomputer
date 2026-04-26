@@ -36,7 +36,6 @@ def test_bedrock_transport_instantiates_with_mock_boto3(mock_boto3):
 def test_bedrock_transport_format_request_basic(mock_boto3):
     sys.modules.pop("extensions.aws_bedrock_provider.transport", None)
     from extensions.aws_bedrock_provider.transport import BedrockTransport
-
     from plugin_sdk.core import Message
     from plugin_sdk.transports import NormalizedRequest
 
@@ -86,7 +85,6 @@ async def test_bedrock_provider_complete_roundtrip(mock_boto3):
     sys.modules.pop("extensions.aws_bedrock_provider.transport", None)
     sys.modules.pop("extensions.aws_bedrock_provider.provider", None)
     from extensions.aws_bedrock_provider.provider import BedrockProvider
-
     from plugin_sdk.core import Message  # noqa: PLC0415
 
     mock_boto3.converse.return_value = {
