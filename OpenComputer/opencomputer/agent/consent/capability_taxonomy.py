@@ -39,6 +39,11 @@ F1_CAPABILITIES: dict[str, ConsentTier] = {
     # MVP — Layered Awareness ingestion sources (2026-04-26).
     # Per-source consent so user can revoke any single ingestion path
     # via `opencomputer consent revoke <id>` without affecting others.
+    #
+    # ingestion.recent_files is IMPLICIT because it reads only file
+    # metadata (path, mtime, size_bytes) — never content. Implementations
+    # under this grant MUST NOT open file contents; that requires a
+    # separate EXPLICIT capability (added when content reads are wired).
     "ingestion.recent_files": ConsentTier.IMPLICIT,
     "ingestion.git_log": ConsentTier.IMPLICIT,
     "ingestion.calendar": ConsentTier.EXPLICIT,
