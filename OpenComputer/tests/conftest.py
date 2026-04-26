@@ -173,6 +173,48 @@ def _register_aws_bedrock_provider_alias() -> None:
             # Do NOT exec yet — tests control when the module loads
 
 
+def _register_browser_bridge_alias() -> None:
+    """Register extensions.browser_bridge → extensions/browser-bridge/.
+
+    Mirrors the pattern used for ``extensions.aws_bedrock_provider`` —
+    plugins live in hyphenated dirs, but Python modules need underscores.
+    Layered Awareness MVP T10: lets tests import the adapter / plugin
+    Python modules from the hyphenated ``browser-bridge/`` directory.
+
+    We register the parent package (with ``__path__`` pointing at the
+    hyphenated dir) so Python's standard import machinery resolves
+    ``extensions.browser_bridge.adapter`` against ``adapter.py`` in
+    that directory. We pre-stub the sub-modules with their spec but
+    actually execute them on first import — unlike the bedrock pattern
+    (which expects test fixtures to ``sys.modules.pop()`` before import),
+    the browser-bridge tests import directly, so leaving an unexecuted
+    stub in ``sys.modules`` would mask the real module.
+    """
+    _ensure_extensions_pkg()
+    _BB_DIR = _EXT_DIR / "browser-bridge"
+
+    if "extensions.browser_bridge" not in sys.modules:
+        mod = types.ModuleType("extensions.browser_bridge")
+        mod.__path__ = [str(_BB_DIR)]
+        mod.__package__ = "extensions.browser_bridge"
+        sys.modules["extensions.browser_bridge"] = mod
+
+    for sub in ("adapter", "plugin"):
+        full_name = f"extensions.browser_bridge.{sub}"
+        if full_name not in sys.modules:
+            init = _BB_DIR / f"{sub}.py"
+            if not init.exists():
+                continue
+            spec = importlib.util.spec_from_file_location(full_name, str(init))
+            if spec is None or spec.loader is None:
+                continue
+            sub_mod = importlib.util.module_from_spec(spec)
+            sub_mod.__package__ = "extensions.browser_bridge"
+            sys.modules[full_name] = sub_mod
+            spec.loader.exec_module(sub_mod)
+
+
 _register_oi_capability_alias()
 _register_coding_harness_alias()
 _register_aws_bedrock_provider_alias()
+_register_browser_bridge_alias()
