@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  OpenComputer gateway daemon — macOS LaunchAgent template.
+
+  Auto-starts ``opencomputer gateway`` at user login, restarts on crash
+  (with throttling so a sleep/resume cycle doesn't thrash). Logs land
+  under ``~/.opencomputer/logs/`` so they coexist with OC's existing
+  centralised-logging output (PR #128, Round 2B P-4).
+
+  Placeholders ({{ ... }}) are substituted by ``scripts/launchd/install.sh``
+  at install time — DO NOT edit them by hand. The installer resolves
+  the absolute ``opencomputer`` binary on the user's PATH at install
+  time so LaunchAgent's sparse PATH (/usr/bin:/bin:/usr/sbin:/sbin)
+  doesn't break the start.
+
+  Install:    bash scripts/launchd/install.sh
+  Uninstall:  bash scripts/launchd/uninstall.sh
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.opencomputer.gateway</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{OPENCOMPUTER_BIN}}</string>
+        <string>gateway</string>
+    </array>
+
+    <!-- Start at user login + on every boot when the user is logged in. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart whenever the process exits (clean or crash). Combined
+         with ThrottleInterval below this gives crash-resilience without
+         busy-restart loops on a permanent failure. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Don't restart more than once every 60 seconds. Without this,
+         a permanent failure (e.g. bad token) would cause LaunchAgent
+         to spawn-die-spawn at ~10/sec, eating CPU. -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <!-- LaunchAgent inherits a sparse PATH; we set HOME explicitly so
+         opencomputer can resolve ~/.opencomputer/. The user's shell
+         dotfiles are NOT sourced — anything the gateway needs (API
+         keys, channel tokens) must be in ~/.opencomputer/.env which
+         opencomputer loads explicitly via security/env_loader. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{{HOME}}</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/opt/anaconda3/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <!-- Working dir set so any relative paths in plugins resolve sanely.
+         OC plugins should never use relative paths but defence-in-depth. -->
+    <key>WorkingDirectory</key>
+    <string>{{HOME}}</string>
+
+    <!-- Logs land alongside OC's centralised logs so ``opencomputer
+         logs tail`` sees them too. -->
+    <key>StandardOutPath</key>
+    <string>{{HOME}}/.opencomputer/logs/gateway.launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{HOME}}/.opencomputer/logs/gateway.launchd.err.log</string>
+
+    <!-- ProcessType=Interactive prevents macOS from aggressive App Nap
+         when the user isn't actively foregrounding the gateway. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>
