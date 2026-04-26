@@ -128,6 +128,44 @@ dreaming, multi-channel onboarding).
   tooling that needs to reason about the version string.
 
 
+### Added (Layered Awareness V2.A — V1 follow-ups, 2026-04-26)
+
+Six follow-up fixes from the PR #143 V1 review backlog. Each shipped
+as its own commit during V2.A iteration.
+
+- **F1 consent enforcement on Layer 2 readers** (T1). The 6 ingestion.*
+  capability claims registered in V1 are now actually enforced —
+  revoking via `opencomputer consent revoke ingestion.calendar` skips
+  the next bootstrap's calendar read instead of being audit-only.
+  Adds `_get_consent_gate()` lazy gate accessor + `_consent_allows()`
+  fail-closed wrapper in the orchestrator. Open-by-default fallback
+  when no gate is configured (first-run profiles).
+- **Active calendar permission request** (T2). When EventKit auth
+  status is `NotDetermined` (0), `read_upcoming_events` now calls
+  `requestAccessToEntityType_completion_(0, ...)` to actively trigger
+  the macOS Privacy & Security dialog. Blocks via `threading.Event`
+  with 60s timeout; subsequent runs don't re-prompt (macOS persists).
+- **Dotted-directory pruning in `scan_recent_files`** (T3). Rewrote
+  the file walker from `rglob("*")` to `os.walk` with in-place
+  `dirnames[:]` mutation so `.git/`, `.cache/`, `.npm/`, `.idea/`
+  subtrees are pruned at the source rather than walked-then-skipped.
+  Major performance + privacy win on real `~/Documents` trees.
+- **`bridge.json` chmod 0o600** (T4). Browser-bridge auth token file
+  is now owner-readable only — no more world-readable token leak via
+  `~/.opencomputer/<profile>/profile_bootstrap/bridge.json`.
+  Applies on both fresh creation and `--rotate`.
+- **Calendar + browser visit counters in `BootstrapResult`** (T5).
+  Added `calendar_events_scanned` + `browser_visits_scanned` fields;
+  CLI displays both. Reads that previously discarded their results
+  now surface their effort to the user.
+- **Multi-Chromium-family browser history** (T6). `read_chrome_history`
+  is now `read_all_browser_history` under the hood, walking
+  `_CHROMIUM_FAMILY_ROOTS` for Chrome, Brave, Edge, Vivaldi, Arc,
+  Chromium across all `Default` + `Profile N` directories. Original
+  `read_chrome_history` preserved as a backward-compat alias.
+
+Test count delta: +21 tests (3075 → 3096 passing).
+
 ### Added (background PyPI update check — hermes parity)
 
 - `opencomputer/cli_update_check.py` — non-blocking PyPI update check.
