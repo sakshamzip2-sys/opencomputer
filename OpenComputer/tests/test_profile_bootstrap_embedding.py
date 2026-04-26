@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from opencomputer.profile_bootstrap.embedding import (
-    EmbeddingUnavailable,
+    EmbeddingUnavailableError,
     embed_texts,
     is_embedding_available,
 )
@@ -27,7 +27,7 @@ def test_embed_texts_raises_when_unavailable():
         "opencomputer.profile_bootstrap.embedding._import_sentence_transformers",
         side_effect=ImportError(),
     ):
-        with pytest.raises(EmbeddingUnavailable):
+        with pytest.raises(EmbeddingUnavailableError):
             embed_texts(["hello"])
 
 

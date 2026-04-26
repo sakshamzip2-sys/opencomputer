@@ -14,11 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 _DEFAULT_COLLECTION = "layered_awareness_v1"
 
 
-class ChromaUnavailable(RuntimeError):
+class ChromaUnavailableError(RuntimeError):
     """Raised when chromadb isn't installed."""
 
 
@@ -59,7 +58,7 @@ class VectorStoreClient:
         try:
             chromadb = _import_chromadb()
         except ImportError as exc:
-            raise ChromaUnavailable(
+            raise ChromaUnavailableError(
                 "chromadb not installed; install via 'pip install opencomputer[deepening]'"
             ) from exc
         persist_dir.mkdir(parents=True, exist_ok=True)

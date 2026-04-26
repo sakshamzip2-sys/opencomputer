@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from opencomputer.profile_bootstrap.vector_store import (
-    ChromaUnavailable,
+    ChromaUnavailableError,
     VectorStoreClient,
     is_chroma_available,
 )
@@ -24,7 +24,7 @@ def test_client_init_raises_when_unavailable(tmp_path: Path):
         "opencomputer.profile_bootstrap.vector_store._import_chromadb",
         side_effect=ImportError(),
     ):
-        with pytest.raises(ChromaUnavailable):
+        with pytest.raises(ChromaUnavailableError):
             VectorStoreClient(persist_dir=tmp_path)
 
 

@@ -455,13 +455,14 @@ def test_bootstrap_zero_counters_when_consent_denied(
 
 def test_extract_and_emit_motif_returns_false_when_ollama_unavailable():
     from unittest.mock import MagicMock, patch
-    from opencomputer.profile_bootstrap.llm_extractor import OllamaUnavailable
+
+    from opencomputer.profile_bootstrap.llm_extractor import OllamaUnavailableError
     from opencomputer.profile_bootstrap.orchestrator import extract_and_emit_motif
 
     bus = MagicMock()
     with patch(
         "opencomputer.profile_bootstrap.llm_extractor.extract_artifact",
-        side_effect=OllamaUnavailable("test"),
+        side_effect=OllamaUnavailableError("test"),
     ):
         emitted = extract_and_emit_motif(
             content="x", kind="file", source_path="/a", bus=bus,
@@ -472,6 +473,7 @@ def test_extract_and_emit_motif_returns_false_when_ollama_unavailable():
 
 def test_extract_and_emit_motif_publishes_when_extraction_nonempty():
     from unittest.mock import MagicMock, patch
+
     from opencomputer.profile_bootstrap.llm_extractor import ArtifactExtraction
     from opencomputer.profile_bootstrap.orchestrator import extract_and_emit_motif
 
@@ -493,6 +495,7 @@ def test_extract_and_emit_motif_publishes_when_extraction_nonempty():
 
 def test_extract_and_emit_motif_returns_false_when_extraction_blank():
     from unittest.mock import MagicMock, patch
+
     from opencomputer.profile_bootstrap.llm_extractor import ArtifactExtraction
     from opencomputer.profile_bootstrap.orchestrator import extract_and_emit_motif
 

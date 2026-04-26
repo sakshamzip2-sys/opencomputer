@@ -6,7 +6,7 @@ messages) into structured :class:`ArtifactExtraction` records that
 flow into the F2 SignalEvent bus.
 
 If Ollama is not installed, :func:`is_ollama_available` returns False
-and :func:`extract_artifact` raises :class:`OllamaUnavailable`. Callers
+and :func:`extract_artifact` raises :class:`OllamaUnavailableError`. Callers
 must handle that — deepening proceeds with whatever extraction it can.
 """
 from __future__ import annotations
@@ -15,7 +15,6 @@ import json
 import shutil
 import subprocess
 from dataclasses import dataclass
-
 
 _DEFAULT_MODEL = "llama3.2:3b"
 _EXTRACTION_PROMPT = """You are a JSON extractor. Given the artifact below, return ONE JSON object with these keys ONLY:
@@ -32,7 +31,7 @@ Artifact:
 """
 
 
-class OllamaUnavailable(RuntimeError):
+class OllamaUnavailableError(RuntimeError):
     """Raised when Ollama isn't on PATH."""
 
 
@@ -58,13 +57,13 @@ def extract_artifact(
     model: str = _DEFAULT_MODEL,
     timeout_seconds: float = 15.0,
 ) -> ArtifactExtraction:
-    """Run one extraction. Raises :class:`OllamaUnavailable` if not available.
+    """Run one extraction. Raises :class:`OllamaUnavailableError` if not available.
 
     Returns blank :class:`ArtifactExtraction` on malformed JSON, timeout, or
     nonzero exit. Truncates content to ~4000 chars for context budget.
     """
     if not is_ollama_available():
-        raise OllamaUnavailable("ollama not on PATH; install via 'brew install ollama'")
+        raise OllamaUnavailableError("ollama not on PATH; install via 'brew install ollama'")
     artifact = content[:4000]
     prompt = _EXTRACTION_PROMPT.format(artifact=artifact)
     try:

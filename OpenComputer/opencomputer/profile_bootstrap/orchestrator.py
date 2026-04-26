@@ -301,12 +301,12 @@ def extract_and_emit_motif(
     """
     from opencomputer.profile_bootstrap.llm_extractor import (
         ArtifactExtraction,
-        OllamaUnavailable,
+        OllamaUnavailableError,
         extract_artifact,
     )
     try:
         extraction = extract_artifact(content)
-    except OllamaUnavailable:
+    except OllamaUnavailableError:
         return False
     if extraction == ArtifactExtraction():
         # All defaults → nothing extracted.

@@ -5,7 +5,7 @@ import pytest
 
 from opencomputer.profile_bootstrap.llm_extractor import (
     ArtifactExtraction,
-    OllamaUnavailable,
+    OllamaUnavailableError,
     extract_artifact,
     is_ollama_available,
 )
@@ -31,7 +31,7 @@ def test_extract_raises_when_unavailable():
         "opencomputer.profile_bootstrap.llm_extractor.is_ollama_available",
         return_value=False,
     ):
-        with pytest.raises(OllamaUnavailable):
+        with pytest.raises(OllamaUnavailableError):
             extract_artifact("some content")
 
 

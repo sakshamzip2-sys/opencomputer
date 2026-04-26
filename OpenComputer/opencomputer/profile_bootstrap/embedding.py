@@ -17,7 +17,7 @@ _DEFAULT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 _cached_model: Any | None = None
 
 
-class EmbeddingUnavailable(RuntimeError):
+class EmbeddingUnavailableError(RuntimeError):
     """Raised when sentence-transformers isn't installed."""
 
 
@@ -58,7 +58,7 @@ def embed_texts(
     try:
         _import_sentence_transformers()
     except ImportError as exc:
-        raise EmbeddingUnavailable(
+        raise EmbeddingUnavailableError(
             "sentence-transformers not installed; "
             "install via 'pip install opencomputer[deepening]'"
         ) from exc
