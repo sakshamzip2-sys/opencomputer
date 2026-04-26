@@ -375,6 +375,7 @@ class AgentLoop:
         runtime: RuntimeContext | None = None,
         stream_callback=None,
         system_prompt_override: str | None = None,
+        initial_messages: list[Message] | None = None,
     ) -> ConversationResult:
         """Run the agent loop until the model stops calling tools.
 
@@ -395,6 +396,15 @@ class AgentLoop:
             named-template path; ``system_override`` remains for direct
             callers that want a raw swap. When both are set,
             ``system_prompt_override`` wins (it's the III.5 semantic).
+        initial_messages:
+            Round 2B P-9 — pre-seed a fresh session's history with these
+            messages BEFORE ``user_message`` is appended. Only honoured
+            for new sessions (``session_id`` not present in the DB);
+            existing sessions keep their persisted history. Used by
+            :class:`opencomputer.tools.delegate.DelegateTool` to fork the
+            parent's recent context into a delegated child. Seeded
+            messages are persisted so resume-from-disk reproduces the
+            same starting state.
         """
         sid = session_id or str(uuid.uuid4())
         self._runtime = runtime or DEFAULT_RUNTIME_CONTEXT
@@ -410,6 +420,13 @@ class AgentLoop:
                 model=self.config.model.model,
             )
             messages: list[Message] = []
+            # Round 2B P-9: optional pre-seed for forked-context delegations.
+            # ``initial_messages`` is only honoured for fresh sessions to keep
+            # resume-from-disk deterministic. Seeded messages are persisted so
+            # the on-disk session matches in-memory state.
+            if initial_messages:
+                messages.extend(initial_messages)
+                self.db.append_messages_batch(sid, list(initial_messages))
         else:
             messages = self.db.get_messages(sid)
 
@@ -813,11 +830,21 @@ class AgentLoop:
                     output_tokens=total_output,
                 )
 
-            # Push the current runtime to DelegateTool so subagents inherit it
+            # Push the current runtime to DelegateTool so subagents inherit it.
+            # Round 2B P-9: also snapshot ``messages`` onto the runtime so a
+            # delegate tool_use with ``forked_context=true`` can seed the
+            # child loop with the parent's recent conversation. Snapshot is
+            # taken BEFORE the assistant message containing the delegate
+            # tool_use is appended, so the snapshot ends at a clean
+            # turn-boundary (no orphan tool_use).
             try:
+                import dataclasses as _dc
+
                 from opencomputer.tools.delegate import DelegateTool
 
-                DelegateTool.set_runtime(self._runtime)
+                DelegateTool.set_runtime(
+                    _dc.replace(self._runtime, parent_messages=tuple(messages))
+                )
             except Exception:
                 pass  # delegate tool may not be registered yet in some contexts
 

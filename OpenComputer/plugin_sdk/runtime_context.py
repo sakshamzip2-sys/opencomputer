@@ -17,7 +17,10 @@ context queries). CLI + direct AgentLoop calls leave it None.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from plugin_sdk.core import Message
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +56,22 @@ class RuntimeContext:
     `LoopConfig.max_delegation_depth` (default 2 = parent → child →
     grandchild rejected). Mirrors Hermes `MAX_DEPTH` from
     `sources/hermes-agent/tools/delegate_tool.py`."""
+
+    parent_messages: tuple[Message, ...] = ()
+    """Round 2B P-9 — snapshot of the parent loop's message history,
+    pushed by ``AgentLoop`` immediately before dispatching tool calls.
+
+    Default empty tuple keeps existing callers (CLI, direct
+    ``run_conversation`` invocations, fixtures) untouched: the field
+    only carries data inside the parent → child delegation handoff.
+
+    Consumed by :class:`opencomputer.tools.delegate.DelegateTool` when
+    its ``forked_context`` argument is true. The tool slices the last
+    few messages and walks backwards via
+    :meth:`opencomputer.agent.compaction.CompactionEngine._safe_split_index`
+    so a ``tool_use`` is never separated from its ``tool_result``
+    (Anthropic 400 otherwise). Stored as a ``tuple`` to keep
+    ``RuntimeContext`` frozen-and-hashable-friendly."""
 
 
 #: A sentinel "no flags" default — useful when callers don't care about modes.

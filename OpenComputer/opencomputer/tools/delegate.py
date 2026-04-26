@@ -133,6 +133,16 @@ class DelegateTool(BaseTool):
                             "for fire-and-forget delegations with no filesystem coordination."
                         ),
                     },
+                    # Round 2B P-9: optional context fork for the child loop.
+                    "forked_context": {
+                        "type": "boolean",
+                        "description": (
+                            "If true, child receives a snapshot of the parent's "
+                            "recent messages (last 5 by default). Tool_use and "
+                            "tool_result pairs are preserved atomically."
+                        ),
+                        "default": False,
+                    },
                 },
                 "required": ["task"],
             },
@@ -263,16 +273,51 @@ class DelegateTool(BaseTool):
                 is_error=True,
             )
 
+        # Round 2B P-9: forked-context snapshot. When the caller asks for
+        # ``forked_context=true`` we hand the child the tail of the parent's
+        # recent message history, so it can answer questions that need that
+        # context without re-fetching everything via tools.
+        #
+        # Boundary safety is delegated to ``CompactionEngine._safe_split_index``
+        # — that helper walks backwards until splitting will not orphan a
+        # ``tool_use`` from its ``tool_result``. The Anthropic API HTTP-400s
+        # if a ``tool_use`` is sent without its matching ``tool_result``, so
+        # this is correctness, not stylistic.
+        child_initial_messages: list = []
+        if call.arguments.get("forked_context"):
+            from opencomputer.agent.compaction import (  # noqa: PLC0415
+                CompactionEngine,
+            )
+
+            parent_msgs = list(self._current_runtime.parent_messages or ())
+            if parent_msgs:
+                # ``__new__`` skips ``__init__`` (which wants a provider) so
+                # we can reuse the boundary algorithm without standing up a
+                # real engine. ``_safe_split_index`` itself does not touch
+                # ``self`` — see opencomputer/agent/compaction.py.
+                _engine = CompactionEngine.__new__(CompactionEngine)
+                preserve_recent = 5
+                safe_idx = _engine._safe_split_index(parent_msgs, preserve_recent)
+                seed = parent_msgs[safe_idx:]
+                # Filter out system messages — child has its own.
+                child_initial_messages = [m for m in seed if m.role != "system"]
+
         # Lazy import to avoid circular dependency on coordinator at module load
         from opencomputer.tools.delegation_coordinator import (  # noqa: PLC0415
             DelegationLockTimeout,
             get_default_coordinator,
         )
 
-        # T1.1: child runtime gets incremented depth
+        # T1.1: child runtime gets incremented depth.
+        # P-9: also clear ``parent_messages`` — the snapshot has been consumed
+        # into ``child_initial_messages``. The child's own loop will rewrite
+        # ``parent_messages`` with ITS message history when it dispatches its
+        # own delegate calls; leaving the parent's snapshot in place would
+        # leak parent context into a grandchild.
         child_runtime = dataclasses.replace(
             self._current_runtime,
             delegation_depth=self._current_runtime.delegation_depth + 1,
+            parent_messages=(),
         )
 
         subagent_loop = self._factory()
@@ -313,6 +358,7 @@ class DelegateTool(BaseTool):
                     system_prompt_override=(
                         template.system_prompt if template is not None else None
                     ),
+                    initial_messages=child_initial_messages or None,
                 )
                 # D7: emit SubagentStop hook when the delegated subagent finishes
                 # so plugins can log / summarize / react. Fire-and-forget.
