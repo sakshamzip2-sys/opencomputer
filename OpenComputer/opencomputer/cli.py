@@ -27,6 +27,7 @@ from opencomputer.agent.loop import AgentLoop
 from opencomputer.agent.memory_bridge import MemoryBridge
 from opencomputer.hooks.engine import engine as hook_engine
 from opencomputer.hooks.shell_handlers import make_shell_hook_handler
+from opencomputer.observability.logging_config import configure as configure_logging
 from opencomputer.plugins.registry import registry as plugin_registry
 from opencomputer.tools.ask_user_question import AskUserQuestionTool
 from opencomputer.tools.bash import BashTool
@@ -50,6 +51,32 @@ from plugin_sdk.hooks import HookEvent, HookSpec
 from plugin_sdk.runtime_context import RuntimeContext
 
 _log = logging.getLogger("opencomputer.cli")
+
+_LOGGING_CONFIGURED = False
+"""Sentinel guarding :func:`_configure_logging_once` against duplicate handler
+attachment when multiple Typer subcommands run inside a single process
+(tests, REPLs)."""
+
+
+def _configure_logging_once() -> None:
+    """Wire :mod:`opencomputer.observability.logging_config` once per process.
+
+    Round 2B P-4. ``configure()`` adds rotating file handlers + the
+    session-context filter to the ``opencomputer`` / ``opencomputer.gateway``
+    / ``opencomputer.errors`` loggers. We must not call it twice in the
+    same process — Python's logging module appends handlers without
+    de-duplication, so a second call doubles every record.
+    """
+    global _LOGGING_CONFIGURED
+    if _LOGGING_CONFIGURED:
+        return
+    try:
+        from opencomputer.agent.config import _home
+
+        configure_logging(_home())
+        _LOGGING_CONFIGURED = True
+    except Exception as e:  # noqa: BLE001 — logging setup must never crash startup
+        _log.warning("logging configuration failed: %s", e)
 
 
 def _memory_shutdown_atexit() -> None:
@@ -479,6 +506,7 @@ def chat(
     ),
 ) -> None:
     """Start an interactive chat session."""
+    _configure_logging_once()
     cfg = load_config()
     # Follow-up #25 — one-shot hint if Docker became available after setup.
     from opencomputer.cli_hints import maybe_print_docker_toggle_hint
@@ -516,6 +544,14 @@ def chat(
         )
 
     session_id = resume or str(uuid.uuid4())
+    # P-4 — bind session id onto the ContextVar so log records emitted
+    # during this chat are stamped with it. SessionDB.create_session
+    # also stamps when a fresh session is persisted; doing it here too
+    # covers the resume path (no DB insert) and any logs between now
+    # and the first DB write.
+    from opencomputer.observability.logging_config import set_session_id
+
+    set_session_id(session_id)
     console.print(f"[bold cyan]OpenComputer v{__version__}[/bold cyan]")
     console.print(f"[dim]session: {session_id}[/dim]")
     console.print(f"[dim]model:   {cfg.model.model} ({cfg.model.provider})[/dim]")
@@ -622,6 +658,7 @@ def wire(
     port: int = typer.Option(18789, "--port"),
 ) -> None:
     """Run the wire server — JSON-over-WebSocket API for TUI / IDE / web clients."""
+    _configure_logging_once()
     from opencomputer.gateway.wire_server import WireServer
 
     cfg = load_config()
@@ -667,6 +704,7 @@ def gateway() -> None:
     DISCORD_BOT_TOKEN, etc.) in the environment. The same agent loop runs,
     but input comes from channels instead of the terminal.
     """
+    _configure_logging_once()
     from opencomputer.gateway.server import Gateway
     from opencomputer.mcp.client import MCPManager
 

@@ -346,6 +346,17 @@ class SessionDB:
                 "VALUES (?, ?, ?, ?, ?)",
                 (session_id, time.time(), platform, model, title),
             )
+        # Round 2B P-4 — bind the session id onto the
+        # observability ContextVar so subsequent log records emitted
+        # from this coroutine carry it. Import is local so the SessionDB
+        # has no hard dependency on the observability module (keeps the
+        # state.py surface lean and avoids any import-cycle risk).
+        try:
+            from opencomputer.observability.logging_config import set_session_id
+
+            set_session_id(session_id)
+        except Exception:  # noqa: BLE001 — never let logging glue break sessions
+            pass
 
     def end_session(self, session_id: str) -> None:
         with self._txn() as conn:

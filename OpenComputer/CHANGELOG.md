@@ -12,6 +12,30 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Round 2B P-4 — centralized rotated logging)
+
+- New `opencomputer/observability/logging_config.py` wires three rotating
+  file handlers under `<HOME>/logs/` — `agent.log` (full
+  `opencomputer` tree), `gateway.log` (`opencomputer.gateway.*`),
+  `errors.log` (`opencomputer.errors`, ERROR-and-above only). 10 MB ×
+  5 backups per channel.
+- Per-coroutine session context via `contextvars.ContextVar` —
+  `set_session_id(...)` is wired from `SessionDB.create_session` and
+  the CLI `chat` startup so every log record carries the active
+  session id (or `-` when none is bound). Deliberately *not*
+  `threading.local`: asyncio coroutines share the loop thread, so a
+  thread-local would leak ids across concurrent sessions.
+- Secret-redaction at format time covering Bearer tokens, Slack
+  (`xoxb-` / `xoxp-`) tokens, Telegram bot tokens, Anthropic
+  (`sk-ant-…`) keys, generic OpenAI-style `sk-…` keys, AWS access
+  keys (`AKIA…`), and any path under `<home>/.opencomputer/secrets/`.
+- CLI `chat` / `wire` / `gateway` subcommands invoke
+  `_configure_logging_once()` at startup so the handlers attach exactly
+  once per process.
+- 14 new tests in `tests/test_logging_config.py` cover ContextVar
+  isolation under `asyncio.gather`, every redaction pattern, real
+  rotation, and per-channel routing.
+
 ### Added (Round 2B P-6 — MCP OAuth 2.1 PKCE flow)
 
 Adds an OAuth 2.1 Authorization-Code-with-PKCE flow for MCP servers, with
