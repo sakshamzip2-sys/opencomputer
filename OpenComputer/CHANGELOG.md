@@ -12,6 +12,55 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Round 2B P-16 — security hardening)
+
+Two surfaces tightened against the most common credential-leak +
+agent-confusion failure modes.
+
+- `opencomputer/mcp/client.py` — MCP tools that carry `_meta.owner =
+  "system"` or `_meta.internal = true` (or the same fields on
+  `annotations`) are now filtered out of the agent-visible tool list.
+  Default behaviour unchanged: only servers that explicitly opt in
+  hide tools. Lets server authors stash admin / introspection tools
+  on the same MCP endpoint as the public surface without exposing
+  them to the LLM. Helper `_tool_is_internal(tool)` is the single
+  filter point so future schemas (extension carriers beyond `_meta`)
+  can register here without touching the connect path.
+- `opencomputer/security/env_loader.py` — new module. Reads
+  `KEY=value` dotenv files with two safety properties enforced by
+  default: the leading UTF-8 BOM (a common Windows-editor accident)
+  is silently stripped before parsing, and any group/other
+  permission bit on the file (`os.stat().st_mode & 0o077`) is
+  fail-closed via the typed `LoosePermissionError`. The override
+  path runs through a process-wide flag set by the new CLI option
+  `--allow-loose-env-perms`, which logs a WARNING with the offending
+  mode + a `chmod 600` hint at every load. The CLI handler strips
+  the flag from `sys.argv` before Typer dispatch (mirroring the
+  existing `-p`/`--profile` early-intercept pattern) so individual
+  subcommands need not declare the option.
+- `opencomputer/evolution/redaction.py` — five new patterns added
+  (`slack_token`, `telegram_token`, `anthropic_key`, `openai_key`,
+  `aws_akid`) plus a widened `Bearer` alphabet that catches dotted
+  JWT-shaped tokens. `PATTERN_NAMES` grew from five to ten entries;
+  the originals stay in their original slots so existing trajectory
+  bundles continue to round-trip cleanly. Pattern application order
+  was changed: the more-specific shapes (Anthropic / OpenAI / Slack
+  / Telegram / AWS) run BEFORE the legacy generic `api_key` rule so
+  the precise replacement label wins. Same regex shapes are also
+  applied at log-format time by the P-4 logging redactor — now
+  factored consistently across both surfaces.
+
+Tests: `tests/test_security_p16.py` adds 24 cases covering BOM strip,
+loose-perm refusal (mode 0644 + 0640), happy-path 0600 load,
+explicit + process-wide override warnings, missing-file probe, the
+mini parser surface (export / quotes / comments / empty values), CLI
+flag interception, six MCP-tool filter scenarios (meta-internal,
+meta-owner-system, annotations-extras, plain public, explicit
+non-system, missing carriers, end-to-end registry filter), and seven
+new redaction patterns (Anthropic-vs-OpenAI label precedence, Slack
+bot/personal, Telegram, AWS AKID, dotted JWT bearer, false-positive
+prose). Suite: 2931 → 2955 (+24).
+
 ### Added (Round 2B P-8 — bg auto-notifications)
 
 Background processes started via `StartProcess` now fire a typed

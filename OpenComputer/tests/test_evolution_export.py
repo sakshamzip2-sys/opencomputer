@@ -152,13 +152,15 @@ def test_bundle_empty_trajectory(isolated_home, tmp_path):
     assert manifest["part_index"] == 1
     assert manifest["total_parts"] == 1
     redaction = json.loads(members["redaction.json"])
-    assert redaction == {
-        "api_key": 0,
-        "file_path": 0,
-        "email": 0,
-        "ip": 0,
-        "bearer_token": 0,
-    }
+    # P-16 expanded the empty counter set; assert only that the
+    # original five entries are zero so this test stays decoupled
+    # from future pattern additions.
+    assert redaction["api_key"] == 0
+    assert redaction["file_path"] == 0
+    assert redaction["email"] == 0
+    assert redaction["ip"] == 0
+    assert redaction["bearer_token"] == 0
+    assert all(v == 0 for v in redaction.values())
 
 
 # ---------------------------------------------------------------------------
@@ -205,25 +207,33 @@ def test_bundle_redacts_all_patterns(isolated_home, db_path, tmp_path):
     assert "8.8.8.8" not in body
     assert "abc123-xyz789.tok" not in body
     assert "sk-abcdef0123456789abcdef0123" not in body
-    # All 5 placeholders must be present
+    # All placeholders must be present. P-16: ``sk-...`` now lands in
+    # the more-specific ``<OPENAI_KEY_REDACTED>`` slot.
     assert "/Users/REDACTED/" in body
     assert "<EMAIL_REDACTED>" in body
     assert "<IP_REDACTED>" in body
     assert "Bearer <REDACTED>" in body
-    assert "<API_KEY_REDACTED>" in body
+    assert "<OPENAI_KEY_REDACTED>" in body
 
     # Non-string fields preserved
     assert "1.2" in body  # duration_seconds
 
     # redaction.json — counts only, no raw values
     redaction = json.loads(members["redaction.json"])
-    assert redaction == {
-        "api_key": 1,
-        "file_path": 1,
-        "email": 1,
-        "ip": 1,
-        "bearer_token": 1,
-    }
+    # The original five counts are unchanged for non-OpenAI key
+    # patterns; the ``sk-...`` count moves into ``openai_key`` (P-16).
+    assert redaction["api_key"] == 0
+    assert redaction["openai_key"] == 1
+    assert redaction["file_path"] == 1
+    assert redaction["email"] == 1
+    assert redaction["ip"] == 1
+    assert redaction["bearer_token"] == 1
+    # New P-16 slots default to zero on this fixture (no slack /
+    # telegram / anthropic / aws values seeded above).
+    assert redaction["slack_token"] == 0
+    assert redaction["telegram_token"] == 0
+    assert redaction["anthropic_key"] == 0
+    assert redaction["aws_akid"] == 0
     # Sanity: nothing in redaction.json leaked PII
     raw_redaction_text = members["redaction.json"]
     assert "alice" not in raw_redaction_text

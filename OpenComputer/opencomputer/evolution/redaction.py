@@ -53,7 +53,31 @@ _IP_SAFE = {"127.0.0.1", "0.0.0.0"}
 
 # Bearer tokens — ``Authorization: Bearer …`` style.  Case-sensitive on the
 # ``Bearer`` keyword to avoid spurious matches on prose like "bearer scheme".
-_BEARER_RE = re.compile(r"Bearer\s+[a-zA-Z0-9_\-\.=]+")
+_BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9_\-\.]+")
+
+# Slack legacy bot/personal tokens — ``xoxb-...`` (bot) or ``xoxp-...``
+# (personal). Both prefixes share a layout of dash-separated segments
+# at least 20 chars on the trailing segment to avoid matching prose.
+_SLACK_TOKEN_RE = re.compile(r"xox[bp]-[A-Za-z0-9-]{20,}")
+
+# Telegram bot tokens — ``<bot-id>:<random>``. The colon split + the
+# trailing random segment ≥20 chars rules out most non-token integers.
+_TELEGRAM_TOKEN_RE = re.compile(r"\b\d+:[A-Za-z0-9_-]{20,}\b")
+
+# Anthropic API keys — ``sk-ant-...``. Caught BEFORE the generic
+# OpenAI ``sk-`` rule so the more specific replacement label wins.
+_ANTHROPIC_KEY_RE = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
+
+# OpenAI-style API keys — ``sk-...`` (≥20 chars after the prefix).
+# Excludes the ``sk-ant-`` shape so we don't double-match Anthropic
+# keys (anchored ``\b`` plus the ``[A-Za-z0-9]`` body keeps it tight).
+_OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")
+
+# AWS access key IDs — ``AKIA`` + 16 uppercase alnum chars.  These
+# are ID-side only; secret access keys are 40 chars of base64 with
+# no fixed prefix and intentionally NOT matched here (would catch
+# UUIDs / hashes).
+_AWS_AKID_RE = re.compile(r"\bAKIA[0-9A-Z]{16}\b")
 
 # ---------------------------------------------------------------------------
 # Replacement helpers
@@ -122,17 +146,84 @@ def _redact_bearers(text: str) -> tuple[str, int]:
     return out, count
 
 
+def _redact_slack_tokens(text: str) -> tuple[str, int]:
+    count = 0
+
+    def _sub(_m: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return "<SLACK_TOKEN_REDACTED>"
+
+    out = _SLACK_TOKEN_RE.sub(_sub, text)
+    return out, count
+
+
+def _redact_telegram_tokens(text: str) -> tuple[str, int]:
+    count = 0
+
+    def _sub(_m: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return "<TELEGRAM_TOKEN_REDACTED>"
+
+    out = _TELEGRAM_TOKEN_RE.sub(_sub, text)
+    return out, count
+
+
+def _redact_anthropic_keys(text: str) -> tuple[str, int]:
+    count = 0
+
+    def _sub(_m: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return "<ANTHROPIC_KEY_REDACTED>"
+
+    out = _ANTHROPIC_KEY_RE.sub(_sub, text)
+    return out, count
+
+
+def _redact_openai_keys(text: str) -> tuple[str, int]:
+    count = 0
+
+    def _sub(_m: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return "<OPENAI_KEY_REDACTED>"
+
+    out = _OPENAI_KEY_RE.sub(_sub, text)
+    return out, count
+
+
+def _redact_aws_keys(text: str) -> tuple[str, int]:
+    count = 0
+
+    def _sub(_m: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return "<AWS_AKID_REDACTED>"
+
+    out = _AWS_AKID_RE.sub(_sub, text)
+    return out, count
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 # Stable order of patterns — used by the empty counter and reporting.
+# P-16 added five token-shaped patterns (slack/telegram/anthropic/openai/aws);
+# they run AFTER the generic API-key pass so the more specific labels win.
 PATTERN_NAMES: tuple[str, ...] = (
     "api_key",
     "file_path",
     "email",
     "ip",
     "bearer_token",
+    "slack_token",
+    "telegram_token",
+    "anthropic_key",
+    "openai_key",
+    "aws_akid",
 )
 
 
@@ -142,17 +233,38 @@ def empty_counts() -> dict[str, int]:
 
 
 def redact(text: str) -> tuple[str, dict[str, int]]:
-    """Apply all 5 redaction patterns to *text*.
+    """Apply all redaction patterns to *text*.
 
     Returns a tuple ``(redacted_text, counts)`` where ``counts`` is a dict
-    mapping pattern-name to number of matches replaced.  The order of patterns
-    applied is: API keys → file paths → emails → IPs → bearer tokens.  This
-    order matters because API keys can contain characters that look like other
-    patterns (e.g. an OpenAI key could match the email regex if it contained
-    an ``@``); redacting keys first prevents double-counting.
+    mapping pattern-name to number of matches replaced. Order of application
+    matters because some patterns are subsets of others. The current chain is:
+
+    1. ``anthropic_key``  — ``sk-ant-...`` redacted before the generic ``sk-``
+       pattern so the Anthropic-specific label wins.
+    2. ``openai_key``     — ``sk-...`` (≥20 chars), excluding the Anthropic
+       prefix already consumed.
+    3. ``slack_token``    — ``xox[bp]-...``.
+    4. ``telegram_token`` — ``<digits>:<random>``.
+    5. ``aws_akid``       — ``AKIA...`` (16-char access key id).
+    6. ``api_key``        — generic ``sk-/anthropic-/github_pat_/gh*_`` legacy
+       pattern. Most precise prefix-only matches have already been consumed
+       above, but kept for backwards-compat with existing trajectories.
+    7. ``file_path``      — ``/Users/<name>/`` username scrubbing.
+    8. ``email``          — RFC-5322 lite.
+    9. ``ip``             — IPv4 (loopback skipped).
+    10. ``bearer_token``  — ``Bearer <token>`` last so a bearer wrapping a
+        Slack token still has its inner token caught above.
+
+    P-16 added entries 1-5 + the AWS key pattern; the long-standing
+    behavior (entries 6-10) is preserved.
     """
     counts = empty_counts()
     out = text
+    out, counts["anthropic_key"] = _redact_anthropic_keys(out)
+    out, counts["openai_key"] = _redact_openai_keys(out)
+    out, counts["slack_token"] = _redact_slack_tokens(out)
+    out, counts["telegram_token"] = _redact_telegram_tokens(out)
+    out, counts["aws_akid"] = _redact_aws_keys(out)
     out, counts["api_key"] = _redact_api_keys(out)
     out, counts["file_path"] = _redact_file_paths(out)
     out, counts["email"] = _redact_emails(out)

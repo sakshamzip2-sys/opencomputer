@@ -74,6 +74,44 @@ class _OSVSecurityEvent(SignalEvent):
     blocked: bool = False
 
 
+def _tool_is_internal(tool: Any) -> bool:
+    """Return ``True`` when an MCP tool is flagged ``owner=system`` or ``internal=true``.
+
+    P-16 sub-item (a) — internal-tool gating. MCP servers can mark a
+    tool as off-limits to the agent loop by setting either flag in
+    one of two MCP-spec carrier fields:
+
+    * ``Tool._meta`` (``meta`` attribute on the pydantic model) — the
+      first-class MCP extension carrier. Preferred location.
+    * ``Tool.annotations`` (extra fields allowed on
+      :class:`mcp.types.ToolAnnotations`) — checked too because some
+      servers stash custom metadata here.
+
+    Default behavior unchanged: tools that don't set either field
+    surface to the agent like always.
+    """
+    for carrier_attr in ("meta", "annotations"):
+        carrier = getattr(tool, carrier_attr, None)
+        if carrier is None:
+            continue
+        if isinstance(carrier, dict):
+            extras = carrier
+        else:
+            # pydantic models — prefer model_dump (round-trips extra="allow"
+            # fields), fall back to __dict__ for plain dataclasses.
+            try:
+                extras = carrier.model_dump()
+            except Exception:  # noqa: BLE001
+                extras = getattr(carrier, "__dict__", {}) or {}
+        if not isinstance(extras, dict):
+            continue
+        if extras.get("owner") == "system":
+            return True
+        if extras.get("internal") is True:
+            return True
+    return False
+
+
 def _extract_package(cfg: MCPServerConfig) -> tuple[str, str] | None:
     """Best-effort (package, ecosystem) extraction for a stdio MCP launch.
 
@@ -325,9 +363,20 @@ class MCPConnection:
                 self.version = None
             self.session = session
 
-            # List + cache tools
+            # List + cache tools. Internal tools (owner=system OR
+            # internal=true) are filtered here so the agent never sees
+            # them in its schema. P-16 sub-item (a).
             tool_list = await session.list_tools()
+            hidden = 0
             for t in tool_list.tools:
+                if _tool_is_internal(t):
+                    hidden += 1
+                    logger.debug(
+                        "MCP server '%s' tool '%s' hidden (internal/system)",
+                        self.config.name,
+                        t.name,
+                    )
+                    continue
                 self.tools.append(
                     MCPTool(
                         server_name=self.config.name,
@@ -336,6 +385,12 @@ class MCPConnection:
                         parameters=t.inputSchema or {"type": "object", "properties": {}},
                         session=session,
                     )
+                )
+            if hidden:
+                logger.info(
+                    "MCP server '%s' suppressed %d internal tool(s)",
+                    self.config.name,
+                    hidden,
                 )
             self.state = "connected"
             self.connect_time = time.monotonic()
