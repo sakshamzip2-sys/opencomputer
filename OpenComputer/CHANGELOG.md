@@ -2,6 +2,32 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
+## [Unreleased]
+
+### Changed (`memory dream-on` registers a cron job; `dream-off` removes it)
+
+Round 4 Item 4. Closes the gap where `dream-on --interval daily` only
+flipped a config flag and printed "set up cron yourself" — most users
+would never wire it up. Now it uses the cron infra
+(`opencomputer/cron/`, already merged) automatically.
+
+- `opencomputer/cli_memory.py::memory_dream_on()` — after the existing
+  config flip, calls `cron.jobs.create_job()` with `name="memory-dreaming"`
+  and schedule `0 3 * * *` (daily) or `0 * * * *` (hourly). On
+  `--interval` change, removes the previous job first via
+  `_remove_existing_dream_cron_job()` so re-runs replace cleanly
+  rather than accumulating duplicates.
+- `opencomputer/cli_memory.py::memory_dream_off()` — mirrors the
+  cleanup. Idempotent; safe to call when no job exists.
+- 8 new tests in `tests/test_dream_on_creates_cron_job.py`: name +
+  schedule per interval, hourly variant, replace-on-interval-change,
+  idempotent on repeat, dream-off cleanup, dream-off no-op, doesn't
+  touch unrelated cron jobs, invalid interval doesn't leave half state.
+
+User must still run `opencomputer cron daemon` (or use the LaunchAgent
+from PR #153) for the schedule to actually fire — we don't start the
+daemon for the user. The `dream-on` output names this requirement.
+
 ## [2026.4.26.post3] — vision-completion ship + release-CI typo fix
 
 post2 was tagged but never published — the new wheel-smoke guard from

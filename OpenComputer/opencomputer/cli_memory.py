@@ -578,21 +578,58 @@ def memory_dream_now(
     )
 
 
+#: Marker name used to identify cron jobs created by ``dream-on`` so we
+#: can find + remove them on ``dream-on`` re-run (interval change) and
+#: on ``dream-off``. Prefer the explicit name over fuzzy matching of
+#: prompts so a user-created cron job can't accidentally collide.
+_DREAM_CRON_JOB_NAME = "memory-dreaming"
+
+#: Cron prompt the dreaming job runs. Kept terse + benign so the cron
+#: threat scanner (opencomputer/cron/threats.py) doesn't reject it.
+_DREAM_CRON_PROMPT = (
+    "Run `opencomputer memory dream-now` via the Bash tool to consolidate "
+    "any undreamed episodic memories. Report the JSON output verbatim and exit."
+)
+
+
+def _remove_existing_dream_cron_job() -> int:
+    """Remove any cron jobs previously created by ``dream-on``.
+
+    Idempotent: safe to call when no job exists. Returns the number of
+    jobs removed for logging. Filters by exact ``name`` so a hand-rolled
+    job that happens to mention dreaming in its prompt is left alone.
+    """
+    from opencomputer.cron import jobs as cron_jobs
+
+    removed = 0
+    for job in cron_jobs.list_jobs():
+        if job.get("name") == _DREAM_CRON_JOB_NAME:
+            cron_jobs.remove_job(job["id"])
+            removed += 1
+    return removed
+
+
 @memory_app.command("dream-on")
 def memory_dream_on(
     interval: str = typer.Option(
         "daily",
         "--interval",
         "-i",
-        help="Cadence hint: 'daily' or 'hourly'. Persisted to config.yaml.",
+        help="Cadence: 'daily' (3 AM) or 'hourly' (top of hour).",
     ),
 ) -> None:
-    """EXPERIMENTAL — enable episodic-memory dreaming + persist the cadence.
+    """EXPERIMENTAL — enable episodic-memory dreaming + register a cron job.
 
-    Today this only writes the config flag; an external scheduler
-    (cron / launchd / systemd) drives ``dream-now`` on the chosen
-    cadence. A built-in scheduler is intentionally deferred until the
-    EXPERIMENTAL gate flips (see ``docs/memory_dreaming.md``).
+    Sets ``memory.dreaming_enabled = True`` AND creates an
+    ``opencomputer cron`` job named ``memory-dreaming`` that runs
+    ``dream-now`` on the chosen cadence. The cron daemon
+    (``opencomputer cron daemon`` or the LaunchAgent from PR #153)
+    must be running for the schedule to fire — we don't start it for
+    the user.
+
+    Idempotent: re-running with a different ``--interval`` removes
+    the previous job before creating the new one, so you never end
+    up with two duplicate dreaming jobs.
     """
     interval = interval.strip().lower()
     if interval not in {"daily", "hourly"}:
@@ -612,13 +649,51 @@ def memory_dream_on(
     cfg = set_value(cfg, "memory.dreaming_enabled", True)
     cfg = set_value(cfg, "memory.dreaming_interval", interval)
     save_config(cfg)
-    console.print(
-        f"[green]✓[/green] dreaming enabled (interval={interval})\n"
-        f"[dim]saved to {config_file_path()}[/dim]\n"
-        "[yellow]Note:[/yellow] EXPERIMENTAL — see docs/memory_dreaming.md.\n"
-        "[dim]Schedule via cron/launchd/systemd: "
-        "`opencomputer memory dream-now`[/dim]"
+
+    # Remove any existing dreaming job so re-runs (e.g. switching
+    # daily→hourly) replace cleanly rather than accumulating.
+    removed = _remove_existing_dream_cron_job()
+
+    # Schedule strings: 3 AM daily by default (lowest-traffic hour for
+    # most users) or top-of-hour hourly. Both use cron syntax which
+    # the existing scheduler parses.
+    schedule = "0 3 * * *" if interval == "daily" else "0 * * * *"
+    try:
+        from opencomputer.cron import jobs as cron_jobs
+
+        job = cron_jobs.create_job(
+            schedule=schedule,
+            name=_DREAM_CRON_JOB_NAME,
+            prompt=_DREAM_CRON_PROMPT,
+            plan_mode=False,  # dream-now is non-destructive; full agent ok
+        )
+    except Exception as exc:  # noqa: BLE001 — never crash dream-on on cron failure
+        console.print(
+            f"[yellow]![/yellow] dreaming enabled but cron job creation failed: "
+            f"{type(exc).__name__}: {exc}\n"
+            "[dim]You can schedule manually: `opencomputer cron create "
+            f"--schedule '{schedule}' --prompt '{_DREAM_CRON_PROMPT}'`[/dim]"
+        )
+        return
+
+    msg_parts = [
+        f"[green]✓[/green] dreaming enabled (interval={interval})",
+        f"[dim]saved to {config_file_path()}[/dim]",
+        f"[green]✓[/green] cron job created: {job['id']} ({schedule})",
+    ]
+    if removed:
+        msg_parts.insert(
+            -1,
+            f"[dim]({removed} previous dreaming job(s) replaced)[/dim]",
+        )
+    msg_parts.append(
+        "[yellow]Note:[/yellow] EXPERIMENTAL — see docs/memory_dreaming.md."
     )
+    msg_parts.append(
+        "[dim]Make sure `opencomputer cron daemon` (or the LaunchAgent "
+        "from PR #153) is running for the schedule to fire.[/dim]"
+    )
+    console.print("\n".join(msg_parts))
 
 
 @memory_app.command("dream-off")
@@ -639,7 +714,22 @@ def memory_dream_off() -> None:
     cfg = load_config()
     cfg = set_value(cfg, "memory.dreaming_enabled", False)
     save_config(cfg)
-    console.print(
+
+    # Mirror dream-on: also remove the cron job we created. Idempotent;
+    # ``_remove_existing_dream_cron_job`` returns 0 when nothing matches.
+    try:
+        removed = _remove_existing_dream_cron_job()
+    except Exception as exc:  # noqa: BLE001 — config flip already succeeded
+        console.print(
+            f"[yellow]![/yellow] config disabled but cron-job removal failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        removed = 0
+
+    msg = (
         f"[green]✓[/green] dreaming disabled\n"
         f"[dim]saved to {config_file_path()}[/dim]"
     )
+    if removed:
+        msg += f"\n[green]✓[/green] removed {removed} cron job(s)"
+    console.print(msg)
