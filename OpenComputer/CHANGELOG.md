@@ -12,6 +12,26 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (CLI quality-of-life — hermes parity)
+
+Two paper-cut commands ported from hermes-agent's CLI surface.
+
+- `opencomputer config edit` — opens the active profile's config.yaml
+  in `$VISUAL` / `$EDITOR` (POSIX convention; falls back to `vi`).
+  Uses `shlex.split` so multi-arg values like `code -w` work.
+  Refuses with a pointer to `opencomputer setup` when no config exists
+  yet — better than dropping the user into an empty buffer they have
+  to populate by hand. Mirrors hermes' `hermes config edit`,
+  referenced from `sources/hermes-agent-2026.4.23/hermes_cli/setup.py:2207`.
+- `opencomputer auth` — focused provider-credential view. Read-only
+  summary of every provider env var declared by the active plugin
+  manifests, plus the proxy hint (`ANTHROPIC_BASE_URL`). Echoes only
+  the last 4 chars for secrets ≥8 chars; shorter values print as
+  "(set)". URL values are stripped to `scheme://host` so any
+  token-bearing path / query string can't leak. Mirrors hermes'
+  `hermes auth status`. Cleaner focused view than `opencomputer
+  doctor` when you just want to answer "did I export the right key?".
+
 ### Changed (onboarding UX — hermes parity)
 
 Brings OC's first-run experience up to hermes-agent parity for the

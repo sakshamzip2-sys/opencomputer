@@ -917,6 +917,63 @@ def doctor(
 
 
 @app.command()
+def auth() -> None:
+    """Show provider credential status — what's configured, what's missing.
+
+    Hermes parity (``hermes auth status``). Read-only summary of every
+    provider env var the active plugins declare, plus the proxy hint
+    (``ANTHROPIC_BASE_URL``). Echoes only the last 4 characters of each
+    set value — never the full token. Cleaner focused view than
+    ``opencomputer doctor`` when you just want to answer "did I export
+    the right key?".
+    """
+    candidates: list[tuple[str, str]] = []
+    seen_env_vars: set[str] = set()
+
+    def _add(env_var: str, label: str) -> None:
+        if env_var and env_var not in seen_env_vars:
+            seen_env_vars.add(env_var)
+            candidates.append((env_var, label))
+
+    _add("ANTHROPIC_API_KEY", "Anthropic (Claude)")
+    _add("ANTHROPIC_BASE_URL", "Anthropic proxy URL (Claude Router etc.)")
+    _add("OPENAI_API_KEY", "OpenAI (GPT)")
+    try:
+        from opencomputer.plugins.discovery import discover, standard_search_paths
+
+        for cand in discover(standard_search_paths()):
+            setup = cand.manifest.setup
+            if setup is None:
+                continue
+            for prov in setup.providers:
+                label = prov.label or prov.id
+                for env_var in prov.env_vars:
+                    _add(env_var, label)
+    except Exception:  # noqa: BLE001
+        pass
+
+    console.print("\n[bold]Provider credentials[/bold]\n")
+    for env_var, label in candidates:
+        value = os.environ.get(env_var, "")
+        if value:
+            if env_var.endswith("_URL"):
+                # URLs are not secrets — print the whole thing so the user
+                # can confirm they targeted the right proxy.
+                shown = value
+            else:
+                tail = value[-4:] if len(value) >= 4 else value
+                shown = f"…{tail}"
+            console.print(
+                f"  [green]✓[/green] {env_var:<24} [dim]({label})[/dim]  {shown}"
+            )
+        else:
+            console.print(
+                f"  [yellow]·[/yellow] {env_var:<24} [dim]({label})[/dim]  not set"
+            )
+    console.print()
+
+
+@app.command()
 def skills() -> None:
     """List available skills."""
     from opencomputer.agent.memory import MemoryManager
@@ -1119,6 +1176,46 @@ def config_set(
 def config_path() -> None:
     """Print the path to the config file."""
     console.print(str(config_file_path()))
+
+
+@config_app.command("edit")
+def config_edit() -> None:
+    """Open the active profile's config.yaml in $VISUAL / $EDITOR.
+
+    Hermes parity (``hermes config edit`` — referenced from
+    ``sources/hermes-agent-2026.4.23/hermes_cli/setup.py:2207``). Picks
+    ``$VISUAL`` first (POSIX convention for the user's "real" editor),
+    then ``$EDITOR``, then ``vi`` as a final fallback. Refuses with a
+    pointer to ``opencomputer setup`` when no config exists yet — better
+    than dropping the user into an empty buffer they have to remember
+    every config key for.
+    """
+    import subprocess
+
+    cfg_path = config_file_path()
+    if not cfg_path.exists():
+        console.print(
+            f"[bold red]error:[/bold red] no config at [dim]{cfg_path}[/dim]\n"
+            f"[dim]Run [bold]opencomputer setup[/bold] to create one.[/dim]"
+        )
+        raise typer.Exit(1)
+
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    try:
+        result = subprocess.run([editor, str(cfg_path)], check=False)
+    except FileNotFoundError as exc:
+        console.print(
+            f"[bold red]error:[/bold red] editor '{editor}' not found "
+            f"({exc.strerror}).\n"
+            f"[dim]Set $EDITOR to a command on your PATH.[/dim]"
+        )
+        raise typer.Exit(1) from None
+
+    if result.returncode != 0:
+        console.print(
+            f"[yellow]![/yellow] editor exited with status {result.returncode}"
+        )
+        raise typer.Exit(result.returncode)
 
 
 # III.3 — bundled settings variants. Mirrors sources/claude-code/examples/
