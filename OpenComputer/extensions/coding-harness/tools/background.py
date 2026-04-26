@@ -3,12 +3,21 @@
 Shared in-memory registry keyed by pid. Output is streamed into a bounded
 buffer so CheckOutput can read pending lines without blocking. Processes
 are cleaned up on SessionEnd to prevent zombies.
+
+Round 2B P-8 — auto-notification on exit. Each :class:`StartProcessTool`
+spawn registers a watcher coroutine that awaits ``proc.wait()`` then
+fires a :class:`~plugin_sdk.hooks.HookEvent.NOTIFICATION` carrying a
+:class:`~opencomputer.agent.bg_notify.BgProcessExit` payload. The default
+subscriber stashes a system message in
+:mod:`opencomputer.agent.bg_notify`; the agent loop drains that store
+between turns so the model sees the completion in its next-turn context.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -27,6 +36,15 @@ class _BgEntry:
     read_task_out: asyncio.Task | None = None
     read_task_err: asyncio.Task | None = None
     command: str = ""
+    # P-8 — completion bookkeeping. ``tool_call_id`` and ``session_id``
+    # are stamped at start so the watcher can route the eventual exit
+    # notification back to the originating session even if the agent has
+    # since moved on. ``started_at`` is ``time.monotonic()`` so the
+    # duration calc is immune to NTP slews.
+    tool_call_id: str = ""
+    session_id: str = ""
+    started_at: float = 0.0
+    notify_task: asyncio.Task | None = None
 
 
 #: Process table — module-level singleton, shared across all tool instances.
@@ -43,8 +61,85 @@ async def _drain(stream: asyncio.StreamReader | None, buf: deque[str]) -> None:
         buf.append(line.decode("utf-8", errors="replace").rstrip("\n"))
 
 
+async def _watch_and_notify(entry: _BgEntry) -> None:
+    """P-8 — await proc exit, then fire the Notification hook.
+
+    Defensive: every step is wrapped because this runs as a fire-and-
+    forget task under the agent's event loop. A raise here would surface
+    as a "Task exception was never retrieved" warning AND silently drop
+    the agent's auto-notification, so we'd rather log + move on than
+    propagate.
+
+    The watcher waits for the read-drain tasks BEFORE constructing the
+    payload so the stdout / stderr buffers reflect everything the
+    process actually wrote — readline returns EOF only after the pipe
+    closes, which is after the process exits. Without this wait the
+    tail strings would race and could miss the last few hundred bytes.
+    """
+    try:
+        await entry.proc.wait()
+    except Exception:  # noqa: BLE001
+        logger.warning("bg watcher: proc.wait raised for pid=%d", entry.pid, exc_info=True)
+        return
+
+    # Drain any remaining buffered output. ``_drain`` returns when the
+    # stream EOFs — both should EOF shortly after the process exits.
+    for t in (entry.read_task_out, entry.read_task_err):
+        if t is None:
+            continue
+        try:
+            await asyncio.wait_for(t, timeout=2.0)
+        except (TimeoutError, Exception):  # noqa: BLE001
+            # Don't let a stuck reader block the notification.
+            t.cancel()
+
+    duration = max(0.0, time.monotonic() - entry.started_at)
+    exit_code = entry.proc.returncode if entry.proc.returncode is not None else -1
+
+    # Build payload + fire hook. Imports are local because background.py
+    # is loaded by the plugin loader's synthetic-module path; importing
+    # opencomputer.* at module top would require sys.path setup the loader
+    # already provides at register time, but local imports keep test
+    # isolation cleaner (each test's _load_module call is self-contained).
+    try:
+        from opencomputer.agent.bg_notify import (
+            BgProcessExit,
+            make_hook_context,
+            tail_chars,
+        )
+        from opencomputer.hooks.engine import engine as _hook_engine
+
+        payload = BgProcessExit(
+            session_id=entry.session_id,
+            tool_call_id=entry.tool_call_id,
+            exit_code=exit_code,
+            tail_stdout=tail_chars(list(entry.stdout_lines), 200),
+            tail_stderr=tail_chars(list(entry.stderr_lines), 200),
+            duration_seconds=duration,
+        )
+        ctx = make_hook_context(payload)
+        # ``fire_and_forget`` schedules every Notification subscriber.
+        # The bg_notify default subscriber stashes the system message;
+        # any user-side Notification subscribers (Telegram mirroring,
+        # audit logging) see the same context and can opt-in / out via
+        # the BG_PROCESS_EXIT_MARKER name on ctx.message.
+        _hook_engine.fire_and_forget(ctx)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "bg watcher: notification fire failed for pid=%d", entry.pid, exc_info=True
+        )
+
+
 async def _cleanup_all() -> None:
-    """Called on SessionEnd to kill any lingering processes."""
+    """Called on SessionEnd to kill any lingering processes.
+
+    P-8 — also cancels each entry's notify watcher. A SessionEnd-driven
+    cleanup means the agent is going away; firing a Notification into a
+    dead session would be wasted work (the drain side is keyed on
+    session id, so the system message would never be consumed). Cancel
+    explicitly so the watcher returns cleanly without producing a stale
+    payload.
+    """
     for entry in list(_PROCESSES.values()):
         try:
             if entry.proc.returncode is None:
@@ -56,6 +151,8 @@ async def _cleanup_all() -> None:
         except ProcessLookupError:
             pass
         finally:
+            if entry.notify_task is not None and not entry.notify_task.done():
+                entry.notify_task.cancel()
             _PROCESSES.pop(entry.pid, None)
 
 
@@ -107,9 +204,31 @@ class StartProcessTool(BaseTool):
                 content=f"Error starting process: {type(e).__name__}: {e}",
                 is_error=True,
             )
-        entry = _BgEntry(pid=proc.pid, proc=proc, command=cmd)
+        # P-8 — capture context the watcher needs at start time. We grab
+        # the active session id BEFORE spawning the watcher so a session
+        # that ends mid-run still routes the eventual exit notification
+        # to the original session (the agent loop's drain is keyed on id,
+        # not "currently active session"; a dead session sees no harm).
+        try:
+            from opencomputer.agent.bg_notify import current_session_id
+
+            session_id = current_session_id()
+        except Exception:  # noqa: BLE001 — defensive
+            session_id = ""
+        entry = _BgEntry(
+            pid=proc.pid,
+            proc=proc,
+            command=cmd,
+            tool_call_id=call.id,
+            session_id=session_id,
+            started_at=time.monotonic(),
+        )
         entry.read_task_out = asyncio.create_task(_drain(proc.stdout, entry.stdout_lines))
         entry.read_task_err = asyncio.create_task(_drain(proc.stderr, entry.stderr_lines))
+        # P-8 — auto-notify watcher. Fire-and-forget; the task is held on
+        # the entry so KillProcess + cleanup can cancel it explicitly to
+        # avoid a "Task was destroyed but pending" warning at shutdown.
+        entry.notify_task = asyncio.create_task(_watch_and_notify(entry))
         _PROCESSES[proc.pid] = entry
         return ToolResult(
             tool_call_id=call.id,
