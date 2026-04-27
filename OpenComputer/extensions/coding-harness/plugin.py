@@ -112,6 +112,16 @@ def register(api) -> None:  # PluginAPI duck-typed
     api.register_injection_provider(AcceptEditsModeInjectionProvider())
     api.register_injection_provider(ReviewModeInjectionProvider())
 
+    # Tier B item 19 — auto-fetch URLs in incoming user messages so the
+    # agent sees the article/page content inline alongside the message
+    # without having to call WebFetch first. SSRF-guarded + cached
+    # per-session. Toggleable via
+    # ``opencomputer.agent.link_understanding.DEFAULT_CONFIG.enabled``.
+    from opencomputer.agent.injection_providers import (
+        LinkUnderstandingInjectionProvider,
+    )
+    api.register_injection_provider(LinkUnderstandingInjectionProvider())
+
     # Hooks — 7 total. Scope-check runs first (most deny-ey), then plan-block,
     # then auto-checkpoint, then post-edit-review. Session bootstrap / cleanup
     # are on their own events. The bg-notify subscriber listens on
