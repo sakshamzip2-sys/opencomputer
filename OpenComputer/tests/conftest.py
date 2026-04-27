@@ -8,6 +8,7 @@ imported with underscores in test code:
     extension modules via the underscore form Python requires.)
 2.  extensions.aws_bedrock_provider → extensions/aws-bedrock-provider/
 3.  extensions.browser_bridge → extensions/browser-bridge/
+4.  extensions.ambient_sensors → extensions/ambient-sensors/
 
 The aliases are injected into sys.modules BEFORE any test module is collected.
 """
@@ -24,6 +25,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _EXT_DIR = _PROJECT_ROOT / "extensions"
 _CH_DIR = _EXT_DIR / "coding-harness"
 _BEDROCK_DIR = _EXT_DIR / "aws-bedrock-provider"
+_AMBIENT_DIR = _EXT_DIR / "ambient-sensors"
 
 
 def _ensure_extensions_pkg() -> None:
@@ -129,6 +131,46 @@ def _register_browser_bridge_alias() -> None:
             spec.loader.exec_module(sub_mod)
 
 
+def _register_ambient_sensors_alias() -> None:
+    """Register extensions.ambient_sensors → extensions/ambient-sensors/.
+
+    Mirrors the browser_bridge pattern (eager exec on first import) — the
+    ambient-sensors plugin dir is hyphenated, so tests import the Python
+    modules via the underscore form. Only ``foreground.py`` exists in T2;
+    later tasks (T3-T6) add ``sensitive_apps.py``, ``pause_state.py``,
+    ``daemon.py``, and ``plugin.py``. The loop below skips files that
+    don't yet exist, so this stays correct as the plugin grows.
+    """
+    _ensure_extensions_pkg()
+
+    if not _AMBIENT_DIR.exists():
+        # Directory does not exist yet (e.g. on a stale checkout). Register
+        # nothing; later test imports will fail with a clear ModuleNotFoundError.
+        return
+
+    if "extensions.ambient_sensors" not in sys.modules:
+        mod = types.ModuleType("extensions.ambient_sensors")
+        mod.__path__ = [str(_AMBIENT_DIR)]
+        mod.__package__ = "extensions.ambient_sensors"
+        sys.modules["extensions.ambient_sensors"] = mod
+
+    for sub in ("foreground", "sensitive_apps", "pause_state", "daemon", "plugin"):
+        full_name = f"extensions.ambient_sensors.{sub}"
+        if full_name in sys.modules:
+            continue
+        init = _AMBIENT_DIR / f"{sub}.py"
+        if not init.exists():
+            continue
+        spec = importlib.util.spec_from_file_location(full_name, str(init))
+        if spec is None or spec.loader is None:
+            continue
+        sub_mod = importlib.util.module_from_spec(spec)
+        sub_mod.__package__ = "extensions.ambient_sensors"
+        sys.modules[full_name] = sub_mod
+        spec.loader.exec_module(sub_mod)
+
+
 _register_coding_harness_alias()
 _register_aws_bedrock_provider_alias()
 _register_browser_bridge_alias()
+_register_ambient_sensors_alias()
