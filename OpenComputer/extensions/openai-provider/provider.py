@@ -10,9 +10,13 @@ proxy quirks — the official SDK already sends what proxies expect.
 
 from __future__ import annotations
 
+import base64
 import json
+import logging
+import mimetypes
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -58,6 +62,72 @@ def _record_429(exc: OpenAIRateLimitError) -> None:
         except Exception:
             headers = None
     record_rate_limit(_RATE_GUARD_PROVIDER, headers=headers)
+
+
+_log = logging.getLogger("opencomputer.providers.openai")
+
+
+_OPENAI_SUPPORTED_IMAGE_MEDIA_TYPES: tuple[str, ...] = (
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+)
+
+
+def _build_openai_multimodal_content(
+    *, text: str, image_paths: list[str]
+) -> list[dict[str, Any]]:
+    """Build OpenAI Chat-Completions content array combining text + images.
+
+    OpenAI's multimodal shape is ``[{"type": "text", "text": ...},
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]``
+    — different from Anthropic's ``image / source`` shape but the same
+    inputs (path on disk, base64 the bytes, infer media type via
+    ``mimetypes``). Skips unreadable / unsupported / >20 MB attachments
+    with a WARNING log; never raises so a bad attachment doesn't kill
+    the turn.
+
+    Order: text first, then images — OpenAI's vision examples lead with
+    that shape.
+    """
+    blocks: list[dict[str, Any]] = []
+    if text:
+        blocks.append({"type": "text", "text": text})
+    for path_str in image_paths:
+        path = Path(path_str)
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            _log.warning("image attachment unreadable: %s (%s)", path, exc)
+            continue
+        if len(data) > 20 * 1024 * 1024:
+            _log.warning(
+                "image attachment over 20 MB cap; skipping: %s (%d bytes)",
+                path,
+                len(data),
+            )
+            continue
+        media_type, _ = mimetypes.guess_type(str(path))
+        if media_type not in _OPENAI_SUPPORTED_IMAGE_MEDIA_TYPES:
+            _log.warning(
+                "image attachment has unsupported media type %r; skipping: %s",
+                media_type,
+                path,
+            )
+            continue
+        b64 = base64.b64encode(data).decode("ascii")
+        blocks.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{media_type};base64,{b64}"},
+            }
+        )
+    if not blocks:
+        # Edge case: every attachment was skipped AND text is empty.
+        # Send an empty text block so the API doesn't reject the request.
+        blocks.append({"type": "text", "text": text or ""})
+    return blocks
 
 
 class OpenAIProvider(BaseProvider):
@@ -138,7 +208,20 @@ class OpenAIProvider(BaseProvider):
                     }
                 )
             else:
-                out.append({"role": m.role, "content": m.content})
+                # User / assistant text message. If the message carries
+                # image attachments, build a multimodal content array
+                # (OpenAI vision shape — image_url with data: URI).
+                if m.attachments:
+                    out.append(
+                        {
+                            "role": m.role,
+                            "content": _build_openai_multimodal_content(
+                                text=m.content, image_paths=m.attachments
+                            ),
+                        }
+                    )
+                else:
+                    out.append({"role": m.role, "content": m.content})
         return out
 
     def _parse_response(self, resp: ChatCompletion) -> ProviderResponse:
