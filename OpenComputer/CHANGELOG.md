@@ -45,6 +45,70 @@ companion persona will reference this file in its system prompt overlay.
 entries, alias resolution, dispatch behavior, callback failure paths,
 and empty-title handling. Full suite: 3824 passing, 12 skipped.
 
+### Added (Curated skills import — surgical 10-item subset)
+
+Imported 10 specifically-valuable patterns from
+[`everything-claude-code`](https://github.com/affaan-m/everything-claude-code)
+(MIT) that close real gaps in OC's existing skill surface. Survey
+filtered ~250 ECC items down to these 10 via the "good enough already?"
+test against OC's existing 44 bundled skills + 31 tools + 22 plugins.
+
+#### PRP workflow (5 commands)
+
+Product-Requirement-Prompt pipeline: opinionated end-to-end flow from
+problem-first PRD -> implementation plan -> code -> PR -> commit. OC had
+`/plan` and `/code-review` but no structured PM-grade product spec
+workflow.
+
+- `prp-prd` — Interactive PRD generator (problem-first, hypothesis-driven)
+- `prp-plan` — Implementation plan from a PRD
+- `prp-implement` — Execute the plan
+- `prp-pr` — Open PR with full context
+- `prp-commit` — Structured commit with traceability
+
+#### Adversarial review trio (GAN harness pattern)
+
+Inspired by Anthropic's harness-design paper (March 2026). Three agents
+that collaborate on iterative critique:
+
+- `gan-generator` — Builds the candidate
+- `gan-evaluator` — Tests and scores against rubric (ruthlessly strict)
+- `gan-planner` — Plans next iteration based on evaluator feedback
+
+Different angle from straight code-review; useful for UI/UX iteration
+where evaluator runs the live app via Playwright.
+
+#### Specific-angle review (1 agent)
+
+- `silent-failure-hunter` — Catches `except Exception: pass`, swallowed
+  errors, fallback masking, missing error propagation. OC's generic
+  `code-review` skill doesn't focus on this specific anti-pattern set.
+
+#### Model routing (1 command)
+
+- `model-route` — Recommend best model tier (haiku/sonnet/opus) for the
+  current task by complexity + budget. Useful when the agent has access
+  to multiple providers and needs to pick deliberately.
+
+All 10 ship under `opencomputer/skills/<name>/SKILL.md` with the OC
+SKILL.md format (`name` + `description` frontmatter + source attribution
+comment). Source content preserved verbatim; only frontmatter adapted.
+`tests/test_curated_skills_import.py` enforces discoverability + format
+compliance.
+
+#### What was deliberately NOT imported
+
+ECC ships ~250 markdown items (183 skills + 47 agents + 79 commands).
+The other ~240 either:
+- Already exist in OC (44 bundled skills + plugin imports cover most of the curated good ones).
+- Are language-specific (cpp/csharp/dart/flutter/go/java/kotlin/rust/swift) — only valuable to users coding in those languages.
+- Are vertical-business (carrier-relationship-management, healthcare-reviewer) — narrow use cases.
+- Duplicate existing OC tools/skills.
+
+The "good enough already?" filter is deliberate. Bulk-importing the
+remaining ~240 would add discovery friction without proportional value.
+Future imports should be similarly surgical and follow the gap-test.
+
 ### Added (Ambient foreground sensor — Phase 1, opt-in cross-platform observation)
 
 OpenComputer now ships a cross-platform, opt-in ambient sensor that
