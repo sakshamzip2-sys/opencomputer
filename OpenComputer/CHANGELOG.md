@@ -4,6 +4,44 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Browser Control — Playwright-based automation)
+
+OpenComputer can now control a browser. Default OFF; opt in by installing
+`opencomputer[browser]` + running `playwright install chromium`. Five
+new tools — `browser_navigate`, `browser_click`, `browser_fill`,
+`browser_snapshot`, `browser_scrape` — all isolated by default (no
+shared cookies / login).
+
+- `extensions/browser-control/` — new plugin (~520 LOC) with browser.py
+  Playwright wrapper + tools.py 5 BaseTool subclasses + privacy-contract
+  README.
+- 5 new F1 capabilities: `browser.navigate`, `browser.click`,
+  `browser.fill` (EXPLICIT — can submit forms); `browser.snapshot`,
+  `browser.scrape` (IMPLICIT — read-only).
+- Doctor preflight: `_check_browser_control_capable` reports playwright
+  install status.
+- AST no-egress test: 0 violations on first run.
+- 14+ unit tests (Playwright fully mocked).
+
+#### Privacy contract (hard, AST-enforced)
+
+- No direct HTTP-client imports in plugin source (Playwright handles
+  networking internally)
+- No screenshots / pixels — text accessibility tree only
+- Isolated browser context per call — no shared cookies or login
+- `browser_fill` is EXPLICIT-tier — agent must justify each call
+- Optional `OPENCOMPUTER_BROWSER_PROFILE_PATH` env var enables shared
+  profile (documented as risky)
+
+#### Cross-platform
+
+Playwright wheels are cross-platform (mac/linux/win). The chromium
+binary download is per-OS. Note: browser-control tests run only on the
+main pytest job (ubuntu, py 3.12 + 3.13) — not the cross-platform
+matrix — because Playwright in CI on macOS/Windows is slow (~5min per
+run) and the actual cross-platform claim is per-Playwright-wheel-
+coverage, not per-CI-run.
+
 ### Added (plugin_sdk — RegexClassifier abstraction)
 
 Codebase audit found 7+ files implementing the same shape: `_PATTERNS = [...]`
