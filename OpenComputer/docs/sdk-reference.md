@@ -923,6 +923,76 @@ layer, subclass both `TransportBase` and `BaseProvider`; delegate
 
 ---
 
+## Classifier abstraction (2026-04-28)
+
+Codebase audit found 7+ files implementing the same shape: a list of
+regex patterns mapped to category labels, iterated, with a verdict
+returned. This module abstracts that pattern so a future embedding /
+LLM back-end can plug in via the same protocol on call sites that
+benefit (vibe classifier, life-event detectors, persona classifier).
+
+### `Classifier`
+
+Runtime-checkable `Protocol` that a classifier back-end satisfies. One
+method:
+
+```python
+def classify(self, text: str) -> ClassifierVerdict[L]:
+    ...
+```
+
+`L` is the label type — `str`, `Enum`, or any other hashable. Each
+implementation can choose its own labels; the protocol is generic.
+
+### `RegexClassifier[L]`
+
+Regex-table back-end of `Classifier`. Construct with a sequence of
+`Rule[L]` plus an `AggregationPolicy`; the classifier is stateless
+and thread-safe.
+
+```python
+from plugin_sdk import RegexClassifier, Rule, AggregationPolicy
+import re
+
+c = RegexClassifier(
+    rules=[
+        Rule(pattern=re.compile(r"\bdrop\s+table\b", re.IGNORECASE),
+             label="sql_drop", severity="critical"),
+        Rule(pattern=re.compile(r"\brm\s+-rf"), label="destructive_rm"),
+    ],
+    policy=AggregationPolicy.ALL_MATCHES,
+)
+verdict = c.classify(user_input)
+if verdict.has_match:
+    log.warning("triggered: %s", verdict.matched_labels)
+```
+
+### `Rule[L]`
+
+Frozen dataclass: `(pattern, label, weight=1.0, severity="", description="")`.
+`weight` is only consulted by `WEIGHTED_SUM` policies; `severity` and
+`description` are advisory metadata for audit output.
+
+### `ClassifierVerdict[L]`
+
+Frozen dataclass returned by `classify`. Fields:
+
+- `matched_labels: list[L]` — distinct labels that fired, in policy order
+- `weights_by_label: dict[L, float]` — accumulated weights (only populated for `WEIGHTED_SUM`)
+- `triggered_rules: tuple[Rule[L], ...]` — every Rule object that matched (audit trail)
+- `has_match: bool` — convenience property
+- `top_label: L | None` — convenience property; first entry of `matched_labels` or None
+
+### `AggregationPolicy`
+
+Enum that selects how multiple matched rules combine into a verdict:
+
+- `FIRST_MATCH` — return the first matching rule's label only. Rule order encodes priority.
+- `ALL_MATCHES` — return every matched label, deduped, in rule order.
+- `WEIGHTED_SUM` — accumulate `Rule.weight` per label; return labels ranked descending.
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute

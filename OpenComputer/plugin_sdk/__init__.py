@@ -10,6 +10,13 @@ backwards-compatible guarantees across minor releases.
 __version__ = "0.1.0"
 
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
+from plugin_sdk.classifier import (
+    AggregationPolicy,
+    Classifier,
+    ClassifierVerdict,
+    RegexClassifier,
+    Rule,
+)
 from plugin_sdk.consent import (
     CapabilityClaim,
     ConsentDecision,
@@ -135,6 +142,12 @@ __all__ = [
     "Usage",
     "BaseChannelAdapter",
     "ChannelCapabilities",
+    # classifier abstraction (2026-04-28)
+    "AggregationPolicy",
+    "Classifier",
+    "ClassifierVerdict",
+    "RegexClassifier",
+    "Rule",
     # hooks
     "HookEvent",
     "HookContext",

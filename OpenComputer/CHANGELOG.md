@@ -4,6 +4,33 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (plugin_sdk — RegexClassifier abstraction)
+
+Codebase audit found 7+ files implementing the same shape: `_PATTERNS = [...]`
++ iterate + match → label. Each one re-rolled its own pattern table,
+weight conventions, result dataclass, and test harness. This change
+ships the shared abstraction:
+
+- `plugin_sdk.Classifier[L]` — `Protocol[L]` with `classify(text) -> ClassifierVerdict[L]`. Future `EmbeddingClassifier` / `LLMClassifier` plug in via the same protocol.
+- `plugin_sdk.RegexClassifier[L]` — regex back-end with three aggregation policies: `FIRST_MATCH` (priority order via rule order), `ALL_MATCHES` (fan-out detectors), `WEIGHTED_SUM` (instruction_detector style).
+- `plugin_sdk.Rule[L]` — frozen dataclass: `(pattern, label, weight, severity, description)`.
+- `plugin_sdk.ClassifierVerdict[L]` — frozen dataclass: `matched_labels`, `weights_by_label`, `triggered_rules`, `has_match`, `top_label`.
+
+### Changed (vibe + JobChange life-event use the abstraction)
+
+- `opencomputer/agent/vibe_classifier.py` — `classify_vibe()` and `VALID_VIBES` API unchanged. Implementation now uses `RegexClassifier` with `FIRST_MATCH` policy; rule order encodes priority (stuck > frustrated > excited > tired > curious > calm).
+- `opencomputer/awareness/life_events/job_change.py` — `JobChange.consider_event` uses `RegexClassifier` with `FIRST_MATCH` to surface the first matched trigger label. Same patterns + thresholds + payload shape.
+
+### Out of scope (deferred to follow-up PRs)
+
+- Migrating the security classifiers (threat scanners, bash safety, python denylist, sensitive-app filter, instruction detector) — separate PRs since they're security-critical and need targeted review.
+- Migrating the persona auto-classifier — its compound logic (foreground app + state-query + file extensions + time of day) doesn't cleanly fit `RegexClassifier`. Stays as-is.
+- Embedding back-end — separate PR. Will be the first non-regex `Classifier` implementation, likely targeting vibe + life-event detectors first.
+
+### Tests
+
+17 new tests in `tests/test_plugin_sdk_classifier.py` covering each policy + protocol satisfaction + generics + empty input. All 14 vibe tests + 3 JobChange tests + companion tests pass unchanged (refactor is invisible to consumers). Full suite 4046 passing, 13 skipped.
+
 ### Added (Auto skill evolution — close the Hermes "self-improving skills" gap)
 
 OpenComputer can now **automatically detect reusable patterns from
