@@ -50,7 +50,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     title         TEXT,
     message_count INTEGER DEFAULT 0,
     input_tokens  INTEGER DEFAULT 0,
-    output_tokens INTEGER DEFAULT 0
+    output_tokens INTEGER DEFAULT 0,
+    vibe          TEXT,    -- A.4 (2026-04-27): per-session emotional state
+                           -- (frustrated|excited|tired|curious|calm|stuck|"")
+    vibe_updated  REAL     -- A.4: when vibe was last classified (epoch seconds)
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -255,6 +258,21 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
             # Column already exists (fresh DB built from v1 DDL that
             # already carries these columns, or prior partial migration).
             pass
+    # A.4 (2026-04-27): per-session vibe column for the companion mood
+    # thread. ``vibe`` is one of {frustrated, excited, tired, curious,
+    # calm, stuck} or NULL (not yet classified). ``vibe_updated`` is the
+    # epoch timestamp of the last classification.
+    for col_def in (
+        ("sessions", "vibe", "TEXT"),
+        ("sessions", "vibe_updated", "REAL"),
+    ):
+        table, col, typ = col_def
+        try:
+            conn.execute(
+                f'ALTER TABLE {table} ADD COLUMN "{col}" {typ}'
+            )
+        except sqlite3.OperationalError:
+            pass
 
 
 def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
@@ -327,6 +345,8 @@ _EXPECTED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("messages", "reasoning_details", "TEXT"),
     ("messages", "codex_reasoning_items", "TEXT"),
     ("messages", "attachments", "TEXT"),
+    ("sessions", "vibe", "TEXT"),
+    ("sessions", "vibe_updated", "REAL"),
     ("episodic_events", "dreamed_into", "INTEGER"),
 )
 
@@ -508,6 +528,56 @@ class SessionDB:
                 "UPDATE sessions SET title = ? WHERE id = ?",
                 (title, session_id),
             )
+
+    # ─── A.4 mood thread (2026-04-27) ─────────────────────────────
+
+    def get_session_vibe(self, session_id: str) -> tuple[str | None, float | None]:
+        """Return ``(vibe, last_updated_epoch)`` for the session.
+
+        ``vibe`` is one of ``frustrated|excited|tired|curious|calm|stuck``
+        or ``None`` if not yet classified. ``last_updated_epoch`` is the
+        ``time.time()`` value when the classifier last wrote, or None.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT vibe, vibe_updated FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return (None, None)
+        vibe = row["vibe"]
+        ts = row["vibe_updated"]
+        return (vibe if vibe else None, float(ts) if ts is not None else None)
+
+    def set_session_vibe(self, session_id: str, vibe: str) -> None:
+        """Persist ``vibe`` (and stamp ``vibe_updated`` = now) on the session.
+
+        Vibes are advisory companion-context markers — wrong values won't
+        crash anything, the companion overlay just gets bad anchors.
+        Caller is responsible for picking from the supported vocabulary.
+        """
+        with self._txn() as conn:
+            conn.execute(
+                "UPDATE sessions SET vibe = ?, vibe_updated = ? WHERE id = ?",
+                (vibe, time.time(), session_id),
+            )
+
+    def list_recent_session_vibes(self, limit: int = 5) -> list[dict[str, Any]]:
+        """Return the N most-recent sessions that have a vibe classified.
+
+        Used by the companion overlay to surface "you sounded frustrated
+        yesterday" — the agent can reference the previous-session vibe
+        when the user returns.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, title, vibe, vibe_updated, started_at "
+                "FROM sessions "
+                "WHERE vibe IS NOT NULL AND vibe != '' "
+                "ORDER BY vibe_updated DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ─── messages ─────────────────────────────────────────────────
 
