@@ -4,6 +4,41 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Voice Mode — continuous push-to-talk)
+
+OpenComputer can now hold a voice conversation. Default OFF; opt in with
+`opencomputer voice talk`. Cross-platform (macOS/Linux/Windows) with
+local-Whisper fallback (mlx-whisper on macOS Apple Silicon, whisper-cpp
+elsewhere) — no OpenAI key required.
+
+- Audio capture via sounddevice (lazy import; headless-safe).
+- VAD gating via webrtcvad (filters non-speech).
+- STT pipeline: OpenAI Whisper API → mlx-whisper → whisper-cpp
+  (auto-detected; `--local` forces local).
+- TTS playback via existing voice/tts.py + sounddevice + barge-in
+  (spacebar interrupts mid-playback).
+- Main orchestrator: capture → VAD → STT → AgentLoop → TTS loop,
+  failure-isolated per turn.
+- Doctor preflight (sounddevice + audio device + webrtcvad + at least
+  one STT backend).
+- AST no-egress test guards against direct network imports in plugin
+  source.
+- 50+ tests across audio_capture, vad, stt, tts_playback, orchestrator,
+  doctor, and the no-egress contract.
+
+Privacy: audio buffers are RAM-only (never persisted). VAD + push-to-talk
+required (no continuous recording). All Whisper calls go through the
+existing cost-guarded `opencomputer.voice` infrastructure.
+
+Optional install extras:
+
+- `pip install opencomputer[voice]` — base (sounddevice + webrtcvad +
+  soundfile)
+- `pip install opencomputer[voice-local]` — cross-platform local STT
+  (whisper-cpp)
+- `pip install opencomputer[voice-mlx]` — macOS Apple Silicon local STT
+  (mlx-whisper)
+
 ### Added (Auto skill evolution — close the Hermes "self-improving skills" gap)
 
 OpenComputer can now **automatically detect reusable patterns from

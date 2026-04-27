@@ -70,14 +70,24 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y xclip
 
+      - name: Install Linux PortAudio (for voice-mode sounddevice)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y libportaudio2
+
       - name: Install dependencies
+        # Voice extras are needed for tests/test_voice_mode_*.py (the VAD
+        # + audio_capture tests import webrtcvad / sounddevice directly).
+        # ``voice-mlx`` is intentionally NOT installed in CI — the wheel is
+        # macOS-Apple-Silicon only and would fail on the linux/windows
+        # runners. The voice-mode plugin auto-detects backends, so absence
+        # of mlx-whisper is fine.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,voice]"
 
-      - name: Run introspection + AGPL guard + doctor + ambient + skill-evolution tests
+      - name: Run introspection + AGPL guard + doctor + ambient + skill-evolution + voice-mode tests
         # Explicit `shell: bash` so glob expansion works uniformly across
         # all three OSes — PowerShell (Windows default) doesn't expand
         # `*.py` the way bash does and would pass the literal star to pytest.
         shell: bash
-        run: pytest tests/test_introspection_*.py tests/test_no_agpl_imports.py tests/test_doctor_introspection_checks.py tests/test_ambient_*.py tests/test_skill_evolution_*.py -v --tb=short
+        run: pytest tests/test_introspection_*.py tests/test_no_agpl_imports.py tests/test_doctor_introspection_checks.py tests/test_ambient_*.py tests/test_skill_evolution_*.py tests/test_voice_mode_*.py -v --tb=short
