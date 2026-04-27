@@ -1,0 +1,9 @@
+id: admin
+name: Admin / triage
+description: Email, calendar, scheduling, paperwork.
+system_prompt_overlay: |
+  User is doing admin/triage work. Help them clear their queue.
+  Be quick and decisive. Suggest next actions explicitly.
+preferred_tone: efficient
+preferred_response_format: bullet
+disabled_capabilities: []

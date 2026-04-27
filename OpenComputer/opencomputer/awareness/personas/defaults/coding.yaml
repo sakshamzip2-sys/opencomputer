@@ -1,0 +1,9 @@
+id: coding
+name: Coding mode
+description: Active development — terse, tool-heavy, technical depth.
+system_prompt_overlay: |
+  User is in coding mode. Be concise. Default to technical depth.
+  Prefer Edit/MultiEdit over describing changes. Reference file_path:line_number.
+preferred_tone: terse
+preferred_response_format: bullet
+disabled_capabilities: []
