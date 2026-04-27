@@ -1,36 +1,40 @@
-"""OpenComputer MCP server — exposes session history to MCP clients.
+"""OpenComputer MCP server — exposes OC's session history + send-out path to MCP clients.
 
-Lets external MCP clients (Claude Code, Cursor, …) query OC's sessions
-and consent audit chain over stdio. Run via ``opencomputer mcp serve``.
+Lets external MCP clients (Claude Code, Cursor, …) query OC's sessions,
+long-poll for new messages, and send messages back out through OC's
+live channel adapters — all over stdio. Run via ``opencomputer mcp
+serve``.
 
-Bridges OC ↔ Claude Code: when Saksham is coding in Claude Code and
-wants to reference a discussion that happened in OC chat (Telegram /
-CLI / cron output), Claude Code can call ``sessions_list`` /
-``session_get`` / ``messages_read`` to surface it.
+The bidirectional bridge: Claude Code reading + replying on Telegram
+via OC, without Saksham having to context-switch between the two.
 
-Read-only tools currently exposed (Tier-A item 14 expanded the surface
-from 5 → 7):
+Read-only tools (7):
 
 - ``sessions_list(limit=20)`` — list recent sessions.
 - ``session_get(session_id)`` — get one session's metadata.
 - ``messages_read(session_id, limit=100)`` — read messages from a session.
 - ``recall_search(query, limit=20)`` — FTS5 search across session history.
 - ``consent_history(capability=None, limit=50)`` — F1 audit-log entries.
-- ``channels_list()`` — distinct platforms with active sessions  (NEW)
-- ``events_poll(since_message_id=0, limit=50)`` — incremental poll for
-  new messages across all sessions (NEW)
+- ``channels_list()`` — distinct platforms with active sessions.
+- ``events_poll(since_message_id=0, limit=50)`` — incremental cursor poll.
 
-Honest deferral — three Hermes write tools are NOT yet ported:
+Write tools + long-poll (3, all Tier-A item 14 follow-up):
 
-- ``messages_send`` — requires IPC with the gateway daemon (which holds
-  the live channel adapter connections to Telegram / Discord / etc.).
-  Implementing properly needs a SQLite ``pending_outgoing`` queue that
-  the gateway consumes; in-progress design.
-- ``permissions_respond`` — same IPC requirement against the F1
-  pending-consent queue.
-- ``events_wait`` — long-poll. The current MCP wire protocol returns one
-  response per call, so true server-push isn't supported until the MCP
-  spec evolves; clients can still ``events_poll`` on a timer.
+- ``messages_send(platform, chat_id, body)`` — enqueue outbound; the
+  gateway daemon picks it up within ~1s and dispatches via the live
+  adapter for ``platform``. Returns immediately with a queue id.
+- ``messages_send_status(message_id)`` — look up delivery state of a
+  previously-queued send.
+- ``events_wait(since_message_id, timeout_s)`` — long-poll wrapper
+  around ``events_poll`` that blocks until a new message arrives or
+  timeout (capped at 120s).
+
+Honest deferral — one Hermes tool not yet ported:
+
+- ``permissions_respond`` — needs F1 pending-consent queue surface
+  exposed; the F1 audit chain is read-only today. Implementing safely
+  means designing a write-back path that doesn't bypass the gateway's
+  consent-grant flow. Deferred to a focused F1 follow-up.
 
 Pattern: high-level ``mcp.server.fastmcp.FastMCP`` decorators (clean +
 type-checked) over ``mcp.server.stdio.stdio_server()`` transport
@@ -284,6 +288,144 @@ def build_server() -> FastMCP:
                 # or a fresh profile. Return empty rather than raise.
                 return []
             return [dict(r) for r in rows]
+
+    @server.tool()
+    async def messages_send(
+        platform: str, chat_id: str, body: str
+    ) -> dict[str, Any]:
+        """Send a message via the gateway daemon's channel adapter.
+
+        Writes to OC's outgoing-message queue; the gateway daemon picks
+        it up within ~1s and dispatches via the live adapter for
+        ``platform``. Returns immediately with the queue id; the caller
+        should not assume delivery synchronously.
+
+        Args:
+            platform: One of ``"telegram"``, ``"discord"``, ``"slack"``,
+                etc. Must match a platform with a paired adapter on the
+                gateway. Use ``channels_list()`` to discover the active
+                set.
+            chat_id: Platform-native chat / channel / DM identifier
+                (string form). For Telegram this is the chat id (e.g.
+                ``"123456789"``); for Discord it's the channel id.
+            body: Message text. Plaintext only — adapter-side rendering
+                handles platform-native formatting.
+
+        Returns:
+            Dict with ``id`` (queue row id), ``status`` (always
+            ``"queued"`` here — the queue id is the source of truth;
+            check ``messages_send_status`` for delivery state), and
+            ``note`` (one-line user-facing hint about what to do next).
+
+        Notes:
+            - If no gateway daemon is running, the row stays ``queued``
+              indefinitely. Either start the gateway with
+              ``opencomputer gateway`` or use the ``opencomputer
+              outgoing list`` CLI to inspect.
+            - Failures (auth, chat not found) get marked ``failed`` on
+              the queue row with the error text — fetch via
+              ``messages_send_status``.
+        """
+        from opencomputer.gateway.outgoing_queue import OutgoingQueue
+
+        queue = OutgoingQueue(_home() / "sessions.db")
+        msg = queue.enqueue(platform=platform, chat_id=chat_id, body=body)
+        return {
+            "id": msg.id,
+            "status": msg.status,
+            "note": (
+                "Queued for delivery. The gateway daemon drains the queue "
+                "every second; if no gateway is running the message waits."
+            ),
+        }
+
+    @server.tool()
+    def messages_send_status(message_id: str) -> dict[str, Any] | None:
+        """Look up the delivery state of a previously-queued send.
+
+        Args:
+            message_id: The id returned by ``messages_send``.
+
+        Returns:
+            Dict with ``id``, ``platform``, ``chat_id``, ``status``
+            (``queued | sent | failed | expired``), ``error`` (if
+            failed), ``enqueued_at``, ``sent_at``, ``attempts``. Or
+            ``None`` if no such id exists.
+        """
+        from opencomputer.gateway.outgoing_queue import OutgoingQueue
+
+        queue = OutgoingQueue(_home() / "sessions.db")
+        msg = queue.get(message_id)
+        if msg is None:
+            return None
+        return {
+            "id": msg.id,
+            "platform": msg.platform,
+            "chat_id": msg.chat_id,
+            "body": msg.body,
+            "status": msg.status,
+            "error": msg.error,
+            "enqueued_at": msg.enqueued_at,
+            "sent_at": msg.sent_at,
+            "attempts": msg.attempts,
+        }
+
+    @server.tool()
+    async def events_wait(
+        since_message_id: int = 0,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 1.0,
+    ) -> dict[str, Any]:
+        """Long-poll for new messages — block until at least one arrives or timeout.
+
+        Wraps ``events_poll`` with a sleep loop. Returns the same shape
+        as ``events_poll``. Use this from MCP clients that want
+        real-time-ish notifications without a busy poll.
+
+        Args:
+            since_message_id: Cursor — return messages with id > this.
+                Same semantics as ``events_poll``.
+            timeout_s: Max seconds to wait. Default 30. Caps at 120 to
+                avoid pathological MCP timeouts; clients wanting longer
+                holds should call again.
+            poll_interval_s: How often to check (default 1s).
+
+        Returns:
+            Same shape as ``events_poll`` — ``{messages, next_cursor}``.
+            On timeout returns ``{messages: [], next_cursor:
+            since_message_id}``.
+        """
+        bounded_timeout = max(0.5, min(timeout_s, 120.0))
+        bounded_poll = max(0.1, min(poll_interval_s, 5.0))
+        deadline = asyncio.get_event_loop().time() + bounded_timeout
+        cursor = since_message_id
+        while True:
+            # Inline the same query as events_poll — duplicating the SQL
+            # is cheaper than restructuring events_poll into a callable.
+            db_path = _home() / "sessions.db"
+            if db_path.exists():
+                with sqlite3.connect(str(db_path)) as conn:
+                    conn.row_factory = sqlite3.Row
+                    try:
+                        rows = conn.execute(
+                            "SELECT m.id, m.session_id, m.role, m.content, "
+                            "m.timestamp, s.platform "
+                            "FROM messages m "
+                            "JOIN sessions s ON m.session_id = s.id "
+                            "WHERE m.id > ? "
+                            "ORDER BY m.id ASC LIMIT 50",
+                            (cursor,),
+                        ).fetchall()
+                    except sqlite3.OperationalError:
+                        rows = []
+                if rows:
+                    msgs = [dict(r) for r in rows]
+                    return {"messages": msgs, "next_cursor": msgs[-1]["id"]}
+            # No new messages — sleep, retry until deadline.
+            now = asyncio.get_event_loop().time()
+            if now >= deadline:
+                return {"messages": [], "next_cursor": cursor}
+            await asyncio.sleep(min(bounded_poll, max(0.0, deadline - now)))
 
     return server
 

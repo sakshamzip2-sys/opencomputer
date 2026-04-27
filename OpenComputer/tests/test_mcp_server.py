@@ -31,10 +31,10 @@ class TestServerStructure:
         s = build_server()
         assert s.name == "opencomputer"
 
-    def test_seven_tools_registered(self) -> None:
-        # Tier-A item 14 added ``channels_list`` and ``events_poll`` to the
-        # original five — keep the assertion strict so future deletions are
-        # caught explicitly.
+    def test_ten_tools_registered(self) -> None:
+        # Original 5 + Tier-A item 14 (channels_list, events_poll) +
+        # Tier-A item 14 follow-up (messages_send, messages_send_status,
+        # events_wait) = 10 tools.
         s = build_server()
         tools = asyncio.run(s.list_tools())
         names = sorted(t.name for t in tools)
@@ -42,7 +42,10 @@ class TestServerStructure:
             "channels_list",
             "consent_history",
             "events_poll",
+            "events_wait",
             "messages_read",
+            "messages_send",
+            "messages_send_status",
             "recall_search",
             "session_get",
             "sessions_list",
