@@ -61,12 +61,15 @@ class WebSearchTool(BaseTool):
         return ToolSchema(
             name="WebSearch",
             description=(
-                "Search the web and return the top results as a markdown list. "
-                "Use this when you need current information outside training "
-                "data (news, recent docs, prices). Pair with WebFetch to read "
-                "a specific result in detail. Provider is configured via "
-                "`opencomputer config set tools.web_search.provider <name>`; "
-                "the model can override per-call by passing `provider`."
+                "Search the web; return the top results as a markdown list. Use this "
+                "when you need information that's likely beyond the model's training "
+                "cutoff — news, recent docs, current prices, today's headlines. The "
+                "result is a list of links and snippets; pair with WebFetch to read "
+                "the full text of a chosen result. Provider chain (DDG, Brave, Tavily, "
+                "Exa, Firecrawl) is configured via `opencomputer config set tools."
+                "web_search.provider <name>`; the model can override per-call via "
+                "`provider`. For library/SDK docs, prefer the Context7 MCP — it "
+                "returns curated, version-aware docs better than a generic web search."
             ),
             parameters={
                 "type": "object",

@@ -16,8 +16,14 @@ class GlobTool(BaseTool):
         return ToolSchema(
             name="Glob",
             description=(
-                "Find files matching a glob pattern. Returns paths sorted by modification "
-                "time (newest first). Supports recursive patterns like '**/*.py'."
+                "Find files matching a glob pattern, sorted by mtime (newest first). "
+                "Supports recursive globs like '**/*.py' or 'src/**/*.ts'. Use this when "
+                "you need to enumerate files by name or extension — what's in a "
+                "directory, every test file, recently-touched configs. Prefer Glob over "
+                "Bash `find` / `ls` / `git ls-files` since the result ordering is "
+                "predictable and the harness can route paths cleanly. For content "
+                "search (regex inside files), use Grep instead. Pattern is required; "
+                "results are capped at `max_results` (default 500) to avoid context blow-up."
             ),
             parameters={
                 "type": "object",

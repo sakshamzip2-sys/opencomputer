@@ -47,9 +47,14 @@ class WebFetchTool(BaseTool):
         return ToolSchema(
             name="WebFetch",
             description=(
-                "Fetch a URL and return its main text content (HTML stripped). "
-                "Use this when you need to read a web page — articles, docs, "
-                "blog posts, API references. Truncates long pages."
+                "Fetch a URL over HTTP(S) and return the visible text with HTML chrome "
+                "(scripts, styles, nav) stripped. Use this when you need to read an "
+                "article, doc page, blog post, or API reference end-to-end. Pair with "
+                "WebSearch — search returns links, fetch reads one. CAUTION: the page "
+                "is truncated to `max_chars` (default 8000) so very long pages lose "
+                "their tail; pass a larger cap if needed. Don't use WebFetch as a "
+                "browser — it can't run JS. For dynamic content, render via the "
+                "chrome-devtools or playwright MCP instead."
             ),
             parameters={
                 "type": "object",

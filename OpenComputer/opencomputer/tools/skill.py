@@ -36,9 +36,14 @@ class SkillTool(BaseTool):
         return ToolSchema(
             name="Skill",
             description=(
-                "Load and follow a saved skill by name. Returns the full SKILL.md "
-                "body so you can execute the steps it describes. Use `opencomputer "
-                "skills` (or your memory of available skills) to discover the name."
+                "Load a saved skill by id and follow its steps. Returns the full "
+                "SKILL.md body (frontmatter stripped). Use this when a previously-"
+                "captured procedural memory matches the current task — the skill body "
+                "tells you HOW. Discover names via `opencomputer skills` or skim your "
+                "skill index. Prefer Skill over re-deriving a workflow from scratch when "
+                "a relevant skill exists. To create or amend a skill, use SkillManage "
+                "instead. If the skill turns out to be wrong/stale, patch it via "
+                "SkillManage immediately rather than working around it silently."
             ),
             parameters={
                 "type": "object",

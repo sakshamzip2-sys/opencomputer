@@ -123,10 +123,18 @@ class TodoWriteTool(BaseTool):
         return ToolSchema(
             name="TodoWrite",
             description=(
-                "Track multi-step tasks across turns. Each call REPLACES the full list. "
-                "Use for: work requiring 3+ discrete steps, complex refactors, multi-file "
-                "changes. Exactly ONE item should be in_progress at a time. Update to "
-                "'completed' IMMEDIATELY after finishing a step; do not batch."
+                "Track multi-step tasks across turns. Each call REPLACES the full list "
+                "(send the complete new state every time — makes changes explicit). "
+                "Use for: work that requires 3+ discrete steps, complex refactors, "
+                "multi-file changes, anything where the user benefits from seeing "
+                "what's left. Each item has `id`, `content` (imperative: 'Add logging "
+                "to utils.py'), `activeForm` (gerund: 'Adding logging to utils.py'), "
+                "and `status` ∈ pending/in_progress/completed. Exactly ONE item should "
+                "be in_progress at a time (soft-enforced — multiple in_progress raises "
+                "an error). Update to 'completed' IMMEDIATELY after finishing a step; "
+                "do NOT batch updates. Don't use for trivial 1-2 step tasks; use only "
+                "when planning visibility actually helps. Persisted to the session DB "
+                "so it survives --resume."
             ),
             parameters={
                 "type": "object",

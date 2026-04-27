@@ -66,10 +66,15 @@ class AppleScriptRunTool(BaseTool):
         return ToolSchema(
             name="AppleScriptRun",
             description=(
-                "Run an AppleScript on macOS via osascript. Returns stdout "
-                "on success. Destructive keywords (empty trash / shutdown / "
-                "restart / delete / format / eject / rm -rf) are refused. "
-                "Set dry_run=true to return the script without executing."
+                "Run an AppleScript on macOS via osascript and return stdout. Use this "
+                "to control GUI apps (Notes, Reminders, Mail, Safari), trigger system "
+                "notifications, or automate Finder/System Events. CAUTION: Destructive "
+                "keywords (empty trash / shutdown / restart / delete / format / eject / "
+                "rm -rf) are refused outright by the denylist — defence-in-depth, NOT "
+                "the primary gate (the gate is PER_ACTION consent). Set dry_run=true "
+                "to inspect the script without executing it; review the output first if "
+                "you constructed the script from user input. Prefer AppleScriptRun over "
+                "Bash `osascript -e ...` since this path is denylisted + audited."
             ),
             parameters={
                 "type": "object",

@@ -36,9 +36,14 @@ class VoiceSynthesizeTool(BaseTool):
         return ToolSchema(
             name="VoiceSynthesize",
             description=(
-                "Convert text into spoken audio using OpenAI TTS. Returns the "
-                "absolute path of the generated audio file. Default format is "
-                "opus (good for chat platforms); pass `format` to override."
+                "Convert text into spoken audio via OpenAI TTS; returns the absolute "
+                "path of the generated file. Use this when the user wants you to speak "
+                "a reply out loud, generate a voice memo, or hand the answer to a chat "
+                "platform that prefers audio. Default format is opus (good for Telegram/"
+                "WhatsApp); pass `format` to override (mp3/wav/flac/aac/pcm). Default "
+                "voice is `alloy`; override with echo/fable/onyx/nova/shimmer. Network "
+                "call to OpenAI — incurs token cost; the underlying voice module is "
+                "cost-guarded but loud usage will still bill the account."
             ),
             parameters={
                 "type": "object",

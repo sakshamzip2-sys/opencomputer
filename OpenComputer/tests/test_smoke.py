@@ -93,7 +93,11 @@ def test_prompt_builder_renders() -> None:
     pb = PromptBuilder()
     out = pb.build(skills=[])
     assert "OpenComputer" in out
-    assert "Current working directory" in out
+    # V3.A-T3: the engineered base.j2 renames "Current working directory: X"
+    # → "Working directory: X" (under the "# System info" header). The
+    # earlier prose-line phrasing is gone — this assertion is the
+    # deliberate snapshot update.
+    assert "Working directory:" in out
 
 
 def test_memory_manager_writes_skill() -> None:

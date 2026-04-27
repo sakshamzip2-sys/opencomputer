@@ -15,9 +15,18 @@ class BashTool(BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="Bash",
-            description="Execute a bash command and return stdout+stderr. "
-            "Commands run in /bin/bash with a configurable timeout. "
-            "Use for scripted tasks, git, package management, file ops.",
+            description=(
+                "Execute a bash command in /bin/bash with a configurable timeout, "
+                "returning stdout+stderr+exit code. Use for git, package managers (npm/"
+                "pip/uv/cargo), build/test runners, and any shell pipeline. CAUTION: "
+                "this can mutate the filesystem and run arbitrary code — review the "
+                "command before invoking. Prefer Read/Edit/Write/Grep/Glob over Bash "
+                "'cat'/'sed'/'echo'/'grep'/'find' since the dedicated tools give you "
+                "line-numbered output and structured errors. Avoid long sleeps, "
+                "interactive prompts, and `git push --force` unless explicitly asked. "
+                "For long-running processes, use StartProcess instead so the call "
+                "doesn't block the agent loop."
+            ),
             parameters={
                 "type": "object",
                 "properties": {

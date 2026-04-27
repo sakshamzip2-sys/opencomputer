@@ -37,6 +37,7 @@ from opencomputer.tools.glob import GlobTool
 from opencomputer.tools.grep import GrepTool
 from opencomputer.tools.notebook_edit import NotebookEditTool
 from opencomputer.tools.push_notification import PushNotificationTool
+from opencomputer.tools.python_exec import PythonExec
 from opencomputer.tools.read import ReadTool
 from opencomputer.tools.recall import RecallTool
 from opencomputer.tools.registry import registry
@@ -218,6 +219,7 @@ def _register_builtin_tools() -> None:
     registry.register(ReadTool())
     registry.register(WriteTool())
     registry.register(BashTool())
+    registry.register(PythonExec())
     registry.register(GrepTool())
     registry.register(GlobTool())
     registry.register(SkillManageTool())
@@ -652,25 +654,19 @@ def _check_provider_key(provider_name: str) -> None:
         _offer_setup_or_exit(f"{key_env} is not set in your environment")
 
 
-@app.command()
-def chat(
-    resume: str = typer.Option(
-        "",
-        "--resume",
-        "-r",
-        help=(
-            "Resume a session. Pass a session id, or `last` for the most "
-            "recent, or `pick` for an interactive picker of the last 10."
-        ),
-    ),
-    plan: bool = typer.Option(
-        False, "--plan", help="Plan mode — agent describes actions, refuses destructive tools."
-    ),
-    no_compact: bool = typer.Option(
-        False, "--no-compact", help="Disable automatic context compaction (debugging)."
-    ),
+def _run_chat_session(
+    *,
+    resume: str,
+    plan: bool,
+    no_compact: bool,
+    yolo: bool = False,
 ) -> None:
-    """Start an interactive chat session."""
+    """Shared interactive REPL used by ``chat`` and ``code`` commands.
+
+    V3.A-T7 — extracted from ``chat`` so ``code`` can reuse the full
+    setup/loop without copy-paste. ``yolo`` threads through ``RuntimeContext``
+    so the consent layer can skip per-action prompts when the user opts in.
+    """
     _configure_logging_once()
     if not config_file_path().exists() and not _has_any_provider_configured():
         _offer_setup_or_exit("No OpenComputer config found")
@@ -711,7 +707,7 @@ def chat(
     n_agents = _discover_and_register_agents()
     n_settings_hooks = _register_settings_hooks(cfg)
     provider = _resolve_provider(cfg.model.provider)
-    runtime = RuntimeContext(plan_mode=plan)
+    runtime = RuntimeContext(plan_mode=plan, yolo_mode=yolo)
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
     mcp_mgr = MCPManager(tool_registry=registry)
 
@@ -757,6 +753,10 @@ def chat(
         console.print(f"[dim]hooks:   {n_settings_hooks} from settings.yaml[/dim]")
     if plan:
         console.print("[bold yellow]plan mode ON[/bold yellow] — destructive tools will be refused")
+    if yolo:
+        console.print(
+            "[bold red]yolo mode ON[/bold red] — per-action confirmation prompts skipped"
+        )
     if no_compact:
         console.print("[dim]compaction disabled[/dim]")
     if cfg.mcp.servers:
@@ -813,6 +813,73 @@ def chat(
             asyncio.run(_run_turn(user_input))
         except Exception as e:
             console.print(f"[bold red]error:[/bold red] {type(e).__name__}: {e}")
+
+
+@app.command()
+def chat(
+    resume: str = typer.Option(
+        "",
+        "--resume",
+        "-r",
+        help=(
+            "Resume a session. Pass a session id, or `last` for the most "
+            "recent, or `pick` for an interactive picker of the last 10."
+        ),
+    ),
+    plan: bool = typer.Option(
+        False, "--plan", help="Plan mode — agent describes actions, refuses destructive tools."
+    ),
+    no_compact: bool = typer.Option(
+        False, "--no-compact", help="Disable automatic context compaction (debugging)."
+    ),
+) -> None:
+    """Start an interactive chat session."""
+    _run_chat_session(resume=resume, plan=plan, no_compact=no_compact, yolo=False)
+
+
+@app.command()
+def code(
+    path: str | None = typer.Argument(
+        None, help="Working directory to start the agent in (defaults to cwd)."
+    ),
+    resume: str = typer.Option(
+        "",
+        "--resume",
+        "-r",
+        help=(
+            "Resume a session. Pass a session id, or `last` for the most "
+            "recent, or `pick` for an interactive picker of the last 10."
+        ),
+    ),
+    plan: bool = typer.Option(
+        False,
+        "--plan",
+        help="Start in plan mode — agent describes actions, refuses destructive tools.",
+    ),
+    yolo: bool = typer.Option(
+        False,
+        "--yolo",
+        help="Skip per-action confirmation prompts (USE WITH CAUTION).",
+    ),
+    no_compact: bool = typer.Option(
+        False, "--no-compact", help="Disable automatic context compaction (debugging)."
+    ),
+) -> None:
+    """Start the coding agent in [path] (or cwd). Snappy entry-point.
+
+    Mirrors ``opencomputer chat`` but is tailored for coding work — Edit,
+    MultiEdit, TodoWrite, RunTests etc. are enabled by default. Use
+    ``--plan`` for read-only discovery; ``--yolo`` to skip per-action
+    confirmation prompts.
+    """
+    if path:
+        target = os.path.abspath(path)
+        if not os.path.isdir(target):
+            console.print(f"[bold red]error:[/bold red] not a directory: {target}")
+            raise typer.Exit(code=1)
+        os.chdir(target)
+        console.print(f"[dim]cwd: {target}[/dim]")
+    _run_chat_session(resume=resume, plan=plan, no_compact=no_compact, yolo=yolo)
 
 
 @app.command()

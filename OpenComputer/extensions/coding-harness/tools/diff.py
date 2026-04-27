@@ -21,9 +21,15 @@ class CheckpointDiffTool(BaseTool):
         return ToolSchema(
             name="CheckpointDiff",
             description=(
-                "Show a unified diff between the most recent checkpoint and "
-                "current on-disk files. Pass `checkpoint_id` to diff against "
-                "a specific checkpoint instead."
+                "Show a unified diff between a checkpoint and the current on-disk "
+                "files. Use this AFTER a series of Edit/MultiEdit/Write calls when you "
+                "(or the user / reviewer) want to see what actually changed since the "
+                "last known-good state. Defaults to diffing against the most recent "
+                "checkpoint; pass `checkpoint_id` to diff against a specific one (use "
+                "Rewind(list_checkpoints=true) to discover ids). `context_lines` (default "
+                "3) controls the diff context width. Read-only — no files are touched. "
+                "Prefer CheckpointDiff over Bash 'git diff' for in-flight changes the "
+                "agent made: it diffs against the rewind store rather than git's index."
             ),
             parameters={
                 "type": "object",

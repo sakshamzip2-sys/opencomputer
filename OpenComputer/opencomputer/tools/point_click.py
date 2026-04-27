@@ -59,9 +59,14 @@ class PointAndClickTool(BaseTool):
         return ToolSchema(
             name="PointAndClick",
             description=(
-                "Click at absolute screen coordinates on macOS. "
-                "Requires Accessibility permission. Default left-click; "
-                "pass button='right' for right-click."
+                "Inject a mouse click at absolute screen coordinates (macOS only). "
+                "Requires Accessibility permission for the controlling process. Default "
+                "left-click; pass button='right' for right-click. CAUTION: this drives "
+                "the user's actual desktop — verify coordinates first via Screenshot or "
+                "ExtractScreenText so you don't click the wrong thing. PER_ACTION "
+                "consent prompts every call until promoted. For text input or app "
+                "control, prefer AppleScriptRun (more declarative). Coordinate range "
+                "is clamped to [0,8000]; clicks far off-screen are rejected."
             ),
             parameters={
                 "type": "object",

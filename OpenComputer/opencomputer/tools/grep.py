@@ -19,8 +19,14 @@ class GrepTool(BaseTool):
         return ToolSchema(
             name="Grep",
             description=(
-                "Search for a regex pattern in files. Uses ripgrep if available, "
-                "falls back to pure Python. Returns matching lines with file:line prefix."
+                "Search file contents by regex. Returns matches as `file:line:content`. "
+                "Backed by ripgrep when available (fast, .gitignore-aware), falls back to "
+                "pure Python otherwise. Use this for code search across a tree — finding "
+                "callers, definitions, error strings. Prefer Grep over Bash 'grep'/'rg' "
+                "so the harness can route results consistently. Pair with `glob` to "
+                "narrow by extension (e.g. glob='*.py'), and `case_insensitive` for "
+                "free-text search. For path-only searches (e.g. \"all *.ts files\"), use "
+                "the Glob tool instead — it's cheaper and sorts by mtime."
             ),
             parameters={
                 "type": "object",

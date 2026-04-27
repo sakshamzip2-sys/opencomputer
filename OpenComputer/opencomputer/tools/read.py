@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from opencomputer.tools._file_read_state import mark_read
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -15,9 +16,15 @@ class ReadTool(BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="Read",
-            description="Read the contents of a file from disk. Returns the text, "
-            "prefixed with line numbers. Supports optional offset and limit "
-            "for reading slices of large files.",
+            description=(
+                "Read a file from disk. Output is prefixed with line numbers so you can "
+                "reference exact lines back to the user. Use this for any path you need "
+                "to inspect — config, code, logs. Prefer Read over Bash 'cat'/'head'/"
+                "'tail': line-numbered output is LLM-friendly and the harness tracks "
+                "file state. Don't re-Read a file you just edited — Edit/Write would "
+                "have errored if the change failed. For large files, pass `offset`+`limit` "
+                "to slice instead of reading the whole thing. file_path must be absolute."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -70,6 +77,10 @@ class ReadTool(BaseTool):
                 content=f"Error reading {path}: {type(e).__name__}: {e}",
                 is_error=True,
             )
+
+        # Record that this path has been Read so Edit/MultiEdit can
+        # honour their "Read first" contract.
+        mark_read(path)
 
         lines = text.splitlines()
         offset = max(1, int(args.get("offset", 1)))

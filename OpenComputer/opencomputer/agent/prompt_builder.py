@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import platform
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -26,6 +27,78 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from opencomputer.agent.memory import SkillMeta
 
 _TRUNCATION_MARKER = "[earlier entries truncated]\n\n"
+
+#: V3.A-T8 — per-file size cap for workspace context loader. Keeps the
+#: prefix prompt bounded if a project ships a 10MB CLAUDE.md. Truncated
+#: files get a marker so the agent knows what happened.
+_WORKSPACE_FILE_CAP_BYTES = 100_000
+_WORKSPACE_TRUNCATION_NOTE = "\n\n[truncated — file exceeded 100KB cap]\n"
+
+
+def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> str:
+    """Find ``OPENCOMPUTER.md`` / ``CLAUDE.md`` / ``AGENTS.md`` from cwd or ancestors.
+
+    Walks up from ``start`` (default cwd) up to ``max_depth`` levels.
+    Returns concatenated content with file-tagged markers, or an empty
+    string if none found.
+
+    Per-file size is capped at ``_WORKSPACE_FILE_CAP_BYTES`` (100KB) to
+    prevent a misconfigured workspace file from blowing the prompt
+    budget; over-cap files are truncated with a visible marker so the
+    agent can ask for the full file if needed.
+
+    The ``seen_paths`` set deduplicates the same physical file across
+    iterations (e.g. via symlink or repeated visit), but distinct files
+    in different ancestors are all loaded — closer-to-cwd first, since
+    they reflect more-specific project conventions.
+    """
+    if start is None:
+        start = Path.cwd()
+    start = start.resolve()
+
+    # Files to check, in priority order. We collect ALL that exist, not
+    # just the highest-priority one — multiple files may coexist (e.g.
+    # both CLAUDE.md and AGENTS.md in the same repo).
+    target_names = ("OPENCOMPUTER.md", "CLAUDE.md", "AGENTS.md")
+
+    found: list[tuple[str, str]] = []
+    seen_paths: set[Path] = set()
+
+    current = start
+    # ``range(max_depth)`` iterates exactly ``max_depth`` times — each
+    # iteration inspects one directory level (start + max_depth-1
+    # ancestors). The break-on-root guard handles filesystems shallower
+    # than ``max_depth``.
+    for _ in range(max_depth):
+        for name in target_names:
+            candidate = current / name
+            if not candidate.is_file():
+                continue
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved in seen_paths:
+                continue
+            try:
+                content = candidate.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            seen_paths.add(resolved)
+            if len(content) > _WORKSPACE_FILE_CAP_BYTES:
+                content = content[:_WORKSPACE_FILE_CAP_BYTES] + _WORKSPACE_TRUNCATION_NOTE
+            found.append((name, content))
+        if current.parent == current:
+            break  # filesystem root reached
+        current = current.parent
+
+    if not found:
+        return ""
+
+    parts: list[str] = []
+    for name, content in found:
+        parts.append(f"## {name}\n\n{content.strip()}\n")
+    return "\n".join(parts)
 
 
 def _truncate_from_top(text: str, limit: int) -> str:
@@ -67,6 +140,25 @@ class PromptContext:
     #: string means "no user-model knowledge yet" — base.j2 omits the
     #: section accordingly.
     user_facts: str = ""
+    #: V3.A-T3 — operating-system label rendered into the system info block
+    #: (e.g. ``"Darwin"`` / ``"Linux"`` / ``"Windows"``). Defaults to the
+    #: live :func:`platform.system` value when ``PromptBuilder.build``
+    #: constructs the context, but downstream callers may override.
+    os_name: str = ""
+    #: V3.A-T3 — workspace-context slot reserved for T8 (CLAUDE.md /
+    #: OPENCOMPUTER.md / AGENTS.md aggregation). Defaults to ``""`` so
+    #: ``base.j2`` omits the section until the loader is wired. Existing
+    #: PromptContext consumers do not need to set this; the field has a
+    #: safe default.
+    workspace_context: str = ""
+    #: V3.A-T3 — runtime mode flags that drive Jinja conditionals in
+    #: ``base.j2``. ``plan_mode`` mirrors ``runtime.plan_mode`` and tells
+    #: the agent that destructive tools are blocked. ``yolo_mode`` mirrors
+    #: ``runtime.yolo_mode`` and warns the agent that the safety gate is
+    #: lowered. Both default to ``False`` so unmodified callers render the
+    #: standard prompt (no plan/yolo bumper sections).
+    plan_mode: bool = False
+    yolo_mode: bool = False
 
 
 class PromptBuilder:
@@ -94,6 +186,9 @@ class PromptBuilder:
         memory_char_limit: int = 4000,
         user_char_limit: int = 2000,
         template: str = "base.j2",
+        workspace_context: str = "",
+        plan_mode: bool = False,
+        yolo_mode: bool = False,
     ) -> str:
         memory = _truncate_from_top(declarative_memory, memory_char_limit)
         profile = _truncate_from_top(user_profile, user_char_limit)
@@ -106,6 +201,10 @@ class PromptBuilder:
             user_profile=profile,
             soul=soul,
             user_facts=user_facts,
+            os_name=platform.system() or "",
+            workspace_context=workspace_context,
+            plan_mode=plan_mode,
+            yolo_mode=yolo_mode,
         )
         tpl = self.env.get_template(template)
         return tpl.render(
@@ -117,6 +216,10 @@ class PromptBuilder:
             user_profile=ctx.user_profile,
             soul=ctx.soul,
             user_facts=ctx.user_facts,
+            os_name=ctx.os_name,
+            workspace_context=ctx.workspace_context,
+            plan_mode=ctx.plan_mode,
+            yolo_mode=ctx.yolo_mode,
         )
 
     def build_user_facts(
@@ -169,6 +272,9 @@ class PromptBuilder:
         session_id: str | None = None,
         enable_ambient_blocks: bool = True,
         max_ambient_block_chars: int = 800,
+        workspace_context: str = "",
+        plan_mode: bool = False,
+        yolo_mode: bool = False,
     ) -> str:
         """Async variant of build() that appends ambient memory blocks.
 
@@ -192,6 +298,9 @@ class PromptBuilder:
             memory_char_limit=memory_char_limit,
             user_char_limit=user_char_limit,
             template=template,
+            workspace_context=workspace_context,
+            plan_mode=plan_mode,
+            yolo_mode=yolo_mode,
         )
         if not enable_ambient_blocks or memory_bridge is None:
             return base
@@ -208,4 +317,4 @@ class PromptBuilder:
         return base
 
 
-__all__ = ["PromptBuilder", "PromptContext"]
+__all__ = ["PromptBuilder", "PromptContext", "load_workspace_context"]

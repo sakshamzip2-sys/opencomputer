@@ -33,7 +33,7 @@ from opencomputer.agent.injection import engine as injection_engine
 from opencomputer.agent.memory import MemoryManager
 from opencomputer.agent.memory_bridge import MemoryBridge
 from opencomputer.agent.memory_context import MemoryContext
-from opencomputer.agent.prompt_builder import PromptBuilder
+from opencomputer.agent.prompt_builder import PromptBuilder, load_workspace_context
 from opencomputer.agent.reviewer import PostResponseReviewer
 from opencomputer.agent.state import SessionDB
 from opencomputer.agent.step import StepOutcome
@@ -447,6 +447,11 @@ class AgentLoop:
         # handled=True, return early — no LLM call for this turn. When
         # handled=False (rare: e.g. /plan sets a flag, then chat continues),
         # fall through to the normal loop.
+        #
+        # V3.A-T10: importing ``slash_commands`` registers built-in
+        # (non-plugin) commands like ``/scrape`` into the same dict the
+        # dispatcher reads from below. The import is idempotent.
+        from opencomputer.agent import slash_commands as _builtin_slash  # noqa: F401
         from opencomputer.agent.slash_dispatcher import dispatch as _slash_dispatch
         from opencomputer.plugins.registry import registry as _plugin_registry
 
@@ -536,6 +541,21 @@ class AgentLoop:
                 except Exception:  # noqa: BLE001 — defensive: never break loop
                     _log.debug("build_user_facts failed; degrading to empty", exc_info=True)
                     user_facts = ""
+                # V3.A-T8 — workspace context loader. Walk up from cwd to
+                # discover OPENCOMPUTER.md / CLAUDE.md / AGENTS.md and inject
+                # them into the FROZEN base prompt. Computed once per session
+                # so prefix-cache hits on turn 2+ stay valid; mid-session
+                # edits to those files don't reflect until the next session.
+                # A file-read failure must NEVER break agent startup, so any
+                # exception degrades to "no workspace context".
+                try:
+                    workspace_context = load_workspace_context()
+                except Exception:  # noqa: BLE001 — defensive: never break loop
+                    _log.debug(
+                        "load_workspace_context failed; degrading to empty",
+                        exc_info=True,
+                    )
+                    workspace_context = ""
                 # PR-6 T2.1: use build_with_memory so ambient memory blocks
                 # from active providers are appended under '## Memory context'.
                 # Falls back to the sync build() path if ambient blocks are
@@ -554,6 +574,7 @@ class AgentLoop:
                     session_id=sid,
                     enable_ambient_blocks=self.config.memory.enable_ambient_blocks,
                     max_ambient_block_chars=self.config.memory.max_ambient_block_chars,
+                    workspace_context=workspace_context,
                 )
                 # Evict the least-recently-used snapshot if the cache is full
                 # BEFORE inserting, so we never exceed the cap even transiently.

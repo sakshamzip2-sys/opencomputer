@@ -34,11 +34,16 @@ class ExitPlanModeTool(BaseTool):
         return ToolSchema(
             name="ExitPlanMode",
             description=(
-                "Signal that plan-mode planning is complete. Pass the full plan "
-                "as markdown. The tool returns the plan wrapped in a user-visible "
-                "'Plan ready for review' header so the host surface can render it "
-                "prominently. Does NOT exit plan mode automatically — the user "
-                "decides whether to approve and re-run without --plan."
+                "Signal that plan-mode planning is COMPLETE and surface the plan for "
+                "user review. Use this only when you are in plan mode and have "
+                "produced a concrete, actionable plan you want the user to approve "
+                "before any edits begin. Pass the full plan as markdown — bullet "
+                "points, code touched, success criteria, anything the user needs to "
+                "judge whether to proceed. The tool wraps the plan in a 'Plan ready "
+                "for review' header so the host surface can render it prominently. "
+                "Does NOT auto-exit plan mode — the user decides whether to approve "
+                "and re-run without --plan. Don't call this just to share a sketch; "
+                "the model is in plan mode for a reason."
             ),
             parameters={
                 "type": "object",
