@@ -281,6 +281,11 @@ class AgentLoop:
         # NOTE: constructed BEFORE CompactionEngine so we can pass the bridge
         # reference to it for PR-6 T2.2 on_pre_compress wiring.
         self._current_session_id: str = ""
+        #: Path A.1 (2026-04-27): the persona id picked by the classifier
+        #: for the most recent prompt-build. Used by base.j2 to apply
+        #: persona-specific Jinja conditionals (e.g. softening "no filler"
+        #: rules under the companion persona).
+        self._active_persona_id: str = ""
         self.memory_context = MemoryContext(
             manager=self.memory,
             db=self.db,
@@ -640,6 +645,7 @@ class AgentLoop:
                     max_ambient_block_chars=self.config.memory.max_ambient_block_chars,
                     workspace_context=workspace_context,
                     persona_overlay=persona_overlay,
+                    active_persona_id=self._active_persona_id,
                 )
                 # Evict the least-recently-used snapshot if the cache is full
                 # BEFORE inserting, so we never exceed the cap even transiently.
@@ -1166,8 +1172,105 @@ class AgentLoop:
             return ""
         if persona is None:
             return ""
+        # V2.C-T5: stash the active persona id for the prompt builder so
+        # base.j2 can apply persona-specific Jinja conditionals (Path A.2:
+        # the "no filler / no hedging / not a chat toy" rules are dropped
+        # when active_persona == "companion" so the companion overlay's
+        # warm-but-honest register isn't fighting the action-bias rules).
+        self._active_persona_id = str(result.persona_id)
         overlay = persona.get("system_prompt_overlay", "") or ""
-        return str(overlay).strip()
+        overlay = str(overlay).strip()
+
+        # Path A.3 (2026-04-27): when companion is the active persona,
+        # peek the most-recent unconsumed Life-Event firing and append
+        # it as a "RECENT LIFE EVENT" anchor. The reflective lane needs
+        # real anchors to land — without them, the companion has nothing
+        # specific to point at when asked "how are you?". The firing's
+        # ``hint_text`` is concrete and actionable.
+        if result.persona_id == "companion":
+            try:
+                from opencomputer.awareness.life_events.registry import (
+                    get_global_registry,
+                )
+
+                firing = get_global_registry().peek_most_recent_firing()
+                if firing is not None and firing.hint_text:
+                    overlay = (
+                        overlay
+                        + "\n\n## RECENT LIFE EVENT (anchor for the companion)\n\n"
+                        + f"Detected pattern: {firing.pattern_id} "
+                        + f"(confidence {firing.confidence:.0%}, "
+                        + f"{firing.evidence_count} evidence items)\n"
+                        + f"Hint: {firing.hint_text}\n\n"
+                        + "When the user asks how you are, you can use this as "
+                        + "a real anchor — e.g. 'I keep thinking about what you "
+                        + "mentioned earlier' or naming the pattern by its "
+                        + "felt shape. Don't over-reference it; use it once "
+                        + "naturally if it fits, or ignore if the moment "
+                        + "doesn't call for it."
+                    )
+            except Exception:  # noqa: BLE001 — degrade silently
+                _log.debug(
+                    "companion life-event peek failed; degrading to bare overlay",
+                    exc_info=True,
+                )
+
+            # Path A.4 (2026-04-27): mood thread.
+            # 1. Classify the user's apparent vibe from the last few
+            #    messages and persist on the session row.
+            # 2. Append a "PREVIOUS-SESSION VIBE" anchor referencing the
+            #    most recent OTHER-session vibe (so the companion can
+            #    naturally reference "you sounded frustrated yesterday").
+            try:
+                from opencomputer.agent.vibe_classifier import classify_vibe
+
+                if last_user_messages:
+                    current_vibe = classify_vibe(list(last_user_messages))
+                    self.db.set_session_vibe(session_id, current_vibe)
+
+                # Look for the most-recent OTHER session's vibe (within
+                # the last ~72 hours) so the companion has continuity.
+                import time as _time2
+
+                rows = self.db.list_recent_session_vibes(limit=10)
+                cutoff = _time2.time() - (72 * 3600)
+                prev = next(
+                    (
+                        r for r in rows
+                        if r.get("id") != session_id
+                        and (r.get("vibe_updated") or 0) >= cutoff
+                    ),
+                    None,
+                )
+                if prev is not None:
+                    age_hours = (
+                        _time2.time() - float(prev.get("vibe_updated") or 0)
+                    ) / 3600.0
+                    age_str = (
+                        f"{age_hours:.0f}h ago"
+                        if age_hours >= 1
+                        else "less than an hour ago"
+                    )
+                    title = prev.get("title") or "(untitled session)"
+                    overlay = (
+                        overlay
+                        + "\n\n## PREVIOUS-SESSION VIBE (anchor for the companion)\n\n"
+                        + "User's apparent emotional state in their last "
+                        + f"different session ({age_str}, '{title}'): "
+                        + f"**{prev.get('vibe')}**.\n\n"
+                        + "If the user's tone now is markedly different, you "
+                        + "can naturally reference the shift — 'you sounded "
+                        + f"{prev.get('vibe')} last we talked, this feels "
+                        + "different — what changed?'. Don't force it; use "
+                        + "only when the contrast is obvious."
+                    )
+            except Exception:  # noqa: BLE001 — degrade silently
+                _log.debug(
+                    "companion vibe-classify / previous-vibe lookup failed",
+                    exc_info=True,
+                )
+
+        return overlay
 
     # ─── T1 of auto-skill-evolution plan: SessionEndEvent emission ─
 

@@ -90,6 +90,19 @@ SLASH_REGISTRY: list[CommandDef] = [
         category="session",
         aliases=("history",),
     ),
+    CommandDef(
+        name="rename",
+        description="Set a friendly title for the current session.",
+        category="session",
+        aliases=("title",),
+        args_hint="<new title>",
+    ),
+    CommandDef(
+        name="resume",
+        description="Switch to a prior session (interactive picker by default).",
+        category="session",
+        args_hint="[last|<session-id-prefix>]",
+    ),
 ]
 
 

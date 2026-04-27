@@ -32,7 +32,13 @@ from opencomputer.cli_ui.slash import (
 
 @dataclass
 class SlashContext:
-    """Everything a slash handler might need from the chat loop."""
+    """Everything a slash handler might need from the chat loop.
+
+    The ``on_*`` callbacks delegate state mutations the chat loop owns
+    (e.g. rebinding ``nonlocal session_id`` for ``/clear`` or
+    ``/resume``). Default no-op callables keep the dataclass usable in
+    test contexts that don't exercise those handlers.
+    """
 
     console: Console
     session_id: str
@@ -40,6 +46,13 @@ class SlashContext:
     on_clear: Callable[[], None]
     get_cost_summary: Callable[[], dict[str, int]]
     get_session_list: Callable[[], list[dict[str, Any]]]
+    #: ``/rename <title>`` — returns True on success, False if the title
+    #: couldn't be persisted (no current session, DB error).
+    on_rename: Callable[[str], bool] = lambda title: False
+    #: ``/resume [last|<id-prefix>|pick]`` — returns True if the chat
+    #: loop swapped to the target session; False on no-match / ambiguous
+    #: prefix / DB error.
+    on_resume: Callable[[str], bool] = lambda target: False
 
 
 def _split_args(text: str) -> tuple[str, list[str]]:
@@ -143,6 +156,32 @@ def _handle_sessions(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_rename(ctx: SlashContext, args: list[str]) -> SlashResult:
+    title = " ".join(args).strip()
+    if not title:
+        ctx.console.print(
+            "[red]/rename needs a title[/red] — e.g. `/rename my-debug-session`"
+        )
+        return SlashResult(handled=True)
+    ok = ctx.on_rename(title)
+    if ok:
+        ctx.console.print(f"[green]session renamed →[/green] {title}")
+    else:
+        ctx.console.print("[red]rename failed[/red] (no current session?)")
+    return SlashResult(handled=True)
+
+
+def _handle_resume(ctx: SlashContext, args: list[str]) -> SlashResult:
+    target = (args[0] if args else "pick").strip()
+    ok = ctx.on_resume(target)
+    if not ok:
+        ctx.console.print(
+            "[red]resume failed[/red] — target not found, ambiguous prefix, "
+            "or no prior sessions"
+        )
+    return SlashResult(handled=True)
+
+
 _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "exit": _handle_exit,
     "clear": _handle_clear,
@@ -152,6 +191,8 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "cost": _handle_cost,
     "model": _handle_model,
     "sessions": _handle_sessions,
+    "rename": _handle_rename,
+    "resume": _handle_resume,
 }
 
 
