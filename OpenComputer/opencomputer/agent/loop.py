@@ -417,6 +417,7 @@ class AgentLoop:
         stream_callback=None,
         system_prompt_override: str | None = None,
         initial_messages: list[Message] | None = None,
+        images: list[str] | None = None,
     ) -> ConversationResult:
         """Run the agent loop until the model stops calling tools.
 
@@ -648,8 +649,15 @@ class AgentLoop:
         injected = await injection_engine.compose(inj_ctx)
         system = base_system + ("\n\n" + injected if injected else "")
 
-        # Append user message + persist
-        user_msg = Message(role="user", content=user_message)
+        # Append user message + persist. ``images`` (TUI image-paste) is
+        # threaded onto Message.attachments; the provider converts to
+        # multimodal content blocks at request time. Note: SessionDB
+        # doesn't yet persist attachments — image paths are turn-scoped
+        # only, won't survive session resume. Acceptable since the user
+        # can re-paste; documented as a known limitation.
+        user_msg = Message(
+            role="user", content=user_message, attachments=list(images or [])
+        )
         messages.append(user_msg)
         self._emit_before_message_write(session_id=sid, message=user_msg)
         self.db.append_message(sid, user_msg)

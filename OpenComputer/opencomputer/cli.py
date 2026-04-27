@@ -791,9 +791,9 @@ def _run_chat_session(
     from opencomputer.mcp.client import MCPManager
 
     _register_builtin_tools()
-    n_plugins = _discover_plugins()
+    _discover_plugins()
     _apply_model_overrides()
-    n_agents = _discover_and_register_agents()
+    _discover_and_register_agents()
     n_settings_hooks = _register_settings_hooks(cfg)
     provider = _resolve_provider(cfg.model.provider)
     runtime = RuntimeContext(plan_mode=plan, yolo_mode=yolo)
@@ -834,10 +834,11 @@ def _run_chat_session(
     console.print(f"[bold cyan]OpenComputer v{__version__}[/bold cyan]")
     console.print(f"[dim]session: {session_id}[/dim]")
     console.print(f"[dim]model:   {cfg.model.model} ({cfg.model.provider})[/dim]")
-    console.print(f"[dim]tools:   {', '.join(sorted(registry.names()))}[/dim]")
-    console.print(f"[dim]plugins: {n_plugins} loaded[/dim]")
-    if n_agents:
-        console.print(f"[dim]agents:  {n_agents} template(s) registered[/dim]")
+    # tools / plugins / agents counts intentionally hidden from the
+    # startup banner — they're noise for an interactive session. Run
+    # ``opencomputer plugins``, ``opencomputer skills``, etc. to inspect
+    # them on demand. Counters still computed above for any callers
+    # that depend on n_plugins / n_agents in the same scope.
     if n_settings_hooks:
         console.print(f"[dim]hooks:   {n_settings_hooks} from settings.yaml[/dim]")
     if plan:
@@ -871,9 +872,9 @@ def _run_chat_session(
     # variants below; no `nonlocal` needed.
     _token_tally = {"in": 0, "out": 0}
 
-    async def _run_turn(user_input: str) -> None:
+    async def _run_turn(user_input: str, images: list[str] | None = None) -> None:
         if not use_live_ui:
-            await _run_turn_plain(user_input)
+            await _run_turn_plain(user_input, images=images)
             return
 
         from opencomputer.cli_ui import StreamingRenderer
@@ -888,6 +889,7 @@ def _run_chat_session(
                 session_id=session_id,
                 runtime=runtime,
                 stream_callback=renderer.on_chunk,
+                images=images,
             )
             elapsed = _time.monotonic() - t_start
             _token_tally["in"] += result.input_tokens
@@ -900,7 +902,9 @@ def _run_chat_session(
                 elapsed_s=elapsed,
             )
 
-    async def _run_turn_plain(user_input: str) -> None:
+    async def _run_turn_plain(
+        user_input: str, images: list[str] | None = None
+    ) -> None:
         # Legacy path — kept verbatim so `printf … | opencomputer chat`
         # still produces clean piped output (no Rich Live escapes).
         printed_header = {"val": False}
@@ -916,6 +920,7 @@ def _run_chat_session(
             session_id=session_id,
             runtime=runtime,
             stream_callback=on_chunk,
+            images=images,
         )
         _token_tally["in"] += result.input_tokens
         _token_tally["out"] += result.output_tokens
@@ -941,6 +946,7 @@ def _run_chat_session(
         is_slash_command,
         read_user_input,
     )
+    from opencomputer.cli_ui.input_loop import extract_image_attachments
 
     profile_home = _profile_home_fn()
 
@@ -996,6 +1002,18 @@ def _run_chat_session(
         if not user_input.strip():
             continue
 
+        # Extract image attachments inserted by the BracketedPaste / Ctrl+V
+        # handlers as ``[image: /abs/path]`` placeholder tokens. The cleaned
+        # text is what the model sees; the path list flows through to
+        # ``loop.run_conversation(images=...)`` which sets them on the user
+        # Message's ``attachments`` field for the provider to convert into
+        # multimodal content blocks.
+        cleaned_text, _image_paths = extract_image_attachments(user_input)
+        # If the only thing in the input was an image placeholder, give the
+        # model a generic prompt so it knows to describe the image.
+        if _image_paths and not cleaned_text.strip():
+            cleaned_text = "(See attached image.)"
+
         # Render the user's message inside a green-bordered Panel so it
         # is visually distinct from the assistant's response. PromptSession
         # is configured with erase_when_done=True so the typed prompt line
@@ -1004,9 +1022,20 @@ def _run_chat_session(
         from rich.panel import Panel as _UserPanel
         from rich.text import Text as _UserText
 
+        _panel_body_parts: list[_UserText] = []
+        if cleaned_text:
+            _panel_body_parts.append(_UserText(cleaned_text, style="bold"))
+        for _img_path in _image_paths:
+            if _panel_body_parts:
+                _panel_body_parts.append(_UserText("\n"))
+            _panel_body_parts.append(
+                _UserText(f"📎 {_img_path}", style="dim cyan")
+            )
+        _panel_body = _UserText.assemble(*_panel_body_parts) if _panel_body_parts else _UserText(user_input, style="bold")
+
         console.print(
             _UserPanel(
-                _UserText(user_input, style="bold"),
+                _panel_body,
                 border_style="green",
                 padding=(0, 1),
                 expand=False,
@@ -1037,20 +1066,24 @@ def _run_chat_session(
         # handler. Both call scope.request_cancel() which task.cancel()s
         # the in-flight conversation, raising CancelledError that we
         # catch here to print a friendly note.
-        async def _run_turn_cancellable(input_text: str) -> None:
+        async def _run_turn_cancellable(
+            input_text: str, images: list[str] | None
+        ) -> None:
             scope = TurnCancelScope()
             listener = KeyboardListener(scope)
             with scope.install_sigint_handler():
                 listener.start()
                 try:
-                    await scope.run(_run_turn(input_text))
+                    await scope.run(_run_turn(input_text, images=images))
                 except asyncio.CancelledError:
                     console.print("\n[yellow]turn cancelled.[/yellow]")
                 finally:
                     listener.stop()
 
         try:
-            asyncio.run(_run_turn_cancellable(user_input))
+            asyncio.run(
+                _run_turn_cancellable(cleaned_text, _image_paths or None)
+            )
         except Exception as e:
             console.print(f"[bold red]error:[/bold red] {type(e).__name__}: {e}")
 
