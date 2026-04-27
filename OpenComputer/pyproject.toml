@@ -83,6 +83,14 @@ menubar = [
 gui = [
   "pyobjc-framework-Quartz>=10.0; platform_system == 'Darwin'",
 ]
+# Optional: voice-mode (continuous push-to-talk audio + VAD gating).
+# Install with `pip install opencomputer[voice]`. ``sounddevice`` provides
+# cross-platform audio capture; ``webrtcvad`` filters non-speech frames
+# before they reach the STT path. See extensions/voice-mode/.
+voice = [
+  "webrtcvad>=2.0",
+  "sounddevice>=0.4",
+]
 
 [project.scripts]
 opencomputer = "opencomputer.cli:main"
