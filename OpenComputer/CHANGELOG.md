@@ -4,6 +4,28 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Fixed (Gateway — friendly user-facing errors on dispatch failures)
+
+When the agent loop raised inside `Dispatch.handle_message` (e.g. an
+upstream LLM 504, a 429 rate-limit, an auth failure, or a network
+hiccup), the gateway returned the literal
+`[error: InternalServerError: Error code: 504 - {'error': {...}}]`
+to the channel — leaking SDK class names + raw exception args at the
+user. Telegram users in particular saw what looked like the bot
+"silently dying" because the message looked like internal noise.
+
+- `opencomputer/gateway/dispatch.py` — new `_format_user_facing_error`
+  helper maps exceptions to one-liners keyed off `status_code` (5xx →
+  "model service returned an error (504), try again in a moment", 429 →
+  rate-limit message, 401/403 → auth message) and class name
+  (`APIConnectionError` / `*Timeout` → network-issue message). Full
+  traceback is still logged via `logger.exception` so debugging isn't
+  weakened.
+- `tests/test_dispatch_friendly_errors.py` (new, 9 tests) covers the
+  504 repro, the 5xx batch, 429, 401/403, network/timeout names, and
+  the unknown-exception fallback that retains the class name without
+  leaking the raw repr.
+
 ### Added (Grok-style terminal chat experience — Round 5)
 
 The `opencomputer chat` terminal got the four upgrades that make Grok's

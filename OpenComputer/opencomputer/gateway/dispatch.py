@@ -34,6 +34,53 @@ if TYPE_CHECKING:
 logger = logging.getLogger("opencomputer.gateway.dispatch")
 
 
+def _format_user_facing_error(exc: Exception) -> str:
+    """Render an exception from the agent loop as a one-liner the user
+    can read on a chat surface.
+
+    The full traceback is logged via ``logger.exception`` at the call
+    site — this only shapes what the *user* sees on Telegram / Discord
+    / etc. Keying off ``status_code`` works for Anthropic, OpenAI, and
+    httpx exceptions uniformly; class-name fallback handles network-
+    layer errors that never produced an HTTP response.
+
+    Pure function (no Dispatch state) so unit tests + downstream
+    error-presentation code can call it directly.
+    """
+    name = type(exc).__name__
+    status = getattr(exc, "status_code", None)
+
+    # Network-layer — connection refused, DNS failure, TCP timeout. No HTTP
+    # status was ever produced. Class-name match because httpx + the SDKs
+    # use these names without a shared base class we can isinstance-check.
+    if name in {
+        "APIConnectionError", "APITimeoutError", "ConnectError",
+        "ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout",
+    }:
+        return ("Can't reach the model server right now (network issue). "
+                "Try again in a moment.")
+
+    if status == 429 or name == "RateLimitError":
+        return ("Rate-limited by the model provider. "
+                "Try again in a few seconds.")
+
+    if status in (401, 403) or name in {
+        "AuthenticationError", "PermissionDeniedError",
+    }:
+        return ("Authentication failed — your API key may be invalid or "
+                "your provider proxy is misconfigured.")
+
+    if isinstance(status, int) and 500 <= status < 600:
+        return (f"The model service returned an error ({status}). "
+                "This is usually transient — try again in a moment.")
+
+    # Unknown / unmapped — keep the class name so logs can be grepped,
+    # but don't dump the raw exception args (those often contain the
+    # offending prompt or an SDK-internal kwarg dump).
+    return (f"Sorry, something went wrong ({name}). "
+            "Check the gateway logs for details.")
+
+
 def session_id_for(platform: str, chat_id: str) -> str:
     """Derive the stable per-chat session id used by :class:`Dispatch`.
 
@@ -194,8 +241,11 @@ class Dispatch:
                     )
                 return result.final_message.content or None
             except Exception as e:  # noqa: BLE001
+                # Always log full traceback for debugging; user only
+                # sees the one-liner from _format_user_facing_error so
+                # SDK internals / prompt fragments don't leak to chat.
                 logger.exception("dispatch error for %s: %s", event.platform, e)
-                return f"[error: {type(e).__name__}: {e}]"
+                return _format_user_facing_error(e)
             finally:
                 heartbeat.cancel()
                 try:
@@ -322,4 +372,4 @@ class Dispatch:
             )
 
 
-__all__ = ["Dispatch", "session_id_for"]
+__all__ = ["Dispatch", "session_id_for", "_format_user_facing_error"]
