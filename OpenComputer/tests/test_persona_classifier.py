@@ -39,7 +39,12 @@ def test_late_night_default_relaxed():
     assert result.persona_id == "relaxed"
 
 
-def test_no_signal_defaults_admin():
+def test_no_signal_defaults_companion():
+    """Path A.1 (2026-04-27) deliberately changed the no-signal default
+    from 'admin' to 'companion'. The companion overlay is warm-but-honest
+    about state-queries; admin was action-only and produced robotic
+    answers to social openers like 'how are you?'. Companion is the
+    better default for unspecified contexts."""
     ctx = ClassificationContext(foreground_app="", time_of_day_hour=14)
     result = classify(ctx)
-    assert result.persona_id == "admin"
+    assert result.persona_id == "companion"
