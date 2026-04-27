@@ -226,6 +226,7 @@ All committed + pushed to `main`. Current main sha: `5c62a12` (2026-04-24).
 | Sub-project D tail | PR #27 / `5c62a12` | Cheap-route gating (D6) + slash-command router formalization (D8) — v1.0 candidate (2026-04-24) |
 | Drift preventers | PR #29 / `00bf48b` | Pre-v1.0 cleanup — PascalCase tool renames (CheckpointDiff, GitDiff, StartProcess, CheckOutput, KillProcess) + plugin search-path consolidation |
 | Sub-project F1 | PR #?? / (pending) | Consent layer + immutable audit log (core, non-bypassable). Schema v1→v2, 4 SDK types, 8 CLI subcommands, HMAC-chained tamper-evident audit, progressive promotion (N=10), bypass flag, AGPL-isolation grep test. Infrastructure only — F2+ attach claims to tools |
+| OI removal | 2026-04-27 (branch `feat/native-cross-platform-introspection`) | `oi_bridge` (Open Interpreter subprocess bridge, AGPL) replaced by native cross-platform `extensions/coding-harness/introspection/` module (psutil/mss/pyperclip/rapidocr-onnxruntime). 5 tool names preserved; F1 capability namespace migrated `oi_bridge.*` → `introspection.*`. Net diff ~−2,400 LOC. Cross-platform support extended from "macOS, Linux only" to "macOS, Linux, Windows" (psutil + os.walk replace the broken `ps aux` / `find -mmin` paths). `docs/f7/` removed. |
 
 **Test count:** 885 passing across 71 test files.
 

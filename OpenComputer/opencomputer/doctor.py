@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,22 @@ class Check:
     name: str
     status: Literal["pass", "fail", "warn", "skip"]
     detail: str = ""
+
+
+@dataclass(slots=True)
+class CheckResult:
+    """Result type for the introspection / orphan-venv helpers (T10).
+
+    Distinct from ``Check`` because these helpers are also called directly
+    from tests, where a boolean ``ok`` plus a free-form ``level`` (info /
+    warning / error) is more ergonomic than the four-value ``status``
+    string the rich report uses. ``run_doctor`` translates ``CheckResult``
+    -> ``Check`` when wiring them into the report.
+    """
+
+    ok: bool
+    level: Literal["info", "warning", "error"]
+    message: str
 
 
 def _status_icon(s: str) -> str:
@@ -559,6 +576,95 @@ def _check_g_subsystems() -> list[Check]:
     return checks
 
 
+def _check_orphan_oi_venv(profile_home: Path) -> CheckResult:
+    """Detect leftover OI venv directory from prior OpenComputer versions.
+
+    Pre-2026-04-27 codebase ran Open Interpreter in a separate venv at
+    ``<profile_home>/oi_capability/``. That bridge is now removed; if the
+    directory still exists it's ~150 MB of orphan disk and we surface it
+    so the user can ``rm -rf`` it.
+    """
+    if not profile_home.exists() or not profile_home.is_dir():
+        return CheckResult(
+            ok=True, level="info", message="No orphan OI venv (profile dir absent)"
+        )
+
+    oi_venv = profile_home / "oi_capability"
+    if oi_venv.exists():
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                f"Orphan OI venv at {oi_venv} (~150 MB). "
+                f"Safe to delete: rm -rf {oi_venv}"
+            ),
+        )
+    return CheckResult(ok=True, level="info", message="No orphan OI venv")
+
+
+def _check_introspection_deps() -> list[CheckResult]:
+    """Verify the 4 native deps used by extensions/coding-harness/introspection.
+
+    Also checks Linux-specific clipboard helper (xclip / xsel). Linux-only
+    failures are emitted at WARNING level so doctor exit code stays clean
+    when introspection isn't actively used.
+    """
+    results: list[CheckResult] = []
+    for mod_name in ("psutil", "mss", "pyperclip", "rapidocr_onnxruntime"):
+        try:
+            __import__(mod_name)
+            results.append(
+                CheckResult(ok=True, level="info", message=f"{mod_name} OK")
+            )
+        except ImportError:
+            pip_name = mod_name.replace("_", "-")
+            results.append(
+                CheckResult(
+                    ok=False,
+                    level="error",
+                    message=f"{mod_name} missing — pip install -U {pip_name}",
+                )
+            )
+
+    if sys.platform.startswith("linux"):
+        if shutil.which("xclip") or shutil.which("xsel"):
+            results.append(
+                CheckResult(
+                    ok=True,
+                    level="info",
+                    message="Linux clipboard helper present (xclip/xsel)",
+                )
+            )
+        else:
+            results.append(
+                CheckResult(
+                    ok=False,
+                    level="warning",
+                    message=(
+                        "Linux clipboard requires xclip or xsel — apt install xclip"
+                    ),
+                )
+            )
+    return results
+
+
+def _level_to_status(
+    result: CheckResult,
+) -> Literal["pass", "fail", "warn", "skip"]:
+    """Translate CheckResult.level/ok to the four-state Check.status used
+    by the rich report. Errors -> fail, warnings -> warn, success -> pass.
+    """
+    if result.ok:
+        return "pass"
+    if result.level == "error":
+        return "fail"
+    return "warn"
+
+
+def _result_to_check(name: str, result: CheckResult) -> Check:
+    return Check(name=name, status=_level_to_status(result), detail=result.message)
+
+
 def run_doctor(fix: bool = False) -> int:
     """Run all checks and print a report. Returns the number of failed checks.
 
@@ -593,6 +699,27 @@ def run_doctor(fix: bool = False) -> int:
 
     # Sub-project G subsystems — surface their state at a glance.
     checks.extend(_check_g_subsystems())
+
+    # T10 — orphan OI venv detection + introspection deps verification.
+    # Both feed the same per-profile home dir other checks already use, and
+    # surface as warn (orphan disk) / fail (missing required dep) in the
+    # rich report.
+    from opencomputer.agent.config import _home as _resolve_home
+
+    try:
+        profile_home = _resolve_home()
+    except Exception:  # noqa: BLE001 — resolution must never crash doctor
+        profile_home = None
+    if profile_home is not None:
+        checks.append(
+            _result_to_check("orphan OI venv", _check_orphan_oi_venv(profile_home))
+        )
+    for dep_result in _check_introspection_deps():
+        # Use the first whitespace-delimited token as the check name so the
+        # rich report shows e.g. "introspection: psutil" / "introspection:
+        # rapidocr_onnxruntime" / "introspection: Linux".
+        first = dep_result.message.split()[0] if dep_result.message else "dep"
+        checks.append(_result_to_check(f"introspection: {first}", dep_result))
 
     # Plugin-contributed checks + repairs (run last so plugins see a fully-
     # loaded registry, config, and DB-writable environment).

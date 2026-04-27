@@ -91,7 +91,7 @@ class SignalEvent:
         system-emitted events (e.g. startup hook).
     source:
         Short identifier for the emitter. Convention: ``"agent_loop"``,
-        ``"web_fetch"``, ``"oi_bridge"``. Useful for per-publisher
+        ``"web_fetch"``, ``"introspection"``. Useful for per-publisher
         metrics.
     metadata:
         Arbitrary JSON-serializable structured data. Subclasses add
