@@ -56,6 +56,32 @@ def _save_servers(servers: tuple[MCPServerConfig, ...]) -> Path:
     return save_config(new_cfg)
 
 
+def _enforce_osv_malware_check(
+    command: str, args: tuple[str, ...] | list[str], skip: bool
+) -> None:
+    """Pre-flight OSV malware scan for an MCP server package.
+
+    Called before any path that ultimately spawns ``npx`` / ``uvx`` /
+    ``pipx``. Looks up the package in Google's OSV.dev database for
+    ``MAL-*`` advisories (regular CVEs are intentionally ignored — those
+    are vulnerabilities, not confirmed malware). Network failures are
+    fail-open: the launch proceeds with a debug log entry. Hits abort
+    the launch with a typer.Exit(1) unless ``skip`` is True.
+
+    Centralised so every launch path (install, test, …) routes through
+    the same enforcement and the override flag stays consistent.
+    """
+    if skip:
+        return
+    from opencomputer.security.osv_check import check_package_for_malware
+
+    result = check_package_for_malware(command, list(args))
+    if result is not None:
+        typer.echo(result, err=True)
+        typer.echo("Use --skip-osv-check to override (NOT recommended).", err=True)
+        raise typer.Exit(1)
+
+
 @mcp_app.command("list")
 def list_servers() -> None:
     """List every configured MCP server."""
@@ -98,6 +124,11 @@ def add_server(
     disabled: bool = typer.Option(
         False, "--disabled", help="Add but leave disabled until you `enable` it."
     ),
+    skip_osv_check: bool = typer.Option(
+        False,
+        "--skip-osv-check",
+        help="Bypass the OSV malware pre-flight check (NOT recommended).",
+    ),
 ) -> None:
     """Add a new MCP server to config.yaml.
 
@@ -110,6 +141,9 @@ def add_server(
         raise typer.BadParameter("--command is required for stdio transport")
     if transport in ("sse", "http") and not url:
         raise typer.BadParameter(f"--url is required for {transport} transport")
+
+    if transport == "stdio" and command:
+        _enforce_osv_malware_check(command, arg, skip_osv_check)
 
     new_server = MCPServerConfig(
         name=name,
@@ -255,7 +289,14 @@ def status_servers() -> None:
 
 
 @mcp_app.command("test")
-def test_server(name: str = typer.Argument(..., help="Server name to test.")) -> None:
+def test_server(
+    name: str = typer.Argument(..., help="Server name to test."),
+    skip_osv_check: bool = typer.Option(
+        False,
+        "--skip-osv-check",
+        help="Bypass the OSV malware pre-flight check (NOT recommended).",
+    ),
+) -> None:
     """Connect to one server, list its tools, then disconnect. No registration.
 
     Useful as a smoke test after `add` — confirms the transport is reachable
@@ -267,6 +308,9 @@ def test_server(name: str = typer.Argument(..., help="Server name to test.")) ->
         console.print(f"[red]error:[/red] {name!r} is not configured.")
         console.print("[dim]run `opencomputer mcp list` to see configured servers.[/dim]")
         raise typer.Exit(1)
+
+    if target.transport == "stdio" and target.command:
+        _enforce_osv_malware_check(target.command, target.args, skip_osv_check)
 
     from opencomputer.mcp.client import MCPConnection
 
@@ -562,6 +606,11 @@ def mcp_install(
     disabled: bool = typer.Option(
         False, "--disabled", help="Add but leave disabled until you `enable` it."
     ),
+    skip_osv_check: bool = typer.Option(
+        False,
+        "--skip-osv-check",
+        help="Bypass the OSV malware pre-flight check (NOT recommended).",
+    ),
 ) -> None:
     """Install a bundled MCP preset into config.yaml.
 
@@ -584,6 +633,10 @@ def mcp_install(
             f"Available: {', '.join(list_preset_slugs())}"
         )
         raise typer.Exit(1)
+
+    # Pre-flight OSV malware scan on the preset's launch command (npx/uvx/pipx).
+    if p.config.transport == "stdio" and p.config.command:
+        _enforce_osv_malware_check(p.config.command, p.config.args, skip_osv_check)
 
     cfg = load_config()
     server_name = name or p.config.name
