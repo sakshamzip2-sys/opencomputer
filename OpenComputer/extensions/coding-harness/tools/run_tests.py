@@ -46,9 +46,16 @@ class RunTestsTool(BaseTool):
         return ToolSchema(
             name="RunTests",
             description=(
-                "Run the project's test suite. Auto-detects pytest / vitest / "
-                "jest / cargo test / go test based on project markers. Pass "
-                "`runner` to force a specific one, `filter` to narrow."
+                "Run the project's test suite. Auto-detects the runner from project "
+                "markers: pyproject.toml/pytest.ini → pytest, vitest.config → vitest, "
+                "jest.config → jest, Cargo.toml → cargo test, go.mod → go test. Pass "
+                "`runner` to force a specific one (overrides detection), and `filter` "
+                "to narrow to a subset (passed straight to the runner — pytest test ids, "
+                "go's regex pattern, etc.). Use this rather than Bash + remembering the "
+                "right command per project: same exit-code discipline, structured timeout, "
+                "and emits progress events. Default timeout is 120s (max 600s); for "
+                "longer suites raise `timeout_s`. If detection finds nothing the tool "
+                "errors and lists supported runners."
             ),
             parameters={
                 "type": "object",

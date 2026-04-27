@@ -15,8 +15,15 @@ class WriteTool(BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="Write",
-            description="Write content to a file. Overwrites the file if it exists. "
-            "Creates parent directories as needed. file_path must be absolute.",
+            description=(
+                "Write content to a file (creates or overwrites). Parent directories are "
+                "created as needed. Use Write for NEW files or for full rewrites of an "
+                "existing file. Prefer Edit/MultiEdit for targeted changes — Write blows "
+                "away history and forces you to ship the entire file every time. CAUTION: "
+                "if the file already exists, you should Read it first to preserve content "
+                "you don't intend to remove. file_path must be absolute. Avoid creating "
+                "documentation/README files unless explicitly requested."
+            ),
             parameters={
                 "type": "object",
                 "properties": {

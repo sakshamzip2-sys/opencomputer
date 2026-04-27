@@ -16,10 +16,18 @@ class MultiEditTool(BaseTool):
         return ToolSchema(
             name="MultiEdit",
             description=(
-                "Apply multiple Edit operations to a single file atomically. "
-                "All edits are applied in-memory; the file is written once at the end. "
-                "If ANY edit fails (missing text, non-unique without replace_all), the "
-                "whole batch is rolled back and the file is unchanged."
+                "Apply multiple Edit operations to a SINGLE file atomically. All edits "
+                "are applied in-memory in order; the file is written exactly once at "
+                "the end. If ANY edit fails (missing text, non-unique without "
+                "replace_all, no-op pair), the whole batch is rolled back and the file "
+                "stays unchanged. Use this when you need to make 3+ changes to the same "
+                "file — it's more efficient than calling Edit repeatedly and gives you "
+                "all-or-nothing semantics. CAUTION: edits run sequentially, so a later "
+                "edit's `old_string` must match what earlier edits leave behind. Read "
+                "first (same harness rule as Edit). For NEW files use Write; for changes "
+                "across multiple files, dispatch one MultiEdit per file (preferably in "
+                "parallel where independent). Prefer MultiEdit + review over repeatedly "
+                "Writing the same file."
             ),
             parameters={
                 "type": "object",

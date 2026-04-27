@@ -48,10 +48,15 @@ class NotebookEditTool(BaseTool):
         return ToolSchema(
             name="NotebookEdit",
             description=(
-                "Edit a Jupyter notebook (.ipynb): insert, replace, or delete a "
-                "cell. For inserts, `cell_index` is where the new cell goes "
-                "(append by passing an index past the end). For replace/delete, "
-                "`cell_index` identifies the target. To READ a notebook, use Read."
+                "Edit a Jupyter notebook (.ipynb) by cell — insert, replace, or delete. "
+                "Use this when changing notebook structure (adding code/markdown cells, "
+                "swapping out a buggy cell). For inserts, `cell_index` is where the new "
+                "cell goes (append by passing an index past the end). For replace/delete, "
+                "`cell_index` identifies the target. To READ a notebook, use Read — the "
+                "Read tool already handles .ipynb parsing. Prefer NotebookEdit over "
+                "Edit/Write on .ipynb: notebooks are JSON with strict cell structure, "
+                "raw text edits will corrupt them. The tool preserves cell ids and "
+                "nbformat-4 invariants automatically."
             ),
             parameters={
                 "type": "object",

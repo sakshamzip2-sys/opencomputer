@@ -47,10 +47,15 @@ class AskUserQuestionTool(BaseTool):
         return ToolSchema(
             name="AskUserQuestion",
             description=(
-                "Ask the user a question and wait for their reply. Use this when "
-                "you genuinely need a decision from the human and cannot proceed "
-                "without it — NOT for confirmation of routine work. Provide "
-                "`options` for multiple-choice asks; omit for free-form."
+                "Ask the user a question and BLOCK on their reply. Use this only when "
+                "you genuinely need a decision and cannot proceed without it — e.g. an "
+                "ambiguous spec, a destructive choice, missing credentials. Do NOT use "
+                "this to confirm routine work, request approval for the obvious next "
+                "step, or paraphrase what the user already said. Provide `options` for "
+                "multiple-choice asks (cleaner UX); omit for free-form answers. CAUTION: "
+                "in gateway mode (Telegram/Discord) this returns an error pointing you "
+                "to PushNotification + waiting for the next inbound message; the synchronous "
+                "blocking path only works in interactive CLI mode."
             ),
             parameters={
                 "type": "object",

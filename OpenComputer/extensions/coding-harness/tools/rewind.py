@@ -23,9 +23,16 @@ class RewindTool(BaseTool):
         return ToolSchema(
             name="Rewind",
             description=(
-                "Restore files to a previous checkpoint. Pass `steps` to go "
-                "back N checkpoints (default 1), or `checkpoint_id` to jump to "
-                "a specific one. Use `list_checkpoints=true` to enumerate first."
+                "Restore files to a previous checkpoint — undo a batch of edits the "
+                "agent made. Pass `steps=N` to go back N checkpoints (default 1), "
+                "`checkpoint_id` to jump to a specific one, or `list_checkpoints=true` "
+                "to enumerate available checkpoints without restoring anything (cheap, "
+                "use this first if unsure). CAUTION: this overwrites on-disk files "
+                "with their checkpoint contents — anything the user changed manually "
+                "since the checkpoint will be lost. Prefer CheckpointDiff first to "
+                "review what's about to revert. Use Rewind for: a failed multi-step "
+                "edit, a bad refactor you want to back out of, or an exploratory "
+                "branch you no longer want."
             ),
             parameters={
                 "type": "object",

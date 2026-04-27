@@ -33,8 +33,14 @@ class VoiceTranscribeTool(BaseTool):
         return ToolSchema(
             name="VoiceTranscribe",
             description=(
-                "Transcribe an audio file to text using OpenAI Whisper. "
-                "Caller must provide an absolute file path that already exists."
+                "Transcribe an audio file (m4a/mp3/wav/opus/etc.) to text using OpenAI "
+                "Whisper. Use when the user supplies a voice memo, meeting recording, "
+                "or attached audio you need to read into text. Pass an optional "
+                "`language` ISO 639-1 hint ('en', 'es', 'ja') to bias the decoder; "
+                "Whisper auto-detects otherwise. Caller must provide an absolute file "
+                "path that already exists — relative paths are rejected. Network call "
+                "to OpenAI; do not pass sensitive recordings without consent. Telegram "
+                "voice messages already auto-transcribe; use this tool for everything else."
             ),
             parameters={
                 "type": "object",

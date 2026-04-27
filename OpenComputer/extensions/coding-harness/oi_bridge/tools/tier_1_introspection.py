@@ -70,9 +70,14 @@ class ListAppUsageTool(BaseTool):
         return ToolSchema(
             name="list_app_usage",
             description=(
-                "List recently-active applications in the last N hours. "
-                "Returns a list of app names and last-seen timestamps. "
-                "Platform: macOS, Linux."
+                "List recently-active applications on the user's machine over the last "
+                "N hours (default 8). Returns app names with last-seen timestamps so "
+                "you can ground answers in what the user has actually been working on. "
+                "Use this when answering 'what was I doing yesterday?' or when "
+                "tailoring suggestions to current workflows. CAUTION: process list is "
+                "personal data; do not echo it to third parties without consent. Read-"
+                "only — backed by `ps aux`; under F1 ConsentGate (IMPLICIT tier). "
+                "Platform: macOS, Linux. Windows not supported."
             ),
             parameters={
                 "type": "object",
@@ -128,9 +133,14 @@ class ReadClipboardOnceTool(BaseTool):
         return ToolSchema(
             name="read_clipboard_once",
             description=(
-                "Read the current clipboard contents once. "
-                "Never streams or polls — single read only. "
-                "May contain sensitive data. Platform: all."
+                "Read the current system clipboard contents — single read only, never "
+                "streamed or polled. Use when the user references 'this' / 'what I just "
+                "copied' and you need the actual text/HTML/image. CAUTION: clipboards "
+                "frequently contain sensitive data (passwords, API keys, addresses); "
+                "treat the result as private and do not log, echo to third parties, or "
+                "include in unrelated tool calls. Under F1 ConsentGate (IMPLICIT tier). "
+                "Single-shot semantics enforced by design — repeated reads require "
+                "explicit re-invocation, no background polling. Platform: all."
             ),
             parameters={
                 "type": "object",
@@ -181,9 +191,15 @@ class ScreenshotTool(BaseTool):
         return ToolSchema(
             name="screenshot",
             description=(
-                "Capture a screenshot of the current screen. "
-                "Returns base64-encoded PNG. May contain sensitive on-screen data. "
-                "Platform: all."
+                "Capture a screenshot of the current screen, returned as base64-encoded "
+                "PNG. Use when the user asks 'what's on my screen?' or when you need to "
+                "verify GUI state before PointAndClick / AppleScriptRun. Pass `quadrant` "
+                "(top-left/top-right/bottom-left/bottom-right) to capture just one "
+                "corner — cheaper and less private. CAUTION: screenshots may contain "
+                "sensitive on-screen data (passwords, private chats, financial info); "
+                "do not include in error messages, third-party calls, or persistent "
+                "logs. For text content prefer extract_screen_text instead — OCR is "
+                "smaller and more privacy-aware. Under F1 ConsentGate (IMPLICIT tier)."
             ),
             parameters={
                 "type": "object",
@@ -244,9 +260,15 @@ class ExtractScreenTextTool(BaseTool):
         return ToolSchema(
             name="extract_screen_text",
             description=(
-                "Extract all visible text from the screen using OCR (Tesseract). "
-                "Returns plain text. Requires Tesseract installed on the system. "
-                "Platform: all."
+                "Extract visible text from the screen via OCR (Tesseract). Returns plain "
+                "text — much smaller and more focused than a screenshot. Use this when "
+                "you need to read what an app is showing without grabbing pixel data — "
+                "error dialog text, web page contents, terminal output the agent isn't "
+                "directly attached to. Prefer extract_screen_text over screenshot when "
+                "you only need the words; the OCR cost is paid once and the output is "
+                "trivially diff-able. Requires Tesseract on PATH (`brew install "
+                "tesseract`). CAUTION: still extracts whatever's visible — same "
+                "privacy concerns as screenshot. Under F1 ConsentGate (IMPLICIT tier)."
             ),
             parameters={
                 "type": "object",
@@ -297,9 +319,16 @@ class ListRecentFilesTool(BaseTool):
         return ToolSchema(
             name="list_recent_files",
             description=(
-                "List files modified in the last N hours in the specified directory. "
-                "Returns a list of file paths sorted by modification time (newest first). "
-                "Platform: macOS, Linux."
+                "List files modified in the last N hours in a directory, sorted by "
+                "mtime (newest first). Use when the user references 'the file I just "
+                "edited' / 'what changed today' and you need to anchor on actual "
+                "filesystem activity rather than guess. Default look-back is 8 hours, "
+                "default directory is `~`, default cap is 50 results — narrow with "
+                "`directory` and `hours` for cheaper queries. Backed by `find -mmin`, "
+                "so the result includes everything modified, not just files the user "
+                "opened. Prefer this over Glob when 'recent' matters more than name "
+                "patterns. CAUTION: home-dir scans are slow on large machines; pass a "
+                "specific subdirectory when possible. Platform: macOS, Linux."
             ),
             parameters={
                 "type": "object",

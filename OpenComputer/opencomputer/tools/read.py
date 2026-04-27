@@ -15,9 +15,15 @@ class ReadTool(BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="Read",
-            description="Read the contents of a file from disk. Returns the text, "
-            "prefixed with line numbers. Supports optional offset and limit "
-            "for reading slices of large files.",
+            description=(
+                "Read a file from disk. Output is prefixed with line numbers so you can "
+                "reference exact lines back to the user. Use this for any path you need "
+                "to inspect — config, code, logs. Prefer Read over Bash 'cat'/'head'/"
+                "'tail': line-numbered output is LLM-friendly and the harness tracks "
+                "file state. Don't re-Read a file you just edited — Edit/Write would "
+                "have errored if the change failed. For large files, pass `offset`+`limit` "
+                "to slice instead of reading the whole thing. file_path must be absolute."
+            ),
             parameters={
                 "type": "object",
                 "properties": {

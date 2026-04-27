@@ -164,9 +164,16 @@ class StartProcessTool(BaseTool):
         return ToolSchema(
             name="StartProcess",
             description=(
-                "Start a long-running process in the background and return its pid. "
-                "Use for dev servers, test watchers, any command you'll want to check "
-                "on later. The pid lets you call CheckOutput and KillProcess."
+                "Start a long-running process in the background; return its pid. Use "
+                "for dev servers, test watchers, log tailers, anything that doesn't "
+                "exit on its own. The pid lets you later call CheckOutput (read "
+                "stdout/stderr) and KillProcess (terminate). Prefer StartProcess over "
+                "Bash for any command that won't terminate quickly — Bash blocks the "
+                "agent loop until the timeout, while StartProcess returns immediately. "
+                "CAUTION: spawned processes inherit the agent's environment; output is "
+                "buffered to a 5000-line ring per stream so very chatty processes lose "
+                "old lines. The watcher fires a Notification hook on exit so the agent "
+                "sees completion in its next turn even without polling."
             ),
             parameters={
                 "type": "object",
@@ -243,7 +250,17 @@ class CheckOutputTool(BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="CheckOutput",
-            description="Read pending stdout/stderr lines from a background process by pid.",
+            description=(
+                "Read pending stdout/stderr lines from a background process by pid. "
+                "Use after StartProcess to see what the process has written so far — "
+                "build output, server logs, test progress. By default `drain=true` "
+                "consumes the buffer (clears read lines); pass `drain=false` to peek "
+                "without consuming. Output is split into stdout/stderr sections with a "
+                "status header (`running` or `exited(code=N)`) so you can tell whether "
+                "to keep watching or move on. Read-only and parallel-safe. If the pid "
+                "isn't tracked the call errors — likely the process was already killed "
+                "or the agent restarted."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -299,7 +316,17 @@ class KillProcessTool(BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="KillProcess",
-            description="Terminate a background process by pid.",
+            description=(
+                "Terminate a background process by pid (started via StartProcess). "
+                "Sends SIGTERM first, escalates to SIGKILL after a 3-second grace "
+                "period if the process doesn't exit. Use this when a dev server or "
+                "watcher is no longer needed, or when a runaway process is consuming "
+                "resources. CAUTION: this is a hard stop — any in-flight work the "
+                "process was doing is lost. Prefer letting short-lived commands "
+                "complete on their own; KillProcess is for processes that won't exit "
+                "otherwise. If the pid isn't tracked the call errors (already killed, "
+                "or session restart cleaned it up)."
+            ),
             parameters={
                 "type": "object",
                 "properties": {"pid": {"type": "integer"}},

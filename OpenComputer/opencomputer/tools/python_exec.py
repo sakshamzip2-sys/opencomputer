@@ -40,11 +40,17 @@ class PythonExec(BaseTool):
         return ToolSchema(
             name="PythonExec",
             description=(
-                "Run a Python script in a subprocess and return stdout + stderr. "
-                "Use this for ad-hoc data analysis (pandas, sklearn, json transforms) "
-                "where Bash + python3 -c would be clunky. Multi-line scripts welcome. "
-                "Denylisted patterns (os.system, subprocess, eval, .ssh access) are "
-                "rejected pre-spawn."
+                "Run a multi-line Python script in a subprocess; returns stdout+stderr "
+                "and exit code. Use for ad-hoc data analysis (pandas, sklearn, numpy), "
+                "JSON transforms, regex experiments, throwaway computations — anything "
+                "where `Bash python3 -c '...'` quoting would be painful. Prefer this over "
+                "Bash for non-trivial Python: multi-line scripts execute cleanly and the "
+                "denylist (os.system, subprocess, eval, exec, .ssh access) is reviewed "
+                "pre-spawn so obvious foot-guns are caught early. CAUTION: a SystemExit "
+                "still kills the subprocess, not the agent. For installed pkgs only — "
+                "the subprocess inherits the agent's interpreter and won't pip-install "
+                "for you. Use this rather than dropping intermediate .py files for "
+                "single-shot work."
             ),
             parameters={
                 "type": "object",

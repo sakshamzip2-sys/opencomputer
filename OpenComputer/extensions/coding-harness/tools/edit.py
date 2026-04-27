@@ -16,13 +16,24 @@ class EditTool(BaseTool):
         return ToolSchema(
             name="Edit",
             description=(
-                "Perform exact string replacement in a file.\n\n"
-                "- `old_string` must be UNIQUE in the file. If it appears multiple times, "
-                "the tool errors with a 'provide more context' hint — expand old_string "
-                "with surrounding lines until it is unique.\n"
-                "- `old_string` must match the file's content EXACTLY, including all "
+                "Surgical find-and-replace in an existing file. The preferred way to "
+                "modify code: cheaper than Write (only sends the diff), preserves "
+                "everything you don't touch, and uniqueness check catches accidental "
+                "double-replacements.\n\n"
+                "- READ FIRST: you must Read the file at least once in this conversation "
+                "before editing — the harness tracks state and will refuse otherwise. "
+                "When matching against Read's output, strip the line-number prefix "
+                "(format is `<num>\\t<content>`); never include the line numbers in "
+                "old_string.\n"
+                "- `old_string` must match the file content EXACTLY, including all "
                 "whitespace and indentation.\n"
-                "- Use `replace_all: true` to replace every occurrence."
+                "- `old_string` must be UNIQUE in the file. If it appears multiple times "
+                "the tool errors — expand old_string with more surrounding context until "
+                "unique, or pass `replace_all: true`.\n"
+                "- Don't use Edit for new files; use Write. Don't use it on .ipynb "
+                "notebooks; use NotebookEdit.\n"
+                "- Prefer Edit over Bash sed/awk: structured errors and the harness can "
+                "track the change for rewind/diff."
             ),
             parameters={
                 "type": "object",
