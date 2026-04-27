@@ -5,6 +5,7 @@ Kept under ``cli_ui/`` (not ``cli/``) to avoid colliding with ``cli.py``.
 """
 
 from opencomputer.cli_ui.input_loop import build_prompt_session, read_user_input
+from opencomputer.cli_ui.keyboard_listener import KeyboardListener
 from opencomputer.cli_ui.slash import (
     SLASH_REGISTRY,
     CommandDef,
@@ -19,6 +20,7 @@ from opencomputer.cli_ui.turn_cancel import TurnCancelScope
 __all__ = [
     "SLASH_REGISTRY",
     "CommandDef",
+    "KeyboardListener",
     "SlashContext",
     "SlashResult",
     "StreamingRenderer",
