@@ -144,15 +144,40 @@ FORBIDDEN = [
 
 Marked `@pytest.mark.benchmark` so it doesn't run in CI but does run via `make benchmark`. Daily check, low cost.
 
-### A.6 — Full Plural Personas + emotional memory (~6 h, OPTIONAL)
+### A.6 — PARKED (NOT PENDING) as of 2026-04-28
 
-The "Path C" stretch goal:
+**Originally sketched as:** ~6h "Path C" stretch — cross-session vibe
+persistence + retrieval, companion expresses preferences over time,
+emotional-state ML classifier from BGE embeddings.
 
-- Cross-session vibe persistence + retrieval (build on A.4)
-- Companion expresses preferences over time ("I keep wanting to dig into the auth refactor — feels like the keystone.")
-- Emotional-state ML classifier from message embeddings (use existing BGE/Chroma from V2.B)
+**Audit finding:** A.4 already shipped 80% of A.6's scope:
 
-This is genuine V2.D / V3 work. Sketch only — separate plan when scheduled.
+- ✅ Cross-session vibe persistence (A.4 — `vibe` + `vibe_updated` columns)
+- ✅ Cross-session vibe retrieval (A.4 — `list_recent_session_vibes`)
+- ✅ Companion references previous vibes (A.4 — `PREVIOUS-SESSION VIBE`
+  anchor in the persona overlay)
+
+What A.6 would actually add:
+
+- ML classifier replacing the heuristic regex from A.4. **Marginal**:
+  ~5% accuracy gain on the 6-class vocab in exchange for ~50-200ms BGE
+  inference per turn + Chroma collection overhead. The regex nails
+  obvious cases (`"I'm stuck"`, `"frustrating"`, `"amazing!"`); the ML
+  upgrade only helps on subtle / sarcastic / non-English edges.
+- "Companion expresses preferences over time" — vague success metric;
+  easy to over-engineer into a fake-personality simulator that fails
+  the same anti-robot-cosplay tests A.5 enforces.
+
+**Decision: park, do not "defer."** The honest framing isn't "wait
+for dogfood." It's "the heuristic was good enough; the ML upgrade
+isn't justified speculatively." Reopen only if a specific failure
+mode surfaces in real use (e.g. sarcastic `"this is awesome"` flagged
+`excited` when user is frustrated) — and then build *for that
+failure*, not the whole ML stack.
+
+If the gap between regex and ground-truth ever proves load-bearing,
+the V2.B BGE/Chroma stack is already in place; A.6 wouldn't need the
+infra build, just the classifier glue + a labeled corpus.
 
 ## Track A summary
 
@@ -163,7 +188,7 @@ This is genuine V2.D / V3 work. Sketch only — separate plan when scheduled.
 | A.3 | Life-Event → companion context | 3 | PR 2 |
 | A.4 | Mood thread (vibe column + tracking) | 3 | PR 3 |
 | A.5 | Anti-robot-cosplay regression test | 1 | bundled |
-| A.6 | Full V2.D stretch | 6 | future |
+| A.6 | PARKED (A.4 covers 80%; ML upgrade not justified speculatively) | — | — |
 | **Total** | | **~18h** | **3-4 PRs** |
 
 ---
@@ -244,7 +269,9 @@ Given limited per-session budgets, ship in this order:
 4. **B.1 (matrix + mattermost)** — modest user value, follows pattern.
 5. **B.4 (email)** — substantial work (IMAP+SMTP) but high value (turns the agent into an email assistant).
 6. **B.5 (webhook + homeassistant)** — programmatic surface.
-7. **A.6 (V2.D stretch)** — only after dogfooding A.1-A.5 for 2 weeks.
+7. **A.6 (V2.D stretch)** — PARKED. A.4 covers the cross-session vibe
+   need; ML upgrade is over-engineering until a specific failure mode
+   surfaces. See A.6 section above for the audit.
 8. **B.3 (China stack)** — only if/when needed.
 9. **B.6 (bluebubbles cleanup)** — janitorial.
 
