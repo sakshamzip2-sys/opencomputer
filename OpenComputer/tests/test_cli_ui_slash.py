@@ -5,16 +5,16 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 from rich.console import Console
 
 from opencomputer.cli_ui.slash import (
-    CommandDef,
     SLASH_REGISTRY,
+    CommandDef,
     SlashResult,
     is_slash_command,
     resolve_command,
 )
+from opencomputer.cli_ui.slash_handlers import SlashContext, dispatch_slash
 
 
 def test_is_slash_command_detects_leading_slash():
@@ -78,8 +78,6 @@ def test_command_def_has_aliases_and_args_hint():
 
 
 # ---------- Handler dispatch tests (Task 4) ----------
-
-from opencomputer.cli_ui.slash_handlers import SlashContext, dispatch_slash
 
 
 def _make_ctx(console: Console | None = None) -> SlashContext:

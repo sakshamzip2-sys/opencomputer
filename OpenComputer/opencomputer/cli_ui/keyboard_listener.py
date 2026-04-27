@@ -58,7 +58,7 @@ class KeyboardListener:
             listener.stop()
     """
 
-    def __init__(self, scope: "TurnCancelScope") -> None:
+    def __init__(self, scope: TurnCancelScope) -> None:
         self._scope = scope
         self._thread: threading.Thread | None = None
         self._stop_event: threading.Event = threading.Event()

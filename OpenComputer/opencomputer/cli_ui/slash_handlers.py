@@ -12,10 +12,11 @@ booting an agent.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from rich.console import Console
 from rich.table import Table

@@ -209,7 +209,10 @@ app = typer.Typer(
     help="Personal AI agent framework — plugin-first, self-improving, multi-channel.",
     no_args_is_help=False,
 )
-console = Console()
+# record=True enables /screenshot + /export — Rich keeps a render
+# log on the console so console.save_text/save_html/save_svg can
+# replay every printed segment. Phase 1 TUI uplift dependency.
+console = Console(record=True)
 
 
 def _register_builtin_tools() -> None:
@@ -846,6 +849,11 @@ def _run_chat_session(
     # pollute a piped stdout).
     use_live_ui = sys.stdout.isatty()
 
+    # Phase 1 TUI uplift — closure-captured cumulative token tally so
+    # /cost can read it. Mutated (not rebound) inside both _run_turn
+    # variants below; no `nonlocal` needed.
+    _token_tally = {"in": 0, "out": 0}
+
     async def _run_turn(user_input: str) -> None:
         if not use_live_ui:
             await _run_turn_plain(user_input)
@@ -865,6 +873,8 @@ def _run_chat_session(
                 stream_callback=renderer.on_chunk,
             )
             elapsed = _time.monotonic() - t_start
+            _token_tally["in"] += result.input_tokens
+            _token_tally["out"] += result.output_tokens
             renderer.finalize(
                 reasoning=getattr(result.final_message, "reasoning", None),
                 iterations=result.iterations,
@@ -890,6 +900,8 @@ def _run_chat_session(
             runtime=runtime,
             stream_callback=on_chunk,
         )
+        _token_tally["in"] += result.input_tokens
+        _token_tally["out"] += result.output_tokens
         if printed_header["val"]:
             console.print()
         if result.final_message.content.strip() and not printed_header["val"]:
@@ -900,21 +912,109 @@ def _run_chat_session(
             f"{result.input_tokens} in / {result.output_tokens} out)[/dim]\n"
         )
 
-    while True:
+    # Phase 1 TUI uplift — PromptSession + slash dispatch + cancel scope
+    # + KeyboardListener for mid-stream ESC. Falls back to legacy line-
+    # by-line path on non-TTY (pipes / CI / `printf … | oc chat`).
+    from opencomputer.agent.config import _home as _profile_home_fn
+    from opencomputer.cli_ui import (
+        KeyboardListener,
+        SlashContext,
+        TurnCancelScope,
+        dispatch_slash,
+        is_slash_command,
+        read_user_input,
+    )
+
+    profile_home = _profile_home_fn()
+
+    def _on_clear() -> None:
+        nonlocal session_id
+        session_id = str(uuid.uuid4())
+        _token_tally["in"] = 0
+        _token_tally["out"] = 0
+        console.clear()
+
+    def _get_cost_summary() -> dict[str, int]:
+        return dict(_token_tally)
+
+    def _get_session_list() -> list[dict]:
         try:
-            user_input = console.input("[bold green]you ›[/bold green] ")
+            from opencomputer.agent.state import SessionDB
+
+            db = SessionDB(profile_home / "sessions.db")
+            rows = db.list_sessions(limit=20)
+            return [
+                {"id": r.get("id", "?"), "started_at": r.get("started_at", "?")}
+                for r in rows
+            ]
+        except Exception:
+            return []
+
+    if not sys.stdin.isatty():
+        # Non-TTY (piped stdin) — keep the old line-by-line behavior.
+        for line in sys.stdin:
+            user_input = line.rstrip("\n")
+            if not user_input.strip():
+                continue
+            if user_input.strip().lower() in {"exit", "quit", ":q"}:
+                break
+            try:
+                asyncio.run(_run_turn(user_input))
+            except Exception as e:
+                console.print(f"[bold red]error:[/bold red] {type(e).__name__}: {e}")
+        _print_update_hint_if_any()
+        return
+
+    while True:
+        async def _read_one() -> str:
+            scope = TurnCancelScope()
+            return await read_user_input(profile_home=profile_home, scope=scope)
+
+        try:
+            user_input = asyncio.run(_read_one())
         except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]bye.[/dim]")
             _print_update_hint_if_any()
             return
-        if user_input.strip().lower() in {"exit", "quit", ":q"}:
-            console.print("[dim]bye.[/dim]")
-            _print_update_hint_if_any()
-            return
         if not user_input.strip():
             continue
+
+        if is_slash_command(user_input):
+            slash_ctx = SlashContext(
+                console=console,
+                session_id=session_id,
+                config=cfg,
+                on_clear=_on_clear,
+                get_cost_summary=_get_cost_summary,
+                get_session_list=_get_session_list,
+            )
+            result = dispatch_slash(user_input, slash_ctx)
+            if result.exit_loop:
+                if result.message:
+                    console.print(f"[dim]{result.message}[/dim]")
+                _print_update_hint_if_any()
+                return
+            continue
+
+        # Run the turn under a cancel scope. ESC during streaming is
+        # caught by KeyboardListener; Ctrl+C is caught by the SIGINT
+        # handler. Both call scope.request_cancel() which task.cancel()s
+        # the in-flight conversation, raising CancelledError that we
+        # catch here to print a friendly note.
+        async def _run_turn_cancellable(input_text: str) -> None:
+            scope = TurnCancelScope()
+            listener = KeyboardListener(scope)
+            with scope.install_sigint_handler():
+                listener.start()
+                try:
+                    await scope.run(_run_turn(input_text))
+                except asyncio.CancelledError:
+                    console.print("\n[yellow]turn cancelled.[/yellow]")
+                finally:
+                    listener.stop()
+
         try:
-            asyncio.run(_run_turn(user_input))
+            asyncio.run(_run_turn_cancellable(user_input))
         except Exception as e:
             console.print(f"[bold red]error:[/bold red] {type(e).__name__}: {e}")
 

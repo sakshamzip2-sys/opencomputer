@@ -17,8 +17,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import signal
+from collections.abc import Awaitable, Iterator
 from types import TracebackType
-from typing import Any, Awaitable, Iterator
+from typing import Any
 
 
 class TurnCancelScope:
@@ -28,7 +29,7 @@ class TurnCancelScope:
         self._event: asyncio.Event = asyncio.Event()
         self._task: asyncio.Task[Any] | None = None
 
-    async def __aenter__(self) -> "TurnCancelScope":
+    async def __aenter__(self) -> TurnCancelScope:
         return self
 
     async def __aexit__(
