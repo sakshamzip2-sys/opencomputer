@@ -36,7 +36,7 @@ Both sessions read this file at startup. Both update it after every commit.
 
 ## Reserved files — Session C only (Session A + B must NOT modify)
 
-- `extensions/oi-capability/*` (deprecated compat shim — refactored into `extensions/coding-harness/oi_bridge/` in PR-3, 2026-04-25; remove on next major version bump)
+- `extensions/oi-capability/*` (deprecated compat shim — refactored into `extensions/coding-harness/introspection/` in PR-3, 2026-04-25; remove on next major version bump)
 - `tests/test_oi_*.py`
 - `docs/f7/*`
 

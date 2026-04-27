@@ -255,7 +255,7 @@ def build_server() -> FastMCP:
 
         Args:
             capability: Optional filter — only entries for this capability_id
-                (e.g. ``"cron.create"``, ``"oi_bridge.screenshot"``).
+                (e.g. ``"cron.create"``, ``"introspection.screenshot"``).
             limit: Max entries to return.
 
         Returns:

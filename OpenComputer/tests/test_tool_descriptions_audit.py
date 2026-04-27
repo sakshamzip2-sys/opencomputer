@@ -12,7 +12,7 @@ Two tool surfaces are audited:
      imported as a package; we use the same ``sys.path`` shim that
      ``test_phase6c.py`` uses).
 
-The OI bridge tools (``extensions/coding-harness/oi_bridge/tools/``) live
+The native introspection tools (``extensions/coding-harness/introspection/``) live
 under the coding-harness umbrella — they are imported via the
 ``extensions.coding_harness`` alias that ``conftest.py`` installs.
 """
@@ -137,21 +137,17 @@ def harness_schemas() -> list:
             RunTestsTool(ctx=ctx),
         ]
 
-        # OI Tier-1 introspection tools — five of them. Use the
+        # Native introspection tools — five of them. Use the
         # extensions.coding_harness alias installed by tests/conftest.py.
         try:
-            tier1_mod = importlib.import_module(
-                "extensions.coding_harness.oi_bridge.tools.tier_1_introspection"
+            introspection_mod = importlib.import_module(
+                "extensions.coding_harness.introspection"
             )
-            wrapper_mod = importlib.import_module(
-                "extensions.coding_harness.oi_bridge.subprocess.wrapper"
-            )
-            wrapper = wrapper_mod.OISubprocessWrapper()
-            for tool_cls in tier1_mod.ALL_TOOLS:
-                instances.append(tool_cls(wrapper=wrapper))
+            for tool_cls in introspection_mod.ALL_TOOLS:
+                instances.append(tool_cls())
         except Exception:  # noqa: BLE001
             # If the alias isn't wired we still want the rest of the
-            # extension audit to fire; the OI tools just won't be checked.
+            # extension audit to fire; the introspection tools just won't be checked.
             pass
 
         return [t.schema for t in instances]

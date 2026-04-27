@@ -162,8 +162,8 @@ def register(api) -> None:  # PluginAPI duck-typed
 
     # Native introspection tools — Tier 1 only.
     #
-    # The legacy ``oi_bridge`` subprocess wrapper (Open-Interpreter shim) was
-    # replaced in the 2026-04-27 native-introspection migration. Tiers 2-5
+    # The legacy Open-Interpreter subprocess wrapper was replaced in the
+    # 2026-04-27 native-introspection migration. Tiers 2-5
     # had already been trimmed in the 2026-04-25 cleanup because each
     # overlapped with a feature OpenComputer already provides:
     #
