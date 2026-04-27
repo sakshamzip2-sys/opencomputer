@@ -13,6 +13,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.theme import Theme as _RichTheme
 
 from opencomputer import __version__
 from opencomputer.agent.config import Config, default_config
@@ -212,7 +213,23 @@ app = typer.Typer(
 # record=True enables /screenshot + /export — Rich keeps a render
 # log on the console so console.save_text/save_html/save_svg can
 # replay every printed segment. Phase 1 TUI uplift dependency.
-console = Console(record=True)
+#
+# Theme override: Rich's default Markdown style applies a dark
+# background to inline code spans (`like this`) and code blocks via
+# Pygments' monokai theme. On dark terminals that bg shows up as a
+# black band that contrasts badly with the surrounding render. We
+# override the relevant styles to use foreground color only — no bg.
+_OC_THEME = _RichTheme(
+    {
+        # Inline `code` spans — keep them visually distinct via color
+        # but drop the background.
+        "markdown.code": "bold cyan",
+        "markdown.code_block": "cyan",
+        # Block quotes — same treatment, text only.
+        "markdown.block_quote": "italic",
+    }
+)
+console = Console(record=True, theme=_OC_THEME)
 
 
 def _register_builtin_tools() -> None:
@@ -906,7 +923,7 @@ def _run_chat_session(
             console.print()
         if result.final_message.content.strip() and not printed_header["val"]:
             console.print("[bold magenta]oc ›[/bold magenta]")
-            console.print(Markdown(result.final_message.content))
+            console.print(Markdown(result.final_message.content, code_theme="ansi_dark"))
         console.print(
             f"[dim]({result.iterations} iterations · "
             f"{result.input_tokens} in / {result.output_tokens} out)[/dim]\n"
@@ -978,6 +995,25 @@ def _run_chat_session(
             return
         if not user_input.strip():
             continue
+
+        # Render the user's message inside a green-bordered Panel so it
+        # is visually distinct from the assistant's response. PromptSession
+        # is configured with erase_when_done=True so the typed prompt line
+        # is gone by now; this Panel is the only visible record of the
+        # turn input, matching Claude Code's left-bar boundary style.
+        from rich.panel import Panel as _UserPanel
+        from rich.text import Text as _UserText
+
+        console.print(
+            _UserPanel(
+                _UserText(user_input, style="bold"),
+                border_style="green",
+                padding=(0, 1),
+                expand=False,
+                title=_UserText("you", style="bold green"),
+                title_align="left",
+            )
+        )
 
         if is_slash_command(user_input):
             slash_ctx = SlashContext(

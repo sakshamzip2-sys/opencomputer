@@ -74,6 +74,10 @@ def build_prompt_session(
         mouse_support=False,
         enable_history_search=True,
         complete_while_typing=False,
+        # erase_when_done clears the typed prompt line on submit so the
+        # chat loop can re-render the user's message inside a styled
+        # boundary box (no duplicate "you › ..." line in scrollback).
+        erase_when_done=True,
     )
 
 

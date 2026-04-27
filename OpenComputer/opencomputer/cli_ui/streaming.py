@@ -230,12 +230,15 @@ class StreamingRenderer:
             )
 
         # Final answer as Markdown — re-rendered from the full buffer
-        # so code blocks get proper syntax highlighting.
+        # so code blocks get proper syntax highlighting. ``code_theme=
+        # "ansi_dark"`` uses the terminal's own ANSI colors instead of
+        # Pygments' monokai (which has a hardcoded dark background that
+        # shows up as a black band on dark terminals).
         if self._buffer:
             content = "".join(self._buffer)
             if self._header_shown:
                 self.console.print("[bold magenta]oc ›[/bold magenta]")
-            self.console.print(Markdown(content))
+            self.console.print(Markdown(content, code_theme="ansi_dark"))
 
         # Token-rate footer.
         rate = (out_tok / elapsed_s) if elapsed_s > 0 else 0.0
@@ -270,7 +273,7 @@ class StreamingRenderer:
             # markdown renderer doesn't error mid-stream.
             if text.count("```") % 2 == 1:
                 text = text + "\n```"
-            renderables.append(Markdown(text))
+            renderables.append(Markdown(text, code_theme="ansi_dark"))
         else:
             renderables.append(
                 Spinner("dots", text=Text("Thinking…", style="dim"))
