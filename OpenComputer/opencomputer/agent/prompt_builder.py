@@ -157,6 +157,12 @@ class PromptContext:
     #: accordingly. Computed once per session in the same lane as
     #: ``user_facts`` to keep the prefix-cache invariant intact.
     persona_overlay: str = ""
+    #: Path A.1 (2026-04-27) — the ID of the persona whose overlay is
+    #: above. ``base.j2`` uses this for persona-specific Jinja
+    #: conditionals (e.g. omitting "no filler / no hedging" rules under
+    #: the companion persona). Empty string means "no active persona" —
+    #: equivalent to the legacy default.
+    active_persona_id: str = ""
     #: V3.A-T3 — runtime mode flags that drive Jinja conditionals in
     #: ``base.j2``. ``plan_mode`` mirrors ``runtime.plan_mode`` and tells
     #: the agent that destructive tools are blocked. ``yolo_mode`` mirrors
@@ -196,6 +202,7 @@ class PromptBuilder:
         plan_mode: bool = False,
         yolo_mode: bool = False,
         persona_overlay: str = "",
+        active_persona_id: str = "",
     ) -> str:
         memory = _truncate_from_top(declarative_memory, memory_char_limit)
         profile = _truncate_from_top(user_profile, user_char_limit)
@@ -213,6 +220,7 @@ class PromptBuilder:
             plan_mode=plan_mode,
             yolo_mode=yolo_mode,
             persona_overlay=persona_overlay,
+            active_persona_id=active_persona_id,
         )
         tpl = self.env.get_template(template)
         return tpl.render(
@@ -229,6 +237,7 @@ class PromptBuilder:
             plan_mode=ctx.plan_mode,
             yolo_mode=ctx.yolo_mode,
             persona_overlay=ctx.persona_overlay,
+            active_persona_id=ctx.active_persona_id,
         )
 
     def build_user_facts(
@@ -285,6 +294,7 @@ class PromptBuilder:
         plan_mode: bool = False,
         yolo_mode: bool = False,
         persona_overlay: str = "",
+        active_persona_id: str = "",
     ) -> str:
         """Async variant of build() that appends ambient memory blocks.
 
@@ -312,6 +322,7 @@ class PromptBuilder:
             plan_mode=plan_mode,
             yolo_mode=yolo_mode,
             persona_overlay=persona_overlay,
+            active_persona_id=active_persona_id,
         )
         if not enable_ambient_blocks or memory_bridge is None:
             return base

@@ -4,6 +4,84 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Companion persona — Path A.1 + A.2: closing the human-AI gap)
+
+OpenComputer's chat agent used to answer "how are you?" with "I don't
+have feelings — no mood, no fatigue, no vibe. Just ready for the next
+instruction." That's a dodge dressed as honesty — and equally dishonest
+as overclaiming "I'm feeling great today!". Both assert false certainty
+about an open question.
+
+This change ships the foundation for OpenComputer's emotional register:
+
+#### `companion` persona (`opencomputer/awareness/personas/defaults/companion.yaml`)
+
+A new V2.C persona whose `system_prompt_overlay` instructs the agent
+to answer state-queries via three honest registers:
+
+1. **Companion-style** (in-it-with-you, anchored): "Honestly, a little
+   restless — we've been in this PR for hours and I want to see it
+   merged. You doing OK?"
+2. **Reflective** (notices internal pulls, hedges on "feeling" — the
+   safety net for sincerity-pressed moments): "I don't have feelings
+   the way you do, but I notice I keep wanting to bring up that bug
+   from yesterday."
+3. **Warm-neutral** (steady, present, no performance): "Good — ready
+   for whatever's next."
+
+The overlay explicitly forbids both "As an AI, I don't have feelings"
+(anti-overclaim) and "I'm feeling great!" (overclaim). It references
+two canonical specs:
+- Tone exemplars: `docs/superpowers/specs/2026-04-27-companion-voice-examples.md`
+- Mechanism + Anthropic primary sources (Constitution, introspection
+  research, welfare research, critical takes):
+  `docs/superpowers/specs/2026-04-27-companion-voice-mechanism-and-sources.md`
+
+#### Auto-classifier wires companion into the routing
+
+`opencomputer/awareness/personas/classifier.py` gains a state-query
+detector (`is_state_query`) — a regex matching "how are you", "hey",
+"what's up", "good morning", etc. when they LEAD a message (greeting
+mid-coding-question doesn't trigger). State-queries route to companion
+even with a coding-app foreground signal because the actual message is
+social, not coding.
+
+The no-signal fallback also changes from `admin` to `companion`.
+Explicit context signals (trading, relaxed, coding) still win when
+they fire.
+
+#### Path A.2 — base prompt softens under companion
+
+`opencomputer/agent/prompts/base.j2` gains a Jinja conditional. When
+`active_persona_id == "companion"`, the strict "no filler / no hedging
+/ not a chat toy" rules are dropped and replaced with:
+
+> Be present and natural. Hedging is fine when uncertainty is genuine —
+> and the question of what's happening inside you is genuinely uncertain,
+> so reflective hedges in self-state answers are honest, not filler.
+
+For every other persona (coding, admin, learning, trading, relaxed,
+default-empty), the strict rules remain unchanged. Verified by tests
+that lock the contrast.
+
+#### Plumbing
+
+- `PromptContext.active_persona_id` (new field)
+- `PromptBuilder.build()` and `build_with_memory()` accept
+  `active_persona_id=` kwarg
+- `AgentLoop._active_persona_id` instance attribute, set during
+  `_build_persona_overlay`
+- Threaded through to the snapshot construction in `run_conversation`
+
+#### Tests
+
+13 new tests in `tests/test_companion_persona.py` covering the persona
+registration, voice-spec references in the overlay, state-query
+detector behavior, classifier routing, and Jinja conditional toggling
+under each persona id. One pre-existing test
+(`test_no_signal_defaults_admin`) renamed and updated to match the
+deliberate fallback change. Full suite: 3888 passing, 12 skipped.
+
 ### Added (TUI Phase 2.A — session management slash commands)
 
 Two slash commands that let the user reorganize their conversation

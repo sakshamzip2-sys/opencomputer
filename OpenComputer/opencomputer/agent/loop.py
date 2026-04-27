@@ -281,6 +281,11 @@ class AgentLoop:
         # NOTE: constructed BEFORE CompactionEngine so we can pass the bridge
         # reference to it for PR-6 T2.2 on_pre_compress wiring.
         self._current_session_id: str = ""
+        #: Path A.1 (2026-04-27): the persona id picked by the classifier
+        #: for the most recent prompt-build. Used by base.j2 to apply
+        #: persona-specific Jinja conditionals (e.g. softening "no filler"
+        #: rules under the companion persona).
+        self._active_persona_id: str = ""
         self.memory_context = MemoryContext(
             manager=self.memory,
             db=self.db,
@@ -620,6 +625,7 @@ class AgentLoop:
                     max_ambient_block_chars=self.config.memory.max_ambient_block_chars,
                     workspace_context=workspace_context,
                     persona_overlay=persona_overlay,
+                    active_persona_id=self._active_persona_id,
                 )
                 # Evict the least-recently-used snapshot if the cache is full
                 # BEFORE inserting, so we never exceed the cap even transiently.
@@ -1114,6 +1120,12 @@ class AgentLoop:
             return ""
         if persona is None:
             return ""
+        # V2.C-T5: stash the active persona id for the prompt builder so
+        # base.j2 can apply persona-specific Jinja conditionals (Path A.2:
+        # the "no filler / no hedging / not a chat toy" rules are dropped
+        # when active_persona == "companion" so the companion overlay's
+        # warm-but-honest register isn't fighting the action-bias rules).
+        self._active_persona_id = str(result.persona_id)
         overlay = persona.get("system_prompt_overlay", "") or ""
         return str(overlay).strip()
 
