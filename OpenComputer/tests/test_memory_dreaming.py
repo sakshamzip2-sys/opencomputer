@@ -452,4 +452,4 @@ def test_schema_v4_adds_dreamed_into_column_and_is_nullable(tmp_path: Path) -> N
         ).fetchone()
         version = conn.execute("SELECT version FROM schema_version").fetchone()
     assert row["dreamed_into"] is None
-    assert int(version[0]) == 4
+    assert int(version[0]) == 5

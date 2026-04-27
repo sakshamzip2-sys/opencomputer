@@ -31,8 +31,10 @@ from plugin_sdk.core import Message, ToolCall
 #: (``dreamed_into`` on ``episodic_events`` — points an entry that has
 #: been folded into a consolidation row at the row id of that
 #: consolidation). Existing rows keep their data — new columns default
-#: to NULL.
-SCHEMA_VERSION = 4
+#: to NULL. v5 = Tier-A item 11 ``tool_usage`` table — per-tool-call
+#: telemetry for ``opencomputer insights`` (tool, duration_ms, error,
+#: model, ts). Existing data unaffected; the table starts empty.
+SCHEMA_VERSION = 5
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -202,6 +204,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (1, 2): "_migrate_v1_to_v2",
     (2, 3): "_migrate_v2_to_v3",
     (3, 4): "_migrate_v3_to_v4",
+    (4, 5): "_migrate_v4_to_v5",
 }
 
 
@@ -276,6 +279,41 @@ def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         # Column already exists (fresh DB; or partial migration).
         pass
+
+
+def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """Tier-A item 11: per-tool-call telemetry table.
+
+    Records one row per tool dispatch — what tool, how long, did it
+    error, which session/model. Powers ``opencomputer insights`` for
+    the "is web_search costing me 60% of my time/spend?" answer that
+    aggregate per-provider cost can't surface.
+
+    Idempotent — fresh DBs and re-runs both no-op cleanly via
+    ``IF NOT EXISTS``.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS tool_usage (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id    TEXT NOT NULL,
+            ts            REAL NOT NULL,
+            tool          TEXT NOT NULL,
+            model         TEXT,
+            duration_ms   REAL,
+            error         INTEGER NOT NULL DEFAULT 0,
+            outcome       TEXT,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tool_usage_session
+            ON tool_usage(session_id);
+        CREATE INDEX IF NOT EXISTS idx_tool_usage_ts
+            ON tool_usage(ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_tool_usage_tool
+            ON tool_usage(tool);
+        """
+    )
 
 
 #: Columns that historically arrived via numbered ALTER migrations.
@@ -761,6 +799,108 @@ class SessionDB:
                 (safe_q, limit),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # ─── Tier-A item 11: tool_usage telemetry ─────────────────────
+
+    def record_tool_usage(
+        self,
+        *,
+        session_id: str,
+        tool: str,
+        outcome: str,
+        duration_ms: float | None = None,
+        model: str | None = None,
+        ts: float | None = None,
+    ) -> None:
+        """Record one tool dispatch into the v5 ``tool_usage`` table.
+
+        Args:
+            session_id: Owner session.
+            tool: Tool name (``"Read"``, ``"Bash"``, ``"WebSearch"``, …).
+            outcome: One of ``success``, ``failure``, ``blocked``,
+                ``cancelled``. ``error`` column is set to 1 for everything
+                except ``success`` so simple "% errored" queries are cheap.
+            duration_ms: Wall-clock spent in ``tool.execute`` (in ms). May
+                be ``None`` for very fast tools where measurement noise
+                dwarfs the value.
+            model: The LLM model whose response triggered this tool call,
+                if known. Best-effort attribution — not all dispatch sites
+                pass it.
+            ts: Override timestamp (UTC seconds). Defaults to ``time.time()``.
+
+        Failures here are swallowed: telemetry should never break the loop.
+        """
+        try:
+            err = 0 if outcome == "success" else 1
+            with self._txn() as conn:
+                conn.execute(
+                    "INSERT INTO tool_usage "
+                    "(session_id, ts, tool, model, duration_ms, error, outcome) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        ts if ts is not None else time.time(),
+                        tool,
+                        model,
+                        duration_ms,
+                        err,
+                        outcome,
+                    ),
+                )
+        except sqlite3.OperationalError:
+            # Pre-v5 DB or transient lock. Telemetry is best-effort — drop
+            # this row rather than break the dispatch path.
+            pass
+
+    def query_tool_usage(
+        self,
+        *,
+        days: int | None = 30,
+        group_by: str = "tool",
+    ) -> list[dict[str, Any]]:
+        """Aggregate ``tool_usage`` rows for the insights CLI.
+
+        Args:
+            days: Time window — only rows newer than ``now - days * 86400``.
+                Pass ``None`` for "all time".
+            group_by: ``tool`` | ``model`` | ``session_id``. Anything else
+                is treated as ``tool``.
+
+        Returns:
+            Rows like ``[{"key": "Read", "calls": 42, "errors": 1,
+            "avg_duration_ms": 12.3, "total_duration_ms": 516.6,
+            "error_rate": 0.024}, ...]`` sorted by ``calls`` desc.
+        """
+        col = group_by if group_by in ("tool", "model", "session_id") else "tool"
+        params: list[Any] = []
+        sql = (
+            f"SELECT {col} as key, "
+            "COUNT(*) as calls, "
+            "SUM(error) as errors, "
+            "AVG(duration_ms) as avg_duration_ms, "
+            "SUM(duration_ms) as total_duration_ms "
+            "FROM tool_usage "
+        )
+        if days is not None:
+            sql += "WHERE ts >= ? "
+            params.append(time.time() - days * 86400)
+        sql += f"GROUP BY {col} ORDER BY calls DESC"
+
+        with self._connect() as conn:
+            try:
+                rows = conn.execute(sql, params).fetchall()
+            except sqlite3.OperationalError:
+                # Pre-v5 DB; return empty.
+                return []
+
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            calls = d.get("calls") or 0
+            errs = d.get("errors") or 0
+            d["error_rate"] = (errs / calls) if calls else 0.0
+            out.append(d)
+        return out
 
 
 __all__ = ["SessionDB"]

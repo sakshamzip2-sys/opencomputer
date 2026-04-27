@@ -1396,6 +1396,11 @@ from opencomputer.evolution.entrypoint import evolution_app  # noqa: E402
 
 app.add_typer(evolution_app, name="evolution")
 
+# Tier-A item 11 — per-tool insights CLI (`opencomputer insights`)
+from opencomputer.cli_insights import insights_app  # noqa: E402
+
+app.add_typer(insights_app, name="insights")
+
 # Phase 3.F — autonomous full-system-control mode toggle
 from opencomputer.cli_system_control import system_control_app  # noqa: E402
 
