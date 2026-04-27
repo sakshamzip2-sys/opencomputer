@@ -1396,10 +1396,20 @@ from opencomputer.evolution.entrypoint import evolution_app  # noqa: E402
 
 app.add_typer(evolution_app, name="evolution")
 
+# Tier-A item 9 — Skills Guard CLI (`opencomputer skill scan <path>`)
+from opencomputer.cli_skills import skill_app  # noqa: E402
+
+app.add_typer(skill_app, name="skill")
+
 # Tier-A item 11 — per-tool insights CLI (`opencomputer insights`)
 from opencomputer.cli_insights import insights_app  # noqa: E402
 
 app.add_typer(insights_app, name="insights")
+
+# Tier-B item 23 — detached task management CLI
+from opencomputer.cli_task import task_app  # noqa: E402
+
+app.add_typer(task_app, name="task")
 
 # Phase 3.F — autonomous full-system-control mode toggle
 from opencomputer.cli_system_control import system_control_app  # noqa: E402
