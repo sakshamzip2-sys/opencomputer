@@ -78,6 +78,19 @@ F1_CAPABILITIES: dict[str, ConsentTier] = {
     # metadata-only and matches the privacy posture of other ambient
     # ingestion paths (recent_files, git_log).
     "ambient.foreground.observe": ConsentTier.IMPLICIT,
+    # Auto-skill-evolution — T1 of 2026-04-27 plan.
+    #
+    # Three capabilities cover the observe → propose → publish pipeline.
+    # ``observe`` is IMPLICIT: only reads SessionEndEvent + ToolCallEvent
+    # bus traffic that's already been consented to by upstream ingestion.
+    # ``propose`` is EXPLICIT: drafting a new SKILL.md from observed
+    # patterns is a one-time user opt-in (revocable via consent revoke).
+    # ``auto_publish`` is PER_ACTION: each automatic activation of a
+    # drafted skill bypasses the manual approval flow, so the user
+    # confirms every promotion until they explicitly raise the tier.
+    "skill_evolution.observe": ConsentTier.IMPLICIT,
+    "skill_evolution.propose": ConsentTier.EXPLICIT,
+    "skill_evolution.auto_publish": ConsentTier.PER_ACTION,
 }
 
 # Reserved for later phases (documented, not enforced here):
