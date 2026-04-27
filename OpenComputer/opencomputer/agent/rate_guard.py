@@ -23,7 +23,8 @@ import logging
 import os
 import tempfile
 import time
-from typing import Any, Mapping, Optional
+from collections.abc import Mapping
+from typing import Any
 
 from opencomputer.agent.config import _home
 
@@ -43,7 +44,7 @@ def _state_path(provider: str) -> str:
     return os.path.join(base, _STATE_SUBDIR, f"{provider}.json")
 
 
-def _parse_reset_seconds(headers: Optional[Mapping[str, str]]) -> Optional[float]:
+def _parse_reset_seconds(headers: Mapping[str, str] | None) -> float | None:
     """Extract the best available reset-time estimate from response headers.
 
     Priority:
@@ -78,8 +79,8 @@ def _parse_reset_seconds(headers: Optional[Mapping[str, str]]) -> Optional[float
 def record_rate_limit(
     provider: str,
     *,
-    headers: Optional[Mapping[str, str]] = None,
-    error_context: Optional[dict[str, Any]] = None,
+    headers: Mapping[str, str] | None = None,
+    error_context: dict[str, Any] | None = None,
     default_cooldown: float = 300.0,
 ) -> None:
     """Record that ``provider`` is rate-limited.
@@ -96,7 +97,7 @@ def record_rate_limit(
         default_cooldown: Fallback cooldown in seconds when no header data.
     """
     now = time.time()
-    reset_at: Optional[float] = None
+    reset_at: float | None = None
 
     # Try headers first (most accurate)
     header_seconds = _parse_reset_seconds(headers)
@@ -147,7 +148,7 @@ def record_rate_limit(
         logger.debug("Failed to write %s rate limit state: %s", provider, exc)
 
 
-def rate_limit_remaining(provider: str) -> Optional[float]:
+def rate_limit_remaining(provider: str) -> float | None:
     """Check if ``provider`` is currently rate-limited.
 
     Returns:

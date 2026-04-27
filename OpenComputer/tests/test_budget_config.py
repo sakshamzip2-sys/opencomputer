@@ -1,9 +1,9 @@
 """TS-T2 — BudgetConfig tests."""
 
 from opencomputer.agent.budget_config import (
-    BudgetConfig,
     DEFAULT_BUDGET,
     DEFAULT_PREVIEW_SIZE_CHARS,
+    BudgetConfig,
 )
 
 

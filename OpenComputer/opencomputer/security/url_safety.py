@@ -169,9 +169,7 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     if ip.is_multicast or ip.is_unspecified:
         return True
     # CGNAT range not covered by is_private
-    if ip in _CGNAT_NETWORK:
-        return True
-    return False
+    return ip in _CGNAT_NETWORK
 
 
 def _allows_private_ip_resolution(hostname: str, scheme: str) -> bool:

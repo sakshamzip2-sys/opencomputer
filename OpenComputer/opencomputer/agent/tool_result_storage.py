@@ -38,9 +38,9 @@ import logging
 from pathlib import Path
 
 from opencomputer.agent.budget_config import (
+    DEFAULT_BUDGET,
     DEFAULT_PREVIEW_SIZE_CHARS,
     BudgetConfig,
-    DEFAULT_BUDGET,
 )
 from opencomputer.agent.config import _home
 
@@ -102,10 +102,7 @@ def _build_persisted_message(
 ) -> str:
     """Build the ``<persisted-output>`` replacement block."""
     size_kb = original_size / 1024
-    if size_kb >= 1024:
-        size_str = f"{size_kb / 1024:.1f} MB"
-    else:
-        size_str = f"{size_kb:.1f} KB"
+    size_str = f"{size_kb / 1024:.1f} MB" if size_kb >= 1024 else f"{size_kb:.1f} KB"
 
     msg = f"{PERSISTED_OUTPUT_TAG}\n"
     msg += f"This tool result was too large ({original_size:,} characters, {size_str}).\n"

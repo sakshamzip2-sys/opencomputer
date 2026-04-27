@@ -12,13 +12,12 @@ the port self-contained without requiring registry changes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict
 
 # Tools whose thresholds must never be overridden.
 # ``read_file``=inf prevents infinite persist->read->persist loops. The
 # corresponding tool in OC is named ``Read``; we list both spellings so the
 # guard works regardless of which name is dispatched.
-PINNED_THRESHOLDS: Dict[str, float] = {
+PINNED_THRESHOLDS: dict[str, float] = {
     "read_file": float("inf"),
     "Read": float("inf"),
 }
@@ -43,7 +42,7 @@ class BudgetConfig:
     default_result_size: int = DEFAULT_RESULT_SIZE_CHARS
     turn_budget: int = DEFAULT_TURN_BUDGET_CHARS
     preview_size: int = DEFAULT_PREVIEW_SIZE_CHARS
-    tool_overrides: Dict[str, int] = field(default_factory=dict)
+    tool_overrides: dict[str, int] = field(default_factory=dict)
 
     def resolve_threshold(self, tool_name: str) -> int | float:
         """Resolve the persistence threshold for a tool.
