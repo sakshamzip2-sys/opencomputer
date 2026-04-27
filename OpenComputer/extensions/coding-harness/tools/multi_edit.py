@@ -11,6 +11,12 @@ from pathlib import Path
 # same "Read first" contract MultiEdit's description has always promised.
 from opencomputer.tools._file_read_state import has_been_read, mark_read
 from opencomputer.tools.edit_diff_format import render_unified_diff
+from opencomputer.tools.file_state import (
+    check_stale as _check_stale_against_siblings,
+)
+from opencomputer.tools.file_state import (
+    note_write as _note_write_for_subagent_guard,
+)
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -209,6 +215,8 @@ class MultiEditTool(BaseTool):
             return ToolResult(
                 tool_call_id=call.id, content="All edits produced no net change"
             )
+        # Sibling-staleness check before writing — see file_state docstring.
+        stale_warning = _check_stale_against_siblings(path)
         try:
             path.write_text(text, encoding="utf-8")
         except Exception as e:
@@ -227,18 +235,19 @@ class MultiEditTool(BaseTool):
         # Mark the path as Read so subsequent Edits in this turn don't need
         # a fresh Read — we just wrote known bytes.
         mark_read(path)
+        _note_write_for_subagent_guard(path)
 
         # V3.A-T6: render ONE diff for the entire batch — `original` is the
         # file's content before any edits in the batch, `text` is the final
         # in-memory state after all edits applied. Capped at MAX_DIFF_LINES.
         diff = render_unified_diff(before=original, after=text, file_path=str(path))
-        return ToolResult(
-            tool_call_id=call.id,
-            content=(
-                f"Applied {len(edits)} edit(s) to {path} ({total_replacements} replacements)\n\n"
-                f"Diff:\n{diff}"
-            ),
+        message = (
+            f"Applied {len(edits)} edit(s) to {path} ({total_replacements} replacements)\n\n"
+            f"Diff:\n{diff}"
         )
+        if stale_warning:
+            message = f"WARNING: {stale_warning}\n\n{message}"
+        return ToolResult(tool_call_id=call.id, content=message)
 
 
 __all__ = ["MultiEditTool"]
