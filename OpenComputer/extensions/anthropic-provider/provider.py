@@ -18,6 +18,7 @@ from anthropic.types import Message as AnthropicMessage
 from pydantic import BaseModel, Field
 
 from opencomputer.agent.credential_pool import CredentialPool
+from opencomputer.agent.prompt_caching import apply_anthropic_cache_control
 from plugin_sdk.core import Message, ToolCall
 from plugin_sdk.provider_contract import (
     BaseProvider,
@@ -186,6 +187,50 @@ class AnthropicProvider(BaseProvider):
                 out.append({"role": m.role, "content": m.content})
         return out
 
+    def _apply_cache_control(
+        self,
+        anthropic_messages: list[dict[str, Any]],
+        system: str,
+    ) -> tuple[Any, list[dict[str, Any]]]:
+        """Apply Anthropic prompt caching (system_and_3 strategy).
+
+        Prepends ``system`` to ``anthropic_messages`` as a synthetic system
+        message, applies cache_control breakpoints (system + last 3 non-system
+        messages), then extracts system back out as a list of content blocks
+        so it can be passed to the SDK's ``system=`` parameter with cache_control
+        preserved.
+
+        Returns:
+            (system_for_sdk, messages_for_sdk) — system is a list of content
+            blocks (e.g. ``[{"type": "text", "text": "...", "cache_control": ...}]``)
+            when there is a system prompt, or an empty string otherwise.
+        """
+        # Build a unified list with system at index 0 (if any) so the
+        # cache function can apply the system_and_3 strategy uniformly.
+        unified: list[dict[str, Any]] = []
+        if system:
+            unified.append({"role": "system", "content": system})
+        unified.extend(anthropic_messages)
+
+        # Apply cache_control breakpoints. native_anthropic=True puts
+        # cache_control on the message dict directly for tool messages
+        # (Anthropic SDK pattern).
+        cached = apply_anthropic_cache_control(unified, native_anthropic=True)
+
+        # Extract system back out as a list of content blocks (preserves
+        # cache_control). The Anthropic SDK accepts ``system=`` as either
+        # a string or a list of content blocks; the list form is required
+        # to carry cache_control.
+        if system and cached and cached[0].get("role") == "system":
+            sys_content = cached[0].get("content")
+            sys_for_sdk: Any = sys_content if isinstance(sys_content, list) else system
+            messages_for_sdk = cached[1:]
+        else:
+            sys_for_sdk = system
+            messages_for_sdk = cached
+
+        return sys_for_sdk, messages_for_sdk
+
     def _parse_response(self, resp: AnthropicMessage) -> ProviderResponse:
         """Convert an Anthropic response back to our canonical Message + metadata."""
         text_parts: list[str] = []
@@ -244,14 +289,20 @@ class AnthropicProvider(BaseProvider):
     ) -> ProviderResponse:
         """Low-level complete using the given API key (pool-rotation target)."""
         client = self._build_client_for_key(key) if key != self._api_key else self.client
+        anthropic_messages = self._to_anthropic_messages(messages)
+        # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
+        # Up to 4 cache_control breakpoints (system + last 3 non-system
+        # messages) for ~75% input-token cost reduction on multi-turn
+        # conversations.
+        sys_for_sdk, api_messages = self._apply_cache_control(anthropic_messages, system)
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "messages": self._to_anthropic_messages(messages),
+            "messages": api_messages,
         }
-        if system:
-            kwargs["system"] = system
+        if sys_for_sdk:
+            kwargs["system"] = sys_for_sdk
         if tools:
             kwargs["tools"] = [t.to_anthropic_format() for t in tools]
         resp = await client.messages.create(**kwargs)
@@ -308,14 +359,17 @@ class AnthropicProvider(BaseProvider):
     ) -> ProviderResponse:
         """Low-level stream_complete that aggregates into a ProviderResponse (pool target)."""
         client = self._build_client_for_key(key) if key != self._api_key else self.client
+        anthropic_messages = self._to_anthropic_messages(messages)
+        # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
+        sys_for_sdk, api_messages = self._apply_cache_control(anthropic_messages, system)
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "messages": self._to_anthropic_messages(messages),
+            "messages": api_messages,
         }
-        if system:
-            kwargs["system"] = system
+        if sys_for_sdk:
+            kwargs["system"] = sys_for_sdk
         if tools:
             kwargs["tools"] = [t.to_anthropic_format() for t in tools]
         async with client.messages.stream(**kwargs) as stream_ctx:
@@ -337,14 +391,17 @@ class AnthropicProvider(BaseProvider):
         Yields text_delta events as tokens arrive, then a single "done" event
         with the final ProviderResponse (including tool calls if any).
         """
+        anthropic_messages = self._to_anthropic_messages(messages)
+        # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
+        sys_for_sdk, api_messages = self._apply_cache_control(anthropic_messages, system)
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "messages": self._to_anthropic_messages(messages),
+            "messages": api_messages,
         }
-        if system:
-            kwargs["system"] = system
+        if sys_for_sdk:
+            kwargs["system"] = sys_for_sdk
         if tools:
             kwargs["tools"] = [t.to_anthropic_format() for t in tools]
 
