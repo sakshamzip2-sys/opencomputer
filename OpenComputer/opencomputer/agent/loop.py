@@ -1163,6 +1163,61 @@ class AgentLoop:
                     exc_info=True,
                 )
 
+            # Path A.4 (2026-04-27): mood thread.
+            # 1. Classify the user's apparent vibe from the last few
+            #    messages and persist on the session row.
+            # 2. Append a "PREVIOUS-SESSION VIBE" anchor referencing the
+            #    most recent OTHER-session vibe (so the companion can
+            #    naturally reference "you sounded frustrated yesterday").
+            try:
+                from opencomputer.agent.vibe_classifier import classify_vibe
+
+                if last_user_messages:
+                    current_vibe = classify_vibe(list(last_user_messages))
+                    self.db.set_session_vibe(session_id, current_vibe)
+
+                # Look for the most-recent OTHER session's vibe (within
+                # the last ~72 hours) so the companion has continuity.
+                import time as _time2
+
+                rows = self.db.list_recent_session_vibes(limit=10)
+                cutoff = _time2.time() - (72 * 3600)
+                prev = next(
+                    (
+                        r for r in rows
+                        if r.get("id") != session_id
+                        and (r.get("vibe_updated") or 0) >= cutoff
+                    ),
+                    None,
+                )
+                if prev is not None:
+                    age_hours = (
+                        _time2.time() - float(prev.get("vibe_updated") or 0)
+                    ) / 3600.0
+                    age_str = (
+                        f"{age_hours:.0f}h ago"
+                        if age_hours >= 1
+                        else "less than an hour ago"
+                    )
+                    title = prev.get("title") or "(untitled session)"
+                    overlay = (
+                        overlay
+                        + "\n\n## PREVIOUS-SESSION VIBE (anchor for the companion)\n\n"
+                        + "User's apparent emotional state in their last "
+                        + f"different session ({age_str}, '{title}'): "
+                        + f"**{prev.get('vibe')}**.\n\n"
+                        + "If the user's tone now is markedly different, you "
+                        + "can naturally reference the shift — 'you sounded "
+                        + f"{prev.get('vibe')} last we talked, this feels "
+                        + "different — what changed?'. Don't force it; use "
+                        + "only when the contrast is obvious."
+                    )
+            except Exception:  # noqa: BLE001 — degrade silently
+                _log.debug(
+                    "companion vibe-classify / previous-vibe lookup failed",
+                    exc_info=True,
+                )
+
         return overlay
 
     # ─── PR-6 T2.3 session lifecycle ───────────────────────────────
