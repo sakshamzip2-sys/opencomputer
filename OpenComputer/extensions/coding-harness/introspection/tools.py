@@ -34,6 +34,7 @@ import mss
 import mss.tools
 import psutil
 import pyperclip
+from extensions.coding_harness.introspection.ocr import ocr_text_from_screen
 
 from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
@@ -343,7 +344,19 @@ class ExtractScreenTextTool(BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="extract_screen_text",
-            description="TODO: filled in by T2-T6",
+            description=(
+                "Extract visible text from the primary monitor via OCR. Returns plain "
+                "text — much smaller and more focused than a screenshot. Use this when "
+                "you need to read what an app is showing without grabbing pixel data — "
+                "error dialog text, web page contents, terminal output the agent isn't "
+                "directly attached to. Prefer extract_screen_text over screenshot when "
+                "you only need the words; the OCR cost is paid once and the output is "
+                "trivially diff-able. Cross-platform via mss + rapidocr-onnxruntime "
+                "(no system Tesseract install required). First call in a process "
+                "may take ~5s to load model weights. CAUTION: still extracts whatever's "
+                "visible — same privacy concerns as screenshot. Linux requires an X or "
+                "Wayland display server. Under F1 ConsentGate (IMPLICIT tier)."
+            ),
             parameters={
                 "type": "object",
                 "properties": {},
@@ -352,7 +365,11 @@ class ExtractScreenTextTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        raise NotImplementedError("Lands in T2-T6")
+        try:
+            text = ocr_text_from_screen()
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
+        return ToolResult(tool_call_id=call.id, content=text)
 
 
 class ListRecentFilesTool(BaseTool):
