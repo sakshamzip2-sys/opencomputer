@@ -1401,6 +1401,11 @@ from opencomputer.cli_skills import skill_app  # noqa: E402
 
 app.add_typer(skill_app, name="skill")
 
+# Tier-B item 23 — detached task management CLI
+from opencomputer.cli_task import task_app  # noqa: E402
+
+app.add_typer(task_app, name="task")
+
 # Phase 3.F — autonomous full-system-control mode toggle
 from opencomputer.cli_system_control import system_control_app  # noqa: E402
 
