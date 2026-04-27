@@ -176,7 +176,9 @@ async def test_webfetch_handles_timeout(monkeypatch: pytest.MonkeyPatch) -> None
             raise httpx.TimeoutException("timed out")
 
     monkeypatch.setattr("opencomputer.tools.web_fetch.httpx.AsyncClient", _FakeClient)
-    res = await tool.execute(_call("WebFetch", {"url": "https://slow.example.com"}))
+    # Use example.com (resolves to a public IP) so the TS-T4 SSRF guard
+    # passes and we reach the FakeClient timeout path being tested.
+    res = await tool.execute(_call("WebFetch", {"url": "https://example.com"}))
     assert res.is_error
     assert "timed out" in res.content
 

@@ -92,6 +92,58 @@ gaps) is the natural next plan.
 
 Spec + plan: `OpenComputer/docs/superpowers/plans/2026-04-27-layered-awareness-v2c.md`
 
+### Added (Tier S Port from Hermes — 2026-04-27)
+
+Seven highest-leverage modules ported from `sources/hermes-agent-2026.4.23/`
+that were missing in OpenComputer's stack. Saksham's deep-gap audit identified
+these as "1-day each, ranked by leverage."
+
+- **TS-T1 — Anthropic prompt caching (`system_and_3` strategy).** Up to 4
+  cache_control breakpoints (system + last 3 non-system messages). ~75%
+  input-token cost reduction on multi-turn conversations. Wired into
+  anthropic-provider's request path (sync + async + native stream paths,
+  3 call sites). 73 LOC verbatim port. Pure functions, zero deps.
+- **TS-T2 — Tool-result spillover with 3-level overflow defense.** Per-tool
+  cap (each tool's job), per-result persistence (>threshold spills to
+  `<profile_home>/tool_result_storage/<id>.txt` with preview + path in-context),
+  per-turn aggregate budget (200K-char ceiling triggers largest-result spill).
+  Closes the OOM-on-big-grep gap. Adapted Hermes's env-sandbox abstraction
+  to OC's local filesystem.
+- **TS-T3 — OSV malware check before MCP server launch.** Queries Google's
+  free OSV API for `MAL-*` advisories on `npx`/`uvx` packages before launch.
+  Fail-open on network errors. Wired into `mcp add`, `mcp install`, `mcp test`
+  with `--skip-osv-check` override flag. Lives at
+  `opencomputer/security/osv_check.py` (distinct from pre-existing
+  `opencomputer/mcp/osv_check.py` which is the httpx vuln-cache).
+- **TS-T4 — URL safety / SSRF guard.** Blocks `169.254.169.254` (cloud
+  metadata), localhost, RFC1918, CGNAT (100.64/10), link-local. ALWAYS
+  blocks cloud metadata even with toggle on. `OPENCOMPUTER_ALLOW_PRIVATE_URLS`
+  env var + `security.allow_private_urls` config opt-out for VPN/proxy
+  edge cases. Wired into WebFetch (with httpx redirect re-validation hook
+  for DNS-rebinding defense) and WebSearch (filters result URLs).
+- **TS-T5 — Subdirectory hint discovery.** As the agent navigates into
+  subdirectories via tool calls, lazily loads `OPENCOMPUTER.md` /
+  `AGENTS.md` / `CLAUDE.md` / `.cursorrules` and **appends to the tool result**,
+  not the system prompt (preserves prompt caching). Walks up to 5 ancestor
+  directories. Inspired by Block/goose.
+- **TS-T6 — Async title generator.** Auto-generates short session titles
+  via OC's cheap-route provider call (claude-haiku-4-5) after the first
+  response. Daemon-thread fire-and-forget — never adds latency. SessionDB
+  gained `set_session_title` / `get_session_title` (column already existed).
+- **TS-T7 — Cross-session rate-limit guard.** Generalized port of Hermes's
+  Nous-specific guard. State at `<profile_home>/rate_limits/{provider}.json`.
+  Atomic writes via tempfile + `os.replace`. Header priority:
+  `x-ratelimit-reset-requests-1h` > `x-ratelimit-reset-requests` > `retry-after`.
+  Wired into anthropic + openai providers (3 call sites each); new
+  `RateLimitedError` exception in `plugin_sdk/provider_contract.py`.
+
+V3.B follow-ups parked: Tier A (PTC, Skills Guard, pluggable context
+engines, Insights, Tirith, file_state, MCP server mode), Tier B
+(proxy-capture, realtime voice, canvas-host, etc.), Tier C smaller items
+— each gets its own follow-up plan.
+
+Spec + plan: `OpenComputer/docs/superpowers/plans/2026-04-27-tier-s-port.md`
+
 ## [2026.4.27] — Round 4 ship: undeferred items, all 5 landed
 
 User reviewed the deferral list and pushed back on 5 items they

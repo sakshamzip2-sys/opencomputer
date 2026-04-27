@@ -16,17 +16,48 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from openai import AsyncOpenAI
+from openai import RateLimitError as OpenAIRateLimitError
 from openai.types.chat import ChatCompletion
 
 from opencomputer.agent.credential_pool import CredentialPool
+from opencomputer.agent.rate_guard import (
+    format_remaining,
+    rate_limit_remaining,
+    record_rate_limit,
+)
 from plugin_sdk.core import Message, ToolCall
 from plugin_sdk.provider_contract import (
     BaseProvider,
     ProviderResponse,
+    RateLimitedError,
     StreamEvent,
     Usage,
 )
 from plugin_sdk.tool_contract import ToolSchema
+
+_RATE_GUARD_PROVIDER = "openai"
+
+
+def _check_rate_limit() -> None:
+    """TS-T7 — short-circuit if a previous 429 hasn't reset yet."""
+    remaining = rate_limit_remaining(_RATE_GUARD_PROVIDER)
+    if remaining is not None:
+        raise RateLimitedError(
+            _RATE_GUARD_PROVIDER,
+            f"OpenAI rate-limited; wait {format_remaining(remaining)}",
+        )
+
+
+def _record_429(exc: OpenAIRateLimitError) -> None:
+    """TS-T7 — persist the 429 so concurrent sessions back off too."""
+    headers: dict[str, str] | None = None
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            headers = dict(response.headers)
+        except Exception:
+            headers = None
+    record_rate_limit(_RATE_GUARD_PROVIDER, headers=headers)
 
 
 class OpenAIProvider(BaseProvider):
@@ -167,6 +198,10 @@ class OpenAIProvider(BaseProvider):
         temperature: float = 1.0,
     ) -> ProviderResponse:
         """Low-level complete using the given API key (pool-rotation target)."""
+        # TS-T7 — short-circuit before the SDK so concurrent sessions
+        # don't keep pinging while a 429 cools down.
+        _check_rate_limit()
+
         client = self._build_client_for_key(key) if key != self._api_key else self.client
         kwargs: dict[str, Any] = {
             "model": model,
@@ -176,7 +211,11 @@ class OpenAIProvider(BaseProvider):
         }
         if tools:
             kwargs["tools"] = [t.to_openai_format() for t in tools]
-        resp = await client.chat.completions.create(**kwargs)
+        try:
+            resp = await client.chat.completions.create(**kwargs)
+        except OpenAIRateLimitError as exc:
+            _record_429(exc)
+            raise
         return self._parse_response(resp)
 
     async def complete(
@@ -229,6 +268,9 @@ class OpenAIProvider(BaseProvider):
         temperature: float = 1.0,
     ) -> ProviderResponse:
         """Low-level streaming that aggregates into a ProviderResponse (pool target)."""
+        # TS-T7 — short-circuit before the SDK.
+        _check_rate_limit()
+
         client = self._build_client_for_key(key) if key != self._api_key else self.client
         kwargs: dict[str, Any] = {
             "model": model,
@@ -245,7 +287,11 @@ class OpenAIProvider(BaseProvider):
         finish_reason = "stop"
         usage: Usage = Usage()
 
-        stream = await client.chat.completions.create(**kwargs)
+        try:
+            stream = await client.chat.completions.create(**kwargs)
+        except OpenAIRateLimitError as exc:
+            _record_429(exc)
+            raise
         async for chunk in stream:
             if not chunk.choices:
                 continue
@@ -352,7 +398,13 @@ class OpenAIProvider(BaseProvider):
         finish_reason = "stop"
         usage: Usage = Usage()
 
-        stream = await self.client.chat.completions.create(**kwargs)
+        # TS-T7 — short-circuit if a previous 429 hasn't reset.
+        _check_rate_limit()
+        try:
+            stream = await self.client.chat.completions.create(**kwargs)
+        except OpenAIRateLimitError as exc:
+            _record_429(exc)
+            raise
         async for chunk in stream:
             if not chunk.choices:
                 continue

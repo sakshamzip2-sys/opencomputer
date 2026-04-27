@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from opencomputer.agent.config import default_config
+from opencomputer.security.url_safety import is_safe_url
 from opencomputer.tools.search_backends import (
     BACKEND_IDS,
     SearchBackendError,
@@ -144,6 +145,13 @@ class WebSearchTool(BaseTool):
                 content=f"Error: {type(e).__name__}: {e}",
                 is_error=True,
             )
+
+        # SSRF guard (TS-T4): drop result hits that resolve to private/internal
+        # IPs or cloud metadata endpoints. Search providers occasionally surface
+        # links into private VPN-routed namespaces; keeping them in the list
+        # invites the model to follow up with a WebFetch that would (rightly)
+        # be blocked, wasting a turn. Filtering at the search layer is cheaper.
+        hits = [h for h in hits if is_safe_url(h.url)]
 
         if not hits:
             return ToolResult(

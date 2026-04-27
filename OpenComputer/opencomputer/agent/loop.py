@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from collections import OrderedDict
@@ -37,6 +38,7 @@ from opencomputer.agent.prompt_builder import PromptBuilder, load_workspace_cont
 from opencomputer.agent.reviewer import PostResponseReviewer
 from opencomputer.agent.state import SessionDB
 from opencomputer.agent.step import StepOutcome
+from opencomputer.agent.subdirectory_hints import SubdirectoryHintTracker
 from opencomputer.agent.tool_ordering import sort_tools_for_request
 from opencomputer.tools.bash_safety import detect_destructive
 from opencomputer.tools.memory_tool import MemoryTool
@@ -326,6 +328,16 @@ class AgentLoop:
         # pre-empting the security boundary. When None, gate is disabled
         # (back-compat: tools without claims are unaffected either way).
         self._consent_gate = consent_gate
+
+        # TS-T5: progressive subdirectory hint discovery. Watches tool
+        # calls for paths into NEW subdirectories and lazily loads
+        # ``OPENCOMPUTER.md`` / ``AGENTS.md`` / ``CLAUDE.md`` /
+        # ``.cursorrules`` from those dirs. The startup CWD is pre-marked
+        # (its hints are already in the system prompt via
+        # ``load_workspace_context``) so we never duplicate-load it.
+        # Hints get appended to the relevant tool result — NOT the system
+        # prompt — to keep Anthropic's prefix cache hot.
+        self._subdir_tracker = SubdirectoryHintTracker(working_dir=os.getcwd())
 
         # Register agent-facing memory tools in the global registry. Safe to
         # call repeatedly — the registry's .register() is idempotent on
@@ -912,6 +924,23 @@ class AgentLoop:
                     turn_index=turn_start_index,
                     runtime=self._runtime,
                 )
+                # TS-T6: kick off async title generation after the first
+                # user→assistant exchange. Daemon thread, fire-and-forget;
+                # ``maybe_auto_title`` self-skips on later turns and on
+                # already-titled sessions, so we can call it
+                # unconditionally here without checking the turn index.
+                try:
+                    from opencomputer.agent.title_generator import maybe_auto_title
+
+                    maybe_auto_title(
+                        session_db=self.db,
+                        session_id=sid,
+                        user_message=user_message,
+                        assistant_response=step.assistant_message.content or "",
+                        conversation_history=messages,
+                    )
+                except Exception:  # noqa: BLE001 — title gen is best-effort
+                    pass
                 self.db.end_session(sid)
                 return ConversationResult(
                     final_message=step.assistant_message,
@@ -1560,14 +1589,90 @@ class AgentLoop:
         else:
             results = [await _run_one(c) for c in calls]
 
+        # TS-T5: subdirectory hint discovery. Append project context files
+        # (OPENCOMPUTER.md / AGENTS.md / CLAUDE.md) to the matching tool's
+        # result content when the tool's args reference a NEW directory.
+        # Done BEFORE spillover so any hints that grow a result past the
+        # per-tool budget still get persisted to disk by Layer 2 below.
+        # Frozen-dataclass ToolResult forces a rebuild — same idiom as
+        # the spillover layer that follows. Errors are swallowed; hint
+        # discovery must never break the dispatch path.
+        _call_by_id = {c.id: c for c in calls}
+        hinted_results: list[ToolResult] = []
+        for r in results:
+            try:
+                c = _call_by_id.get(r.tool_call_id)
+                if c is not None:
+                    hints = self._subdir_tracker.check_tool_call(
+                        c.name, dict(c.arguments or {})
+                    )
+                    if hints:
+                        r = ToolResult(
+                            tool_call_id=r.tool_call_id,
+                            content=(r.content or "") + hints,
+                            is_error=r.is_error,
+                        )
+            except Exception:  # noqa: BLE001 — never break dispatch
+                _log.debug("subdir hint discovery skipped", exc_info=True)
+            hinted_results.append(r)
+        results = hinted_results
+
+        # TS-T2: 3-level overflow defense. Layer 2 fires per-result with the
+        # tool name so per-tool thresholds (and pinned ``Read``=inf) apply.
+        # Layer 3 then runs over the batch in dict form to handle the
+        # "many medium-sized results combine to overflow" case. Both layers
+        # are idempotent against already-persisted blocks.
+        from opencomputer.agent.tool_result_storage import (
+            enforce_turn_budget as _enforce_turn_budget,
+        )
+        from opencomputer.agent.tool_result_storage import (
+            maybe_persist_tool_result as _maybe_persist_tool_result,
+        )
+
+        _name_by_id = {c.id: c.name for c in calls}
+        # Layer 2 — per-result spillover.
+        adjusted: list[ToolResult] = []
+        for r in results:
+            tool_name = _name_by_id.get(r.tool_call_id, "")
+            new_content = _maybe_persist_tool_result(
+                content=r.content or "",
+                tool_name=tool_name,
+                tool_use_id=r.tool_call_id,
+            )
+            if new_content != r.content:
+                # ``ToolResult`` is frozen+slots — rebuild via the constructor.
+                r = ToolResult(
+                    tool_call_id=r.tool_call_id,
+                    content=new_content,
+                    is_error=r.is_error,
+                )
+            adjusted.append(r)
+
+        # Layer 3 — per-turn aggregate budget. Operates over plain dicts and
+        # mutates them in place; we copy back into ToolResult objects.
+        tool_message_dicts: list[dict] = [
+            {"content": r.content, "tool_call_id": r.tool_call_id} for r in adjusted
+        ]
+        _enforce_turn_budget(tool_message_dicts)
+        adjusted = [
+            ToolResult(
+                tool_call_id=r.tool_call_id,
+                content=tool_message_dicts[i]["content"],
+                is_error=r.is_error,
+            )
+            if tool_message_dicts[i]["content"] != r.content
+            else r
+            for i, r in enumerate(adjusted)
+        ]
+
         return [
             Message(
                 role="tool",
                 content=r.content,
                 tool_call_id=r.tool_call_id,
-                name=next((c.name for c in calls if c.id == r.tool_call_id), None),
+                name=_name_by_id.get(r.tool_call_id),
             )
-            for r in results
+            for r in adjusted
         ]
 
     def _emit_before_message_write(

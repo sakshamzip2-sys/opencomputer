@@ -55,6 +55,27 @@ class ProviderResponse:
     codex_reasoning_items: Any = None  # list[dict[str, Any]] | None
 
 
+class RateLimitedError(RuntimeError):  # noqa: N818 — public name is the load-bearing one
+    """TS-T7 — provider is currently rate-limited (cross-session signal).
+
+    Raised by a provider's ``complete`` / ``stream_complete`` when the
+    cross-session rate-limit guard (``opencomputer.agent.rate_guard``)
+    indicates a previous 429 hasn't reset yet. Carries the provider name
+    plus a human-readable message so the caller can decide between
+    waiting, falling back to another provider/model, or surfacing the
+    error verbatim.
+
+    Subclasses ``RuntimeError`` (not a custom hierarchy) so the existing
+    transient-error string-matching in ``opencomputer.agent.fallback``
+    can pick this up via the ``"rate limit"`` marker without needing an
+    isinstance check; that keeps the fallback layer provider-agnostic.
+    """
+
+    def __init__(self, provider: str, message: str) -> None:
+        super().__init__(message)
+        self.provider = provider
+
+
 @dataclass(frozen=True, slots=True)
 class StreamEvent:
     """One event emitted by `provider.stream_complete()`.
@@ -132,4 +153,10 @@ class BaseProvider(ABC):
         ...
 
 
-__all__ = ["BaseProvider", "ProviderResponse", "Usage", "StreamEvent"]
+__all__ = [
+    "BaseProvider",
+    "ProviderResponse",
+    "RateLimitedError",
+    "StreamEvent",
+    "Usage",
+]
