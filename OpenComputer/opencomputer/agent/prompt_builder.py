@@ -28,6 +28,78 @@ from opencomputer.agent.memory import SkillMeta
 
 _TRUNCATION_MARKER = "[earlier entries truncated]\n\n"
 
+#: V3.A-T8 — per-file size cap for workspace context loader. Keeps the
+#: prefix prompt bounded if a project ships a 10MB CLAUDE.md. Truncated
+#: files get a marker so the agent knows what happened.
+_WORKSPACE_FILE_CAP_BYTES = 100_000
+_WORKSPACE_TRUNCATION_NOTE = "\n\n[truncated — file exceeded 100KB cap]\n"
+
+
+def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> str:
+    """Find ``OPENCOMPUTER.md`` / ``CLAUDE.md`` / ``AGENTS.md`` from cwd or ancestors.
+
+    Walks up from ``start`` (default cwd) up to ``max_depth`` levels.
+    Returns concatenated content with file-tagged markers, or an empty
+    string if none found.
+
+    Per-file size is capped at ``_WORKSPACE_FILE_CAP_BYTES`` (100KB) to
+    prevent a misconfigured workspace file from blowing the prompt
+    budget; over-cap files are truncated with a visible marker so the
+    agent can ask for the full file if needed.
+
+    The ``seen_paths`` set deduplicates the same physical file across
+    iterations (e.g. via symlink or repeated visit), but distinct files
+    in different ancestors are all loaded — closer-to-cwd first, since
+    they reflect more-specific project conventions.
+    """
+    if start is None:
+        start = Path.cwd()
+    start = start.resolve()
+
+    # Files to check, in priority order. We collect ALL that exist, not
+    # just the highest-priority one — multiple files may coexist (e.g.
+    # both CLAUDE.md and AGENTS.md in the same repo).
+    target_names = ("OPENCOMPUTER.md", "CLAUDE.md", "AGENTS.md")
+
+    found: list[tuple[str, str]] = []
+    seen_paths: set[Path] = set()
+
+    current = start
+    # ``range(max_depth)`` iterates exactly ``max_depth`` times — each
+    # iteration inspects one directory level (start + max_depth-1
+    # ancestors). The break-on-root guard handles filesystems shallower
+    # than ``max_depth``.
+    for _ in range(max_depth):
+        for name in target_names:
+            candidate = current / name
+            if not candidate.is_file():
+                continue
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved in seen_paths:
+                continue
+            try:
+                content = candidate.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            seen_paths.add(resolved)
+            if len(content) > _WORKSPACE_FILE_CAP_BYTES:
+                content = content[:_WORKSPACE_FILE_CAP_BYTES] + _WORKSPACE_TRUNCATION_NOTE
+            found.append((name, content))
+        if current.parent == current:
+            break  # filesystem root reached
+        current = current.parent
+
+    if not found:
+        return ""
+
+    parts: list[str] = []
+    for name, content in found:
+        parts.append(f"## {name}\n\n{content.strip()}\n")
+    return "\n".join(parts)
+
 
 def _truncate_from_top(text: str, limit: int) -> str:
     """Drop content from the TOP until under *limit* chars, prepending a marker.
@@ -245,4 +317,4 @@ class PromptBuilder:
         return base
 
 
-__all__ = ["PromptBuilder", "PromptContext"]
+__all__ = ["PromptBuilder", "PromptContext", "load_workspace_context"]
