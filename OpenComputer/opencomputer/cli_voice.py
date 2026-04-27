@@ -113,4 +113,57 @@ def voice_cost_estimate(
         typer.echo(f"STT  (whisper-1)   {duration:5.1f}s        = ${cost:.4f}")
 
 
+@voice_app.command("talk")
+def voice_talk(
+    prefer_local: Annotated[
+        bool,
+        typer.Option(
+            "--local",
+            help="Prefer local STT backends (mlx-whisper / whisper-cpp) over the OpenAI API.",
+        ),
+    ] = False,
+) -> None:
+    """Enter continuous push-to-talk voice mode.
+
+    Press Enter to start a recording, Enter again to stop and send. Ctrl+C exits.
+    Real spacebar push-to-talk + barge-in keyboard handling lands in a polish PR.
+    """
+    import asyncio
+
+    from extensions.voice_mode.voice_mode import run_voice_loop
+
+    from opencomputer.agent.config import _home
+    from opencomputer.cost_guard.guard import get_default_guard
+
+    typer.echo("🎤 voice-mode: starting (Enter to record / Enter to stop, Ctrl+C to exit)")
+
+    # Stub agent for T5 — T6+ wires the real AgentLoop.
+    async def stub_agent(user_text: str) -> str:
+        return f"You said: {user_text}. (real agent integration lands in a follow-up)"
+
+    def record_trigger() -> bool:
+        # Block until the user presses Enter twice (start + stop).
+        # The orchestrator wraps the AudioCapture lifecycle around this call,
+        # so the second prompt acts as the "stop" edge.
+        input("Press Enter to record (then Enter to stop): ")
+        return True
+
+    def stop_trigger() -> bool:
+        return False  # never stop autonomously; user exits via Ctrl+C
+
+    try:
+        asyncio.run(
+            run_voice_loop(
+                agent_runner=stub_agent,
+                cost_guard=get_default_guard(),
+                profile_home=_home(),
+                record_trigger=record_trigger,
+                stop_trigger=stop_trigger,
+                prefer_local_stt=prefer_local,
+            )
+        )
+    except KeyboardInterrupt:
+        typer.echo("\nvoice-mode: stopped")
+
+
 __all__ = ["voice_app"]

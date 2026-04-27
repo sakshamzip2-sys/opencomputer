@@ -650,6 +650,125 @@ def _check_introspection_deps() -> list[CheckResult]:
     return results
 
 
+def _check_voice_mode_capable() -> CheckResult:
+    """T6 (voice-mode) — verify dependencies + audio device + STT backend.
+
+    Voice-mode is opt-in (default off, started via ``opencomputer voice
+    talk``). The check is a *preflight*, not a runtime probe — we don't
+    open the mic, we only verify:
+
+    1. ``sounddevice`` imports (PortAudio is reachable on Linux).
+    2. At least one audio input device is enumerable. Headless / SSH
+       sessions typically have zero input devices; surface that clearly.
+    3. ``webrtcvad`` imports (VAD gating is required).
+    4. At least one STT backend is reachable: ``OPENAI_API_KEY`` set, or
+       ``mlx-whisper`` importable, or ``pywhispercpp`` importable.
+
+    Each missing dep returns level=warning (not error) — voice-mode is
+    optional, so doctor exit-code stays clean when the user hasn't opted
+    into it. The happy-path message lists which STT backends were
+    detected so the user can confirm they're getting the path they
+    expect (e.g. local-only on a no-API-key host).
+    """
+    # 1. sounddevice import (covers both pip-missing and PortAudio-missing).
+    try:
+        import sounddevice as sd
+    except ImportError:
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                "voice-mode: sounddevice not installed — "
+                "pip install opencomputer[voice]"
+            ),
+        )
+    except OSError as exc:
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                f"voice-mode: PortAudio missing ({exc}) — "
+                "Linux: apt install libportaudio2"
+            ),
+        )
+
+    # 2. At least one audio input device. Headless / SSH = no input.
+    try:
+        devices = sd.query_devices()
+        has_input = any(
+            d.get("max_input_channels", 0) > 0 for d in devices
+        )
+        if not has_input:
+            return CheckResult(
+                ok=False,
+                level="warning",
+                message=(
+                    "voice-mode: no audio input device detected "
+                    "(headless? SSH?)"
+                ),
+            )
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=f"voice-mode: device query failed: {exc}",
+        )
+
+    # 3. webrtcvad import.
+    try:
+        import webrtcvad  # noqa: F401
+    except ImportError:
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                "voice-mode: webrtcvad not installed — "
+                "pip install opencomputer[voice]"
+            ),
+        )
+
+    # 4. At least one STT backend reachable.
+    has_openai_key = bool(os.environ.get("OPENAI_API_KEY"))
+    has_mlx = False
+    has_whisper_cpp = False
+    try:
+        import mlx_whisper  # noqa: F401
+
+        has_mlx = True
+    except ImportError:
+        pass
+    try:
+        import pywhispercpp  # noqa: F401
+
+        has_whisper_cpp = True
+    except ImportError:
+        pass
+
+    if not (has_openai_key or has_mlx or has_whisper_cpp):
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                "voice-mode: no STT backend — set OPENAI_API_KEY OR "
+                "pip install opencomputer[voice-mlx] OR "
+                "opencomputer[voice-local]"
+            ),
+        )
+
+    backends: list[str] = []
+    if has_openai_key:
+        backends.append("openai-api")
+    if has_mlx:
+        backends.append("mlx-whisper")
+    if has_whisper_cpp:
+        backends.append("whisper-cpp")
+    return CheckResult(
+        ok=True,
+        level="info",
+        message=f"voice-mode ready (STT: {', '.join(backends)})",
+    )
+
+
 def _check_ambient_state(profile_home: Path) -> CheckResult:
     """Read ambient state.json; warn if enabled but heartbeat is stale or missing.
 
@@ -955,6 +1074,14 @@ def run_doctor(fix: bool = False) -> int:
                 _check_skill_evolution_state(profile_home),
             )
         )
+
+    # T6 (voice-mode) — sounddevice + webrtcvad + audio-input-device + STT
+    # backend preflight. Opt-in feature; check returns warning on missing
+    # deps so doctor exit-code stays clean if the user hasn't installed
+    # the [voice] extra.
+    checks.append(
+        _result_to_check("voice-mode", _check_voice_mode_capable())
+    )
 
     # Plugin-contributed checks + repairs (run last so plugins see a fully-
     # loaded registry, config, and DB-writable environment).

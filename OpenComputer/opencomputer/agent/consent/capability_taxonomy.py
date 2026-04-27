@@ -12,6 +12,13 @@ F1_CAPABILITIES: dict[str, ConsentTier] = {
     # F8 (voice — Phase 1.1 of catch-up plan)
     "voice.synthesize": ConsentTier.IMPLICIT,
     "voice.transcribe": ConsentTier.IMPLICIT,
+    # voice-mode plugin (continuous push-to-talk) — T1 of 2026-04-28 plan.
+    # ``voice.capture`` is EXPLICIT because microphone access is privacy-
+    # sensitive — the user opts in once, revocable via consent revoke.
+    # ``voice.playback`` is IMPLICIT — speaker output is low-risk and
+    # mirrors the existing voice.synthesize tier.
+    "voice.capture": ConsentTier.EXPLICIT,
+    "voice.playback": ConsentTier.IMPLICIT,
     # F9 (channels — Phase 1.3 of catch-up plan).
     # Auto-granted by `opencomputer pair <platform>` after format + live
     # check pass. Tier EXPLICIT means: user-confirmed but not per-message.
