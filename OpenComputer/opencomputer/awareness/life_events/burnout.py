@@ -4,7 +4,9 @@ from __future__ import annotations
 import time
 
 from opencomputer.awareness.life_events.pattern import (
-    EvidenceItem, LifeEventPattern, SurfacingPolicy,
+    EvidenceItem,
+    LifeEventPattern,
+    SurfacingPolicy,
 )
 
 

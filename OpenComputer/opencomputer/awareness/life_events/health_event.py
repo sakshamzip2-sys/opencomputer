@@ -4,9 +4,10 @@ from __future__ import annotations
 from typing import ClassVar
 
 from opencomputer.awareness.life_events.pattern import (
-    EvidenceItem, LifeEventPattern, SurfacingPolicy,
+    EvidenceItem,
+    LifeEventPattern,
+    SurfacingPolicy,
 )
-
 
 _HEALTH_DOMAINS: ClassVar[frozenset[str]] = frozenset({
     "webmd.com", "mayoclinic.org", "drugs.com", "healthline.com",

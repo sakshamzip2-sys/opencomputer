@@ -1,4 +1,5 @@
 import time
+
 from opencomputer.awareness.life_events.burnout import Burnout
 
 

@@ -1,5 +1,6 @@
 from opencomputer.awareness.personas.classifier import (
-    ClassificationContext, classify,
+    ClassificationContext,
+    classify,
 )
 
 

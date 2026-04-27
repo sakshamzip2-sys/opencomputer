@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from opencomputer.awareness.life_events.pattern import (
-    EvidenceItem, LifeEventPattern, SurfacingPolicy,
+    EvidenceItem,
+    LifeEventPattern,
+    SurfacingPolicy,
 )
 
 

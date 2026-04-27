@@ -34,6 +34,41 @@ clean piped output).
 Live streaming of THINKING chunks is deferred — Anthropic's SDK
 exposes them separately from assistant chunks; for v1 we render the
 thinking panel post-hoc from the persisted `reasoning` field.
+### Added (Layered Awareness V2.C — Life-Event Detector + Plural Personas, 2026-04-27)
+
+- **Life-Event Detector framework** — `LifeEventPattern` ABC + sliding-window
+  evidence accumulator with exponential decay (default 7-day half-life,
+  14-day window). Patterns subscribe to F2 SignalEvent bus; firings either
+  surface as chat hints (`surfacing="hint"`) or stay silent F4 graph edges
+  (`surfacing="silent"` for HealthEvent / RelationshipShift — never auto-surface).
+- **6 starter patterns** — JobChange, ExamPrep, Burnout, RelationshipShift,
+  HealthEvent, Travel. Surface threshold 0.7 default.
+- **Pattern registry + bus subscription** — `LifeEventRegistry` owns the
+  pattern instances + firing queue; `subscribe_to_bus()` wires it to the
+  default TypedEventBus. Per-pattern exception isolation.
+- **`opencomputer awareness patterns {list,mute,unmute}`** CLI + persistent
+  mute state at `<profile_home>/awareness/muted_patterns.json`.
+- **`opencomputer awareness personas list`** CLI.
+- **Persona auto-classifier** — `classify(ClassificationContext)` reads
+  foreground app, time of day, recent files, last messages → returns
+  `ClassificationResult(persona_id, confidence, reason)`. Heuristic-based
+  in V2.C; V2.D may swap to LLM.
+- **5 default personas** — coding, trading, relaxed, admin, learning.
+  YAML at `opencomputer/awareness/personas/defaults/*.yaml`. User overrides
+  via `<profile_home>/personas/*.yaml`.
+- **Persona overlay wired into AgentLoop** — at session start, classifier
+  runs, persona's `system_prompt_overlay` lands as `{{ persona_overlay }}`
+  slot in base.j2 (between user_facts and skills).
+- **Foreground-app detector** — best-effort macOS osascript probe; falls
+  back to "" on non-macOS.
+- **F1 capability claims** — `awareness.life_event.observe`,
+  `awareness.life_event.surface`, `awareness.persona.classify`,
+  `awareness.persona.switch` (all IMPLICIT).
+
+V2.D (Curious Companion — agent asks indirect questions to fill knowledge
+gaps) is the natural next plan.
+
+Spec + plan: `OpenComputer/docs/superpowers/plans/2026-04-27-layered-awareness-v2c.md`
 
 ## [2026.4.27] — Round 4 ship: undeferred items, all 5 landed
 

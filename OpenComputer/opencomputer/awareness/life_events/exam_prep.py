@@ -4,9 +4,10 @@ from __future__ import annotations
 from typing import ClassVar
 
 from opencomputer.awareness.life_events.pattern import (
-    EvidenceItem, LifeEventPattern, SurfacingPolicy,
+    EvidenceItem,
+    LifeEventPattern,
+    SurfacingPolicy,
 )
-
 
 _EDU_DOMAINS: ClassVar[frozenset[str]] = frozenset({
     "khanacademy.org", "coursera.org", "edx.org", ".edu/", "geeksforgeeks.org",

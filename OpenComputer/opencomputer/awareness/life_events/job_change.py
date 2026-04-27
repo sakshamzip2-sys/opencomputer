@@ -4,9 +4,10 @@ from __future__ import annotations
 from typing import ClassVar
 
 from opencomputer.awareness.life_events.pattern import (
-    EvidenceItem, LifeEventPattern, SurfacingPolicy,
+    EvidenceItem,
+    LifeEventPattern,
+    SurfacingPolicy,
 )
-
 
 _TRIGGER_TERMS: ClassVar[frozenset[str]] = frozenset({
     "linkedin.com/jobs", "indeed.com", "glassdoor.com",

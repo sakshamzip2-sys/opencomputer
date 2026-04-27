@@ -1,4 +1,5 @@
 from pathlib import Path
+
 from opencomputer.awareness.personas.registry import get_persona, list_personas
 
 

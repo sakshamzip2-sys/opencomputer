@@ -15,7 +15,8 @@ from opencomputer.awareness.life_events.exam_prep import ExamPrep
 from opencomputer.awareness.life_events.health_event import HealthEvent
 from opencomputer.awareness.life_events.job_change import JobChange
 from opencomputer.awareness.life_events.pattern import (
-    LifeEventPattern, PatternFiring,
+    LifeEventPattern,
+    PatternFiring,
 )
 from opencomputer.awareness.life_events.relationship_shift import RelationshipShift
 from opencomputer.awareness.life_events.travel import Travel

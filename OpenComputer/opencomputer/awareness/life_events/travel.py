@@ -4,9 +4,10 @@ from __future__ import annotations
 from typing import ClassVar
 
 from opencomputer.awareness.life_events.pattern import (
-    EvidenceItem, LifeEventPattern, SurfacingPolicy,
+    EvidenceItem,
+    LifeEventPattern,
+    SurfacingPolicy,
 )
-
 
 _TRAVEL_DOMAINS: ClassVar[frozenset[str]] = frozenset({
     "booking.com", "expedia.com", "kayak.com", "skyscanner.com",

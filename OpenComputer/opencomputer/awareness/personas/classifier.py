@@ -6,8 +6,7 @@ may swap in an LLM-based classifier.
 """
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +47,7 @@ def classify(ctx: ClassificationContext) -> ClassificationResult:
         return ClassificationResult("learning", 0.6, f"{md_files} recent .md files")
 
     # Time-of-day fallback
-    if 21 <= ctx.time_of_day_hour or ctx.time_of_day_hour < 6:
+    if ctx.time_of_day_hour >= 21 or ctx.time_of_day_hour < 6:
         return ClassificationResult("relaxed", 0.5, f"hour={ctx.time_of_day_hour} (evening/late)")
     if 9 <= ctx.time_of_day_hour < 12:
         return ClassificationResult("coding", 0.4, "morning hours, default to coding")

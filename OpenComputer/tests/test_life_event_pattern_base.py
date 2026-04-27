@@ -1,6 +1,9 @@
 import time
+
 from opencomputer.awareness.life_events.pattern import (
-    EvidenceItem, LifeEventPattern, PatternFiring,
+    EvidenceItem,
+    LifeEventPattern,
+    PatternFiring,
 )
 
 

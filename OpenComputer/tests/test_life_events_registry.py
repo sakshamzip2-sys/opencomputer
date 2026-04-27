@@ -1,7 +1,9 @@
 import time
 
 from opencomputer.awareness.life_events.registry import (
-    DEFAULT_PATTERNS, LifeEventRegistry, subscribe_to_bus,
+    DEFAULT_PATTERNS,
+    LifeEventRegistry,
+    subscribe_to_bus,
 )
 
 
@@ -87,7 +89,9 @@ def test_hint_firings_queued_for_chat():
 def test_per_pattern_exception_isolated():
     """A pattern whose accumulate raises must not take the registry down."""
     from opencomputer.awareness.life_events.pattern import (
-        EvidenceItem, LifeEventPattern, PatternFiring,
+        EvidenceItem,
+        LifeEventPattern,
+        PatternFiring,
     )
 
     class _BadPattern(LifeEventPattern):
