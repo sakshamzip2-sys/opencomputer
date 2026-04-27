@@ -1654,6 +1654,33 @@ class AgentLoop:
                 exc_info=True,
             )
 
+        # Tier-A item 11: write a row to ``tool_usage`` for the insights
+        # CLI. Separate try/except — one of {bus publish, telemetry write}
+        # failing must not break the other or the loop.
+        try:
+            if session_id:
+                # ``self.config.model.name`` is the *configured* model;
+                # the actual per-turn model lives in ``_last_model`` when
+                # the cheap-route or auxiliary client overrides for a
+                # specific turn (Item 15 wires this fully). Best-effort.
+                model_for_row = (
+                    getattr(self, "_last_model", None)
+                    or getattr(self.config.model, "name", None)
+                )
+                self.db.record_tool_usage(
+                    session_id=session_id,
+                    tool=call.name,
+                    outcome=outcome,
+                    duration_ms=max(0.0, duration_seconds) * 1000.0,
+                    model=model_for_row,
+                )
+        except Exception:  # noqa: BLE001 — never break the loop
+            _log.debug(
+                "tool_usage record failed for tool=%s — continuing",
+                call.name,
+                exc_info=True,
+            )
+
     def _all_parallel_safe(self, calls: list[ToolCall]) -> bool:
         """Decide whether a batch of tool calls is safe to run in parallel.
 
