@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import time
+from pathlib import Path
 from typing import Any, ClassVar
 
 import mss
@@ -58,6 +60,58 @@ def _quadrant_bounds(monitor: dict, quadrant: str) -> dict:
     if quadrant == "bottom-right":
         return {"left": left + half_w, "top": top + half_h, "width": half_w, "height": half_h}
     return monitor
+
+
+# Files modified inside any of these directories are noise — system caches,
+# package bundles, sandbox data — not what the user means by "files I edited".
+_SKIP_DIR_NAMES: frozenset[str] = frozenset({
+    # Generic dot/dunder
+    ".git", ".hg", ".svn", "__pycache__",
+    ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    # Build / packaging
+    "node_modules", "dist", "build", ".next", ".nuxt",
+    # macOS bloat
+    "Library",  # broad: skips ~/Library entirely; user-edited content lives elsewhere
+    "Mail", "Caches", "Containers",  # in case someone passes a non-home root
+    # Windows bloat
+    "AppData",
+})
+
+# Hard cap on files inspected per call. Walks halt early once exceeded;
+# the partial sorted result is returned. Tuned for "responsive" (~<1s)
+# on developer machines.
+_WALK_FILE_BUDGET: int = 50_000
+
+
+def _walk_recent_files(base: Path, cutoff: float, limit: int) -> list[tuple[float, Path]]:
+    """Return [(mtime, path), ...] for files under ``base`` modified after ``cutoff``.
+
+    Skips directories named in ``_SKIP_DIR_NAMES`` and any starting with '.'.
+    Returns at most ``limit * 2`` entries (caller sorts + truncates to ``limit``).
+    Halts early at ``_WALK_FILE_BUDGET`` files inspected.
+    """
+    out: list[tuple[float, Path]] = []
+    cap = max(limit * 2, limit + 10)
+    inspected = 0
+    for root, dirs, files in os.walk(base):  # followlinks=False (default) — safe
+        # Prune in-place so os.walk doesn't recurse into them
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIR_NAMES and not d.startswith(".")]
+        for fname in files:
+            if fname.startswith("."):
+                continue
+            inspected += 1
+            if inspected > _WALK_FILE_BUDGET:
+                return out
+            p = Path(root) / fname
+            try:
+                m = p.stat().st_mtime
+            except OSError:
+                continue
+            if m > cutoff:
+                out.append((m, p))
+                if len(out) >= cap:
+                    return out
+    return out
 
 
 class ListAppUsageTool(BaseTool):
@@ -329,7 +383,17 @@ class ListRecentFilesTool(BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="list_recent_files",
-            description="TODO: filled in by T2-T6",
+            description=(
+                "List files modified in the last N hours under a directory, sorted by "
+                "mtime (newest first). Use when the user references 'the file I just "
+                "edited' / 'what changed today'. Default look-back is 8 hours, default "
+                "directory is `~`, default cap is 50 results — narrow with `directory` "
+                "and `hours` for cheaper queries. Returns JSON array of {path, mtime}. "
+                "Skips noise dirs (.git, __pycache__, node_modules, .venv, Library, "
+                "AppData) and hidden files; hard-caps file inspection at 50,000. "
+                "Cross-platform via os.walk + pathlib (macOS, Linux, Windows). Under F1 "
+                "ConsentGate (IMPLICIT tier)."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -354,4 +418,25 @@ class ListRecentFilesTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        raise NotImplementedError("Lands in T2-T6")
+        hours = int(call.arguments.get("hours", 8))
+        directory = call.arguments.get("directory", "~")
+        limit = int(call.arguments.get("limit", 50))
+
+        base = Path(os.path.expanduser(directory))
+        if not base.exists() or not base.is_dir():
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"Error: directory not found: {directory}",
+                is_error=True,
+            )
+
+        cutoff = time.time() - hours * 3600
+
+        try:
+            rows = _walk_recent_files(base, cutoff, limit)
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
+
+        rows.sort(reverse=True)
+        payload = [{"path": str(p), "mtime": m} for m, p in rows[:limit]]
+        return ToolResult(tool_call_id=call.id, content=json.dumps(payload))
