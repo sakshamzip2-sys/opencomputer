@@ -33,7 +33,7 @@ logger = logging.getLogger("opencomputer.ext.mattermost")
 class MattermostAdapter(BaseChannelAdapter):
     """Mattermost channel — Web API only (no WebSocket runtime)."""
 
-    platform = Platform.WEB  # No MATTERMOST enum; reuse WEB
+    platform = Platform.MATTERMOST
     max_message_length = 16_000  # Mattermost server-default
     capabilities = (
         ChannelCapabilities.REACTIONS

@@ -154,7 +154,7 @@ class TestDispatch:
         assert "GUJALKALI" in ev.text
         assert ev.metadata["webhook_token_id"] == token_id
         assert ev.metadata["webhook_notify"] == "telegram"
-        assert ev.platform.value == "web"
+        assert ev.platform.value == "webhook"
 
     @pytest.mark.asyncio
     async def test_plain_text_body_accepted(self, adapter_with_token) -> None:

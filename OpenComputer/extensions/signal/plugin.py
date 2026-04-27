@@ -36,5 +36,5 @@ def register(api) -> None:  # PluginAPI duck-typed
     adapter = SignalAdapter(
         config={"signal_cli_url": url, "phone_number": phone}
     )
-    api.register_channel(Platform.WEB.value, adapter)
+    api.register_channel(Platform.SIGNAL.value, adapter)
     logger.info("signal plugin: registered for %s via %s", phone, url)

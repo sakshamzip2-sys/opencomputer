@@ -31,7 +31,7 @@ def register(api) -> None:  # PluginAPI duck-typed
         "port": int(os.environ.get("WEBHOOK_PORT", "18790")),
     }
     adapter = WebhookAdapter(config=config)
-    api.register_channel(Platform.WEB.value, adapter)
+    api.register_channel(Platform.WEBHOOK.value, adapter)
     logger.info(
         "webhook: registered (host=%s port=%d) — bind on gateway start",
         config["host"], config["port"],

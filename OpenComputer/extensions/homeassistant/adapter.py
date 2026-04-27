@@ -47,7 +47,7 @@ logger = logging.getLogger("opencomputer.ext.homeassistant")
 class HomeAssistantAdapter(BaseChannelAdapter):
     """Home Assistant REST API channel — service-call outbound only."""
 
-    platform = Platform.WEB
+    platform = Platform.HOMEASSISTANT
     max_message_length = 4096
 
     capabilities = ChannelCapabilities(0)

@@ -39,7 +39,7 @@ _API_VERSION = "v18.0"
 class WhatsAppAdapter(BaseChannelAdapter):
     """WhatsApp Cloud API channel — outbound + reactions."""
 
-    platform = Platform.WEB
+    platform = Platform.WHATSAPP
     max_message_length = 4096
     """WhatsApp text message limit (per Meta's docs)."""
 

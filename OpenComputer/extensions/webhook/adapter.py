@@ -73,7 +73,7 @@ _RATE_LIMIT_WINDOW_SECONDS = 60.0
 
 
 class WebhookAdapter(BaseChannelAdapter):
-    platform = Platform.WEB
+    platform = Platform.WEBHOOK
     max_message_length = 64_000  # webhook responses can be larger than chat
     capabilities = ChannelCapabilities.NONE  # no typing, no reactions, no edit
 
@@ -187,7 +187,7 @@ class WebhookAdapter(BaseChannelAdapter):
             )
 
         event = MessageEvent(
-            platform=Platform.WEB,
+            platform=Platform.WEBHOOK,
             chat_id=f"webhook:{token_id}",
             user_id=f"webhook:{token_meta.get('name', token_id[:8])}",
             text=text,
