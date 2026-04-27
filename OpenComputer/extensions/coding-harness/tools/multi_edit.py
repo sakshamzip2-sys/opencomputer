@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from plugin_sdk.core import ToolCall, ToolResult
-from plugin_sdk.tool_contract import BaseTool, ToolSchema
-
 # V3.A-T5: per-edit failures must teach the model how to recover. Each error
 # message identifies WHICH edit in the batch failed (1-indexed for human
 # readability), what the underlying problem is, and the next concrete action
@@ -14,6 +11,8 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 # same "Read first" contract MultiEdit's description has always promised.
 from opencomputer.tools._file_read_state import has_been_read, mark_read
 from opencomputer.tools.edit_diff_format import render_unified_diff
+from plugin_sdk.core import ToolCall, ToolResult
+from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 
 class MultiEditTool(BaseTool):

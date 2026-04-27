@@ -28,6 +28,72 @@ User must still run `opencomputer cron daemon` (or use the LaunchAgent
 from PR #153) for the schedule to actually fire — we don't start the
 daemon for the user. The `dream-on` output names this requirement.
 
+### Added (Coding Harness Parity V3.A — 2026-04-27)
+
+OpenComputer's coding harness now matches Claude Code's quality across
+seven engineered surfaces. A user choosing `oc code` should not need to
+fall back to `claude` for any common workflow.
+
+- **Benchmark suite** (T0) — 5 canonical tasks (refactor / add test / fix
+  type error / write script / debug failure) wired through AgentLoop.
+  Records `tool_calls + iterations + elapsed + success`. Opt-in via
+  `pytest -m benchmark`. Establishes the quality yardstick.
+- **`PythonExec` tool** (T1) — sandboxed Python via `asyncio.create_subprocess_exec`.
+  Denylist (`os.system`, `subprocess`, `eval`, `exec`, `__import__`,
+  `/.ssh/`, etc.) blocks obvious abuse pre-spawn. Closes the OI principle
+  gap: ad-hoc data analysis (pandas, sklearn) without `bash python3 -c`
+  ceremony.
+- **`profile-scraper` skill** (T2) — structured laptop knowledge ingestion
+  with 12 source functions (identity, projects, browser history,
+  shell history, git activity, recent files, app inventory, system info,
+  secrets audit, git emails, package managers). `{field, value, source,
+  confidence, timestamp}` schema. Denylist for `~/.ssh`, Messages.app,
+  financial PDFs. 10-snapshot retention. `secrets_audit` returns
+  `{file, count}` payloads — never the matched token value.
+- **Engineered `base.j2`** (T3) — system prompt grew from 47 lines to
+  ~250 lines / ~14k chars. New sections: working rules, tool-use
+  discipline, plan/yolo modes, memory integration, error recovery,
+  workspace context, doing-tasks loop, refusal policy.
+  PromptContext extended with `os_name`, `workspace_context`,
+  `plan_mode`, `yolo_mode` (safe defaults preserve existing callers).
+- **Tool description audit** (T4) — every one of 35 registered tools now
+  has a description ≥120 chars (median ~595 chars, max 982 for `Edit`).
+  Each teaches when to use, when NOT to use, and pitfalls. Destructive
+  tools (`Edit`, `MultiEdit`, `Write`, `Bash`, `PythonExec`,
+  `AppleScriptRun`) carry warning/guidance text.
+- **Engineered `Edit`/`MultiEdit` error messages** (T5) — every error
+  return path now nudges toward the fix. "old_string not unique" lists
+  the two remediation paths (more context vs `replace_all=true`); "file
+  not Read first" enforced via new `_file_read_state.py` tracker (no
+  longer just documented; now actually checked). Per-edit batch errors
+  in MultiEdit identify which edit failed (`edit #N of M failed`).
+- **Diff visualization** (T6) — Edit/MultiEdit success messages now
+  include a unified diff (`difflib.unified_diff`, `n=3` context, capped
+  at 500 lines via `MAX_DIFF_LINES`). Closes the model's self-verify
+  loop without re-Reading.
+- **`oc code [path]`** command (T7) — snappy entry-point matching
+  `claude` ergonomics. `oc` shorthand was already present in
+  `[project.scripts]`. Mirrors `chat` semantics with the new helper
+  `_run_chat_session` to keep both DRY.
+- **Workspace context loader** (T8) — `load_workspace_context()` walks
+  up to 5 ancestor directories from cwd looking for `OPENCOMPUTER.md`,
+  `CLAUDE.md`, `AGENTS.md`. All three are loaded if present. Per-file
+  100KB cap with truncation marker. Wired at session-start in
+  `agent/loop.py` so the result lands on the FROZEN base prompt
+  (prefix-cache safe).
+- **`NotebookEdit` smoke** (T9) — 16 fixture-based tests against real
+  `.ipynb` v4.5 format. No bugs found in the existing 192-LOC tool;
+  schema documented (`path`, `mode`, `cell_index`, `cell_type`, `source`).
+- **`/scrape` slash command** (T10) — built-in registry alongside
+  plugin-authored commands. `/scrape`, `/scrape --full`, `/scrape --diff`
+  (compares the two most recent snapshots).
+
+V3.B follow-ups parked: streaming PythonExec output mid-execution; LSP
+integration for `oc code`; continuous benchmark CI integration; empirical
+cross-comparison harness with Claude Code.
+
+Spec + plan: `OpenComputer/docs/superpowers/plans/2026-04-27-coding-harness-parity-v3a.md`
+
 ## [2026.4.26.post3] — vision-completion ship + release-CI typo fix
 
 post2 was tagged but never published — the new wheel-smoke guard from

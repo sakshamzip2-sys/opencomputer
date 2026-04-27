@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from opencomputer.tools._file_read_state import mark_read
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
-
-from opencomputer.tools._file_read_state import mark_read
 
 
 class WriteTool(BaseTool):

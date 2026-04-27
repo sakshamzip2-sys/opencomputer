@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from plugin_sdk.core import ToolCall, ToolResult
-from plugin_sdk.tool_contract import BaseTool, ToolSchema
-
 # V3.A-T5: every error path is engineered to TEACH the model how to recover —
 # the message points to the next concrete action (Read, Glob, replace_all,
 # Write, etc.) rather than just describing what went wrong. The
@@ -15,6 +12,8 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 # "Read first" contract that Edit's description has always promised.
 from opencomputer.tools._file_read_state import has_been_read, mark_read
 from opencomputer.tools.edit_diff_format import render_unified_diff
+from plugin_sdk.core import ToolCall, ToolResult
+from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 
 class EditTool(BaseTool):
