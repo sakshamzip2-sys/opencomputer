@@ -4,6 +4,84 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (TUI Phase 1 — input layer foundation)
+
+Replaces `console.input()` with `prompt_toolkit.PromptSession` for the
+interactive `opencomputer chat` / `opencomputer code` REPL. Fixes the
+two long-reported gaps — ESC doesn't stop streaming, no screenshots —
+plus 5 adjacent missing-basics.
+
+- **ESC interrupts streaming.** A `KeyboardListener` daemon thread
+  reads stdin in raw (cbreak) mode while the LLM is responding; the
+  first ESC byte fires `TurnCancelScope.request_cancel()`, which
+  `task.cancel()`s the in-flight `loop.run_conversation` and prints
+  `turn cancelled.`. The CLI does not exit. Pattern adapted from
+  kimi-cli's `KeyboardListener`.
+- **Ctrl+C scoped to "cancel turn", not "kill CLI".** A SIGINT handler
+  installed for the duration of each turn routes Ctrl+C to the same
+  cancel scope. Idle Ctrl+C / Ctrl+D still exit cleanly.
+- **`/screenshot` and `/export` slash commands.** `Console(record=True)`
+  is now used so the full rendered output can be dumped via
+  `console.save_text/save_html/save_svg`. Format inferred from extension.
+- **Persistent input history.** `prompt_toolkit.history.FileHistory` at
+  `~/.opencomputer/<profile>/input_history` — Up-arrow recall now works
+  across sessions, not just in-process.
+- **Multi-line input.** `Alt+Enter` and `Ctrl+J` insert a literal newline
+  (Enter still submits). Paste a code block without it firing a premature
+  submit on the first newline.
+- **Bracketed paste.** prompt_toolkit's automatic bracketed-paste means
+  multi-line pastes stay as one user message instead of N submits.
+- **Slash command palette (8 commands + 9 aliases).** New
+  `opencomputer/cli_ui/slash.py` registry: `/exit` (`/quit`, `/q`),
+  `/clear` (`/new`, `/reset`), `/help` (`/h`, `/?`), `/screenshot`
+  (`/snap`), `/export`, `/cost`, `/model`, `/sessions` (`/history`).
+  Unknown slash commands are consumed (don't leak to the LLM) with an
+  error message pointing at `/help`.
+
+### New modules
+
+- `opencomputer/cli_ui/turn_cancel.py` — `TurnCancelScope` async
+  context manager: owns `asyncio.Event`, `request_cancel()`,
+  `is_cancelled()`, `run(awaitable)`, `install_sigint_handler()`.
+- `opencomputer/cli_ui/keyboard_listener.py` — raw-mode stdin daemon
+  thread that fires ESC cancel during streaming. No-op on non-TTY.
+- `opencomputer/cli_ui/input_loop.py` — `build_prompt_session()`,
+  `read_user_input()` (async), key bindings for ESC/Alt-Enter/Ctrl-J.
+- `opencomputer/cli_ui/slash.py` — `CommandDef` dataclass,
+  `SLASH_REGISTRY`, `SlashResult`, `is_slash_command`,
+  `resolve_command`. Pattern adapted from hermes-agent's
+  `hermes_cli/commands.py:CommandDef`.
+- `opencomputer/cli_ui/slash_handlers.py` — concrete handlers behind
+  `dispatch_slash(text, ctx)`.
+
+### Changed
+
+- `opencomputer/cli.py:_run_chat_session` — input loop uses
+  `read_user_input()` + `dispatch_slash()` + `TurnCancelScope` +
+  `KeyboardListener` instead of inline `console.input` + bare
+  `asyncio.run(_run_turn(...))`.
+- Module-level `console = Console()` → `console = Console(record=True)`
+  so `/screenshot` and `/export` can replay rendered output.
+- Both `_run_turn` (Live UI) and `_run_turn_plain` (non-TTY) bump a
+  closure-captured `_token_tally` dict so `/cost` shows the cumulative
+  session totals instead of just the last turn.
+
+### Non-TTY behavior
+
+Piped stdin (`printf ... | opencomputer chat`, CI tests) keeps the
+legacy line-by-line path. prompt_toolkit, KeyboardListener, and
+SIGINT handler install only when `sys.stdin.isatty()` is True.
+
+### New dependency
+
+- `prompt_toolkit>=3.0` added to core dependencies in `pyproject.toml`.
+
+### Tests
+
+36 new tests across 4 files (`test_cli_ui_turn_cancel.py`,
+`test_cli_ui_slash.py`, `test_cli_ui_input_loop.py`,
+`test_cli_ui_keyboard_listener.py`). Full suite (3697 tests) passes.
+
 ### Removed (Open Interpreter subprocess bridge — AGPL → MIT-clean cross-platform)
 
 OpenComputer is MIT-licensed and runs on macOS, Linux, and Windows. The

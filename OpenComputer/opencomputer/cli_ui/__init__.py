@@ -1,14 +1,34 @@
-"""Terminal UI helpers (Round 5 — Grok-style chat experience).
+"""Terminal UI helpers (Round 5 — Grok-style chat experience + Phase 1
+TUI uplift: PromptSession-based input layer, slash dispatch, cancel scope).
 
-Kept under ``cli_ui/`` (not ``cli/``) to avoid colliding with
-``cli.py``. Exports stay minimal — :class:`StreamingRenderer` and the
-``current_renderer()`` accessor used by the hook subscriber in
-``cli.py`` to deliver tool-call status events to the active renderer.
+Kept under ``cli_ui/`` (not ``cli/``) to avoid colliding with ``cli.py``.
 """
 
-from opencomputer.cli_ui.streaming import (
-    StreamingRenderer,
-    current_renderer,
+from opencomputer.cli_ui.input_loop import build_prompt_session, read_user_input
+from opencomputer.cli_ui.keyboard_listener import KeyboardListener
+from opencomputer.cli_ui.slash import (
+    SLASH_REGISTRY,
+    CommandDef,
+    SlashResult,
+    is_slash_command,
+    resolve_command,
 )
+from opencomputer.cli_ui.slash_handlers import SlashContext, dispatch_slash
+from opencomputer.cli_ui.streaming import StreamingRenderer, current_renderer
+from opencomputer.cli_ui.turn_cancel import TurnCancelScope
 
-__all__ = ["StreamingRenderer", "current_renderer"]
+__all__ = [
+    "SLASH_REGISTRY",
+    "CommandDef",
+    "KeyboardListener",
+    "SlashContext",
+    "SlashResult",
+    "StreamingRenderer",
+    "TurnCancelScope",
+    "build_prompt_session",
+    "current_renderer",
+    "dispatch_slash",
+    "is_slash_command",
+    "read_user_input",
+    "resolve_command",
+]
