@@ -291,7 +291,10 @@ def build_server() -> FastMCP:
 
     @server.tool()
     async def messages_send(
-        platform: str, chat_id: str, body: str
+        platform: str,
+        chat_id: str,
+        body: str,
+        thread_hint: str | None = None,
     ) -> dict[str, Any]:
         """Send a message via the gateway daemon's channel adapter.
 
@@ -310,6 +313,15 @@ def build_server() -> FastMCP:
                 ``"123456789"``); for Discord it's the channel id.
             body: Message text. Plaintext only — adapter-side rendering
                 handles platform-native formatting.
+            thread_hint: Item 21 — optional topic tag. Replies that
+                preserve this hint (or the same incoming-message context
+                in a future PR) will derive a SEPARATE OpenComputer
+                session from the same chat. Use cases: cron output
+                (``thread_hint="cron:morning-briefing"``) so its
+                follow-ups don't pollute the ad-hoc Q&A thread; a fresh
+                topic kicked off by an external script. Default
+                ``None`` reproduces the legacy "same chat = same session"
+                behaviour.
 
         Returns:
             Dict with ``id`` (queue row id), ``status`` (always
@@ -329,10 +341,16 @@ def build_server() -> FastMCP:
         from opencomputer.gateway.outgoing_queue import OutgoingQueue
 
         queue = OutgoingQueue(_home() / "sessions.db")
-        msg = queue.enqueue(platform=platform, chat_id=chat_id, body=body)
+        metadata: dict[str, Any] = {}
+        if thread_hint:
+            metadata["thread_hint"] = thread_hint
+        msg = queue.enqueue(
+            platform=platform, chat_id=chat_id, body=body, metadata=metadata,
+        )
         return {
             "id": msg.id,
             "status": msg.status,
+            "thread_hint": thread_hint,
             "note": (
                 "Queued for delivery. The gateway daemon drains the queue "
                 "every second; if no gateway is running the message waits."

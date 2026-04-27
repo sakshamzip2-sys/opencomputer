@@ -81,7 +81,9 @@ def _format_user_facing_error(exc: Exception) -> str:
             "Check the gateway logs for details.")
 
 
-def session_id_for(platform: str, chat_id: str) -> str:
+def session_id_for(
+    platform: str, chat_id: str, thread_hint: str | None = None,
+) -> str:
     """Derive the stable per-chat session id used by :class:`Dispatch`.
 
     Public helper extracted from :meth:`Dispatch._session_id_for` so
@@ -90,13 +92,28 @@ def session_id_for(platform: str, chat_id: str) -> str:
     adapter (the adapter's per-chat decisions key on the same id the
     dispatcher would have generated for the same inbound event).
 
-    Stable across processes: ``sha256(platform:chat_id)`` truncated to
-    32 hex chars. Two adapters seeing the same ``(platform, chat_id)``
-    pair always produce identical session ids — so a nudge submitted
-    via wire / CLI lands in the same per-session bucket the agent loop
-    will later consume.
+    Stable across processes: ``sha256(platform:chat_id[:thread_hint])``
+    truncated to 32 hex chars. Two adapters seeing the same
+    ``(platform, chat_id, thread_hint)`` triple always produce identical
+    session ids — so a nudge submitted via wire / CLI lands in the same
+    per-session bucket the agent loop will later consume.
+
+    Item 21 — ``thread_hint``: when present, derives a SEPARATE session
+    from the same chat. Use cases:
+
+    - Cron output to Telegram tags itself with ``thread_hint="cron:<job>"``
+      so the morning briefing doesn't pollute the ad-hoc Q&A thread.
+    - Future ``messages_send`` callers can pass a hint when explicitly
+      starting a new topic from a non-conversational source.
+
+    None / empty hint reproduces the legacy behavior (same chat → same
+    session forever) so existing tests + callers see no change.
     """
-    h = hashlib.sha256(f"{platform}:{chat_id}".encode())
+    key = (
+        f"{platform}:{chat_id}:{thread_hint}" if thread_hint
+        else f"{platform}:{chat_id}"
+    )
+    h = hashlib.sha256(key.encode())
     return h.hexdigest()[:32]
 
 
@@ -152,8 +169,19 @@ class Dispatch:
             adapter.set_approval_callback(self._handle_approval_click)
 
     def _session_id_for(self, event: MessageEvent) -> str:
-        """Stable session id: hash(platform + chat_id). Keeps history per chat."""
-        return session_id_for(event.platform.value, event.chat_id)
+        """Stable session id: hash(platform + chat_id[, thread_hint]).
+
+        ``thread_hint`` (Item 21) comes from ``event.metadata["thread_hint"]``
+        if set, letting cron / non-conversational paths route output to
+        a separate session within the same chat. Default behaviour
+        (no hint) keeps existing chats on a single session forever.
+        """
+        thread_hint: str | None = None
+        if event.metadata:
+            raw = event.metadata.get("thread_hint")
+            if isinstance(raw, str) and raw.strip():
+                thread_hint = raw.strip()
+        return session_id_for(event.platform.value, event.chat_id, thread_hint)
 
     async def handle_message(self, event: MessageEvent) -> str | None:
         """
