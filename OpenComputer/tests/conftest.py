@@ -192,7 +192,7 @@ def _register_skill_evolution_alias() -> None:
         mod.__package__ = "extensions.skill_evolution"
         sys.modules["extensions.skill_evolution"] = mod
 
-    for sub in ("pattern_detector",):
+    for sub in ("pattern_detector", "skill_extractor"):
         full_name = f"extensions.skill_evolution.{sub}"
         if full_name in sys.modules:
             continue
