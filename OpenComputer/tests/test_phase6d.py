@@ -272,6 +272,8 @@ def test_plugin_registers_all_modes_and_hooks():
         "coding-harness:plan-mode",
         "coding-harness:accept-edits-mode",
         "coding-harness:review-mode",
+        # Tier B item 19 — auto-fetch URLs in incoming messages.
+        "link-understanding",
     }
     # Plan-block + auto-checkpoint + post-edit-review = 3 hooks.
     assert len(api.hooks) >= 3
