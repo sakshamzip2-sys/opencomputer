@@ -62,6 +62,11 @@ dev = [
   "ruff>=0.7",
   "black>=24.0",
   "mypy>=1.11",
+  # Voice-mode test deps (light enough for CI; the heavy local-Whisper
+  # backends mlx-whisper / whisper-cpp stay in their own extras).
+  "webrtcvad>=2.0",
+  "sounddevice>=0.4",
+  "soundfile>=0.12",
 ]
 # Optional: self-hosted Honcho memory provider (Phase 10f.K–N). Install with
 #   pip install opencomputer[honcho]
@@ -82,6 +87,25 @@ menubar = [
 # the wheel via the platform marker.
 gui = [
   "pyobjc-framework-Quartz>=10.0; platform_system == 'Darwin'",
+]
+# Optional: voice-mode (continuous push-to-talk audio + VAD gating).
+# Install with `pip install opencomputer[voice]`. ``sounddevice`` provides
+# cross-platform audio capture; ``webrtcvad`` filters non-speech frames
+# before they reach the STT path. See extensions/voice-mode/.
+voice = [
+  "webrtcvad>=2.0",
+  "sounddevice>=0.4",
+  "soundfile>=0.12",
+]
+# Optional: cross-platform local STT via whisper.cpp (pywhispercpp). Heavy
+# wheel; opt in with `pip install opencomputer[voice-local]`.
+voice-local = [
+  "pywhispercpp>=1.2",
+]
+# Optional: macOS Apple Silicon-optimized local STT via mlx-whisper.
+# Install with `pip install opencomputer[voice-mlx]` on macOS only.
+voice-mlx = [
+  "mlx-whisper>=0.4; platform_system == 'Darwin'",
 ]
 
 [project.scripts]
