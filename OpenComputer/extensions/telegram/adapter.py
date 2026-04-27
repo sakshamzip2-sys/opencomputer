@@ -120,6 +120,15 @@ class TelegramAdapter(BaseChannelAdapter):
         self._offset: int = 0
         self._polling_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+        # Round 4 Item 3 — webhook mode config. Defaults to "polling"
+        # so existing users see no change. Set "webhook" + a public
+        # ``webhook_url`` (HTTPS) to switch. ``webhook_port`` defaults
+        # to 8443 (Telegram's recommended port for self-hosted webhooks).
+        self._mode: str = str(config.get("mode") or "polling").lower()
+        self._webhook_url: str = str(config.get("webhook_url") or "")
+        self._webhook_port: int = int(config.get("webhook_port") or 8443)
+        self._webhook_secret: str = str(config.get("webhook_secret") or "")
+        self._webhook_runner: Any = None  # aiohttp.web.AppRunner
         # Round 2a P-5 — inline approval-button bookkeeping.
         # ``_approval_callback`` is the function the gateway / agent loop
         # registers via :meth:`set_approval_callback` to receive button
@@ -193,8 +202,65 @@ class TelegramAdapter(BaseChannelAdapter):
             logger.error("telegram connect failed: %s", e)
             self._release_lock()
             return False
-        # start long-polling loop
+
+        # Round 4 Item 3 — webhook mode branch.
+        if self._mode == "webhook":
+            ok = await self._start_webhook_mode()
+            if not ok:
+                self._release_lock()
+                return False
+            return True
+
+        # Default: long-polling loop.
         self._polling_task = asyncio.create_task(self._poll_forever())
+        return True
+
+    async def _start_webhook_mode(self) -> bool:
+        """Spin up the aiohttp webhook server + register URL with Telegram."""
+        if not self._webhook_url:
+            logger.error(
+                "telegram webhook mode: webhook_url not configured. "
+                "Set telegram.webhook_url to your public HTTPS URL "
+                "(e.g. https://your-tunnel.ngrok.io/telegram/webhook) "
+                "or run `opencomputer telegram tunnel detect`."
+            )
+            return False
+
+        from extensions.telegram.webhook_helper import (
+            generate_secret_token,
+            set_webhook,
+            start_webhook_server,
+        )
+
+        # Generate a secret on first connect if the user didn't provide
+        # one — Telegram echoes it on every push, we verify constant-
+        # time on receive.
+        secret = self._webhook_secret or generate_secret_token()
+        self._webhook_secret = secret
+
+        try:
+            self._webhook_runner = await start_webhook_server(
+                secret_token=secret,
+                port=self._webhook_port,
+                handle_update=self._handle_update,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("telegram webhook server failed to start: %s", exc)
+            return False
+
+        ok, msg = await set_webhook(
+            token=self.token,
+            url=self._webhook_url,
+            secret_token=secret,
+            drop_pending=True,
+            allowed_updates=["message", "callback_query"],
+        )
+        if not ok:
+            logger.error("telegram setWebhook failed: %s", msg)
+            await self._webhook_runner.cleanup()
+            self._webhook_runner = None
+            return False
+        logger.info("telegram webhook registered: %s", self._webhook_url)
         return True
 
     def _scope_lock_path(self) -> str:
@@ -221,6 +287,21 @@ class TelegramAdapter(BaseChannelAdapter):
                 await self._polling_task
             except asyncio.CancelledError:
                 pass
+        # Round 4 Item 3 — webhook teardown. Deregister at Telegram
+        # first so they stop pushing, then shut down our server.
+        if self._mode == "webhook":
+            try:
+                from extensions.telegram.webhook_helper import delete_webhook
+
+                await delete_webhook(token=self.token)
+            except Exception as exc:  # noqa: BLE001 — disconnect must not raise
+                logger.debug("telegram deleteWebhook on disconnect: %s", exc)
+            if self._webhook_runner is not None:
+                try:
+                    await self._webhook_runner.cleanup()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("webhook server cleanup: %s", exc)
+                self._webhook_runner = None
         if self._client is not None:
             await self._client.aclose()
         self._release_lock()

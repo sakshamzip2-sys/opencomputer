@@ -4,6 +4,46 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Telegram webhook mode — Round 4 Item 3)
+
+Polling stays the default; webhook is opt-in via config. User asked
+for this once they could run a tunnel (ngrok/cloudflared) on Mac
+or deploy to a VPS, so the HTTPS-endpoint blocker no longer
+disqualifies it. Webhook mode is strictly better than polling — saves
+bandwidth, no 30-second poll latency, no dropped updates on
+connection blips.
+
+- `extensions/telegram/webhook_helper.py` (new) — wraps Telegram's
+  setWebhook / deleteWebhook / getWebhookInfo APIs, plus an
+  `aiohttp`-based receiver server with constant-time secret-token
+  verification (X-Telegram-Bot-Api-Secret-Token header). Tunnel
+  detection helpers: `detect_ngrok_url()` probes ngrok's
+  `127.0.0.1:4040/api/tunnels`, `detect_cloudflared_running()` checks
+  for the cloudflared process via pgrep.
+- `extensions/telegram/adapter.py::TelegramAdapter` — new config
+  fields (`mode`, `webhook_url`, `webhook_port`, `webhook_secret`).
+  `connect()` branches on `mode == "webhook"` to call new
+  `_start_webhook_mode()` instead of starting the polling loop;
+  `disconnect()` cleans up the aiohttp server AND deregisters at
+  Telegram (so polling can resume cleanly).
+- 11 new tests in `tests/test_telegram_webhook.py`: secret-token
+  generation (Telegram-compatible chars + uniqueness), setWebhook
+  payload shape, setWebhook error path, deleteWebhook handles
+  network failure, secret-header verification (match / mismatch /
+  missing), ngrok-URL detection (https tunnel + connection refused),
+  cloudflared detection handles missing pgrep.
+
+We deliberately use raw aiohttp (already in pyproject deps) instead
+of porting hermes' `python-telegram-bot.start_webhook()` — keeps the
+dep surface unchanged + matches OC's existing httpx-only HTTP posture.
+
+Why no CLI surface yet (deferred to follow-up):
+- The webhook receiver works end-to-end via config alone
+- A `opencomputer telegram tunnel detect` command would be ~30 LOC
+  but adds a typer subapp; ship the core first, polish in next PR
+- Live tunnel-integration testing requires running ngrok during CI;
+  defer until needed
+
 ### Added (LLM-mediated recall synthesis — Round 4 Item 1)
 
 User asked: "think of something better than strict keyword pattern
