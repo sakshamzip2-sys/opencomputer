@@ -8,18 +8,27 @@ app (which both ``opencomputer`` and ``oc`` console-scripts dispatch to).
 """
 from __future__ import annotations
 
+import re
+
 from typer.testing import CliRunner
 
 from opencomputer.cli import app
 
 runner = CliRunner()
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHF]")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI terminal escape sequences so plain-text assertions work."""
+    return _ANSI_RE.sub("", text)
+
 
 def test_code_command_exists() -> None:
     """``oc code --help`` returns a 0 exit code and mentions coding."""
     result = runner.invoke(app, ["code", "--help"])
     assert result.exit_code == 0, result.stdout
-    output = result.stdout.lower()
+    output = _strip_ansi(result.stdout).lower()
     assert "code" in output or "coding" in output
 
 
@@ -32,10 +41,10 @@ def test_code_accepts_path_argument(tmp_path) -> None:
 def test_code_supports_plan_flag() -> None:
     """``oc code`` exposes ``--plan`` for read-only discovery mode."""
     result = runner.invoke(app, ["code", "--help"])
-    assert "--plan" in result.stdout
+    assert "--plan" in _strip_ansi(result.stdout)
 
 
 def test_code_supports_yolo_flag() -> None:
     """``oc code`` exposes ``--yolo`` to skip per-action confirmation prompts."""
     result = runner.invoke(app, ["code", "--help"])
-    assert "--yolo" in result.stdout
+    assert "--yolo" in _strip_ansi(result.stdout)
