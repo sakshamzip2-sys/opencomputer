@@ -1,11 +1,20 @@
 """Home Assistant channel plugin — entry point.
 
-Outbound only via REST API. Inbound: webhook adapter (G.3) wired to a
-Home Assistant automation that POSTs events.
+Outbound: REST API (service calls — see adapter docstring).
+Inbound: optional WebSocket subscription to ``state_changed`` events
+when filter env vars are set. 2026-04-28 follow-up — webhook-driven
+inbound (HA → OC webhook) remains an alternative pattern.
 
-Env vars: ``HOMEASSISTANT_URL`` (e.g. ``http://homeassistant.local:8123``)
-and ``HOMEASSISTANT_TOKEN`` (long-lived access token from your HA
-profile page). Disabled by default.
+Env vars (required):
+- ``HOMEASSISTANT_URL`` (e.g. ``http://homeassistant.local:8123``)
+- ``HOMEASSISTANT_TOKEN`` (long-lived access token)
+
+Env vars (optional inbound — closed by default):
+- ``HASS_WATCH_ALL=true`` — forward EVERY state_changed event
+- ``HASS_WATCH_DOMAINS`` — CSV (e.g. ``binary_sensor,sensor``)
+- ``HASS_WATCH_ENTITIES`` — CSV (e.g. ``light.front_door``)
+- ``HASS_IGNORE_ENTITIES`` — CSV ignore-list
+- ``HASS_COOLDOWN_SECONDS`` — per-entity cooldown (default 30)
 """
 
 from __future__ import annotations
@@ -25,6 +34,13 @@ from plugin_sdk.core import Platform
 logger = logging.getLogger("opencomputer.ext.homeassistant")
 
 
+def _csv(env_name: str) -> list[str]:
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return []
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
 def register(api) -> None:  # PluginAPI duck-typed
     url = os.environ.get("HOMEASSISTANT_URL", "").strip()
     token = os.environ.get("HOMEASSISTANT_TOKEN", "").strip()
@@ -34,6 +50,17 @@ def register(api) -> None:  # PluginAPI duck-typed
             "(HOMEASSISTANT_URL or HOMEASSISTANT_TOKEN unset)"
         )
         return
-    adapter = HomeAssistantAdapter(config={"url": url, "token": token})
+    config = {
+        "url": url,
+        "token": token,
+        # Inbound — all default empty/False so legacy outbound-only
+        # deployments are unaffected.
+        "watch_domains": _csv("HASS_WATCH_DOMAINS"),
+        "watch_entities": _csv("HASS_WATCH_ENTITIES"),
+        "ignore_entities": _csv("HASS_IGNORE_ENTITIES"),
+        "watch_all": os.environ.get("HASS_WATCH_ALL", "").lower() == "true",
+        "cooldown_seconds": int(os.environ.get("HASS_COOLDOWN_SECONDS", "30")),
+    }
+    adapter = HomeAssistantAdapter(config=config)
     api.register_channel(Platform.HOMEASSISTANT.value, adapter)
     logger.info("homeassistant plugin: registered for %s", url)
