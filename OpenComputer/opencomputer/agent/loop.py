@@ -1127,7 +1127,43 @@ class AgentLoop:
         # warm-but-honest register isn't fighting the action-bias rules).
         self._active_persona_id = str(result.persona_id)
         overlay = persona.get("system_prompt_overlay", "") or ""
-        return str(overlay).strip()
+        overlay = str(overlay).strip()
+
+        # Path A.3 (2026-04-27): when companion is the active persona,
+        # peek the most-recent unconsumed Life-Event firing and append
+        # it as a "RECENT LIFE EVENT" anchor. The reflective lane needs
+        # real anchors to land — without them, the companion has nothing
+        # specific to point at when asked "how are you?". The firing's
+        # ``hint_text`` is concrete and actionable.
+        if result.persona_id == "companion":
+            try:
+                from opencomputer.awareness.life_events.registry import (
+                    get_global_registry,
+                )
+
+                firing = get_global_registry().peek_most_recent_firing()
+                if firing is not None and firing.hint_text:
+                    overlay = (
+                        overlay
+                        + "\n\n## RECENT LIFE EVENT (anchor for the companion)\n\n"
+                        + f"Detected pattern: {firing.pattern_id} "
+                        + f"(confidence {firing.confidence:.0%}, "
+                        + f"{firing.evidence_count} evidence items)\n"
+                        + f"Hint: {firing.hint_text}\n\n"
+                        + "When the user asks how you are, you can use this as "
+                        + "a real anchor — e.g. 'I keep thinking about what you "
+                        + "mentioned earlier' or naming the pattern by its "
+                        + "felt shape. Don't over-reference it; use it once "
+                        + "naturally if it fits, or ignore if the moment "
+                        + "doesn't call for it."
+                    )
+            except Exception:  # noqa: BLE001 — degrade silently
+                _log.debug(
+                    "companion life-event peek failed; degrading to bare overlay",
+                    exc_info=True,
+                )
+
+        return overlay
 
     # ─── PR-6 T2.3 session lifecycle ───────────────────────────────
 
