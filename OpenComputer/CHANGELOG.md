@@ -4,6 +4,37 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Removed (OpenCLI residue cleanup)
+
+Follow-up to the 2026-04-25 OpenCLI scraper plugin removal (commit
+`cae1a58`). The plugin's source was deleted then but six docstring
+mentions and an empty `extensions/opencli-scraper/__pycache__/` tree
+remained, misleading new contributors into thinking F6 wiring was
+still pending. This change finishes the sweep.
+
+- Removed `extensions/opencli-scraper/` empty directory tree (only
+  `__pycache__/` files remained from the prior deletion; no source).
+- `opencomputer/ingestion/bus.py` — replaced "Phases 4/5 (F6 OpenCLI
+  scraper, F7 OI bridge) publish here" with "plugin publishers (web
+  fetchers, file watchers, OI bridge tools) emit here".
+- `opencomputer/security/__init__.py` — replaced "Future F6 (OpenCLI
+  scraper) and F7 (OI bridge) plugins will pipe..." paragraph with
+  current statement that WebFetch + the coding-harness OI bridge are
+  the actual consumers.
+- `opencomputer/security/sanitize.py` — removed the obsolete
+  "Future F6 / F7 wiring" docstring section entirely.
+- `opencomputer/security/instruction_detector.py` — replaced "web
+  pages via the F6 OpenCLI scraper" example with "web pages via
+  WebFetch".
+- `plugin_sdk/ingestion.py` — replaced `"opencli_scraper"` in the
+  source-id convention example with `"web_fetch"`; updated
+  `WebObservationEvent` docstring from "Phases 4/5 (F6 OpenCLI
+  scraper, F7 OI web tools)" to "Web fetchers (e.g. WebFetch tool,
+  OI bridge)".
+
+No functional or behavioral change. Docstrings + dead-directory cleanup
+only. CI: 80 tests in the affected modules still pass.
+
 ### Fixed (Gateway — friendly user-facing errors on dispatch failures)
 
 When the agent loop raised inside `Dispatch.handle_message` (e.g. an

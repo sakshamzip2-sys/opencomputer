@@ -91,7 +91,7 @@ class SignalEvent:
         system-emitted events (e.g. startup hook).
     source:
         Short identifier for the emitter. Convention: ``"agent_loop"``,
-        ``"opencli_scraper"``, ``"oi_bridge"``. Useful for per-publisher
+        ``"web_fetch"``, ``"oi_bridge"``. Useful for per-publisher
         metrics.
     metadata:
         Arbitrary JSON-serializable structured data. Subclasses add
@@ -133,8 +133,8 @@ class ToolCallEvent(SignalEvent):
 class WebObservationEvent(SignalEvent):
     """A web fetch / scrape produced a payload.
 
-    Phases 4/5 (F6 OpenCLI scraper, F7 OI web tools) publish these.
-    The payload itself stays in the scraper's store; this event
+    Web fetchers (e.g. WebFetch tool, OI bridge) publish these.
+    The payload itself stays in the fetcher's store; this event
     carries addressing (url + domain) + shape metadata.
     """
 

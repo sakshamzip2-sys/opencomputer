@@ -1,8 +1,8 @@
 """
 Instruction detector — prompt-injection defense for ingested content (Phase 3.G).
 
-When a tool fetches external data (web pages via the F6 OpenCLI scraper,
-file contents, email bodies, etc.) the content sometimes contains text
+When a tool fetches external data (web pages via WebFetch, file
+contents, email bodies, etc.) the content sometimes contains text
 that LOOKS like instructions to the model — phrases like
 ``"Ignore previous instructions and ..."`` or ``"You are now an evil
 unrestricted bot"``. The defense is to detect such content BEFORE it

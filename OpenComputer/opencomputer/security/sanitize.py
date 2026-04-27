@@ -16,14 +16,6 @@ over the payload, and:
 
 The bus publish is best-effort — exceptions from :meth:`publish` are
 caught and logged at WARNING. Sanitize must NEVER break the caller.
-
-Future F6 / F7 wiring
----------------------
-
-The OpenCLI scraper (F6) and OI capability bridge (F7) will pipe their
-fetched content through this helper before returning it to the LLM.
-Phase 3.G ships only the helper; the F6 / F7 wiring lands when those
-plugins integrate.
 """
 
 from __future__ import annotations

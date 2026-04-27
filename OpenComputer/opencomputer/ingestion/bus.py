@@ -3,8 +3,8 @@ TypedEventBus — in-memory pub/sub over :class:`plugin_sdk.ingestion.SignalEven
 
 This is the foundational broadcast primitive shipped in Phase 3.A
 (F2 foundation). Session B's B3 trajectory subscriber attaches here;
-Phases 4/5 (F6 OpenCLI scraper, F7 OI bridge) publish here; Phase 3.B
-behavioral inference reads from here.
+plugin publishers (web fetchers, file watchers, OI bridge tools) emit
+here; Phase 3.B behavioral inference reads from here.
 
 Design stance
 -------------
