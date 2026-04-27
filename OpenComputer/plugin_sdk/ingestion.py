@@ -247,6 +247,44 @@ class MemoryWriteEvent(SignalEvent):
     content_size: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class ForegroundAppEvent(SignalEvent):
+    """Foreground app or window-title change observed by ambient-sensors plugin.
+
+    Privacy contract:
+
+    - ``window_title_hash`` is SHA-256 of the title — raw title NEVER leaves
+      the sensor. Hashes are useful only as a per-process dedup token.
+    - When the sensor's sensitive-app filter matches, the publisher replaces
+      ``app_name`` with ``"<filtered>"``, ``window_title_hash`` with the
+      empty string, and sets ``is_sensitive=True``. Subscribers thus never
+      see filtered raw values.
+    - All fields default to empty/false so an under-filled instance can't
+      accidentally publish meaningful data.
+    """
+
+    event_type: str = "foreground_app"
+    app_name: str = ""
+    window_title_hash: str = ""
+    bundle_id: str = ""
+    is_sensitive: bool = False
+    platform: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AmbientSensorPauseEvent(SignalEvent):
+    """An ambient sensor entered or exited a paused/disabled state.
+
+    Subscribers (e.g. the motif extractor) use these events so gaps in
+    the foreground stream aren't misattributed to user idleness.
+    """
+
+    event_type: str = "ambient_sensor_pause"
+    sensor_name: str = "foreground"
+    paused: bool = True
+    reason: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Normalizers
 # ---------------------------------------------------------------------------
@@ -334,6 +372,9 @@ __all__ = [
     "TurnStartEvent",
     "DelegationCompleteEvent",
     "MemoryWriteEvent",
+    # T1 of ambient foreground sensor plan (2026-04-27)
+    "ForegroundAppEvent",
+    "AmbientSensorPauseEvent",
     # normalizer
     "SignalNormalizer",
     "IdentityNormalizer",

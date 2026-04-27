@@ -69,6 +69,15 @@ F1_CAPABILITIES: dict[str, ConsentTier] = {
     "awareness.life_event.surface": ConsentTier.IMPLICIT,
     "awareness.persona.classify": ConsentTier.IMPLICIT,
     "awareness.persona.switch": ConsentTier.IMPLICIT,
+    # Ambient foreground sensor — T1 of 2026-04-27 plan.
+    #
+    # Observe foreground app + hashed window title; sensitive-app filter
+    # applied before publish (app_name="<filtered>", title hash dropped).
+    # Data stays local: only metadata reaches the F2 bus, raw window
+    # titles never leave the sensor. IMPLICIT because the data is
+    # metadata-only and matches the privacy posture of other ambient
+    # ingestion paths (recent_files, git_log).
+    "ambient.foreground.observe": ConsentTier.IMPLICIT,
 }
 
 # Reserved for later phases (documented, not enforced here):
