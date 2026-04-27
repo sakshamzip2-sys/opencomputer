@@ -4,6 +4,85 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Removed (Open Interpreter subprocess bridge — AGPL → MIT-clean cross-platform)
+
+OpenComputer is MIT-licensed and runs on macOS, Linux, and Windows. The
+prior `oi_bridge` design — subprocess RPC into AGPL Open Interpreter,
+quarantined behind a 2-test CI license boundary — paid heavy structural
+cost (separate venv, JSON-RPC, telemetry kill-switch, ~150 MB on disk)
+for what was, in the end, 5 thin wrappers around `psutil`, `mss`,
+`pyperclip`, and Tesseract. This release cuts the bridge entirely.
+
+- Deleted `extensions/coding-harness/oi_bridge/` (~1,308 LOC) — subprocess
+  wrapper, venv bootstrap, JSON-RPC protocol, telemetry kill-switch, the 5
+  Tier-1 OI-backed tools.
+- Deleted `extensions/oi-capability/` (deprecated shim, no-op since
+  2026-04-25).
+- Deleted 6 OI test files (~1,220 LOC) covering subprocess wrapper, venv
+  bootstrap, protocol, telemetry disable, AGPL boundary, and tier-1
+  introspection.
+- Deleted `tests/conftest.py` OI alias plumbing (~80 LOC) — the
+  `extensions.coding_harness.oi_bridge` synthetic-package machinery.
+- Deleted `OpenComputer/docs/f7/` design + interweaving plan documents
+  (obsolete).
+
+### Added (Native cross-platform introspection module)
+
+New `extensions/coding-harness/introspection/` (3 files, ~370 LOC)
+provides the SAME 5 tool names with native-Python implementations. The
+LLM-facing tool-name contract is unchanged.
+
+- `list_app_usage` → `psutil.process_iter` (works on macOS, Linux, AND
+  Windows — replaces the broken `ps aux` shell-out path on Windows).
+- `read_clipboard_once` → `pyperclip.paste()` (mac/win out-of-the-box;
+  Linux needs `xclip` or `xsel` — `opencomputer doctor` warns).
+- `screenshot` → `mss.mss().grab(...)` returning base64 PNG; quadrant
+  capture preserves multi-monitor origin offsets. Faster than pyautogui
+  with fewer system deps.
+- `extract_screen_text` → `mss` capture + `rapidocr-onnxruntime` (no
+  system Tesseract install). First call in a process pays a ~5 s model
+  load; subsequent calls reuse a memoized OCR instance. `parallel_safe`
+  set to `False` to avoid memory pressure (each instance is ~200 MB).
+- `list_recent_files` → `os.walk` + `pathlib` mtime filter + sort. Skips
+  noise dirs (`.git`, `__pycache__`, `node_modules`, `.venv`, `Library`,
+  `AppData`); hard-caps file inspection at 50,000. Cross-platform path
+  semantics — replaces the broken `find -mmin` shell-out on Windows.
+
+Dependencies added to `pyproject.toml`: `psutil>=5.9`, `mss>=9.0`,
+`pyperclip>=1.8`, `rapidocr-onnxruntime>=1.2.3` — all pure-pip wheels.
+
+### Changed (F1 capability namespace migration)
+
+Capability claims migrated from `oi_bridge.*` → `introspection.*`. The
+HMAC-chained F1 audit log is unaffected (chain integrity is signature-
+based, not namespace-based). Existing user grants under the old namespace
+become orphans — users will be re-prompted at first use under the new
+namespace. F1 only shipped 2 days prior — minimal blast radius.
+
+### Added (Doctor checks + AGPL imports guard)
+
+- `_check_orphan_oi_venv` warns when a leftover
+  `<profile_home>/oi_capability/` directory is detected (~150 MB), prompts
+  the user to `rm -rf`. Caught a real orphan on the maintainer's machine
+  during T10 smoke test — exactly the migration hygiene this check exists
+  for.
+- `_check_introspection_deps` verifies `psutil` / `mss` / `pyperclip` /
+  `rapidocr_onnxruntime` are importable; missing → `error` with `pip
+  install` hint. On Linux only, also checks for `xclip` / `xsel` on PATH;
+  missing → `warning` (NOT error — preserves doctor exit code).
+- `tests/test_no_agpl_imports.py` (new): forward-looking AST-based guard
+  scans `opencomputer/`, `plugin_sdk/`, `extensions/` for imports of any
+  package on a deny-list (currently just `interpreter`). Replaces the
+  deleted OI-specific boundary test with a generic mechanism that catches
+  any future AGPL contagion.
+
+### Net diff: ~−2,400 LOC
+
+The OI bridge + 6 test files + conftest plumbing + docs/f7 totalled
+~2,800 LOC. The native module + new tests come to ~600 LOC. Cross-platform
+support went from "macOS, Linux only — Windows broken for 2 of 5 tools"
+to "macOS, Linux, Windows out of the box".
+
 ### Removed (OpenCLI residue cleanup)
 
 Follow-up to the 2026-04-25 OpenCLI scraper plugin removal (commit

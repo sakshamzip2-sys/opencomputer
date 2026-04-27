@@ -36,9 +36,7 @@ Both sessions read this file at startup. Both update it after every commit.
 
 ## Reserved files — Session C only (Session A + B must NOT modify)
 
-- `extensions/oi-capability/*` (deprecated compat shim — refactored into `extensions/coding-harness/oi_bridge/` in PR-3, 2026-04-25; remove on next major version bump)
-- `tests/test_oi_*.py`
-- `docs/f7/*`
+*(Session C plan fully superseded — 2026-04-27)*
 
 **Note (2026-04-25):** OpenCLI scraper plugin (`extensions/opencli-scraper/`,
 `tests/test_opencli_*.py`, `docs/f6/*`) was REMOVED per user direction —
@@ -46,6 +44,8 @@ Both sessions read this file at startup. Both update it after every commit.
 and the 12 curated platforms (github / reddit / linkedin / etc.) didn't
 match Saksham's stock-research workflow. Session C reservations on those
 paths no longer apply.
+
+**Note (2026-04-27):** `extensions/oi-capability/*` (OI bridge, AGPL) + `tests/test_oi_*.py` + `docs/f7/*` have all been REMOVED as part of the OI removal branch (`feat/native-cross-platform-introspection`). Replaced by native `extensions/coding-harness/introspection/` module. Session C reservations on those paths no longer apply.
 
 ## Shared files (coordinate)
 

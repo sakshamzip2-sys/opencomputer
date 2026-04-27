@@ -160,10 +160,12 @@ def register(api) -> None:  # PluginAPI duck-typed
         api.register_slash_command(DiffCommand(harness_ctx=ctx))
         api.register_slash_command(UndoCommand(harness_ctx=ctx))
 
-    # OI Bridge tools — Tier 1 (introspection) only.
+    # Native introspection tools — Tier 1 only.
     #
-    # Tiers 2-5 were removed in the 2026-04-25 OI-trim cleanup because
-    # each overlapped with a feature OpenComputer already provides:
+    # The legacy Open-Interpreter subprocess wrapper was replaced in the
+    # 2026-04-27 native-introspection migration. Tiers 2-5
+    # had already been trimmed in the 2026-04-25 cleanup because each
+    # overlapped with a feature OpenComputer already provides:
     #
     # * Tier 2 (email/SMS/Slack/Discord) → channel adapters + MCP.
     # * Tier 3 (browser) → built-in WebFetchTool covers raw fetches.
@@ -171,17 +173,17 @@ def register(api) -> None:  # PluginAPI duck-typed
     # * Tier 5 (schedule task / custom code) → ``opencomputer cron`` (G.1)
     #   + BashTool.
     #
-    # What remains is Tier 1's unique value: read file regions, list apps,
-    # clipboard, screenshot, screen text, search, git log. F1 ConsentGate
-    # enforces capability claims at dispatch.
+    # What remains is Tier 1's unique value, now delivered via pure-pip
+    # cross-platform implementations (psutil / mss / pyperclip /
+    # rapidocr-onnxruntime): list apps, clipboard, screenshot, screen text,
+    # recent files. F1 ConsentGate enforces capability claims at dispatch.
+    #
+    # The runtime alias for ``extensions.coding_harness`` is synthesized
+    # below because the directory is named ``coding-harness`` (hyphen) and
+    # cannot be imported as a dotted package natively. tests/conftest.py
+    # registers the same alias for the test runner; production needs it
+    # here before the introspection package import is attempted.
     try:
-        # The dir is named ``coding-harness`` (hyphen) so Python can't
-        # import it as ``extensions.coding_harness`` natively. tests/conftest.py
-        # registers an alias for the test runner; production needs the
-        # same alias *here*, before the imports below are attempted.
-        # Without this, OI Tier-1 introspection tools (screenshot, OCR,
-        # clipboard, app usage, recent files) silently fail to load on
-        # fresh installs.
         import sys as _sys  # noqa: PLC0415
         import types as _types  # noqa: PLC0415
         from pathlib import Path as _Path  # noqa: PLC0415
@@ -196,17 +198,23 @@ def register(api) -> None:  # PluginAPI duck-typed
             _ch_pkg.__package__ = "extensions.coding_harness"
             _sys.modules["extensions.coding_harness"] = _ch_pkg
 
-        from extensions.coding_harness.oi_bridge.subprocess.wrapper import (  # noqa: PLC0415
-            OISubprocessWrapper,
+        import logging as _logging  # noqa: PLC0415
+
+        from extensions.coding_harness.introspection import (  # noqa: PLC0415
+            ALL_TOOLS as _INTROSPECTION_TOOLS,
         )
-        from extensions.coding_harness.oi_bridge.tools import (  # noqa: PLC0415
-            tier_1_introspection,
-        )
-        _oi_wrapper = OISubprocessWrapper()
-        for _tool_cls in getattr(tier_1_introspection, "ALL_TOOLS", ()):
-            api.register_tool(_tool_cls(wrapper=_oi_wrapper))
-    except Exception as _exc:  # noqa: BLE001
-        import logging as _logging
-        _logging.getLogger(__name__).warning(
-            "OI bridge registration failed (skipping): %s", _exc, exc_info=True,
+        _log = _logging.getLogger("opencomputer.coding_harness.plugin")
+        for _tool_cls in _INTROSPECTION_TOOLS:
+            try:
+                api.register_tool(_tool_cls())
+            except Exception as _exc:  # noqa: BLE001
+                _log.warning(
+                    "Failed to register introspection tool %s: %s",
+                    _tool_cls.__name__,
+                    _exc,
+                )
+    except ImportError as _exc:
+        import logging as _logging  # noqa: PLC0415
+        _logging.getLogger("opencomputer.coding_harness.plugin").warning(
+            "Introspection module not loadable: %s", _exc,
         )
