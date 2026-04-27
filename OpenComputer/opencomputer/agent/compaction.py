@@ -24,6 +24,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+from opencomputer.agent.context_engine import ContextEngine, ContextEngineResult
 from plugin_sdk.core import Message
 from plugin_sdk.provider_contract import BaseProvider
 
@@ -73,8 +74,16 @@ def context_window_for(model: str) -> int:
     return DEFAULT_CONTEXT_WINDOWS["_default"]
 
 
-class CompactionEngine:
-    """Decide when to compact, and do it with safety rails."""
+class CompactionEngine(ContextEngine):
+    """Decide when to compact, and do it with safety rails.
+
+    Implements the :class:`ContextEngine` ABC — the agent loop binds
+    this engine via the ``"compressor"`` name in the registry by
+    default. Subclasses or plugin-provided alternatives can replace
+    it via ``LoopConfig.context_engine``.
+    """
+
+    name: str = "compressor"
 
     def __init__(
         self,
@@ -94,9 +103,31 @@ class CompactionEngine:
         self._in_progress = False
 
     @property
-    def in_progress(self) -> bool:
+    def in_progress(self) -> bool:  # type: ignore[override]
         """True while compaction's own LLM call is in flight — hooks must not fire."""
         return self._in_progress
+
+    # ─── ContextEngine ABC implementation ──────────────────────────
+
+    def should_compress(self, *, last_input_tokens: int) -> bool:
+        """ABC entry point. Delegates to the existing ``should_compact``."""
+        return self.should_compact(last_input_tokens)
+
+    async def compress(
+        self, *, messages: list[Message], last_input_tokens: int
+    ) -> ContextEngineResult:
+        """ABC entry point. Wraps ``maybe_run`` and converts to the ABC's
+        result shape.
+        """
+        legacy = await self.maybe_run(messages, last_input_tokens)
+        return ContextEngineResult(
+            messages=legacy.messages,
+            did_compress=legacy.did_compact,
+            degraded=legacy.degraded,
+            reason=legacy.reason,
+        )
+
+    # ─── Existing API kept verbatim for callers ─────────────────────
 
     def should_compact(self, last_input_tokens: int) -> bool:
         """Use actual measured tokens, not an estimate."""
