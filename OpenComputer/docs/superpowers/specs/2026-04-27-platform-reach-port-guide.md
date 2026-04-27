@@ -1,8 +1,46 @@
 # Platform Reach — Hermes → OpenComputer Adapter Port Guide
 
-> Written 2026-04-27 to make Track B mechanical. Each adapter port should
-> be ~1-2h of focused work using this guide as the recipe. Ships from the
-> master plan at `docs/superpowers/plans/2026-04-27-companion-and-platform-master.md`.
+> Written 2026-04-27. Updated 2026-04-28: most of the Track B adapters
+> are ALREADY shipped — see "Reality check" section.
+>
+> Ships from the master plan at
+> `docs/superpowers/plans/2026-04-27-companion-and-platform-master.md`.
+
+## Reality check (2026-04-28)
+
+When this guide was first written, the assumption was that Track B
+adapters needed to be ported from hermes. **Verification confirmed this
+was wrong** — most of them already exist in `extensions/` from prior
+parallel work:
+
+| Adapter | Status | LOC |
+|---|---|---|
+| extensions/sms/ | ✅ shipped 2026-04-28 (PR #194 — first port using this guide) | ~280 |
+| extensions/matrix/ | ✅ already shipped | 267 |
+| extensions/mattermost/ | ✅ already shipped | 264 |
+| extensions/signal/ | ✅ already shipped | 218 |
+| extensions/whatsapp/ | ✅ already shipped | 191 |
+| extensions/email/ | ✅ already shipped | 370 |
+| extensions/webhook/ | ✅ already shipped | 534 |
+| extensions/slack/ | ✅ already shipped | 267 |
+| extensions/homeassistant/ | ✅ already shipped (different design — service-call outbound only, no WS event subscription) | 155 |
+
+All 9 have matching test files in `tests/test_<platform>_adapter.py`,
+totalling 101 passing tests. The Platform enum was extended with
+`SMS|MATRIX|MATTERMOST|EMAIL|WEBHOOK|HOMEASSISTANT` slots in PR #194 so
+the existing adapters (which were registering as `Platform.WEB` etc.)
+can be migrated to dedicated enum values in a future cleanup.
+
+**What this guide is still useful for:**
+- Adding NEW adapters not yet in the queue (Bluesky, Mastodon, Lark,
+  Threads, Bluetooth — none ported yet)
+- Adding inbound-event mode to homeassistant (current OC version is
+  outbound-only; hermes has WebSocket state_changed subscription)
+- Audit / refactor of existing adapters against the hermes reference
+  (some OC adapters are trimmed-down — feature parity work would re-add
+  pieces from hermes following the recipes below)
+- Schema reference: the BaseChannelAdapter contract description below
+  is canonical for any future channel work
 
 ## The pattern (OC's existing channel adapter contract)
 
