@@ -447,6 +447,11 @@ class AgentLoop:
         # handled=True, return early — no LLM call for this turn. When
         # handled=False (rare: e.g. /plan sets a flag, then chat continues),
         # fall through to the normal loop.
+        #
+        # V3.A-T10: importing ``slash_commands`` registers built-in
+        # (non-plugin) commands like ``/scrape`` into the same dict the
+        # dispatcher reads from below. The import is idempotent.
+        from opencomputer.agent import slash_commands as _builtin_slash  # noqa: F401
         from opencomputer.agent.slash_dispatcher import dispatch as _slash_dispatch
         from opencomputer.plugins.registry import registry as _plugin_registry
 
