@@ -41,7 +41,7 @@ dependencies = [
   "psutil>=5.9",
   "mss>=9.0",
   "pyperclip>=1.8",
-  "rapidocr-onnxruntime>=1.4",
+  "rapidocr-onnxruntime>=1.2.3",
 ]
 
 [project.optional-dependencies]
