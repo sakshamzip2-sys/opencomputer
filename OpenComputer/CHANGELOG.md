@@ -2,6 +2,39 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
+## [Unreleased]
+
+### Added (Grok-style terminal chat experience — Round 5)
+
+The `opencomputer chat` terminal got the four upgrades that make Grok's
+CLI feel responsive: spinner, live markdown, tool-call status panel,
+and a thinking block above the answer. Falls back to the prior plain-
+stream path on non-TTY (so `echo … | opencomputer chat` still produces
+clean piped output).
+
+- `opencomputer/cli_ui/streaming.py` (new, ~250 LOC) —
+  `StreamingRenderer` wraps Rich's `Live` with: spinner before first
+  token (`◐ Thinking…`), live markdown re-render at 4 fps with
+  syntax-highlighted code blocks, tool-call status panel showing the
+  last 3 dispatches with ✓/✗ + elapsed time, post-hoc thinking panel
+  rendering `ProviderResponse.reasoning`, and a token-rate footer
+  (`98 tok/s`).
+- `opencomputer/cli.py::chat()` — `_run_turn` now uses the renderer on
+  TTY; `_run_turn_plain` retained for piped stdin. New
+  `_wire_streaming_renderer_hooks()` registers a single `PRE_TOOL_USE`
+  HookSpec + a `tool_call` bus subscription (one-time per process).
+  Both check `current_renderer()` so they no-op on non-TTY runs.
+- 16 new tests in `tests/test_streaming_renderer.py`: enter/exit
+  sentinel state, buffer accumulation, thinking panel emit/skip,
+  token-rate footer, tool panel start/end, last-3 row eviction,
+  concurrent same-name calls get distinct rows, mid-stream code-fence
+  defence, args-preview truncation + newline strip, duration
+  formatting, zero-elapsed safety, late-completion idempotency.
+
+Live streaming of THINKING chunks is deferred — Anthropic's SDK
+exposes them separately from assistant chunks; for v1 we render the
+thinking panel post-hoc from the persisted `reasoning` field.
+
 ## [2026.4.27] — Round 4 ship: undeferred items, all 5 landed
 
 User reviewed the deferral list and pushed back on 5 items they

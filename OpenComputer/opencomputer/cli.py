@@ -491,6 +491,75 @@ def _resolve_resume_target(spec: str) -> str | None:
     return str(rows[int(choice) - 1]["id"])
 
 
+_STREAM_HOOKS_WIRED = False
+
+
+def _wire_streaming_renderer_hooks() -> None:
+    """Register hook + bus subscriptions that bridge tool-dispatch
+    events to the active :class:`StreamingRenderer`.
+
+    Round 5 / Grok-style terminal. Fires once per process. PRE_TOOL_USE
+    runs before each dispatch and tells the renderer "tool starting";
+    the typed-event bus's ``tool_call`` events tell the renderer
+    "tool finished". Both no-op when no renderer is active (e.g.
+    non-TTY runs use the plain-stream code path which never enters a
+    StreamingRenderer context).
+    """
+    global _STREAM_HOOKS_WIRED
+    if _STREAM_HOOKS_WIRED:
+        return
+    _STREAM_HOOKS_WIRED = True
+
+    from opencomputer.cli_ui import current_renderer
+    from opencomputer.ingestion.bus import default_bus
+    from plugin_sdk.hooks import HookEvent, HookSpec
+
+    # Per-call ids so on_tool_end can match its on_tool_start.
+    # The dict key is the ToolCall.id (set by the agent loop).
+    _tool_idx_by_call_id: dict[str, tuple[str, int]] = {}
+
+    async def _on_pre_tool_use(ctx) -> None:  # type: ignore[no-untyped-def]
+        renderer = current_renderer()
+        if renderer is None:
+            return
+        try:
+            call = ctx.tool_call
+            args_preview = (
+                ", ".join(f"{k}={v}" for k, v in (call.arguments or {}).items())
+                if call.arguments
+                else ""
+            )
+            idx = renderer.on_tool_start(call.name, args_preview)
+            _tool_idx_by_call_id[call.id] = (call.name, idx)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("renderer on_tool_start hook failed: %s", exc)
+
+    hook_engine.register(
+        HookSpec(event=HookEvent.PRE_TOOL_USE, handler=_on_pre_tool_use)
+    )
+
+    def _on_tool_call_complete(event) -> None:
+        renderer = current_renderer()
+        if renderer is None:
+            return
+        # ToolCallEvent doesn't carry the original ToolCall.id (it's
+        # built fresh from the dispatched call), so we re-derive from
+        # the (name, ordering) — last-recorded entry for that name
+        # wins. Acceptable for the rendering use case; concurrent
+        # dispatches of the SAME tool are rare and the worst-case is
+        # one row's status flipping a few hundred ms early.
+        try:
+            for key, (name, idx) in list(_tool_idx_by_call_id.items()):
+                if name == event.tool_name:
+                    renderer.on_tool_end(name, idx, ok=event.outcome == "success")
+                    _tool_idx_by_call_id.pop(key, None)
+                    break
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("renderer on_tool_end bus subscription failed: %s", exc)
+
+    default_bus.subscribe("tool_call", _on_tool_call_complete)
+
+
 def _print_update_hint_if_any() -> None:
     """Print the upgrade hint at chat exit when one is ready.
 
@@ -765,16 +834,54 @@ def _run_chat_session(
         )
     console.print("[dim]Type 'exit' to quit. Ctrl+C to interrupt.[/dim]\n")
 
+    # Round 5 — bridge agent loop tool dispatches → StreamingRenderer.
+    # PRE_TOOL_USE hook fires on tool start; bus subscription on
+    # ToolCallEvent fires on completion. Both check current_renderer()
+    # so they no-op when the chat loop isn't actively rendering.
+    _wire_streaming_renderer_hooks()
+
+    # Round 5 — Grok-style terminal: live markdown + spinner + tool
+    # status + thinking panel + token-rate readout. Falls back to the
+    # plain-stream path on non-TTY (Rich.Live escape sequences would
+    # pollute a piped stdout).
+    use_live_ui = sys.stdout.isatty()
+
     async def _run_turn(user_input: str) -> None:
-        # Stream tokens to the terminal as they arrive
+        if not use_live_ui:
+            await _run_turn_plain(user_input)
+            return
+
+        from opencomputer.cli_ui import StreamingRenderer
+
+        with StreamingRenderer(console) as renderer:
+            renderer.start_thinking()
+            import time as _time
+
+            t_start = _time.monotonic()
+            result = await loop.run_conversation(
+                user_message=user_input,
+                session_id=session_id,
+                runtime=runtime,
+                stream_callback=renderer.on_chunk,
+            )
+            elapsed = _time.monotonic() - t_start
+            renderer.finalize(
+                reasoning=getattr(result.final_message, "reasoning", None),
+                iterations=result.iterations,
+                in_tok=result.input_tokens,
+                out_tok=result.output_tokens,
+                elapsed_s=elapsed,
+            )
+
+    async def _run_turn_plain(user_input: str) -> None:
+        # Legacy path — kept verbatim so `printf … | opencomputer chat`
+        # still produces clean piped output (no Rich Live escapes).
         printed_header = {"val": False}
 
         def on_chunk(text: str) -> None:
             if not printed_header["val"]:
                 console.print("[bold magenta]oc ›[/bold magenta] ", end="")
                 printed_header["val"] = True
-            # Print raw text (not markdown) so streaming is smooth;
-            # final full message is re-rendered as Markdown below.
             console.print(text, end="", markup=False, highlight=False)
 
         result = await loop.run_conversation(
@@ -783,11 +890,8 @@ def _run_chat_session(
             runtime=runtime,
             stream_callback=on_chunk,
         )
-        # Newline after streaming content (if any)
         if printed_header["val"]:
             console.print()
-        # Re-render as Markdown for code fences / lists if content is present
-        # and wasn't already streamed as text (prevents double output).
         if result.final_message.content.strip() and not printed_header["val"]:
             console.print("[bold magenta]oc ›[/bold magenta]")
             console.print(Markdown(result.final_message.content))
