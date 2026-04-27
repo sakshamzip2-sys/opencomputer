@@ -49,3 +49,38 @@ def test_build_prompt_session_returns_session(tmp_path: Path):
     # History is a FileHistory pointing under our profile dir.
     assert isinstance(session.history, FileHistory)
     assert Path(session.history.filename).parent == tmp_path
+
+
+def test_build_prompt_session_has_slash_completer(tmp_path: Path):
+    """PromptSession must have SlashCommandCompleter wired so the
+    dropdown menu appears when the user types '/'."""
+    from opencomputer.cli_ui.slash_completer import SlashCommandCompleter
+
+    scope = TurnCancelScope()
+    session = build_prompt_session(profile_home=tmp_path, scope=scope)
+    assert isinstance(session.completer, SlashCommandCompleter)
+
+
+def test_build_prompt_session_complete_while_typing_enabled(tmp_path: Path):
+    """``complete_while_typing`` must be True so the dropdown auto-shows
+    as the user types — without it, completions only fire on Tab."""
+    scope = TurnCancelScope()
+    session = build_prompt_session(profile_home=tmp_path, scope=scope)
+    cwt = session.complete_while_typing
+    if callable(cwt):
+        cwt = cwt()
+    assert cwt is True
+
+
+def test_build_prompt_session_tab_keybinding_registered(tmp_path: Path):
+    """Tab/ControlI must be bound so our LCP handler runs instead of
+    falling through to prompt_toolkit's default Tab behavior."""
+    from prompt_toolkit.keys import Keys
+
+    scope = TurnCancelScope()
+    session = build_prompt_session(profile_home=tmp_path, scope=scope)
+    tab_keys = (Keys.Tab, Keys.ControlI)
+    bindings = session.key_bindings.bindings
+    assert any(
+        any(k in tab_keys for k in b.keys) for b in bindings
+    ), "Tab keybinding missing from PromptSession"
