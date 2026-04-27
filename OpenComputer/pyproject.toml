@@ -91,6 +91,16 @@ voice = [
   "webrtcvad>=2.0",
   "sounddevice>=0.4",
 ]
+# Optional: cross-platform local STT via whisper.cpp (pywhispercpp). Heavy
+# wheel; opt in with `pip install opencomputer[voice-local]`.
+voice-local = [
+  "pywhispercpp>=1.2",
+]
+# Optional: macOS Apple Silicon-optimized local STT via mlx-whisper.
+# Install with `pip install opencomputer[voice-mlx]` on macOS only.
+voice-mlx = [
+  "mlx-whisper>=0.4; platform_system == 'Darwin'",
+]
 
 [project.scripts]
 opencomputer = "opencomputer.cli:main"
