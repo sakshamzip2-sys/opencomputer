@@ -151,11 +151,15 @@ def test_resume_passthrough_unknown_spec_returns_input(
 
     # The function would crash on an unrecognised spec because of the
     # ``spec == "pick"`` branch below — confirm we only ever route
-    # ``last`` and ``pick`` here. (chat() guards with the membership
-    # check; we re-assert at this layer too.)
+    # ``last`` and ``pick`` here. (the chat session guards with the
+    # membership check; we re-assert at this layer too.)
+    #
+    # V3.A-T7: ``chat`` was thinned to a delegator over
+    # ``_run_chat_session``; the magic-spec guard now lives in the
+    # shared helper, so inspect that body instead.
     import inspect
 
-    src = inspect.getsource(cli.chat)
+    src = inspect.getsource(cli._run_chat_session)
     assert 'resume in ("last", "pick")' in src, (
-        "chat() must guard the resolver call with the magic-spec membership check"
+        "_run_chat_session() must guard the resolver call with the magic-spec membership check"
     )
