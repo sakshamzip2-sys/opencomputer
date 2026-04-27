@@ -1,0 +1,12 @@
+{
+  "id": "voice-mode",
+  "name": "voice-mode",
+  "description": "Continuous push-to-talk voice mode. Capture audio, transcribe via Whisper (API or local), agent responds via TTS playback. Default OFF.",
+  "version": "0.1.0",
+  "kind": "mixed",
+  "enabled_by_default": false,
+  "entry": "plugin",
+  "author": "OpenComputer",
+  "license": "MIT",
+  "capabilities": ["voice.capture", "voice.playback"]
+}

@@ -113,4 +113,13 @@ def voice_cost_estimate(
         typer.echo(f"STT  (whisper-1)   {duration:5.1f}s        = ${cost:.4f}")
 
 
+@voice_app.command("talk")
+def voice_talk() -> None:
+    """Enter continuous push-to-talk voice mode. (Hold spacebar to record; release to send.)"""
+    typer.echo("voice talk: orchestrator not yet implemented (lands in T5)")
+    typer.echo("This is the T1 stub — audio_capture.py is implemented and tested.")
+    typer.echo("Will integrate VAD (T2), STT (T3), TTS+barge-in (T4), and main loop (T5).")
+    raise typer.Exit(code=1)
+
+
 __all__ = ["voice_app"]

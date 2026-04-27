@@ -10,6 +10,7 @@ imported with underscores in test code:
 3.  extensions.browser_bridge → extensions/browser-bridge/
 4.  extensions.ambient_sensors → extensions/ambient-sensors/
 5.  extensions.skill_evolution → extensions/skill-evolution/
+6.  extensions.voice_mode → extensions/voice-mode/
 
 The aliases are injected into sys.modules BEFORE any test module is collected.
 """
@@ -28,6 +29,7 @@ _CH_DIR = _EXT_DIR / "coding-harness"
 _BEDROCK_DIR = _EXT_DIR / "aws-bedrock-provider"
 _AMBIENT_DIR = _EXT_DIR / "ambient-sensors"
 _SKILL_EVO_DIR = _EXT_DIR / "skill-evolution"
+_VOICE_MODE_DIR = _EXT_DIR / "voice-mode"
 
 
 def _ensure_extensions_pkg() -> None:
@@ -215,8 +217,52 @@ def _register_skill_evolution_alias() -> None:
         setattr(parent, sub, sub_mod)
 
 
+def _register_voice_mode_alias() -> None:
+    """Register extensions.voice_mode → extensions/voice-mode/.
+
+    Mirrors the skill_evolution / ambient_sensors pattern (eager exec on
+    first import) — the voice-mode plugin dir is hyphenated, so tests
+    import the Python modules via the underscore form. The loop below
+    skips files that don't yet exist, so this stays correct as the
+    plugin grows from T1 (audio_capture) through T5 (main loop).
+    """
+    _ensure_extensions_pkg()
+
+    if not _VOICE_MODE_DIR.exists():
+        return
+
+    if "extensions.voice_mode" not in sys.modules:
+        mod = types.ModuleType("extensions.voice_mode")
+        mod.__path__ = [str(_VOICE_MODE_DIR)]
+        mod.__package__ = "extensions.voice_mode"
+        sys.modules["extensions.voice_mode"] = mod
+        # Bind on parent so pytest's monkeypatch dotted-path resolver
+        # (which uses getattr) can find ``extensions.voice_mode``.
+        sys.modules["extensions"].voice_mode = mod
+
+    parent = sys.modules["extensions.voice_mode"]
+    for sub in ("audio_capture", "vad", "stt", "tts", "playback", "orchestrator", "plugin"):
+        full_name = f"extensions.voice_mode.{sub}"
+        if full_name in sys.modules:
+            setattr(parent, sub, sys.modules[full_name])
+            continue
+        init = _VOICE_MODE_DIR / f"{sub}.py"
+        if not init.exists():
+            continue
+        spec = importlib.util.spec_from_file_location(full_name, str(init))
+        if spec is None or spec.loader is None:
+            continue
+        sub_mod = importlib.util.module_from_spec(spec)
+        sub_mod.__package__ = "extensions.voice_mode"
+        sys.modules[full_name] = sub_mod
+        spec.loader.exec_module(sub_mod)
+        # Bind on parent so monkeypatch.setattr("extensions.voice_mode.X", ...) works.
+        setattr(parent, sub, sub_mod)
+
+
 _register_coding_harness_alias()
 _register_aws_bedrock_provider_alias()
 _register_browser_bridge_alias()
 _register_ambient_sensors_alias()
 _register_skill_evolution_alias()
+_register_voice_mode_alias()
