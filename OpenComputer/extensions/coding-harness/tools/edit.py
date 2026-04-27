@@ -7,6 +7,14 @@ from pathlib import Path
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
+# V3.A-T5: every error path is engineered to TEACH the model how to recover —
+# the message points to the next concrete action (Read, Glob, replace_all,
+# Write, etc.) rather than just describing what went wrong. The
+# ``opencomputer.tools._file_read_state`` module is a process-local set of
+# paths that have been Read (or Written), so we can enforce the
+# "Read first" contract that Edit's description has always promised.
+from opencomputer.tools._file_read_state import has_been_read, mark_read
+
 
 class EditTool(BaseTool):
     parallel_safe = False  # writes to disk
@@ -69,19 +77,67 @@ class EditTool(BaseTool):
         if not path.is_absolute():
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"Error: file_path must be absolute, got: {path}",
+                content=(
+                    f"file_path must be an absolute path, got: {path!s}. "
+                    f"Edit requires absolute paths to avoid ambiguity. "
+                    f"Tip: prefix with the project root (e.g. /Users/you/project/...)."
+                ),
                 is_error=True,
             )
-        if not path.exists() or not path.is_file():
+        if not path.exists():
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"Error: file does not exist: {path}",
+                content=(
+                    f"{path} does not exist. Edit only modifies existing files. "
+                    f"If you meant to create a new file, use the Write tool. "
+                    f"If you're unsure where the file lives, use Glob "
+                    f"(e.g. pattern='**/{path.name}') to locate it."
+                ),
+                is_error=True,
+            )
+        if path.is_dir():
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"{path} is a directory, not a file. Edit operates on files only. "
+                    f"Use Glob to list directory contents (e.g. pattern='{path}/**'), "
+                    f"or Read on a specific file inside it."
+                ),
+                is_error=True,
+            )
+        if not path.is_file():
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"{path} is not a regular file (it may be a socket, fifo, or "
+                    f"device). Edit can only modify regular files."
+                ),
                 is_error=True,
             )
         if old == new:
             return ToolResult(
                 tool_call_id=call.id,
-                content="Error: old_string and new_string are identical — no change",
+                content=(
+                    "old_string and new_string are identical — Edit would be a no-op "
+                    "and is rejected to surface the mistake. "
+                    "If you wanted to inspect the file, use Read. "
+                    "If you wanted to verify a change, the previous Edit's success "
+                    "message already confirmed it landed."
+                ),
+                is_error=True,
+            )
+
+        if not has_been_read(path):
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"You must Read {path} before editing it. "
+                    f"Edit relies on the file's known state from a prior Read in "
+                    f"this conversation — without it, your old_string is a guess "
+                    f"and likely to mismatch. Call Read on this path first, then "
+                    f"retry Edit with old_string copied byte-for-byte from Read's "
+                    f"output (after stripping the line-number prefix)."
+                ),
                 is_error=True,
             )
 
@@ -90,7 +146,12 @@ class EditTool(BaseTool):
         except Exception as e:
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"Error reading {path}: {type(e).__name__}: {e}",
+                content=(
+                    f"Error reading {path}: {type(e).__name__}: {e}. "
+                    f"Likely causes: file became unreadable, encoding is not UTF-8, "
+                    f"or it was deleted between your Read and this Edit. "
+                    f"Re-Read the file and retry."
+                ),
                 is_error=True,
             )
 
@@ -99,8 +160,15 @@ class EditTool(BaseTool):
             return ToolResult(
                 tool_call_id=call.id,
                 content=(
-                    f"Error: old_string not found in {path}. "
-                    f"Verify the exact text including whitespace."
+                    f"old_string was not found in {path}. The old_string must match "
+                    f"the file's CURRENT content byte-for-byte, including indentation, "
+                    f"trailing whitespace, and line endings. "
+                    f"Common causes: (1) the file changed since you last Read it — "
+                    f"Read it again to get fresh bytes; (2) you copied old_string from "
+                    f"Read's output without stripping the line-number prefix "
+                    f"(`<num>\\t<content>`); (3) your old_string spans a tab/space "
+                    f"mismatch; (4) Windows vs. Unix line endings differ. "
+                    f"Tip: Read the file again and copy the exact bytes you want to replace."
                 ),
                 is_error=True,
             )
@@ -108,9 +176,14 @@ class EditTool(BaseTool):
             return ToolResult(
                 tool_call_id=call.id,
                 content=(
-                    f"Error: old_string appears {count} times in {path}. "
-                    f"Expand old_string with more context (surrounding lines) until it is "
-                    f"unique, or pass replace_all=true."
+                    f"old_string appears {count} times in {path}, so Edit can't tell "
+                    f"which occurrence you mean. Either: "
+                    f"(1) provide more surrounding context (a few extra lines before "
+                    f"and/or after) to make old_string unique, or "
+                    f"(2) pass replace_all=true to replace every occurrence at once. "
+                    f"If the duplicates are in different functions, expanding the "
+                    f"old_string to include the surrounding `def`/signature line is "
+                    f"usually the cleanest fix."
                 ),
                 is_error=True,
             )
@@ -121,9 +194,17 @@ class EditTool(BaseTool):
         except Exception as e:
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"Error writing {path}: {type(e).__name__}: {e}",
+                content=(
+                    f"Error writing {path}: {type(e).__name__}: {e}. "
+                    f"Likely causes: insufficient permissions, full disk, or the file "
+                    f"is locked by another process. Check filesystem state and retry."
+                ),
                 is_error=True,
             )
+
+        # The bytes we just wrote are by definition the file's current state,
+        # so subsequent Edits in this turn don't need a fresh Read.
+        mark_read(path)
 
         n = count if replace_all else 1
         return ToolResult(

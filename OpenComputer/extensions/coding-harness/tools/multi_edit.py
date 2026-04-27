@@ -7,6 +7,13 @@ from pathlib import Path
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
+# V3.A-T5: per-edit failures must teach the model how to recover. Each error
+# message identifies WHICH edit in the batch failed (1-indexed for human
+# readability), what the underlying problem is, and the next concrete action
+# to take. The shared read-state tracker in opencomputer.tools enforces the
+# same "Read first" contract MultiEdit's description has always promised.
+from opencomputer.tools._file_read_state import has_been_read, mark_read
+
 
 class MultiEditTool(BaseTool):
     parallel_safe = False
@@ -62,19 +69,62 @@ class MultiEditTool(BaseTool):
         if not path.is_absolute():
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"Error: file_path must be absolute, got: {path}",
+                content=(
+                    f"file_path must be an absolute path, got: {path!s}. "
+                    f"MultiEdit requires absolute paths to avoid ambiguity. "
+                    f"Tip: prefix with the project root."
+                ),
                 is_error=True,
             )
-        if not path.exists() or not path.is_file():
+        if not path.exists():
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"Error: file does not exist: {path}",
+                content=(
+                    f"{path} does not exist. MultiEdit only modifies existing files. "
+                    f"If you meant to create a new file, use Write. "
+                    f"If you're unsure where the file lives, use Glob to locate it."
+                ),
+                is_error=True,
+            )
+        if path.is_dir():
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"{path} is a directory, not a file. MultiEdit operates on files only. "
+                    f"Use Glob (pattern='{path}/**') to list directory contents."
+                ),
+                is_error=True,
+            )
+        if not path.is_file():
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"{path} is not a regular file. MultiEdit can only modify regular files."
+                ),
                 is_error=True,
             )
         if not isinstance(edits, list) or not edits:
             return ToolResult(
                 tool_call_id=call.id,
-                content="Error: edits must be a non-empty list",
+                content=(
+                    "edits must be a non-empty list. Provide at least one "
+                    "{old_string, new_string} object. If you only need to change one "
+                    "thing, prefer the Edit tool — it has a simpler shape."
+                ),
+                is_error=True,
+            )
+
+        if not has_been_read(path):
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"You must Read {path} before editing it. "
+                    f"MultiEdit relies on the file's known state from a prior Read in "
+                    f"this conversation — without it, your old_strings are guesses "
+                    f"and likely to mismatch. Call Read on this path first, then "
+                    f"retry MultiEdit with each old_string copied byte-for-byte from "
+                    f"Read's output (after stripping the line-number prefix)."
+                ),
                 is_error=True,
             )
 
@@ -83,7 +133,12 @@ class MultiEditTool(BaseTool):
         except Exception as e:
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"Error reading {path}: {type(e).__name__}: {e}",
+                content=(
+                    f"Error reading {path}: {type(e).__name__}: {e}. "
+                    f"Likely causes: file became unreadable, encoding is not UTF-8, "
+                    f"or it was deleted between your Read and this MultiEdit. "
+                    f"Re-Read the file and retry."
+                ),
                 is_error=True,
             )
 
@@ -91,15 +146,22 @@ class MultiEditTool(BaseTool):
         total_replacements = 0
 
         for i, edit in enumerate(edits):
+            # Show the model a 1-indexed position so it can match the error
+            # message against its own input order ("edit 1 of 3" not "edit 0").
+            edit_label = f"edit #{i + 1} of {len(edits)}"
             old = edit.get("old_string", "")
             new = edit.get("new_string", "")
             replace_all = bool(edit.get("replace_all", False))
 
             if old == new:
-                # Rollback: return without writing.
                 return ToolResult(
                     tool_call_id=call.id,
-                    content=f"Error: edit {i}: old_string == new_string (no change). Rolled back.",
+                    content=(
+                        f"{edit_label} failed: old_string and new_string are identical — "
+                        f"Edit would be a no-op. The whole batch was rolled back; the "
+                        f"file is unchanged. Remove the no-op edit and resubmit. "
+                        f"If you wanted to inspect the file, use Read instead."
+                    ),
                     is_error=True,
                 )
 
@@ -107,16 +169,33 @@ class MultiEditTool(BaseTool):
             if count == 0:
                 return ToolResult(
                     tool_call_id=call.id,
-                    content=f"Error: edit {i}: old_string not found. Rolled back {total_replacements} prior edits.",
+                    content=(
+                        f"{edit_label} failed: old_string was not found in the "
+                        f"in-memory file state. The whole batch was rolled back; "
+                        f"{total_replacements} prior in-memory edits were discarded "
+                        f"and {path} is unchanged on disk. "
+                        f"Remember: edits apply sequentially, so a later edit must "
+                        f"match what earlier edits in this same batch produced. "
+                        f"If your old_string was correct against the original file, "
+                        f"check whether an earlier edit in this batch already replaced "
+                        f"those bytes. Otherwise: Read the file again and copy "
+                        f"old_string byte-for-byte (matching whitespace and line endings) "
+                        f"from the fresh Read output."
+                    ),
                     is_error=True,
                 )
             if count > 1 and not replace_all:
                 return ToolResult(
                     tool_call_id=call.id,
                     content=(
-                        f"Error: edit {i}: old_string appears {count} times — "
-                        f"expand with more context or set replace_all=true. "
-                        f"Rolled back {total_replacements} prior edits."
+                        f"{edit_label} failed: old_string appears {count} times in the "
+                        f"in-memory file state. The whole batch was rolled back; "
+                        f"{total_replacements} prior in-memory edits were discarded "
+                        f"and {path} is unchanged on disk. "
+                        f"Either: (1) expand old_string with more surrounding context "
+                        f"(a few extra lines) to make it unique, or "
+                        f"(2) set replace_all=true on this edit to replace every "
+                        f"occurrence."
                     ),
                     is_error=True,
                 )
@@ -135,9 +214,19 @@ class MultiEditTool(BaseTool):
         except Exception as e:
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"Error writing {path}: {type(e).__name__}: {e}",
+                content=(
+                    f"Error writing {path}: {type(e).__name__}: {e}. "
+                    f"All in-memory edits were prepared successfully but the disk "
+                    f"write failed. Likely causes: insufficient permissions, full "
+                    f"disk, or the file is locked by another process. Resolve and "
+                    f"retry the MultiEdit."
+                ),
                 is_error=True,
             )
+
+        # Mark the path as Read so subsequent Edits in this turn don't need
+        # a fresh Read — we just wrote known bytes.
+        mark_read(path)
 
         return ToolResult(
             tool_call_id=call.id,

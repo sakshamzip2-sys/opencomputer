@@ -7,6 +7,8 @@ from pathlib import Path
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
+from opencomputer.tools._file_read_state import mark_read
+
 
 class ReadTool(BaseTool):
     parallel_safe = True
@@ -76,6 +78,10 @@ class ReadTool(BaseTool):
                 content=f"Error reading {path}: {type(e).__name__}: {e}",
                 is_error=True,
             )
+
+        # Record that this path has been Read so Edit/MultiEdit can
+        # honour their "Read first" contract.
+        mark_read(path)
 
         lines = text.splitlines()
         offset = max(1, int(args.get("offset", 1)))

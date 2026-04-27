@@ -7,6 +7,8 @@ from pathlib import Path
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
+from opencomputer.tools._file_read_state import mark_read
+
 
 class WriteTool(BaseTool):
     parallel_safe = False  # writes to same path could race
@@ -59,6 +61,10 @@ class WriteTool(BaseTool):
                 content=f"Error writing {path}: {type(e).__name__}: {e}",
                 is_error=True,
             )
+        # Treat Write as also satisfying the "Read first" precondition for
+        # subsequent Edits — the agent has just authored the bytes, so it
+        # demonstrably knows them.
+        mark_read(path)
         return ToolResult(
             tool_call_id=call.id,
             content=f"Wrote {len(content)} bytes to {path}",

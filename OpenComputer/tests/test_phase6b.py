@@ -36,6 +36,19 @@ def _call(tool_name: str, **args):
     return ToolCall(id="t1", name=tool_name, arguments=args)
 
 
+def _mark_read(path: Path) -> None:
+    """Honour Edit/MultiEdit's "Read first" contract from V3.A-T5.
+
+    Tests that fabricate a file via ``f.write_text`` haven't gone through the
+    real ReadTool that maintains the read-state set, so we mark them
+    explicitly. Production agents always reach Edit via Read → Edit, so the
+    marker is a no-op there.
+    """
+    from opencomputer.tools._file_read_state import mark_read
+
+    mark_read(path)
+
+
 # ─── Edit tool ──────────────────────────────────────────────────
 
 
@@ -43,6 +56,7 @@ def test_edit_replaces_unique_string(tmp_path: Path) -> None:
     mod = _load_module("edit", "tools/edit.py")
     f = tmp_path / "code.py"
     f.write_text("def foo():\n    return 1\n")
+    _mark_read(f)
     tool = mod.EditTool()
     r = asyncio.run(
         tool.execute(
@@ -62,6 +76,7 @@ def test_edit_errors_on_non_unique_without_replace_all(tmp_path: Path) -> None:
     mod = _load_module("edit2", "tools/edit.py")
     f = tmp_path / "code.py"
     f.write_text("x = 1\ny = 1\n")
+    _mark_read(f)
     tool = mod.EditTool()
     r = asyncio.run(
         tool.execute(
@@ -79,6 +94,7 @@ def test_edit_replace_all(tmp_path: Path) -> None:
     mod = _load_module("edit3", "tools/edit.py")
     f = tmp_path / "code.py"
     f.write_text("x = 1\ny = 1\n")
+    _mark_read(f)
     tool = mod.EditTool()
     r = asyncio.run(
         tool.execute(
@@ -104,6 +120,7 @@ def test_multi_edit_atomic_rollback_on_mid_failure(tmp_path: Path) -> None:
     f = tmp_path / "c.py"
     original = "a = 1\nb = 2\nc = 3\n"
     f.write_text(original)
+    _mark_read(f)
     tool = mod.MultiEditTool()
     r = asyncio.run(
         tool.execute(
@@ -119,7 +136,10 @@ def test_multi_edit_atomic_rollback_on_mid_failure(tmp_path: Path) -> None:
         )
     )
     assert r.is_error
-    assert "Rolled back" in r.content
+    # V3.A-T5: error message uses lowercase "rolled back" alongside the
+    # nudge-text. We use a case-insensitive check so future copy tweaks
+    # don't break this test for cosmetic reasons.
+    assert "rolled back" in r.content.lower()
     # Critical invariant: file is unchanged
     assert f.read_text() == original
 
@@ -128,6 +148,7 @@ def test_multi_edit_all_succeed(tmp_path: Path) -> None:
     mod = _load_module("medit2", "tools/multi_edit.py")
     f = tmp_path / "c.py"
     f.write_text("a = 1\nb = 2\n")
+    _mark_read(f)
     tool = mod.MultiEditTool()
     r = asyncio.run(
         tool.execute(
