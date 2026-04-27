@@ -434,6 +434,41 @@ class SessionDB:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    # ─── session titles (TS-T6) ───────────────────────────────────
+
+    def get_session_title(self, session_id: str) -> str | None:
+        """Return the session's stored title, or None if unset.
+
+        Treats the empty string the same as NULL — ``create_session``
+        seeds the column with ``""`` for sessions that have never been
+        titled, so we collapse both to ``None`` for callers that just
+        want to know "is there a title yet?".
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT title FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        title = row["title"]
+        return title if title else None
+
+    def set_session_title(self, session_id: str, title: str) -> None:
+        """Persist ``title`` on the session row. No-op if the session
+        doesn't exist yet.
+
+        Called from a daemon thread by
+        :func:`opencomputer.agent.title_generator.maybe_auto_title`, so
+        we use the same ``_txn`` retry-on-busy wrapper as every other
+        write — SQLite handles concurrent writers from multiple
+        connections via WAL + ``BEGIN IMMEDIATE``.
+        """
+        with self._txn() as conn:
+            conn.execute(
+                "UPDATE sessions SET title = ? WHERE id = ?",
+                (title, session_id),
+            )
+
     # ─── messages ─────────────────────────────────────────────────
 
     @staticmethod
