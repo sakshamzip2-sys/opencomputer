@@ -4,11 +4,29 @@ TUI uplift: PromptSession-based input layer, slash dispatch, cancel scope).
 Kept under ``cli_ui/`` (not ``cli/``) to avoid colliding with ``cli.py``.
 """
 
+from opencomputer.cli_ui.input_loop import build_prompt_session, read_user_input
+from opencomputer.cli_ui.slash import (
+    SLASH_REGISTRY,
+    CommandDef,
+    SlashResult,
+    is_slash_command,
+    resolve_command,
+)
+from opencomputer.cli_ui.slash_handlers import SlashContext, dispatch_slash
 from opencomputer.cli_ui.streaming import StreamingRenderer, current_renderer
 from opencomputer.cli_ui.turn_cancel import TurnCancelScope
 
 __all__ = [
+    "SLASH_REGISTRY",
+    "CommandDef",
+    "SlashContext",
+    "SlashResult",
     "StreamingRenderer",
     "TurnCancelScope",
+    "build_prompt_session",
     "current_renderer",
+    "dispatch_slash",
+    "is_slash_command",
+    "read_user_input",
+    "resolve_command",
 ]
