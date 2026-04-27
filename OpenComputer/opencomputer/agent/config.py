@@ -86,6 +86,14 @@ class LoopConfig:
     max_delegation_depth: int = 2
     """Cap on `DelegateTool` recursion. 2 = parent (depth 0) → child (depth 1) → grandchild (depth 2) rejected.
     Mirrors Hermes `MAX_DEPTH = 2` from `sources/hermes-agent/tools/delegate_tool.py`."""
+    context_engine: str = "compressor"
+    """Tier-A item 10 — which :class:`ContextEngine` strategy the loop uses.
+    ``"compressor"`` is the default (existing CompactionEngine, aux-LLM
+    summarization with safe boundary splitting). Plugins register
+    alternatives via ``opencomputer.agent.context_engine_registry.register``
+    — a profile setting other than ``"compressor"`` resolves through the
+    registry; an unknown name logs a warning and falls back to the
+    default so a misconfigured profile still boots."""
 
 
 @dataclass(frozen=True, slots=True)

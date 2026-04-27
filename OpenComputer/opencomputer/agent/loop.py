@@ -301,7 +301,24 @@ class AgentLoop:
         except Exception:  # noqa: BLE001 — never break agent startup
             _log.debug("bg_notify provider wiring skipped", exc_info=True)
 
-        self.compaction = CompactionEngine(
+        # Tier-A item 10 — resolve the context-engine strategy via the
+        # registry. ``LoopConfig.context_engine`` defaults to
+        # ``"compressor"`` (the existing CompactionEngine), so production
+        # behavior is unchanged. A plugin that registered an alternative
+        # engine + a profile that selects it will resolve through the
+        # registry. Unknown name → fall back to CompactionEngine so a
+        # misconfigured profile still boots (the registry's ``build``
+        # logs a warning in that case).
+        from opencomputer.agent import context_engine_registry as _ctx_registry
+
+        engine_name = getattr(config.loop, "context_engine", "compressor")
+        self.compaction = _ctx_registry.build(
+            engine_name,
+            provider=provider,
+            model=config.model.model,
+            disabled=compaction_disabled,
+            memory_bridge=self.memory_bridge,
+        ) or CompactionEngine(
             provider=provider,
             model=config.model.model,
             disabled=compaction_disabled,
