@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import platform
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -67,6 +68,25 @@ class PromptContext:
     #: string means "no user-model knowledge yet" — base.j2 omits the
     #: section accordingly.
     user_facts: str = ""
+    #: V3.A-T3 — operating-system label rendered into the system info block
+    #: (e.g. ``"Darwin"`` / ``"Linux"`` / ``"Windows"``). Defaults to the
+    #: live :func:`platform.system` value when ``PromptBuilder.build``
+    #: constructs the context, but downstream callers may override.
+    os_name: str = ""
+    #: V3.A-T3 — workspace-context slot reserved for T8 (CLAUDE.md /
+    #: OPENCOMPUTER.md / AGENTS.md aggregation). Defaults to ``""`` so
+    #: ``base.j2`` omits the section until the loader is wired. Existing
+    #: PromptContext consumers do not need to set this; the field has a
+    #: safe default.
+    workspace_context: str = ""
+    #: V3.A-T3 — runtime mode flags that drive Jinja conditionals in
+    #: ``base.j2``. ``plan_mode`` mirrors ``runtime.plan_mode`` and tells
+    #: the agent that destructive tools are blocked. ``yolo_mode`` mirrors
+    #: ``runtime.yolo_mode`` and warns the agent that the safety gate is
+    #: lowered. Both default to ``False`` so unmodified callers render the
+    #: standard prompt (no plan/yolo bumper sections).
+    plan_mode: bool = False
+    yolo_mode: bool = False
 
 
 class PromptBuilder:
@@ -94,6 +114,9 @@ class PromptBuilder:
         memory_char_limit: int = 4000,
         user_char_limit: int = 2000,
         template: str = "base.j2",
+        workspace_context: str = "",
+        plan_mode: bool = False,
+        yolo_mode: bool = False,
     ) -> str:
         memory = _truncate_from_top(declarative_memory, memory_char_limit)
         profile = _truncate_from_top(user_profile, user_char_limit)
@@ -106,6 +129,10 @@ class PromptBuilder:
             user_profile=profile,
             soul=soul,
             user_facts=user_facts,
+            os_name=platform.system() or "",
+            workspace_context=workspace_context,
+            plan_mode=plan_mode,
+            yolo_mode=yolo_mode,
         )
         tpl = self.env.get_template(template)
         return tpl.render(
@@ -117,6 +144,10 @@ class PromptBuilder:
             user_profile=ctx.user_profile,
             soul=ctx.soul,
             user_facts=ctx.user_facts,
+            os_name=ctx.os_name,
+            workspace_context=ctx.workspace_context,
+            plan_mode=ctx.plan_mode,
+            yolo_mode=ctx.yolo_mode,
         )
 
     def build_user_facts(
@@ -169,6 +200,9 @@ class PromptBuilder:
         session_id: str | None = None,
         enable_ambient_blocks: bool = True,
         max_ambient_block_chars: int = 800,
+        workspace_context: str = "",
+        plan_mode: bool = False,
+        yolo_mode: bool = False,
     ) -> str:
         """Async variant of build() that appends ambient memory blocks.
 
@@ -192,6 +226,9 @@ class PromptBuilder:
             memory_char_limit=memory_char_limit,
             user_char_limit=user_char_limit,
             template=template,
+            workspace_context=workspace_context,
+            plan_mode=plan_mode,
+            yolo_mode=yolo_mode,
         )
         if not enable_ambient_blocks or memory_bridge is None:
             return base
