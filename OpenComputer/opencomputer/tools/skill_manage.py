@@ -7,20 +7,98 @@ description auto-activates and its body enters the system prompt.
 
 Inspired by hermes's tools/skill_manager_tool.py. Trimmed: only the
 actions we actually need (create/edit/patch/delete/view/list).
+
+Self-authored skills run through the Skills Guard scanner before being
+written to disk so the agent can't (accidentally or via injection)
+persist a skill that exfiltrates env vars / runs ``rm -rf /`` / ships
+hidden bidi instructions. The scanner uses the ``agent-created`` trust
+tier — caution-tier findings emit a warning but pass; dangerous-tier
+findings refuse the write so the agent can retry without the offending
+content.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
 import frontmatter
 
 from opencomputer.agent.config import default_config
+from opencomputer.skills_guard import (
+    format_scan_report,
+    scan_file,
+    should_allow_install,
+)
+from opencomputer.skills_guard.scanner import ScanResult, _build_summary, _determine_verdict
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 _VALID_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+logger = logging.getLogger("opencomputer.tools.skill_manage")
+
+
+def _scan_skill_content(skill_id: str, content: str) -> ScanResult:
+    """Scan in-memory SKILL.md content as if it lived on disk.
+
+    Writes to a tmp file under the system tempdir, scans it, and returns
+    the result. Done this way so the scanner stays single-source-of-truth
+    (it operates on Path objects, not strings); the alternative would be
+    a parallel "scan_text" entry point that could drift.
+    """
+    import tempfile
+
+    findings = []
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td) / "SKILL.md"
+        tmp.write_text(content, encoding="utf-8")
+        findings = scan_file(tmp, rel_path="SKILL.md")
+
+    verdict = _determine_verdict(findings)
+    return ScanResult(
+        skill_name=skill_id,
+        source="agent-created",
+        trust_level="agent-created",
+        verdict=verdict,
+        findings=findings,
+        summary=_build_summary(skill_id, verdict, findings),
+    )
+
+
+def _guard_or_error(call_id: str, skill_id: str, content: str) -> ToolResult | None:
+    """Return a ``ToolResult`` describing the block, or ``None`` to allow.
+
+    Caution-tier results are allowed but logged so we can audit how often
+    the agent's drafts trip lower-severity patterns.
+    """
+    result = _scan_skill_content(skill_id, content)
+    decision, reason = should_allow_install(result)
+
+    if decision is True:
+        if result.findings:
+            logger.warning(
+                "skill_manage: %s passed with caution-level findings: %s",
+                skill_id, result.summary,
+            )
+        return None
+
+    # decision is False or None — both refuse the write. Return the full
+    # report so the agent can see exactly which lines tripped which
+    # patterns and retry with safer content.
+    msg_lines = [
+        f"Error: skill '{skill_id}' refused by Skills Guard.",
+        f"Reason: {reason}",
+        "",
+        format_scan_report(result),
+        "",
+        "Retry with the flagged content removed or paraphrased.",
+    ]
+    return ToolResult(
+        tool_call_id=call_id,
+        content="\n".join(msg_lines),
+        is_error=True,
+    )
 
 
 def _skills_root() -> Path:
@@ -184,6 +262,8 @@ class SkillManageTool(BaseTool):
                 content=f"Error: skill '{name}' already exists — use action='edit' or 'patch'",
                 is_error=True,
             )
+        if blocked := _guard_or_error(call_id, name, content):
+            return blocked
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
         return ToolResult(
@@ -203,6 +283,8 @@ class SkillManageTool(BaseTool):
                 content=f"Error: skill '{name}' not found — use action='create' to add it",
                 is_error=True,
             )
+        if blocked := _guard_or_error(call_id, name, content):
+            return blocked
         skill_md.write_text(content, encoding="utf-8")
         return ToolResult(
             tool_call_id=call_id, content=f"Updated skill '{name}'"
@@ -241,6 +323,12 @@ class SkillManageTool(BaseTool):
                 is_error=True,
             )
         new_text = text.replace(find, replace)
+        # Patch is the sneakiest write path — the find/replace pair could
+        # introduce a dangerous pattern that the agent then forgets it
+        # added. Re-scan after substitution so the guard sees the final
+        # disk state, not the diff.
+        if blocked := _guard_or_error(call_id, name, new_text):
+            return blocked
         skill_md.write_text(new_text, encoding="utf-8")
         return ToolResult(
             tool_call_id=call_id, content=f"Patched skill '{name}' (1 replacement)"
