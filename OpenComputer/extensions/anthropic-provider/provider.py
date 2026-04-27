@@ -8,8 +8,12 @@ plugin system, but for Phase 1 it lives in-tree so we can ship quickly.
 
 from __future__ import annotations
 
+import base64
+import logging
+import mimetypes
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any, Literal
 
 import httpx
@@ -58,6 +62,75 @@ def _record_429(exc: AnthropicRateLimitError) -> None:
         except Exception:
             headers = None
     record_rate_limit(_RATE_GUARD_PROVIDER, headers=headers)
+
+
+_log = logging.getLogger("opencomputer.providers.anthropic")
+
+
+_SUPPORTED_IMAGE_MEDIA_TYPES: tuple[str, ...] = (
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+)
+
+
+def _build_anthropic_multimodal_content(
+    *, text: str, image_paths: list[str]
+) -> list[dict[str, Any]]:
+    """Build Anthropic content array combining text + base64-encoded images.
+
+    Reads each path in ``image_paths``, base64-encodes the bytes, infers
+    the media type via ``mimetypes``, and emits Anthropic's
+    ``{"type": "image", "source": {"type": "base64", "media_type": ..., "data": ...}}``
+    blocks. Skips any path that fails to read, has an unsupported media type,
+    or exceeds Anthropic's 5 MB per-image cap — logged at WARNING; never
+    raises so a bad attachment doesn't kill the turn.
+
+    Order: images first, then text — matches what Claude Desktop sends and
+    what humans expect ("here are images, here's my question about them").
+    """
+    blocks: list[dict[str, Any]] = []
+    for path_str in image_paths:
+        path = Path(path_str)
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            _log.warning("image attachment unreadable: %s (%s)", path, exc)
+            continue
+        if len(data) > 5 * 1024 * 1024:
+            _log.warning(
+                "image attachment over 5 MB cap; skipping: %s (%d bytes)",
+                path,
+                len(data),
+            )
+            continue
+        media_type, _ = mimetypes.guess_type(str(path))
+        if media_type not in _SUPPORTED_IMAGE_MEDIA_TYPES:
+            _log.warning(
+                "image attachment has unsupported media type %r; skipping: %s",
+                media_type,
+                path,
+            )
+            continue
+        blocks.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": base64.b64encode(data).decode("ascii"),
+                },
+            }
+        )
+    if text:
+        blocks.append({"type": "text", "text": text})
+    if not blocks:
+        # Edge case: every attachment was skipped AND text is empty. Send
+        # a single empty text block so Anthropic's API doesn't reject the
+        # request for empty content.
+        blocks.append({"type": "text", "text": text or ""})
+    return blocks
 
 
 class AnthropicProviderConfig(BaseModel):
@@ -181,6 +254,7 @@ class AnthropicProvider(BaseProvider):
     # ─── message conversion ─────────────────────────────────────────
 
     def _to_anthropic_messages(self, messages: list[Message]) -> list[dict[str, Any]]:
+
         """Convert our canonical Message list to Anthropic's message format."""
         out: list[dict[str, Any]] = []
         for m in messages:
@@ -215,7 +289,21 @@ class AnthropicProvider(BaseProvider):
                     }
                 )
             else:
-                out.append({"role": m.role, "content": m.content})
+                # User / assistant text message. If the message carries
+                # image attachments, build a multimodal content array
+                # with text + base64-encoded images so the model can
+                # actually see them.
+                if m.attachments:
+                    out.append(
+                        {
+                            "role": m.role,
+                            "content": _build_anthropic_multimodal_content(
+                                text=m.content, image_paths=m.attachments
+                            ),
+                        }
+                    )
+                else:
+                    out.append({"role": m.role, "content": m.content})
         return out
 
     def _apply_cache_control(

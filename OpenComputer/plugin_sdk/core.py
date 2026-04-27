@@ -46,6 +46,17 @@ class Message:
     reasoning: str | None = None  # extended thinking, if supported
     reasoning_details: Any = None  # list[dict[str, Any]] | None
     codex_reasoning_items: Any = None  # list[dict[str, Any]] | None
+    attachments: list[str] = field(default_factory=list)
+    """Absolute filesystem paths to image attachments associated with this
+    message. Forward-compatible field added 2026-04-27 for TUI image-paste
+    support. Empty list (the default) means "text-only message" — every
+    pre-existing call site keeps working without modification.
+
+    Providers that support multimodal input (Anthropic, OpenAI vision)
+    convert these paths into provider-specific image content blocks at
+    request time. Providers that don't simply ignore them.
+
+    SessionDB serialises this as JSON alongside the other list fields."""
 
 
 @dataclass(frozen=True, slots=True)
