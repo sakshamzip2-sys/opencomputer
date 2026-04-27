@@ -8,20 +8,29 @@ wants to reference a discussion that happened in OC chat (Telegram /
 CLI / cron output), Claude Code can call ``sessions_list`` /
 ``session_get`` / ``messages_read`` to surface it.
 
-Five tools exposed (G.6 / Tier 2.2 minimum slice):
+Read-only tools currently exposed (Tier-A item 14 expanded the surface
+from 5 → 7):
 
-- ``sessions_list(limit=20)`` — list recent sessions with id/platform/title.
+- ``sessions_list(limit=20)`` — list recent sessions.
 - ``session_get(session_id)`` — get one session's metadata.
 - ``messages_read(session_id, limit=100)`` — read messages from a session.
 - ``recall_search(query, limit=20)`` — FTS5 search across session history.
 - ``consent_history(capability=None, limit=50)`` — F1 audit-log entries.
+- ``channels_list()`` — distinct platforms with active sessions  (NEW)
+- ``events_poll(since_message_id=0, limit=50)`` — incremental poll for
+  new messages across all sessions (NEW)
 
-Deviation from Hermes ``mcp_serve.py`` (10 tools): OC ships read-only first
-because that's the bridges-OC-to-Claude-Code use case; the bidirectional
-slice (``messages_send`` / ``events_poll`` / ``events_wait`` /
-``permissions_respond`` / ``attachments_fetch`` / ``channels_list``) is
-deferred to Phase 12m / a G.6.x follow-up so we don't ship a
-write-capable MCP surface before F1 consent has been live for a while.
+Honest deferral — three Hermes write tools are NOT yet ported:
+
+- ``messages_send`` — requires IPC with the gateway daemon (which holds
+  the live channel adapter connections to Telegram / Discord / etc.).
+  Implementing properly needs a SQLite ``pending_outgoing`` queue that
+  the gateway consumes; in-progress design.
+- ``permissions_respond`` — same IPC requirement against the F1
+  pending-consent queue.
+- ``events_wait`` — long-poll. The current MCP wire protocol returns one
+  response per call, so true server-push isn't supported until the MCP
+  spec evolves; clients can still ``events_poll`` on a timer.
 
 Pattern: high-level ``mcp.server.fastmcp.FastMCP`` decorators (clean +
 type-checked) over ``mcp.server.stdio.stdio_server()`` transport
@@ -133,6 +142,112 @@ def build_server() -> FastMCP:
         bounded = max(1, min(limit, 200))
         db = SessionDB(_home() / "sessions.db")
         return db.search(query, limit=bounded)
+
+    @server.tool()
+    def channels_list() -> list[dict[str, Any]]:
+        """List distinct platforms with at least one OpenComputer session.
+
+        Useful for an external MCP client to discover where OC is reachable —
+        e.g. before a future ``messages_send`` it would consult this to
+        learn the available platform values.
+
+        Returns:
+            One dict per platform with keys ``platform`` (e.g. "telegram"),
+            ``session_count`` (how many distinct sessions exist on that
+            platform), ``last_seen`` (ISO timestamp of the most recent
+            session's start). Sorted by ``session_count`` descending so
+            the user's most-active platforms surface first.
+        """
+        db_path = _home() / "sessions.db"
+        if not db_path.exists():
+            return []
+        # Direct SQL — SessionDB doesn't expose a "platforms" helper and
+        # adding one for one MCP tool isn't worth it.
+        import datetime as _dt
+
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT platform, COUNT(*) as session_count, "
+                    "MAX(started_at) as last_seen "
+                    "FROM sessions WHERE platform IS NOT NULL "
+                    "GROUP BY platform "
+                    "ORDER BY session_count DESC"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            ts = r["last_seen"]
+            iso = (
+                _dt.datetime.fromtimestamp(ts, tz=_dt.UTC).isoformat()
+                if isinstance(ts, (int, float))
+                else None
+            )
+            out.append(
+                {
+                    "platform": r["platform"],
+                    "session_count": r["session_count"],
+                    "last_seen": iso,
+                }
+            )
+        return out
+
+    @server.tool()
+    def events_poll(
+        since_message_id: int = 0, limit: int = 50
+    ) -> dict[str, Any]:
+        """Incremental poll for messages that arrived after a cursor.
+
+        External MCP clients (Claude Code, Cursor) call this on a timer
+        to pick up newly-received Telegram/Discord messages without
+        having to enumerate every session. Returns a single batch plus
+        the next cursor; clients should re-poll with ``next_cursor`` to
+        continue the stream.
+
+        Args:
+            since_message_id: Cursor — return only messages whose row id
+                is strictly greater than this. Use ``0`` on first call;
+                use the returned ``next_cursor`` thereafter.
+            limit: Max messages to return per call (default 50, max 500).
+
+        Returns:
+            Dict with ``messages`` (list of newest-N rows from the
+            messages table joined with their session's platform / chat
+            id) and ``next_cursor`` (the highest row id returned, or
+            ``since_message_id`` if no new rows). Re-poll with that
+            cursor to get the next slice.
+        """
+        bounded = max(1, min(limit, 500))
+        db_path = _home() / "sessions.db"
+        if not db_path.exists():
+            return {"messages": [], "next_cursor": since_message_id}
+
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            try:
+                # Join messages → sessions so the caller learns the
+                # platform without a follow-up ``session_get`` per row.
+                # Chat id is encoded into ``session_id`` by the gateway —
+                # callers that need a structured (platform, chat_id)
+                # tuple should call ``session_get`` for resolution.
+                rows = conn.execute(
+                    "SELECT m.id, m.session_id, m.role, m.content, "
+                    "m.timestamp, s.platform "
+                    "FROM messages m "
+                    "JOIN sessions s ON m.session_id = s.id "
+                    "WHERE m.id > ? "
+                    "ORDER BY m.id ASC LIMIT ?",
+                    (since_message_id, bounded),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # Pre-migration DB or missing column; return empty.
+                return {"messages": [], "next_cursor": since_message_id}
+
+        messages = [dict(r) for r in rows]
+        next_cursor = messages[-1]["id"] if messages else since_message_id
+        return {"messages": messages, "next_cursor": next_cursor}
 
     @server.tool()
     def consent_history(capability: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
