@@ -1,0 +1,17 @@
+{
+  "id": "skill-evolution",
+  "name": "skill-evolution",
+  "description": "Auto skill evolution loop. Watches successful sessions, detects reusable patterns, generates SKILL.md candidates, and stages them under <profile_home>/skills/_proposed/ for user review.",
+  "version": "0.1.0",
+  "author": "OpenComputer",
+  "license": "MIT",
+  "kind": "mixed",
+  "entry": "plugin",
+  "enabled_by_default": false,
+  "tool_names": [],
+  "capabilities": [
+    "skill_evolution.observe",
+    "skill_evolution.propose",
+    "skill_evolution.auto_publish"
+  ]
+}
