@@ -17,10 +17,9 @@ Modules
   drop-in sanitizer for tools that fetch external data; quarantines
   + publishes a :class:`HookSignalEvent` to the F2 bus on detection.
 
-Future F6 (OpenCLI scraper) and F7 (OI bridge) plugins will pipe
-their fetched payloads through ``sanitize_external_content`` before
-returning them to the LLM. Phase 3.G ships only the defense
-primitive; the wiring lands when those plugins integrate.
+Plugins that fetch external content (e.g. the coding-harness OI bridge,
+the WebFetch tool) pipe their payloads through
+``sanitize_external_content`` before returning them to the LLM.
 """
 
 from __future__ import annotations
