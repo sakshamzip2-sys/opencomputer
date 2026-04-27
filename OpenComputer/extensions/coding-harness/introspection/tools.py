@@ -28,6 +28,7 @@ import time
 from typing import Any, ClassVar
 
 import psutil
+import pyperclip
 
 from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
@@ -142,7 +143,17 @@ class ReadClipboardOnceTool(BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="read_clipboard_once",
-            description="TODO: filled in by T2-T6",
+            description=(
+                "Read the current system clipboard contents — single read only, never "
+                "streamed or polled. Use when the user references 'this' / 'what I just "
+                "copied' and you need the actual text. CAUTION: clipboards frequently "
+                "contain sensitive data (passwords, API keys, addresses); treat the "
+                "result as private and do not log, echo to third parties, or include in "
+                "unrelated tool calls. Cross-platform via pyperclip — Linux requires "
+                "xclip or xsel on PATH (handled at install / verified by `opencomputer "
+                "doctor`). Under F1 ConsentGate (IMPLICIT tier). Single-shot semantics "
+                "by design — repeated reads require explicit re-invocation."
+            ),
             parameters={
                 "type": "object",
                 "properties": {},
@@ -151,7 +162,11 @@ class ReadClipboardOnceTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        raise NotImplementedError("Lands in T2-T6")
+        try:
+            text = pyperclip.paste()
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
+        return ToolResult(tool_call_id=call.id, content=text)
 
 
 class ScreenshotTool(BaseTool):
