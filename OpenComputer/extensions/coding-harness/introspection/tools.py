@@ -12,19 +12,15 @@ Python libraries directly:
 
 Removing the OI subprocess eliminates the AGPL dependency chain and gives us
 true cross-platform support (Windows included where the underlying libs allow).
-Capability claims live under the ``introspection.*`` namespace from the start —
-the legacy ``oi_bridge.*`` namespace will be retired alongside the old module
-once T7+ ships.
-
-Class shape lands in T1 (this file): consent_tier, parallel_safe,
-capability_claims, schema with original tool names, ``NotImplementedError``
-``execute`` bodies. T2-T6 fill those in one tool at a time.
+Capability claims live under the ``introspection.*`` namespace from the start.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -40,9 +36,11 @@ from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
-# Prime psutil's CPU-percent sampler so the first call from inside a tool
-# returns meaningful values. (psutil.cpu_percent is delta-based; the very
-# first invocation always returns 0.0.)
+_log = logging.getLogger(__name__)
+
+# Prime psutil's system-wide CPU-percent sampler. Per-PID samplers still need
+# their own priming pass — see ``ListAppUsageTool.execute`` which does a
+# two-pass walk to make ``cpu_percent`` values meaningful on the first call.
 psutil.cpu_percent(interval=None)
 
 
@@ -90,11 +88,19 @@ def _walk_recent_files(base: Path, cutoff: float, limit: int) -> list[tuple[floa
     Skips directories named in ``_SKIP_DIR_NAMES`` and any starting with '.'.
     Returns at most ``limit * 2`` entries (caller sorts + truncates to ``limit``).
     Halts early at ``_WALK_FILE_BUDGET`` files inspected.
+
+    Permission errors during directory traversal are logged at DEBUG level
+    rather than swallowed silently — this matters on Windows where locked
+    subtrees (System Volume Information, etc.) would otherwise vanish from
+    the walk without any signal that results may be incomplete.
     """
+    def _onerror(exc: OSError) -> None:
+        _log.debug("list_recent_files: skipped subtree due to %s", exc)
+
     out: list[tuple[float, Path]] = []
     cap = max(limit * 2, limit + 10)
     inspected = 0
-    for root, dirs, files in os.walk(base):  # followlinks=False (default) — safe
+    for root, dirs, files in os.walk(base, onerror=_onerror):  # followlinks=False (default) — safe
         # Prune in-place so os.walk doesn't recurse into them
         dirs[:] = [d for d in dirs if d not in _SKIP_DIR_NAMES and not d.startswith(".")]
         for fname in files:
@@ -171,6 +177,16 @@ class ListAppUsageTool(BaseTool):
 
         rows: list[dict[str, Any]] = []
         try:
+            # psutil's cpu_percent is a delta-since-last-call sample tracked
+            # per-PID. The first call for any process returns 0.0 because
+            # there's no prior sample to compare against. Walking
+            # process_iter once primes those per-PID samplers; a brief
+            # asyncio sleep lets the kernel accumulate CPU-time deltas; the
+            # second walk then reads meaningful values. ~100 ms latency cost.
+            for _ in psutil.process_iter(["cpu_percent"]):
+                pass
+            await asyncio.sleep(0.1)
+
             for p in psutil.process_iter(["name", "cpu_percent", "create_time"]):
                 info = p.info
                 create_time = info.get("create_time") or 0.0
