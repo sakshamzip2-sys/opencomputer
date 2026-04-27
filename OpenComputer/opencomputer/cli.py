@@ -973,6 +973,74 @@ def _run_chat_session(
         except Exception:
             return []
 
+    def _on_rename(title: str) -> bool:
+        """``/rename <title>`` → persist via SessionDB.set_session_title.
+
+        Returns True on success. The auto-titler in
+        ``title_generator.maybe_auto_title`` already skips sessions that
+        have a title, so manual renames stick.
+        """
+        try:
+            from opencomputer.agent.state import SessionDB
+
+            db = SessionDB(profile_home / "sessions.db")
+            db.set_session_title(session_id, title)
+            return True
+        except Exception as e:  # noqa: BLE001
+            _log.warning("rename failed: %s", e)
+            return False
+
+    def _on_resume(target: str) -> bool:
+        """``/resume [last|<id-prefix>|pick]`` → swap active session.
+
+        Mutates ``nonlocal session_id``. Returns False on no-match,
+        ambiguous prefix, or DB error. Audit-refined behaviors:
+        - Short-circuits when resolved == current session_id.
+        - Lists matches when an id-prefix is ambiguous.
+        - Post-resume banner shows the session title.
+        """
+        nonlocal session_id
+        try:
+            from opencomputer.agent.state import SessionDB
+
+            db = SessionDB(profile_home / "sessions.db")
+            if target in ("pick", "last"):
+                resolved = _resolve_resume_target(target)
+            else:
+                rows = db.list_sessions(limit=200)
+                matches = [
+                    r["id"] for r in rows if r["id"].startswith(target)
+                ]
+                if len(matches) > 1:
+                    console.print(
+                        f"[yellow]ambiguous prefix[/yellow] {target!r} "
+                        f"matches {len(matches)} sessions:"
+                    )
+                    for mid in matches[:10]:
+                        title = db.get_session_title(mid) or "(untitled)"
+                        console.print(f"  [dim]{mid[:8]}[/dim]  {title}")
+                    return False
+                resolved = matches[0] if matches else None
+            if not resolved:
+                return False
+            if resolved == session_id:
+                console.print(
+                    "[dim]already on this session — nothing to resume.[/dim]"
+                )
+                return True
+            session_id = resolved
+            _token_tally["in"] = 0
+            _token_tally["out"] = 0
+            title = db.get_session_title(session_id) or "(untitled)"
+            console.print(
+                f"[bold cyan]resumed →[/bold cyan] {session_id[:8]} "
+                f"[dim]({title})[/dim]"
+            )
+            return True
+        except Exception as e:  # noqa: BLE001
+            _log.warning("resume failed: %s", e)
+            return False
+
     if not sys.stdin.isatty():
         # Non-TTY (piped stdin) — keep the old line-by-line behavior.
         for line in sys.stdin:
@@ -1052,6 +1120,8 @@ def _run_chat_session(
                 on_clear=_on_clear,
                 get_cost_summary=_get_cost_summary,
                 get_session_list=_get_session_list,
+                on_rename=_on_rename,
+                on_resume=_on_resume,
             )
             result = dispatch_slash(user_input, slash_ctx)
             if result.exit_loop:
