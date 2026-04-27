@@ -42,24 +42,14 @@ jobs:
         run: pytest tests/ -v --tb=short
 
   # Cross-platform verification of the introspection + ambient modules'
-  # cross-platform claims.
-  #
-  # NOTE: macOS and Windows runners are temporarily disabled because the
-  # repo is currently PRIVATE and those runners count against the paid
-  # tier (macOS=10x, Windows=2x the Linux rate). When the repo goes
-  # public OR billing is configured, restore this list to:
-  #   os: [ubuntu-latest, macos-latest, windows-latest]
-  # The platform-specific code paths in the introspection + ambient
-  # modules (osascript, pywin32, mss, etc.) still exist and have unit
-  # tests covering them via mocked OS calls — they're just not exercised
-  # on actual Mac/Windows runners until CI budget allows.
+  # cross-platform claims. Public repo = unlimited free CI on all 3 OSes.
   test-cross-platform:
     name: introspection cross-platform (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.13"]
 
     defaults:
