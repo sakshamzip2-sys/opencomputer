@@ -23,11 +23,20 @@ capability_claims, schema with original tool names, ``NotImplementedError``
 
 from __future__ import annotations
 
+import json
+import time
 from typing import Any, ClassVar
+
+import psutil
 
 from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
+
+# Prime psutil's CPU-percent sampler so the first call from inside a tool
+# returns meaningful values. (psutil.cpu_percent is delta-based; the very
+# first invocation always returns 0.0.)
+psutil.cpu_percent(interval=None)
 
 
 class ListAppUsageTool(BaseTool):
@@ -58,7 +67,15 @@ class ListAppUsageTool(BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="list_app_usage",
-            description="TODO: filled in by T2-T6",
+            description=(
+                "List recently-active applications on the user's machine over the last "
+                "N hours (default 8). Returns a JSON array of {name, cpu_percent, started} "
+                "sorted by CPU usage (highest first), capped at 30 entries. Use this when "
+                "answering 'what was I doing?' or when tailoring suggestions to current "
+                "workflows. CAUTION: process list is personal data; do not echo it to "
+                "third parties without consent. Cross-platform via psutil (macOS, Linux, "
+                "Windows). Read-only — under F1 ConsentGate (IMPLICIT tier)."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -73,7 +90,28 @@ class ListAppUsageTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        raise NotImplementedError("Lands in T2-T6")
+        hours = int(call.arguments.get("hours", 8))
+        cutoff = time.time() - hours * 3600
+
+        rows: list[dict[str, Any]] = []
+        try:
+            for p in psutil.process_iter(["name", "cpu_percent", "create_time"]):
+                info = p.info
+                create_time = info.get("create_time") or 0.0
+                if create_time < cutoff:
+                    continue
+                rows.append(
+                    {
+                        "name": info.get("name") or "<unknown>",
+                        "cpu_percent": float(info.get("cpu_percent") or 0.0),
+                        "started": create_time,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
+
+        rows.sort(key=lambda r: r["cpu_percent"], reverse=True)
+        return ToolResult(tool_call_id=call.id, content=json.dumps(rows[:30]))
 
 
 class ReadClipboardOnceTool(BaseTool):
