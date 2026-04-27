@@ -8,6 +8,21 @@ from extensions.voice_mode.audio_capture import AudioBuffer
 from extensions.voice_mode.vad import VadError, VadResult, detect_speech
 
 
+def _webrtcvad_importable() -> bool:
+    """Check if webrtcvad's C extension actually loads (some Python versions fail at runtime)."""
+    try:
+        import webrtcvad  # noqa: F401
+        return True
+    except (ImportError, OSError):
+        return False
+
+
+_skip_no_webrtcvad = pytest.mark.skipif(
+    not _webrtcvad_importable(),
+    reason="webrtcvad's C extension didn't load — integration tests skipped (voice-mode is opt-in)",
+)
+
+
 def _silence_buffer(duration_seconds=0.6, sample_rate=16000):
     """Pure silence (zeros)."""
     n_samples = int(sample_rate * duration_seconds)
@@ -36,6 +51,7 @@ def _noise_buffer(duration_seconds=0.6, sample_rate=16000):
     )
 
 
+@_skip_no_webrtcvad
 def test_silence_returns_no_speech():
     """Pure silence should NOT be classified as speech."""
     buf = _silence_buffer(duration_seconds=0.6)

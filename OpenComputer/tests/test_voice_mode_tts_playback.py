@@ -13,6 +13,22 @@ from extensions.voice_mode.tts_playback import (
 )
 
 
+def _audio_libs_importable() -> bool:
+    """Check sounddevice + soundfile load (PortAudio missing on some CI hosts)."""
+    try:
+        import sounddevice  # noqa: F401
+        import soundfile  # noqa: F401
+        return True
+    except (ImportError, OSError):
+        return False
+
+
+_skip_no_audio_libs = pytest.mark.skipif(
+    not _audio_libs_importable(),
+    reason="sounddevice/soundfile not loadable — integration tests skipped (voice-mode is opt-in)",
+)
+
+
 @pytest.mark.asyncio
 async def test_synthesize_and_play_happy_path(tmp_path):
     """Synthesize → play → return result with duration."""
@@ -73,6 +89,7 @@ async def test_play_audio_file_handles_missing_soundfile():
             await play_audio_file(fake_path)
 
 
+@_skip_no_audio_libs
 @pytest.mark.asyncio
 async def test_play_audio_file_missing_file_raises():
     bogus = Path("/tmp/definitely-does-not-exist.opus")
