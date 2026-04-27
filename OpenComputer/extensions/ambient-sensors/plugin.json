@@ -1,0 +1,13 @@
+{
+  "id": "ambient-sensors",
+  "name": "ambient-sensors",
+  "description": "Cross-platform ambient awareness sensors. Phase 1: foreground-app observation.",
+  "version": "0.1.0",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "mixed",
+  "entry": "plugin",
+  "enabled_by_default": false,
+  "tool_names": [],
+  "capabilities": ["ambient.foreground.observe"]
+}

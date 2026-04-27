@@ -4,6 +4,92 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Ambient foreground sensor — Phase 1, opt-in cross-platform observation)
+
+OpenComputer now ships a cross-platform, opt-in ambient sensor that
+publishes hashed `ForegroundAppEvent`s to the F2 typed event bus. The
+persona classifier and motif extractor can use these events to build a
+richer picture of how a user spends their time across apps without ever
+seeing raw window titles.
+
+The sensor is **default OFF** — no behavior change for any user who
+hasn't explicitly opted in via `opencomputer ambient on`. Ships
+cross-platform first-class: macOS (osascript), Linux X11 (xdotool /
+wmctrl), Windows (pywin32). Linux Wayland is unsupported in v1 — the
+daemon reports cleanly via doctor rather than emitting bogus data.
+
+#### What shipped
+
+- `extensions/ambient-sensors/` — new plugin (~700 LOC) covering the
+  cross-platform foreground detector, sensor daemon (asyncio poll loop
+  with dedup + 2-second min-interval guard + sensitive-app filter +
+  heartbeat), pause-state helpers, sensitive-app regex deny-list with
+  user-extensible override, plugin manifest, and a privacy-contract
+  README.
+- `plugin_sdk/ingestion.py` — new `ForegroundAppEvent` and
+  `AmbientSensorPauseEvent` SDK types (frozen, slots, metadata-only —
+  no raw titles, no payloads, no user content).
+- `opencomputer/agent/consent/capability_taxonomy.py` —
+  `ambient.foreground.observe` registered at IMPLICIT tier.
+- `opencomputer/cli_ambient.py` — `opencomputer ambient {on, off, pause,
+  resume, status, daemon}`. Status output is aggregate-only (never names
+  specific apps — enforced by tests).
+- `opencomputer/doctor.py` — `_check_ambient_state` (warns if enabled
+  but heartbeat stale or missing) + `_check_ambient_foreground_capable`
+  (per-platform readiness preflight).
+- `opencomputer/gateway/server.py` — gateway boots the daemon iff
+  state.enabled is True; failure to start is logged but never blocks
+  gateway startup.
+
+#### Privacy contract (hard, baked into tests)
+
+The ambient sensor MUST NOT:
+- Send any data to a network destination
+  (`tests/test_ambient_no_cloud_egress.py` AST-scans the plugin source
+  for HTTP-client imports including `httpx`, `requests`, `urllib`,
+  `socket`, `anthropic`, `openai`, etc. Zero violations on first run.)
+- Capture screen pixels, OCR'd text, or audio.
+- Publish raw window titles — only SHA-256 hashes leave the sensor.
+- Auto-take user-visible actions.
+- Run when paused or disabled.
+- Train any model on collected data.
+
+When the sensitive-app filter matches (default deny-list covers
+password managers, banking, healthcare, private browsing, secure
+messaging — extensible via `<profile_home>/ambient/sensitive_apps.txt`),
+the published event has `app_name = "<filtered>"`,
+`window_title_hash = ""`, `is_sensitive = True`. Raw values never
+leave the sensor.
+
+#### Cross-platform CI verification
+
+The `test-cross-platform` CI matrix from PR #181 is extended to cover
+`tests/test_ambient_*.py` on ubuntu-latest + macos-latest +
+windows-latest, so the cross-platform claim is genuinely CI-verified.
+
+#### Tests
+
+10 new test files (~1,200 LOC of tests):
+
+- `test_ambient_foreground_event.py` — SDK type contract (frozen, defaults safe)
+- `test_ambient_foreground_detector.py` — platform forks, mocked OS calls
+- `test_ambient_sensitive_filter.py` — regex matching + user override + malformed-pattern resilience
+- `test_ambient_pause_state.py` — state file round-trip, missing/corrupt handling
+- `test_ambient_daemon_dedup.py` — 9 hard-contract tests (dedup, min-interval, sensitive filter, hashed titles, pause transitions, heartbeat, exception swallowing)
+- `test_ambient_cli.py` — Typer smoke tests + status-no-leak contract
+- `test_ambient_capability_claim.py` — F1 namespace + IMPLICIT tier contract
+- `test_ambient_doctor_checks.py` — both new doctor checks
+- `test_ambient_no_cloud_egress.py` — AST-scan deny-list guard
+
+#### Phasing
+
+This is Phase 1. Spec at
+`docs/superpowers/specs/2026-04-27-ambient-foreground-sensor-design.md`
+covers the broader phasing: file-activity (Phase 2, deferred), screen
+capture (Phase 3, may never ship), audio (Phase 4, may never ship),
+proactive nudge reactor (Phase 5, requires Phase 1+2 first). Each
+phase is its own opt-in PR; nothing auto-enables.
+
 ### Added (TUI Phase 1 — input layer foundation)
 
 Replaces `console.input()` with `prompt_toolkit.PromptSession` for the

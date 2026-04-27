@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from opencomputer.agent.loop import AgentLoop
 from opencomputer.gateway.dispatch import Dispatch
@@ -41,6 +42,9 @@ class Gateway:
         self._adapters: list[BaseChannelAdapter] = []
         self._drainer: OutgoingDrainer | None = None
         self._drainer_task: asyncio.Task[None] | None = None
+        # T8 — ambient foreground sensor daemon (opt-in). Started in ``start()``
+        # only when ``<profile_home>/ambient/state.json`` has ``enabled=True``.
+        self._ambient_daemon: Any | None = None
 
     def register_adapter(self, adapter: BaseChannelAdapter) -> None:
         """Register a channel adapter (usually from a loaded plugin)."""
@@ -70,6 +74,11 @@ class Gateway:
         # boot is still useful.
         await self._start_outgoing_drainer()
 
+        # T8 — ambient foreground sensor daemon. Only starts if the user
+        # opted in via ``oc ambient on``; failure to start is logged but
+        # never blocks the gateway.
+        await self._start_ambient_daemon()
+
     async def _start_outgoing_drainer(self) -> None:
         from opencomputer.agent.config import _home
 
@@ -84,8 +93,53 @@ class Gateway:
             name="gateway-outgoing-drainer",
         )
 
+    async def _start_ambient_daemon(self) -> None:
+        """Start the ambient foreground sensor daemon iff the user opted in.
+
+        The daemon lives at ``extensions/ambient-sensors/`` (hyphenated dir).
+        Python module names need underscores, so we reuse the synthetic
+        ``extensions.ambient_sensors`` alias helper from
+        :mod:`opencomputer.cli_ambient`. Any failure here is logged and
+        swallowed — the gateway must keep working even if the ambient
+        plugin is broken or absent.
+        """
+        try:
+            from opencomputer.agent.config import _home
+            from opencomputer.cli_ambient import _ensure_ambient_sensors_alias
+            from opencomputer.ingestion.bus import default_bus
+
+            _ensure_ambient_sensors_alias()
+            from extensions.ambient_sensors.daemon import (  # type: ignore[import-not-found]
+                ForegroundSensorDaemon,
+            )
+            from extensions.ambient_sensors.pause_state import (  # type: ignore[import-not-found]
+                load_state,
+            )
+
+            state = load_state(_home() / "ambient" / "state.json")
+            if not state.enabled:
+                logger.debug("ambient sensor opt-out (state.enabled=False) — skipping daemon")
+                return
+
+            self._ambient_daemon = ForegroundSensorDaemon(
+                bus=default_bus,
+                profile_home_factory=_home,
+            )
+            self._ambient_daemon.start()
+            logger.info("ambient sensor daemon started (state.enabled=True)")
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "failed to start ambient daemon — gateway continues without it"
+            )
+
     async def stop(self) -> None:
         logger.info("gateway: stopping")
+        if self._ambient_daemon is not None:
+            try:
+                await self._ambient_daemon.stop()
+            except Exception:  # noqa: BLE001
+                logger.exception("ambient daemon stop failed (ignored)")
+            self._ambient_daemon = None
         if self._drainer is not None:
             self._drainer.stop()
         if self._drainer_task is not None:

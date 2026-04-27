@@ -18,9 +18,11 @@ Checks:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -648,6 +650,133 @@ def _check_introspection_deps() -> list[CheckResult]:
     return results
 
 
+def _check_ambient_state(profile_home: Path) -> CheckResult:
+    """Read ambient state.json; warn if enabled but heartbeat is stale or missing.
+
+    The ambient foreground sensor is opt-in (default off). When the user has
+    enabled it via ``opencomputer ambient on``, the daemon writes a heartbeat
+    file each tick. A missing or stale heartbeat means the daemon isn't
+    running or got stuck — surface that as a warning so the user knows their
+    opt-in isn't actually being honoured.
+    """
+    state_path = profile_home / "ambient" / "state.json"
+    if not state_path.exists():
+        return CheckResult(
+            ok=True,
+            level="info",
+            message="ambient sensor disabled (default — opt in with `opencomputer ambient on`)",
+        )
+
+    try:
+        state = json.loads(state_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        return CheckResult(
+            ok=False, level="warning", message=f"ambient state.json unreadable: {exc}"
+        )
+
+    if not state.get("enabled", False):
+        return CheckResult(ok=True, level="info", message="ambient sensor disabled")
+
+    hb_path = profile_home / "ambient" / "heartbeat"
+    if not hb_path.exists():
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                "ambient sensor enabled but heartbeat missing — "
+                "daemon not running (start gateway or run `opencomputer ambient daemon`)"
+            ),
+        )
+    try:
+        hb_age = time.time() - float(hb_path.read_text().strip())
+    except (OSError, ValueError):
+        return CheckResult(
+            ok=False, level="warning", message="ambient heartbeat file unreadable"
+        )
+
+    if hb_age > 60:
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=f"ambient sensor heartbeat stale ({hb_age:.0f}s old) — daemon may be stuck",
+        )
+    return CheckResult(
+        ok=True,
+        level="info",
+        message=f"ambient sensor running (heartbeat {hb_age:.0f}s ago)",
+    )
+
+
+def _check_ambient_foreground_capable() -> CheckResult:
+    """Verify the platform-specific foreground detector can actually run.
+
+    macOS uses ``osascript``; Linux X11 uses ``xdotool`` / ``wmctrl``; Windows
+    uses ``pywin32``. Linux Wayland is unsupported in v1 — warn so the user
+    knows the sensor will silently no-op there.
+    """
+    if sys.platform == "darwin":
+        if shutil.which("osascript"):
+            return CheckResult(
+                ok=True,
+                level="info",
+                message=(
+                    "ambient: osascript present (macOS) — ensure Accessibility "
+                    "permission is granted"
+                ),
+            )
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message="ambient: osascript missing — sensor cannot detect foreground on macOS",
+        )
+
+    if sys.platform.startswith("linux"):
+        if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
+            return CheckResult(
+                ok=False,
+                level="warning",
+                message=(
+                    "ambient: Wayland-only display server — foreground sensor "
+                    "unsupported in v1; runs on X11 sessions only"
+                ),
+            )
+        if shutil.which("xdotool") or shutil.which("wmctrl"):
+            return CheckResult(
+                ok=True,
+                level="info",
+                message="ambient: xdotool/wmctrl available (Linux X11)",
+            )
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                "ambient: install xdotool or wmctrl for Linux foreground "
+                "detection — `apt install xdotool`"
+            ),
+        )
+
+    if sys.platform == "win32":
+        try:
+            __import__("win32gui")
+            return CheckResult(
+                ok=True,
+                level="info",
+                message="ambient: pywin32 importable (Windows)",
+            )
+        except ImportError:
+            return CheckResult(
+                ok=False,
+                level="warning",
+                message="ambient: install pywin32 for Windows foreground detection",
+            )
+
+    return CheckResult(
+        ok=False,
+        level="warning",
+        message=f"ambient: platform {sys.platform} unsupported",
+    )
+
+
 def _level_to_status(
     result: CheckResult,
 ) -> Literal["pass", "fail", "warn", "skip"]:
@@ -720,6 +849,17 @@ def run_doctor(fix: bool = False) -> int:
         # rapidocr_onnxruntime" / "introspection: Linux".
         first = dep_result.message.split()[0] if dep_result.message else "dep"
         checks.append(_result_to_check(f"introspection: {first}", dep_result))
+
+    # T8 — ambient foreground sensor: state/heartbeat freshness + platform
+    # capability. Runs alongside the orphan-venv / introspection checks so
+    # they share the resolved profile_home.
+    if profile_home is not None:
+        checks.append(
+            _result_to_check("ambient state", _check_ambient_state(profile_home))
+        )
+    checks.append(
+        _result_to_check("ambient foreground", _check_ambient_foreground_capable())
+    )
 
     # Plugin-contributed checks + repairs (run last so plugins see a fully-
     # loaded registry, config, and DB-writable environment).

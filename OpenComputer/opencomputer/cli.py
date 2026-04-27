@@ -1605,6 +1605,11 @@ from opencomputer.cli_awareness import awareness_app  # noqa: E402
 
 app.add_typer(awareness_app, name="awareness")
 
+# Ambient foreground sensor — opt-in, hashed-app-id event publisher
+from opencomputer.cli_ambient import app as ambient_app  # noqa: E402
+
+app.add_typer(ambient_app, name="ambient")
+
 
 @config_app.command("show")
 def config_show() -> None:
