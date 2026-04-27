@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS messages (
     reasoning              TEXT,   -- extended thinking (free-form text)
     reasoning_details      TEXT,   -- II.6: JSON, OpenRouter/Nous structured array
     codex_reasoning_items  TEXT,   -- II.6: JSON, OpenAI o1/o3 reasoning items
+    attachments            TEXT,   -- 2026-04-27: JSON list[str], image attachments
     timestamp              REAL NOT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -245,7 +246,7 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
     large legacy DBs. Wrapped in try/except so fresh DBs that already
     have the columns from DDL get a silent no-op.
     """
-    for col_name in ("reasoning_details", "codex_reasoning_items"):
+    for col_name in ("reasoning_details", "codex_reasoning_items", "attachments"):
         try:
             conn.execute(
                 f'ALTER TABLE messages ADD COLUMN "{col_name}" TEXT'
@@ -325,6 +326,7 @@ def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
 _EXPECTED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("messages", "reasoning_details", "TEXT"),
     ("messages", "codex_reasoning_items", "TEXT"),
+    ("messages", "attachments", "TEXT"),
     ("episodic_events", "dreamed_into", "INTEGER"),
 )
 
@@ -533,6 +535,11 @@ class SessionDB:
             if msg.codex_reasoning_items is not None
             else None
         )
+        # 2026-04-27: image attachments serialise as JSON list[str].
+        # Empty list → NULL so non-image messages don't bloat the column.
+        attachments_json = (
+            json.dumps(msg.attachments) if msg.attachments else None
+        )
         return (
             session_id,
             msg.role,
@@ -543,6 +550,7 @@ class SessionDB:
             msg.reasoning,
             reasoning_details_json,
             codex_items_json,
+            attachments_json,
             time.time(),
         )
 
@@ -552,8 +560,9 @@ class SessionDB:
     _INSERT_MESSAGE_SQL = (
         "INSERT INTO messages "
         "(session_id, role, content, tool_call_id, tool_calls, name, "
-        "reasoning, reasoning_details, codex_reasoning_items, timestamp) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "reasoning, reasoning_details, codex_reasoning_items, attachments, "
+        "timestamp) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
 
     def append_message(self, session_id: str, msg: Message) -> int:
@@ -596,7 +605,8 @@ class SessionDB:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, name, "
-                "reasoning, reasoning_details, codex_reasoning_items "
+                "reasoning, reasoning_details, codex_reasoning_items, "
+                "attachments "
                 "FROM messages WHERE session_id = ? ORDER BY id",
                 (session_id,),
             ).fetchall()
@@ -623,6 +633,22 @@ class SessionDB:
                     codex_items = json.loads(r["codex_reasoning_items"])
                 except (json.JSONDecodeError, TypeError):
                     codex_items = None
+            # 2026-04-27: deserialise attachments (image paths). Same
+            # forgiving JSON shape as the reasoning fields. Pre-migration
+            # rows return NULL via dict.get(); legacy DBs upgraded by
+            # _self_heal_columns get an empty column.
+            attachments_list: list[str] = []
+            try:
+                raw_attach = r["attachments"]
+            except (IndexError, KeyError):
+                raw_attach = None
+            if raw_attach:
+                try:
+                    parsed = json.loads(raw_attach)
+                    if isinstance(parsed, list):
+                        attachments_list = [str(p) for p in parsed]
+                except (json.JSONDecodeError, TypeError):
+                    attachments_list = []
             out.append(
                 Message(
                     role=r["role"],
@@ -633,6 +659,7 @@ class SessionDB:
                     reasoning=r["reasoning"],
                     reasoning_details=reasoning_details,
                     codex_reasoning_items=codex_items,
+                    attachments=attachments_list,
                 )
             )
         return out

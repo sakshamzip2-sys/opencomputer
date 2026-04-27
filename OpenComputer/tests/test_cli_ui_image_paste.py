@@ -160,6 +160,92 @@ def test_anthropic_multimodal_helper_handles_oversized(tmp_path: Path):
     assert blocks == [{"type": "text", "text": "too big"}]
 
 
+def test_openai_multimodal_helper_text_only_when_no_images():
+    spec = importlib.util.spec_from_file_location(
+        "op_test", "extensions/openai-provider/provider.py"
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    blocks = mod._build_openai_multimodal_content(
+        text="just text", image_paths=[]
+    )
+    assert len(blocks) == 1
+    assert blocks[0] == {"type": "text", "text": "just text"}
+
+
+def test_openai_multimodal_helper_with_real_image(tmp_path: Path):
+    spec = importlib.util.spec_from_file_location(
+        "op_test2", "extensions/openai-provider/provider.py"
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    png = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+        "0000000d49444154789c6360000000000300010001fcdde40c0000000049454e44"
+        "ae426082"
+    )
+    img_path = tmp_path / "sample.png"
+    img_path.write_bytes(png)
+    blocks = mod._build_openai_multimodal_content(
+        text="describe this", image_paths=[str(img_path)]
+    )
+    assert len(blocks) == 2
+    # OpenAI puts text first, then images.
+    assert blocks[0] == {"type": "text", "text": "describe this"}
+    assert blocks[1]["type"] == "image_url"
+    assert blocks[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_openai_multimodal_helper_skips_oversized(tmp_path: Path):
+    spec = importlib.util.spec_from_file_location(
+        "op_test3", "extensions/openai-provider/provider.py"
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    big_path = tmp_path / "big.png"
+    big_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * (20 * 1024 * 1024 + 1))
+    blocks = mod._build_openai_multimodal_content(
+        text="too big", image_paths=[str(big_path)]
+    )
+    assert blocks == [{"type": "text", "text": "too big"}]
+
+
+def test_sessiondb_persists_attachments(tmp_path: Path):
+    """``Message.attachments`` round-trips through SessionDB."""
+    import uuid as _uuid
+
+    from opencomputer.agent.state import SessionDB
+
+    db = SessionDB(tmp_path / "test.db")
+    sid = str(_uuid.uuid4())
+    db.create_session(sid)
+    db.append_message(
+        sid, Message(role="user", content="see this", attachments=["/tmp/a.png", "/tmp/b.png"])
+    )
+    db.append_message(sid, Message(role="assistant", content="OK"))
+    msgs = db.get_messages(sid)
+    assert len(msgs) == 2
+    assert msgs[0].attachments == ["/tmp/a.png", "/tmp/b.png"]
+    assert msgs[1].attachments == []
+
+
+def test_sessiondb_handles_empty_attachments(tmp_path: Path):
+    """Empty ``attachments`` list collapses to NULL in the DB and round-trips as []."""
+    import uuid as _uuid
+
+    from opencomputer.agent.state import SessionDB
+
+    db = SessionDB(tmp_path / "test.db")
+    sid = str(_uuid.uuid4())
+    db.create_session(sid)
+    db.append_message(sid, Message(role="user", content="plain text"))
+    msgs = db.get_messages(sid)
+    assert msgs[0].attachments == []
+
+
 def test_clipboard_module_imports():
     """Clipboard module imports cleanly (uses only stdlib subprocess)."""
     from opencomputer.cli_ui import clipboard
