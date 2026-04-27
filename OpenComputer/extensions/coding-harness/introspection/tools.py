@@ -23,10 +23,13 @@ capability_claims, schema with original tool names, ``NotImplementedError``
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 from typing import Any, ClassVar
 
+import mss
+import mss.tools
 import psutil
 import pyperclip
 
@@ -38,6 +41,23 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 # returns meaningful values. (psutil.cpu_percent is delta-based; the very
 # first invocation always returns 0.0.)
 psutil.cpu_percent(interval=None)
+
+
+def _quadrant_bounds(monitor: dict, quadrant: str) -> dict:
+    """Compute the rect for one quadrant of `monitor`, preserving its origin."""
+    half_w = monitor["width"] // 2
+    half_h = monitor["height"] // 2
+    left = monitor["left"]
+    top = monitor["top"]
+    if quadrant == "top-left":
+        return {"left": left, "top": top, "width": half_w, "height": half_h}
+    if quadrant == "top-right":
+        return {"left": left + half_w, "top": top, "width": half_w, "height": half_h}
+    if quadrant == "bottom-left":
+        return {"left": left, "top": top + half_h, "width": half_w, "height": half_h}
+    if quadrant == "bottom-right":
+        return {"left": left + half_w, "top": top + half_h, "width": half_w, "height": half_h}
+    return monitor
 
 
 class ListAppUsageTool(BaseTool):
@@ -197,7 +217,18 @@ class ScreenshotTool(BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="screenshot",
-            description="TODO: filled in by T2-T6",
+            description=(
+                "Capture a screenshot of the primary monitor, returned as base64-encoded "
+                "PNG. Use when the user asks 'what's on my screen?' or when you need to "
+                "verify GUI state. Pass `quadrant` (top-left/top-right/bottom-left/bottom-"
+                "right) to capture just one corner — cheaper and less private. CAUTION: "
+                "screenshots may contain sensitive on-screen data (passwords, private "
+                "chats, financial info); do not include in error messages, third-party "
+                "calls, or persistent logs. For text content prefer extract_screen_text "
+                "(OCR) — smaller and more privacy-aware. Cross-platform via mss (macOS, "
+                "Linux, Windows). Linux requires an X or Wayland display server. Under F1 "
+                "ConsentGate (IMPLICIT tier)."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -215,7 +246,17 @@ class ScreenshotTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        raise NotImplementedError("Lands in T2-T6")
+        quadrant = call.arguments.get("quadrant")
+        try:
+            with mss.mss() as sct:
+                monitor = sct.monitors[1]  # primary monitor
+                if quadrant:
+                    monitor = _quadrant_bounds(monitor, quadrant)
+                shot = sct.grab(monitor)
+                png = mss.tools.to_png(shot.rgb, shot.size)
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
+        return ToolResult(tool_call_id=call.id, content=base64.b64encode(png).decode("ascii"))
 
 
 class ExtractScreenTextTool(BaseTool):
