@@ -176,3 +176,95 @@ async def test_default_directory_expands_tilde():
         # If it errors for unrelated reasons (e.g. perm error scanning home), that's fine,
         # but it must not be the "directory not found" path.
         assert "not found" not in result.content.lower()
+
+
+@pytest.mark.asyncio
+async def test_skips_library_when_at_home_root(tmp_path, monkeypatch):
+    """Library directly under the user's home IS pruned — that's the
+    macOS app-data dir we don't want to walk.
+
+    Note: monkeypatch's dotted-string syntax doesn't traverse the
+    synthetic ``extensions.coding_harness`` alias correctly, so we import
+    the module object and use the typed ``setattr(module, name, value)``
+    overload instead.
+    """
+    # Pretend tmp_path is the user's home.
+    from extensions.coding_harness.introspection import tools as tools_mod
+    monkeypatch.setattr(tools_mod, "_get_home", lambda: tmp_path.resolve())
+
+    library = tmp_path / "Library"
+    library.mkdir()
+    (library / "noise.txt").write_text("application-support junk")
+
+    real = tmp_path / "doc.txt"
+    real.write_text("real")
+
+    tool = ListRecentFilesTool()
+    result = await tool.execute(ToolCall(
+        id="t1", name="list_recent_files",
+        arguments={"hours": 1, "directory": str(tmp_path), "limit": 50},
+    ))
+
+    payload = json.loads(result.content)
+    paths = [r["path"] for r in payload]
+    assert all("/Library/" not in p for p in paths), (
+        "Expected ~/Library to be pruned at home root, got: " + str(paths)
+    )
+    assert any("doc.txt" in p for p in paths)
+
+
+@pytest.mark.asyncio
+async def test_does_not_skip_library_in_user_project(tmp_path, monkeypatch):
+    """A project named 'Library' under a NON-home directory must be walked.
+
+    Regression guard: the prior basename-only `_SKIP_DIR_NAMES` rule
+    silently pruned any folder named Library anywhere in the tree, which
+    broke users with `~/Projects/Library/code.py` etc.
+    """
+    # Pretend the home dir is somewhere ELSE — tmp_path is NOT home.
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    from extensions.coding_harness.introspection import tools as tools_mod
+    monkeypatch.setattr(tools_mod, "_get_home", lambda: fake_home.resolve())
+
+    user_project = tmp_path / "Library"  # the user's project, NOT under home
+    user_project.mkdir()
+    (user_project / "code.py").write_text("important user content")
+
+    tool = ListRecentFilesTool()
+    result = await tool.execute(ToolCall(
+        id="t1", name="list_recent_files",
+        arguments={"hours": 1, "directory": str(tmp_path), "limit": 50},
+    ))
+
+    payload = json.loads(result.content)
+    paths = [r["path"] for r in payload]
+    assert any("code.py" in p for p in paths), (
+        "Library at non-home root should be walked, but got: " + str(paths)
+    )
+
+
+@pytest.mark.asyncio
+async def test_skips_appdata_when_at_home_root(tmp_path, monkeypatch):
+    """AppData under home IS pruned — Windows local + roaming app data."""
+    from extensions.coding_harness.introspection import tools as tools_mod
+    monkeypatch.setattr(tools_mod, "_get_home", lambda: tmp_path.resolve())
+
+    appdata = tmp_path / "AppData"
+    appdata.mkdir()
+    (appdata / "noise.dat").write_text("windows app junk")
+
+    real = tmp_path / "doc.txt"
+    real.write_text("real")
+
+    tool = ListRecentFilesTool()
+    result = await tool.execute(ToolCall(
+        id="t1", name="list_recent_files",
+        arguments={"hours": 1, "directory": str(tmp_path), "limit": 50},
+    ))
+
+    payload = json.loads(result.content)
+    paths = [r["path"] for r in payload]
+    assert all("/AppData/" not in p for p in paths), (
+        "Expected AppData to be pruned at home root, got: " + str(paths)
+    )

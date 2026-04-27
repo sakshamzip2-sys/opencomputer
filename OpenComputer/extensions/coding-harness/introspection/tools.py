@@ -61,19 +61,30 @@ def _quadrant_bounds(monitor: dict, quadrant: str) -> dict:
     return monitor
 
 
-# Files modified inside any of these directories are noise — system caches,
-# package bundles, sandbox data — not what the user means by "files I edited".
+# Basenames to skip ANYWHERE in the tree — these are universally noise:
+# version-control metadata, build artifacts, package bundles, virtual envs.
+# A user is extremely unlikely to have legitimate content in a dir literally
+# named ``__pycache__``.
 _SKIP_DIR_NAMES: frozenset[str] = frozenset({
     # Generic dot/dunder
     ".git", ".hg", ".svn", "__pycache__",
     ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
     # Build / packaging
     "node_modules", "dist", "build", ".next", ".nuxt",
-    # macOS bloat
-    "Library",  # broad: skips ~/Library entirely; user-edited content lives elsewhere
-    "Mail", "Caches", "Containers",  # in case someone passes a non-home root
-    # Windows bloat
-    "AppData",
+    # macOS Library children — these only ever appear inside ``~/Library``
+    # in normal use; skipping them as basenames is safe noise reduction.
+    "Mail", "Caches", "Containers",
+})
+
+# Directories to skip ONLY when they appear directly inside the user's home.
+# Prevents the false-positive case where a user has a project literally named
+# ``Library`` (e.g. ``~/Projects/Library/``) — the previous basename-only rule
+# silently pruned it. Path-scoped checks make ``~/Library`` (the macOS app
+# data dir, real noise) and ``~/Projects/Library`` (real user code) behave
+# differently, which is what users expect.
+_HOME_SKIP_RELATIVE: frozenset[str] = frozenset({
+    "Library",  # macOS application support, mail, caches, containers
+    "AppData",  # Windows local + roaming app data
 })
 
 # Hard cap on files inspected per call. Walks halt early once exceeded;
@@ -82,10 +93,31 @@ _SKIP_DIR_NAMES: frozenset[str] = frozenset({
 _WALK_FILE_BUDGET: int = 50_000
 
 
+def _get_home() -> Path | None:
+    """Resolve the user's home directory or return ``None`` if unresolvable.
+
+    Indirected through this helper so tests can monkeypatch the home
+    location without having to reach into ``pathlib.Path.home`` (which
+    is a classmethod and affects every other test in the suite).
+
+    ``Path.home()`` raises ``RuntimeError`` when the HOME / USERPROFILE
+    env var is unset (rare; minimal CI containers). In that case fall
+    back to "no home-relative skip applied", which is safer than crashing.
+    """
+    try:
+        return Path.home().resolve()
+    except (RuntimeError, OSError):
+        return None
+
+
 def _walk_recent_files(base: Path, cutoff: float, limit: int) -> list[tuple[float, Path]]:
     """Return [(mtime, path), ...] for files under ``base`` modified after ``cutoff``.
 
     Skips directories named in ``_SKIP_DIR_NAMES`` and any starting with '.'.
+    Additionally skips ``_HOME_SKIP_RELATIVE`` entries (Library, AppData) but
+    ONLY when the parent directory is the user's home — preserves projects
+    that happen to be named ``Library`` somewhere deeper in the tree.
+
     Returns at most ``limit * 2`` entries (caller sorts + truncates to ``limit``).
     Halts early at ``_WALK_FILE_BUDGET`` files inspected.
 
@@ -97,12 +129,26 @@ def _walk_recent_files(base: Path, cutoff: float, limit: int) -> list[tuple[floa
     def _onerror(exc: OSError) -> None:
         _log.debug("list_recent_files: skipped subtree due to %s", exc)
 
+    home = _get_home()
+
     out: list[tuple[float, Path]] = []
     cap = max(limit * 2, limit + 10)
     inspected = 0
     for root, dirs, files in os.walk(base, onerror=_onerror):  # followlinks=False (default) — safe
+        # Resolve once per iteration to compare against home accurately.
+        try:
+            root_resolved = Path(root).resolve()
+        except OSError:
+            root_resolved = Path(root)
+        is_home = home is not None and root_resolved == home
+
         # Prune in-place so os.walk doesn't recurse into them
-        dirs[:] = [d for d in dirs if d not in _SKIP_DIR_NAMES and not d.startswith(".")]
+        dirs[:] = [
+            d for d in dirs
+            if d not in _SKIP_DIR_NAMES
+            and not d.startswith(".")
+            and not (is_home and d in _HOME_SKIP_RELATIVE)
+        ]
         for fname in files:
             if fname.startswith("."):
                 continue
