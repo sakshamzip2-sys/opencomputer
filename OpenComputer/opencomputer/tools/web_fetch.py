@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 from bs4 import BeautifulSoup
 
+from opencomputer.security.url_safety import is_safe_url
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -96,11 +97,36 @@ class WebFetchTool(BaseTool):
                 is_error=True,
             )
 
+        # SSRF guard (TS-T4): pre-check the URL before any network round-trip.
+        # Blocks private IPs, cloud metadata endpoints, DNS-resolution failures.
+        if not is_safe_url(url):
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Blocked: URL {url} fails SSRF safety check "
+                    "(private IP, cloud metadata, or DNS resolution failure)."
+                ),
+                is_error=True,
+            )
+
+        async def _validate_redirect(response: httpx.Response) -> None:
+            """Re-validate every redirect target — DNS rebinding / chained
+            redirects could otherwise reach private space after the initial
+            check passed."""
+            if response.is_redirect:
+                location = response.headers.get("location", "")
+                if location and location.startswith(("http://", "https://")) and not is_safe_url(location):
+                    raise httpx.RequestError(
+                        f"Blocked redirect to unsafe URL: {location}",
+                        request=response.request,
+                    )
+
         try:
             async with httpx.AsyncClient(
                 timeout=timeout_s,
                 follow_redirects=True,
                 headers={"User-Agent": DEFAULT_USER_AGENT},
+                event_hooks={"response": [_validate_redirect]},
             ) as client:
                 resp = await client.get(url)
         except httpx.TimeoutException:
