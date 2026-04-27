@@ -257,3 +257,59 @@ def test_multi_edit_file_not_read_first_nudges(multi_edit_tool, tmp_path):
     assert result.is_error
     msg = result.content.lower()
     assert "read" in msg
+
+
+# ─── V3.A-T6: success-path diff visualization ────────────────────
+
+
+def test_edit_success_includes_diff(edit_tool, tmp_path):
+    """Edit's success message must include a unified diff so the model
+    can verify the change without a follow-up Read."""
+    from opencomputer.tools._file_read_state import mark_read
+
+    p = tmp_path / "f.txt"
+    p.write_text("hello world\n")
+    mark_read(str(p))  # honor the V3.A-T5 read-first contract
+
+    call = ToolCall(
+        id="t",
+        name="Edit",
+        arguments={
+            "file_path": str(p),
+            "old_string": "hello",
+            "new_string": "goodbye",
+        },
+    )
+    result = asyncio.run(edit_tool.execute(call))
+    assert not result.is_error
+    # Diff section must be present in the success message
+    assert "Diff:" in result.content
+    assert "-hello" in result.content or "hello world" in result.content
+    assert "+goodbye" in result.content or "goodbye world" in result.content
+
+
+def test_multi_edit_success_includes_diff(multi_edit_tool, tmp_path):
+    """MultiEdit must render ONE unified diff for the whole batch on success."""
+    from opencomputer.tools._file_read_state import mark_read
+
+    p = tmp_path / "f.txt"
+    p.write_text("aa\nbb\ncc\n")
+    mark_read(str(p))
+
+    call = ToolCall(
+        id="t",
+        name="MultiEdit",
+        arguments={
+            "file_path": str(p),
+            "edits": [
+                {"old_string": "aa", "new_string": "AAA"},
+                {"old_string": "cc", "new_string": "CCC"},
+            ],
+        },
+    )
+    result = asyncio.run(multi_edit_tool.execute(call))
+    assert not result.is_error
+    assert "Diff:" in result.content
+    # Both edits should be reflected in the single diff
+    assert "AAA" in result.content
+    assert "CCC" in result.content

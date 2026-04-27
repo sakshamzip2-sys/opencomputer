@@ -13,6 +13,7 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 # to take. The shared read-state tracker in opencomputer.tools enforces the
 # same "Read first" contract MultiEdit's description has always promised.
 from opencomputer.tools._file_read_state import has_been_read, mark_read
+from opencomputer.tools.edit_diff_format import render_unified_diff
 
 
 class MultiEditTool(BaseTool):
@@ -228,9 +229,16 @@ class MultiEditTool(BaseTool):
         # a fresh Read — we just wrote known bytes.
         mark_read(path)
 
+        # V3.A-T6: render ONE diff for the entire batch — `original` is the
+        # file's content before any edits in the batch, `text` is the final
+        # in-memory state after all edits applied. Capped at MAX_DIFF_LINES.
+        diff = render_unified_diff(before=original, after=text, file_path=str(path))
         return ToolResult(
             tool_call_id=call.id,
-            content=f"Applied {len(edits)} edit(s) to {path} ({total_replacements} replacements)",
+            content=(
+                f"Applied {len(edits)} edit(s) to {path} ({total_replacements} replacements)\n\n"
+                f"Diff:\n{diff}"
+            ),
         )
 
 

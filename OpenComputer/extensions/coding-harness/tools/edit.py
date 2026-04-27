@@ -14,6 +14,7 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 # paths that have been Read (or Written), so we can enforce the
 # "Read first" contract that Edit's description has always promised.
 from opencomputer.tools._file_read_state import has_been_read, mark_read
+from opencomputer.tools.edit_diff_format import render_unified_diff
 
 
 class EditTool(BaseTool):
@@ -207,9 +208,16 @@ class EditTool(BaseTool):
         mark_read(path)
 
         n = count if replace_all else 1
+        # V3.A-T6: include a unified diff in the success message so the model
+        # can verify what it changed without a follow-up Read. The diff is
+        # capped at MAX_DIFF_LINES (500) to keep token cost bounded.
+        diff = render_unified_diff(before=text, after=new_text, file_path=str(path))
         return ToolResult(
             tool_call_id=call.id,
-            content=f"Edited {path} ({n} replacement{'s' if n != 1 else ''})",
+            content=(
+                f"Edited {path} ({n} replacement{'s' if n != 1 else ''})\n\n"
+                f"Diff:\n{diff}"
+            ),
         )
 
 
