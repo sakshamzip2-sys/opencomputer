@@ -12,6 +12,12 @@ from pathlib import Path
 # "Read first" contract that Edit's description has always promised.
 from opencomputer.tools._file_read_state import has_been_read, mark_read
 from opencomputer.tools.edit_diff_format import render_unified_diff
+from opencomputer.tools.file_state import (
+    check_stale as _check_stale_against_siblings,
+)
+from opencomputer.tools.file_state import (
+    note_write as _note_write_for_subagent_guard,
+)
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -189,6 +195,10 @@ class EditTool(BaseTool):
             )
 
         new_text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+        # Cross-agent staleness check before writing — if a sibling
+        # subagent wrote this file after the current task's last read,
+        # surface a warning so the agent can reconsider before clobbering.
+        stale_warning = _check_stale_against_siblings(path)
         try:
             path.write_text(new_text, encoding="utf-8")
         except Exception as e:
@@ -205,19 +215,20 @@ class EditTool(BaseTool):
         # The bytes we just wrote are by definition the file's current state,
         # so subsequent Edits in this turn don't need a fresh Read.
         mark_read(path)
+        _note_write_for_subagent_guard(path)
 
         n = count if replace_all else 1
         # V3.A-T6: include a unified diff in the success message so the model
         # can verify what it changed without a follow-up Read. The diff is
         # capped at MAX_DIFF_LINES (500) to keep token cost bounded.
         diff = render_unified_diff(before=text, after=new_text, file_path=str(path))
-        return ToolResult(
-            tool_call_id=call.id,
-            content=(
-                f"Edited {path} ({n} replacement{'s' if n != 1 else ''})\n\n"
-                f"Diff:\n{diff}"
-            ),
+        message = (
+            f"Edited {path} ({n} replacement{'s' if n != 1 else ''})\n\n"
+            f"Diff:\n{diff}"
         )
+        if stale_warning:
+            message = f"WARNING: {stale_warning}\n\n{message}"
+        return ToolResult(tool_call_id=call.id, content=message)
 
 
 __all__ = ["EditTool"]

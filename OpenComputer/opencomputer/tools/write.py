@@ -5,6 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from opencomputer.tools._file_read_state import mark_read
+from opencomputer.tools.file_state import (
+    check_stale as _check_stale_against_siblings,
+)
+from opencomputer.tools.file_state import (
+    note_write as _note_write_for_subagent_guard,
+)
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -51,6 +57,13 @@ class WriteTool(BaseTool):
                 content=f"Error: file_path must be absolute, got: {path}",
                 is_error=True,
             )
+        # Subagent-staleness guard: if a sibling subagent wrote this path
+        # after our last read, the new content is almost certainly based
+        # on a stale view. Surface as a warning rather than a hard block —
+        # the agent may legitimately want to overwrite (full rewrite).
+        # ``stale_warning`` becomes a one-line prefix on the success
+        # message so the agent sees it next turn.
+        stale_warning = _check_stale_against_siblings(path)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
@@ -64,7 +77,10 @@ class WriteTool(BaseTool):
         # subsequent Edits — the agent has just authored the bytes, so it
         # demonstrably knows them.
         mark_read(path)
-        return ToolResult(
-            tool_call_id=call.id,
-            content=f"Wrote {len(content)} bytes to {path}",
-        )
+        # Stamp this task as the last writer so siblings see the staleness
+        # warning on their next write.
+        _note_write_for_subagent_guard(path)
+        message = f"Wrote {len(content)} bytes to {path}"
+        if stale_warning:
+            message = f"WARNING: {stale_warning}\n{message}"
+        return ToolResult(tool_call_id=call.id, content=message)

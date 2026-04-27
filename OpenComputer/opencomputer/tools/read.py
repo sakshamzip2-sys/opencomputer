@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from opencomputer.tools._file_read_state import mark_read
+from opencomputer.tools.file_state import record_read as _record_read_for_subagent_guard
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -89,4 +90,8 @@ class ReadTool(BaseTool):
         end_idx = start_idx + limit
         slice_ = lines[start_idx:end_idx]
         numbered = "\n".join(f"{start_idx + i + 1:>6}\t{ln}" for i, ln in enumerate(slice_))
+        # Record the read for the subagent-staleness guard. ``partial=True``
+        # if the agent only saw a windowed view — write should still warn.
+        partial = (start_idx > 0) or (len(slice_) < len(lines))
+        _record_read_for_subagent_guard(path, partial=partial)
         return ToolResult(tool_call_id=call.id, content=numbered)
