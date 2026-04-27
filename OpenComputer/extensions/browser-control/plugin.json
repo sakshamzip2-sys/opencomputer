@@ -1,0 +1,18 @@
+{
+  "id": "browser-control",
+  "name": "browser-control",
+  "description": "Browser automation via Playwright. Navigate, click, fill, snapshot, scrape — isolated sessions by default. Default OFF.",
+  "version": "0.1.0",
+  "kind": "tool",
+  "enabled_by_default": false,
+  "entry": "plugin",
+  "author": "OpenComputer",
+  "license": "MIT",
+  "capabilities": [
+    "browser.navigate",
+    "browser.click",
+    "browser.fill",
+    "browser.snapshot",
+    "browser.scrape"
+  ]
+}
