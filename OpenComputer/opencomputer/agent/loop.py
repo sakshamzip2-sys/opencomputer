@@ -556,6 +556,20 @@ class AgentLoop:
                         exc_info=True,
                     )
                     workspace_context = ""
+                # V2.C-T5 — persona auto-classifier overlay. Runs once per
+                # session (same lane as user_facts / workspace_context) so
+                # the resulting overlay lands on the frozen base prompt
+                # and prefix-cache hits on turn 2+ stay valid. Classifier
+                # failure degrades to "" — agent startup must NEVER break
+                # over a persona miss.
+                try:
+                    persona_overlay = self._build_persona_overlay(sid)
+                except Exception:  # noqa: BLE001 — defensive: never break loop
+                    _log.debug(
+                        "_build_persona_overlay failed; degrading to empty",
+                        exc_info=True,
+                    )
+                    persona_overlay = ""
                 # PR-6 T2.1: use build_with_memory so ambient memory blocks
                 # from active providers are appended under '## Memory context'.
                 # Falls back to the sync build() path if ambient blocks are
@@ -575,6 +589,7 @@ class AgentLoop:
                     enable_ambient_blocks=self.config.memory.enable_ambient_blocks,
                     max_ambient_block_chars=self.config.memory.max_ambient_block_chars,
                     workspace_context=workspace_context,
+                    persona_overlay=persona_overlay,
                 )
                 # Evict the least-recently-used snapshot if the cache is full
                 # BEFORE inserting, so we never exceed the cap even transiently.
@@ -963,6 +978,90 @@ class AgentLoop:
             input_tokens=total_input,
             output_tokens=total_output,
         )
+
+    # ─── V2.C-T5 persona auto-classifier ───────────────────────────
+
+    def _build_persona_overlay(self, session_id: str) -> str:
+        """Run the persona classifier and return the matched persona's overlay.
+
+        V2.C-T5 — invoked once per session in the same lane as
+        ``user_facts`` / ``workspace_context`` so the resulting overlay
+        lands on the FROZEN base prompt and the prefix cache stays warm.
+
+        Pulls a SIMPLIFIED context for V2.C: foreground app via
+        ``osascript`` (macOS only, "" elsewhere), current hour, last 10
+        recent file paths from the session message log (best effort), and
+        the last 3 user messages. Any failure degrades to ``""`` (no
+        persona section in the prompt) — startup must NEVER break over a
+        classifier issue. V2.D may swap in a richer context source.
+        """
+        import datetime as _dt
+
+        from opencomputer.awareness.personas._foreground import (
+            detect_frontmost_app,
+        )
+        from opencomputer.awareness.personas.classifier import (
+            ClassificationContext,
+            classify,
+        )
+        from opencomputer.awareness.personas.registry import get_persona
+
+        try:
+            foreground_app = detect_frontmost_app()
+        except Exception:  # noqa: BLE001 — defensive: never break loop
+            foreground_app = ""
+
+        try:
+            hour = _dt.datetime.now().hour
+        except Exception:  # noqa: BLE001 — defensive: never break loop
+            hour = 12
+
+        recent_files: tuple[str, ...] = ()
+        last_user_messages: tuple[str, ...] = ()
+        try:
+            messages = self.db.get_messages(session_id)
+        except Exception:  # noqa: BLE001 — defensive: never break loop
+            messages = []
+        if messages:
+            # Best-effort extraction of file paths from tool calls and
+            # user messages — V2.C ships with a simple heuristic (look for
+            # path-like strings in tool args). Empty tuple is fine if
+            # nothing matches.
+            file_paths: list[str] = []
+            user_texts: list[str] = []
+            for msg in messages:
+                if msg.role == "user" and isinstance(msg.content, str):
+                    user_texts.append(msg.content)
+                tool_calls = getattr(msg, "tool_calls", None) or ()
+                for tc in tool_calls:
+                    args = getattr(tc, "arguments", None)
+                    if isinstance(args, dict):
+                        for v in args.values():
+                            if (
+                                isinstance(v, str)
+                                and ("/" in v or "." in v)
+                                and len(v) < 512
+                            ):
+                                file_paths.append(v)
+            recent_files = tuple(file_paths[-10:])
+            last_user_messages = tuple(user_texts[-3:])
+
+        try:
+            ctx = ClassificationContext(
+                foreground_app=foreground_app,
+                time_of_day_hour=hour,
+                recent_file_paths=recent_files,
+                last_messages=last_user_messages,
+            )
+            result = classify(ctx)
+            persona = get_persona(result.persona_id)
+        except Exception:  # noqa: BLE001 — defensive: never break loop
+            _log.debug("persona classifier failed; degrading to empty", exc_info=True)
+            return ""
+        if persona is None:
+            return ""
+        overlay = persona.get("system_prompt_overlay", "") or ""
+        return str(overlay).strip()
 
     # ─── PR-6 T2.3 session lifecycle ───────────────────────────────
 
