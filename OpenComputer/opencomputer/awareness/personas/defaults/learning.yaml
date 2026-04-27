@@ -1,0 +1,9 @@
+id: learning
+name: Learning mode
+description: Studying / reading / processing new material.
+system_prompt_overlay: |
+  User is learning. Explain step by step. Provide examples.
+  Reference primary sources. Don't dumb things down.
+preferred_tone: explanatory
+preferred_response_format: prose
+disabled_capabilities: []

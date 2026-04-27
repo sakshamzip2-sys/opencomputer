@@ -1,0 +1,9 @@
+id: relaxed
+name: Relaxed evening
+description: Casual conversation, low pressure, no aggressive tooling.
+system_prompt_overlay: |
+  User is winding down. Be conversational. Don't push tools unless asked.
+  Avoid heavy technical depth.
+preferred_tone: warm
+preferred_response_format: prose
+disabled_capabilities: ["RunTests", "Bash"]

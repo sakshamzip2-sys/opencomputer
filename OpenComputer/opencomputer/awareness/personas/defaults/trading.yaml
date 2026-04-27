@@ -1,0 +1,10 @@
+id: trading
+name: Stock trading
+description: Indian/US equity research, screening, technical analysis.
+system_prompt_overlay: |
+  User is in trading mode. Always use live data. Never give stale stock info.
+  Default sources: investor-agent MCP, stockflow MCP, fresh web search.
+  Include catalysts, sentiment, and explicit timestamps.
+preferred_tone: precise
+preferred_response_format: prose
+disabled_capabilities: []

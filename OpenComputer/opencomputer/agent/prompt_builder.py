@@ -151,6 +151,12 @@ class PromptContext:
     #: PromptContext consumers do not need to set this; the field has a
     #: safe default.
     workspace_context: str = ""
+    #: V2.C-T5 — persona auto-classifier output (system_prompt_overlay
+    #: from the matched persona YAML). Empty string means "no persona
+    #: detected" — ``base.j2`` omits the "Active persona" section
+    #: accordingly. Computed once per session in the same lane as
+    #: ``user_facts`` to keep the prefix-cache invariant intact.
+    persona_overlay: str = ""
     #: V3.A-T3 — runtime mode flags that drive Jinja conditionals in
     #: ``base.j2``. ``plan_mode`` mirrors ``runtime.plan_mode`` and tells
     #: the agent that destructive tools are blocked. ``yolo_mode`` mirrors
@@ -189,6 +195,7 @@ class PromptBuilder:
         workspace_context: str = "",
         plan_mode: bool = False,
         yolo_mode: bool = False,
+        persona_overlay: str = "",
     ) -> str:
         memory = _truncate_from_top(declarative_memory, memory_char_limit)
         profile = _truncate_from_top(user_profile, user_char_limit)
@@ -205,6 +212,7 @@ class PromptBuilder:
             workspace_context=workspace_context,
             plan_mode=plan_mode,
             yolo_mode=yolo_mode,
+            persona_overlay=persona_overlay,
         )
         tpl = self.env.get_template(template)
         return tpl.render(
@@ -220,6 +228,7 @@ class PromptBuilder:
             workspace_context=ctx.workspace_context,
             plan_mode=ctx.plan_mode,
             yolo_mode=ctx.yolo_mode,
+            persona_overlay=ctx.persona_overlay,
         )
 
     def build_user_facts(
@@ -275,6 +284,7 @@ class PromptBuilder:
         workspace_context: str = "",
         plan_mode: bool = False,
         yolo_mode: bool = False,
+        persona_overlay: str = "",
     ) -> str:
         """Async variant of build() that appends ambient memory blocks.
 
@@ -301,6 +311,7 @@ class PromptBuilder:
             workspace_context=workspace_context,
             plan_mode=plan_mode,
             yolo_mode=yolo_mode,
+            persona_overlay=persona_overlay,
         )
         if not enable_ambient_blocks or memory_bridge is None:
             return base

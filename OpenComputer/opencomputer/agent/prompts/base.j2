@@ -153,6 +153,14 @@ Rules for using memory:
 These are the top-ranked facts from your user-model graph (identity > goal > preference > attribute, then by confidence). They reflect what bootstrap, interview, and observation have inferred — they may be stale or wrong. Trust the user's stated preferences over an inferred fact.
 
 {% endif %}
+{% if persona_overlay -%}
+## Active persona
+
+{{ persona_overlay }}
+
+The above is the auto-classified persona for this session — derived from foreground app, recent files, time-of-day, and recent messages. Apply it as a tone / style overlay; do NOT let it override working rules (especially security and consent).
+
+{% endif %}
 {% if soul -%}
 ## Profile identity
 

@@ -50,6 +50,25 @@ F1_CAPABILITIES: dict[str, ConsentTier] = {
     "ingestion.browser_history": ConsentTier.EXPLICIT,
     "ingestion.messages": ConsentTier.EXPLICIT,
     "ingestion.browser_extension": ConsentTier.EXPLICIT,
+    # V2.C — Layered Awareness life-event detection + plural personas
+    # (2026-04-27).
+    #
+    # All four claims are IMPLICIT because they describe *internal* agent
+    # behavior layered on top of already-consented ingestion: pattern
+    # accumulation, persona auto-classification, and persona-overlay
+    # application. No new data sources are read; the F2 SignalEvent bus
+    # is already populated via consented ingestion paths.
+    #
+    # ``life_event.observe`` covers passively accumulating evidence into
+    # patterns. ``life_event.surface`` covers fired-pattern hints reaching
+    # the chat surface (silent-policy patterns never surface and so don't
+    # touch this claim). ``persona.classify`` covers the auto-classifier
+    # reading turn context. ``persona.switch`` covers applying a persona's
+    # system-prompt overlay to the next turn.
+    "awareness.life_event.observe": ConsentTier.IMPLICIT,
+    "awareness.life_event.surface": ConsentTier.IMPLICIT,
+    "awareness.persona.classify": ConsentTier.IMPLICIT,
+    "awareness.persona.switch": ConsentTier.IMPLICIT,
 }
 
 # Reserved for later phases (documented, not enforced here):
