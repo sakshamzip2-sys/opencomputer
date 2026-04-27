@@ -91,6 +91,12 @@ class Platform(str, Enum):
     SIGNAL = "signal"
     IMESSAGE = "imessage"
     WEB = "web"
+    SMS = "sms"
+    MATRIX = "matrix"
+    MATTERMOST = "mattermost"
+    EMAIL = "email"
+    WEBHOOK = "webhook"
+    HOMEASSISTANT = "homeassistant"
 
 
 @dataclass(frozen=True, slots=True)
