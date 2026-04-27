@@ -32,5 +32,5 @@ def register(api) -> None:  # PluginAPI duck-typed
         )
         return
     adapter = MatrixAdapter(config={"homeserver": homeserver, "access_token": token})
-    api.register_channel(Platform.WEB.value, adapter)
+    api.register_channel(Platform.MATRIX.value, adapter)
     logger.info("matrix plugin: registered for %s", homeserver)

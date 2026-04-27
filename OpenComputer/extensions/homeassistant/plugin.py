@@ -35,5 +35,5 @@ def register(api) -> None:  # PluginAPI duck-typed
         )
         return
     adapter = HomeAssistantAdapter(config={"url": url, "token": token})
-    api.register_channel(Platform.WEB.value, adapter)
+    api.register_channel(Platform.HOMEASSISTANT.value, adapter)
     logger.info("homeassistant plugin: registered for %s", url)

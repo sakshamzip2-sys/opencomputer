@@ -60,5 +60,5 @@ def register(api) -> None:  # PluginAPI duck-typed
         config["allowed_senders"] = [a.strip() for a in allowed.split(",") if a.strip()]
 
     adapter = EmailAdapter(config=config)
-    api.register_channel(Platform.WEB.value, adapter)
+    api.register_channel(Platform.EMAIL.value, adapter)
     logger.info("email plugin: registered for %s on %s", user, host)

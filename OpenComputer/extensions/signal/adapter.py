@@ -40,7 +40,7 @@ logger = logging.getLogger("opencomputer.ext.signal")
 class SignalAdapter(BaseChannelAdapter):
     """Signal channel — signal-cli JSON-RPC HTTP wrapper. Text + reactions."""
 
-    platform = Platform.WEB
+    platform = Platform.SIGNAL
     max_message_length = 4096
     """Signal protocol's per-message text limit. signal-cli will fragment
     longer payloads into multi-part messages, but we keep the API surface

@@ -53,7 +53,7 @@ _DEFAULT_SMTP_PORT = 465
 class EmailAdapter(BaseChannelAdapter):
     """Email channel — IMAP poll + SMTP send."""
 
-    platform = Platform.WEB  # No EMAIL enum yet; reuse WEB
+    platform = Platform.EMAIL
     max_message_length = 64_000  # Email bodies are generous
     capabilities = ChannelCapabilities.NONE  # No typing / reactions / edit on email
 
@@ -215,7 +215,7 @@ class EmailAdapter(BaseChannelAdapter):
         text = subject + ("\n\n" + body if body else "")
 
         return MessageEvent(
-            platform=Platform.WEB,
+            platform=Platform.EMAIL,
             chat_id=from_addr,
             user_id=from_addr,
             text=text,

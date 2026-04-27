@@ -37,7 +37,7 @@ logger = logging.getLogger("opencomputer.ext.matrix")
 class MatrixAdapter(BaseChannelAdapter):
     """Matrix channel — Client-Server API. Unencrypted rooms only."""
 
-    platform = Platform.WEB
+    platform = Platform.MATRIX
     max_message_length = 60_000
     capabilities = (
         ChannelCapabilities.REACTIONS

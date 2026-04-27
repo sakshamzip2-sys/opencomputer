@@ -35,5 +35,5 @@ def register(api) -> None:  # PluginAPI duck-typed
     adapter = WhatsAppAdapter(
         config={"access_token": token, "phone_number_id": phone_id}
     )
-    api.register_channel(Platform.WEB.value, adapter)
+    api.register_channel(Platform.WHATSAPP.value, adapter)
     logger.info("whatsapp plugin: registered for phone_number_id=%s", phone_id)

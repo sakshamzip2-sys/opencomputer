@@ -30,5 +30,5 @@ def register(api) -> None:  # PluginAPI duck-typed
         )
         return
     adapter = MattermostAdapter(config={"base_url": url, "token": token})
-    api.register_channel(Platform.WEB.value, adapter)
+    api.register_channel(Platform.MATTERMOST.value, adapter)
     logger.info("mattermost plugin: registered for %s", url)
