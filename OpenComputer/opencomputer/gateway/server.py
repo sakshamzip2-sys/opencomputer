@@ -45,6 +45,10 @@ class Gateway:
         # T8 — ambient foreground sensor daemon (opt-in). Started in ``start()``
         # only when ``<profile_home>/ambient/state.json`` has ``enabled=True``.
         self._ambient_daemon: Any | None = None
+        # Auto-skill-evolution subscriber (T8 of the skill-evolution series).
+        # Subscribes to ``session_end`` on the F2 bus and stages SKILL.md
+        # candidates for user review. Opt-in via ``oc skills evolution on``.
+        self._evolution_subscriber: Any | None = None
 
     def register_adapter(self, adapter: BaseChannelAdapter) -> None:
         """Register a channel adapter (usually from a loaded plugin)."""
@@ -78,6 +82,10 @@ class Gateway:
         # opted in via ``oc ambient on``; failure to start is logged but
         # never blocks the gateway.
         await self._start_ambient_daemon()
+
+        # Auto-skill-evolution subscriber. Same opt-in / failure-isolated
+        # contract as the ambient daemon — never crashes gateway boot.
+        await self._start_evolution_subscriber()
 
     async def _start_outgoing_drainer(self) -> None:
         from opencomputer.agent.config import _home
@@ -132,8 +140,87 @@ class Gateway:
                 "failed to start ambient daemon — gateway continues without it"
             )
 
+    async def _start_evolution_subscriber(self) -> None:
+        """Start the auto-skill-evolution F2 subscriber iff the user opted in.
+
+        The plugin lives at ``extensions/skill-evolution/`` (hyphenated).
+        We reuse the synthetic ``extensions.skill_evolution`` alias helper
+        from :mod:`opencomputer.cli_skills` so the production import path
+        matches what the test suite uses. Any failure is logged and
+        swallowed — the gateway must keep working even if the plugin is
+        broken or absent.
+
+        Wiring:
+        - Provider is resolved the same way :mod:`opencomputer.agent.title_generator`
+          and :mod:`opencomputer.agent.recall_synthesizer` do — via the
+          configured ``cfg.model.provider`` lookup against the live plugin
+          registry. That lets the LLM judge + extractor inherit the user's
+          API config without new setup.
+        - Cost guard is the per-profile default
+          (:func:`opencomputer.cost_guard.get_default_guard`), shared with
+          the rest of the agent so its budget caps apply transitively.
+        - SessionDB is constructed lazily per call via the factory so the
+          subscriber never holds a connection between events.
+        """
+        try:
+            from opencomputer.agent.config import _home, default_config
+            from opencomputer.agent.state import SessionDB
+            from opencomputer.cli_skills import _ensure_skill_evolution_alias
+            from opencomputer.cost_guard import get_default_guard
+            from opencomputer.ingestion.bus import default_bus
+            from opencomputer.plugins.registry import registry as plugin_registry
+
+            _ensure_skill_evolution_alias()
+            from extensions.skill_evolution.subscriber import (  # type: ignore[import-not-found]
+                EvolutionSubscriber,
+                _is_enabled,
+            )
+
+            if not _is_enabled(_home()):
+                logger.debug(
+                    "skill-evolution opt-out (state.enabled=False) — skipping subscriber"
+                )
+                return
+
+            # Resolve the user's configured provider — same pattern used by
+            # title_generator / recall_synthesizer. If the provider isn't
+            # registered, we can't run the LLM judge, so we skip rather
+            # than start a half-working subscriber.
+            cfg = default_config()
+            provider_cls = plugin_registry.providers.get(cfg.model.provider)
+            if provider_cls is None:
+                logger.warning(
+                    "skill-evolution: provider %r not registered — skipping subscriber",
+                    cfg.model.provider,
+                )
+                return
+            provider = provider_cls() if isinstance(provider_cls, type) else provider_cls
+
+            cfg_for_db = cfg  # captured by the lambda below
+
+            evo_subscriber = EvolutionSubscriber(
+                bus=default_bus,
+                profile_home_factory=_home,
+                session_db_factory=lambda: SessionDB(cfg_for_db.session.db_path),
+                provider=provider,
+                cost_guard=get_default_guard(),
+            )
+            evo_subscriber.start()
+            self._evolution_subscriber = evo_subscriber
+            logger.info("skill-evolution subscriber started (state.enabled=True)")
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "failed to start skill-evolution subscriber — gateway continues without it"
+            )
+
     async def stop(self) -> None:
         logger.info("gateway: stopping")
+        if self._evolution_subscriber is not None:
+            try:
+                self._evolution_subscriber.stop()
+            except Exception:  # noqa: BLE001
+                logger.exception("skill-evolution subscriber stop failed (ignored)")
+            self._evolution_subscriber = None
         if self._ambient_daemon is not None:
             try:
                 await self._ambient_daemon.stop()

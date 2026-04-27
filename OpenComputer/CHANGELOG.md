@@ -4,6 +4,80 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (Auto skill evolution — close the Hermes "self-improving skills" gap)
+
+OpenComputer can now **automatically detect reusable patterns from
+successful sessions and propose them as new skills**. The user reviews
+proposals via `opencomputer skills review` and accepts/rejects each.
+Default OFF; opt-in via `opencomputer skills evolution on`.
+
+Closes the only real gap vs. Hermes's "self-improving / agent-created
+skills" claim: OC already had `skill_manage` (manual / agent-deliberate)
+but no AUTOMATIC "this run succeeded, save as skill" loop. This ships
+the loop with three guardrails:
+
+1. **Two-stage detection** — a cheap heuristic filter (errors / short /
+   sensitive / duplicate) cuts ~90% of sessions; an LLM judge (haiku,
+   daily-budget capped at 20 calls) decides whether the remainder is a
+   genuinely novel reusable pattern (confidence >= 70).
+2. **Staging, not auto-publish** — generated `SKILL.md` candidates land
+   in `<profile_home>/skills/_proposed/<auto-name>/`. The active skills
+   directory is unaffected until the user runs
+   `opencomputer skills accept <name>`.
+3. **Privacy by construction** — sensitive-app filter (banking /
+   passwords / healthcare etc.) excludes content from extraction; PII
+   regex sweep redacts credit-card / SSN patterns; raw transcripts are
+   never persisted (only `SKILL.md` + metadata-only `provenance.json`);
+   AST-enforced no-network-egress in plugin source.
+
+#### What shipped (8 tasks T1-T8)
+
+- `plugin_sdk/ingestion.py` — new `SessionEndEvent` (frozen, slots,
+  metadata-only) emitted by the agent loop at all terminal points
+  (END_TURN, error, cancelled, timeout).
+- `opencomputer/agent/consent/capability_taxonomy.py` — 3 new
+  capabilities: `skill_evolution.observe` (IMPLICIT),
+  `skill_evolution.propose` (EXPLICIT), `skill_evolution.auto_publish`
+  (PER_ACTION).
+- `extensions/skill-evolution/` (~1,300 LOC) — `pattern_detector`,
+  `skill_extractor`, `candidate_store`, `subscriber`, plugin manifest,
+  README with privacy contract.
+- `opencomputer/cli_skills.py` — new
+  `oc skills {list, review, accept, reject, evolution {on, off, status}}`
+  subcommand group. Status output is aggregate-only — never leaks
+  candidate names or session content.
+- `opencomputer/doctor.py` — `_check_skill_evolution_state` per-profile
+  preflight (state file, heartbeat staleness, proposal pile-up warning
+  at >20 candidates pending review).
+- `opencomputer/gateway/server.py` — gateway boots the subscriber when
+  `state.enabled=True`; failure logged but never blocks gateway boot.
+
+#### Tests (~700 LOC)
+
+- 9 contract tests on the SDK + capability registration
+- 10 pattern-detector tests (heuristic + LLM-judge mocked)
+- 11 skill-extractor tests (3-call pipeline + redaction)
+- 13 candidate-store tests (atomic writes, collision, pruning)
+- 7 subscriber tests (lifecycle, disabled-noop, threshold)
+- 14 CLI tests (privacy-contract-enforcing — status never leaks names)
+- 7 privacy AST tests (no-egress + no-raw-transcript)
+- 8 doctor tests
+
+Privacy contracts enforced by AST + filesystem-shape tests, not just
+runtime assertions. The no-egress test parses every `.py` under
+`extensions/skill-evolution/` and fails if it imports `urllib`,
+`requests`, `httpx`, `socket`, etc. The no-raw-transcript test asserts
+that nothing under `_proposed/<name>/` outside `SKILL.md` /
+`provenance.json` ever appears.
+
+#### Cross-platform
+
+CI matrix extended to run `tests/test_skill_evolution_*.py` on
+`ubuntu-latest` + `macos-latest` + `windows-latest`. The plugin is
+pure Python (no platform-specific code paths), so cross-platform
+support is inherent — but we exercise it on all three OSes anyway so
+shell glob / path-separator regressions can't sneak in unnoticed.
+
 ### Added (Companion persona — Path A.1 + A.2: closing the human-AI gap)
 
 OpenComputer's chat agent used to answer "how are you?" with "I don't

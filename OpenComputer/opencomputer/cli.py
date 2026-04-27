@@ -1680,6 +1680,12 @@ from opencomputer.cli_ambient import app as ambient_app  # noqa: E402
 
 app.add_typer(ambient_app, name="ambient")
 
+# Auto-skill-evolution — `opencomputer skills {list,review,accept,reject,evolution}`
+# Sibling to the singular `skill` namespace already mounted above.
+from opencomputer.cli_skills import app as skills_app  # noqa: E402
+
+app.add_typer(skills_app, name="skills")
+
 
 @config_app.command("show")
 def config_show() -> None:

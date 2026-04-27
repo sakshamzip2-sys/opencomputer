@@ -458,6 +458,16 @@ class AgentLoop:
         # Expose current session id to memory tools via the context provider.
         self._current_session_id = sid
 
+        # T1 of auto-skill-evolution plan — anchor session wall-clock start
+        # so SessionEndEvent.duration_seconds is meaningful from every exit
+        # path (including the slash-command early return below). Set BEFORE
+        # any branching so a thrown exception in setup still carries a
+        # sensible duration.
+        _session_started_at = time.monotonic()
+        _session_had_errors = False
+        _session_end_reason = "completed"
+        _session_iterations = 0
+
         # If this is a fresh session, create it in the DB and seed history from disk.
         existing = self.db.get_session(sid) if session_id else None
         if existing is None:
@@ -507,6 +517,16 @@ class AgentLoop:
             self._emit_before_message_write(session_id=sid, message=assistant_msg)
             self.db.append_message(sid, assistant_msg)
             self.db.end_session(sid)
+            # T1 of auto-skill-evolution plan — slash-command path is a
+            # session terminal too; emit so subscribers see consistent
+            # session-end coverage.
+            await self._emit_session_end_event(
+                session_id=sid,
+                end_reason="completed",
+                turn_count=0,
+                duration_seconds=time.monotonic() - _session_started_at,
+                had_errors=False,
+            )
             return ConversationResult(
                 final_message=assistant_msg,
                 messages=messages,
@@ -700,344 +720,376 @@ class AgentLoop:
         self._loop_started_at = time.monotonic()
         self._last_activity_at = self._loop_started_at
 
-        for _iter in range(self.config.loop.max_iterations):
-            iterations += 1
+        # T1 of auto-skill-evolution plan — wrap iteration loop +
+        # budget-exhausted exit in try/except/finally so the agent
+        # loop emits a SessionEndEvent at every terminal point
+        # (END_TURN, budget-exhausted, timeout, cancellation, error).
+        # Bus failure is swallowed inside _emit_session_end_event so
+        # a broken bus cannot break the loop's return path.
+        try:
+            for _iter in range(self.config.loop.max_iterations):
+                iterations += 1
 
-            # Round 2B P-3: enforce both timeouts at the top of each iteration.
-            # Inactivity check first (the more useful signal); absolute cap
-            # second. Both raise out of run_conversation — no synthetic
-            # assistant message: the caller (CLI / gateway) decides how to
-            # surface the timeout to the user.
-            now = time.monotonic()
-            if now - self._last_activity_at > self.config.loop.inactivity_timeout_s:
-                raise InactivityTimeout(
-                    f"no LLM/tool activity for "
-                    f"{self.config.loop.inactivity_timeout_s}s "
-                    f"(last activity {now - self._last_activity_at:.1f}s ago)"
-                )
-            if now - self._loop_started_at > self.config.loop.iteration_timeout_s:
-                raise IterationTimeout(
-                    f"loop wall-clock cap of "
-                    f"{self.config.loop.iteration_timeout_s}s exceeded "
-                    f"(elapsed {now - self._loop_started_at:.1f}s)"
-                )
+                # Round 2B P-3: enforce both timeouts at the top of each iteration.
+                # Inactivity check first (the more useful signal); absolute cap
+                # second. Both raise out of run_conversation — no synthetic
+                # assistant message: the caller (CLI / gateway) decides how to
+                # surface the timeout to the user.
+                now = time.monotonic()
+                if now - self._last_activity_at > self.config.loop.inactivity_timeout_s:
+                    raise InactivityTimeout(
+                        f"no LLM/tool activity for "
+                        f"{self.config.loop.inactivity_timeout_s}s "
+                        f"(last activity {now - self._last_activity_at:.1f}s ago)"
+                    )
+                if now - self._loop_started_at > self.config.loop.iteration_timeout_s:
+                    raise IterationTimeout(
+                        f"loop wall-clock cap of "
+                        f"{self.config.loop.iteration_timeout_s}s exceeded "
+                        f"(elapsed {now - self._loop_started_at:.1f}s)"
+                    )
 
-            # T3.2 (PR-8): publish TurnStartEvent at the top of each iteration.
-            # Best-effort + exception-isolated so a broken bus never stalls the loop.
-            try:
-                from opencomputer.ingestion.bus import default_bus as _bus
-                from plugin_sdk.ingestion import TurnStartEvent
-
-                _bus.publish(TurnStartEvent(
-                    session_id=sid,
-                    source="agent_loop",
-                    turn_index=iterations,
-                ))
-            except Exception:  # noqa: BLE001
-                pass
-
-            # D6 cheap-route gating: on iteration 0 only, if cheap_model is
-            # configured AND the heuristic fires, pass the cheap model to
-            # the provider for this turn. Subsequent iterations revert to
-            # the main model — cheap models often have capability gaps
-            # that cascade once tools start firing.
-            model_for_turn = self.config.model.model
-            cheap = self.config.model.cheap_model
-            if (
-                cheap is not None
-                and _iter == 0
-                and should_route_cheap(user_message)
-            ):
-                _log.debug(
-                    "cheap-route fired: routing first turn to %s (msg len=%d)",
-                    cheap,
-                    len(user_message),
-                )
-                model_for_turn = cheap
-
-            # P-2 (round 2a): mid-run /steer nudge. Between turns means
-            # after the previous iteration's tool dispatch but before the
-            # next LLM request — i.e. _iter > 0 (the first iteration's
-            # context is the user's original message, no nudge needed).
-            # Latest-wins is enforced inside SteerRegistry.submit; here
-            # we just consume + append a synthetic user message so the
-            # next ``_run_one_step`` call sees it. The format string is
-            # centralised in ``opencomputer.agent.steer.format_nudge_message``
-            # so CLI / wire / Telegram acknowledgements stay in sync.
-            if _iter > 0:
+                # T3.2 (PR-8): publish TurnStartEvent at the top of each iteration.
+                # Best-effort + exception-isolated so a broken bus never stalls the loop.
                 try:
-                    from opencomputer.agent.steer import (
-                        default_registry as _steer_registry,
+                    from opencomputer.ingestion.bus import default_bus as _bus
+                    from plugin_sdk.ingestion import TurnStartEvent
+
+                    _bus.publish(TurnStartEvent(
+                        session_id=sid,
+                        source="agent_loop",
+                        turn_index=iterations,
+                    ))
+                except Exception:  # noqa: BLE001
+                    pass
+
+                # D6 cheap-route gating: on iteration 0 only, if cheap_model is
+                # configured AND the heuristic fires, pass the cheap model to
+                # the provider for this turn. Subsequent iterations revert to
+                # the main model — cheap models often have capability gaps
+                # that cascade once tools start firing.
+                model_for_turn = self.config.model.model
+                cheap = self.config.model.cheap_model
+                if (
+                    cheap is not None
+                    and _iter == 0
+                    and should_route_cheap(user_message)
+                ):
+                    _log.debug(
+                        "cheap-route fired: routing first turn to %s (msg len=%d)",
+                        cheap,
+                        len(user_message),
                     )
-                    from opencomputer.agent.steer import (
-                        format_nudge_message as _format_nudge,
+                    model_for_turn = cheap
+
+                # P-2 (round 2a): mid-run /steer nudge. Between turns means
+                # after the previous iteration's tool dispatch but before the
+                # next LLM request — i.e. _iter > 0 (the first iteration's
+                # context is the user's original message, no nudge needed).
+                # Latest-wins is enforced inside SteerRegistry.submit; here
+                # we just consume + append a synthetic user message so the
+                # next ``_run_one_step`` call sees it. The format string is
+                # centralised in ``opencomputer.agent.steer.format_nudge_message``
+                # so CLI / wire / Telegram acknowledgements stay in sync.
+                if _iter > 0:
+                    try:
+                        from opencomputer.agent.steer import (
+                            default_registry as _steer_registry,
+                        )
+                        from opencomputer.agent.steer import (
+                            format_nudge_message as _format_nudge,
+                        )
+
+                        nudge = _steer_registry.consume(sid)
+                        if nudge:
+                            nudge_msg = Message(
+                                role="user",
+                                content=_format_nudge(nudge),
+                            )
+                            messages.append(nudge_msg)
+                            # Persist so a resumed session sees the same
+                            # context (the nudge was already promised to
+                            # the user; replaying without it would silently
+                            # change the next turn's semantics).
+                            self.db.append_message(sid, nudge_msg)
+                            _log.debug(
+                                "steer: applied pending nudge for session %s "
+                                "(len=%d)",
+                                sid,
+                                len(nudge),
+                            )
+                    except Exception:  # noqa: BLE001 — never break the loop
+                        _log.warning(
+                            "steer: consume failed for session %s — continuing",
+                            sid,
+                            exc_info=True,
+                        )
+
+                # Round 2B P-8 — drain pending background-process exit notices
+                # for this session and inject them as system messages so the
+                # next provider call sees the completion. Drained on EVERY
+                # iteration (including iter 0) because a long-running bg proc
+                # may finish during the user's typing window and we want the
+                # very first model turn to know about it. Persist so a resumed
+                # session keeps the bg-exit context visible.
+                try:
+                    from opencomputer.agent.bg_notify import (
+                        drain_for_session as _drain_bg,
                     )
 
-                    nudge = _steer_registry.consume(sid)
-                    if nudge:
-                        nudge_msg = Message(
-                            role="user",
-                            content=_format_nudge(nudge),
-                        )
-                        messages.append(nudge_msg)
-                        # Persist so a resumed session sees the same
-                        # context (the nudge was already promised to
-                        # the user; replaying without it would silently
-                        # change the next turn's semantics).
-                        self.db.append_message(sid, nudge_msg)
+                    bg_notices = _drain_bg(sid)
+                    for body in bg_notices:
+                        bg_msg = Message(role="system", content=body)
+                        messages.append(bg_msg)
+                        self.db.append_message(sid, bg_msg)
+                    if bg_notices:
                         _log.debug(
-                            "steer: applied pending nudge for session %s "
-                            "(len=%d)",
+                            "bg-notify: applied %d pending bg exit notice(s) for session %s",
+                            len(bg_notices),
                             sid,
-                            len(nudge),
                         )
                 except Exception:  # noqa: BLE001 — never break the loop
                     _log.warning(
-                        "steer: consume failed for session %s — continuing",
+                        "bg-notify: drain failed for session %s — continuing",
                         sid,
                         exc_info=True,
                     )
 
-            # Round 2B P-8 — drain pending background-process exit notices
-            # for this session and inject them as system messages so the
-            # next provider call sees the completion. Drained on EVERY
-            # iteration (including iter 0) because a long-running bg proc
-            # may finish during the user's typing window and we want the
-            # very first model turn to know about it. Persist so a resumed
-            # session keeps the bg-exit context visible.
-            try:
-                from opencomputer.agent.bg_notify import (
-                    drain_for_session as _drain_bg,
-                )
+                # Compaction check — uses REAL measured tokens from prior turn.
+                # First iteration (no prior measurement) skips the check.
+                if self._last_input_tokens > 0:
+                    # D7: emit PreCompact hook BEFORE actually compacting so
+                    # plugins can observe / log / modify behavior pre-summary.
+                    if self.compaction.should_compact(self._last_input_tokens):
+                        from opencomputer.hooks.engine import engine as _hook_engine
+                        from plugin_sdk.hooks import HookContext, HookEvent
 
-                bg_notices = _drain_bg(sid)
-                for body in bg_notices:
-                    bg_msg = Message(role="system", content=body)
-                    messages.append(bg_msg)
-                    self.db.append_message(sid, bg_msg)
-                if bg_notices:
-                    _log.debug(
-                        "bg-notify: applied %d pending bg exit notice(s) for session %s",
-                        len(bg_notices),
-                        sid,
-                    )
-            except Exception:  # noqa: BLE001 — never break the loop
-                _log.warning(
-                    "bg-notify: drain failed for session %s — continuing",
-                    sid,
-                    exc_info=True,
-                )
+                        _hook_engine.fire_and_forget(
+                            HookContext(
+                                event=HookEvent.PRE_COMPACT,
+                                session_id=sid,
+                                runtime=self._runtime,
+                            )
+                        )
+                        # Round 2A P-1: BEFORE_COMPACTION carries the messages
+                        # snapshot the summariser is about to consume. Distinct
+                        # from PRE_COMPACT (kept for back-compat) — the new event
+                        # exposes the actual context to handlers.
+                        _hook_engine.fire_and_forget(
+                            HookContext(
+                                event=HookEvent.BEFORE_COMPACTION,
+                                session_id=sid,
+                                runtime=self._runtime,
+                                messages=list(messages),
+                            )
+                        )
+                    result = await self.compaction.maybe_run(messages, self._last_input_tokens)
+                    if result.did_compact:
+                        messages = result.messages
+                        # Round 2A P-1: AFTER_COMPACTION fires only when
+                        # compaction actually ran (did_compact=True). The handler
+                        # sees the post-compaction message list (synthetic
+                        # summary + recent block).
+                        from opencomputer.hooks.engine import engine as _hook_engine_ac
+                        from plugin_sdk.hooks import (
+                            HookContext as _HookContextAC,
+                        )
+                        from plugin_sdk.hooks import HookEvent as _HookEventAC
 
-            # Compaction check — uses REAL measured tokens from prior turn.
-            # First iteration (no prior measurement) skips the check.
-            if self._last_input_tokens > 0:
-                # D7: emit PreCompact hook BEFORE actually compacting so
-                # plugins can observe / log / modify behavior pre-summary.
-                if self.compaction.should_compact(self._last_input_tokens):
-                    from opencomputer.hooks.engine import engine as _hook_engine
-                    from plugin_sdk.hooks import HookContext, HookEvent
-
-                    _hook_engine.fire_and_forget(
-                        HookContext(
-                            event=HookEvent.PRE_COMPACT,
-                            session_id=sid,
+                        _hook_engine_ac.fire_and_forget(
+                            _HookContextAC(
+                                event=_HookEventAC.AFTER_COMPACTION,
+                                session_id=sid,
+                                runtime=self._runtime,
+                                messages=list(messages),
+                            )
+                        )
+                        # Re-collect injections with the new message list. Reuse
+                        # the same ``turn_index`` computed at turn-start — the
+                        # logical turn number doesn't change just because we
+                        # summarized earlier history; throttling decisions must
+                        # stay consistent for this turn.
+                        inj_ctx = InjectionContext(
+                            messages=tuple(messages),
                             runtime=self._runtime,
-                        )
-                    )
-                    # Round 2A P-1: BEFORE_COMPACTION carries the messages
-                    # snapshot the summariser is about to consume. Distinct
-                    # from PRE_COMPACT (kept for back-compat) — the new event
-                    # exposes the actual context to handlers.
-                    _hook_engine.fire_and_forget(
-                        HookContext(
-                            event=HookEvent.BEFORE_COMPACTION,
                             session_id=sid,
-                            runtime=self._runtime,
-                            messages=list(messages),
+                            turn_index=turn_index,
                         )
-                    )
-                result = await self.compaction.maybe_run(messages, self._last_input_tokens)
-                if result.did_compact:
-                    messages = result.messages
-                    # Round 2A P-1: AFTER_COMPACTION fires only when
-                    # compaction actually ran (did_compact=True). The handler
-                    # sees the post-compaction message list (synthetic
-                    # summary + recent block).
-                    from opencomputer.hooks.engine import engine as _hook_engine_ac
-                    from plugin_sdk.hooks import (
-                        HookContext as _HookContextAC,
-                    )
-                    from plugin_sdk.hooks import HookEvent as _HookEventAC
+                        injected = await injection_engine.compose(inj_ctx)
+                        system = base_system + ("\n\n" + injected if injected else "")
 
-                    _hook_engine_ac.fire_and_forget(
-                        _HookContextAC(
-                            event=_HookEventAC.AFTER_COMPACTION,
-                            session_id=sid,
-                            runtime=self._runtime,
-                            messages=list(messages),
-                        )
-                    )
-                    # Re-collect injections with the new message list. Reuse
-                    # the same ``turn_index`` computed at turn-start — the
-                    # logical turn number doesn't change just because we
-                    # summarized earlier history; throttling decisions must
-                    # stay consistent for this turn.
-                    inj_ctx = InjectionContext(
-                        messages=tuple(messages),
-                        runtime=self._runtime,
-                        session_id=sid,
-                        turn_index=turn_index,
-                    )
-                    injected = await injection_engine.compose(inj_ctx)
-                    system = base_system + ("\n\n" + injected if injected else "")
-
-            step = await self._run_one_step(
-                messages=messages,
-                system=system,
-                stream_callback=stream_callback,
-                model=model_for_turn,
-                session_id=sid,
-            )
-            # Round 2B P-3: a returned LLM response is activity. Bump BEFORE
-            # the early-return path below so an end-turn turn that took 290s
-            # still resets the timer for any caller that resumes the same
-            # AgentLoop on the same session.
-            self._last_activity_at = time.monotonic()
-            self._last_input_tokens = step.input_tokens
-            total_input += step.input_tokens
-            total_output += step.output_tokens
-
-            if not step.should_continue:
-                # No tool calls — safe to persist the assistant message alone. (PR #1)
-                messages.append(step.assistant_message)
-                self._emit_before_message_write(
-                    session_id=sid, message=step.assistant_message
-                )
-                self.db.append_message(sid, step.assistant_message)
-                # Record an episodic event for this completed turn — pass the
-                # tool messages this turn produced so file paths get extracted. (PR #6)
-                if self._episodic is not None:
-                    try:
-                        turn_tool_msgs = [
-                            m for m in messages[turn_start_index:] if m.role == "tool"
-                        ]
-                        existing_count = len(self.db.list_episodic(session_id=sid, limit=10_000))
-                        self._episodic.record_turn(
-                            session_id=sid,
-                            turn_index=existing_count,
-                            user_message=user_message,
-                            assistant_message=step.assistant_message,
-                            tool_messages=turn_tool_msgs,
-                        )
-                    except Exception:  # noqa: BLE001
-                        # Episodic recording is best-effort; never fail the turn.
-                        pass
-                # Phase 12a: spawn the post-response reviewer fire-and-forget.
-                # The user-facing return is NOT awaited on this — if review
-                # crashes or takes long, the turn is unaffected.
-                if self._reviewer is not None and step.assistant_message.content:
-                    try:
-                        self._reviewer.spawn_review(
-                            user_message=user_message,
-                            assistant_message=step.assistant_message.content,
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-                # Phase 12b1 A7: notify the external memory provider that
-                # a turn completed. Bridge is fire-and-forget (exceptions
-                # swallowed internally) and guards on runtime.agent_context
-                # — symmetric with prefetch above. Only called on END_TURN;
-                # never on max-iterations exhaustion or exception exits,
-                # because a half-finished turn would confuse the provider.
-                await self.memory_bridge.sync_turn(
-                    user=user_message,
-                    assistant=step.assistant_message.content or "",
-                    turn_index=turn_start_index,
-                    runtime=self._runtime,
-                )
-                # TS-T6: kick off async title generation after the first
-                # user→assistant exchange. Daemon thread, fire-and-forget;
-                # ``maybe_auto_title`` self-skips on later turns and on
-                # already-titled sessions, so we can call it
-                # unconditionally here without checking the turn index.
-                try:
-                    from opencomputer.agent.title_generator import maybe_auto_title
-
-                    maybe_auto_title(
-                        session_db=self.db,
-                        session_id=sid,
-                        user_message=user_message,
-                        assistant_response=step.assistant_message.content or "",
-                        conversation_history=messages,
-                    )
-                except Exception:  # noqa: BLE001 — title gen is best-effort
-                    pass
-                self.db.end_session(sid)
-                return ConversationResult(
-                    final_message=step.assistant_message,
+                step = await self._run_one_step(
                     messages=messages,
+                    system=system,
+                    stream_callback=stream_callback,
+                    model=model_for_turn,
                     session_id=sid,
-                    iterations=iterations,
-                    input_tokens=total_input,
-                    output_tokens=total_output,
                 )
+                # Round 2B P-3: a returned LLM response is activity. Bump BEFORE
+                # the early-return path below so an end-turn turn that took 290s
+                # still resets the timer for any caller that resumes the same
+                # AgentLoop on the same session.
+                self._last_activity_at = time.monotonic()
+                self._last_input_tokens = step.input_tokens
+                total_input += step.input_tokens
+                total_output += step.output_tokens
 
-            # Push the current runtime to DelegateTool so subagents inherit it.
-            # Round 2B P-9: also snapshot ``messages`` onto the runtime so a
-            # delegate tool_use with ``forked_context=true`` can seed the
-            # child loop with the parent's recent conversation. Snapshot is
-            # taken BEFORE the assistant message containing the delegate
-            # tool_use is appended, so the snapshot ends at a clean
-            # turn-boundary (no orphan tool_use).
-            try:
-                import dataclasses as _dc
+                if not step.should_continue:
+                    # No tool calls — safe to persist the assistant message alone. (PR #1)
+                    messages.append(step.assistant_message)
+                    self._emit_before_message_write(
+                        session_id=sid, message=step.assistant_message
+                    )
+                    self.db.append_message(sid, step.assistant_message)
+                    # Record an episodic event for this completed turn — pass the
+                    # tool messages this turn produced so file paths get extracted. (PR #6)
+                    if self._episodic is not None:
+                        try:
+                            turn_tool_msgs = [
+                                m for m in messages[turn_start_index:] if m.role == "tool"
+                            ]
+                            existing_count = len(self.db.list_episodic(session_id=sid, limit=10_000))
+                            self._episodic.record_turn(
+                                session_id=sid,
+                                turn_index=existing_count,
+                                user_message=user_message,
+                                assistant_message=step.assistant_message,
+                                tool_messages=turn_tool_msgs,
+                            )
+                        except Exception:  # noqa: BLE001
+                            # Episodic recording is best-effort; never fail the turn.
+                            pass
+                    # Phase 12a: spawn the post-response reviewer fire-and-forget.
+                    # The user-facing return is NOT awaited on this — if review
+                    # crashes or takes long, the turn is unaffected.
+                    if self._reviewer is not None and step.assistant_message.content:
+                        try:
+                            self._reviewer.spawn_review(
+                                user_message=user_message,
+                                assistant_message=step.assistant_message.content,
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                    # Phase 12b1 A7: notify the external memory provider that
+                    # a turn completed. Bridge is fire-and-forget (exceptions
+                    # swallowed internally) and guards on runtime.agent_context
+                    # — symmetric with prefetch above. Only called on END_TURN;
+                    # never on max-iterations exhaustion or exception exits,
+                    # because a half-finished turn would confuse the provider.
+                    await self.memory_bridge.sync_turn(
+                        user=user_message,
+                        assistant=step.assistant_message.content or "",
+                        turn_index=turn_start_index,
+                        runtime=self._runtime,
+                    )
+                    # TS-T6: kick off async title generation after the first
+                    # user→assistant exchange. Daemon thread, fire-and-forget;
+                    # ``maybe_auto_title`` self-skips on later turns and on
+                    # already-titled sessions, so we can call it
+                    # unconditionally here without checking the turn index.
+                    try:
+                        from opencomputer.agent.title_generator import maybe_auto_title
 
-                from opencomputer.tools.delegate import DelegateTool
+                        maybe_auto_title(
+                            session_db=self.db,
+                            session_id=sid,
+                            user_message=user_message,
+                            assistant_response=step.assistant_message.content or "",
+                            conversation_history=messages,
+                        )
+                    except Exception:  # noqa: BLE001 — title gen is best-effort
+                        pass
+                    self.db.end_session(sid)
+                    return ConversationResult(
+                        final_message=step.assistant_message,
+                        messages=messages,
+                        session_id=sid,
+                        iterations=iterations,
+                        input_tokens=total_input,
+                        output_tokens=total_output,
+                    )
 
-                DelegateTool.set_runtime(
-                    _dc.replace(self._runtime, parent_messages=tuple(messages))
+                # Push the current runtime to DelegateTool so subagents inherit it.
+                # Round 2B P-9: also snapshot ``messages`` onto the runtime so a
+                # delegate tool_use with ``forked_context=true`` can seed the
+                # child loop with the parent's recent conversation. Snapshot is
+                # taken BEFORE the assistant message containing the delegate
+                # tool_use is appended, so the snapshot ends at a clean
+                # turn-boundary (no orphan tool_use).
+                try:
+                    import dataclasses as _dc
+
+                    from opencomputer.tools.delegate import DelegateTool
+
+                    DelegateTool.set_runtime(
+                        _dc.replace(self._runtime, parent_messages=tuple(messages))
+                    )
+                except Exception:
+                    pass  # delegate tool may not be registered yet in some contexts
+
+                # Dispatch tools BEFORE persisting the assistant message. If we saved
+                # it first and then got cancelled mid-dispatch, the DB would hold a
+                # tool_use with no matching tool_result — Anthropic 400s on resume.
+                # Atomic batch persist below restores the invariant.
+                tool_results = await self._dispatch_tool_calls(
+                    step.assistant_message.tool_calls or [],
+                    session_id=sid,
+                    turn_index=iterations,
                 )
-            except Exception:
-                pass  # delegate tool may not be registered yet in some contexts
+                # T1 of auto-skill-evolution plan — observe is_error flags
+                # so SessionEndEvent.had_errors reflects the truth even when
+                # the loop terminates cleanly via END_TURN.
+                if any(getattr(r, "is_error", False) for r in tool_results):
+                    _session_had_errors = True
+                # Round 2B P-3: tool dispatch finished — count both successful and
+                # error results as activity (the agent did *something*, that's
+                # what the inactivity timer cares about). ``_dispatch_tool_calls``
+                # also bumps per-call internally so a long parallel batch keeps
+                # the timer fresh between calls.
+                self._last_activity_at = time.monotonic()
+                turn_messages: list[Message] = [step.assistant_message, *tool_results]
+                messages.extend(turn_messages)
+                for _msg in turn_messages:
+                    self._emit_before_message_write(session_id=sid, message=_msg)
+                self.db.append_messages_batch(sid, turn_messages)
 
-            # Dispatch tools BEFORE persisting the assistant message. If we saved
-            # it first and then got cancelled mid-dispatch, the DB would hold a
-            # tool_use with no matching tool_result — Anthropic 400s on resume.
-            # Atomic batch persist below restores the invariant.
-            tool_results = await self._dispatch_tool_calls(
-                step.assistant_message.tool_calls or [],
-                session_id=sid,
-                turn_index=iterations,
+            # Budget exhausted
+            final = Message(
+                role="assistant",
+                content="[loop iteration budget exhausted — agent did not finish]",
             )
-            # Round 2B P-3: tool dispatch finished — count both successful and
-            # error results as activity (the agent did *something*, that's
-            # what the inactivity timer cares about). ``_dispatch_tool_calls``
-            # also bumps per-call internally so a long parallel batch keeps
-            # the timer fresh between calls.
-            self._last_activity_at = time.monotonic()
-            turn_messages: list[Message] = [step.assistant_message, *tool_results]
-            messages.extend(turn_messages)
-            for _msg in turn_messages:
-                self._emit_before_message_write(session_id=sid, message=_msg)
-            self.db.append_messages_batch(sid, turn_messages)
-
-        # Budget exhausted
-        final = Message(
-            role="assistant",
-            content="[loop iteration budget exhausted — agent did not finish]",
-        )
-        messages.append(final)
-        self._emit_before_message_write(session_id=sid, message=final)
-        self.db.append_message(sid, final)
-        self.db.end_session(sid)
-        return ConversationResult(
-            final_message=final,
-            messages=messages,
-            session_id=sid,
-            iterations=iterations,
-            input_tokens=total_input,
-            output_tokens=total_output,
-        )
+            messages.append(final)
+            self._emit_before_message_write(session_id=sid, message=final)
+            self.db.append_message(sid, final)
+            self.db.end_session(sid)
+            return ConversationResult(
+                final_message=final,
+                messages=messages,
+                session_id=sid,
+                iterations=iterations,
+                input_tokens=total_input,
+                output_tokens=total_output,
+            )
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            _session_end_reason = "cancelled"
+            raise
+        except LoopTimeout:
+            _session_end_reason = "timeout"
+            _session_had_errors = True
+            raise
+        except Exception:
+            _session_end_reason = "error"
+            _session_had_errors = True
+            raise
+        finally:
+            _session_iterations = iterations
+            await self._emit_session_end_event(
+                session_id=sid,
+                end_reason=_session_end_reason,
+                turn_count=_session_iterations,
+                duration_seconds=time.monotonic() - _session_started_at,
+                had_errors=_session_had_errors,
+            )
 
     # ─── V2.C-T5 persona auto-classifier ───────────────────────────
 
@@ -1219,6 +1271,46 @@ class AgentLoop:
                 )
 
         return overlay
+
+    # ─── T1 of auto-skill-evolution plan: SessionEndEvent emission ─
+
+    async def _emit_session_end_event(
+        self,
+        *,
+        session_id: str,
+        end_reason: str,
+        turn_count: int,
+        duration_seconds: float,
+        had_errors: bool,
+    ) -> None:
+        """Publish a :class:`SessionEndEvent` on the typed bus.
+
+        Wrapped in a broad try/except so a bus failure (subscribe-error,
+        broken default_bus, mid-shutdown loop close) cannot break the
+        loop's own return path. Best-effort; warnings logged.
+
+        T1 of 2026-04-27 auto-skill-evolution plan.
+        """
+        try:
+            from opencomputer.ingestion.bus import default_bus as _bus
+            from plugin_sdk.ingestion import SessionEndEvent as _SessionEndEvent
+
+            await _bus.apublish(
+                _SessionEndEvent(
+                    session_id=session_id,
+                    source="agent_loop",
+                    end_reason=end_reason,
+                    turn_count=turn_count,
+                    duration_seconds=duration_seconds,
+                    had_errors=had_errors,
+                )
+            )
+        except Exception:  # noqa: BLE001 — bus failure must not break the loop
+            _log.warning(
+                "bus: SessionEndEvent publish failed for session=%s — continuing",
+                session_id,
+                exc_info=True,
+            )
 
     # ─── PR-6 T2.3 session lifecycle ───────────────────────────────
 

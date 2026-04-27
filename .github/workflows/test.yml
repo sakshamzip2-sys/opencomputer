@@ -75,9 +75,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Run introspection + AGPL guard + doctor + ambient tests
+      - name: Run introspection + AGPL guard + doctor + ambient + skill-evolution tests
         # Explicit `shell: bash` so glob expansion works uniformly across
         # all three OSes — PowerShell (Windows default) doesn't expand
         # `*.py` the way bash does and would pass the literal star to pytest.
         shell: bash
-        run: pytest tests/test_introspection_*.py tests/test_no_agpl_imports.py tests/test_doctor_introspection_checks.py tests/test_ambient_*.py -v --tb=short
+        run: pytest tests/test_introspection_*.py tests/test_no_agpl_imports.py tests/test_doctor_introspection_checks.py tests/test_ambient_*.py tests/test_skill_evolution_*.py -v --tb=short

@@ -285,6 +285,23 @@ class AmbientSensorPauseEvent(SignalEvent):
     reason: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class SessionEndEvent(SignalEvent):
+    """Session reached a terminal state.
+
+    Emitted by the agent loop when a session ends — naturally via
+    END_TURN, via error, via user cancellation, or via timeout. Lets
+    subscribers (analytics, evolution, finalization) react without
+    polling the SessionDB.
+    """
+
+    event_type: str = "session_end"
+    end_reason: str = "completed"      # "completed" | "error" | "cancelled" | "timeout"
+    turn_count: int = 0
+    duration_seconds: float = 0.0
+    had_errors: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Normalizers
 # ---------------------------------------------------------------------------
@@ -375,6 +392,8 @@ __all__ = [
     # T1 of ambient foreground sensor plan (2026-04-27)
     "ForegroundAppEvent",
     "AmbientSensorPauseEvent",
+    # T1 of auto-skill-evolution plan (2026-04-27)
+    "SessionEndEvent",
     # normalizer
     "SignalNormalizer",
     "IdentityNormalizer",

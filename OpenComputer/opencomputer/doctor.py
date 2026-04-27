@@ -707,6 +707,90 @@ def _check_ambient_state(profile_home: Path) -> CheckResult:
     )
 
 
+def _check_skill_evolution_state(profile_home: Path) -> CheckResult:
+    """T8 — read skill-evolution state.json; warn if enabled but heartbeat stale.
+
+    The auto-skill-evolution subscriber is opt-in (default off). When the user
+    has flipped ``oc skills evolution on`` the in-process subscriber writes a
+    heartbeat file on every observed ``session_end`` event while enabled.
+    Sessions are infrequent (one per user-driven turn), so the staleness
+    threshold is generous (10 minutes) — this surfaces "subscriber not
+    running" rather than "no events recently".
+
+    Also surfaces a pile-up warning when the ``_proposed/`` candidates
+    directory has more than 20 entries — that's the user's review queue
+    and a backlog usually means they need to run ``oc skills review``.
+    """
+    state_path = profile_home / "skills" / "evolution_state.json"
+    if not state_path.exists():
+        return CheckResult(
+            ok=True,
+            level="info",
+            message=(
+                "skill-evolution disabled (default — opt in with "
+                "`opencomputer skills evolution on`)"
+            ),
+        )
+    try:
+        state = json.loads(state_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=f"evolution_state.json unreadable: {exc}",
+        )
+    if not state.get("enabled", False):
+        return CheckResult(ok=True, level="info", message="skill-evolution disabled")
+    hb_path = profile_home / "skills" / "evolution_heartbeat"
+    if not hb_path.exists():
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                "skill-evolution enabled but heartbeat missing — "
+                "subscriber not running (gateway boot likely failed silently)"
+            ),
+        )
+    try:
+        hb_age = time.time() - float(hb_path.read_text().strip())
+    except (OSError, ValueError):
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message="skill-evolution heartbeat unreadable",
+        )
+    if hb_age > 600:  # 10 minutes — events are infrequent
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=f"skill-evolution heartbeat stale ({hb_age:.0f}s old)",
+        )
+    proposed_dir = profile_home / "skills" / "_proposed"
+    proposal_count = (
+        sum(
+            1
+            for entry in proposed_dir.iterdir()
+            if entry.is_dir() and not entry.name.startswith(".")
+        )
+        if proposed_dir.exists()
+        else 0
+    )
+    if proposal_count > 20:
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                f"skill-evolution: {proposal_count} candidates pending — "
+                f"run `opencomputer skills review`"
+            ),
+        )
+    return CheckResult(
+        ok=True,
+        level="info",
+        message=f"skill-evolution running ({proposal_count} candidates pending review)",
+    )
+
+
 def _check_ambient_foreground_capable() -> CheckResult:
     """Verify the platform-specific foreground detector can actually run.
 
@@ -860,6 +944,17 @@ def run_doctor(fix: bool = False) -> int:
     checks.append(
         _result_to_check("ambient foreground", _check_ambient_foreground_capable())
     )
+
+    # Auto-skill-evolution (T8 of the skill-evolution series): per-profile
+    # state + heartbeat + candidate-backlog surface. Same shape as the
+    # ambient-state check above — opt-in, fail-open if disabled.
+    if profile_home is not None:
+        checks.append(
+            _result_to_check(
+                "skill-evolution",
+                _check_skill_evolution_state(profile_home),
+            )
+        )
 
     # Plugin-contributed checks + repairs (run last so plugins see a fully-
     # loaded registry, config, and DB-writable environment).
