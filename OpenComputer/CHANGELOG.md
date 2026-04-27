@@ -2,7 +2,24 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
-## [Unreleased]
+## [2026.4.27] — Round 4 ship: undeferred items, all 5 landed
+
+User reviewed the deferral list and pushed back on 5 items they
+wanted shipped. All 5 in this release plus archit-2's Layered
+Awareness V2.B Background Deepening (#155):
+
+- #156 Memory dreaming via `opencomputer cron` (item 4)
+- #157 MCP catalog 5→20 entries + `catalog` synonym (item 2)
+- #158 Per-profile credential isolation (item 5)
+- #159 LLM-mediated recall synthesis — Hermes pattern, not vectors (item 1)
+- #160 Telegram webhook mode (item 3)
+- #155 Layered Awareness V2.B (archit-2)
+
+Plan + audit lived at `~/.claude/plans/replicated-purring-dewdrop.md`.
+The most-counterintuitive finding from investigation: cron infra was
+already merged so item 4 was hours, not days; vector search was the
+WRONG answer for "better than keyword" — Hermes pattern (FTS5 + LLM
+synthesis) is.
 
 ### Added (Telegram webhook mode — Round 4 Item 3)
 

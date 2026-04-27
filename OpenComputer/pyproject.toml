@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "opencomputer"
-version = "2026.4.26.post3"
+version = "2026.4.27"
 description = "Personal AI agent framework — plugin-first, self-improving, multi-channel"
 readme = "README.md"
 requires-python = ">=3.12"
