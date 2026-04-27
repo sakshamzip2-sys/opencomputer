@@ -90,6 +90,7 @@ gui = [
 voice = [
   "webrtcvad>=2.0",
   "sounddevice>=0.4",
+  "soundfile>=0.12",
 ]
 # Optional: cross-platform local STT via whisper.cpp (pywhispercpp). Heavy
 # wheel; opt in with `pip install opencomputer[voice-local]`.
