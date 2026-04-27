@@ -1560,14 +1560,62 @@ class AgentLoop:
         else:
             results = [await _run_one(c) for c in calls]
 
+        # TS-T2: 3-level overflow defense. Layer 2 fires per-result with the
+        # tool name so per-tool thresholds (and pinned ``Read``=inf) apply.
+        # Layer 3 then runs over the batch in dict form to handle the
+        # "many medium-sized results combine to overflow" case. Both layers
+        # are idempotent against already-persisted blocks.
+        from opencomputer.agent.tool_result_storage import (
+            enforce_turn_budget as _enforce_turn_budget,
+        )
+        from opencomputer.agent.tool_result_storage import (
+            maybe_persist_tool_result as _maybe_persist_tool_result,
+        )
+
+        _name_by_id = {c.id: c.name for c in calls}
+        # Layer 2 — per-result spillover.
+        adjusted: list[ToolResult] = []
+        for r in results:
+            tool_name = _name_by_id.get(r.tool_call_id, "")
+            new_content = _maybe_persist_tool_result(
+                content=r.content or "",
+                tool_name=tool_name,
+                tool_use_id=r.tool_call_id,
+            )
+            if new_content != r.content:
+                # ``ToolResult`` is frozen+slots — rebuild via the constructor.
+                r = ToolResult(
+                    tool_call_id=r.tool_call_id,
+                    content=new_content,
+                    is_error=r.is_error,
+                )
+            adjusted.append(r)
+
+        # Layer 3 — per-turn aggregate budget. Operates over plain dicts and
+        # mutates them in place; we copy back into ToolResult objects.
+        tool_message_dicts: list[dict] = [
+            {"content": r.content, "tool_call_id": r.tool_call_id} for r in adjusted
+        ]
+        _enforce_turn_budget(tool_message_dicts)
+        adjusted = [
+            ToolResult(
+                tool_call_id=r.tool_call_id,
+                content=tool_message_dicts[i]["content"],
+                is_error=r.is_error,
+            )
+            if tool_message_dicts[i]["content"] != r.content
+            else r
+            for i, r in enumerate(adjusted)
+        ]
+
         return [
             Message(
                 role="tool",
                 content=r.content,
                 tool_call_id=r.tool_call_id,
-                name=next((c.name for c in calls if c.id == r.tool_call_id), None),
+                name=_name_by_id.get(r.tool_call_id),
             )
-            for r in results
+            for r in adjusted
         ]
 
     def _emit_before_message_write(
