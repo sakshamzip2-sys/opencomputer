@@ -4,6 +4,47 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (TUI Phase 2.A — session management slash commands)
+
+Two slash commands that let the user reorganize their conversation
+history without exiting the chat:
+
+- **`/rename <title>`** (alias `/title`) — set a friendly title for the
+  current session. Persists via `SessionDB.set_session_title`. The
+  background auto-titler from the Tier S port already skips sessions
+  with a stored title, so manual renames stick.
+- **`/resume [last|<id-prefix>|pick]`** — switch the active session
+  mid-chat without restarting the CLI. Bare `/resume` opens the picker
+  (numbered list with titles); `/resume last` jumps to the most recent
+  prior session; `/resume abc1` matches a session-id prefix.
+  Disambiguates ambiguous prefixes by listing candidates. Short-circuits
+  if you `/resume` the session you're already on.
+
+### New SlashContext callbacks
+
+- `on_rename: Callable[[str], bool]` — handler for `/rename`.
+- `on_resume: Callable[[str], bool]` — handler for `/resume`.
+
+The chat loop (`_run_chat_session`) wires both as closures that mutate
+`nonlocal session_id`. When a `/resume` succeeds, the cumulative
+token tally (`_token_tally`) resets and the banner shows the new
+session's title.
+
+### Companion voice spec
+
+`docs/superpowers/specs/2026-04-27-companion-voice-examples.md` —
+canonical reference for how the agent should sound when asked "how are
+you?" 9 emotional registers + 50+ exemplar responses + the principles
+(name a specific state, anchor in something real, contractions and
+natural rhythm, turn it back, no "As an AI" dodge). The future
+companion persona will reference this file in its system prompt overlay.
+
+### Tests
+
+11 new tests in `tests/test_cli_ui_session_slash.py` covering registry
+entries, alias resolution, dispatch behavior, callback failure paths,
+and empty-title handling. Full suite: 3824 passing, 12 skipped.
+
 ### Added (Curated skills import — surgical 10-item subset)
 
 Imported 10 specifically-valuable patterns from
