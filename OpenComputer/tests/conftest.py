@@ -191,10 +191,15 @@ def _register_skill_evolution_alias() -> None:
         mod.__path__ = [str(_SKILL_EVO_DIR)]
         mod.__package__ = "extensions.skill_evolution"
         sys.modules["extensions.skill_evolution"] = mod
+        # Bind on parent so pytest's monkeypatch dotted-path resolver
+        # (which uses getattr) can find ``extensions.skill_evolution``.
+        sys.modules["extensions"].skill_evolution = mod
 
-    for sub in ("pattern_detector", "skill_extractor", "candidate_store"):
+    parent = sys.modules["extensions.skill_evolution"]
+    for sub in ("pattern_detector", "skill_extractor", "candidate_store", "subscriber"):
         full_name = f"extensions.skill_evolution.{sub}"
         if full_name in sys.modules:
+            setattr(parent, sub, sys.modules[full_name])
             continue
         init = _SKILL_EVO_DIR / f"{sub}.py"
         if not init.exists():
@@ -206,6 +211,8 @@ def _register_skill_evolution_alias() -> None:
         sub_mod.__package__ = "extensions.skill_evolution"
         sys.modules[full_name] = sub_mod
         spec.loader.exec_module(sub_mod)
+        # Bind on parent so monkeypatch.setattr("extensions.skill_evolution.X", ...) works.
+        setattr(parent, sub, sub_mod)
 
 
 _register_coding_harness_alias()
