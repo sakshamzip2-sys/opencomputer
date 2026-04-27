@@ -241,7 +241,7 @@ def _register_voice_mode_alias() -> None:
         sys.modules["extensions"].voice_mode = mod
 
     parent = sys.modules["extensions.voice_mode"]
-    for sub in ("audio_capture", "vad", "stt", "tts", "tts_playback", "playback", "orchestrator", "plugin"):
+    for sub in ("audio_capture", "vad", "stt", "tts", "tts_playback", "playback", "orchestrator", "voice_mode", "plugin"):
         full_name = f"extensions.voice_mode.{sub}"
         if full_name in sys.modules:
             setattr(parent, sub, sys.modules[full_name])
