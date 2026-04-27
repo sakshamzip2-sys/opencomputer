@@ -1416,6 +1416,11 @@ from opencomputer.cli_models import models_app  # noqa: E402
 
 app.add_typer(models_app, name="models")
 
+# V2.C-T3 — Layered Awareness controls (patterns + personas)
+from opencomputer.cli_awareness import awareness_app  # noqa: E402
+
+app.add_typer(awareness_app, name="awareness")
+
 
 @config_app.command("show")
 def config_show() -> None:
