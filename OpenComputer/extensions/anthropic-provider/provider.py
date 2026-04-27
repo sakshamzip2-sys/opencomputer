@@ -14,19 +14,50 @@ from typing import Any, Literal
 
 import httpx
 from anthropic import AsyncAnthropic
+from anthropic import RateLimitError as AnthropicRateLimitError
 from anthropic.types import Message as AnthropicMessage
 from pydantic import BaseModel, Field
 
 from opencomputer.agent.credential_pool import CredentialPool
 from opencomputer.agent.prompt_caching import apply_anthropic_cache_control
+from opencomputer.agent.rate_guard import (
+    format_remaining,
+    rate_limit_remaining,
+    record_rate_limit,
+)
 from plugin_sdk.core import Message, ToolCall
 from plugin_sdk.provider_contract import (
     BaseProvider,
     ProviderResponse,
+    RateLimitedError,
     StreamEvent,
     Usage,
 )
 from plugin_sdk.tool_contract import ToolSchema
+
+_RATE_GUARD_PROVIDER = "anthropic"
+
+
+def _check_rate_limit() -> None:
+    """TS-T7 — short-circuit if a previous 429 hasn't reset yet."""
+    remaining = rate_limit_remaining(_RATE_GUARD_PROVIDER)
+    if remaining is not None:
+        raise RateLimitedError(
+            _RATE_GUARD_PROVIDER,
+            f"Anthropic rate-limited; wait {format_remaining(remaining)}",
+        )
+
+
+def _record_429(exc: AnthropicRateLimitError) -> None:
+    """TS-T7 — persist the 429 so concurrent sessions back off too."""
+    headers: dict[str, str] | None = None
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            headers = dict(response.headers)
+        except Exception:
+            headers = None
+    record_rate_limit(_RATE_GUARD_PROVIDER, headers=headers)
 
 
 class AnthropicProviderConfig(BaseModel):
@@ -288,6 +319,10 @@ class AnthropicProvider(BaseProvider):
         temperature: float = 1.0,
     ) -> ProviderResponse:
         """Low-level complete using the given API key (pool-rotation target)."""
+        # TS-T7 — short-circuit before the SDK so concurrent sessions
+        # don't keep pinging while a 429 cools down.
+        _check_rate_limit()
+
         client = self._build_client_for_key(key) if key != self._api_key else self.client
         anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
@@ -305,7 +340,13 @@ class AnthropicProvider(BaseProvider):
             kwargs["system"] = sys_for_sdk
         if tools:
             kwargs["tools"] = [t.to_anthropic_format() for t in tools]
-        resp = await client.messages.create(**kwargs)
+        try:
+            resp = await client.messages.create(**kwargs)
+        except AnthropicRateLimitError as exc:
+            # TS-T7 — record the 429 so other sessions back off, then
+            # re-raise so the caller's retry/fallback logic still sees it.
+            _record_429(exc)
+            raise
         return self._parse_response(resp)
 
     async def complete(
@@ -358,6 +399,9 @@ class AnthropicProvider(BaseProvider):
         temperature: float = 1.0,
     ) -> ProviderResponse:
         """Low-level stream_complete that aggregates into a ProviderResponse (pool target)."""
+        # TS-T7 — same cross-session guard as the non-streaming path.
+        _check_rate_limit()
+
         client = self._build_client_for_key(key) if key != self._api_key else self.client
         anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
@@ -372,8 +416,12 @@ class AnthropicProvider(BaseProvider):
             kwargs["system"] = sys_for_sdk
         if tools:
             kwargs["tools"] = [t.to_anthropic_format() for t in tools]
-        async with client.messages.stream(**kwargs) as stream_ctx:
-            final = await stream_ctx.get_final_message()
+        try:
+            async with client.messages.stream(**kwargs) as stream_ctx:
+                final = await stream_ctx.get_final_message()
+        except AnthropicRateLimitError as exc:
+            _record_429(exc)
+            raise
         return self._parse_response(final)
 
     async def stream_complete(
@@ -429,11 +477,17 @@ class AnthropicProvider(BaseProvider):
             return
 
         # No pool — native streaming path (unchanged behavior).
-        async with self.client.messages.stream(**kwargs) as stream:
-            async for text in stream.text_stream:
-                if text:
-                    yield StreamEvent(kind="text_delta", text=text)
-            final = await stream.get_final_message()
+        # TS-T7 — short-circuit if a previous 429 hasn't reset.
+        _check_rate_limit()
+        try:
+            async with self.client.messages.stream(**kwargs) as stream:
+                async for text in stream.text_stream:
+                    if text:
+                        yield StreamEvent(kind="text_delta", text=text)
+                final = await stream.get_final_message()
+        except AnthropicRateLimitError as exc:
+            _record_429(exc)
+            raise
 
         yield StreamEvent(kind="done", response=self._parse_response(final))
 
