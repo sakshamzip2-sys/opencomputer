@@ -117,9 +117,32 @@ class TelegramAdapter(BaseChannelAdapter):
         self.base_url = f"https://api.telegram.org/bot{self.token}"
         self._client: httpx.AsyncClient | None = None
         self._bot_id: int | None = None
+        self._bot_username: str | None = None
         self._offset: int = 0
         self._polling_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+        # Hermes PR 3a.1 — mention-boundary gating (DEFAULT OFF). When
+        # ``require_mention`` is True, group messages must explicitly
+        # @-mention the bot (entity-based, NEVER substring) OR reply to
+        # one of the bot's messages, OR match a configured wake-word
+        # regex. ``free_response_chats`` lists chat ids exempt from the
+        # gate (e.g. the operator's 1:1 DM). 1:1 chats also bypass the
+        # gate by default — only group/supergroup chats are filtered.
+        self._require_mention: bool = bool(config.get("require_mention") or False)
+        self._free_response_chats: set[str] = {
+            str(c) for c in (config.get("free_response_chats") or [])
+        }
+        # Compile wake-word regexes once. Bad patterns are logged + dropped
+        # so a single mistyped entry doesn't break inbound delivery.
+        self._mention_patterns: list[re.Pattern[str]] = []
+        for pat in config.get("mention_patterns") or []:
+            try:
+                self._mention_patterns.append(re.compile(pat, re.IGNORECASE))
+            except re.error as exc:
+                logger.warning(
+                    "telegram mention_patterns: ignoring invalid regex %r: %s",
+                    pat, exc,
+                )
         # Round 4 Item 3 — webhook mode config. Defaults to "polling"
         # so existing users see no change. Set "webhook" + a public
         # ``webhook_url`` (HTTPS) to switch. ``webhook_port`` defaults
@@ -193,9 +216,12 @@ class TelegramAdapter(BaseChannelAdapter):
                 self._release_lock()
                 return False
             self._bot_id = data["result"]["id"]
+            # PR 3a.1 — capture the bot's @username so entity-based
+            # mention matching can compare exactly (no substring).
+            self._bot_username = data["result"].get("username") or None
             logger.info(
                 "telegram: connected as @%s (id=%s)",
-                data["result"].get("username", "?"),
+                self._bot_username or "?",
                 self._bot_id,
             )
         except Exception as e:  # noqa: BLE001
@@ -370,6 +396,12 @@ class TelegramAdapter(BaseChannelAdapter):
         if self._bot_id is not None and frm.get("id") == self._bot_id:
             return
 
+        # PR 3a.1 — mention-boundary gate. Default-OFF; when enabled
+        # group messages must explicitly mention the bot or be replies
+        # to it. 1:1 DMs always pass through.
+        if not self._should_process_message(msg):
+            return
+
         # Text — may be empty if the message is just an attachment with no caption
         text = msg.get("text") or msg.get("caption", "")
 
@@ -440,6 +472,106 @@ class TelegramAdapter(BaseChannelAdapter):
             metadata=metadata,
         )
         await self.handle_message(event)
+
+    # ------------------------------------------------------------------
+    # PR 3a.1 — mention-boundary helpers
+    # ------------------------------------------------------------------
+
+    def _message_mentions_bot(self, msg: dict[str, Any]) -> bool:
+        """Entity-based @-mention detection.
+
+        Telegram puts every @mention in the ``entities`` (or
+        ``caption_entities``) array with ``type="mention"`` for plain
+        ``@username`` references, or ``type="text_mention"`` for users
+        without a public username (which carries the user object inline).
+
+        We match strictly against ``self._bot_username`` (exact, case-
+        insensitive) and ``self._bot_id``. NEVER substring — that would
+        treat ``@hermes_bot_admin`` as a mention of ``@hermes_bot``.
+        """
+        entities = msg.get("entities") or msg.get("caption_entities") or []
+        if not entities:
+            return False
+        text = msg.get("text") or msg.get("caption") or ""
+        # UTF-16 indexing: Telegram entity offsets are in UTF-16 code units,
+        # but for the @mention case we just need the substring at the entity
+        # range; Python's str slice on the BMP-only ASCII bot username is
+        # fine because @-usernames are 7-bit ASCII per Telegram rules.
+        text_utf16 = text.encode("utf-16-le")
+        for ent in entities:
+            etype = ent.get("type")
+            if etype == "mention":
+                offset = int(ent.get("offset", 0))
+                length = int(ent.get("length", 0))
+                # Slice in UTF-16 code units, decode back to str.
+                try:
+                    raw = text_utf16[offset * 2 : (offset + length) * 2].decode(
+                        "utf-16-le"
+                    )
+                except UnicodeDecodeError:
+                    continue
+                # ``raw`` is e.g. "@hermes_bot". Compare case-insensitively
+                # against our @username; exact equality only.
+                if (
+                    raw.startswith("@")
+                    and self._bot_username is not None
+                    and raw[1:].lower() == self._bot_username.lower()
+                ):
+                    return True
+            elif etype == "text_mention":
+                user = ent.get("user") or {}
+                if (
+                    self._bot_id is not None
+                    and user.get("id") == self._bot_id
+                ):
+                    return True
+        return False
+
+    def _is_reply_to_bot(self, msg: dict[str, Any]) -> bool:
+        """``True`` iff the message is a reply to one of our messages."""
+        reply_to = msg.get("reply_to_message")
+        if not reply_to:
+            return False
+        sender = reply_to.get("from") or {}
+        return self._bot_id is not None and sender.get("id") == self._bot_id
+
+    def _should_process_message(self, msg: dict[str, Any]) -> bool:
+        """Apply the mention-boundary gate to a raw inbound message dict.
+
+        Default-OFF: when ``require_mention`` is False, every message
+        passes (preserves pre-3a behaviour exactly — see audit C4 mandate).
+
+        When enabled, the gate applies ONLY to group/supergroup chats.
+        Private (1:1) chats always pass — there's no ambiguity about
+        addressee in a DM. ``free_response_chats`` exempts specific
+        chat ids from the gate even in groups.
+        """
+        if not self._require_mention:
+            return True
+
+        chat = msg.get("chat") or {}
+        chat_type = chat.get("type") or "private"
+        if chat_type == "private":
+            return True
+
+        chat_id = str(chat.get("id", ""))
+        if chat_id in self._free_response_chats:
+            return True
+
+        if self._is_reply_to_bot(msg):
+            return True
+
+        if self._message_mentions_bot(msg):
+            return True
+
+        # Wake-word regex patterns operate on plain text — the user
+        # opted into matching specific tokens (e.g. r"\bhey hermes\b").
+        if self._mention_patterns:
+            text = msg.get("text") or msg.get("caption") or ""
+            if any(p.search(text) for p in self._mention_patterns):
+                return True
+
+        return False
 
     async def _handle_steer_command(self, *, chat_id: str, text: str) -> None:
         """Route a ``/steer <text>`` Telegram message into SteerRegistry.
