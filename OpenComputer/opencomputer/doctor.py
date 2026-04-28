@@ -1173,4 +1173,92 @@ def run_doctor(fix: bool = False) -> int:
     return failures
 
 
-__all__ = ["run_doctor"]
+async def auth_monitor_once(
+    *,
+    providers: dict[str, object],
+    cooldown_reason: str = "health_check_failed",
+    logger=None,
+) -> dict[str, dict[str, str]]:
+    """One-pass health check across credential pools (OpenClaw 1.E port).
+
+    For each provider in ``providers``, calls ``provider.ping(key)`` for each
+    key in its ``credential_pool``. On exception, calls the existing
+    ``credential_pool.report_auth_failure(key, reason=cooldown_reason)``
+    so the existing per-key quarantine kicks in. On success, no-op.
+
+    Providers without ``ping`` are skipped with a logger warning.
+
+    Returns a per-provider status dict for the CLI / test consumer.
+    """
+    import logging
+
+    log = logger or logging.getLogger(__name__)
+    report: dict[str, dict[str, str]] = {}
+    for name, provider in providers.items():
+        report[name] = {}
+        ping = getattr(provider, "ping", None)
+        pool = getattr(provider, "credential_pool", None) or getattr(
+            provider, "_credential_pool", None
+        )
+        if pool is None:
+            report[name]["__error__"] = "no credential_pool"
+            log.debug("auth_monitor: provider %s has no credential_pool; skip", name)
+            continue
+        if ping is None:
+            report[name]["__error__"] = "no ping method"
+            log.warning(
+                "auth_monitor: provider %s has no ping(); skipping (future PR adds ping)",
+                name,
+            )
+            continue
+        keys = [s.key for s in getattr(pool, "_states", [])]
+        for key in keys:
+            short = key[:8] + "..."
+            try:
+                await ping(key)
+                report[name][short] = "ok"
+            except Exception as exc:
+                await pool.report_auth_failure(key, reason=cooldown_reason)
+                report[name][short] = f"failed: {type(exc).__name__}"
+                log.warning(
+                    "auth_monitor: %s key %s failed health check; quarantined (%s)",
+                    name,
+                    short,
+                    type(exc).__name__,
+                )
+    return report
+
+
+async def auth_monitor_loop(
+    *,
+    providers: dict[str, object],
+    interval_seconds: int = 300,
+    stop_event: asyncio.Event | None = None,
+    logger=None,
+) -> None:
+    """Background loop calling ``auth_monitor_once`` every ``interval_seconds``.
+
+    Exits promptly when ``stop_event.is_set()``. Opt-in: callers wire this
+    via ``asyncio.create_task(auth_monitor_loop(...))`` only when
+    ``config.auth.monitor.enabled`` is set.
+    """
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            return
+        try:
+            await auth_monitor_once(providers=providers, logger=logger)
+        except Exception:
+            (logger or __import__("logging").getLogger(__name__)).exception(
+                "auth_monitor_loop: pass failed; will retry on next interval"
+            )
+        if stop_event is None:
+            await asyncio.sleep(interval_seconds)
+        else:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+                return
+            except asyncio.TimeoutError:
+                continue
+
+
+__all__ = ["run_doctor", "auth_monitor_once", "auth_monitor_loop"]
