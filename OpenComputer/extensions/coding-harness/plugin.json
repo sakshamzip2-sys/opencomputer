@@ -17,7 +17,9 @@
     "KillProcess",
     "Rewind",
     "CheckpointDiff",
-    "RunTests",
+    "RunTests"
+  ],
+  "optional_tool_names": [
     "list_app_usage",
     "read_clipboard_once",
     "screenshot",

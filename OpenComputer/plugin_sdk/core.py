@@ -304,7 +304,20 @@ class PluginManifest:
     # tracker (E2) to resolve tool-not-found events to candidate plugins
     # without loading them. Default ``()`` means the plugin registers no
     # tools (provider-only / channel-only / memory-only plugins).
+    #
+    # Tools that depend on optional pip extras (and may not register at
+    # runtime if the extra isn't installed) belong in
+    # ``optional_tool_names`` instead — the drift-guard test enforces
+    # that ``tool_names`` matches *registered* tools and tolerates
+    # missing optional ones.
     tool_names: tuple[str, ...] = ()
+    # Tools registered conditionally — typically gated on an optional
+    # pip extra (e.g. ``coding-harness``'s introspection tools depend
+    # on ``mss`` / ``rapidocr_onnxruntime``). The demand-tracker queries
+    # both ``tool_names`` and ``optional_tool_names`` so the user can
+    # still be pointed at the right plugin when an optional tool is
+    # unavailable. Default ``()`` keeps every existing manifest valid.
+    optional_tool_names: tuple[str, ...] = ()
     # Sub-project G.11 (Tier 2.13): MCP servers this plugin needs in order
     # to function. Each entry is either:
     #   - a preset slug (e.g. ``"filesystem"``, ``"github"``) — resolved

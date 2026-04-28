@@ -612,6 +612,15 @@ def _check_introspection_deps() -> list[CheckResult]:
     when introspection isn't actively used.
     """
     results: list[CheckResult] = []
+    # Introspection (coding-harness Tier 1) is opt-in — its tools live
+    # under ``optional_tool_names`` in coding-harness/plugin.json and the
+    # plugin filters them at register time when their pip extra is
+    # missing. So missing-introspection-deps is a *warning* (advisory:
+    # "this opt-in feature isn't available"), not an *error* (which
+    # would fail ``oc doctor`` exit-code on every machine without the
+    # extras). Mirrors the voice-mode pattern at
+    # :func:`_check_voice_mode_capable` — opt-in features degrade with
+    # warnings, never errors.
     for mod_name in ("psutil", "mss", "pyperclip", "rapidocr_onnxruntime"):
         try:
             __import__(mod_name)
@@ -623,7 +632,7 @@ def _check_introspection_deps() -> list[CheckResult]:
             results.append(
                 CheckResult(
                     ok=False,
-                    level="error",
+                    level="warning",
                     message=f"{mod_name} missing — pip install -U {pip_name}",
                 )
             )

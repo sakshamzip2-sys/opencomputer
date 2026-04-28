@@ -139,6 +139,10 @@ class PluginManifestSchema(BaseModel):
     # default_factory keeps existing manifests (without this field) valid
     # under extra="forbid".
     tool_names: list[str] = Field(default_factory=list)
+    # Tools registered conditionally on optional pip extras. Drift-guard
+    # tolerates these being missing at runtime (mss / rapidocr_onnxruntime
+    # for coding-harness's introspection tools, for example).
+    optional_tool_names: list[str] = Field(default_factory=list)
     # Phase 12b1 Sub-project A — Honcho-as-default
     enabled_by_default: bool = Field(default=False)
     # Sub-project G.11 (Tier 2.13) — MCP catalog binding. Plugin-declared

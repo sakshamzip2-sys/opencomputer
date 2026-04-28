@@ -127,7 +127,11 @@ def test_bundled_plugin_manifests_have_accurate_tool_names(
 
     try:
         for cand in candidates:
-            declared: set[str] = set(cand.manifest.tool_names)
+            declared_required: set[str] = set(cand.manifest.tool_names)
+            declared_optional: set[str] = set(
+                getattr(cand.manifest, "optional_tool_names", ())
+            )
+            declared_all: set[str] = declared_required | declared_optional
 
             api, tool_registry = _isolated_api(tmp_path / cand.manifest.id)
             loaded = load_plugin(cand, api)
@@ -143,13 +147,27 @@ def test_bundled_plugin_manifests_have_accurate_tool_names(
             registered: set[str] = set(tool_registry.names())
 
             # Trivially-passing case: both empty.
-            if declared == set() and registered == set():
+            if declared_all == set() and registered == set():
                 continue
 
-            if declared != registered:
+            # Drift invariant (post-optional_tool_names refactor):
+            #   1. Every required tool MUST register. Missing-required is
+            #      a real drift bug.
+            #   2. Every registered tool MUST be declared (required OR
+            #      optional). Surprise registrations are also drift.
+            #   3. Optional tools are tolerated as missing (e.g.
+            #      coding-harness's introspection tools when ``mss`` /
+            #      ``rapidocr_onnxruntime`` aren't installed).
+            missing_required = declared_required - registered
+            surprise_registered = registered - declared_all
+            if missing_required or surprise_registered:
                 mismatches.append(
                     f"plugin {cand.manifest.id!r}: "
-                    f"declared={sorted(declared)} registered={sorted(registered)}"
+                    f"missing_required={sorted(missing_required)} "
+                    f"surprise_registered={sorted(surprise_registered)} "
+                    f"(declared_required={sorted(declared_required)} "
+                    f"declared_optional={sorted(declared_optional)} "
+                    f"registered={sorted(registered)})"
                 )
     finally:
         # Restore sys.path + drop any synthetic plugin modules we loaded so

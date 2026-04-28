@@ -454,6 +454,7 @@ def _validate_runtime_contract(
     new_providers = after.provider_names - before.provider_names
     new_channels = after.channel_names - before.channel_names
     new_slash = after.slash_names - before.slash_names
+    new_injection = after.injection_provider_ids - before.injection_provider_ids
     added_hooks = after.hook_count - before.hook_count
     added_memory = (
         after.memory_provider_present and not before.memory_provider_present
@@ -492,6 +493,7 @@ def _validate_runtime_contract(
         and not new_providers
         and not new_channels
         and not new_slash
+        and not new_injection
         and added_hooks == 0
         and not added_memory
     ):

@@ -171,6 +171,21 @@ Rules for using memory:
 These are the top-ranked facts from your user-model graph (identity > goal > preference > attribute, then by confidence). They reflect what bootstrap, interview, and observation have inferred — they may be stale or wrong. Trust the user's stated preferences over an inferred fact.
 
 {% endif %}
+{% if user_tone -%}
+<user-tone>
+{{ user_tone }}
+</user-tone>
+
+The user stated this as their tone preference during onboarding. Honour it as the default register — it overrides any persona-default tone. Match this preference unless the current task makes a different register clearly more useful (e.g. a bug is forcing precision the user didn't ask for).
+
+{% elif persona_preferred_tone -%}
+<persona-tone>
+{{ persona_preferred_tone }}
+</persona-tone>
+
+The above is the active persona's default tone (from its YAML). Apply it as the register for this session. The user has NOT stated an explicit tone preference, so this persona-default is the best signal — but if the user states one mid-session, switch.
+
+{% endif %}
 {% if persona_overlay -%}
 ## Active persona
 

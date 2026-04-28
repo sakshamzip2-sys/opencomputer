@@ -180,3 +180,122 @@ def test_persona_overlay_classifies_vibe_for_non_companion(
     assert len(rows) == 1, "vibe should be logged for non-companion persona"
     assert rows[0]["vibe"] == "frustrated"
     assert rows[0]["classifier_version"] == "regex_v1"
+
+
+# ── Prompt A: cross-persona previous-session anchor ──────────────────
+
+
+def _seed_prev_session_with_vibe(
+    db: SessionDB, *, prev_id: str, vibe: str, age_seconds: float
+) -> None:
+    """Create a previous session with a known vibe N seconds in the past."""
+    db.create_session(prev_id, platform="cli", model="m")
+    db.append_message(prev_id, Message(role="user", content="hi"))
+    db.set_session_vibe(prev_id, vibe)
+    # set_session_vibe stamps vibe_updated = time.time(); back-date it.
+    with sqlite3.connect(db.db_path) as conn:
+        conn.execute(
+            "UPDATE sessions SET vibe_updated = ? WHERE id = ?",
+            (time.time() - age_seconds, prev_id),
+        )
+        conn.commit()
+
+
+def _run_overlay_with_persona(
+    db: SessionDB,
+    *,
+    session_id: str,
+    persona_id: str,
+    vibe_now: str,
+) -> str:
+    """Build a minimal AgentLoop and call _build_persona_overlay."""
+    from opencomputer.agent.loop import AgentLoop
+
+    loop = AgentLoop.__new__(AgentLoop)
+    loop.db = db
+    loop._active_persona_id = ""
+
+    fake_persona = type(
+        "P", (), {"persona_id": persona_id, "confidence": 0.9, "reasoning": ""}
+    )()
+    with patch(
+        "opencomputer.awareness.personas.classifier.classify",
+        return_value=fake_persona,
+    ), patch(
+        "opencomputer.awareness.personas.registry.get_persona",
+        return_value={"id": persona_id, "system_prompt_overlay": "x"},
+    ), patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="",
+    ), patch(
+        "opencomputer.agent.vibe_classifier.classify_vibe",
+        return_value=vibe_now,
+    ):
+        return loop._build_persona_overlay(session_id)
+
+
+def test_prev_session_anchor_companion_keeps_existing_framing(
+    tmp_path: Path,
+) -> None:
+    """Companion persona retains the existing 'PREVIOUS-SESSION VIBE
+    (anchor for the companion)' framing — no behavior change for companion.
+    """
+    db = SessionDB(tmp_path / "s.db")
+    _seed_session(db, "s1")
+    _seed_prev_session_with_vibe(
+        db, prev_id="s_prev", vibe="frustrated", age_seconds=2 * 3600
+    )
+    overlay = _run_overlay_with_persona(
+        db, session_id="s1", persona_id="companion", vibe_now="curious"
+    )
+    assert "PREVIOUS-SESSION VIBE (anchor for the companion)" in overlay
+    assert "**frustrated**" in overlay
+
+
+def test_prev_session_anchor_non_companion_uses_neutral_framing(
+    tmp_path: Path,
+) -> None:
+    """Non-companion persona must still receive the previous-session vibe
+    anchor, but in a neutral framing — not the companion-specific text.
+
+    This is the headline regression for Prompt A: pre-change, non-companion
+    sessions saw zero cross-session anchor.
+    """
+    db = SessionDB(tmp_path / "s.db")
+    _seed_session(db, "s1")
+    _seed_prev_session_with_vibe(
+        db, prev_id="s_prev", vibe="stuck", age_seconds=2 * 3600
+    )
+    overlay = _run_overlay_with_persona(
+        db, session_id="s1", persona_id="coding", vibe_now="curious"
+    )
+    # Neutral framing must mention recent user state and the vibe.
+    assert "Recent user state" in overlay
+    assert "stuck" in overlay
+    # Must NOT use the companion-specific framing.
+    assert "anchor for the companion" not in overlay
+
+
+def test_prev_session_anchor_skipped_when_prev_vibe_calm(
+    tmp_path: Path,
+) -> None:
+    """Calm is the regex classifier's default fallback — injecting a
+    'recent user state: calm' anchor adds noise without signal. Skip it
+    on every persona, including companion.
+    """
+    db = SessionDB(tmp_path / "s.db")
+    _seed_session(db, "s1")
+    _seed_prev_session_with_vibe(
+        db, prev_id="s_prev", vibe="calm", age_seconds=2 * 3600
+    )
+    # Non-companion persona: no anchor at all.
+    overlay_coding = _run_overlay_with_persona(
+        db, session_id="s1", persona_id="coding", vibe_now="curious"
+    )
+    assert "Recent user state" not in overlay_coding
+    assert "PREVIOUS-SESSION VIBE" not in overlay_coding
+    # Companion persona: also skipped — calm carries no signal.
+    overlay_companion = _run_overlay_with_persona(
+        db, session_id="s1", persona_id="companion", vibe_now="curious"
+    )
+    assert "PREVIOUS-SESSION VIBE" not in overlay_companion

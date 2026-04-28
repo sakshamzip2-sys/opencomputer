@@ -291,6 +291,48 @@ def test_mixed_kind_with_one_tool_no_warning(
     )
 
 
+def test_mixed_kind_with_only_injection_provider_no_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """kind=mixed + only injection provider registered → no warning.
+
+    Regression: an injection-only plugin (e.g. extensions/affect-injection)
+    was triggering the 'registered no mixed' warning because the loader's
+    drift check at _validate_runtime_contract didn't count
+    register_injection_provider toward the kind=mixed claim. The snapshot
+    already captures injection_provider_ids — the check just needed to
+    include it.
+    """
+    root = tmp_path / "mix-injection"
+    _write_entry(
+        root,
+        "entry_mod",
+        (
+            "from plugin_sdk.injection import (\n"
+            "    DynamicInjectionProvider, InjectionContext\n"
+            ")\n"
+            "class P(DynamicInjectionProvider):\n"
+            "    @property\n"
+            "    def provider_id(self):\n"
+            "        return 'mix-injection:v1'\n"
+            "    async def collect(self, ctx):\n"
+            "        return None\n"
+            "def register(api):\n"
+            "    api.register_injection_provider(P())\n"
+        ),
+    )
+    cand = _candidate(root, "entry_mod", "mix-injection", kind="mixed")
+
+    caplog.set_level(logging.WARNING, logger="opencomputer.plugins.loader")
+    loaded = load_plugin(cand, _isolated_api(tmp_path))
+
+    assert loaded is not None
+    msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert not any(
+        "mix-injection" in m and "registered no" in m for m in msgs
+    ), f"unexpected drift warning for injection-only mixed plugin: {msgs}"
+
+
 def test_mixed_kind_with_nothing_registered_emits_warning(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

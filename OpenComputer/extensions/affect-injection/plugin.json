@@ -1,0 +1,14 @@
+{
+  "id": "affect-injection",
+  "name": "Affect Injection",
+  "description": "Per-turn DynamicInjectionProvider that surfaces user state (vibe + recent arc + active life-event pattern) as a structured <user-state> block in the system prompt. Read-only over sessions.db / life-event registry / F4 graph.",
+  "version": "0.1.0",
+  "author": "OpenComputer",
+  "license": "MIT",
+  "kind": "mixed",
+  "entry": "plugin",
+  "schema_version": 2,
+  "profiles": ["*"],
+  "enabled_by_default": false,
+  "tool_names": []
+}

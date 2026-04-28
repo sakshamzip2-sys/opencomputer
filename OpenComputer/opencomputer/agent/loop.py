@@ -625,6 +625,22 @@ class AgentLoop:
                         exc_info=True,
                     )
                     persona_overlay = ""
+                # Prompt C (2026-04-28) — read the user's stated tone
+                # preference from the F4 graph (the bootstrap quick-
+                # interview's question 3 is persisted as a preference
+                # node with a ``tone_preference:`` prefix). Same lane
+                # as user_facts / persona_overlay so it lands on the
+                # FROZEN base and prefix-cache stays warm. Empty string
+                # when the user skipped the bootstrap question — base.j2
+                # omits the ``<user-tone>`` block accordingly.
+                try:
+                    user_tone = self.prompt_builder.build_user_tone()
+                except Exception:  # noqa: BLE001 — defensive: never break loop
+                    _log.debug(
+                        "build_user_tone failed; degrading to empty",
+                        exc_info=True,
+                    )
+                    user_tone = ""
                 # PR-6 T2.1: use build_with_memory so ambient memory blocks
                 # from active providers are appended under '## Memory context'.
                 # Falls back to the sync build() path if ambient blocks are
@@ -646,6 +662,10 @@ class AgentLoop:
                     workspace_context=workspace_context,
                     persona_overlay=persona_overlay,
                     active_persona_id=self._active_persona_id,
+                    user_tone=user_tone,
+                    persona_preferred_tone=getattr(
+                        self, "_active_persona_preferred_tone", ""
+                    ),
                 )
                 # Evict the least-recently-used snapshot if the cache is full
                 # BEFORE inserting, so we never exceed the cap even transiently.
@@ -1270,6 +1290,14 @@ class AgentLoop:
         # when active_persona == "companion" so the companion overlay's
         # warm-but-honest register isn't fighting the action-bias rules).
         self._active_persona_id = str(result.persona_id)
+        # Prompt C follow-up (2026-04-28): expose the persona's
+        # ``preferred_tone`` so prompt assembly can render it as a
+        # ``<persona-tone>`` block (suppressed when user_tone is set —
+        # user wins, code-level enforcement). Empty string when the
+        # YAML has no field.
+        self._active_persona_preferred_tone = str(
+            persona.get("preferred_tone", "") or ""
+        ).strip()
         overlay = persona.get("system_prompt_overlay", "") or ""
         overlay = str(overlay).strip()
 
@@ -1332,50 +1360,70 @@ class AgentLoop:
                     exc_info=True,
                 )
 
-            # Look for the most-recent OTHER session's vibe (within the
-            # last ~72 hours) so the companion has continuity. The current
-            # session's vibe is set above; this only adds the prompt
-            # anchor and is companion-specific.
-            try:
-                import time as _time2
+        # Cross-persona previous-session vibe anchor (Prompt A, 2026-04-28).
+        # The current session's vibe is set above unconditionally; this
+        # block adds the *cross-session* anchor — what state the user was
+        # carrying in from a prior session within the last ~72h. It used
+        # to be gated to ``persona_id == "companion"`` but every persona
+        # benefits from the continuity. Framing branches on persona so the
+        # companion overlay's reflective register is preserved.
+        #
+        # Signal gate: skip the anchor entirely when the prior vibe was
+        # ``"calm"`` — calm is the regex classifier's default fallback, so
+        # injecting a "recent user state: calm" block adds noise without
+        # signal. Worth re-thinking once a real-confidence backend ships.
+        try:
+            import time as _time2
 
-                rows = self.db.list_recent_session_vibes(limit=10)
-                cutoff = _time2.time() - (72 * 3600)
-                prev = next(
-                    (
-                        r for r in rows
-                        if r.get("id") != session_id
-                        and (r.get("vibe_updated") or 0) >= cutoff
-                    ),
-                    None,
+            rows = self.db.list_recent_session_vibes(limit=10)
+            cutoff = _time2.time() - (72 * 3600)
+            prev = next(
+                (
+                    r for r in rows
+                    if r.get("id") != session_id
+                    and (r.get("vibe_updated") or 0) >= cutoff
+                ),
+                None,
+            )
+            if prev is not None and prev.get("vibe") and prev.get("vibe") != "calm":
+                age_hours = (
+                    _time2.time() - float(prev.get("vibe_updated") or 0)
+                ) / 3600.0
+                age_str = (
+                    f"{age_hours:.0f}h ago"
+                    if age_hours >= 1
+                    else "less than an hour ago"
                 )
-                if prev is not None:
-                    age_hours = (
-                        _time2.time() - float(prev.get("vibe_updated") or 0)
-                    ) / 3600.0
-                    age_str = (
-                        f"{age_hours:.0f}h ago"
-                        if age_hours >= 1
-                        else "less than an hour ago"
-                    )
-                    title = prev.get("title") or "(untitled session)"
+                title = prev.get("title") or "(untitled session)"
+                prev_vibe = prev.get("vibe")
+                if result.persona_id == "companion":
                     overlay = (
                         overlay
                         + "\n\n## PREVIOUS-SESSION VIBE (anchor for the companion)\n\n"
                         + "User's apparent emotional state in their last "
                         + f"different session ({age_str}, '{title}'): "
-                        + f"**{prev.get('vibe')}**.\n\n"
+                        + f"**{prev_vibe}**.\n\n"
                         + "If the user's tone now is markedly different, you "
                         + "can naturally reference the shift — 'you sounded "
-                        + f"{prev.get('vibe')} last we talked, this feels "
+                        + f"{prev_vibe} last we talked, this feels "
                         + "different — what changed?'. Don't force it; use "
                         + "only when the contrast is obvious."
                     )
-            except Exception:  # noqa: BLE001 — degrade silently
-                _log.debug(
-                    "previous-vibe lookup failed",
-                    exc_info=True,
-                )
+                else:
+                    overlay = (
+                        overlay
+                        + "\n\n## Recent user state\n\n"
+                        + "User's apparent emotional state in their last "
+                        + f"different session ({age_str}): **{prev_vibe}**.\n\n"
+                        + "Useful background context only — don't reference "
+                        + "it explicitly unless the current turn makes the "
+                        + "contrast genuinely relevant."
+                    )
+        except Exception:  # noqa: BLE001 — degrade silently
+            _log.debug(
+                "previous-vibe lookup failed",
+                exc_info=True,
+            )
 
         # ─── Mechanism B (2026-04-28): learning-moment system-prompt overlay ──
         # Same lane as the persona overlay — fires once per profile,

@@ -31,6 +31,7 @@ _AMBIENT_DIR = _EXT_DIR / "ambient-sensors"
 _SKILL_EVO_DIR = _EXT_DIR / "skill-evolution"
 _VOICE_MODE_DIR = _EXT_DIR / "voice-mode"
 _BROWSER_CONTROL_DIR = _EXT_DIR / "browser-control"
+_AFFECT_INJECTION_DIR = _EXT_DIR / "affect-injection"
 
 
 def _ensure_extensions_pkg() -> None:
@@ -304,6 +305,43 @@ def _register_browser_control_alias() -> None:
         setattr(parent, sub, sub_mod)
 
 
+def _register_affect_injection_alias() -> None:
+    """Register extensions.affect_injection → extensions/affect-injection/.
+
+    Prompt B (2026-04-28). Same eager-exec pattern as voice_mode /
+    browser_control: hyphenated dir → underscore Python module name.
+    """
+    _ensure_extensions_pkg()
+
+    if not _AFFECT_INJECTION_DIR.exists():
+        return
+
+    if "extensions.affect_injection" not in sys.modules:
+        mod = types.ModuleType("extensions.affect_injection")
+        mod.__path__ = [str(_AFFECT_INJECTION_DIR)]
+        mod.__package__ = "extensions.affect_injection"
+        sys.modules["extensions.affect_injection"] = mod
+        sys.modules["extensions"].affect_injection = mod
+
+    parent = sys.modules["extensions.affect_injection"]
+    for sub in ("provider", "plugin"):
+        full_name = f"extensions.affect_injection.{sub}"
+        if full_name in sys.modules:
+            setattr(parent, sub, sys.modules[full_name])
+            continue
+        init = _AFFECT_INJECTION_DIR / f"{sub}.py"
+        if not init.exists():
+            continue
+        spec = importlib.util.spec_from_file_location(full_name, str(init))
+        if spec is None or spec.loader is None:
+            continue
+        sub_mod = importlib.util.module_from_spec(spec)
+        sub_mod.__package__ = "extensions.affect_injection"
+        sys.modules[full_name] = sub_mod
+        spec.loader.exec_module(sub_mod)
+        setattr(parent, sub, sub_mod)
+
+
 _register_coding_harness_alias()
 _register_aws_bedrock_provider_alias()
 _register_browser_bridge_alias()
@@ -311,3 +349,4 @@ _register_ambient_sensors_alias()
 _register_skill_evolution_alias()
 _register_voice_mode_alias()
 _register_browser_control_alias()
+_register_affect_injection_alias()

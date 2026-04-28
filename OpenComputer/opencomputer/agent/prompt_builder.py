@@ -157,6 +157,23 @@ class PromptContext:
     #: accordingly. Computed once per session in the same lane as
     #: ``user_facts`` to keep the prefix-cache invariant intact.
     persona_overlay: str = ""
+    #: Prompt C (2026-04-28) — bare tone preference value (with the
+    #: ``tone_preference:`` F4-node prefix stripped). Sourced from the
+    #: highest-confidence + most-recent F4 ``preference`` node whose
+    #: value starts with ``tone_preference:``. Empty string means "user
+    #: never answered the tone question (or skipped bootstrap)" —
+    #: ``base.j2`` omits the ``<user-tone>`` block in that case.
+    #: Lives in the FROZEN base (this dataclass) so the Anthropic prefix
+    #: cache stays warm.
+    user_tone: str = ""
+    #: Prompt C follow-up (2026-04-28) — the active persona's
+    #: ``preferred_tone`` from its YAML (e.g. ``"warm"`` for companion,
+    #: ``"precise"`` for trading). Renders as a ``<persona-tone>`` block
+    #: ONLY when ``user_tone`` is empty — code-level enforcement of the
+    #: "user-stated tone wins over persona-default tone" precedence
+    #: rule from Prompt C. Empty string means "no persona affinity" or
+    #: "persona YAML had no ``preferred_tone`` field".
+    persona_preferred_tone: str = ""
     #: Path A.1 (2026-04-27) — the ID of the persona whose overlay is
     #: above. ``base.j2`` uses this for persona-specific Jinja
     #: conditionals (e.g. omitting "no filler / no hedging" rules under
@@ -203,6 +220,8 @@ class PromptBuilder:
         yolo_mode: bool = False,
         persona_overlay: str = "",
         active_persona_id: str = "",
+        user_tone: str = "",
+        persona_preferred_tone: str = "",
     ) -> str:
         memory = _truncate_from_top(declarative_memory, memory_char_limit)
         profile = _truncate_from_top(user_profile, user_char_limit)
@@ -221,6 +240,8 @@ class PromptBuilder:
             yolo_mode=yolo_mode,
             persona_overlay=persona_overlay,
             active_persona_id=active_persona_id,
+            user_tone=user_tone,
+            persona_preferred_tone=persona_preferred_tone,
         )
         tpl = self.env.get_template(template)
         return tpl.render(
@@ -238,6 +259,8 @@ class PromptBuilder:
             yolo_mode=ctx.yolo_mode,
             persona_overlay=ctx.persona_overlay,
             active_persona_id=ctx.active_persona_id,
+            user_tone=ctx.user_tone,
+            persona_preferred_tone=ctx.persona_preferred_tone,
         )
 
     def build_user_facts(
@@ -275,6 +298,45 @@ class PromptBuilder:
         lines = [f"- ({n.kind}) {n.value[:80]}" for n in nodes_ranked]
         return "\n".join(lines)
 
+    def build_user_tone(
+        self,
+        *,
+        store: UserModelStore | None = None,
+    ) -> str:
+        """Return the bare ``tone_preference`` value, or "" if not set.
+
+        Reads ``preference``-kind nodes from the F4 graph and picks the
+        highest-confidence + most-recent node whose value carries the
+        ``tone_preference:`` prefix written by
+        :func:`opencomputer.profile_bootstrap.persistence.write_interview_answers_to_graph`.
+
+        The prefix is stripped from the returned value so the prompt
+        renders only what the user said, not the F4 storage convention.
+
+        Returns ``""`` when no matching node exists so ``base.j2`` can
+        omit the ``<user-tone>`` block via ``{% if user_tone %}``.
+
+        Prompt C (2026-04-28).
+        """
+        from opencomputer.user_model.store import UserModelStore
+
+        s = store if store is not None else UserModelStore()
+        # Cap at 100 — the user shouldn't have hundreds of preferences,
+        # and the shape we want is whichever ``tone_preference:`` node
+        # is most recent and most confident, so a small limit suffices.
+        nodes = s.list_nodes(kinds=("preference",), limit=100)
+        prefix = "tone_preference:"
+        candidates = [n for n in nodes if (n.value or "").startswith(prefix)]
+        if not candidates:
+            return ""
+        # Sort by descending confidence, then by descending last_seen_at
+        # (most-recent wins on ties).
+        candidates.sort(
+            key=lambda n: (-n.confidence, -n.last_seen_at),
+        )
+        chosen = candidates[0]
+        return chosen.value[len(prefix):].strip()
+
     async def build_with_memory(
         self,
         *,
@@ -295,6 +357,8 @@ class PromptBuilder:
         yolo_mode: bool = False,
         persona_overlay: str = "",
         active_persona_id: str = "",
+        user_tone: str = "",
+        persona_preferred_tone: str = "",
     ) -> str:
         """Async variant of build() that appends ambient memory blocks.
 
@@ -323,6 +387,8 @@ class PromptBuilder:
             yolo_mode=yolo_mode,
             persona_overlay=persona_overlay,
             active_persona_id=active_persona_id,
+            user_tone=user_tone,
+            persona_preferred_tone=persona_preferred_tone,
         )
         if not enable_ambient_blocks or memory_bridge is None:
             return base

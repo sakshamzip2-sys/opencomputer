@@ -54,7 +54,13 @@ def test_introspection_deps_flags_missing():
     failed = [r for r in results if r.message.startswith("rapidocr_onnxruntime")]
     assert len(failed) == 1
     assert not failed[0].ok
-    assert failed[0].level == "error"
+    # 2026-04-28: introspection is opt-in (coding-harness lists these tools
+    # under ``optional_tool_names`` and the plugin filters them at register
+    # time when the extra is missing). Doctor classifies the missing dep
+    # as a warning (advisory), not an error, so ``oc doctor`` exit-code
+    # stays clean on machines that haven't opted into ``[introspection]``.
+    # Mirrors the voice-mode pattern at :func:`_check_voice_mode_capable`.
+    assert failed[0].level == "warning"
     assert "pip install" in failed[0].message
 
 

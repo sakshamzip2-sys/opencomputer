@@ -145,7 +145,14 @@ class PluginDemandTracker:
 
         matching: list[str] = []
         for cand in candidates:
-            if tool_name not in cand.manifest.tool_names:
+            # Match against required AND optional tool names so a user
+            # calling an opt-in tool (e.g. ``screenshot`` from
+            # coding-harness, gated on the ``mss`` pip extra) still gets
+            # pointed at the right plugin.
+            declared_all = set(cand.manifest.tool_names) | set(
+                cand.manifest.optional_tool_names
+            )
+            if tool_name not in declared_all:
                 continue
             if (
                 self.active_profile_plugins is not None
