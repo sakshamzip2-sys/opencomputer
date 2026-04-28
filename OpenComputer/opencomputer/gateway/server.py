@@ -89,11 +89,21 @@ class Gateway:
 
     async def _start_outgoing_drainer(self) -> None:
         from opencomputer.agent.config import _home
+        from opencomputer.plugins.registry import registry as plugin_registry
 
         adapters_by_platform = {
             a.platform.value: a for a in self._adapters
         }
         queue = OutgoingQueue(_home() / "sessions.db")
+        # Hermes channel-port PR 2 / amendment §A.3: thread the live
+        # queue into PluginAPI so webhook-style plugins can enqueue
+        # outbound messages via ``api.outgoing_queue.enqueue(...)``
+        # without importing opencomputer.* directly. Binding here (vs
+        # construction) because the queue's SQLite path is per-profile
+        # and only resolved after config init.
+        plugin_registry.outgoing_queue = queue
+        if plugin_registry.shared_api is not None:
+            plugin_registry.shared_api._bind_outgoing_queue(queue)
         self._drainer = OutgoingDrainer(queue, adapters_by_platform)
         await self._drainer.expire_stale_on_boot()
         self._drainer_task = asyncio.create_task(
