@@ -1018,8 +1018,14 @@ def _run_chat_session(
         read_user_input,
     )
     from opencomputer.cli_ui.input_loop import extract_image_attachments
+    from opencomputer.cli_ui.paste_folder import PasteFolder
 
     profile_home = _profile_home_fn()
+
+    # Per-session paste-fold storage. Pastes >5 lines get folded to
+    # ``[Pasted text #N +M lines]`` placeholders in the input buffer;
+    # full content stored here for submit-time expansion. Reset on /clear.
+    paste_folder = PasteFolder()
 
     # Per-session next-turn prompt buffer for /queue. FIFO, capped to keep
     # a runaway agent from filling memory. Drained one item per outer loop
@@ -1052,6 +1058,8 @@ def _run_chat_session(
         # Drop the queue when starting a fresh session — queued prompts
         # were authored against the old session's context.
         _session_queues.pop(session_id, None)
+        # Drop folded-paste blobs — placeholder ids reset to #1 on the new session.
+        paste_folder.clear()
         console.clear()
 
     def _on_snapshot_create(label: str | None) -> str | None:
@@ -1247,6 +1255,7 @@ def _run_chat_session(
                 profile_home=profile_home,
                 scope=scope,
                 session_title=_title,
+                paste_folder=paste_folder,
             )
 
         # Drain a queued prompt (set via /queue <text>) before prompting
@@ -1272,6 +1281,10 @@ def _run_chat_session(
         # ``loop.run_conversation(images=...)`` which sets them on the user
         # Message's ``attachments`` field for the provider to convert into
         # multimodal content blocks.
+        # Expand any folded-paste placeholders to their stored full text
+        # before we extract image attachments. The LLM sees the full
+        # pasted content; the visible buffer kept the compact placeholder.
+        user_input = paste_folder.expand_all(user_input)
         cleaned_text, _image_paths = extract_image_attachments(user_input)
         # If the only thing in the input was an image placeholder, give the
         # model a generic prompt so it knows to describe the image.
