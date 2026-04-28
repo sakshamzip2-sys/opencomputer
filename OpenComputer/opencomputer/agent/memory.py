@@ -463,8 +463,19 @@ class MemoryManager:
         A skill directory missing ``SKILL.md`` is silently skipped — including
         when it only has a lone ``references/`` subdir (treated as an
         incomplete skill, not an error).
+
+        Skills Hub (Tier 1.A): each subdirectory of ``<skills_path>/.hub/``
+        is treated as an additional root, so hub-installed skills at
+        ``<skills_path>/.hub/<source>/<skill-name>/SKILL.md`` are discovered.
+        Hub roots are appended after user + bundled roots, so user skills
+        still shadow on id collision.
         """
         roots = [self.skills_path, *self.bundled_skills_paths]
+        hub_root = self.skills_path / ".hub"
+        if hub_root.is_dir():
+            for source_dir in sorted(hub_root.iterdir()):
+                if source_dir.is_dir():
+                    roots.append(source_dir)
         seen_ids: set[str] = set()
         out: list[SkillMeta] = []
         for root in roots:
