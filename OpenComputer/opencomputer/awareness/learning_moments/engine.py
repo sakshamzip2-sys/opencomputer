@@ -30,6 +30,7 @@ from opencomputer.awareness.learning_moments.registry import (
     Context,
     LearningMoment,
     Severity,
+    Surface,
     all_moments,
 )
 from opencomputer.awareness.learning_moments.store import (
@@ -78,21 +79,23 @@ def _cap_hit(state: StoreState) -> bool:
     return fired_today >= 1 or fired_week >= 3
 
 
-def select_reveal(
+def _select_for_surface(
+    surface: Surface,
     *,
-    ctx_builder: Callable[[], Context] | None = None,
+    ctx_builder: Callable[[], Context] | None,
     profile_home: Path,
-) -> str | None:
-    """Return a formatted reveal clause to append, or ``None``.
+) -> tuple[LearningMoment, str] | None:
+    """Internal: pick at most one moment for a given surface, mark it
+    fired, return ``(moment, raw_reveal_text)`` or ``None``.
 
-    ``ctx_builder`` is a zero-arg callable that builds the Context.
-    Lazy so the cost (DB reads, MEMORY.md read) is only paid when at
-    least one moment is eligible to fire after cap + dedup checks.
-
-    If any predicate raises, that moment is skipped and the engine
-    moves on. The function never raises to the caller — passive
-    education must not break the agent loop.
+    Shared by :func:`select_reveal`, :func:`select_system_prompt_overlay`,
+    :func:`select_session_end_reflection`. Dedup state + caps are
+    shared across surfaces — a moment that fired via mechanism A also
+    counts toward the daily cap for mechanism B/C, and vice-versa,
+    so users never see >1 surface fire on the same day.
     """
+    from opencomputer.awareness.learning_moments.registry import Surface
+
     state = load(profile_home)
     learning_off = _is_learning_off(profile_home)
     cap_hit = _cap_hit(state)
@@ -101,6 +104,8 @@ def select_reveal(
 
     eligible: list[LearningMoment] = []
     for m in moments:
+        if m.surface != surface:
+            continue
         if m.id in state.moments_fired:
             continue
         if m.severity == Severity.TIP and (learning_off or cap_hit):
@@ -128,16 +133,20 @@ def select_reveal(
             continue
         if not fired:
             continue
-        # Mark fired BEFORE returning so a concurrent loop call can't
-        # double-fire the same moment.
         now = time.time()
         state.moments_fired[m.id] = now
         state.fire_log.append({"id": m.id, "fired_at": now})
 
         reveal_text = m.reveal
+        # The first-reveal opt-out hint only attaches to inline-tail
+        # surfaces — system-prompt overlays go to the LLM (the user
+        # never sees the raw text), and session-end reflections need
+        # to read clean. Both mechanisms inherit the off-flag via the
+        # severity check above.
         if (
             not state.first_reveal_appended
             and m.severity == Severity.TIP
+            and surface == Surface.INLINE_TAIL
         ):
             reveal_text = (
                 reveal_text
@@ -145,9 +154,87 @@ def select_reveal(
             )
             state.first_reveal_appended = True
         save(profile_home, state)
-        return _format_inline_tail(reveal_text)
+        return (m, reveal_text)
 
     return None
+
+
+def select_reveal(
+    *,
+    ctx_builder: Callable[[], Context] | None = None,
+    profile_home: Path,
+) -> str | None:
+    """Return a formatted INLINE_TAIL reveal clause, or ``None``.
+
+    Mechanism A — appended after the assistant's response. Called from
+    the agent loop post-turn. See :func:`_select_for_surface` for the
+    shared cap / dedup / severity logic.
+    """
+    from opencomputer.awareness.learning_moments.registry import Surface
+
+    result = _select_for_surface(
+        Surface.INLINE_TAIL,
+        ctx_builder=ctx_builder,
+        profile_home=profile_home,
+    )
+    if result is None:
+        return None
+    _moment, reveal_text = result
+    return _format_inline_tail(reveal_text)
+
+
+def select_system_prompt_overlay(
+    *,
+    ctx_builder: Callable[[], Context] | None = None,
+    profile_home: Path,
+) -> str | None:
+    """Return a system-prompt overlay clause for the next turn, or ``None``.
+
+    Mechanism B — the returned text is intended to be appended to the
+    next turn's system prompt as a "context anchor" the LLM may weave
+    in if natural. Called from the agent loop PRE-turn. The mechanism
+    matches the existing companion-overlay pattern: deterministic
+    text injected, LLM decides whether to use it. No introspection on
+    whether the LLM actually used the overlay — fired-once semantics
+    are preserved regardless.
+    """
+    from opencomputer.awareness.learning_moments.registry import Surface
+
+    result = _select_for_surface(
+        Surface.SYSTEM_PROMPT,
+        ctx_builder=ctx_builder,
+        profile_home=profile_home,
+    )
+    if result is None:
+        return None
+    _moment, reveal_text = result
+    return reveal_text
+
+
+def select_session_end_reflection(
+    *,
+    ctx_builder: Callable[[], Context] | None = None,
+    profile_home: Path,
+) -> str | None:
+    """Return a session-end reflection clause, or ``None``.
+
+    Mechanism C — appended as a final assistant message at session
+    close. Called from the session-end path
+    (``_emit_session_end_event`` in the loop). Returns the raw reveal
+    text (no inline-tail indentation — this IS the message, not a
+    tail of one).
+    """
+    from opencomputer.awareness.learning_moments.registry import Surface
+
+    result = _select_for_surface(
+        Surface.SESSION_END,
+        ctx_builder=ctx_builder,
+        profile_home=profile_home,
+    )
+    if result is None:
+        return None
+    _moment, reveal_text = result
+    return reveal_text
 
 
 def _format_inline_tail(reveal: str) -> str:

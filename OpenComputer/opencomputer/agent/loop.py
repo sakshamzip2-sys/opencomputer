@@ -974,6 +974,25 @@ class AgentLoop:
                         except AttributeError:
                             _vibe_rows = []
 
+                        # v2 fields: USER.md text + days_since_first_session.
+                        try:
+                            _user_md = self.config.memory.user_path.read_text(
+                                encoding="utf-8",
+                            )
+                        except (OSError, UnicodeError):
+                            _user_md = ""
+                        try:
+                            _first_session_ts = self.db.first_session_started_at()
+                        except (AttributeError, Exception):  # noqa: BLE001
+                            _first_session_ts = None
+                        if _first_session_ts:
+                            import time as _ttt
+                            _days_since_first = max(
+                                0.0, (_ttt.time() - _first_session_ts) / 86400.0,
+                            )
+                        else:
+                            _days_since_first = 0.0
+
                         # Default-arg binding pins the closure values to
                         # this iteration of the outer ``while iterations``
                         # loop — without it ruff B023 (and reality) flags
@@ -985,6 +1004,8 @@ class AgentLoop:
                             _total_sessions_=_total_sessions,
                             _sid_=sid,
                             _user_msg_=user_message or "",
+                            _user_md_=_user_md,
+                            _days_=_days_since_first,
                         ) -> _LMCtx:
                             return _LMCtx(
                                 session_id=_sid_,
@@ -997,6 +1018,8 @@ class AgentLoop:
                                     if r.get("vibe") != "calm"
                                 ),
                                 sessions_db_total_sessions=_total_sessions_,
+                                user_md_text=_user_md_,
+                                days_since_first_session=_days_,
                             )
 
                         _reveal = _select_reveal(
@@ -1354,7 +1377,90 @@ class AgentLoop:
                     exc_info=True,
                 )
 
+        # ─── Mechanism B (2026-04-28): learning-moment system-prompt overlay ──
+        # Same lane as the persona overlay — fires once per profile,
+        # ever, when a SYSTEM_PROMPT-surface moment matches at session
+        # start. The text becomes a context anchor the LLM may weave
+        # in if natural. Best-effort; no-op when nothing fires.
+        try:
+            from opencomputer.agent.config import _home as _profile_home_fn
+            from opencomputer.awareness.learning_moments import (
+                Context as _LMCtx,
+            )
+            from opencomputer.awareness.learning_moments import (
+                select_system_prompt_overlay as _select_overlay,
+            )
+
+            _ph = _profile_home_fn()
+            _total = self.db.count_sessions()
+            _hits = self._compute_cross_session_topic_hits(session_id)
+
+            def _build_b_ctx(
+                _ph_=_ph,
+                _sid_=session_id,
+                _total_=_total,
+                _hits_=_hits,
+            ) -> _LMCtx:
+                return _LMCtx(
+                    session_id=_sid_,
+                    profile_home=_ph_,
+                    user_message="",
+                    memory_md_text="",
+                    vibe_log_session_count_total=0,
+                    vibe_log_session_count_noncalm=0,
+                    sessions_db_total_sessions=_total_,
+                    cross_session_topic_hits=_hits_,
+                )
+
+            lm_overlay = _select_overlay(
+                ctx_builder=_build_b_ctx, profile_home=_ph,
+            )
+            if lm_overlay:
+                overlay = (
+                    overlay
+                    + "\n\n## CROSS-SESSION CONTEXT (learning-moment anchor)\n\n"
+                    + lm_overlay
+                )
+        except Exception:  # noqa: BLE001 — never break loop on overlay miss
+            _log.debug("learning_moments mechanism-B failed", exc_info=True)
+
         return overlay
+
+    def _compute_cross_session_topic_hits(
+        self, session_id: str,
+    ) -> tuple[tuple[str, str], ...]:
+        """Pre-compute (topic, episodic_session_id) hits for Context.
+
+        Looks at episodic events from the last 14 days that are NOT
+        from the current session. Returns up to 3 hits as
+        (topic_summary, session_id) tuples. Empty tuple on any error
+        — the predicate handles ``len(hits) == 0`` gracefully.
+
+        This is a session-start computation (called once from
+        ``_build_persona_overlay``); the per-turn cost is zero.
+        """
+        try:
+            import time as _t
+            cutoff = _t.time() - (14 * 24 * 3600)
+            rows = self.db.list_episodic(session_id=None, limit=50)
+            hits: list[tuple[str, str]] = []
+            seen_sessions: set[str] = set()
+            for r in rows:
+                if r.get("session_id") == session_id:
+                    continue
+                if float(r.get("timestamp", 0)) < cutoff:
+                    continue
+                summary = (r.get("summary") or "").strip()
+                sid = r.get("session_id") or ""
+                if not summary or sid in seen_sessions:
+                    continue
+                seen_sessions.add(sid)
+                hits.append((summary[:80], sid))
+                if len(hits) >= 3:
+                    break
+            return tuple(hits)
+        except Exception:  # noqa: BLE001
+            return ()
 
     # ─── T1 of auto-skill-evolution plan: SessionEndEvent emission ─
 
@@ -1374,6 +1480,13 @@ class AgentLoop:
         loop's own return path. Best-effort; warnings logged.
 
         T1 of 2026-04-27 auto-skill-evolution plan.
+
+        2026-04-28: also dispatches Mechanism C (session-end
+        reflection) for the learning-moments registry. If a moment
+        with ``Surface.SESSION_END`` matches, the reflection text is
+        appended as a final assistant message on the session. Best-
+        effort and gated on the same caps + dedup as the other
+        surfaces.
         """
         try:
             from opencomputer.ingestion.bus import default_bus as _bus
@@ -1392,6 +1505,68 @@ class AgentLoop:
         except Exception:  # noqa: BLE001 — bus failure must not break the loop
             _log.warning(
                 "bus: SessionEndEvent publish failed for session=%s — continuing",
+                session_id,
+                exc_info=True,
+            )
+
+        # ─── Mechanism C: session-end reflection ────────────────────
+        # Only dispatch on clean ends (``completed``). Skip cancels,
+        # errors, timeouts — emitting "that session felt stuck" after
+        # a cancellation would be off-key.
+        if end_reason != "completed":
+            return
+        try:
+            from opencomputer.agent.config import _home as _profile_home_fn
+            from opencomputer.awareness.learning_moments import (
+                Context as _LMCtx,
+            )
+            from opencomputer.awareness.learning_moments import (
+                select_session_end_reflection as _select_session_end,
+            )
+            from plugin_sdk.core import Message as _Msg
+
+            _ph = _profile_home_fn()
+            try:
+                _vibe_rows = self.db.list_vibe_log_for_session(session_id)
+            except AttributeError:
+                _vibe_rows = []
+            _stuck_or_frustrated = sum(
+                1 for r in _vibe_rows
+                if r.get("vibe") in ("stuck", "frustrated")
+            )
+            _fraction = (
+                _stuck_or_frustrated / len(_vibe_rows)
+                if _vibe_rows
+                else 0.0
+            )
+
+            def _build_session_end_ctx(
+                _ph_=_ph,
+                _sid_=session_id,
+                _fraction_=_fraction,
+                _turns_=turn_count,
+            ) -> _LMCtx:
+                return _LMCtx(
+                    session_id=_sid_,
+                    profile_home=_ph_,
+                    user_message="",
+                    memory_md_text="",
+                    vibe_log_session_count_total=len(_vibe_rows),
+                    vibe_log_session_count_noncalm=0,
+                    sessions_db_total_sessions=self.db.count_sessions(),
+                    vibe_stuck_or_frustrated_fraction=_fraction_,
+                    turn_count=_turns_,
+                )
+
+            reflection = _select_session_end(
+                ctx_builder=_build_session_end_ctx, profile_home=_ph,
+            )
+            if reflection:
+                final = _Msg(role="assistant", content=reflection)
+                self.db.append_message(session_id, final)
+        except Exception:  # noqa: BLE001 — reflections are non-load-bearing
+            _log.debug(
+                "learning_moments: session-end reflection failed for %s",
                 session_id,
                 exc_info=True,
             )

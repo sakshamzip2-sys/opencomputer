@@ -506,6 +506,18 @@ class SessionDB:
             row = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
         return int(row[0]) if row else 0
 
+    def first_session_started_at(self) -> float | None:
+        """Epoch seconds of the earliest session, or ``None`` if no
+        sessions yet. Used by ``learning_moments`` to compute
+        ``days_since_first_session`` for established-user gates."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MIN(started_at) FROM sessions"
+            ).fetchone()
+        if not row or row[0] is None:
+            return None
+        return float(row[0])
+
     def end_session(self, session_id: str) -> None:
         with self._txn() as conn:
             conn.execute(

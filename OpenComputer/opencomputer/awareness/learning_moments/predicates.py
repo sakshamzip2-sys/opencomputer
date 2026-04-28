@@ -75,3 +75,53 @@ def recent_files_paste(ctx: Context) -> bool:
     if len(ctx.user_message) > 5000:
         return False
     return bool(_PATH_RE.search(ctx.user_message))
+
+
+# ─── v2 predicates (2026-04-28) ──────────────────────────────────────
+
+
+def user_md_unfilled(ctx: Context) -> bool:
+    """Established user (>7 days, >7 sessions) whose USER.md is empty.
+
+    Both gates matter:
+
+    * Days threshold prevents firing on day-3 when the user hasn't had
+      a chance to use the agent enough to know what to put in USER.md.
+    * Session count gates against "installed it once 8 days ago and
+      came back" — an established user has *used* OC, not just had
+      it installed.
+
+    Empty = file missing OR file contains only whitespace / a tiny
+    template placeholder ("(empty — fill me in)").
+    """
+    if ctx.days_since_first_session < 7.0:
+        return False
+    if ctx.sessions_db_total_sessions < 7:
+        return False
+    text = (ctx.user_md_text or "").strip()
+    if not text:
+        return True
+    return bool(len(text) < 80 and "(empty" in text.lower())
+
+
+def cross_session_recall(ctx: Context) -> bool:
+    """Current user message touches a topic from a recent past session.
+
+    Engine pre-computes ``cross_session_topic_hits`` once per turn by
+    scanning episodic events from the last 14 days for substring
+    matches against the user message. Predicate is then a
+    constant-time check.
+    """
+    return len(ctx.cross_session_topic_hits) > 0
+
+
+def confused_session(ctx: Context) -> bool:
+    """At session end, ≥30% of vibes were stuck/frustrated.
+
+    Mechanism C — dispatched by the session-end path, not per-turn.
+    Gates also on ≥4 turns so a one-off bad opening doesn't trigger.
+    """
+    return (
+        ctx.turn_count >= 4
+        and ctx.vibe_stuck_or_frustrated_fraction >= 0.30
+    )
