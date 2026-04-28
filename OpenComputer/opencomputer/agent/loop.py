@@ -746,9 +746,11 @@ class AgentLoop:
                 # Tolerate both the canonical ``(skill_id, body)`` shape
                 # and a bare ``body`` string for resilience against
                 # third-party adapters that bypass the helper.
+                # NOTE: distinct loop variables (``_sid``, ``_body``) so
+                # the outer ``sid`` (session id) is not shadowed.
                 if isinstance(entry, tuple) and len(entry) == 2:
-                    sid, body = entry
-                    blocks.append(f"### {sid}\n\n{body}")
+                    _sid, _body = entry
+                    blocks.append(f"### {_sid}\n\n{_body}")
                 elif isinstance(entry, str) and entry.strip():
                     blocks.append(entry)
             if blocks:
