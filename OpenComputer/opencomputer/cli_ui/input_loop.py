@@ -478,6 +478,14 @@ async def read_user_input(
             ("class:title.box", " ├"),
         ]
 
+    # Show the corner indicator only for sane-length titles (≤50 chars).
+    # Existing sessions may have a runaway auto-generated title (the now-
+    # disabled cheap-LLM titler sometimes returned the AI's greeting as
+    # a "title" — see Image #12). Filter those out at the UI layer so
+    # historical bad data doesn't surface.
+    def _title_is_displayable() -> bool:
+        return bool(session_title) and 1 <= len(session_title) <= 50
+
     title_window = ConditionalContainer(
         content=Window(
             content=FormattedTextControl(_title_text),
@@ -485,7 +493,7 @@ async def read_user_input(
             align=WindowAlign.RIGHT,
             dont_extend_height=True,
         ),
-        filter=Condition(lambda: bool(session_title)),
+        filter=Condition(_title_is_displayable),
     )
 
     dropdown_window = ConditionalContainer(
@@ -526,6 +534,31 @@ async def read_user_input(
         focused_element=input_window,
     )
 
+    # Construct the Output explicitly with enable_cpr=False so the
+    # renderer never sends `\x1b[6n` and never trusts CPR responses.
+    # Why: VS Code (and some JetBrains) terminals respond to CPR
+    # *partially or with a delay*, which tricks prompt_toolkit's
+    # renderer into using the CPR-dependent code path even when the
+    # response is unreliable. Forcing enable_cpr=False makes the
+    # renderer commit to the no-CPR fallback unconditionally — the
+    # path that actually works in those terminals.
+    import sys as _sys
+
+    from prompt_toolkit.output.defaults import create_output as _create_output
+
+    try:
+        _output = _create_output(stdout=_sys.stdout)
+        # The Vt100_Output instance from create_output has enable_cpr=True
+        # baked in by default; we forcibly disable it post-construction by
+        # patching the property's underlying flag. This is more robust
+        # than constructing a fresh Vt100_Output ourselves because
+        # create_output detects the right Output class for the current
+        # platform (Windows uses a different class entirely).
+        if hasattr(_output, "enable_cpr"):
+            _output.enable_cpr = False  # type: ignore[attr-defined]
+    except Exception:
+        _output = None  # let Application pick the default
+
     app: Application = Application(
         layout=layout,
         key_bindings=kb,
@@ -533,6 +566,7 @@ async def read_user_input(
         full_screen=False,
         erase_when_done=True,
         mouse_support=False,
+        output=_output,
     )
 
     text = await app.run_async()

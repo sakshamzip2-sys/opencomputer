@@ -982,23 +982,18 @@ class AgentLoop:
                         turn_index=turn_start_index,
                         runtime=self._runtime,
                     )
-                    # TS-T6: kick off async title generation after the first
-                    # user→assistant exchange. Daemon thread, fire-and-forget;
-                    # ``maybe_auto_title`` self-skips on later turns and on
-                    # already-titled sessions, so we can call it
-                    # unconditionally here without checking the turn index.
-                    try:
-                        from opencomputer.agent.title_generator import maybe_auto_title
-
-                        maybe_auto_title(
-                            session_db=self.db,
-                            session_id=sid,
-                            user_message=user_message,
-                            assistant_response=step.assistant_message.content or "",
-                            conversation_history=messages,
-                        )
-                    except Exception:  # noqa: BLE001 — title gen is best-effort
-                        pass
+                    # Auto-titler intentionally DISABLED (2026-04-28).
+                    # The cheap-LLM call frequently returned a generic
+                    # "Hello! I'm Claude, an AI assistant made by
+                    # Anthropic..." greeting as the "title", which the
+                    # new corner indicator (PR #214) then showed above
+                    # the input — bad UX (user feedback Image #12).
+                    # Until we have a more reliable summarizing prompt
+                    # or a smaller dedicated title model, titles are
+                    # only set via explicit ``/rename``. The corner
+                    # indicator hides itself when no title is present,
+                    # so fresh sessions show no clutter.
+                    pass
                     self.db.end_session(sid)
                     return ConversationResult(
                         final_message=step.assistant_message,
