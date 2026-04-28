@@ -250,3 +250,118 @@ class TestApprovalPromptFormat:
         assert second["text"] == "Allow weird.thing?"
         # Token still tracked.
         assert "tk2" in a._approval_tokens
+
+
+# ─── PR 3a.3 — _send_with_retry wiring ────────────────────────────
+
+
+class TestSendWithRetry:
+    @pytest.mark.asyncio
+    async def test_send_retries_transient_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ConnectError on attempts 1+2, success on 3 — total 3 calls."""
+        import httpx as _httpx
+
+        # Avoid real backoff sleeps in tests.
+        async def _no_sleep(_d: float) -> None:
+            return None
+
+        monkeypatch.setattr("plugin_sdk.channel_contract.asyncio.sleep", _no_sleep)
+
+        a = _make_adapter()
+        a._client.post = AsyncMock(
+            side_effect=[
+                _httpx.ConnectError("boom 1"),
+                _httpx.ConnectError("boom 2"),
+                _ok_response(),
+            ],
+        )
+        result = await a.send("c", "hi")
+        assert result.success is True
+        assert a._client.post.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_send_retry_exhaustion_returns_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All 3 attempts ConnectError — returns SendResult(success=False)."""
+        import httpx as _httpx
+
+        async def _no_sleep(_d: float) -> None:
+            return None
+
+        monkeypatch.setattr("plugin_sdk.channel_contract.asyncio.sleep", _no_sleep)
+
+        a = _make_adapter()
+        a._client.post = AsyncMock(
+            side_effect=[
+                _httpx.ConnectError("boom 1"),
+                _httpx.ConnectError("boom 2"),
+                _httpx.ConnectError("boom 3"),
+            ],
+        )
+        result = await a.send("c", "hi")
+        assert result.success is False
+        assert "ConnectError" in (result.error or "")
+        assert a._client.post.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_send_non_retryable_propagates(self) -> None:
+        """A 400-class HTTP response is NOT a transient error — no retries."""
+        a = _make_adapter()
+        bad = MagicMock()
+        bad.status_code = 400
+        bad.text = "Bad Request: chat not found"
+        bad.json.return_value = {"ok": False}
+        a._client.post = AsyncMock(return_value=bad)
+
+        result = await a.send("c", "hi")
+        assert result.success is False
+        # Single call, no retry on 400.
+        assert a._client.post.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_send_reaction_retries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reaction send path also benefits from the retry wrapper."""
+        import httpx as _httpx
+
+        async def _no_sleep(_d: float) -> None:
+            return None
+
+        monkeypatch.setattr("plugin_sdk.channel_contract.asyncio.sleep", _no_sleep)
+
+        a = _make_adapter()
+        a._client.post = AsyncMock(
+            side_effect=[
+                _httpx.ConnectError("flap"),
+                _ok_response(),
+            ],
+        )
+        result = await a.send_reaction("c", "1", "👀")
+        assert result.success is True
+        assert a._client.post.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_edit_message_retries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import httpx as _httpx
+
+        async def _no_sleep(_d: float) -> None:
+            return None
+
+        monkeypatch.setattr("plugin_sdk.channel_contract.asyncio.sleep", _no_sleep)
+
+        a = _make_adapter()
+        a._client.post = AsyncMock(
+            side_effect=[
+                _httpx.ConnectError("flap"),
+                _ok_response(),
+            ],
+        )
+        result = await a.edit_message("c", "1", "updated")
+        assert result.success is True
+        assert a._client.post.await_count == 2

@@ -181,6 +181,25 @@ class TelegramAdapter(BaseChannelAdapter):
         # working set small.
         self._seen_callback_ids: OrderedDict[str, None] = OrderedDict()
 
+    async def _post_with_retry(
+        self,
+        url: str,
+        **kwargs: Any,
+    ) -> httpx.Response | SendResult:
+        """PR 3a.3 — wrap ``self._client.post`` with the base
+        ``_send_with_retry`` helper.
+
+        Returns either the live :class:`httpx.Response` on success (so
+        callers can inspect ``status_code`` and ``json()``) OR a
+        :class:`SendResult` carrying ``success=False`` after the helper
+        exhausts its retry budget on transient errors. Non-retryable
+        exceptions propagate.
+        """
+        assert self._client is not None
+        return await self._send_with_retry(  # type: ignore[return-value]
+            self._client.post, url, **kwargs,
+        )
+
     #: Scope name for the per-bot-token machine-local lock. Mirrors
     #: hermes' ``"telegram-bot-token"`` scope so a future cross-tool
     #: convention could be uniformly recognised by tooling.
@@ -624,10 +643,12 @@ class TelegramAdapter(BaseChannelAdapter):
         # user-supplied backticks) we retry the SAME call without
         # parse_mode and with the ORIGINAL text so the user gets the
         # body.
+        # PR 3a.3 — httpx POST wrapped in _send_with_retry for transient
+        # network errors (ConnectError etc.) before we even see HTTP.
         for chunk in _chunk_for_telegram(text, limit=self.max_message_length):
             converted = _to_mdv2(chunk)
             try:
-                resp = await self._client.post(
+                resp = await self._post_with_retry(
                     f"{self.base_url}/sendMessage",
                     json={
                         "chat_id": chat_id,
@@ -636,13 +657,15 @@ class TelegramAdapter(BaseChannelAdapter):
                         "disable_notification": False,
                     },
                 )
+                if isinstance(resp, SendResult):
+                    return resp  # exhausted retries on transient errors
                 # Parse-error fallback: re-send with the original (un-converted)
                 # text and no parse_mode.
                 if (
                     resp.status_code == 400
                     and _MDV2_PARSE_ERROR_MARKER in resp.text.lower()
                 ):
-                    resp = await self._client.post(
+                    resp = await self._post_with_retry(
                         f"{self.base_url}/sendMessage",
                         json={
                             "chat_id": chat_id,
@@ -650,6 +673,8 @@ class TelegramAdapter(BaseChannelAdapter):
                             "disable_notification": False,
                         },
                     )
+                    if isinstance(resp, SendResult):
+                        return resp
                 if resp.status_code != 200:
                     return SendResult(
                         success=False,
@@ -666,7 +691,9 @@ class TelegramAdapter(BaseChannelAdapter):
         if self._client is None:
             return
         try:
-            await self._client.post(
+            # PR 3a.3 — typing is best-effort; retry transient errors but
+            # swallow any final-state failure (don't block the agent).
+            await self._post_with_retry(
                 f"{self.base_url}/sendChatAction",
                 json={"chat_id": chat_id, "action": "typing"},
             )
@@ -763,11 +790,13 @@ class TelegramAdapter(BaseChannelAdapter):
 
             with p.open("rb") as fh:
                 files = {field_name: (p.name, fh, _guess_mime(p))}
-                resp = await self._client.post(
+                resp = await self._post_with_retry(
                     f"{self.base_url}/{endpoint}",
                     data=_build_form(use_mdv2=bool(caption)),
                     files=files,
                 )
+            if isinstance(resp, SendResult):
+                return resp
             # Parse-error fallback — re-upload without parse_mode and
             # with the ORIGINAL caption text.
             if (
@@ -777,11 +806,13 @@ class TelegramAdapter(BaseChannelAdapter):
             ):
                 with p.open("rb") as fh:
                     files = {field_name: (p.name, fh, _guess_mime(p))}
-                    resp = await self._client.post(
+                    resp = await self._post_with_retry(
                         f"{self.base_url}/{endpoint}",
                         data=_build_form(use_mdv2=False),
                         files=files,
                     )
+                    if isinstance(resp, SendResult):
+                        return resp
             if resp.status_code != 200:
                 return SendResult(
                     success=False,
@@ -809,7 +840,7 @@ class TelegramAdapter(BaseChannelAdapter):
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
         try:
-            resp = await self._client.post(
+            resp = await self._post_with_retry(
                 f"{self.base_url}/setMessageReaction",
                 json={
                     "chat_id": chat_id,
@@ -817,6 +848,8 @@ class TelegramAdapter(BaseChannelAdapter):
                     "reaction": [{"type": "emoji", "emoji": emoji}],
                 },
             )
+            if isinstance(resp, SendResult):
+                return resp
             if resp.status_code != 200:
                 return SendResult(
                     success=False,
@@ -848,7 +881,7 @@ class TelegramAdapter(BaseChannelAdapter):
             # PR 3a.2 — MarkdownV2 + parse-error fallback for edits too.
             truncated = text[: self.max_message_length]
             converted = _to_mdv2(truncated)
-            resp = await self._client.post(
+            resp = await self._post_with_retry(
                 f"{self.base_url}/editMessageText",
                 json={
                     "chat_id": chat_id,
@@ -857,11 +890,13 @@ class TelegramAdapter(BaseChannelAdapter):
                     "parse_mode": "MarkdownV2",
                 },
             )
+            if isinstance(resp, SendResult):
+                return resp
             if (
                 resp.status_code == 400
                 and _MDV2_PARSE_ERROR_MARKER in resp.text.lower()
             ):
-                resp = await self._client.post(
+                resp = await self._post_with_retry(
                     f"{self.base_url}/editMessageText",
                     json={
                         "chat_id": chat_id,
@@ -869,6 +904,8 @@ class TelegramAdapter(BaseChannelAdapter):
                         "text": truncated,
                     },
                 )
+                if isinstance(resp, SendResult):
+                    return resp
             if resp.status_code != 200:
                 return SendResult(
                     success=False,
@@ -891,10 +928,12 @@ class TelegramAdapter(BaseChannelAdapter):
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
         try:
-            resp = await self._client.post(
+            resp = await self._post_with_retry(
                 f"{self.base_url}/deleteMessage",
                 json={"chat_id": chat_id, "message_id": int(message_id)},
             )
+            if isinstance(resp, SendResult):
+                return resp
             if resp.status_code != 200:
                 return SendResult(
                     success=False,
@@ -1045,7 +1084,7 @@ class TelegramAdapter(BaseChannelAdapter):
         try:
             # PR 3a.2 — MarkdownV2 + parse-error fallback for approval prompt.
             converted = _to_mdv2(prompt_text)
-            resp = await self._client.post(
+            resp = await self._post_with_retry(
                 f"{self.base_url}/sendMessage",
                 json={
                     "chat_id": chat_id,
@@ -1054,11 +1093,13 @@ class TelegramAdapter(BaseChannelAdapter):
                     "reply_markup": {"inline_keyboard": keyboard},
                 },
             )
+            if isinstance(resp, SendResult):
+                return resp
             if (
                 resp.status_code == 400
                 and _MDV2_PARSE_ERROR_MARKER in resp.text.lower()
             ):
-                resp = await self._client.post(
+                resp = await self._post_with_retry(
                     f"{self.base_url}/sendMessage",
                     json={
                         "chat_id": chat_id,
@@ -1066,6 +1107,8 @@ class TelegramAdapter(BaseChannelAdapter):
                         "reply_markup": {"inline_keyboard": keyboard},
                     },
                 )
+                if isinstance(resp, SendResult):
+                    return resp
             if resp.status_code != 200:
                 return SendResult(
                     success=False,
