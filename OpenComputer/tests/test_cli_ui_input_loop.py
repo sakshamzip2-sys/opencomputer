@@ -97,3 +97,61 @@ def test_build_prompt_session_uses_multicolumn_complete_style(tmp_path: Path):
     scope = TurnCancelScope()
     session = build_prompt_session(profile_home=tmp_path, scope=scope)
     assert session.complete_style == CompleteStyle.MULTI_COLUMN
+
+
+def test_read_user_input_app_layout_renders_without_crash(tmp_path: Path):
+    """Regression: PR #210 introduced ``Dimension(exact=…)`` which is
+    invalid (the kwarg doesn't exist on the constructor — it's a
+    classmethod ``Dimension.exact(N)``). The bug only fired the moment
+    the renderer asked the dropdown Window for its preferred height,
+    i.e. AS SOON AS the user typed ``/``. This test exercises that
+    exact path: build the chat input Application, simulate ``/`` being
+    typed, then ask the layout for its preferred height. If the
+    Dimension API is wrong, this raises ``TypeError`` during
+    ``preferred_height`` — same crash the user hit.
+    """
+    import asyncio
+
+    from prompt_toolkit.application.current import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from opencomputer.cli_ui.input_loop import read_user_input
+
+    async def _drive():
+        with create_pipe_input() as inp:
+            with create_app_session(input=inp, output=DummyOutput()):
+                # Kick off read_user_input as a task; we'll never let it
+                # finish — we just want the Application built so we can
+                # interrogate its layout.
+                task = asyncio.create_task(
+                    read_user_input(profile_home=tmp_path, scope=TurnCancelScope())
+                )
+                # Yield once so the Application is constructed.
+                await asyncio.sleep(0.05)
+
+                from prompt_toolkit.application.current import get_app
+
+                app = get_app()
+                # Simulate a slash typed into the input buffer. This is
+                # what populates ``state["matches"]`` and makes the
+                # dropdown ConditionalContainer go from 0-height to
+                # rendering — the path that crashed.
+                buf = app.current_buffer
+                buf.text = "/"
+                buf.cursor_position = 1
+
+                # Ask the layout for a preferred height — this calls
+                # ``_dropdown_height`` and surfaces the Dimension API bug.
+                size = app.output.get_size()
+                # Should not raise.
+                app.layout.container.preferred_height(size.columns, size.rows)
+
+                # Clean up.
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, EOFError, KeyboardInterrupt):
+                    pass
+
+    asyncio.run(_drive())

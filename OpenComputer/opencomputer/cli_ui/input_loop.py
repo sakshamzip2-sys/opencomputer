@@ -359,7 +359,12 @@ async def read_user_input(
         return out
 
     def _dropdown_height():
-        return Dimension(exact=min(len(state["matches"]), 10))
+        # ``Dimension.exact(N)`` is the classmethod that builds a fixed-N
+        # dimension. Earlier code used ``Dimension(exact=N)`` which is
+        # invalid — the constructor only accepts ``min/max/weight/preferred``.
+        # Calling it crashed prompt_toolkit's renderer the moment the user
+        # typed ``/`` (PR #210 follow-up).
+        return Dimension.exact(min(len(state["matches"]), 10))
 
     kb = KeyBindings()
 
