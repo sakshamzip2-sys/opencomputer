@@ -25,7 +25,13 @@ from __future__ import annotations
 from typing import Any
 
 from opencomputer.agent.slash_commands_impl.bell_cmd import BellCommand
+from opencomputer.agent.slash_commands_impl.copy_cmd import CopyCommand
+from opencomputer.agent.slash_commands_impl.fast_cmd import FastCommand
+from opencomputer.agent.slash_commands_impl.platforms_cmd import PlatformsCommand
+from opencomputer.agent.slash_commands_impl.reasoning_cmd import ReasoningCommand
 from opencomputer.agent.slash_commands_impl.scrape import ScrapeCommand
+from opencomputer.agent.slash_commands_impl.usage_cmd import UsageCommand
+from opencomputer.agent.slash_commands_impl.yolo_cmd import YoloCommand
 from opencomputer.plugins.registry import registry as _plugin_registry
 
 # The built-in slash command classes. Each is instantiated by
@@ -34,6 +40,14 @@ from opencomputer.plugins.registry import registry as _plugin_registry
 _BUILTIN_COMMANDS: tuple[type, ...] = (
     ScrapeCommand,
     BellCommand,  # Tier 2.B — terminal bell on turn complete
+    # Tier 2.A — slash command bundle from
+    # docs/refs/hermes-agent/2026-04-28-major-gaps.md
+    CopyCommand,
+    YoloCommand,
+    ReasoningCommand,
+    FastCommand,
+    UsageCommand,
+    PlatformsCommand,
 )
 
 
