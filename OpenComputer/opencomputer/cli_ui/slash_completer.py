@@ -38,9 +38,17 @@ def longest_common_prefix(strs: list[str]) -> str:
 
 
 def _format_display(cmd: CommandDef) -> str:
+    """Render the left-column display text for a command in the dropdown.
+
+    Format: ``/<name> [<args_hint>] (<category>)`` — mirrors Claude Code's
+    three-column convention (name + source/category + description) where
+    description ends up in ``display_meta`` (right column / meta toolbar).
+    """
+    parts = [f"/{cmd.name}"]
     if cmd.args_hint:
-        return f"/{cmd.name} {cmd.args_hint}"
-    return f"/{cmd.name}"
+        parts.append(cmd.args_hint)
+    parts.append(f"({cmd.category})")
+    return " ".join(parts)
 
 
 class SlashCommandCompleter(Completer):

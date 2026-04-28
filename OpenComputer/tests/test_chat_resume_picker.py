@@ -84,29 +84,39 @@ def test_resume_last_returns_none_when_no_sessions(
 def test_resume_pick_resolves_user_choice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """User types '2' at the picker prompt → second-most-recent session."""
+    """User selects a row in the picker → that session id is returned.
+
+    Updated 2026-04-28: ``_resolve_resume_target("pick")`` now opens the
+    polished alt-screen :func:`run_resume_picker` (PR #207) instead of
+    the old ``rich.prompt.Prompt.ask`` numbered-list flow. We patch the
+    picker entry point to simulate the user's selection.
+    """
     from opencomputer import cli
 
     db_path = _seed_sessions(tmp_path, n=3)
     _patch_default_config_to(db_path, monkeypatch)
 
-    with patch("rich.prompt.Prompt.ask", return_value="2"):
+    with patch(
+        "opencomputer.cli_ui.resume_picker.run_resume_picker",
+        return_value="session-01",
+    ):
         resolved = cli._resolve_resume_target("pick")
-    assert resolved == "session-01", (
-        "expected session at index 2 (1-based) = second newest"
-    )
+    assert resolved == "session-01"
 
 
 def test_resume_pick_blank_choice_returns_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """User hits Enter at the picker → None → caller starts fresh."""
+    """User cancels the picker (Esc / Ctrl+C / empty) → None → fresh session."""
     from opencomputer import cli
 
     db_path = _seed_sessions(tmp_path, n=3)
     _patch_default_config_to(db_path, monkeypatch)
 
-    with patch("rich.prompt.Prompt.ask", return_value=""):
+    with patch(
+        "opencomputer.cli_ui.resume_picker.run_resume_picker",
+        return_value=None,
+    ):
         resolved = cli._resolve_resume_target("pick")
     assert resolved is None
 
@@ -114,7 +124,7 @@ def test_resume_pick_blank_choice_returns_none(
 def test_resume_pick_with_no_sessions_returns_none_without_prompting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Empty DB + 'pick' → don't even show the prompt."""
+    """Empty DB + 'pick' → don't even open the picker."""
     from opencomputer import cli
     from opencomputer.agent.state import SessionDB
 
@@ -122,17 +132,20 @@ def test_resume_pick_with_no_sessions_returns_none_without_prompting(
     SessionDB(db_path)
     _patch_default_config_to(db_path, monkeypatch)
 
-    asked: list[bool] = []
+    opened: list[bool] = []
 
-    def fake_ask(*_a, **_k):
-        asked.append(True)
-        return ""
+    def fake_picker(_rows):
+        opened.append(True)
+        return None
 
-    with patch("rich.prompt.Prompt.ask", side_effect=fake_ask):
+    with patch(
+        "opencomputer.cli_ui.resume_picker.run_resume_picker",
+        side_effect=fake_picker,
+    ):
         resolved = cli._resolve_resume_target("pick")
 
     assert resolved is None
-    assert asked == [], "must not prompt when there's nothing to pick"
+    assert opened == [], "must not open the picker when there's nothing to pick"
 
 
 def test_resume_passthrough_unknown_spec_returns_input(
