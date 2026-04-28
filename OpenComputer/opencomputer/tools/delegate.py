@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 DELEGATE_BLOCKED_TOOLS: frozenset[str] = frozenset({
     "delegate",          # no recursive delegation (depth check is the second line of defense)
     "AskUserQuestion",   # subagent has no user
+    "Clarify",           # subagent has no user (Sub-project 1.G — same reason as AskUserQuestion)
     "ExitPlanMode",      # subagent doesn't own plan mode
 })
 """Tools the parent must NEVER pass to a subagent. Caller-supplied
