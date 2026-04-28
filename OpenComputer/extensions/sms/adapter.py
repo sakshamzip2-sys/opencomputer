@@ -23,7 +23,6 @@ import base64
 import hashlib
 import hmac
 import logging
-import re
 import time
 import urllib.parse
 from typing import Any
@@ -32,6 +31,7 @@ import aiohttp
 from aiohttp import web
 
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
+from plugin_sdk.channel_helpers import redact_phone, strip_markdown
 from plugin_sdk.core import MessageEvent, Platform, SendResult
 
 logger = logging.getLogger("opencomputer.ext.sms")
@@ -41,37 +41,17 @@ MAX_SMS_LENGTH = 1600  # ~10 SMS segments
 DEFAULT_WEBHOOK_PORT = 8080
 DEFAULT_WEBHOOK_HOST = "0.0.0.0"
 
-#: Lightweight markdown strip — Twilio renders raw markdown as literal
-#: characters which is ugly for SMS. Hermes ships a fuller utility; this
-#: covers the common cases (bold, italic, code, links, headers).
-_MD_STRIP_PATTERNS = [
-    # Fenced code blocks FIRST — strip whole block including the language
-    # tag and content. Otherwise inline `code` pattern eats the
-    # opening/closing triple-backticks.
-    (re.compile(r"```.*?```", re.DOTALL), ""),
-    (re.compile(r"\*\*(.+?)\*\*"), r"\1"),  # **bold**
-    (re.compile(r"__(.+?)__"), r"\1"),  # __bold__
-    (re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)"), r"\1"),  # *italic*
-    (re.compile(r"_(.+?)_"), r"\1"),  # _italic_
-    (re.compile(r"`([^`]+?)`"), r"\1"),  # `code` (inline, runs after fenced strip)
-    (re.compile(r"\[([^\]]+)\]\(([^)]+)\)"), r"\1 (\2)"),  # [text](url)
-    (re.compile(r"^#+\s*", re.MULTILINE), ""),  # # headers
-]
 
-
-def _strip_markdown(text: str) -> str:
-    out = text
-    for pat, repl in _MD_STRIP_PATTERNS:
-        out = pat.sub(repl, out)
-    return out
-
-
-def _redact_phone(phone: str) -> str:
-    """Redact the middle of a phone number for logs. Keeps country code +
-    last 2 digits so the log entry is correlatable but not leakable."""
-    if not phone or len(phone) < 6:
-        return "***"
-    return f"{phone[:3]}***{phone[-2:]}"
+# PR 3c.3 — markdown stripping + phone redaction now come from
+# ``plugin_sdk.channel_helpers`` so every channel adapter shares the
+# same implementation. The local copies that lived here previously
+# (`_strip_markdown` / `_redact_phone`) had subtle behavioural
+# differences (the local redactor kept only 2 trailing digits and
+# didn't preserve country-code separation). Re-exported below as
+# private aliases for any downstream caller (tests, plugins) that
+# imported them by name from this module.
+_strip_markdown = strip_markdown
+_redact_phone = redact_phone
 
 
 class SmsAdapter(BaseChannelAdapter):
@@ -146,7 +126,7 @@ class SmsAdapter(BaseChannelAdapter):
             "Twilio webhook server listening on %s:%d, from=%s",
             self._webhook_host,
             self._webhook_port,
-            _redact_phone(self._from_number),
+            redact_phone(self._from_number),
         )
         return True
 
@@ -163,7 +143,7 @@ class SmsAdapter(BaseChannelAdapter):
     async def send(
         self, chat_id: str, text: str, **kwargs: Any
     ) -> SendResult:
-        formatted = _strip_markdown(text)
+        formatted = strip_markdown(text)
         chunks = self._chunk_for_sms(formatted)
         last_result = SendResult(success=True)
 
@@ -187,7 +167,7 @@ class SmsAdapter(BaseChannelAdapter):
                             error_msg = body.get("message", str(body))
                             logger.error(
                                 "send failed to %s: %d %s",
-                                _redact_phone(chat_id),
+                                redact_phone(chat_id),
                                 resp.status,
                                 error_msg,
                             )
@@ -199,7 +179,7 @@ class SmsAdapter(BaseChannelAdapter):
                             success=True, message_id=body.get("sid", "")
                         )
                 except Exception as exc:  # noqa: BLE001
-                    logger.error("send error to %s: %s", _redact_phone(chat_id), exc)
+                    logger.error("send error to %s: %s", redact_phone(chat_id), exc)
                     return SendResult(success=False, error=str(exc))
         finally:
             if owns_session and session is not None:
@@ -334,7 +314,7 @@ class SmsAdapter(BaseChannelAdapter):
 
         logger.info(
             "inbound from=%s text=%r",
-            _redact_phone(from_number),
+            redact_phone(from_number),
             text[:80],
         )
 
