@@ -25,15 +25,71 @@ from __future__ import annotations
 import asyncio
 import enum
 import logging
+import os
 import random
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from plugin_sdk.core import MessageEvent, Platform, ProcessingOutcome, SendResult
 
 logger = logging.getLogger("plugin_sdk.channel_contract")
+
+
+# ─── extract_media helpers ───────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class MediaItem:
+    """A media attachment parsed from agent output (Hermes PR 2 Task 2.4).
+
+    Produced by :meth:`BaseChannelAdapter.extract_media`. Frozen so the
+    extracted path can't be mutated between extraction and the
+    platform-specific ``send_*`` call (defence in depth against
+    accidental rewrite).
+    """
+
+    path: str
+    as_voice: bool
+    ext: str
+
+
+_MEDIA_EXT_WHITELIST: frozenset[str] = frozenset(
+    {
+        # images
+        "png", "jpg", "jpeg", "gif", "webp",
+        # video
+        "mp4", "mov", "avi", "mkv", "webm",
+        # audio
+        "ogg", "opus", "mp3", "wav", "m4a",
+        # documents
+        "epub", "pdf", "zip", "docx", "doc",
+        "xlsx", "xls", "pptx", "ppt",
+        # text
+        "txt", "csv", "md",
+    }
+)
+
+_MEDIA_DIRECTIVE_RE = re.compile(
+    r"(?:\[\[audio_as_voice\]\]\s*|MEDIA:\s*)"
+    r"(?:\"([^\"]+)\"|'([^']+)'|`([^`]+)`|(\S+))",
+)
+
+
+# ─── extract_local_files helpers ─────────────────────────────────────
+
+
+_BARE_PATH_RE = re.compile(
+    r"(?<![/\w])(/[^\s`'\"<>]+\.[a-zA-Z0-9]{1,5})(?=\s|$|[.,;:!?])"
+)
+_HOME_PATH_RE = re.compile(
+    r"(?<![/\w])(~/[^\s`'\"<>]+\.[a-zA-Z0-9]{1,5})(?=\s|$|[.,;:!?])"
+)
+_FENCE_BLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 
 
 class ChannelCapabilities(enum.Flag):
@@ -452,5 +508,115 @@ class BaseChannelAdapter(ABC):
         """``True`` iff ``_set_fatal_error`` was called and not cleared."""
         return self._fatal_error_code is not None
 
+    # ------------------------------------------------------------------
+    # Agent-output post-processing — Hermes channel-port (PR 2 Task 2.4)
+    # ------------------------------------------------------------------
 
-__all__ = ["BaseChannelAdapter", "ChannelCapabilities"]
+    def extract_local_files(
+        self,
+        content: str,
+        allowed_dirs: list[Path] | None = None,
+    ) -> tuple[str, list[Path]]:
+        """Extract bare absolute file paths from agent output.
+
+        Per amendment §A.8: paths outside ``allowed_dirs`` are NOT
+        extracted, even if they exist on disk. Default allowlist is
+        ``[~/Documents, /tmp]`` — the agent's two normal scratch dirs.
+        Override via ``allowed_dirs=`` (channel adapters typically read
+        ``self.config["attachments"]["allowed_dirs"]``).
+
+        Excludes paths inside fenced code blocks or inline code so
+        that a ``rm /etc/passwd`` example in a markdown explanation
+        doesn't get attached as a real file. Validates path existence
+        via ``os.path.isfile``. Returns ``(cleaned_text, [Path, ...])``.
+
+        Relative paths are NOT extracted — only absolute ``/...`` and
+        ``~/...`` paths qualify. The matched substring is removed from
+        the cleaned text; surrounding whitespace is collapsed.
+        """
+        if not content:
+            return content, []
+
+        if allowed_dirs is None:
+            allowed_dirs = [Path.home() / "Documents", Path("/tmp")]
+
+        # Mask code regions so paths inside them aren't matched.
+        masked = _FENCE_BLOCK_RE.sub(
+            lambda m: "\x00" * len(m.group(0)), content
+        )
+        masked = _INLINE_CODE_RE.sub(
+            lambda m: "\x00" * len(m.group(0)), masked
+        )
+
+        paths: list[Path] = []
+        cleaned = content
+
+        for regex in (_BARE_PATH_RE, _HOME_PATH_RE):
+            for match in regex.finditer(masked):
+                raw = match.group(1)
+                expanded = Path(os.path.expanduser(raw))
+                # Existence check — agent paths are real files only.
+                try:
+                    if not expanded.is_file():
+                        continue
+                except OSError:
+                    continue
+                # Allowlist check — defence in depth against
+                # ``/etc/passwd``-style exfiltration.
+                if not any(
+                    self._is_subpath(expanded, d) for d in allowed_dirs
+                ):
+                    continue
+                paths.append(expanded)
+                cleaned = cleaned.replace(raw, "")
+
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+        return cleaned, paths
+
+    @staticmethod
+    def _is_subpath(path: Path, allowed_dir: Path) -> bool:
+        """``True`` iff ``path`` resolves into ``allowed_dir``.
+
+        Uses ``Path.resolve()`` first so ``..`` / symlinks can't escape
+        the allowlist. Returns False on any resolve / relative_to
+        error (treats unresolvable paths as outside).
+        """
+        try:
+            resolved = path.resolve()
+            allowed = allowed_dir.resolve()
+            resolved.relative_to(allowed)
+            return True
+        except (ValueError, OSError):
+            return False
+
+    def extract_media(self, content: str) -> tuple[str, list[MediaItem]]:
+        """Parse ``MEDIA: <path>`` and ``[[audio_as_voice]] <path>`` directives.
+
+        Whitelist-checks the file extension (see
+        :data:`_MEDIA_EXT_WHITELIST`). The matched directive substring
+        is removed from the cleaned text. Returns
+        ``(cleaned_text, [MediaItem, ...])``.
+
+        Note: ``extract_media`` does NOT verify the file exists or
+        check an allowlist — that's the adapter's responsibility before
+        attaching. The directive form is itself the agent's explicit
+        instruction; allowlist enforcement happens at
+        ``extract_local_files`` for the bare-path inference path.
+        """
+        if not content:
+            return content, []
+        items: list[MediaItem] = []
+        cleaned = content
+        for match in _MEDIA_DIRECTIVE_RE.finditer(content):
+            path = next(g for g in match.groups() if g is not None)
+            as_voice = "[[audio_as_voice]]" in match.group(0)
+            ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+            if ext not in _MEDIA_EXT_WHITELIST:
+                continue
+            items.append(MediaItem(path=path, as_voice=as_voice, ext=ext))
+            cleaned = cleaned.replace(match.group(0), "")
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+        return cleaned, items
+
+
+__all__ = ["BaseChannelAdapter", "ChannelCapabilities", "MediaItem"]
