@@ -10,7 +10,7 @@ import re
 
 logger = logging.getLogger("plugin_sdk.format_converters.slack_mrkdwn")
 
-_FENCE_RE = re.compile(r"```([a-zA-Z0-9_+-]*\n.*?\n)```", re.DOTALL)
+_FENCE_RE = re.compile(r"```([a-zA-Z0-9_+-]*\n?.*?)```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _BOLD_DOUBLE_RE = re.compile(r"\*\*([^*\n]+)\*\*")

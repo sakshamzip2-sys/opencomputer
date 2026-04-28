@@ -25,7 +25,7 @@ _MDV2_SPECIAL = r"_*[]()~`>#+-=|{}.!\\"
 _MDV2_ESCAPE_RE = re.compile(f"([{re.escape(_MDV2_SPECIAL)}])")
 
 # Placeholder format: \x00P<n>\x00 (NUL won't appear in user-input text)
-_FENCE_RE = re.compile(r"```([a-zA-Z0-9_+-]*\n.*?\n)```", re.DOTALL)
+_FENCE_RE = re.compile(r"```([a-zA-Z0-9_+-]*\n?.*?)```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _BOLD_DOUBLE_RE = re.compile(r"\*\*([^*\n]+)\*\*")
