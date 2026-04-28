@@ -478,6 +478,14 @@ async def read_user_input(
             ("class:title.box", " ├"),
         ]
 
+    # Show the corner indicator only for sane-length titles (≤50 chars).
+    # Existing sessions may have a runaway auto-generated title (the now-
+    # disabled cheap-LLM titler sometimes returned the AI's greeting as
+    # a "title" — see Image #12). Filter those out at the UI layer so
+    # historical bad data doesn't surface.
+    def _title_is_displayable() -> bool:
+        return bool(session_title) and 1 <= len(session_title) <= 50
+
     title_window = ConditionalContainer(
         content=Window(
             content=FormattedTextControl(_title_text),
@@ -485,7 +493,7 @@ async def read_user_input(
             align=WindowAlign.RIGHT,
             dont_extend_height=True,
         ),
-        filter=Condition(lambda: bool(session_title)),
+        filter=Condition(_title_is_displayable),
     )
 
     dropdown_window = ConditionalContainer(
