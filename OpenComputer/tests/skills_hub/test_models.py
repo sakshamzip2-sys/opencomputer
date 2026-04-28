@@ -1,5 +1,6 @@
 """Tests for SkillSource public ABC and dataclasses."""
 import pytest
+
 from plugin_sdk.skill_source import SkillBundle, SkillMeta, SkillSource
 
 

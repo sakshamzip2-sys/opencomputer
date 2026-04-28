@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal
 
 TrustLevel = Literal["builtin", "trusted", "community", "untrusted"]
 _VALID_TRUST: tuple[str, ...] = ("builtin", "trusted", "community", "untrusted")
@@ -29,8 +29,8 @@ class SkillMeta:
     name: str
     description: str
     source: str
-    version: Optional[str] = None
-    author: Optional[str] = None
+    version: str | None = None
+    author: str | None = None
     tags: tuple[str, ...] = field(default_factory=tuple)
     trust_level: TrustLevel = "community"
     extra: dict = field(default_factory=dict)
@@ -72,11 +72,11 @@ class SkillSource(ABC):
         """Return up to ``limit`` skills matching the query string."""
 
     @abstractmethod
-    def fetch(self, identifier: str) -> Optional[SkillBundle]:
+    def fetch(self, identifier: str) -> SkillBundle | None:
         """Return the full bundle for an identifier, or None if unknown."""
 
     @abstractmethod
-    def inspect(self, identifier: str) -> Optional[SkillMeta]:
+    def inspect(self, identifier: str) -> SkillMeta | None:
         """Return rich metadata for an identifier, or None if unknown."""
 
 
