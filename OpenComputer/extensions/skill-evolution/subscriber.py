@@ -60,6 +60,7 @@ from plugin_sdk.ingestion import SessionEndEvent
 
 from .candidate_store import add_candidate
 from .pattern_detector import is_candidate_session, judge_candidate_async
+from .session_metrics import compute_session_metrics
 from .skill_extractor import extract_skill_from_session
 
 _log = logging.getLogger("opencomputer.skill_evolution.subscriber")
@@ -199,9 +200,20 @@ class EvolutionSubscriber:
             existing_skills_dir = profile_home / "skills"
 
             # ── Stage 1: heuristic ───────────────────────────────────
+            # Compute SessionMetrics from real SessionDB.get_messages()
+            # output. The detector reads pre-derived fields off this
+            # dataclass — no DB hits inside the detector itself.
+            metrics = compute_session_metrics(session_db, session_id)
+            if metrics is None:
+                _log.info(
+                    "skill-evolution: session=%s rejected at stage 1 (no messages)",
+                    session_id,
+                )
+                return
+
             score = is_candidate_session(
                 event,
-                session_db=session_db,
+                metrics=metrics,
                 existing_skills_dir=existing_skills_dir,
                 sensitive_filter=self._sensitive_filter,
             )

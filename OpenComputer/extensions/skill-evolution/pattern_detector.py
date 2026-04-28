@@ -24,24 +24,17 @@ keyword-overlap dedup. The string is used in-process only — no value is
 attached to the returned ``CandidateScore`` (the ``summary_hint`` field
 is left empty here; T3's summariser populates it before Stage 2 runs).
 
-SessionDB shape
----------------
-The functions read the following attributes off the value returned by
-``session_db.get_session(session_id)``, falling back to safe defaults
-when missing:
-
-* ``turn_count`` (int)
-* ``user_messages_total_chars`` (int)
-* ``user_messages_concat`` (str) — best-effort concat of user messages
-* ``tool_calls`` (iterable of objects with ``is_error: bool`` and
-  ``turn_index: int``)
-
-The current ``SessionDB.get_session`` returns a raw row dict with only
-the ``sessions`` table columns (id, started_at, model, ...). The fields
-above are computed downstream — either by an adapter that wraps the row
-with the derived counts (preferred), or by extending ``SessionDB`` with
-a richer accessor in T3. The tests inject a ``MagicMock`` with the
-attributes set directly, which is the contract this module commits to.
+SessionMetrics adapter
+----------------------
+The detector reads pre-computed derived fields off a
+:class:`extensions.skill_evolution.session_metrics.SessionMetrics`
+dataclass — turn_count, user_messages_concat, tool_calls. The
+production caller invokes
+:func:`extensions.skill_evolution.session_metrics.compute_session_metrics`
+to derive these from ``SessionDB.get_messages()`` before invoking the
+detector. Tests construct ``SessionMetrics`` directly. This keeps the
+detector pure (no DB access) and concentrates the SQL query logic in
+the adapter module.
 """
 
 from __future__ import annotations
@@ -235,9 +228,10 @@ def _has_recovery_after_error(tool_calls: Iterable[Any]) -> bool:
 def is_candidate_session(
     session_end_event: SessionEndEvent,
     *,
-    session_db: Any,
+    metrics: Any | None = None,
     existing_skills_dir: Path,
     sensitive_filter: Callable[[Any], bool] | None,
+    session_db: Any | None = None,
 ) -> CandidateScore:
     """Stage 1: cheap heuristic filter. No LLM calls.
 
@@ -251,6 +245,18 @@ def is_candidate_session(
       * The session's user messages share more than
         :data:`_DUPE_OVERLAP_THRESHOLD` of their significant tokens with
         any existing skill's ``description:`` line.
+
+    Parameters
+    ----------
+    metrics
+        Optional pre-computed :class:`SessionMetrics` (preferred). Tests
+        pass this directly; the subscriber computes it via
+        ``compute_session_metrics`` before invoking the detector.
+    session_db
+        Backwards-compatible fallback — when ``metrics`` is None and
+        ``session_db`` has a duck-typed ``.get_session(session_id)`` that
+        returns an attribute-bearing row (legacy mock shape), use it.
+        Production callers should pass ``metrics`` instead.
 
     Returns
     -------
@@ -270,31 +276,40 @@ def is_candidate_session(
             turn_count=turn_count,
         )
 
-    row = None
-    try:
-        row = session_db.get_session(session_id)
-    except Exception:  # noqa: BLE001 — DB hiccup must not crash the detector
-        _log.warning(
-            "skill-evolution: get_session(%r) failed — treating as non-candidate",
-            session_id,
-            exc_info=True,
-        )
-        return CandidateScore(
-            is_candidate=False,
-            rejection_reason="session_db unavailable",
-            session_id=session_id,
-            turn_count=turn_count,
-        )
-
+    row = metrics
     if row is None:
-        return CandidateScore(
-            is_candidate=False,
-            rejection_reason="session row missing",
-            session_id=session_id,
-            turn_count=turn_count,
-        )
+        if session_db is None:
+            return CandidateScore(
+                is_candidate=False,
+                rejection_reason="no metrics and no session_db provided",
+                session_id=session_id,
+                turn_count=turn_count,
+            )
+        try:
+            row = session_db.get_session(session_id)
+        except Exception:  # noqa: BLE001 — DB hiccup must not crash the detector
+            _log.warning(
+                "skill-evolution: get_session(%r) failed — treating as non-candidate",
+                session_id,
+                exc_info=True,
+            )
+            return CandidateScore(
+                is_candidate=False,
+                rejection_reason="session_db unavailable",
+                session_id=session_id,
+                turn_count=turn_count,
+            )
 
-    # Pull derived fields with safe defaults — see module docstring.
+        if row is None:
+            return CandidateScore(
+                is_candidate=False,
+                rejection_reason="session row missing",
+                session_id=session_id,
+                turn_count=turn_count,
+            )
+
+    # Pull derived fields with safe defaults — works on SessionMetrics
+    # (preferred) AND legacy mock-row shape.
     user_chars = int(getattr(row, "user_messages_total_chars", 0) or 0)
     user_text = str(getattr(row, "user_messages_concat", "") or "")
     tool_calls = list(getattr(row, "tool_calls", []) or [])
