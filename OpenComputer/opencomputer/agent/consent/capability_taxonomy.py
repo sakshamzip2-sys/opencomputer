@@ -98,6 +98,24 @@ F1_CAPABILITIES: dict[str, ConsentTier] = {
     "skill_evolution.observe": ConsentTier.IMPLICIT,
     "skill_evolution.propose": ConsentTier.EXPLICIT,
     "skill_evolution.auto_publish": ConsentTier.PER_ACTION,
+    # Browser-control plugin — T1+T2 of 2026-04-28 plan.
+    #
+    # Playwright-based automation. Five capabilities cover the standard
+    # navigate / click / fill / snapshot / scrape surface area.
+    # ``navigate``, ``click``, ``fill`` are EXPLICIT because they can
+    # mutate page state, submit forms, and trigger network requests with
+    # arbitrary parameters. ``snapshot`` and ``scrape`` are IMPLICIT
+    # because they're read-only — equivalent to a more capable WebFetch
+    # that can see JS-rendered content.
+    #
+    # Sessions are isolated by default (fresh browser context per call,
+    # no shared cookies / login). The OPENCOMPUTER_BROWSER_PROFILE_PATH
+    # env var opts into a shared profile for advanced use only.
+    "browser.navigate": ConsentTier.EXPLICIT,
+    "browser.click": ConsentTier.EXPLICIT,
+    "browser.fill": ConsentTier.EXPLICIT,
+    "browser.snapshot": ConsentTier.IMPLICIT,
+    "browser.scrape": ConsentTier.IMPLICIT,
 }
 
 # Reserved for later phases (documented, not enforced here):

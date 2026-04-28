@@ -107,6 +107,13 @@ voice-local = [
 voice-mlx = [
   "mlx-whisper>=0.4; platform_system == 'Darwin'",
 ]
+# Optional: browser-control plugin (Playwright-based automation).
+# Install with `pip install opencomputer[browser]`, then:
+#   playwright install chromium
+# Sessions are isolated per-call by default. See extensions/browser-control/.
+browser = [
+  "playwright>=1.40",
+]
 
 [project.scripts]
 opencomputer = "opencomputer.cli:main"

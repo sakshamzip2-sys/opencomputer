@@ -769,6 +769,53 @@ def _check_voice_mode_capable() -> CheckResult:
     )
 
 
+def _check_browser_control_capable() -> CheckResult:
+    """T1.C (browser-control) — verify Playwright is installed.
+
+    Browser-control is opt-in (default off; ships in the ``[browser]``
+    extra). The check only verifies that ``playwright`` and its
+    ``async_api`` submodule are importable. We do NOT try to launch the
+    chromium binary here — that's a runtime concern (BrowserError will
+    surface if the binary is missing when a tool is actually invoked).
+
+    Returns ``info`` level when playwright isn't installed (opt-in
+    feature, doctor exit-code stays clean) and ``warning`` when the
+    package is partially installed (likely environment corruption).
+    """
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        return CheckResult(
+            ok=False,
+            level="info",
+            message=(
+                "browser-control: playwright not installed "
+                "(opt-in: pip install opencomputer[browser])"
+            ),
+        )
+
+    # playwright is installed; check the async_api submodule.
+    try:
+        from playwright.async_api import async_playwright  # noqa: F401
+    except ImportError:
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message="browser-control: playwright async_api not loadable",
+        )
+
+    # We can't easily check the chromium binary without launching it;
+    # leave that to the runtime (BrowserError will surface if missing).
+    return CheckResult(
+        ok=True,
+        level="info",
+        message=(
+            "browser-control: playwright available "
+            "(run `playwright install chromium` if browser binary missing)"
+        ),
+    )
+
+
 def _check_ambient_state(profile_home: Path) -> CheckResult:
     """Read ambient state.json; warn if enabled but heartbeat is stale or missing.
 
@@ -1081,6 +1128,13 @@ def run_doctor(fix: bool = False) -> int:
     # the [voice] extra.
     checks.append(
         _result_to_check("voice-mode", _check_voice_mode_capable())
+    )
+
+    # T1.C (browser-control) — Playwright import preflight. Opt-in
+    # feature; returns info-level when not installed so doctor exit-code
+    # stays clean for users who haven't pulled the [browser] extra.
+    checks.append(
+        _result_to_check("browser-control", _check_browser_control_capable())
     )
 
     # Plugin-contributed checks + repairs (run last so plugins see a fully-
