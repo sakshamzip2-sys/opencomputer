@@ -22,13 +22,18 @@ fallback when the channel doesn't support reactions).
 
 from __future__ import annotations
 
+import asyncio
 import enum
+import logging
+import random
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from plugin_sdk.core import MessageEvent, Platform, SendResult
+
+logger = logging.getLogger("plugin_sdk.channel_contract")
 
 
 class ChannelCapabilities(enum.Flag):
@@ -92,6 +97,21 @@ class BaseChannelAdapter(ABC):
     #: advertise their feature set; the gateway checks before calling
     #: optional methods.
     capabilities: ChannelCapabilities = ChannelCapabilities.NONE
+
+    #: Substrings (lowercased) used by :meth:`_is_retryable_error` to
+    #: classify transient errors. Adapters can extend this tuple with
+    #: platform-specific patterns (e.g. Telegram's "Bad Gateway").
+    _RETRYABLE_ERROR_PATTERNS: tuple[str, ...] = (
+        "connecterror",
+        "connectionerror",
+        "connectionreset",
+        "connectionrefused",
+        "connecttimeout",
+        "network",
+        "broken pipe",
+        "remotedisconnected",
+        "eoferror",
+    )
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
@@ -232,6 +252,81 @@ class BaseChannelAdapter(ABC):
         `urgent=True` is a hint adapters MAY honour by overriding silent-mode.
         """
         return await self.send(chat_id, text)
+
+    # ------------------------------------------------------------------
+    # Retry helpers — Hermes channel-port (PR 2 Task 2.1)
+    # ------------------------------------------------------------------
+
+    def _is_retryable_error(self, exc: BaseException) -> bool:
+        """Heuristic: is *exc* a transient error worth retrying?
+
+        Read/write timeouts are deliberately excluded — they're
+        non-idempotent (the request may have already reached the server
+        and produced a side-effect; retrying could double-send). Pure
+        connect-time errors (``ConnectTimeout`` etc.) are retryable
+        because the request never made it out.
+
+        Class-name match is the primary signal — many SDKs (httpx,
+        Anthropic, OpenAI) raise distinct error classes that don't
+        share a base. Falls back to message-text match for the long
+        tail of platform-native errors that look like ``OSError("network
+        unreachable")``.
+        """
+        cls = type(exc).__name__.lower()
+        # Exclude pure read/write timeouts; allow connect-timeouts.
+        if "timeout" in cls and "connect" not in cls:
+            return False
+        if any(p in cls for p in self._RETRYABLE_ERROR_PATTERNS):
+            return True
+        msg = str(exc).lower()
+        return any(p in msg for p in self._RETRYABLE_ERROR_PATTERNS)
+
+    async def _send_with_retry(
+        self,
+        send_fn: Callable[..., Awaitable[SendResult]],
+        *args: Any,
+        max_attempts: int = 3,
+        base_delay: float = 1.0,
+        **kwargs: Any,
+    ) -> SendResult:
+        """Retry transient send failures with exponential backoff + jitter.
+
+        Returns the wrapped function's :class:`SendResult` on success,
+        or a failure :class:`SendResult` after exhausting *max_attempts*.
+        Non-retryable exceptions (per :meth:`_is_retryable_error`)
+        propagate immediately so callers can distinguish "the network
+        flapped" from "your request was malformed".
+
+        ``base_delay`` is the first sleep; subsequent attempts double
+        with up to 25% jitter — keeps a thundering-herd of stuck
+        adapters from synchronising their retries.
+        """
+        last_exc: BaseException | None = None
+        for attempt in range(max_attempts):
+            try:
+                return await send_fn(*args, **kwargs)
+            except BaseException as exc:  # noqa: BLE001
+                if not self._is_retryable_error(exc):
+                    raise
+                last_exc = exc
+                if attempt + 1 >= max_attempts:
+                    break
+                delay = base_delay * (2 ** attempt) + random.uniform(
+                    0, base_delay * 0.25
+                )
+                logger.warning(
+                    "send retry %d/%d after %s: %s",
+                    attempt + 1,
+                    max_attempts,
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
+                await asyncio.sleep(delay)
+        err = (
+            f"{type(last_exc).__name__ if last_exc else 'Unknown'}: "
+            f"{str(last_exc)[:300] if last_exc else 'no exc'}"
+        )
+        return SendResult(success=False, error=err)
 
 
 __all__ = ["BaseChannelAdapter", "ChannelCapabilities"]
