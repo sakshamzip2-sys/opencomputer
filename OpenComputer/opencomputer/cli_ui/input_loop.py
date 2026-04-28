@@ -535,9 +535,17 @@ async def read_user_input(
         height=1,
         dont_extend_width=True,
     )
+    # ``wrap_lines=True`` makes long typed input wrap to a new visible
+    # line at the right edge instead of horizontal-scrolling off-screen.
+    # Combined with a flex height (``Dimension(min=1, max=10)``), the input
+    # area grows downward as wrapping requires more lines, capping at 10
+    # so it never eats the entire screen. The prompt_window stays
+    # ``height=1`` and renders only on the first row — wrapped continuation
+    # lines have no prefix, matching zsh/fish wrap UX.
     input_window = Window(
         content=BufferControl(buffer=input_buffer),
-        height=1,
+        height=Dimension(min=1, max=10),
+        wrap_lines=True,
     )
 
     # Right-aligned session-title indicator above the input — mirrors the
