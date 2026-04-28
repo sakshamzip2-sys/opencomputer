@@ -10,6 +10,25 @@ Discord supports more (file uploads, threads) but those land separately.
 
 Connects via DISCORD_BOT_TOKEN env var. Requires the "message_content"
 intent — enable it in the bot's settings on Discord Developer Portal.
+
+Hermes-port (PR 3b.1) gating:
+
+* ``discord.require_mention`` (default ``False``) — when ``True`` the
+  bot only responds in guild channels if it was @-mentioned (either as
+  a user mention or via a role it carries). DMs always pass.
+* ``discord.allowed_users`` — optional allowlist of Discord user IDs
+  (int or str). Empty list ⇒ no user gate.
+* ``discord.allowed_roles`` — optional allowlist of role IDs the
+  message author must carry at least one of. Empty ⇒ no role gate.
+  ``allowed_users`` and ``allowed_roles`` use OR semantics: if either
+  list is configured, the message passes when EITHER list matches.
+* ``discord.allow_bots`` — ``"none"`` (default — preserves existing
+  behaviour: ignore other bots), ``"mentions"`` (process bot messages
+  only when we're mentioned), or ``"all"``.
+
+Multi-bot disambiguation: if other bots are mentioned in the message
+but we are not, the message is silently dropped — even when
+``require_mention=False`` — so bots don't talk over each other.
 """
 
 from __future__ import annotations
@@ -79,6 +98,18 @@ class DiscordAdapter(BaseChannelAdapter):
         self._client_task: asyncio.Task | None = None
         self._channel_cache: dict[str, discord.abc.Messageable] = {}
         self._ready_event = asyncio.Event()
+        # PR 3b.1 — gating config (defaults preserve previous behaviour).
+        self._require_mention: bool = bool(config.get("require_mention", False))
+        self._allowed_users: set[str] = {
+            str(u) for u in (config.get("allowed_users") or [])
+        }
+        self._allowed_roles: set[str] = {
+            str(r) for r in (config.get("allowed_roles") or [])
+        }
+        allow_bots = str(config.get("allow_bots", "none")).lower()
+        if allow_bots not in {"none", "mentions", "all"}:
+            allow_bots = "none"
+        self._allow_bots: str = allow_bots
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -100,6 +131,8 @@ class DiscordAdapter(BaseChannelAdapter):
             # Skip empty / non-text
             if not msg.content:
                 return
+            if not self._should_process(msg):
+                return
             # Cache channel for later sends
             self._channel_cache[str(msg.channel.id)] = msg.channel
             event = MessageEvent(
@@ -113,6 +146,97 @@ class DiscordAdapter(BaseChannelAdapter):
                 metadata={"message_id": msg.id, "guild_id": msg.guild.id if msg.guild else None},
             )
             await self.handle_message(event)
+
+    # ------------------------------------------------------------------
+    # Gating helpers — PR 3b.1
+    # ------------------------------------------------------------------
+
+    def _is_dm(self, msg: discord.Message) -> bool:
+        """True iff this message arrived in a DM (no guild attached)."""
+        return getattr(msg, "guild", None) is None
+
+    def _bot_is_mentioned(self, msg: discord.Message) -> bool:
+        """Detect whether THIS bot was mentioned.
+
+        Combines:
+          1. ``bot.user.mentioned_in(msg)`` — the canonical discord.py
+             check (covers @-user mentions and @everyone / @here for
+             the bot's own user).
+          2. A scan of ``msg.mentions`` — catches role-mentions that
+             resolve to a list of users including the bot, which
+             ``mentioned_in`` does not always surface depending on
+             cache state.
+        """
+        bot_user = getattr(self._client, "user", None)
+        if bot_user is None:
+            return False
+        try:
+            if bot_user.mentioned_in(msg):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        for u in getattr(msg, "mentions", []) or []:
+            if getattr(u, "id", None) == self._bot_user_id:
+                return True
+        return False
+
+    def _other_bots_mentioned(self, msg: discord.Message) -> bool:
+        """True iff another (non-self) bot was mentioned in the message."""
+        for u in getattr(msg, "mentions", []) or []:
+            if getattr(u, "bot", False) and getattr(u, "id", None) != self._bot_user_id:
+                return True
+        return False
+
+    def _passes_user_role_allowlist(self, msg: discord.Message) -> bool:
+        """OR-semantics allowlist gate.
+
+        - If neither ``allowed_users`` nor ``allowed_roles`` is configured,
+          the gate is open.
+        - Otherwise the author passes if they appear in
+          ``allowed_users`` OR carry at least one role in ``allowed_roles``.
+        """
+        if not self._allowed_users and not self._allowed_roles:
+            return True
+        author = getattr(msg, "author", None)
+        author_id = str(getattr(author, "id", ""))
+        if author_id and author_id in self._allowed_users:
+            return True
+        author_role_ids = {
+            str(getattr(r, "id", ""))
+            for r in (getattr(author, "roles", []) or [])
+        }
+        return bool(author_role_ids & self._allowed_roles)
+
+    def _should_process(self, msg: discord.Message) -> bool:
+        """Apply the full gating chain.
+
+        Order:
+          1. Bot-author policy (allow_bots).
+          2. Multi-bot disambiguation (silently drop when another bot
+             is mentioned and we are NOT).
+          3. require_mention (skipped in DMs).
+          4. allowed_users / allowed_roles allowlist.
+        """
+        author = getattr(msg, "author", None)
+        author_is_bot = bool(getattr(author, "bot", False))
+        is_mentioned = self._bot_is_mentioned(msg)
+
+        if author_is_bot:
+            if self._allow_bots == "none":
+                return False
+            if self._allow_bots == "mentions" and not is_mentioned:
+                return False
+            # "all" → fall through
+
+        # Multi-bot disambiguation: if another bot is mentioned but we
+        # aren't, stay silent so we don't talk over the targeted bot.
+        if self._other_bots_mentioned(msg) and not is_mentioned:
+            return False
+
+        if self._require_mention and not self._is_dm(msg) and not is_mentioned:
+            return False
+
+        return self._passes_user_role_allowlist(msg)
 
     async def connect(self) -> bool:
         self._client_task = asyncio.create_task(self._client.start(self.token))
@@ -148,14 +272,22 @@ class DiscordAdapter(BaseChannelAdapter):
                 self._channel_cache[chat_id] = channel
             except Exception as e:
                 return SendResult(success=False, error=f"channel lookup failed: {e}")
-        try:
+
+        async def _do_send() -> SendResult:
             last_id: int | None = None
-            for chunk in _chunk_2000(text, limit=self.max_message_length):
-                sent = await channel.send(chunk)
-                last_id = sent.id
-        except Exception as e:
-            return SendResult(success=False, error=f"{type(e).__name__}: {e}")
-        return SendResult(success=True, message_id=str(last_id) if last_id else None)
+            try:
+                for chunk in _chunk_2000(text, limit=self.max_message_length):
+                    sent = await channel.send(chunk)
+                    last_id = sent.id
+            except Exception as exc:  # noqa: BLE001
+                if self._is_retryable_error(exc):
+                    raise
+                return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+            return SendResult(
+                success=True, message_id=str(last_id) if last_id else None
+            )
+
+        return await self._send_with_retry(_do_send)
 
     async def send_typing(self, chat_id: str) -> None:
         channel = self._channel_cache.get(chat_id)
@@ -210,22 +342,31 @@ class DiscordAdapter(BaseChannelAdapter):
         users' messages requires admin and isn't supported here. No time
         window restriction (unlike Telegram's 48h).
         """
-        try:
-            channel = await self._resolve_channel(chat_id)
-            if channel is None:
-                return SendResult(success=False, error=f"channel {chat_id} not found")
-            msg = await channel.fetch_message(int(message_id))
-            await msg.edit(content=text[: self.max_message_length])
-            return SendResult(success=True, message_id=str(msg.id))
-        except discord.NotFound:
-            return SendResult(success=False, error=f"message {message_id} not found")
-        except discord.Forbidden as e:
-            return SendResult(
-                success=False,
-                error=f"forbidden (bot can only edit its own messages): {e}",
-            )
-        except Exception as e:  # noqa: BLE001
-            return SendResult(success=False, error=f"{type(e).__name__}: {e}")
+        async def _do_edit() -> SendResult:
+            try:
+                channel = await self._resolve_channel(chat_id)
+                if channel is None:
+                    return SendResult(
+                        success=False, error=f"channel {chat_id} not found"
+                    )
+                msg = await channel.fetch_message(int(message_id))
+                await msg.edit(content=text[: self.max_message_length])
+                return SendResult(success=True, message_id=str(msg.id))
+            except discord.NotFound:
+                return SendResult(
+                    success=False, error=f"message {message_id} not found"
+                )
+            except discord.Forbidden as e:
+                return SendResult(
+                    success=False,
+                    error=f"forbidden (bot can only edit its own messages): {e}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                if self._is_retryable_error(exc):
+                    raise
+                return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+
+        return await self._send_with_retry(_do_edit)
 
     async def delete_message(
         self,
@@ -238,19 +379,28 @@ class DiscordAdapter(BaseChannelAdapter):
         Bots can delete their own messages without special permissions;
         deleting others' messages requires ``MANAGE_MESSAGES``.
         """
-        try:
-            channel = await self._resolve_channel(chat_id)
-            if channel is None:
-                return SendResult(success=False, error=f"channel {chat_id} not found")
-            msg = await channel.fetch_message(int(message_id))
-            await msg.delete()
-            return SendResult(success=True)
-        except discord.NotFound:
-            return SendResult(success=False, error=f"message {message_id} not found")
-        except discord.Forbidden as e:
-            return SendResult(success=False, error=f"forbidden: {e}")
-        except Exception as e:  # noqa: BLE001
-            return SendResult(success=False, error=f"{type(e).__name__}: {e}")
+        async def _do_delete() -> SendResult:
+            try:
+                channel = await self._resolve_channel(chat_id)
+                if channel is None:
+                    return SendResult(
+                        success=False, error=f"channel {chat_id} not found"
+                    )
+                msg = await channel.fetch_message(int(message_id))
+                await msg.delete()
+                return SendResult(success=True)
+            except discord.NotFound:
+                return SendResult(
+                    success=False, error=f"message {message_id} not found"
+                )
+            except discord.Forbidden as e:
+                return SendResult(success=False, error=f"forbidden: {e}")
+            except Exception as exc:  # noqa: BLE001
+                if self._is_retryable_error(exc):
+                    raise
+                return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+
+        return await self._send_with_retry(_do_delete)
 
     # ------------------------------------------------------------------
     # Helpers
