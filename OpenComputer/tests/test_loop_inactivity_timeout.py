@@ -104,7 +104,13 @@ def _end_turn_response():
 
 
 def _tool_use_response(tool_id: str = "tc-1"):
-    """ProviderResponse that emits one tool_use call (forces another iteration)."""
+    """ProviderResponse that emits one tool_use call (forces another iteration).
+
+    Args vary per tool_id so the OpenClaw 1.C loop-safety detector doesn't
+    flag a synthetic "same Bash call N times in a row" as a degenerate
+    loop and abort early — these tests are about timeout behavior, not
+    repetition detection.
+    """
     from plugin_sdk.provider_contract import ProviderResponse, Usage
 
     return ProviderResponse(
@@ -112,7 +118,11 @@ def _tool_use_response(tool_id: str = "tc-1"):
             role="assistant",
             content="",
             tool_calls=[
-                ToolCall(id=tool_id, name="Bash", arguments={"command": "echo"}),
+                ToolCall(
+                    id=tool_id,
+                    name="Bash",
+                    arguments={"command": f"echo {tool_id}"},
+                ),
             ],
         ),
         stop_reason="tool_use",
