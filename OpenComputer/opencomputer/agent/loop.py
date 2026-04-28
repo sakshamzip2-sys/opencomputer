@@ -988,6 +988,25 @@ class AgentLoop:
                 total_input += step.input_tokens
                 total_output += step.output_tokens
 
+                # PR #221 follow-up Item 2 — persist the per-turn deltas onto
+                # the ``sessions`` row so ``/usage`` (and any future analytics)
+                # can read real cumulative counts. ``add_tokens`` is a no-op
+                # when both deltas are zero, so providers that don't surface
+                # ``Usage`` produce no UPDATE traffic. Wrapped defensively:
+                # an account-level SQLite error must never wedge the loop.
+                try:
+                    self.db.add_tokens(
+                        sid,
+                        step.input_tokens,
+                        step.output_tokens,
+                    )
+                except Exception:  # noqa: BLE001
+                    _log.debug(
+                        "session token accumulation failed for sid=%s — continuing",
+                        sid,
+                        exc_info=True,
+                    )
+
                 if not step.should_continue:
                     # No tool calls — safe to persist the assistant message alone. (PR #1)
                     # Passive education hook (2026-04-28): build a tail-clause

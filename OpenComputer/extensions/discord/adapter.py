@@ -1212,17 +1212,16 @@ class DiscordAdapter(BaseChannelAdapter):
                     break
         except Exception as e:  # noqa: BLE001
             logger.debug("discord: /usage query_tool_usage failed: %s", e)
-        # Note: token columns aren't populated in the current loop —
-        # the schema reserves them but no UPDATE site writes today.
-        # Keep the line honest about that so the user doesn't think
-        # 0 means "free".
-        token_str = (
-            f"input={in_tok} output={out_tok}"
-            if (in_tok or out_tok)
-            else "(per-session token tracking not yet wired)"
-        )
+        # PR #221 follow-up Item 2: token columns are now populated
+        # by ``AgentLoop.run_conversation`` after each turn (via
+        # ``SessionDB.add_tokens``). When a provider doesn't surface a
+        # ``Usage`` (some local providers don't), the deltas are zero
+        # and the cumulative count stays at 0 — that's a real "we
+        # haven't talked yet" / "provider doesn't report" signal, not a
+        # bug, so we show ``input=0 out=0`` honestly rather than a
+        # disclaimer.
         return (
-            f"Tokens used: {token_str}; "
+            f"Tokens used: input={in_tok} output={out_tok}; "
             f"messages={msgs}; tool calls={tool_calls}; "
             f"session={session_id[:8]}…"
         )
