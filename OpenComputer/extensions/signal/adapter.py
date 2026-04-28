@@ -108,9 +108,16 @@ class SignalAdapter(BaseChannelAdapter):
             },
         }
         try:
-            resp = await self.client.post(
-                f"{self._base_url}/api/v1/rpc", json=payload
+            # PR #221 O2 — wrap signal-cli JSON-RPC POST with the base
+            # adapter's transient-error retry helper. ConnectError /
+            # network-blip retries; non-retryable errors propagate.
+            resp = await self._send_with_retry(
+                self.client.post,
+                f"{self._base_url}/api/v1/rpc",
+                json=payload,
             )
+            if isinstance(resp, SendResult):
+                return resp  # exhausted retries on transient errors
         except Exception as e:  # noqa: BLE001
             logger.error(
                 "signal send: http error to %s: %s", redact_phone(chat_id), e
@@ -179,9 +186,14 @@ class SignalAdapter(BaseChannelAdapter):
             },
         }
         try:
-            resp = await self.client.post(
-                f"{self._base_url}/api/v1/rpc", json=payload
+            # PR #221 O2 — wrap reaction RPC POST with the retry helper.
+            resp = await self._send_with_retry(
+                self.client.post,
+                f"{self._base_url}/api/v1/rpc",
+                json=payload,
             )
+            if isinstance(resp, SendResult):
+                return resp  # exhausted retries on transient errors
         except Exception as e:  # noqa: BLE001
             logger.error(
                 "signal reaction: http error to %s: %s", redact_phone(chat_id), e

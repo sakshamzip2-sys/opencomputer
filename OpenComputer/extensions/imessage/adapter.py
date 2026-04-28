@@ -154,7 +154,10 @@ class IMessageAdapter(BaseChannelAdapter):
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
         try:
-            resp = await self._client.post(
+            # PR #221 O2 — wrap the BlueBubbles bridge POST with the
+            # base adapter's transient-error retry helper.
+            resp = await self._send_with_retry(
+                self._client.post,
                 f"{self._base_url}/api/v1/message/text",
                 params={"password": self._password},
                 json={
@@ -163,6 +166,8 @@ class IMessageAdapter(BaseChannelAdapter):
                     "method": "apple-script",
                 },
             )
+            if isinstance(resp, SendResult):
+                return resp  # exhausted retries on transient errors
             if resp.status_code != 200:
                 logger.warning(
                     "imessage send: HTTP %d to %s",
@@ -210,7 +215,9 @@ class IMessageAdapter(BaseChannelAdapter):
                 error=f"emoji {emoji!r} not mappable to iMessage tapback",
             )
         try:
-            resp = await self._client.post(
+            # PR #221 O2 — wrap reaction POST with the retry helper.
+            resp = await self._send_with_retry(
+                self._client.post,
                 f"{self._base_url}/api/v1/message/react",
                 params={"password": self._password},
                 json={
@@ -219,6 +226,8 @@ class IMessageAdapter(BaseChannelAdapter):
                     "reaction": reaction,
                 },
             )
+            if isinstance(resp, SendResult):
+                return resp  # exhausted retries on transient errors
             if resp.status_code != 200:
                 logger.warning(
                     "imessage react: HTTP %d to %s",

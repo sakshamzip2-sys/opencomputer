@@ -156,12 +156,16 @@ class SmsAdapter(BaseChannelAdapter):
         )
         try:
             for chunk in chunks:
-                form_data = aiohttp.FormData()
-                form_data.add_field("From", self._from_number)
-                form_data.add_field("To", chat_id)
-                form_data.add_field("Body", chunk)
-                try:
-                    async with session.post(url, data=form_data, headers=headers) as resp:
+                # PR #221 O2 — wrap the Twilio Messages.json POST with the
+                # base adapter's transient-error retry helper. We need a
+                # coroutine wrapper because aiohttp's ``session.post(...)``
+                # returns a context-manager rather than a plain awaitable;
+                # the helper just calls ``await fn(...)`` and trips the
+                # retry path on retryable exceptions raised inside.
+                async def _do_post(form_payload: aiohttp.FormData) -> SendResult:
+                    async with session.post(
+                        url, data=form_payload, headers=headers
+                    ) as resp:
                         body = await resp.json()
                         if resp.status >= 400:
                             error_msg = body.get("message", str(body))
@@ -175,12 +179,24 @@ class SmsAdapter(BaseChannelAdapter):
                                 success=False,
                                 error=f"Twilio {resp.status}: {error_msg}",
                             )
-                        last_result = SendResult(
+                        return SendResult(
                             success=True, message_id=body.get("sid", "")
                         )
-                except Exception as exc:  # noqa: BLE001
+
+                form_data = aiohttp.FormData()
+                form_data.add_field("From", self._from_number)
+                form_data.add_field("To", chat_id)
+                form_data.add_field("Body", chunk)
+                try:
+                    chunk_result = await self._send_with_retry(
+                        _do_post, form_data
+                    )
+                except Exception as exc:  # noqa: BLE001 — non-retryable propagate here
                     logger.error("send error to %s: %s", redact_phone(chat_id), exc)
                     return SendResult(success=False, error=str(exc))
+                if not chunk_result.success:
+                    return chunk_result
+                last_result = chunk_result
         finally:
             if owns_session and session is not None:
                 await session.close()
