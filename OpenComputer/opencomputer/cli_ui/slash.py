@@ -104,14 +104,16 @@ SLASH_REGISTRY: list[CommandDef] = [
         args_hint="[last|<session-id-prefix>]",
     ),
     CommandDef(
-        name="reload",
-        description="Re-read .env + config.yaml without restarting the session.",
-        category="config",
+        name="queue",
+        description="Queue a prompt for the next turn (or list/clear pending).",
+        category="session",
+        args_hint="[<prompt>|list|clear]",
     ),
     CommandDef(
-        name="reload-mcp",
-        description="Disconnect + re-discover all MCP servers.",
-        category="config",
+        name="snapshot",
+        description="Archive critical state files (session db + config + .env + ...).",
+        category="session",
+        args_hint="[create [<label>]|list|restore <id>|prune]",
     ),
 ]
 

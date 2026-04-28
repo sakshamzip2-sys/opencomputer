@@ -53,14 +53,26 @@ class SlashContext:
     #: loop swapped to the target session; False on no-match / ambiguous
     #: prefix / DB error.
     on_resume: Callable[[str], bool] = lambda target: False
-    #: ``/reload`` — re-read .env + config.yaml. Returns a small status dict
-    #: describing what changed (``{"env_keys_changed": int,
-    #: "config_changed": bool, "error": str | None}``).
-    on_reload: Callable[[], dict] = dict
-    #: ``/reload-mcp`` — disconnect + re-discover MCP servers. Returns
-    #: ``{"servers_before": int, "servers_after": int, "tools_after": int,
-    #: "error": str | None}``.
-    on_reload_mcp: Callable[[], dict] = dict
+    #: ``/queue <prompt>`` — append a prompt to the per-session next-turn
+    #: buffer. Returns True on success, False if the queue is full
+    #: (default cap = 50). The buffer is FIFO; drained one item per turn
+    #: by the chat outer loop ahead of reading from the user.
+    on_queue_add: Callable[[str], bool] = lambda text: False
+    #: ``/queue list`` — return current pending entries (oldest-first).
+    on_queue_list: Callable[[], list[str]] = list
+    #: ``/queue clear`` — drop all pending entries; return how many.
+    on_queue_clear: Callable[[], int] = lambda: 0
+    #: ``/snapshot create [<label>]`` — archive critical state files;
+    #: returns the new snapshot id, or ``None`` if no eligible files.
+    on_snapshot_create: Callable[[str | None], str | None] = lambda label: None
+    #: ``/snapshot list`` — return snapshot manifests, newest first.
+    on_snapshot_list: Callable[[], list[dict]] = list
+    #: ``/snapshot restore <id>`` — overwrite current state from snapshot;
+    #: returns count of files restored (0 if id not found).
+    on_snapshot_restore: Callable[[str], int] = lambda sid: 0
+    #: ``/snapshot prune`` — drop snapshots beyond the keep cap; returns
+    #: count deleted.
+    on_snapshot_prune: Callable[[], int] = lambda: 0
 
 
 def _split_args(text: str) -> tuple[str, list[str]]:
@@ -190,47 +202,122 @@ def _handle_resume(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
-def _handle_reload(ctx: SlashContext, args: list[str]) -> SlashResult:
-    """``/reload`` — re-read .env + config.yaml."""
-    res = ctx.on_reload()
-    if not res:
+def _handle_queue(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/queue [<prompt>|list|clear]`` — manage the next-turn prompt buffer.
+
+    No args: print current count + usage hint.
+    ``list``: list pending entries.
+    ``clear``: drop all pending; print drop count.
+    Anything else: treat the full ``args`` joined with spaces as the
+    prompt to queue.
+    """
+    if not args:
+        pending = ctx.on_queue_list()
         ctx.console.print(
-            "[red]reload not wired[/red] — chat loop didn't provide a callback."
+            f"[dim]queue: {len(pending)} pending. "
+            f"Use [cyan]/queue <prompt>[/cyan] to add, "
+            f"[cyan]/queue list[/cyan] to show, "
+            f"[cyan]/queue clear[/cyan] to drop all.[/dim]"
         )
         return SlashResult(handled=True)
-    if res.get("error"):
-        ctx.console.print(f"[red]reload failed:[/red] {res['error']}")
+    sub = args[0].lower()
+    if sub == "list":
+        pending = ctx.on_queue_list()
+        if not pending:
+            ctx.console.print("[dim]queue is empty.[/dim]")
+            return SlashResult(handled=True)
+        ctx.console.print(f"[bold]queue ({len(pending)} pending):[/bold]")
+        for i, p in enumerate(pending, start=1):
+            preview = p if len(p) <= 80 else p[:77] + "..."
+            ctx.console.print(f"  [dim]{i}.[/dim] {preview}")
         return SlashResult(handled=True)
-    env_n = res.get("env_keys_changed", 0)
-    cfg_changed = res.get("config_changed", False)
-    parts: list[str] = []
-    if env_n:
-        parts.append(f"{env_n} env var(s) updated")
-    if cfg_changed:
-        parts.append("config.yaml reloaded")
-    if not parts:
-        parts.append("no changes detected")
-    ctx.console.print("[green]reload:[/green] " + ", ".join(parts) + ".")
+    if sub == "clear":
+        n = ctx.on_queue_clear()
+        ctx.console.print(f"[green]queue cleared[/green] — {n} dropped.")
+        return SlashResult(handled=True)
+    text = " ".join(args).strip()
+    if not text:
+        ctx.console.print("[red]queue: empty prompt[/red]")
+        return SlashResult(handled=True)
+    ok = ctx.on_queue_add(text)
+    if ok:
+        preview = text if len(text) <= 80 else text[:77] + "..."
+        ctx.console.print(
+            f"[green]queued[/green] — will fire on next turn: [dim]{preview}[/dim]"
+        )
+    else:
+        ctx.console.print(
+            "[red]queue full[/red] — drain with [cyan]/queue clear[/cyan] first."
+        )
     return SlashResult(handled=True)
 
 
-def _handle_reload_mcp(ctx: SlashContext, args: list[str]) -> SlashResult:
-    """``/reload-mcp`` — disconnect + re-discover MCP servers."""
-    res = ctx.on_reload_mcp()
-    if not res:
-        ctx.console.print(
-            "[red]reload-mcp not wired[/red] — chat loop didn't provide a callback."
-        )
+def _handle_snapshot(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/snapshot [create [<label>]|list|restore <id>|prune]``.
+
+    Default subcommand (no args) is ``list`` — show recent snapshots.
+    """
+    sub = (args[0].lower() if args else "list").strip()
+    if sub == "create":
+        label = " ".join(args[1:]).strip() or None
+        sid = ctx.on_snapshot_create(label)
+        if sid:
+            ctx.console.print(f"[green]snapshot created:[/green] {sid}")
+        else:
+            ctx.console.print(
+                "[yellow]snapshot empty[/yellow] — no eligible state files found "
+                "(profile_home may be uninitialized)."
+            )
         return SlashResult(handled=True)
-    if res.get("error"):
-        ctx.console.print(f"[red]reload-mcp failed:[/red] {res['error']}")
+
+    if sub == "list":
+        items = ctx.on_snapshot_list()
+        if not items:
+            ctx.console.print("[dim]no snapshots.[/dim]")
+            return SlashResult(handled=True)
+        ctx.console.print(f"[bold]snapshots ({len(items)}):[/bold]")
+        for i, m in enumerate(items, start=1):
+            sid = m.get("id", "?")
+            n = m.get("file_count", 0)
+            sz = m.get("total_size", 0)
+            label = m.get("label") or ""
+            label_part = f"  [cyan]{label}[/cyan]" if label else ""
+            ctx.console.print(
+                f"  [dim]{i}.[/dim] {sid}{label_part}  "
+                f"[dim]({n} files, {sz} bytes)[/dim]"
+            )
         return SlashResult(handled=True)
-    before = res.get("servers_before", 0)
-    after = res.get("servers_after", 0)
-    tools = res.get("tools_after", 0)
+
+    if sub == "restore":
+        if len(args) < 2:
+            ctx.console.print(
+                "[red]usage:[/red] /snapshot restore <id>  "
+                "[dim](try /snapshot list first)[/dim]"
+            )
+            return SlashResult(handled=True)
+        sid = args[1].strip()
+        n = ctx.on_snapshot_restore(sid)
+        if n > 0:
+            ctx.console.print(
+                f"[green]restored {n} files[/green] from snapshot {sid}.\n"
+                "[yellow]restart recommended[/yellow] for state.db / config "
+                "changes to take effect."
+            )
+        else:
+            ctx.console.print(
+                f"[red]restore failed[/red] — snapshot {sid!r} not found "
+                "or has no manifest."
+            )
+        return SlashResult(handled=True)
+
+    if sub == "prune":
+        n = ctx.on_snapshot_prune()
+        ctx.console.print(f"[green]pruned[/green] — {n} snapshot(s) deleted.")
+        return SlashResult(handled=True)
+
     ctx.console.print(
-        f"[green]reload-mcp:[/green] {before} → {after} servers, "
-        f"{tools} tool(s) registered."
+        f"[red]unknown subcommand:[/red] /snapshot {sub}  "
+        "[dim](try create | list | restore <id> | prune)[/dim]"
     )
     return SlashResult(handled=True)
 
@@ -246,8 +333,8 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "sessions": _handle_sessions,
     "rename": _handle_rename,
     "resume": _handle_resume,
-    "reload": _handle_reload,
-    "reload-mcp": _handle_reload_mcp,
+    "queue": _handle_queue,
+    "snapshot": _handle_snapshot,
 }
 
 

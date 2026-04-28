@@ -1006,73 +1006,58 @@ def _run_chat_session(
 
     profile_home = _profile_home_fn()
 
+    # Per-session next-turn prompt buffer for /queue. FIFO, capped to keep
+    # a runaway agent from filling memory. Drained one item per outer loop
+    # iteration *before* reading from the user — so a queued prompt fires
+    # the next turn even when the user hasn't pressed Enter.
+    _QUEUE_CAP = 50
+    _session_queues: dict[str, list[str]] = {}
+
+    def _on_queue_add(text: str) -> bool:
+        q = _session_queues.setdefault(session_id, [])
+        if len(q) >= _QUEUE_CAP:
+            return False
+        q.append(text)
+        return True
+
+    def _on_queue_list() -> list[str]:
+        return list(_session_queues.get(session_id, []))
+
+    def _on_queue_clear() -> int:
+        q = _session_queues.get(session_id, [])
+        n = len(q)
+        _session_queues[session_id] = []
+        return n
+
     def _on_clear() -> None:
         nonlocal session_id
         session_id = str(uuid.uuid4())
         _token_tally["in"] = 0
         _token_tally["out"] = 0
+        # Drop the queue when starting a fresh session — queued prompts
+        # were authored against the old session's context.
+        _session_queues.pop(session_id, None)
         console.clear()
 
-    def _on_reload() -> dict:
-        """Re-read .env (override=True) + config.yaml from disk.
+    def _on_snapshot_create(label: str | None) -> str | None:
+        from opencomputer.snapshot import create_snapshot
 
-        Mutates the live cfg dataclass in place so subsequent reads see
-        new values. Already-instantiated provider clients won't pick up
-        new env values until they're reconstructed (out of scope; restart
-        if needed).
-        """
-        out: dict = {"env_keys_changed": 0, "config_changed": False, "error": None}
-        try:
-            from opencomputer.agent.config_store import load_config
+        return create_snapshot(profile_home, label=label)
 
-            try:
-                from dotenv import dotenv_values, load_dotenv
+    def _on_snapshot_list() -> list[dict]:
+        from opencomputer.snapshot import list_snapshots
 
-                env_path = profile_home / ".env"
-                if env_path.exists():
-                    new_vals = dotenv_values(str(env_path))
-                    load_dotenv(str(env_path), override=True)
-                    out["env_keys_changed"] = sum(1 for v in new_vals.values() if v is not None)
-            except ImportError:
-                pass
+        return list_snapshots(profile_home, limit=50)
 
-            cfg_path = profile_home / "config.yaml"
-            if cfg_path.exists():
-                new_cfg = load_config(cfg_path)
-                if new_cfg != cfg:
-                    for f in cfg.__dataclass_fields__:
-                        setattr(cfg, f, getattr(new_cfg, f))
-                    out["config_changed"] = True
-        except Exception as e:  # noqa: BLE001
-            out["error"] = f"{type(e).__name__}: {e}"
-        return out
+    def _on_snapshot_restore(snapshot_id: str) -> int:
+        from opencomputer.snapshot import restore_snapshot
 
-    def _on_reload_mcp() -> dict:
-        """Disconnect every MCP server, re-discover, re-register tools."""
-        out: dict = {
-            "servers_before": 0,
-            "servers_after": 0,
-            "tools_after": 0,
-            "error": None,
-        }
-        try:
-            # mcp_mgr is in the enclosing scope (constructed earlier in chat()).
-            out["servers_before"] = len(mcp_mgr.connections)
-            asyncio.run(mcp_mgr.shutdown())
-            servers = getattr(cfg, "mcp", None)
-            server_list = list(getattr(servers, "servers", [])) if servers else []
-            n = asyncio.run(
-                mcp_mgr.connect_all(
-                    server_list,
-                    osv_check_enabled=getattr(servers, "osv_check_enabled", True) if servers else True,
-                    osv_check_fail_closed=getattr(servers, "osv_check_fail_closed", False) if servers else False,
-                )
-            )
-            out["servers_after"] = len(mcp_mgr.connections)
-            out["tools_after"] = n
-        except Exception as e:  # noqa: BLE001
-            out["error"] = f"{type(e).__name__}: {e}"
-        return out
+        return restore_snapshot(profile_home, snapshot_id)
+
+    def _on_snapshot_prune() -> int:
+        from opencomputer.snapshot import prune_snapshots
+
+        return prune_snapshots(profile_home)
 
     def _get_cost_summary() -> dict[str, int]:
         return dict(_token_tally)
@@ -1195,12 +1180,20 @@ def _run_chat_session(
                 session_title=_title,
             )
 
-        try:
-            user_input = asyncio.run(_read_one())
-        except (KeyboardInterrupt, EOFError):
-            console.print("\n[dim]bye.[/dim]")
-            _print_update_hint_if_any()
-            return
+        # Drain a queued prompt (set via /queue <text>) before prompting
+        # the user. FIFO order — oldest queued first. Visible "(queued)"
+        # marker so the user knows what's running.
+        _q = _session_queues.get(session_id, [])
+        if _q:
+            user_input = _q.pop(0)
+            console.print(f"[dim](queued)[/dim] [bold]{user_input}[/bold]")
+        else:
+            try:
+                user_input = asyncio.run(_read_one())
+            except (KeyboardInterrupt, EOFError):
+                console.print("\n[dim]bye.[/dim]")
+                _print_update_hint_if_any()
+                return
         if not user_input.strip():
             continue
 
@@ -1256,8 +1249,13 @@ def _run_chat_session(
                 get_session_list=_get_session_list,
                 on_rename=_on_rename,
                 on_resume=_on_resume,
-                on_reload=_on_reload,
-                on_reload_mcp=_on_reload_mcp,
+                on_queue_add=_on_queue_add,
+                on_queue_list=_on_queue_list,
+                on_queue_clear=_on_queue_clear,
+                on_snapshot_create=_on_snapshot_create,
+                on_snapshot_list=_on_snapshot_list,
+                on_snapshot_restore=_on_snapshot_restore,
+                on_snapshot_prune=_on_snapshot_prune,
             )
             result = dispatch_slash(user_input, slash_ctx)
             if result.exit_loop:
@@ -1361,13 +1359,29 @@ def code(
     no_compact: bool = typer.Option(
         False, "--no-compact", help="Disable automatic context compaction (debugging)."
     ),
+    worktree: bool = typer.Option(
+        False,
+        "--worktree",
+        "-w",
+        help=(
+            "Spawn a fresh git worktree for this session under "
+            "<repo>/.opencomputer-worktrees/<id>/, chdir into it, and "
+            "auto-remove on exit. Requires the cwd to be inside a git repo."
+        ),
+    ),
+    keep_worktree: bool = typer.Option(
+        False,
+        "--keep-worktree",
+        help="Do NOT remove the worktree on exit (when --worktree is set).",
+    ),
 ) -> None:
     """Start the coding agent in [path] (or cwd). Snappy entry-point.
 
     Mirrors ``opencomputer chat`` but is tailored for coding work — Edit,
     MultiEdit, TodoWrite, RunTests etc. are enabled by default. Use
     ``--plan`` for read-only discovery; ``--yolo`` to skip per-action
-    confirmation prompts.
+    confirmation prompts. Use ``--worktree`` to isolate this session in a
+    fresh git worktree (auto-removed on exit).
     """
     if path:
         target = os.path.abspath(path)
@@ -1376,6 +1390,16 @@ def code(
             raise typer.Exit(code=1)
         os.chdir(target)
         console.print(f"[dim]cwd: {target}[/dim]")
+
+    if worktree:
+        from opencomputer.worktree import session_worktree
+
+        with session_worktree(Path.cwd(), keep=keep_worktree) as wt:
+            if wt != Path.cwd().parent:  # i.e. the worktree was actually created
+                console.print(f"[dim]worktree: {wt}[/dim]")
+            _run_chat_session(resume=resume, plan=plan, no_compact=no_compact, yolo=yolo)
+        return
+
     _run_chat_session(resume=resume, plan=plan, no_compact=no_compact, yolo=yolo)
 
 
