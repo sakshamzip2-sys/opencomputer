@@ -31,6 +31,7 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
+from prompt_toolkit.shortcuts import CompleteStyle
 
 from opencomputer.cli_ui.clipboard import has_clipboard_image, save_clipboard_image
 from opencomputer.cli_ui.slash import SLASH_REGISTRY
@@ -207,6 +208,16 @@ def build_prompt_session(
         # plain chat messages don't trigger any visible menu.
         complete_while_typing=True,
         completer=SlashCommandCompleter(),
+        # MULTI_COLUMN puts the completion menu into the main layout
+        # (Window-based) instead of using a Float widget that depends on
+        # Cursor-Position-Report. This makes the menu visible in editor
+        # terminals (VS Code, JetBrains) that don't reliably respond to
+        # CPR. Trade-off: layout looks like fish/zsh tab completion
+        # (commands in a grid + meta toolbar showing the highlighted
+        # command's description) rather than a single-column popup with
+        # descriptions on every row. Acceptable V1 — strict Claude-Code
+        # parity is a follow-up requiring a custom Application layout.
+        complete_style=CompleteStyle.MULTI_COLUMN,
         # erase_when_done clears the typed prompt line on submit so the
         # chat loop can re-render the user's message inside a styled
         # boundary box (no duplicate "you › ..." line in scrollback).

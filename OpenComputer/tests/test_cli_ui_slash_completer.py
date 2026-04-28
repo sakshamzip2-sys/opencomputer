@@ -107,20 +107,24 @@ def _display_plain(c) -> str:
     return "".join(text for _style, text in c.display)
 
 
-def test_completer_display_includes_args_hint_for_rename():
+def test_completer_display_includes_args_hint_and_category_for_rename():
     completer = SlashCommandCompleter()
     doc = Document(text="/rename", cursor_position=7)
     [c] = list(completer.get_completions(doc, CompleteEvent()))
     plain = _display_plain(c)
     assert "rename" in plain
     assert "<new title>" in plain
+    assert "(session)" in plain
 
 
-def test_completer_display_omits_hint_for_argless_command():
+def test_completer_display_omits_hint_but_includes_category_for_argless():
     completer = SlashCommandCompleter()
     doc = Document(text="/help", cursor_position=5)
     [c] = list(completer.get_completions(doc, CompleteEvent()))
-    assert _display_plain(c) == "/help"
+    plain = _display_plain(c)
+    assert "/help" in plain
+    assert "(meta)" in plain
+    assert "<" not in plain
 
 
 def test_completer_results_sorted_alphabetically():

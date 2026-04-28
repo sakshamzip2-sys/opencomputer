@@ -1226,6 +1226,58 @@ def code(
 
 
 @app.command()
+def resume(
+    plan: bool = typer.Option(
+        False, "--plan", help="Resume in plan mode."
+    ),
+    no_compact: bool = typer.Option(
+        False, "--no-compact", help="Disable automatic context compaction."
+    ),
+) -> None:
+    """Open a full-screen session picker and resume the selected session.
+
+    Equivalent to ``oc chat --resume pick`` but with a polished alt-screen
+    picker (search + arrow nav + metadata rows). Alt-screen mode bypasses
+    Cursor-Position-Report, so it works in editor terminals (VS Code,
+    JetBrains) where the inline dropdown can't render.
+    """
+    from opencomputer.agent.config import _home as _profile_home_fn
+    from opencomputer.agent.state import SessionDB
+    from opencomputer.cli_ui.resume_picker import SessionRow, run_resume_picker
+
+    profile_home = _profile_home_fn()
+    db = SessionDB(profile_home / "sessions.db")
+    db_rows = db.list_sessions(limit=200)
+
+    def _coerce_started_at(v) -> float:
+        try:
+            return float(v) if v is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    rows = [
+        SessionRow(
+            id=r.get("id", ""),
+            title=r.get("title") or "",
+            started_at=_coerce_started_at(r.get("started_at")),
+            message_count=int(r.get("message_count", 0) or 0),
+        )
+        for r in db_rows
+        if r.get("id")
+    ]
+    if not rows:
+        console.print("[dim]no sessions yet — start one with `oc chat`.[/dim]")
+        return
+
+    selected_id = run_resume_picker(rows)
+    if selected_id is None:
+        console.print("[dim]cancelled.[/dim]")
+        return
+
+    _run_chat_session(resume=selected_id, plan=plan, no_compact=no_compact, yolo=False)
+
+
+@app.command()
 def search(
     query: str = typer.Argument(..., help="Query to search across past sessions."),
     limit: int = typer.Option(20, "--limit", "-n"),
