@@ -27,6 +27,7 @@ from typing import Any
 from opencomputer.agent.slash_commands_impl.agents_cmd import AgentsCommand
 from opencomputer.agent.slash_commands_impl.bell_cmd import BellCommand
 from opencomputer.agent.slash_commands_impl.branch_cmd import BranchCommand
+from opencomputer.agent.slash_commands_impl.btw_cmd import BtwCommand
 from opencomputer.agent.slash_commands_impl.copy_cmd import CopyCommand
 from opencomputer.agent.slash_commands_impl.display_toggles_cmd import (
     StatusbarCommand,
@@ -75,6 +76,8 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     AgentsCommand,
     VerboseCommand,
     StatusbarCommand,
+    # Batch 4 — ephemeral side-loop:
+    BtwCommand,
 )
 
 
