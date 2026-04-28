@@ -482,7 +482,7 @@ def default(
         console.print(f"opencomputer {__version__}")
         raise typer.Exit()
     if ctx.invoked_subcommand is None:
-        chat()
+        _run_chat_session(resume="", plan=False, no_compact=False, yolo=False)
 
 
 def _resolve_resume_target(spec: str) -> str | None:
