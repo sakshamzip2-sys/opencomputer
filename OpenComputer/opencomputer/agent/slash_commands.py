@@ -24,13 +24,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from opencomputer.agent.slash_commands_impl.agents_cmd import AgentsCommand
 from opencomputer.agent.slash_commands_impl.bell_cmd import BellCommand
 from opencomputer.agent.slash_commands_impl.branch_cmd import BranchCommand
 from opencomputer.agent.slash_commands_impl.copy_cmd import CopyCommand
+from opencomputer.agent.slash_commands_impl.display_toggles_cmd import (
+    StatusbarCommand,
+    VerboseCommand,
+)
 from opencomputer.agent.slash_commands_impl.fast_cmd import FastCommand
 from opencomputer.agent.slash_commands_impl.history_cmd import HistoryCommand
 from opencomputer.agent.slash_commands_impl.platforms_cmd import PlatformsCommand
 from opencomputer.agent.slash_commands_impl.reasoning_cmd import ReasoningCommand
+from opencomputer.agent.slash_commands_impl.save_cmd import SaveCommand
 from opencomputer.agent.slash_commands_impl.scrape import ScrapeCommand
 from opencomputer.agent.slash_commands_impl.skin_personality_cmd import (
     PersonalityCommand,
@@ -64,6 +70,11 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # Batch 2 — runtime-only state setters:
     SkinCommand,
     PersonalityCommand,
+    # Batch 3 — quick wins:
+    SaveCommand,
+    AgentsCommand,
+    VerboseCommand,
+    StatusbarCommand,
 )
 
 
