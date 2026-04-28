@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 from opencomputer.agent.slash_commands_impl.bell_cmd import BellCommand
+from opencomputer.agent.slash_commands_impl.branch_cmd import BranchCommand
 from opencomputer.agent.slash_commands_impl.copy_cmd import CopyCommand
 from opencomputer.agent.slash_commands_impl.fast_cmd import FastCommand
 from opencomputer.agent.slash_commands_impl.history_cmd import HistoryCommand
@@ -59,6 +60,7 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # runtime.custom; loop plumbs them in before dispatch):
     TitleCommand,
     HistoryCommand,
+    BranchCommand,
     # Batch 2 — runtime-only state setters:
     SkinCommand,
     PersonalityCommand,
