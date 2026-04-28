@@ -28,7 +28,6 @@ from opencomputer.agent.state import SessionDB
 from plugin_sdk.core import Message
 from plugin_sdk.provider_contract import ProviderResponse, Usage
 
-
 # ---------------------------------------------------------------------------
 # SessionDB.add_tokens — the write-side primitive
 # ---------------------------------------------------------------------------
@@ -207,11 +206,10 @@ async def test_run_conversation_tolerates_zero_usage(tmp_path: Path) -> None:
 
 def _load_discord_adapter():
     import importlib.util
-    from pathlib import Path as _P
 
     spec = importlib.util.spec_from_file_location(
         "discord_adapter_token_accum_test",
-        _P(__file__).resolve().parent.parent
+        Path(__file__).resolve().parent.parent
         / "extensions" / "discord" / "adapter.py",
     )
     assert spec is not None and spec.loader is not None

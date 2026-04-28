@@ -24,7 +24,6 @@ from opencomputer.gateway.server import Gateway
 from opencomputer.plugins.loader import PluginAPI
 from opencomputer.plugins.registry import registry as plugin_registry
 
-
 # ---------------------------------------------------------------------------
 # PluginAPI._bind_dispatch — the setter contract
 # ---------------------------------------------------------------------------
