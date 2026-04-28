@@ -34,6 +34,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -333,6 +334,139 @@ class OpenAIArtifactExtractor:
         return _parse_extraction(text.strip())
 
 
+# ─── Smart fallback (2026-04-28) ─────────────────────────────────────
+#
+# When the user is on the default ``extractor: ollama`` but doesn't have
+# Ollama installed AND has a cloud API key in env, offer to switch.
+# This bridges the gap between "privacy-by-default" and "your existing
+# key already paid the privacy cost — no point installing a second LLM
+# stack". Strict gates so the prompt only fires when:
+#
+#   1. stderr is a TTY (interactive run; CI/tests/daemons skip)
+#   2. extractor is the ollama default (explicit picks aren't second-guessed)
+#   3. Ollama isn't on PATH (if it is, no fallback needed)
+#   4. ANTHROPIC_API_KEY or OPENAI_API_KEY is set (we have something to offer)
+#   5. The marker file at ``~/.opencomputer/<profile>/extractor_setup.json``
+#      doesn't exist (we don't pester after answer)
+
+
+def _smart_fallback_candidate() -> tuple[str, str] | None:
+    """Return ``(backend_name, env_var)`` for the strongest candidate, or None.
+
+    Anthropic-preferred ordering — picked because the user's already-running
+    chat path (in this codebase) defaults to Anthropic, so the same key is
+    most likely already exercised. OpenAI is the backup so ``OPENAI_API_KEY``
+    holders aren't excluded.
+    """
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return ("anthropic", "ANTHROPIC_API_KEY")
+    if os.getenv("OPENAI_API_KEY"):
+        return ("openai", "OPENAI_API_KEY")
+    return None
+
+
+def _maybe_offer_extractor_setup() -> str | None:
+    """Run the one-time interactive setup if all gates pass.
+
+    Returns the chosen backend name on accept (and persists to
+    config.yaml + writes the per-backend privacy ack so the standard
+    banner doesn't fire on the next call). Returns ``None`` on any
+    other path — non-interactive, marker exists, no candidate, user
+    declined. Caller must handle ``None`` (typically: fall through to
+    Ollama which will then raise ``ExtractorUnavailableError``).
+    """
+    import sys
+
+    if not sys.stderr.isatty():
+        return None  # non-interactive — never prompt
+
+    # Marker check up front: if we've already asked, never ask again.
+    try:
+        from opencomputer.agent.config import _home
+        profile_home = _home()
+    except Exception:  # noqa: BLE001
+        return None
+    marker = profile_home / "extractor_setup.json"
+    if marker.exists():
+        return None
+
+    candidate = _smart_fallback_candidate()
+    if candidate is None:
+        return None
+
+    backend, env_var = candidate
+
+    sys.stderr.write(
+        f"\n"
+        f"Ollama is not installed, but {env_var} is set in your environment.\n"
+        f"\n"
+        f"Layer 3 deepening (background extraction of topic / intent / people\n"
+        f"from your recent files + browser pages) needs an LLM backend.\n"
+        f"\n"
+        f"  Option A — install Ollama:    brew install ollama && ollama pull qwen2.5:3b\n"
+        f"             Free, fully local, content never leaves your machine.\n"
+        f"\n"
+        f"  Option B — use {backend}:           ~$0.001 per artifact (~$0.05–0.20 per pass)\n"
+        f"             Artifact content (file bodies, page text) sent to {backend}.\n"
+        f"\n"
+        f"Use {backend} for now? You can switch later by editing config.yaml.\n"
+        f"[y/N]: "
+    )
+    sys.stderr.flush()
+    try:
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+
+    # Persist the answer either way so a re-run doesn't re-prompt.
+    try:
+        profile_home.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({
+            "answered_at": time.time(),
+            "answer": answer,
+            "backend_offered": backend,
+        }))
+    except OSError:
+        pass
+
+    if answer not in ("y", "yes"):
+        sys.stderr.write(
+            "OK — keeping the Ollama default. Install Ollama later to enable\n"
+            "Layer 3 deepening, or set deepening.extractor in config.yaml.\n\n"
+        )
+        return None
+
+    # Persist to config.yaml and pre-ack the privacy banner (the prompt
+    # already disclosed the privacy posture; printing the banner on the
+    # next call would just double-tell them the same thing).
+    try:
+        from dataclasses import replace as _replace
+
+        from opencomputer.agent.config_store import load_config, save_config
+
+        loaded = load_config()
+        new_cfg = _replace(
+            loaded, deepening=_replace(loaded.deepening, extractor=backend),
+        )
+        save_config(new_cfg)
+        sys.stderr.write(
+            f"✓ Saved deepening.extractor: {backend} to config.yaml\n\n"
+        )
+    except Exception:  # noqa: BLE001 — never fail extraction over a config write
+        sys.stderr.write(
+            "! Could not persist to config.yaml — using "
+            f"{backend} for this run only.\n\n"
+        )
+
+    try:
+        ack = profile_home / f"deepening_consent_{backend}.acknowledged"
+        ack.write_text("acknowledged via smart fallback\n")
+    except OSError:
+        pass
+
+    return backend
+
+
 # ─── Factory ─────────────────────────────────────────────────────────
 
 
@@ -356,6 +490,17 @@ def get_extractor(config: Any) -> ArtifactExtractor:
         raise ValueError(
             f"deepening.extractor={name!r} not in {_KNOWN_EXTRACTORS}"
         )
+
+    # Smart fallback: user is on the default ``ollama`` but Ollama
+    # isn't installed AND a cloud key is set in env → offer to switch
+    # rather than silently failing. Strict gates inside
+    # ``_maybe_offer_extractor_setup`` (TTY-only, marker-once, etc.)
+    # mean this is a no-op for non-interactive paths and after the
+    # first answer.
+    if name == "ollama" and not OllamaArtifactExtractor().is_available():
+        chosen = _maybe_offer_extractor_setup()
+        if chosen:
+            name = chosen  # banner already pre-acked inside the offer
 
     if name != "ollama":
         _maybe_print_privacy_banner(name)
