@@ -30,6 +30,7 @@ from typing import Any
 
 import httpx
 
+from extensions.telegram.dm_topics import DMTopicManager
 from extensions.telegram.network import (
     TelegramFallbackTransport,
     discover_fallback_ips,
@@ -233,6 +234,47 @@ class TelegramAdapter(BaseChannelAdapter):
         # single response window. Insertion order eviction keeps the
         # working set small.
         self._seen_callback_ids: OrderedDict[str, None] = OrderedDict()
+
+        # PR 5 — DM Topics. Opt-in via ``config["dm_topics"]["enabled"]``.
+        # When enabled, the adapter loads a profile-local registry that
+        # maps Telegram ``message_thread_id`` to a per-topic descriptor
+        # (label / skill / system_prompt). Inbound messages with a
+        # ``message_thread_id`` get an extra ``channel_id`` slot in
+        # ``MessageEvent.metadata`` so the dispatcher (and the
+        # adapter's own ``resolve_channel_prompt`` hook) can route to
+        # the right ephemeral prompt + skill loadout.
+        self._dm_topics: DMTopicManager | None = None
+        dm_cfg = config.get("dm_topics") or {}
+        if isinstance(dm_cfg, dict) and bool(dm_cfg.get("enabled")):
+            self._dm_topics = DMTopicManager(profile_home)
+
+    # ------------------------------------------------------------------
+    # PR 5 — DM-Topics-aware overrides for the per-channel prompt /
+    # skill resolution. The DMTopicManager registry (when enabled)
+    # wins over ``config["channel_prompts"]`` /
+    # ``config["channel_skill_bindings"]`` so a CLI-issued
+    # ``telegram topic-create --skill stocks`` lands without a
+    # config-file edit. Adapters without dm_topics enabled fall
+    # straight through to the base implementation.
+    # ------------------------------------------------------------------
+
+    def resolve_channel_prompt(
+        self, channel_id: str, parent_id: str | None = None,
+    ) -> str | None:
+        if self._dm_topics is not None:
+            topic = self._dm_topics.get_topic(channel_id)
+            if topic is not None and topic.get("system_prompt"):
+                return str(topic["system_prompt"])
+        return super().resolve_channel_prompt(channel_id, parent_id)
+
+    def resolve_channel_skills(
+        self, channel_id: str, parent_id: str | None = None,
+    ) -> list[str]:
+        if self._dm_topics is not None:
+            topic = self._dm_topics.get_topic(channel_id)
+            if topic is not None and topic.get("skill"):
+                return [str(topic["skill"])]
+        return super().resolve_channel_skills(channel_id, parent_id)
 
     async def _post_with_retry(
         self,
@@ -661,6 +703,24 @@ class TelegramAdapter(BaseChannelAdapter):
         metadata: dict[str, Any] = {"message_id": msg.get("message_id")}
         if attachment_meta:
             metadata["attachment_meta"] = attachment_meta
+
+        # PR 5 — DM Topics. When the inbound message carries a
+        # ``message_thread_id`` AND we have a registered topic for it,
+        # surface ``channel_id`` (and a ``parent_chat_id`` fallback) on
+        # the metadata. Downstream the dispatcher uses this slot to
+        # resolve the per-topic system prompt + skill bindings via
+        # ``BaseChannelAdapter.resolve_channel_prompt`` /
+        # ``resolve_channel_skills``. Unregistered thread ids leave
+        # metadata untouched so default behaviour is preserved.
+        thread_id = msg.get("message_thread_id")
+        if thread_id is not None and self._dm_topics is not None:
+            topic_id = str(thread_id)
+            topic = self._dm_topics.get_topic(topic_id)
+            if topic is not None:
+                metadata["channel_id"] = topic_id
+                metadata["message_thread_id"] = topic_id
+                if topic.get("parent_chat_id"):
+                    metadata["parent_channel_id"] = str(topic["parent_chat_id"])
 
         event = MessageEvent(
             platform=Platform.TELEGRAM,

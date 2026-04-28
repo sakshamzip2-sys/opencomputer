@@ -726,6 +726,38 @@ class AgentLoop:
         if prefetched:
             system = system + "\n\n## Relevant memory\n\n" + prefetched
 
+        # Hermes channel-port (PR 5): per-channel ephemeral system
+        # prompt + auto-loaded skills, threaded in via
+        # ``RuntimeContext.custom`` by ``Dispatch._build_channel_runtime``.
+        # Lives on the per-turn ``system`` lane (NOT the FROZEN base) so
+        # different DM-topics within the same chat don't poison each
+        # other's prefix cache. Empty / missing keys are no-ops —
+        # default (CLI / un-channelled) callers see exactly the
+        # pre-PR-5 prompt.
+        channel_prompt = self._runtime.custom.get("channel_prompt")
+        if isinstance(channel_prompt, str) and channel_prompt.strip():
+            system = (
+                system + "\n\n## Channel prompt\n\n" + channel_prompt.strip()
+            )
+        channel_skill_bodies = self._runtime.custom.get("channel_skill_bodies")
+        if channel_skill_bodies:
+            blocks: list[str] = []
+            for entry in channel_skill_bodies:
+                # Tolerate both the canonical ``(skill_id, body)`` shape
+                # and a bare ``body`` string for resilience against
+                # third-party adapters that bypass the helper.
+                if isinstance(entry, tuple) and len(entry) == 2:
+                    sid, body = entry
+                    blocks.append(f"### {sid}\n\n{body}")
+                elif isinstance(entry, str) and entry.strip():
+                    blocks.append(entry)
+            if blocks:
+                system = (
+                    system
+                    + "\n\n## Channel skills (auto-loaded)\n\n"
+                    + "\n\n".join(blocks)
+                )
+
         total_input = 0
         total_output = 0
         iterations = 0

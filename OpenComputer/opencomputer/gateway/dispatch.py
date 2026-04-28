@@ -25,7 +25,11 @@ from typing import TYPE_CHECKING, Any
 
 from opencomputer.agent.loop import AgentLoop
 from plugin_sdk.core import MessageEvent, ProcessingOutcome
-from plugin_sdk.runtime_context import RequestContext
+from plugin_sdk.runtime_context import (
+    DEFAULT_RUNTIME_CONTEXT,
+    RequestContext,
+    RuntimeContext,
+)
 
 if TYPE_CHECKING:
     from opencomputer.gateway.channel_directory import ChannelDirectory
@@ -397,6 +401,17 @@ class Dispatch:
             # with non-empty images as a vision-only turn.
             user_message = event.text or ""
             images = list(event.attachments) if event.attachments else None
+            # Hermes channel-port (PR 5): per-channel ephemeral system
+            # prompt + auto-loaded skills. When the inbound MessageEvent
+            # carries a ``channel_id`` (Telegram DM Topics surface this
+            # via ``message_thread_id`` lookup) we ask the originating
+            # adapter for a resolved prompt + skill list and thread the
+            # result through ``RuntimeContext.custom``. The agent loop's
+            # per-turn ``system`` lane (the same lane that appends
+            # ``prefetched`` memory) reads these and appends them to the
+            # composed system prompt — staying out of the FROZEN base
+            # so prefix-cache hits on turn 2+ remain valid.
+            runtime = self._build_channel_runtime(event, adapter)
             try:
                 if self._plugin_api is not None:
                     with self._plugin_api.in_request(request_ctx):
@@ -404,12 +419,14 @@ class Dispatch:
                             user_message=user_message,
                             session_id=session_id,
                             images=images,
+                            runtime=runtime,
                         )
                 else:
                     result = await self.loop.run_conversation(
                         user_message=user_message,
                         session_id=session_id,
                         images=images,
+                        runtime=runtime,
                     )
                 return result.final_message.content or None
             except Exception as e:  # noqa: BLE001
@@ -437,6 +454,77 @@ class Dispatch:
                             )
                         )
                     )
+
+    def _build_channel_runtime(
+        self, event: MessageEvent, adapter: Any
+    ) -> RuntimeContext:
+        """Resolve per-channel prompt + skill bindings into a RuntimeContext.
+
+        Hermes channel-port (PR 5). Reads ``event.metadata["channel_id"]``
+        (set by the Telegram DM-Topics path); calls the adapter's
+        :meth:`BaseChannelAdapter.resolve_channel_prompt` /
+        :meth:`resolve_channel_skills` resolvers; if either returns
+        non-empty, threads them onto a fresh ``RuntimeContext.custom``
+        under the keys ``channel_prompt`` and ``channel_skill_ids``.
+        Skill *bodies* (not just ids) get pre-loaded too so the loop
+        can splice them into the per-turn system prompt without
+        another disk hop. Failure to resolve is silent — default
+        behaviour (no channel context) is preserved.
+        """
+        if adapter is None or not event.metadata:
+            return DEFAULT_RUNTIME_CONTEXT
+        channel_id = event.metadata.get("channel_id")
+        if not isinstance(channel_id, str) or not channel_id:
+            return DEFAULT_RUNTIME_CONTEXT
+        parent_id = event.metadata.get("parent_channel_id")
+        parent = parent_id if isinstance(parent_id, str) and parent_id else None
+
+        prompt: str | None = None
+        skill_ids: list[str] = []
+        try:
+            prompt = adapter.resolve_channel_prompt(channel_id, parent)
+        except Exception:  # noqa: BLE001 — resolution must never break dispatch
+            logger.debug(
+                "resolve_channel_prompt failed for channel_id=%s",
+                channel_id, exc_info=True,
+            )
+        try:
+            skill_ids = list(
+                adapter.resolve_channel_skills(channel_id, parent) or []
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "resolve_channel_skills failed for channel_id=%s",
+                channel_id, exc_info=True,
+            )
+
+        if not prompt and not skill_ids:
+            return DEFAULT_RUNTIME_CONTEXT
+
+        # Pre-load skill bodies so the agent loop doesn't need to do
+        # disk I/O during system-prompt composition. Missing skill ids
+        # are dropped silently — operators see "channel skill X not
+        # found" only at config validation time.
+        skill_bodies: list[tuple[str, str]] = []
+        memory = getattr(self.loop, "memory", None)
+        if memory is not None and skill_ids:
+            for sid in skill_ids:
+                try:
+                    body = memory.load_skill_body(sid)
+                except Exception:  # noqa: BLE001 — defensive
+                    body = ""
+                if body:
+                    skill_bodies.append((sid, body))
+
+        custom: dict[str, Any] = {}
+        if prompt:
+            custom["channel_prompt"] = prompt
+        if skill_ids:
+            custom["channel_skill_ids"] = skill_ids
+        if skill_bodies:
+            custom["channel_skill_bodies"] = skill_bodies
+        custom["channel_id"] = channel_id
+        return RuntimeContext(custom=custom)
 
     async def _safe_lifecycle_hook(self, coro) -> None:
         """Fire-and-forget lifecycle hook with error swallowing.
