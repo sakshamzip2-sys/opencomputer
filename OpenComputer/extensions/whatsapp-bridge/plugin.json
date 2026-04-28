@@ -1,0 +1,27 @@
+{
+  "id": "whatsapp-bridge",
+  "name": "WhatsApp (Baileys Bridge)",
+  "version": "0.1.0",
+  "description": "WhatsApp via a local Node.js Baileys bridge — full personal-account inbound + outbound. Coexists with the Cloud API plugin; only enable one at a time.",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "channel",
+  "entry": "plugin",
+  "single_instance": true,
+  "enabled_by_default": false,
+  "profiles": ["*"],
+  "setup": {
+    "channels": [
+      {
+        "id": "whatsapp-bridge",
+        "env_vars": [
+          "WHATSAPP_BRIDGE_PORT",
+          "WHATSAPP_BRIDGE_HOST",
+          "WHATSAPP_BRIDGE_AUTH_DIR"
+        ],
+        "label": "WhatsApp (Baileys bridge)",
+        "signup_url": "https://github.com/WhiskeySockets/Baileys"
+      }
+    ]
+  }
+}
