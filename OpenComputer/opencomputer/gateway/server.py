@@ -17,6 +17,7 @@ import asyncio
 import logging
 from typing import Any
 
+from opencomputer.agent.config import GatewayConfig
 from opencomputer.agent.loop import AgentLoop
 from opencomputer.gateway.dispatch import Dispatch
 from opencomputer.gateway.outgoing_drainer import OutgoingDrainer
@@ -29,8 +30,19 @@ logger = logging.getLogger("opencomputer.gateway.server")
 class Gateway:
     """The gateway daemon."""
 
-    def __init__(self, loop: AgentLoop) -> None:
+    def __init__(
+        self,
+        loop: AgentLoop,
+        config: GatewayConfig | None = None,
+    ) -> None:
         self.loop = loop
+        # Gateway-level config (PR #221 follow-up). Defaults preserve
+        # legacy behavior — ``photo_burst_window=0.8``. Users can
+        # override via ``gateway.photo_burst_window: 0.5`` in their
+        # ``~/.opencomputer/<profile>/config.yaml``; the CLI's
+        # ``opencomputer gateway`` entry point reads :class:`Config`
+        # and threads ``cfg.gateway`` here.
+        self._config: GatewayConfig = config or GatewayConfig()
         # Task I.9: wire the shared PluginAPI through to Dispatch so
         # plugins see a per-request scope via ``api.request_context``.
         # ``shared_api`` is set by ``PluginRegistry.load_all``; if the
@@ -38,7 +50,11 @@ class Gateway:
         # silently falls back to the no-scope path.
         from opencomputer.plugins.registry import registry as plugin_registry
 
-        self.dispatch = Dispatch(loop, plugin_api=plugin_registry.shared_api)
+        self.dispatch = Dispatch(
+            loop,
+            plugin_api=plugin_registry.shared_api,
+            config={"photo_burst_window": self._config.photo_burst_window},
+        )
         self._adapters: list[BaseChannelAdapter] = []
         self._drainer: OutgoingDrainer | None = None
         self._drainer_task: asyncio.Task[None] | None = None

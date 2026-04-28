@@ -1479,7 +1479,7 @@ def gateway() -> None:
     if cfg.mcp.servers:
         console.print(f"[dim]mcp: deferring connection to {len(cfg.mcp.servers)} server(s)[/dim]")
 
-    gw = Gateway(loop=loop)
+    gw = Gateway(loop=loop, config=cfg.gateway)
     for platform_name, adapter in plugin_registry.channels.items():
         console.print(f"[dim]registering channel:[/dim] [cyan]{platform_name}[/cyan]")
         gw.register_adapter(adapter)
