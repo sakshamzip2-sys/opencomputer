@@ -158,3 +158,51 @@ def test_base_prompt_default_falls_back_to_strict():
     out = b.build()
     assert "not a chat toy" in out
     assert "Avoid filler" in out
+
+
+# ── 2026-04-28: regression — companion overlay must not be neutered
+# by the "do NOT override working rules" line.
+#
+# The original wording told the model the persona is a tone overlay
+# subordinate to working rules. The model interpreted that to mean
+# "Be concise / 1-4 sentences / skip preamble" wins over the
+# companion-warm register, producing answers like "No feelings here
+# — just an agent waiting for a task" — exactly the anti-overclaim
+# failure mode the overlay was written to prevent.
+
+
+def test_companion_persona_section_explicitly_permits_tone_override():
+    b = PromptBuilder()
+    out = b.build(active_persona_id="companion", persona_overlay="x")
+    # The persona MAY override task-mode tone preferences
+    assert "MAY override" in out
+    # But MUST NOT override security/consent
+    assert "MUST NOT override" in out
+    assert "security or consent" in out
+
+
+def test_companion_drops_be_concise_rule():
+    """Working rule #2 'Be concise' is the dominant pull toward flat
+    one-sentence answers. Under companion, it must not appear."""
+    b = PromptBuilder()
+    out = b.build(active_persona_id="companion")
+    assert "1-4 sentences for a routine answer" not in out
+    assert "Be present, not padded" in out
+
+
+def test_non_companion_keeps_be_concise_rule():
+    """Coding / admin / default modes keep the conciseness pressure."""
+    b = PromptBuilder()
+    out = b.build(active_persona_id="coding")
+    assert "1-4 sentences for a routine answer" in out
+    assert "Be present, not padded" not in out
+
+
+def test_companion_intro_explicitly_calls_out_anti_overclaim():
+    """The companion-only intro must literally name the failure modes
+    so the model can't drift into them under simple greetings."""
+    b = PromptBuilder()
+    out = b.build(active_persona_id="companion")
+    assert "As an AI, I don't have feelings" in out
+    assert "I'm feeling great today" in out
+    assert "Two-to-five sentences" in out
