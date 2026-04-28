@@ -49,6 +49,13 @@ class Gateway:
         # Subscribes to ``session_end`` on the F2 bus and stages SKILL.md
         # candidates for user review. Opt-in via ``oc skills evolution on``.
         self._evolution_subscriber: Any | None = None
+        # Hermes channel-port (PR 2 Task 2.3 / amendment §A.5):
+        # fatal-error supervisor. Ticks every 60s in ``start()`` to
+        # check ``adapter.has_fatal_error()``; reconnects retryable
+        # adapters and logs ERROR for non-retryable. Stop event lets
+        # ``stop()`` wake the loop promptly without waiting up to 60s.
+        self._fatal_supervisor_task: asyncio.Task[None] | None = None
+        self._fatal_supervisor_stop: asyncio.Event = asyncio.Event()
 
     def register_adapter(self, adapter: BaseChannelAdapter) -> None:
         """Register a channel adapter (usually from a loaded plugin)."""
@@ -86,6 +93,16 @@ class Gateway:
         # Auto-skill-evolution subscriber. Same opt-in / failure-isolated
         # contract as the ambient daemon — never crashes gateway boot.
         await self._start_evolution_subscriber()
+
+        # Hermes channel-port (PR 2 Task 2.3): start the fatal-error
+        # supervisor so adapters that flag themselves with
+        # ``_set_fatal_error`` get auto-reconnected (retryable) or
+        # ERROR-logged (non-retryable). Always-on; runs at 60s cadence.
+        self._fatal_supervisor_stop.clear()
+        self._fatal_supervisor_task = asyncio.create_task(
+            self._check_fatal_errors_periodic(),
+            name="gateway-fatal-error-supervisor",
+        )
 
     async def _start_outgoing_drainer(self) -> None:
         from opencomputer.agent.config import _home
@@ -223,8 +240,76 @@ class Gateway:
                 "failed to start skill-evolution subscriber — gateway continues without it"
             )
 
+    async def _tick_fatal_error_supervisor(self) -> None:
+        """One supervisor pass — public-ish so tests can drive a single tick.
+
+        Hermes channel-port (PR 2 Task 2.3 + amendment §A.5). Iterates
+        adapters; for each fatally-flagged one:
+
+        * ``retryable=True``  → disconnect, ``clear_fatal_error()``, connect.
+        * ``retryable=False`` → ERROR-log only; the adapter stays disconnected.
+
+        Per amendment §A.5, uses ``adapter.clear_fatal_error()`` rather
+        than mutating private fields directly.
+        """
+        for adapter in list(self._adapters):
+            if not adapter.has_fatal_error():
+                continue
+            code = adapter._fatal_error_code
+            retryable = adapter._fatal_error_retryable
+            if retryable:
+                logger.warning(
+                    "fatal-error supervisor: reconnecting adapter %s (code=%s)",
+                    adapter.platform,
+                    code,
+                )
+                try:
+                    await adapter.disconnect()
+                    adapter.clear_fatal_error()
+                    await adapter.connect()
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "fatal-error supervisor: reconnect failed for %s",
+                        adapter.platform,
+                    )
+            else:
+                logger.error(
+                    "fatal-error supervisor: %s non-retryable code=%s msg=%s",
+                    adapter.platform,
+                    code,
+                    adapter._fatal_error_message,
+                )
+
+    async def _check_fatal_errors_periodic(self, *, interval: float = 60.0) -> None:
+        """Periodic fatal-error sweep. Runs until ``_fatal_supervisor_stop`` fires.
+
+        Hermes channel-port (PR 2 Task 2.3). Default cadence 60s; tests
+        can pass a small interval to drive multiple iterations quickly.
+        """
+        while not self._fatal_supervisor_stop.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._fatal_supervisor_stop.wait(), timeout=interval
+                )
+                # Stop event fired — exit cleanly.
+                return
+            except TimeoutError:
+                pass
+            await self._tick_fatal_error_supervisor()
+
     async def stop(self) -> None:
         logger.info("gateway: stopping")
+        # Hermes channel-port (PR 2 Task 2.3): stop supervisor BEFORE we
+        # disconnect adapters so the loop doesn't race a final reconnect.
+        if self._fatal_supervisor_task is not None:
+            self._fatal_supervisor_stop.set()
+            try:
+                await asyncio.wait_for(
+                    self._fatal_supervisor_task, timeout=2.0
+                )
+            except (TimeoutError, asyncio.CancelledError):
+                self._fatal_supervisor_task.cancel()
+            self._fatal_supervisor_task = None
         if self._evolution_subscriber is not None:
             try:
                 self._evolution_subscriber.stop()

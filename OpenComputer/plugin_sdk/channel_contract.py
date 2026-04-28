@@ -118,6 +118,16 @@ class BaseChannelAdapter(ABC):
         self._message_handler: (
             Callable[[MessageEvent], Awaitable[str | None]] | None
         ) = None
+        # Hermes channel-port (PR 2 Task 2.3 + amendment §A.5):
+        # adapter-level fatal-error state. Adapters call
+        # ``_set_fatal_error`` from inside their poll loop / send path
+        # when a non-recoverable condition is detected. The gateway's
+        # ``_check_fatal_errors_periodic`` supervisor reads
+        # ``has_fatal_error()`` every 60s and either reconnects (when
+        # retryable=True) or logs ERROR (retryable=False).
+        self._fatal_error_code: str | None = None
+        self._fatal_error_message: str | None = None
+        self._fatal_error_retryable: bool = False
 
     def set_message_handler(
         self, handler: Callable[[MessageEvent], Awaitable[str | None]]
@@ -395,6 +405,52 @@ class BaseChannelAdapter(ABC):
             logger.debug(
                 "processing-hook coroutine raised; swallowing", exc_info=True
             )
+
+    # ------------------------------------------------------------------
+    # Fatal-error handoff — Hermes channel-port (PR 2 Task 2.3 / §A.5)
+    # ------------------------------------------------------------------
+
+    def _set_fatal_error(
+        self, code: str, message: str, *, retryable: bool
+    ) -> None:
+        """Mark this adapter as fatally errored.
+
+        Called by the adapter's own poll loop / send path when a
+        non-recoverable condition is detected. The gateway supervisor
+        reads ``has_fatal_error()`` periodically and either retries
+        (when ``retryable=True``) or logs ERROR.
+
+        ``code`` is a short token (``"conflict"``, ``"auth_failed"``,
+        ``"network"``) suitable for log greping. ``message`` is the
+        human-readable detail.
+        """
+        self._fatal_error_code = code
+        self._fatal_error_message = message
+        self._fatal_error_retryable = retryable
+        logger.error(
+            "adapter fatal error: platform=%s code=%s msg=%s retryable=%s",
+            getattr(self, "platform", "?"),
+            code,
+            message,
+            retryable,
+        )
+
+    def clear_fatal_error(self) -> None:
+        """Reset fatal-error state.
+
+        Per amendment §A.5: the gateway supervisor calls this after a
+        successful disconnect/reconnect cycle rather than mutating the
+        private fields directly — preserves encapsulation. Adapters can
+        also call this themselves if they detect recovery (e.g. a
+        long-poll error transient cleared on the next request).
+        """
+        self._fatal_error_code = None
+        self._fatal_error_message = None
+        self._fatal_error_retryable = False
+
+    def has_fatal_error(self) -> bool:
+        """``True`` iff ``_set_fatal_error`` was called and not cleared."""
+        return self._fatal_error_code is not None
 
 
 __all__ = ["BaseChannelAdapter", "ChannelCapabilities"]
