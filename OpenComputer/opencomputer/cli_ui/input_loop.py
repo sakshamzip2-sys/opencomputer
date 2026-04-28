@@ -259,7 +259,7 @@ async def read_user_input(
     profile_home: Path,
     scope: TurnCancelScope,
     session_title: str | None = None,
-    paste_folder: "PasteFolder | None" = None,
+    paste_folder: PasteFolder | None = None,
 ) -> str:
     """Read one line of user input with an always-visible slash dropdown.
 
