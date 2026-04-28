@@ -32,6 +32,7 @@ from opencomputer.observability.logging_config import configure as configure_log
 from opencomputer.plugins.registry import registry as plugin_registry
 from opencomputer.tools.ask_user_question import AskUserQuestionTool
 from opencomputer.tools.bash import BashTool
+from opencomputer.tools.clarify import ClarifyTool
 from opencomputer.tools.cron_tool import CronTool
 from opencomputer.tools.delegate import DelegateTool
 from opencomputer.tools.glob import GlobTool
@@ -252,6 +253,10 @@ def _register_builtin_tools() -> None:
     registry.register(SkillTool())
     registry.register(PushNotificationTool())  # CLI mode by default
     registry.register(AskUserQuestionTool())
+    # Sub-project 1.G of openclaw-tier1 — narrow disambiguation prompt.
+    # Thin wrapper over AskUserQuestion that constrains the agent to
+    # supply 2-4 concrete options.
+    registry.register(ClarifyTool())
     # Phase 12a — episodic recall + long-term note. Companion to the
     # declarative MemoryTool wired in AgentLoop (10f.D).
     registry.register(RecallTool())
