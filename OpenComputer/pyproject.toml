@@ -118,6 +118,13 @@ voice-mlx = [
 stt-groq = [
   "groq>=0.11",
 ]
+# Optional: free Edge TTS (Microsoft Azure neural voices, no API key).
+# Install with `pip install opencomputer[voice-edge]`. Tier 3 win — removes
+# the API-key onboarding friction for voice output. See
+# opencomputer/voice/edge_tts.py.
+voice-edge = [
+  "edge-tts>=6.1",
+]
 # Optional: browser-control plugin (Playwright-based automation).
 # Install with `pip install opencomputer[browser]`, then:
 #   playwright install chromium
