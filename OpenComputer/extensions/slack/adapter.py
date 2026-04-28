@@ -31,13 +31,22 @@ from typing import Any
 import httpx
 
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
-from plugin_sdk.core import Platform, SendResult
+from plugin_sdk.core import Platform, ProcessingOutcome, SendResult
 from plugin_sdk.format_converters import slack_mrkdwn
 
 logger = logging.getLogger("opencomputer.ext.slack")
 
 
 _SLACK_API_BASE = "https://slack.com/api"
+
+# PR 4.6 — default "agent is thinking" status string surfaced via
+# ``assistant.threads.setStatus``. Cleared (empty string) on
+# ``on_processing_complete`` so a stale "thinking…" indicator never
+# survives an agent run. When ConsentGate prompts the user via Slack,
+# the dispatch code calls :meth:`pause_typing_status` to clear the
+# indicator while we wait for a button click — otherwise users see a
+# typing indicator that lies (the agent is blocked, not thinking).
+_DEFAULT_THINKING_STATUS = "Thinking…"
 
 
 class SlackAdapter(BaseChannelAdapter):
@@ -56,6 +65,11 @@ class SlackAdapter(BaseChannelAdapter):
         super().__init__(config)
         self._token = config["bot_token"]
         self._client: httpx.AsyncClient | None = None
+        # PR 4.6 — track per-thread typing status so we can restore it
+        # after a ConsentGate prompt resolves. Maps channel:thread_ts
+        # → last set status string (or "" for cleared). Bounded by
+        # the number of concurrent active threads.
+        self._typing_status: dict[str, str] = {}
 
     async def connect(self) -> bool:
         """Connect = verify the bot token is valid via auth.test."""
@@ -86,6 +100,111 @@ class SlackAdapter(BaseChannelAdapter):
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+    # ------------------------------------------------------------------
+    # PR 4.6 — typing-status / pause-during-approval
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _typing_key(chat_id: str, thread_ts: str | None) -> str:
+        return f"{chat_id}:{thread_ts or ''}"
+
+    async def _set_typing_status(
+        self,
+        chat_id: str,
+        status: str,
+        thread_ts: str | None = None,
+    ) -> None:
+        """Best-effort ``assistant.threads.setStatus`` call.
+
+        Slack only honours setStatus on assistant-thread channels (the
+        AI-assistant tab); on regular channels the call returns
+        ``not_in_channel`` / similar and we simply absorb the error.
+        That's fine — the API is documented as a no-op outside
+        assistant threads.
+
+        ``status=""`` clears the indicator.
+        """
+        if self._client is None:
+            return
+        key = self._typing_key(chat_id, thread_ts)
+        self._typing_status[key] = status
+        payload: dict[str, Any] = {"channel_id": chat_id, "status": status}
+        if thread_ts:
+            payload["thread_ts"] = thread_ts
+        try:
+            resp = await self._client.post(
+                f"{_SLACK_API_BASE}/assistant.threads.setStatus",
+                json=payload,
+            )
+            data = resp.json()
+            if not data.get("ok"):
+                # Common harmless errors when called outside an assistant
+                # thread; log at DEBUG so production logs aren't flooded.
+                logger.debug(
+                    "slack assistant.threads.setStatus(%r) -> %s",
+                    status, data.get("error"),
+                )
+        except Exception as exc:  # noqa: BLE001 — typing is decoration
+            logger.debug("slack setStatus failed: %s", exc)
+
+    async def pause_typing_status(
+        self, chat_id: str, thread_ts: str | None = None
+    ) -> None:
+        """Clear the typing indicator.
+
+        Called by ConsentGate / approval flows when we're about to
+        prompt the user for input — a stale typing indicator while
+        waiting for a button click misleads users into thinking the
+        agent is still running. The previous status (if any) is
+        preserved so :meth:`resume_typing_status` can restore it.
+        """
+        # Note: we deliberately don't read+restore the previous status
+        # in the API — Slack has no getStatus. Caller decides what to
+        # restore after resume.
+        await self._set_typing_status(chat_id, "", thread_ts=thread_ts)
+
+    async def resume_typing_status(
+        self,
+        chat_id: str,
+        thread_ts: str | None = None,
+        status: str = _DEFAULT_THINKING_STATUS,
+    ) -> None:
+        """Restore the typing indicator.
+
+        Called once the approval flow resolves so the user knows the
+        agent is back on the job. Defaults to "Thinking…" — caller can
+        pass a custom status to convey progress (e.g. "Reading
+        Confluence…").
+        """
+        await self._set_typing_status(chat_id, status, thread_ts=thread_ts)
+
+    # ------------------------------------------------------------------
+    # Lifecycle hooks — show "Thinking…" while the agent is running, clear on
+    # complete. Override of BaseChannelAdapter so reactions don't double-set
+    # status indicators.
+    # ------------------------------------------------------------------
+
+    async def on_processing_start(
+        self, chat_id: str, message_id: str | None
+    ) -> None:
+        """Set ``Thinking…`` status. Overrides the base eye-reaction."""
+        # ``message_id`` is the Slack ts of the inbound message; in
+        # assistant-threads channels we treat it as thread_ts so the
+        # status surfaces in the right thread.
+        await self._set_typing_status(
+            chat_id, _DEFAULT_THINKING_STATUS, thread_ts=message_id
+        )
+
+    async def on_processing_complete(
+        self,
+        chat_id: str,
+        message_id: str | None,
+        outcome: ProcessingOutcome,
+    ) -> None:
+        """Clear the typing status when the agent finishes (any outcome)."""
+        del outcome  # status is binary — final state irrelevant here
+        await self._set_typing_status(chat_id, "", thread_ts=message_id)
 
     # ------------------------------------------------------------------
     # Format-message — markdown → Slack mrkdwn (PR 3b.2)
