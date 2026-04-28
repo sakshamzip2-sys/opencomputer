@@ -733,3 +733,62 @@ def memory_dream_off() -> None:
     if removed:
         msg += f"\n[green]✓[/green] removed {removed} cron job(s)"
     console.print(msg)
+
+
+# ─── 2026-04-28 — passive-education learning-moment controls ────────
+
+
+@memory_app.command("learning-off")
+def memory_learning_off() -> None:
+    """Suppress tip-severity learning-moment reveals.
+
+    Load-bearing prompts (e.g. the smart-fallback for missing Ollama)
+    keep firing — those aren't tips, they're prerequisites for
+    something the user explicitly asked for.
+    """
+    from opencomputer.agent.config import _home
+
+    home = _home()
+    home.mkdir(parents=True, exist_ok=True)
+    (home / ".learning_off").write_text("off\n")
+    console.print(
+        "[green]✓[/green] Learning-moment tips suppressed. "
+        "Re-enable: [cyan]oc memory learning-on[/cyan]"
+    )
+
+
+@memory_app.command("learning-on")
+def memory_learning_on() -> None:
+    """Re-enable learning-moment tips."""
+    from opencomputer.agent.config import _home
+
+    marker = _home() / ".learning_off"
+    if marker.exists():
+        marker.unlink()
+    console.print("[green]✓[/green] Learning-moment tips re-enabled.")
+
+
+@memory_app.command("learning-status")
+def memory_learning_status() -> None:
+    """Show whether tips are on/off + which moments have already fired."""
+    import datetime as _dt
+
+    from opencomputer.agent.config import _home
+    from opencomputer.awareness.learning_moments.store import load
+
+    home = _home()
+    off = (home / ".learning_off").exists()
+    state = load(home)
+    console.print(f"Learning tips: [{'red]OFF' if off else 'green]ON'}[/]")
+    console.print(f"Moments fired: {len(state.moments_fired)}")
+    if not state.moments_fired:
+        console.print(
+            "[dim]None yet. Reveals fire when behavior matches a curated "
+            "trigger (max 1/day, 3/week).[/dim]"
+        )
+        return
+    for moment_id, fired_at in sorted(
+        state.moments_fired.items(), key=lambda kv: kv[1], reverse=True,
+    ):
+        when = _dt.datetime.fromtimestamp(fired_at).isoformat(timespec="seconds")
+        console.print(f"  - {moment_id} [dim]({when})[/dim]")
