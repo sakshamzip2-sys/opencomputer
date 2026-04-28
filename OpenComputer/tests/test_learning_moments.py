@@ -33,14 +33,19 @@ from opencomputer.awareness.learning_moments import (
     all_moments,
     maybe_seed_returning_user,
     select_reveal,
+    select_session_end_reflection,
+    select_system_prompt_overlay,
 )
 from opencomputer.awareness.learning_moments.engine import (
     _cap_hit,
     _format_inline_tail,
 )
 from opencomputer.awareness.learning_moments.predicates import (
+    confused_session,
+    cross_session_recall,
     memory_continuity_first_recall,
     recent_files_paste,
+    user_md_unfilled,
     vibe_first_nonneutral,
 )
 from opencomputer.awareness.learning_moments.store import (
@@ -402,3 +407,239 @@ def test_e2e_severity_load_bearing_fires_even_when_capped(tmp_path, monkeypatch)
     out2 = select_reveal(ctx_builder=lambda: _ctx(), profile_home=tmp_path)
     assert out2 is not None
     assert "crit-text" in out2
+
+
+# ════════════════════════════════════════════════════════════════════
+# v2 (2026-04-28) — mechanisms B + C, 3 new moments
+# ════════════════════════════════════════════════════════════════════
+
+
+# ── new predicates ────────────────────────────────────────────────────
+
+
+def test_user_md_unfilled_fires_when_established_and_empty():
+    ctx = _ctx()
+    # Override v2 fields via dataclass.replace
+    from dataclasses import replace
+    ctx = replace(
+        ctx,
+        days_since_first_session=14.0,
+        sessions_db_total_sessions=20,
+        user_md_text="",
+    )
+    assert user_md_unfilled(ctx) is True
+
+
+def test_user_md_unfilled_skips_new_user():
+    from dataclasses import replace
+    ctx = replace(
+        _ctx(),
+        days_since_first_session=2.0,
+        sessions_db_total_sessions=20,
+        user_md_text="",
+    )
+    assert user_md_unfilled(ctx) is False
+
+
+def test_user_md_unfilled_skips_low_session_count():
+    from dataclasses import replace
+    ctx = replace(
+        _ctx(),
+        days_since_first_session=14.0,
+        sessions_db_total_sessions=3,
+        user_md_text="",
+    )
+    assert user_md_unfilled(ctx) is False
+
+
+def test_user_md_unfilled_skips_when_filled():
+    from dataclasses import replace
+    ctx = replace(
+        _ctx(),
+        days_since_first_session=14.0,
+        sessions_db_total_sessions=20,
+        user_md_text="# Saksham\n\nWorks on OC. Prefers terse. Etc.\n",
+    )
+    assert user_md_unfilled(ctx) is False
+
+
+def test_user_md_unfilled_treats_template_as_empty():
+    from dataclasses import replace
+    ctx = replace(
+        _ctx(),
+        days_since_first_session=14.0,
+        sessions_db_total_sessions=20,
+        user_md_text="# USER.md\n\n(empty — fill me in)\n",
+    )
+    assert user_md_unfilled(ctx) is True
+
+
+def test_cross_session_recall_fires_when_hits_present():
+    from dataclasses import replace
+    ctx = replace(
+        _ctx(),
+        cross_session_topic_hits=(
+            ("auth refactor", "s-yesterday"),
+            ("router fixes", "s-monday"),
+        ),
+    )
+    assert cross_session_recall(ctx) is True
+
+
+def test_cross_session_recall_skips_when_no_hits():
+    assert cross_session_recall(_ctx()) is False
+
+
+def test_confused_session_fires_when_stuck_and_long_enough():
+    from dataclasses import replace
+    ctx = replace(
+        _ctx(),
+        turn_count=6,
+        vibe_stuck_or_frustrated_fraction=0.5,
+    )
+    assert confused_session(ctx) is True
+
+
+def test_confused_session_skips_short_session():
+    from dataclasses import replace
+    ctx = replace(
+        _ctx(),
+        turn_count=2,
+        vibe_stuck_or_frustrated_fraction=0.6,
+    )
+    assert confused_session(ctx) is False
+
+
+def test_confused_session_skips_below_threshold():
+    from dataclasses import replace
+    ctx = replace(
+        _ctx(),
+        turn_count=10,
+        vibe_stuck_or_frustrated_fraction=0.10,
+    )
+    assert confused_session(ctx) is False
+
+
+# ── Surface dispatch ──────────────────────────────────────────────────
+
+
+def test_select_reveal_only_fires_inline_tail_moments(tmp_path, monkeypatch):
+    """A SYSTEM_PROMPT moment should NOT fire via select_reveal."""
+    sp_moment = LearningMoment(
+        id="sp_only", predicate=lambda c: True, reveal="sp",
+        surface=Surface.SYSTEM_PROMPT,
+    )
+    inline_moment = LearningMoment(
+        id="inline_only", predicate=lambda c: False, reveal="inline",
+    )
+    _patch_registry(monkeypatch, [sp_moment, inline_moment])
+    out = select_reveal(ctx_builder=lambda: _ctx(), profile_home=tmp_path)
+    # Neither fires: sp filtered by surface; inline predicate False
+    assert out is None
+
+
+def test_select_system_prompt_overlay_fires_only_for_b_moments(tmp_path, monkeypatch):
+    """An INLINE_TAIL moment should NOT fire via select_system_prompt_overlay."""
+    sp_moment = LearningMoment(
+        id="sp_only", predicate=lambda c: True, reveal="sp_text",
+        surface=Surface.SYSTEM_PROMPT,
+    )
+    inline_moment = LearningMoment(
+        id="inline_only", predicate=lambda c: True, reveal="inline_text",
+    )
+    _patch_registry(monkeypatch, [sp_moment, inline_moment])
+    out = select_system_prompt_overlay(
+        ctx_builder=lambda: _ctx(), profile_home=tmp_path,
+    )
+    assert out == "sp_text"
+    # The inline moment is still eligible (state shows sp_only fired,
+    # cap is now hit but inline_moment dedup applies if we call select_reveal next)
+
+
+def test_select_session_end_reflection_fires_only_for_c_moments(tmp_path, monkeypatch):
+    c_moment = LearningMoment(
+        id="c_only", predicate=lambda c: True, reveal="bye",
+        surface=Surface.SESSION_END,
+    )
+    inline_moment = LearningMoment(
+        id="inline_skip", predicate=lambda c: True, reveal="not_here",
+    )
+    _patch_registry(monkeypatch, [c_moment, inline_moment])
+    out = select_session_end_reflection(
+        ctx_builder=lambda: _ctx(), profile_home=tmp_path,
+    )
+    assert out == "bye"
+
+
+def test_b_overlay_does_not_get_inline_tail_indent(tmp_path, monkeypatch):
+    """Mechanism B output goes to the LLM as a context line, not to
+    the user — no two-space indent, no leading newline."""
+    sp_moment = LearningMoment(
+        id="sp_clean", predicate=lambda c: True, reveal="raw text",
+        surface=Surface.SYSTEM_PROMPT,
+    )
+    _patch_registry(monkeypatch, [sp_moment])
+    out = select_system_prompt_overlay(
+        ctx_builder=lambda: _ctx(), profile_home=tmp_path,
+    )
+    assert out == "raw text"  # no indent, no leading \n
+
+
+def test_caps_shared_across_surfaces(tmp_path, monkeypatch):
+    """Firing an inline-tail moment counts toward the cap that
+    suppresses subsequent system-prompt-overlay tip moments on the
+    same day."""
+    inline = LearningMoment(
+        id="i", predicate=lambda c: True, reveal="i", priority=1,
+    )
+    sp = LearningMoment(
+        id="s", predicate=lambda c: True, reveal="s",
+        surface=Surface.SYSTEM_PROMPT, priority=2,
+    )
+    _patch_registry(monkeypatch, [inline, sp])
+
+    # Inline fires → cap hit
+    out1 = select_reveal(ctx_builder=lambda: _ctx(), profile_home=tmp_path)
+    assert out1 is not None
+
+    # System-prompt overlay should now be suppressed by cap
+    out2 = select_system_prompt_overlay(
+        ctx_builder=lambda: _ctx(), profile_home=tmp_path,
+    )
+    assert out2 is None
+
+
+def test_load_bearing_b_moment_bypasses_caps(tmp_path, monkeypatch):
+    """A LOAD_BEARING SYSTEM_PROMPT moment fires even after cap hit."""
+    inline = LearningMoment(
+        id="i_tip", predicate=lambda c: True, reveal="i", priority=1,
+    )
+    sp = LearningMoment(
+        id="s_critical", predicate=lambda c: True, reveal="s_text",
+        surface=Surface.SYSTEM_PROMPT, severity=Severity.LOAD_BEARING,
+        priority=2,
+    )
+    _patch_registry(monkeypatch, [inline, sp])
+
+    select_reveal(ctx_builder=lambda: _ctx(), profile_home=tmp_path)
+    out = select_system_prompt_overlay(
+        ctx_builder=lambda: _ctx(), profile_home=tmp_path,
+    )
+    assert out == "s_text"
+
+
+# ── End-to-end against the real v1+v2 registry ──────────────────────
+
+
+def test_registry_has_six_moments_with_three_surfaces():
+    ids = {m.id for m in all_moments()}
+    assert "memory_continuity_first_recall" in ids
+    assert "vibe_first_nonneutral" in ids
+    assert "recent_files_paste" in ids
+    assert "user_md_unfilled" in ids
+    assert "cross_session_recall" in ids
+    assert "confused_session" in ids
+    surfaces = {m.surface for m in all_moments()}
+    assert Surface.INLINE_TAIL in surfaces
+    assert Surface.SYSTEM_PROMPT in surfaces
+    assert Surface.SESSION_END in surfaces

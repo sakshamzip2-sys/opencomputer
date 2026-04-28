@@ -4,6 +4,40 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — passive education v2: mechanisms B + C + 3 new moments
+
+Builds on v1. Adds two new reveal surfaces and three new
+hand-curated moments. Six total now.
+
+**Mechanism B — system-prompt overlay.** When a `Surface.SYSTEM_PROMPT`
+moment fires at session start, its text is appended to the system
+prompt for the LLM to weave in if natural. Mirrors the existing
+companion overlay pattern.
+
+**Mechanism C — session-end reflection.** When a `Surface.SESSION_END`
+moment fires, its text is appended as a final assistant message at
+session close. Only dispatches on `end_reason == "completed"` —
+never on cancel / timeout / error.
+
+3 new moments:
+- `user_md_unfilled` (INLINE_TAIL) — established user (>7 days, >7
+  sessions) whose USER.md is empty.
+- `cross_session_recall` (SYSTEM_PROMPT) — past sessions in the last
+  14 days have content that may be relevant; LLM may reference
+  continuity.
+- `confused_session` (SESSION_END) — ≥30% of vibes were
+  stuck/frustrated AND ≥4 turns; suggests `/clear`.
+
+Caps + dedup are **shared across surfaces** — firing a moment via
+mechanism A counts toward the daily cap that suppresses subsequent
+B/C tip moments on the same day. Users never see >1 reveal/day
+regardless of mechanism mix.
+
+SessionDB: `count_sessions()` (already in v1) + new
+`first_session_started_at()` for the "established user" gate.
+
+17 new tests. 4325 / 4325 pass; ruff clean.
+
 ### Added — passive education ("learning moments") v1
 
 OpenComputer's discoverability gap closes a notch. New mechanism that

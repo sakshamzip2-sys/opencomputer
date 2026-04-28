@@ -4,8 +4,18 @@ Public API
 ----------
 
 :func:`select_reveal`
-    Called from the agent loop post-turn. Returns the formatted
-    reveal clause to append to the assistant's response, or ``None``.
+    Mechanism A. Called from the agent loop post-turn. Returns the
+    formatted INLINE_TAIL reveal clause to append to the assistant's
+    response, or ``None``.
+
+:func:`select_system_prompt_overlay`
+    Mechanism B (v2). Called PRE-turn. Returns a SYSTEM_PROMPT context
+    line to append to the next turn's system prompt, or ``None``.
+
+:func:`select_session_end_reflection`
+    Mechanism C (v2). Called from the session-end path. Returns a
+    SESSION_END reflection text to emit as a final assistant message,
+    or ``None``.
 
 :func:`maybe_seed_returning_user`
     Called once at loop init. Seeds the persistence file as
@@ -18,6 +28,8 @@ Architecture: see
 from opencomputer.awareness.learning_moments.engine import (
     maybe_seed_returning_user,
     select_reveal,
+    select_session_end_reflection,
+    select_system_prompt_overlay,
 )
 from opencomputer.awareness.learning_moments.registry import (
     Context,
@@ -35,4 +47,6 @@ __all__ = [
     "all_moments",
     "maybe_seed_returning_user",
     "select_reveal",
+    "select_session_end_reflection",
+    "select_system_prompt_overlay",
 ]
