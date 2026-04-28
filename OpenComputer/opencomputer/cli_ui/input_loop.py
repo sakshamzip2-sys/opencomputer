@@ -34,6 +34,7 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.shortcuts import CompleteStyle
 
 from opencomputer.cli_ui.clipboard import has_clipboard_image, save_clipboard_image
+from opencomputer.cli_ui.paste_folder import PasteFolder
 from opencomputer.cli_ui.slash import SLASH_REGISTRY
 from opencomputer.cli_ui.slash_completer import (
     SlashCommandCompleter,
@@ -258,6 +259,7 @@ async def read_user_input(
     profile_home: Path,
     scope: TurnCancelScope,
     session_title: str | None = None,
+    paste_folder: "PasteFolder | None" = None,
 ) -> str:
     """Read one line of user input with an always-visible slash dropdown.
 
@@ -504,10 +506,30 @@ async def read_user_input(
     @kb.add(Keys.BracketedPaste)
     def _bracketed_paste(event):  # noqa: ANN001
         data: str = getattr(event, "data", "") or ""
+        # Empty paste = clipboard-image attempt (existing flow)
         if not data.strip() and _try_attach_clipboard_image_into_buffer(
             event, profile_home=profile_home
         ):
             return
+
+        # Paste-fold: long pastes get replaced with [Pasted text #N +M lines]
+        # in the buffer; full content stored for submit-time expansion. If
+        # the same content is pasted twice, expand the placeholder in the
+        # buffer instead of inserting a second placeholder ("paste again
+        # to expand").
+        if paste_folder is not None and data:
+            if paste_folder.is_same_as_last(data):
+                ph = paste_folder.placeholder_for_last()
+                buf_text = event.current_buffer.text
+                if ph and ph in buf_text:
+                    new_text = buf_text.replace(ph, data, 1)
+                    event.current_buffer.text = new_text
+                    event.current_buffer.cursor_position = len(new_text)
+                    return
+            folded, _bid = paste_folder.fold(data)
+            event.current_buffer.insert_text(folded)
+            return
+
         event.current_buffer.insert_text(data)
 
     # fzf-inspired aesthetic: bright cyan title for the highlighted row,
@@ -527,6 +549,7 @@ async def read_user_input(
             "dd.divider": "#3a3a3a",
             "title.box": "#5fafd7",
             "title.text": "bold #5fafd7",
+            "hint.dim": "italic #6c6c6c",
         }
     )
 
@@ -613,6 +636,26 @@ async def read_user_input(
     # conventional shell-completion UX (zsh autosuggest, fish, etc.)
     # without the CPR dependency that dropdown-below-input would need.
     filler = Window()
+
+    # Paste-fold hint: dim "paste again to expand" line below the input,
+    # only visible when the buffer contains a folded placeholder we know
+    # about. Mirrors Claude Code's UX.
+    def _paste_hint_text():
+        if paste_folder is None or not paste_folder.has_active_fold(input_buffer.text):
+            return []
+        return [("class:hint.dim", "paste again to expand")]
+
+    def _has_paste_hint() -> bool:
+        return paste_folder is not None and paste_folder.has_active_fold(input_buffer.text)
+
+    paste_hint_window = ConditionalContainer(
+        content=Window(
+            content=FormattedTextControl(_paste_hint_text),
+            height=1,
+        ),
+        filter=Condition(_has_paste_hint),
+    )
+
     layout = Layout(
         HSplit(
             [
@@ -621,6 +664,7 @@ async def read_user_input(
                 dropdown_divider,
                 title_window,
                 VSplit([prompt_window, input_window]),
+                paste_hint_window,
             ]
         ),
         focused_element=input_window,
