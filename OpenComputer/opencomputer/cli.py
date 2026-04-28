@@ -279,6 +279,12 @@ def _register_builtin_tools() -> None:
     # without going through a channel-specific path.
     registry.register(VoiceSynthesizeTool())
     registry.register(VoiceTranscribeTool())
+    # Tier 1.B Tool 1 — first-class cross-platform send (per
+    # docs/refs/hermes-agent/2026-04-28-major-gaps.md). Promotes the
+    # MCP messages_send capability into a core tool so the agent
+    # reaches for it by reflex.
+    from opencomputer.tools.send_message import SendMessageTool
+    registry.register(SendMessageTool())
     # Phase 2.1 + 2.2 of catch-up plan — GUI tools (macOS only).
     # PointAndClickTool: programmatic mouse click via Quartz/osascript.
     # AppleScriptRunTool: AppleScript snippet runner with denylist guard.
