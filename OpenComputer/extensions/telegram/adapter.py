@@ -32,6 +32,7 @@ import httpx
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import MessageEvent, Platform, SendResult
 from plugin_sdk.format_converters.markdownv2 import convert as _to_mdv2
+from plugin_sdk.sticker_cache import StickerCache
 
 logger = logging.getLogger("opencomputer.ext.telegram")
 
@@ -151,6 +152,21 @@ class TelegramAdapter(BaseChannelAdapter):
                     "telegram mention_patterns: ignoring invalid regex %r: %s",
                     pat, exc,
                 )
+        # PR 3a.5 — persistent sticker description cache. Keyed on
+        # ``file_unique_id`` (stable across sends). Cache hit short-
+        # circuits the vision-describe pipeline; misses are passed
+        # through unchanged (the agent / provider does the actual
+        # describing). ``profile_home`` is taken from config for
+        # plugin-side flexibility; falls back to ``~/.opencomputer``.
+        profile_home = Path(
+            config.get("profile_home")
+            or Path.home() / ".opencomputer"
+        )
+        try:
+            profile_home.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        self._sticker_cache = StickerCache(profile_home)
         # Round 4 Item 3 — webhook mode config. Defaults to "polling"
         # so existing users see no change. Set "webhook" + a public
         # ``webhook_url`` (HTTPS) to switch. ``webhook_port`` defaults
@@ -509,6 +525,36 @@ class TelegramAdapter(BaseChannelAdapter):
                      "mime": voice.get("mime_type") or "audio/ogg",
                      "size": voice.get("file_size"),
                      "duration": voice.get("duration")}
+                )
+
+        # PR 3a.5 — sticker handling. Cache hit short-circuits to
+        # ``[sticker: <description>]`` injected into the text body so
+        # the agent has something semantic to react to. Cache miss:
+        # surface as an attachment-style ``telegram:<file_id>`` ref
+        # plus an ``attachment_meta`` entry so the provider/vision
+        # pipeline can describe and ``put()`` the result later.
+        if sticker := msg.get("sticker"):
+            uniq = sticker.get("file_unique_id")
+            sticker_file_id = sticker.get("file_id")
+            cached = self._sticker_cache.get(uniq) if uniq else None
+            if cached:
+                # Inject as readable text so downstream agent code
+                # treats it like any other utterance.
+                text = (text + " " if text else "") + f"[sticker: {cached}]"
+            elif sticker_file_id:
+                # Pass-through — provider-side vision will describe and
+                # may call back into the cache via ``put()``.
+                attachments.append(f"telegram:{sticker_file_id}")
+                attachment_meta.append(
+                    {
+                        "type": "sticker",
+                        "file_id": sticker_file_id,
+                        "file_unique_id": uniq,
+                        "is_animated": bool(sticker.get("is_animated")),
+                        "is_video": bool(sticker.get("is_video")),
+                        "emoji": sticker.get("emoji"),
+                        "set_name": sticker.get("set_name"),
+                    }
                 )
 
         # Skip messages with no text and no attachments — they're metadata-only updates
