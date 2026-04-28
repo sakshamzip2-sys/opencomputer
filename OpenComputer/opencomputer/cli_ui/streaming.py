@@ -261,12 +261,27 @@ class StreamingRenderer:
             pass
 
     def _render(self) -> Group:
-        """Compose the streaming-text view + tool-status panel."""
+        """Compose the streaming-text view + thinking spinner + tool panel.
+
+        Spinner visibility rule: show whenever the AI is still working —
+        i.e. before the first text chunk OR while any tool is currently
+        running. This keeps "thinking" feedback continuous across the
+        whole turn, including the gap between tool dispatch and the
+        next text chunk (which used to leave the user staring at static
+        markdown wondering if anything was happening).
+        """
         renderables = []
 
-        # The streaming text. Use Markdown when the buffer has content;
-        # otherwise leave a dim placeholder so Live always has something
-        # to draw.
+        # Detect whether the AI is "still working":
+        #   - no text yet (haven't streamed first chunk)  → spinner
+        #   - any tool currently running                  → spinner
+        # Otherwise the assistant is actively streaming text and the
+        # markdown re-render IS the feedback.
+        any_tool_running = any(
+            row.ok is None for row in self._tool_calls.values()
+        )
+        show_spinner = (not self._buffer) or any_tool_running
+
         if self._buffer:
             text = "".join(self._buffer)
             # Provisionally close any unterminated code fence so Rich's
@@ -274,9 +289,11 @@ class StreamingRenderer:
             if text.count("```") % 2 == 1:
                 text = text + "\n```"
             renderables.append(Markdown(text, code_theme="ansi_dark"))
-        else:
+
+        if show_spinner:
+            spinner_label = "Running tool…" if any_tool_running else "Thinking…"
             renderables.append(
-                Spinner("dots", text=Text("Thinking…", style="dim"))
+                Spinner("dots", text=Text(spinner_label, style="dim"))
             )
 
         # Tool-status panel below the stream — only when at least one
