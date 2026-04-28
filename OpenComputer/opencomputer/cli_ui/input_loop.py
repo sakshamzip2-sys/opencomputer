@@ -318,18 +318,51 @@ async def read_user_input(
 
     # Mutable picker state. Updated on every keystroke via on_text_changed
     # and consumed by the dropdown FormattedTextControl on each render.
-    state: dict = {"matches": [], "selected_idx": 0}
+    # ``mode`` is "slash" | "file" | "" — distinguishes which dropdown
+    # template to render and where to insert on Tab/Enter.
+    state: dict = {
+        "matches": [],
+        "selected_idx": 0,
+        "mode": "",
+        "at_token_range": None,  # (start, end) when mode == "file"
+    }
 
     def _refilter(text: str) -> None:
+        # Slash prefix wins (existing behavior).
         if text.startswith("/") and " " not in text:
             prefix = text[1:].lower()
             state["matches"] = [
                 c for c in SLASH_REGISTRY if c.name.startswith(prefix)
             ][:10]
             state["selected_idx"] = 0
-        else:
-            state["matches"] = []
+            state["mode"] = "slash"
+            state["at_token_range"] = None
+            return
+
+        # @filepath mode — detect ``@<query>`` at cursor position.
+        from opencomputer.cli_ui.file_completer import (
+            extract_at_token,
+            find_project_files,
+            top_matches,
+        )
+
+        cursor = input_buffer.cursor_position
+        token = extract_at_token(text, cursor)
+        if token is not None:
+            query, start, end = token
+            # Empty query → show recent files. Non-empty → fuzzy match.
+            files = find_project_files(Path.cwd())
+            matches = top_matches(query, files, n=10)
+            state["matches"] = matches
             state["selected_idx"] = 0
+            state["mode"] = "file"
+            state["at_token_range"] = (start, end)
+            return
+
+        state["matches"] = []
+        state["selected_idx"] = 0
+        state["mode"] = ""
+        state["at_token_range"] = None
 
     def _on_text_changed(_buf):  # noqa: ANN001 — pt fires (sender,)
         _refilter(input_buffer.text)
@@ -343,6 +376,23 @@ async def read_user_input(
         if not state["matches"]:
             return []
         out: list[tuple[str, str]] = []
+        if state["mode"] == "file":
+            # File-completion rendering: path + size label.
+            from opencomputer.cli_ui.file_completer import format_size_label
+
+            for i, p in enumerate(state["matches"]):
+                is_sel = i == state["selected_idx"]
+                cursor_cls = "class:dd.cursor" if is_sel else "class:dd.cursor.dim"
+                title_cls = "class:dd.title.selected" if is_sel else "class:dd.title"
+                desc_cls = "class:dd.desc.selected" if is_sel else "class:dd.desc"
+                size = format_size_label(p, base=Path.cwd())
+                out.append((cursor_cls, "❯ " if is_sel else "  "))
+                out.append((title_cls, f"@{p}"))
+                if size:
+                    out.append((desc_cls, f"  ({size})"))
+                out.append(("", "\n"))
+            return out
+        # Slash command rendering (unchanged).
         for i, cmd in enumerate(state["matches"]):
             is_sel = i == state["selected_idx"]
             args = f" {cmd.args_hint}" if cmd.args_hint else ""
@@ -379,17 +429,43 @@ async def read_user_input(
                 len(state["matches"]) - 1, state["selected_idx"] + 1
             )
 
+    def _apply_selection() -> None:
+        """Replace the active token (slash prefix or @<query>) with the
+        selected dropdown row's expansion. Updates buffer + cursor."""
+        if not state["matches"] or not (
+            0 <= state["selected_idx"] < len(state["matches"])
+        ):
+            return
+        sel = state["matches"][state["selected_idx"]]
+        if state["mode"] == "file":
+            start, end = state["at_token_range"]
+            full = input_buffer.text
+            insertion = f"@{sel}"
+            new_text = full[:start] + insertion + full[end:]
+            input_buffer.text = new_text
+            input_buffer.cursor_position = start + len(insertion)
+            # Re-filter so the dropdown updates after the insert (likely
+            # closes since the cursor lands at end-of-token).
+            _refilter(new_text)
+        else:
+            input_buffer.text = f"/{sel.name}"
+            input_buffer.cursor_position = len(input_buffer.text)
+
     @kb.add(Keys.ControlI, filter=Condition(_has_dropdown))  # Tab
     def _tab(event):  # noqa: ANN001
-        sel = state["matches"][state["selected_idx"]]
-        input_buffer.text = f"/{sel.name}"
-        input_buffer.cursor_position = len(input_buffer.text)
+        _apply_selection()
 
     @kb.add(Keys.Enter)
     def _enter(event):  # noqa: ANN001
         # If dropdown is open and a row is selected, expand to that
-        # command before submitting (so the row visibly chosen wins).
+        # command/path before submitting (so the row visibly chosen wins).
         if state["matches"] and 0 <= state["selected_idx"] < len(state["matches"]):
+            if state["mode"] == "file":
+                _apply_selection()
+                # File completion expands inline; do NOT submit on the
+                # same Enter — let the user keep editing or press Enter
+                # again to send.
+                return
             sel = state["matches"][state["selected_idx"]]
             input_buffer.text = f"/{sel.name}"
         event.app.exit(result=input_buffer.text)
