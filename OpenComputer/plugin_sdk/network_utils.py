@@ -189,30 +189,20 @@ def proxy_kwargs_for_aiohttp(url: str | None) -> dict[str, Any]:
 
 
 def proxy_kwargs_for_bot(url: str | None) -> dict[str, Any]:
-    """Build kwargs for python-telegram-bot/discord.py Bot constructors."""
-    if not url:
-        return {}
-    if url.startswith(("http://", "https://")):
-        return {"proxy": url}
-    if url.startswith(("socks://", "socks4://", "socks5://", "socks5h://")):
-        try:
-            from aiohttp_socks import ProxyConnector  # type: ignore[import-not-found]
+    """Build kwargs for python-telegram-bot/discord.py Bot constructors.
 
-            return {"connector": ProxyConnector.from_url(url, rdns=True)}
-        except ImportError:
-            logger.warning(
-                "SOCKS proxy requested but aiohttp_socks not installed; ignoring"
-            )
-            return {}
-    return {}
+    Same shape as :func:`proxy_kwargs_for_aiohttp`; aliased here so call
+    sites that wire a Bot rather than a raw aiohttp session read clearly.
+    """
+    return proxy_kwargs_for_aiohttp(url)
 
 
-async def _ssrf_redirect_guard(response: Any) -> None:
+async def ssrf_redirect_guard(response: Any) -> None:
     """httpx async response hook: re-validate each redirect target.
 
     Usage:
         client = httpx.AsyncClient(
-            event_hooks={"response": [_ssrf_redirect_guard]}
+            event_hooks={"response": [ssrf_redirect_guard]}
         )
     """
     status = getattr(response, "status_code", None)
@@ -229,12 +219,17 @@ async def _ssrf_redirect_guard(response: Any) -> None:
                 )
 
 
+# Backward-compatibility alias: the symbol was originally exported with a
+# leading underscore. Keep the old name for any external wiring that imports
+# it. Prefer the public ``ssrf_redirect_guard`` for new code.
+_ssrf_redirect_guard = ssrf_redirect_guard
+
+
 __all__ = [
-    "_looks_like_image",
-    "_ssrf_redirect_guard",
     "is_network_accessible",
     "proxy_kwargs_for_aiohttp",
     "proxy_kwargs_for_bot",
     "resolve_proxy_url",
     "safe_url_for_log",
+    "ssrf_redirect_guard",
 ]

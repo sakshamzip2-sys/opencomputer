@@ -6,7 +6,7 @@ import pytest
 
 from plugin_sdk.network_utils import (
     _looks_like_image,
-    _ssrf_redirect_guard,
+    ssrf_redirect_guard,
     is_network_accessible,
     proxy_kwargs_for_aiohttp,
     proxy_kwargs_for_bot,
@@ -194,18 +194,18 @@ class _FakeResponse:
 async def test_ssrf_redirect_guard_blocks_loopback():
     resp = _FakeResponse(status_code=302, location="http://127.0.0.1/admin")
     with pytest.raises(RuntimeError, match="SSRF"):
-        await _ssrf_redirect_guard(resp)
+        await ssrf_redirect_guard(resp)
 
 
 @pytest.mark.asyncio
 async def test_ssrf_redirect_guard_allows_public_target():
     resp = _FakeResponse(status_code=302, location="https://8.8.8.8/")
     # Must not raise
-    await _ssrf_redirect_guard(resp)
+    await ssrf_redirect_guard(resp)
 
 
 @pytest.mark.asyncio
 async def test_ssrf_redirect_guard_passes_non_redirect():
     resp = _FakeResponse(status_code=200, location=None)
     # Must not raise
-    await _ssrf_redirect_guard(resp)
+    await ssrf_redirect_guard(resp)

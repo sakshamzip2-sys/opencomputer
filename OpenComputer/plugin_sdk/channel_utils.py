@@ -175,7 +175,6 @@ SUPPORTED_VIDEO_TYPES: frozenset[str] = frozenset(
 __all__ = [
     "SUPPORTED_DOCUMENT_TYPES",
     "SUPPORTED_VIDEO_TYPES",
-    "_prefix_within_utf16_limit",
     "truncate_message_smart",
     "utf16_len",
 ]
