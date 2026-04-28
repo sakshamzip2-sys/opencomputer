@@ -258,11 +258,226 @@ async def read_user_input(
     profile_home: Path,
     scope: TurnCancelScope,
 ) -> str:
-    """Read one line of user input via the prompt session.
+    """Read one line of user input with an always-visible slash dropdown.
 
-    Returns the trimmed string. Caller handles ``EOFError`` (Ctrl+D)
-    and ``KeyboardInterrupt`` (Ctrl+C with empty buffer).
+    Replaces the older :func:`build_prompt_session` path because
+    prompt_toolkit's built-in :class:`CompletionsMenu` (both
+    ``COLUMN`` and ``MULTI_COLUMN`` styles) silently fails to render in
+    editor terminals (VS Code, JetBrains) where Cursor-Position-Report
+    handling is unreliable. We build a custom :class:`Application` with
+    our own dropdown :class:`Window` in the main layout — pure layout
+    flow, no Float widgets, no CPR dependency — guaranteed to render.
+
+    UX:
+
+    - Type ``/`` → dropdown shows all 10 canonical slash commands with
+      ``(category)`` tag and description on each row
+    - Type ``/re`` → list narrows to commands starting with that prefix
+    - Up/Down arrow keys navigate the dropdown (highlighted row in bold
+      with a blue background)
+    - Tab → autocomplete to the highlighted command name
+    - Enter → if dropdown is open and a row is highlighted, expand to
+      that command name then submit; otherwise submit raw text
+    - Esc → dismiss the dropdown if open; clear buffer otherwise
+    - Ctrl+J / Alt+Enter → insert literal newline
+    - Ctrl+V / bracketed paste → handles clipboard images (existing flow)
+    - Ctrl+C / Ctrl+D (empty buffer) → raise to caller per shell convention
+
+    ``build_prompt_session`` is preserved as the legacy entry point used
+    by older callers and several test fixtures; new code should use this.
     """
-    session = build_prompt_session(profile_home=profile_home, scope=scope)
-    text = await session.prompt_async()
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.filters import Condition
+    from prompt_toolkit.layout import (
+        ConditionalContainer,
+        HSplit,
+        Layout,
+        VSplit,
+        Window,
+    )
+    from prompt_toolkit.layout.controls import (
+        BufferControl,
+        FormattedTextControl,
+    )
+    from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.styles import Style
+
+    from .slash import SLASH_REGISTRY
+
+    history_path = _history_file_path(profile_home)
+    history = FileHistory(str(history_path))
+
+    input_buffer = Buffer(
+        history=history,
+        multiline=False,
+        complete_while_typing=False,
+        enable_history_search=True,
+    )
+
+    # Mutable picker state. Updated on every keystroke via on_text_changed
+    # and consumed by the dropdown FormattedTextControl on each render.
+    state: dict = {"matches": [], "selected_idx": 0}
+
+    def _refilter(text: str) -> None:
+        if text.startswith("/") and " " not in text:
+            prefix = text[1:].lower()
+            state["matches"] = [
+                c for c in SLASH_REGISTRY if c.name.startswith(prefix)
+            ][:10]
+            state["selected_idx"] = 0
+        else:
+            state["matches"] = []
+            state["selected_idx"] = 0
+
+    def _on_text_changed(_buf):  # noqa: ANN001 — pt fires (sender,)
+        _refilter(input_buffer.text)
+
+    input_buffer.on_text_changed += _on_text_changed
+
+    def _has_dropdown() -> bool:
+        return bool(state["matches"])
+
+    def _dropdown_text():
+        if not state["matches"]:
+            return []
+        out: list[tuple[str, str]] = []
+        for i, cmd in enumerate(state["matches"]):
+            is_sel = i == state["selected_idx"]
+            arrow = "❯ " if is_sel else "  "
+            args = f" {cmd.args_hint}" if cmd.args_hint else ""
+            cmd_str = f"{arrow}/{cmd.name}{args}"
+            cat_str = f"  ({cmd.category})"
+            desc_str = f"  {cmd.description}"
+            base = "class:dd.selected" if is_sel else "class:dd"
+            cat_cls = "class:dd.cat.selected" if is_sel else "class:dd.cat"
+            desc_cls = "class:dd.desc.selected" if is_sel else "class:dd.desc"
+            out.append((base, cmd_str))
+            out.append((cat_cls, cat_str))
+            out.append((desc_cls, desc_str))
+            out.append((base, "\n"))
+        return out
+
+    def _dropdown_height():
+        return Dimension(exact=min(len(state["matches"]), 10))
+
+    kb = KeyBindings()
+
+    @kb.add(Keys.Up, filter=Condition(_has_dropdown))
+    def _up(event):  # noqa: ANN001
+        if state["matches"]:
+            state["selected_idx"] = max(0, state["selected_idx"] - 1)
+
+    @kb.add(Keys.Down, filter=Condition(_has_dropdown))
+    def _down(event):  # noqa: ANN001
+        if state["matches"]:
+            state["selected_idx"] = min(
+                len(state["matches"]) - 1, state["selected_idx"] + 1
+            )
+
+    @kb.add(Keys.ControlI, filter=Condition(_has_dropdown))  # Tab
+    def _tab(event):  # noqa: ANN001
+        sel = state["matches"][state["selected_idx"]]
+        input_buffer.text = f"/{sel.name}"
+        input_buffer.cursor_position = len(input_buffer.text)
+
+    @kb.add(Keys.Enter)
+    def _enter(event):  # noqa: ANN001
+        # If dropdown is open and a row is selected, expand to that
+        # command before submitting (so the row visibly chosen wins).
+        if state["matches"] and 0 <= state["selected_idx"] < len(state["matches"]):
+            sel = state["matches"][state["selected_idx"]]
+            input_buffer.text = f"/{sel.name}"
+        event.app.exit(result=input_buffer.text)
+
+    @kb.add(Keys.Escape, eager=True)
+    def _esc(event):  # noqa: ANN001
+        # ESC dismisses the dropdown if open; otherwise clears the buffer
+        # (matches the prior PromptSession behavior).
+        if state["matches"]:
+            state["matches"] = []
+            state["selected_idx"] = 0
+        else:
+            input_buffer.text = ""
+
+    @kb.add(Keys.ControlC)
+    def _ctrl_c(event):  # noqa: ANN001
+        event.app.exit(exception=KeyboardInterrupt)
+
+    @kb.add(Keys.ControlD)
+    def _ctrl_d(event):  # noqa: ANN001
+        if not input_buffer.text:
+            event.app.exit(exception=EOFError)
+
+    @kb.add(Keys.ControlJ)
+    def _ctrl_j(event):  # noqa: ANN001
+        input_buffer.insert_text("\n")
+
+    @kb.add(Keys.Escape, Keys.Enter)
+    def _alt_enter(event):  # noqa: ANN001
+        input_buffer.insert_text("\n")
+
+    @kb.add(Keys.ControlV)
+    def _ctrl_v(event):  # noqa: ANN001
+        _try_attach_clipboard_image_into_buffer(event, profile_home=profile_home)
+
+    @kb.add(Keys.BracketedPaste)
+    def _bracketed_paste(event):  # noqa: ANN001
+        data: str = getattr(event, "data", "") or ""
+        if not data.strip() and _try_attach_clipboard_image_into_buffer(
+            event, profile_home=profile_home
+        ):
+            return
+        event.current_buffer.insert_text(data)
+
+    style = Style.from_dict(
+        {
+            "prompt": "ansigreen bold",
+            "dd": "#a8a8a8",
+            "dd.selected": "bold #ffffff bg:#005f87",
+            "dd.cat": "#5fafd7",
+            "dd.cat.selected": "#bcbcbc bg:#005f87",
+            "dd.desc": "#5fd75f",
+            "dd.desc.selected": "#5fd75f bg:#005f87 bold",
+        }
+    )
+
+    prompt_window = Window(
+        content=FormattedTextControl([("class:prompt", "you › ")]),
+        height=1,
+        dont_extend_width=True,
+    )
+    input_window = Window(
+        content=BufferControl(buffer=input_buffer),
+        height=1,
+    )
+    dropdown_window = ConditionalContainer(
+        content=Window(
+            content=FormattedTextControl(_dropdown_text),
+            height=_dropdown_height,
+            wrap_lines=False,
+        ),
+        filter=Condition(_has_dropdown),
+    )
+
+    layout = Layout(
+        HSplit(
+            [
+                VSplit([prompt_window, input_window]),
+                dropdown_window,
+            ]
+        ),
+        focused_element=input_window,
+    )
+
+    app: Application = Application(
+        layout=layout,
+        key_bindings=kb,
+        style=style,
+        full_screen=False,
+        erase_when_done=True,
+        mouse_support=False,
+    )
+
+    text = await app.run_async()
     return _strip_trailing_whitespace(text or "")
