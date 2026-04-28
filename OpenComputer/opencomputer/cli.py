@@ -445,10 +445,19 @@ def _resolve_provider(provider_name: str):
     """
     registered = plugin_registry.providers.get(provider_name)
     if registered is None:
+        installed = list(plugin_registry.providers.keys()) or ["none"]
         raise RuntimeError(
-            f"Provider '{provider_name}' is not available. "
-            f"Installed providers: {list(plugin_registry.providers.keys()) or 'none'}. "
-            f"Ensure the relevant plugin is in extensions/ or ~/.opencomputer/plugins/."
+            f"Provider '{provider_name}' is not available.\n"
+            f"\n"
+            f"  Installed: {installed}\n"
+            f"\n"
+            f"  To fix:\n"
+            f"    › Edit ~/.opencomputer/config.yaml and set "
+            f"`model.provider` to one of the installed names\n"
+            f"    › OR install the missing provider plugin into "
+            f"~/.opencomputer/plugins/ or extensions/\n"
+            f"    › Run `oc auth` to see which credentials each "
+            f"provider expects (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY)\n"
         )
     # Plugins register the CLASS — instantiate with defaults (reads env vars)
     return registered() if isinstance(registered, type) else registered
@@ -1524,9 +1533,28 @@ def plugins() -> None:
 
     candidates = plugin_registry.list_candidates(search_paths)
     if not candidates:
-        console.print("[dim]no plugins found in:[/dim]")
-        for p in search_paths:
-            console.print(f"[dim]  {p}[/dim]")
+        from opencomputer.cli_ui.empty_state import render_empty_state
+
+        render_empty_state(
+            console=console,
+            title="Plugins",
+            when_populated=(
+                "discovered plugin manifests with id, version, kind, and "
+                "description — channel adapters, providers, tools, memory "
+                "providers, and bundled extensions."
+            ),
+            why_empty=(
+                "no plugins found in the standard search paths. A fresh "
+                "OpenComputer install ships with several bundled plugins "
+                "(telegram, anthropic-provider, coding-harness, etc.) — "
+                "if you're seeing nothing, the install may be incomplete."
+            ),
+            next_steps=[
+                "[bold]oc doctor[/bold] — diagnoses common install issues",
+                "Searched paths:",
+                *[f"  [dim]{p}[/dim]" for p in search_paths],
+            ],
+        )
         return
     for c in candidates:
         m = c.manifest
@@ -1652,7 +1680,25 @@ def skills() -> None:
     mem = MemoryManager(cfg.memory.declarative_path, cfg.memory.skills_path)
     found = mem.list_skills()
     if not found:
-        console.print("[dim]no skills found at[/dim] " + str(cfg.memory.skills_path))
+        from opencomputer.cli_ui.empty_state import render_empty_state
+
+        render_empty_state(
+            console=console,
+            title="Skills",
+            when_populated=(
+                "named recipes the agent can invoke directly — each one a "
+                "Markdown file with frontmatter (trigger, description, body)."
+            ),
+            why_empty=(
+                f"no SKILL.md files at {cfg.memory.skills_path}. Skills "
+                "ship via plugins (e.g. coding-harness, memory-honcho) or "
+                "you can author your own."
+            ),
+            next_steps=[
+                "[bold]oc plugins[/bold] — see installed plugins (most ship skills)",
+                "Author a new skill: create `<skills_path>/<id>/SKILL.md` with YAML frontmatter",
+            ],
+        )
         return
     for s in found:
         console.print(f"[cyan]{s.name}[/cyan] — {s.description}")
@@ -1709,6 +1755,11 @@ app.add_typer(mcp_app, name="mcp")
 from opencomputer.cli_memory import memory_app  # noqa: E402
 
 app.add_typer(memory_app, name="memory")
+
+# 2026-04-28 — `oc help tour` opt-in guided walkthrough
+from opencomputer.cli_help import help_app  # noqa: E402
+
+app.add_typer(help_app, name="help")
 
 # Phase 14.M — named plugin-activation presets
 from opencomputer.cli_preset import preset_app  # noqa: E402
@@ -2096,7 +2147,33 @@ def recall(
     db = SessionDB(cfg.session.db_path)
     hits = db.search_episodic(query, limit=limit)
     if not hits:
-        console.print("[dim]no episodic events match[/dim]")
+        from opencomputer.cli_ui.empty_state import render_empty_state
+
+        total = db.count_sessions() if hasattr(db, "count_sessions") else 0
+        if total == 0:
+            why = (
+                "you haven't run any sessions yet — the episodic store "
+                "starts populating after the first conversation."
+            )
+        else:
+            why = (
+                f"no episodic events match {query!r}. You have "
+                f"{total} session(s) on record but none of them touched "
+                "this topic. Try a broader query or related keywords."
+            )
+        render_empty_state(
+            console=console,
+            title="Episodic recall",
+            when_populated=(
+                "matching past turns from any session — the gist of what "
+                "happened, files touched, tools used."
+            ),
+            why_empty=why,
+            next_steps=[
+                "[bold]oc sessions[/bold] — list recent sessions to find a topic",
+                "[bold]oc search <text>[/bold] — full-text search across raw messages",
+            ],
+        )
         return
     for h in hits:
         tools = f" [dim]tools:[/dim] {h['tools_used']}" if h.get("tools_used") else ""
@@ -2278,7 +2355,22 @@ def batch(
         console.print(f"[bold red]error:[/bold red] input file not found: {in_path}")
         raise typer.Exit(1)
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        console.print("[bold red]error:[/bold red] ANTHROPIC_API_KEY not set")
+        from opencomputer.cli_ui.empty_state import render_failure_with_teach
+
+        render_failure_with_teach(
+            console=console,
+            error="ANTHROPIC_API_KEY not set",
+            feature_name="oc batch",
+            feature_purpose=(
+                "submits prompts to Anthropic's batch API and writes "
+                "results to JSONL — uses the same API key as oc chat"
+            ),
+            fixes=[
+                "export ANTHROPIC_API_KEY=sk-ant-...",
+                "Or run [bold]oc auth[/bold] to see what credentials are configured",
+                "Batch is Anthropic-only today — OpenAI batch isn't wired",
+            ],
+        )
         raise typer.Exit(1)
 
     def _on_status(status: str) -> None:

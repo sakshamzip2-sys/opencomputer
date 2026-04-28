@@ -68,7 +68,46 @@ def memory_show(
     label = "USER.md" if user else "MEMORY.md"
     path = _target_path(mm, user)
     if not content:
-        console.print(f"[dim]{label} is empty ({path}).[/dim]")
+        from opencomputer.cli_ui.empty_state import render_empty_state
+
+        if user:
+            render_empty_state(
+                console=console,
+                title="USER.md",
+                when_populated=(
+                    "a brief profile of you that the agent injects into "
+                    "every system prompt: name, role, current focus, "
+                    "communication preferences."
+                ),
+                why_empty=(
+                    f"nothing written yet ({path}). The agent has been "
+                    "guessing about you from context — fill this in and "
+                    "guesses become statements."
+                ),
+                next_steps=[
+                    "[bold]oc memory edit --user[/bold] — open USER.md in $EDITOR",
+                    "Suggested fields: name, role, what you're working on, tone preferences",
+                ],
+            )
+        else:
+            render_empty_state(
+                console=console,
+                title="MEMORY.md",
+                when_populated=(
+                    "a freeform scratch the agent reads on every turn — "
+                    "ongoing tasks, important facts, things you've asked "
+                    "it to remember."
+                ),
+                why_empty=(
+                    f"nothing written yet ({path}). The agent writes here "
+                    "when you ask it to remember something. You can also "
+                    "edit by hand."
+                ),
+                next_steps=[
+                    "[bold]oc memory edit[/bold] — open MEMORY.md in $EDITOR",
+                    "In a chat: 'remember that X' → agent appends here",
+                ],
+            )
         return
     console.print(f"[bold cyan]── {label} ({path}) ──[/bold cyan]")
     console.print(content)
@@ -243,23 +282,61 @@ def memory_setup() -> None:
     """
     bootstrap = _load_honcho_bootstrap()
     if bootstrap is None:
-        console.print(
-            "[red]memory-honcho plugin not found.[/red] Expected at extensions/memory-honcho/"
+        from opencomputer.cli_ui.empty_state import render_failure_with_teach
+
+        render_failure_with_teach(
+            console=console,
+            error="memory-honcho plugin not found",
+            feature_name="Honcho memory provider",
+            feature_purpose=(
+                "is the recommended overlay memory provider — runs in Docker, "
+                "stores facts the agent learns, and feeds them back across sessions"
+            ),
+            fixes=[
+                "Expected at: [bold]extensions/memory-honcho/[/bold]",
+                "If you cloned the repo: [bold]git pull[/bold] should bring it",
+                "If installed via pip: [bold]pip install --upgrade opencomputer[honcho][/bold]",
+                "Without Honcho, OC runs on baseline file memory (MEMORY.md / USER.md) — fully functional, just less rich",
+            ],
         )
         raise typer.Exit(code=1)
 
     docker, compose_v2 = bootstrap.detect_docker()
     if not docker:
-        console.print(
-            "[yellow]Docker is not installed on this machine.[/yellow]\n"
-            "Install Docker Desktop (https://www.docker.com/products/docker-desktop/) "
-            "or your distro's docker + docker-compose-plugin packages, then re-run."
+        from opencomputer.cli_ui.empty_state import render_failure_with_teach
+
+        render_failure_with_teach(
+            console=console,
+            error="Docker is not installed",
+            feature_name="Honcho memory",
+            feature_purpose=(
+                "runs Postgres + Redis + the Honcho API in Docker. The "
+                "agent works fine without it — baseline file memory "
+                "(MEMORY.md / USER.md) covers the essentials"
+            ),
+            fixes=[
+                "macOS: install Docker Desktop → https://www.docker.com/products/docker-desktop/",
+                "Linux: install via your distro's package manager (`apt`/`dnf`/`pacman`) — both `docker` and `docker-compose-plugin`",
+                "Skip this entirely: [bold]oc config set memory.provider \"\"[/bold] uses baseline memory only",
+            ],
         )
         return
     if not compose_v2:
-        console.print(
-            "[yellow]Docker found, but 'docker compose' v2 plugin is missing.[/yellow]\n"
-            "Install the compose plugin and try again."
+        from opencomputer.cli_ui.empty_state import render_failure_with_teach
+
+        render_failure_with_teach(
+            console=console,
+            error="Docker found, but 'docker compose' v2 plugin is missing",
+            feature_name="Honcho memory",
+            feature_purpose=(
+                "needs `docker compose` (v2) to spin up its Postgres + "
+                "Redis stack. The legacy `docker-compose` v1 won't work"
+            ),
+            fixes=[
+                "Linux: [bold]sudo apt install docker-compose-plugin[/bold] (Debian/Ubuntu) or distro equivalent",
+                "macOS: Docker Desktop bundles compose v2 — re-install it if missing",
+                "Verify: [bold]docker compose version[/bold] should print v2.x",
+            ],
         )
         return
 

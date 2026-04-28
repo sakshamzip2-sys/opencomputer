@@ -38,9 +38,24 @@ def cost_show(
     guard = get_default_guard()
     rows = guard.current_usage(provider)
     if not rows:
-        _console.print("[dim]No usage recorded and no limits set.[/dim]")
-        _console.print(
-            "[dim]Set a cap with `opencomputer cost set-limit --provider X --daily Y`.[/dim]"
+        from opencomputer.cli_ui.empty_state import render_empty_state
+
+        render_empty_state(
+            console=_console,
+            title="Cost tracking",
+            when_populated=(
+                "a table of daily / monthly USD spend per provider, plus "
+                "the operations that contributed (deepening, completion, tts, …)."
+            ),
+            why_empty=(
+                "no API spend recorded yet — this fills in as the agent "
+                "runs. Ollama-backed Layer 3 doesn't track cost (it's free); "
+                "Anthropic/OpenAI does."
+            ),
+            next_steps=[
+                "[bold]oc cost set-limit --provider anthropic --daily 5[/bold] — set a $5/day cap",
+                "[bold]oc cost set-limit --provider openai --monthly 50[/bold] — set a $50/month cap",
+            ],
         )
         return
 
