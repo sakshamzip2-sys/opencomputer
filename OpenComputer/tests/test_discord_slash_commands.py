@@ -352,3 +352,237 @@ class TestSimpleSlashHandlers:
         registry_mock.submit.assert_called_once()
         body = registry_mock.submit.call_args.args[1]
         assert body == "__STOP__"
+
+
+# ---------------------------------------------------------------------------
+# /reset, /queue, /resume, /usage — backend-wired (PR #221 follow-up)
+# ---------------------------------------------------------------------------
+
+
+class TestResetSlashWired:
+    @pytest.mark.asyncio
+    async def test_reset_calls_end_session(self) -> None:
+        """/reset must invoke SessionDB.end_session for the chat's sid."""
+        a, _ = _make_real_adapter()
+        interaction = MagicMock()
+        interaction.channel_id = 1234
+        interaction.response.send_message = AsyncMock()
+
+        db_mock = MagicMock()
+        db_mock.end_session = MagicMock()
+        a._session_db = db_mock  # bypass plugin_registry resolution
+
+        await a._handle_reset_slash(interaction)
+        db_mock.end_session.assert_called_once()
+        # Reply mentions reset + ephemeral
+        msg = interaction.response.send_message.await_args.args[0]
+        assert "reset" in msg.lower()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert kwargs.get("ephemeral") is True
+
+    @pytest.mark.asyncio
+    async def test_reset_handles_missing_db(self) -> None:
+        a, _ = _make_real_adapter()
+        interaction = MagicMock()
+        interaction.channel_id = 1
+        interaction.response.send_message = AsyncMock()
+
+        # Force resolver to return None
+        a._session_db = None
+        with patch.object(a, "_resolve_session_db", return_value=None):
+            await a._handle_reset_slash(interaction)
+        msg = interaction.response.send_message.await_args.args[0]
+        assert "unavailable" in msg.lower() or "no sessiondb" in msg.lower()
+
+
+class TestQueueSlashWired:
+    @pytest.mark.asyncio
+    async def test_queue_lists_only_this_chat(self) -> None:
+        """/queue filters to platform=discord + chat_id."""
+        from opencomputer.gateway.outgoing_queue import OutgoingMessage
+
+        a, _ = _make_real_adapter()
+        interaction = MagicMock()
+        interaction.channel_id = 555
+        interaction.response.send_message = AsyncMock()
+
+        # Build queue rows: one matching, one for telegram, one for
+        # different discord chat.
+        rows = [
+            OutgoingMessage(
+                id="aaa", platform="discord", chat_id="555",
+                body="for me", status="queued", enqueued_at=1.0,
+            ),
+            OutgoingMessage(
+                id="bbb", platform="telegram", chat_id="555",
+                body="other platform", status="queued", enqueued_at=2.0,
+            ),
+            OutgoingMessage(
+                id="ccc", platform="discord", chat_id="999",
+                body="other chat", status="queued", enqueued_at=3.0,
+            ),
+        ]
+        queue_mock = MagicMock()
+        queue_mock.list_ = MagicMock(return_value=rows)
+        a._outgoing_queue = queue_mock
+
+        await a._handle_queue_slash(interaction)
+        msg = interaction.response.send_message.await_args.args[0]
+        # Only the matching one shows up
+        assert "aaa" in msg
+        assert "bbb" not in msg
+        assert "ccc" not in msg
+        assert "1 queued" in msg
+
+    @pytest.mark.asyncio
+    async def test_queue_empty(self) -> None:
+        a, _ = _make_real_adapter()
+        interaction = MagicMock()
+        interaction.channel_id = 1
+        interaction.response.send_message = AsyncMock()
+
+        queue_mock = MagicMock()
+        queue_mock.list_ = MagicMock(return_value=[])
+        a._outgoing_queue = queue_mock
+
+        await a._handle_queue_slash(interaction)
+        msg = interaction.response.send_message.await_args.args[0]
+        assert "empty" in msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_queue_unbound(self) -> None:
+        """No OutgoingQueue available → honest 'unavailable' reply."""
+        a, _ = _make_real_adapter()
+        interaction = MagicMock()
+        interaction.channel_id = 1
+        interaction.response.send_message = AsyncMock()
+
+        a._outgoing_queue = None
+        with patch.object(a, "_resolve_outgoing_queue", return_value=None):
+            await a._handle_queue_slash(interaction)
+        msg = interaction.response.send_message.await_args.args[0]
+        assert "unavailable" in msg.lower()
+
+
+class TestResumeSlashWired:
+    @pytest.mark.asyncio
+    async def test_resume_no_session_says_so(self) -> None:
+        """No session row → user gets a 'no recent session' reply."""
+        a, _ = _make_real_adapter()
+        interaction = MagicMock()
+        interaction.channel_id = 1
+        interaction.response.send_message = AsyncMock()
+
+        db_mock = MagicMock()
+        db_mock.get_session = MagicMock(return_value=None)
+        a._session_db = db_mock
+
+        await a._handle_resume_slash(interaction)
+        msg = interaction.response.send_message.await_args.args[0]
+        assert "no recent session" in msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_resume_existing_ended_session_reopens(self) -> None:
+        """Ended session → ended_at gets cleared via UPDATE."""
+        a, _ = _make_real_adapter()
+        interaction = MagicMock()
+        interaction.channel_id = 1
+        interaction.response.send_message = AsyncMock()
+
+        # Use a real on-disk SessionDB so the _txn UPDATE path executes.
+        import tempfile
+        from pathlib import Path
+
+        from opencomputer.agent.state import SessionDB
+
+        with tempfile.TemporaryDirectory() as td:
+            db = SessionDB(Path(td) / "s.db")
+            sid = a._dispatch_thread_session("1", None)
+            db.create_session(sid)
+            db.end_session(sid)
+            assert db.get_session(sid)["ended_at"] is not None
+
+            a._session_db = db
+            await a._handle_resume_slash(interaction)
+            # ended_at cleared after resume
+            assert db.get_session(sid)["ended_at"] is None
+        msg = interaction.response.send_message.await_args.args[0]
+        assert "resumed" in msg.lower()
+
+
+class TestUsageSlashWired:
+    @pytest.mark.asyncio
+    async def test_usage_reports_session_stats(self) -> None:
+        """/usage renders message_count + tool-call aggregate."""
+        a, _ = _make_real_adapter()
+        interaction = MagicMock()
+        interaction.channel_id = 42
+        interaction.response.send_message = AsyncMock()
+
+        sid = a._dispatch_thread_session("42", None)
+        db_mock = MagicMock()
+        db_mock.get_session = MagicMock(return_value={
+            "id": sid,
+            "started_at": 0.0,
+            "ended_at": None,
+            "platform": "discord",
+            "model": "x",
+            "title": "",
+            "message_count": 7,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        })
+        db_mock.query_tool_usage = MagicMock(return_value=[
+            {"key": sid, "calls": 3, "errors": 0,
+             "avg_duration_ms": 10.0, "total_duration_ms": 30.0,
+             "error_rate": 0.0},
+        ])
+        a._session_db = db_mock
+
+        await a._handle_usage_slash(interaction)
+        msg = interaction.response.send_message.await_args.args[0]
+        assert "messages=7" in msg
+        assert "tool calls=3" in msg
+        # Honest about token tracking when columns are zero.
+        assert "not yet wired" in msg.lower() or "input=" in msg.lower()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert kwargs.get("ephemeral") is True
+
+    @pytest.mark.asyncio
+    async def test_usage_with_populated_tokens(self) -> None:
+        """When tokens > 0, the line shows them numerically."""
+        a, _ = _make_real_adapter()
+        interaction = MagicMock()
+        interaction.channel_id = 42
+        interaction.response.send_message = AsyncMock()
+
+        sid = a._dispatch_thread_session("42", None)
+        db_mock = MagicMock()
+        db_mock.get_session = MagicMock(return_value={
+            "id": sid,
+            "input_tokens": 1234,
+            "output_tokens": 567,
+            "message_count": 2,
+        })
+        db_mock.query_tool_usage = MagicMock(return_value=[])
+        a._session_db = db_mock
+
+        await a._handle_usage_slash(interaction)
+        msg = interaction.response.send_message.await_args.args[0]
+        assert "input=1234" in msg
+        assert "output=567" in msg
+
+    @pytest.mark.asyncio
+    async def test_usage_no_session(self) -> None:
+        a, _ = _make_real_adapter()
+        interaction = MagicMock()
+        interaction.channel_id = 42
+        interaction.response.send_message = AsyncMock()
+
+        db_mock = MagicMock()
+        db_mock.get_session = MagicMock(return_value=None)
+        a._session_db = db_mock
+
+        await a._handle_usage_slash(interaction)
+        msg = interaction.response.send_message.await_args.args[0]
+        assert "no session" in msg.lower()

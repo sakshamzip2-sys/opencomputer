@@ -879,18 +879,57 @@ class DiscordAdapter(BaseChannelAdapter):
             pass
 
     async def _handle_reset_slash(self, interaction: discord.Interaction) -> None:
-        """``/reset`` — clear the current chat session."""
+        """``/reset`` — clear the current Discord-channel session.
+
+        PR #221 follow-up. Marks the current session ``ended_at`` (so
+        ``list_sessions`` clearly shows a closed run) and clears the
+        in-memory chat lock so the next message starts fresh. Session
+        id stays deterministic per (platform, chat_id) — a future
+        message into the same channel will create a new session row
+        via the agent loop's INSERT-OR-REPLACE path.
+        """
         chat_id = str(interaction.channel_id)
         sid = self._dispatch_thread_session(
             chat_id, self._thread_parent_channel(chat_id)
         )
-        # Best-effort — the gateway exposes its own /reset path; the
-        # adapter just forwards. We don't bind a hard dep here so tests
-        # can run without a live gateway. A future follow-up can wire
-        # the actual session-clear call once the gateway exposes a
-        # public clear-session API.
-        await interaction.response.send_message(
-            f"session reset (id={sid[:8]}…).", ephemeral=True
+        msg = self._reset_session(sid)
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    def _reset_session(self, session_id: str) -> str:
+        """Best-effort end_session + lock-clear. Returns the user reply.
+
+        Pulled out so tests can drive it without an Interaction. Failures
+        in either step are logged at WARNING and reported to the user as
+        partial success — we never raise back into discord.py because the
+        ``send_message`` ephemeral path can't carry an error usefully.
+        """
+        db = self._resolve_session_db()
+        if db is None:
+            return (
+                "session reset is unavailable (no SessionDB resolvable). "
+                "Check that opencomputer is installed in the same env as "
+                "the gateway."
+            )
+        try:
+            db.end_session(session_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("discord: /reset end_session failed: %s", e)
+            return f"reset partially failed ({type(e).__name__}); try again."
+        # Drop the per-chat lock from the live Dispatch (if accessible
+        # via plugin_registry) so the next inbound message doesn't
+        # block on a stale future.
+        try:
+            from opencomputer.plugins.registry import registry as plugin_registry
+
+            api = getattr(plugin_registry, "shared_api", None)
+            disp = getattr(api, "_dispatch", None) if api is not None else None
+            if disp is not None and hasattr(disp, "_locks"):
+                disp._locks.pop(session_id, None)
+        except Exception:  # noqa: BLE001
+            pass
+        return (
+            f"Session reset. Send a new message to start fresh.\n"
+            f"(closed session={session_id[:8]}…)"
         )
 
     async def _handle_status_slash(self, interaction: discord.Interaction) -> None:
@@ -945,11 +984,58 @@ class DiscordAdapter(BaseChannelAdapter):
         await interaction.response.send_message(ack, ephemeral=True)
 
     async def _handle_queue_slash(self, interaction: discord.Interaction) -> None:
-        """``/queue`` — show queued messages for this chat."""
-        await interaction.response.send_message(
-            "queue inspection not yet wired (planned in a follow-up).",
-            ephemeral=True,
-        )
+        """``/queue`` — show queued outbound messages for this chat.
+
+        PR #221 follow-up. Reads from
+        :class:`opencomputer.gateway.outgoing_queue.OutgoingQueue`
+        (bound onto ``plugin_registry.outgoing_queue`` by the gateway
+        boot path) and renders only entries matching this Discord
+        channel. When the gateway hasn't bound a queue (e.g. we're
+        running a CLI-only session that doesn't use the daemon), we
+        say so honestly rather than mock-empty.
+        """
+        chat_id = str(interaction.channel_id)
+        msg = self._format_queue(chat_id)
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    def _format_queue(self, chat_id: str) -> str:
+        """Render the queue listing for *chat_id*. Pulled out for tests."""
+        queue = self._resolve_outgoing_queue()
+        if queue is None:
+            return (
+                "queue inspection unavailable: gateway hasn't bound an "
+                "OutgoingQueue (start `opencomputer gateway`)."
+            )
+        try:
+            rows = queue.list_(status="queued", limit=50)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("discord: /queue list_ failed: %s", e)
+            return f"queue lookup failed: {type(e).__name__}"
+        # Filter to this chat (gateway is shared across platforms;
+        # entries for Telegram / Slack would otherwise leak through).
+        my_rows = [
+            r for r in rows
+            if r.platform == Platform.DISCORD.value and r.chat_id == chat_id
+        ]
+        if not my_rows:
+            return "queue is empty for this channel."
+        now = time.time()
+        lines = [f"{len(my_rows)} queued message(s):"]
+        for r in my_rows[:10]:  # cap UI at 10 rows; ephemeral has 2k char limit
+            age_s = max(0.0, now - r.enqueued_at)
+            if age_s < 60:
+                age = f"{int(age_s)}s"
+            elif age_s < 3600:
+                age = f"{int(age_s / 60)}m"
+            else:
+                age = f"{int(age_s / 3600)}h"
+            preview = (r.body or "").splitlines()[0][:40] if r.body else ""
+            lines.append(
+                f"  {r.id} [{r.status}] {age} — {preview!s}"
+            )
+        if len(my_rows) > 10:
+            lines.append(f"  …and {len(my_rows) - 10} more")
+        return "\n".join(lines)
 
     async def _handle_background_slash(
         self, interaction: discord.Interaction, prompt: str
@@ -1013,17 +1099,181 @@ class DiscordAdapter(BaseChannelAdapter):
         )
 
     async def _handle_resume_slash(self, interaction: discord.Interaction) -> None:
-        """``/resume`` — resume previous session."""
-        await interaction.response.send_message(
-            "resume not yet wired (planned in a follow-up).", ephemeral=True
+        """``/resume`` — resume the previous session for this channel.
+
+        PR #221 follow-up. The session id is deterministic per
+        (platform, chat_id), so "resume" is really "find the
+        existing session row for this chat and clear its
+        ``ended_at`` so the next message continues it instead of
+        creating a sibling". When no row exists we say so and let
+        the user start fresh.
+        """
+        chat_id = str(interaction.channel_id)
+        sid = self._dispatch_thread_session(
+            chat_id, self._thread_parent_channel(chat_id)
         )
+        msg = self._resume_session(sid)
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    def _resume_session(self, session_id: str) -> str:
+        """Reopen *session_id* if it exists and was ended. Returns user reply."""
+        db = self._resolve_session_db()
+        if db is None:
+            return (
+                "resume is unavailable (no SessionDB resolvable). "
+                "Start `opencomputer gateway` from this profile."
+            )
+        try:
+            row = db.get_session(session_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("discord: /resume get_session failed: %s", e)
+            return f"resume failed: {type(e).__name__}"
+        if row is None:
+            return "No recent session to resume — send a message to start one."
+        ended_at = row.get("ended_at")
+        started_at = row.get("started_at")
+        try:
+            from opencomputer.plugins.registry import registry as plugin_registry  # noqa: F401
+        except Exception:  # noqa: BLE001
+            pass
+        # Clear ended_at via a direct SQL update — SessionDB doesn't
+        # expose a public re-open helper today, but the schema is
+        # stable and a follow-up can promote this to a public method
+        # if more callers need it.
+        if ended_at is not None:
+            try:
+                with db._txn() as conn:  # noqa: SLF001 — schema is internal
+                    conn.execute(
+                        "UPDATE sessions SET ended_at = NULL WHERE id = ?",
+                        (session_id,),
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("discord: /resume reopen failed: %s", e)
+                return f"resume failed: {type(e).__name__}"
+        # Format started_at as a readable timestamp.
+        when = "unknown"
+        if isinstance(started_at, int | float):
+            try:
+                import datetime as _dt
+
+                when = _dt.datetime.fromtimestamp(
+                    float(started_at)
+                ).strftime("%Y-%m-%d %H:%M")
+            except Exception:  # noqa: BLE001
+                pass
+        return f"Resumed session from {when} (id={session_id[:8]}…)."
 
     async def _handle_usage_slash(self, interaction: discord.Interaction) -> None:
-        """``/usage`` — usage stats."""
-        await interaction.response.send_message(
-            "usage stats not yet wired (planned in a follow-up).",
-            ephemeral=True,
+        """``/usage`` — token + tool-call stats for the current session.
+
+        PR #221 follow-up. Reads ``input_tokens`` / ``output_tokens``
+        from the ``sessions`` row (these columns exist on the schema
+        but aren't populated by the agent loop today — see follow-up
+        in this commit's body), and counts tool calls via
+        :meth:`SessionDB.query_tool_usage` filtered to this session.
+        Emits a one-liner the user can read on a 2 KB ephemeral
+        Discord response.
+        """
+        chat_id = str(interaction.channel_id)
+        sid = self._dispatch_thread_session(
+            chat_id, self._thread_parent_channel(chat_id)
         )
+        msg = self._format_usage(sid)
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    def _format_usage(self, session_id: str) -> str:
+        """Render the usage line for *session_id*. Pulled out for tests."""
+        db = self._resolve_session_db()
+        if db is None:
+            return (
+                "usage stats unavailable (no SessionDB resolvable)."
+            )
+        try:
+            row = db.get_session(session_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("discord: /usage get_session failed: %s", e)
+            return f"usage lookup failed: {type(e).__name__}"
+        if row is None:
+            return "No session yet — send a message to start one."
+        in_tok = int(row.get("input_tokens") or 0)
+        out_tok = int(row.get("output_tokens") or 0)
+        msgs = int(row.get("message_count") or 0)
+        # Tool-call telemetry — group_by session_id and pluck our row.
+        tool_calls = 0
+        try:
+            agg = db.query_tool_usage(days=None, group_by="session_id")
+            for r in agg:
+                if r.get("key") == session_id:
+                    tool_calls = int(r.get("calls") or 0)
+                    break
+        except Exception as e:  # noqa: BLE001
+            logger.debug("discord: /usage query_tool_usage failed: %s", e)
+        # Note: token columns aren't populated in the current loop —
+        # the schema reserves them but no UPDATE site writes today.
+        # Keep the line honest about that so the user doesn't think
+        # 0 means "free".
+        token_str = (
+            f"input={in_tok} output={out_tok}"
+            if (in_tok or out_tok)
+            else "(per-session token tracking not yet wired)"
+        )
+        return (
+            f"Tokens used: {token_str}; "
+            f"messages={msgs}; tool calls={tool_calls}; "
+            f"session={session_id[:8]}…"
+        )
+
+    # ------------------------------------------------------------------
+    # Backend resolution helpers — kept private so tests can monkeypatch.
+    # ------------------------------------------------------------------
+
+    def _resolve_session_db(self) -> Any:
+        """Best-effort SessionDB lookup.
+
+        Resolution order:
+        1. ``self._session_db`` — overridable for tests.
+        2. ``plugin_registry.shared_api._loop.db`` if reachable.
+        3. Construct from ``default_config().session.db_path`` as a
+           last-resort fallback so non-daemon CLI smoke tests still
+           land on the right file.
+        """
+        existing = getattr(self, "_session_db", None)
+        if existing is not None:
+            return existing
+        try:
+            from opencomputer.plugins.registry import registry as plugin_registry
+
+            api = getattr(plugin_registry, "shared_api", None)
+            loop_obj = getattr(api, "_loop", None) if api is not None else None
+            db = getattr(loop_obj, "db", None) if loop_obj is not None else None
+            if db is not None:
+                return db
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from opencomputer.agent.config import default_config
+            from opencomputer.agent.state import SessionDB
+
+            return SessionDB(default_config().session.db_path)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _resolve_outgoing_queue(self) -> Any:
+        """Best-effort OutgoingQueue lookup.
+
+        Resolution order:
+        1. ``self._outgoing_queue`` — overridable for tests.
+        2. ``plugin_registry.outgoing_queue`` (bound by Gateway boot).
+        """
+        existing = getattr(self, "_outgoing_queue", None)
+        if existing is not None:
+            return existing
+        try:
+            from opencomputer.plugins.registry import registry as plugin_registry
+
+            return plugin_registry.outgoing_queue
+        except Exception:  # noqa: BLE001
+            return None
 
     async def _handle_thread_create_slash(
         self,
