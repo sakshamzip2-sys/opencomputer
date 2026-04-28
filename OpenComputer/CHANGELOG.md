@@ -4,6 +4,31 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added (T2 batch — 4 skills closing remaining gap-fill roadmap items)
+
+Four skills shipped together as a single PR (each was small enough that
+batching reduces churn).
+
+- **`meeting-notes`** — composes Whisper STT + summary LLM + Notion MCP
+  (optional) + push_notification. Trigger: user shares meeting audio /
+  transcript and asks for summary or action items.
+- **`inbox-triage`** — cross-channel (Telegram/Discord/Slack/iMessage/
+  email) message summary + urgent flagging + reply drafting (NEVER
+  auto-sent). Reuses sensitive-app filter to skip banking/password-mgr
+  contexts.
+- **`bill-deadline-tracker`** — pattern-matches email for due/deadline
+  signals; extracts amount + biller + date; surfaces next 7d + 30d.
+  Optional cron job for daily morning scans.
+- **`coding-via-chat`** — formalizes the existing pattern of "message
+  agent from Telegram → agent edits repo → opens PR". OC already
+  supports this; the skill makes it discoverable.
+
+All 4 are pure SKILL.md additions — no new tools, no plugin
+scaffolding. Each composes existing OC infrastructure (channel
+adapters, voice/STT, email plugin, cron, push_notification, gh CLI).
+Closes T2.A / T2.B / T2.C / T3.A from
+`docs/superpowers/plans/2026-04-27-gap-fill-roadmap.md`.
+
 ### Added (Browser Control — Playwright-based automation)
 
 OpenComputer can now control a browser. Default OFF; opt in by installing
