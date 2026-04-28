@@ -4,6 +4,33 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — pluggable Layer 3 extractor (Ollama / Anthropic / OpenAI)
+
+`opencomputer profile deepen` now supports three extractor backends.
+**Default stays Ollama** — privacy-by-default, content never leaves
+the machine. Users with an existing `ANTHROPIC_API_KEY` /
+`OPENAI_API_KEY` can switch via `config.yaml`:
+
+```yaml
+deepening:
+  extractor: anthropic   # or openai, or ollama (default)
+  model: ""              # empty → backend-specific default
+  daily_cost_cap_usd: 0.50
+```
+
+First switch to a non-Ollama backend prints a one-time privacy
+banner and writes an ack marker per backend per profile. Cost is
+recorded via the existing `cost_guard` (USD estimated from token
+counts). Honors `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` for proxy
+setups (Claude Router).
+
+Public surface preserved: `extract_artifact()`, `is_ollama_available()`,
+`OllamaUnavailableError` (now an alias of `ExtractorUnavailableError`).
+Internals use a `Protocol` + 3 implementations + factory mirroring
+the `Classifier[L]` shape from PR #201. SDK-direct (no async wrapper).
+
+28 new tests in `tests/test_profile_bootstrap_extractor_pluggable.py`.
+
 ### Added (T2 batch — 4 skills closing remaining gap-fill roadmap items)
 
 Four skills shipped together as a single PR (each was small enough that

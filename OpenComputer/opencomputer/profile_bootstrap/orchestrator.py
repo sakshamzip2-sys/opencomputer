@@ -301,12 +301,14 @@ def extract_and_emit_motif(
     """
     from opencomputer.profile_bootstrap.llm_extractor import (
         ArtifactExtraction,
-        OllamaUnavailableError,
-        extract_artifact,
+        ExtractorUnavailableError,
+        get_extractor,
     )
     try:
-        extraction = extract_artifact(content)
-    except OllamaUnavailableError:
+        cfg = _load_config_for_extractor()
+        extractor = get_extractor(cfg)
+        extraction = extractor.extract(content)
+    except ExtractorUnavailableError:
         return False
     if extraction == ArtifactExtraction():
         # All defaults → nothing extracted.
@@ -332,3 +334,34 @@ def extract_and_emit_motif(
         },
     ))
     return True
+
+
+# ─── Cached config loader for the extractor path ─────────────────────
+
+
+_EXTRACTOR_CONFIG_CACHE: dict[str, Any] = {}
+
+
+def _load_config_for_extractor() -> Any:
+    """Load + cache config for the extractor.
+
+    Cache invalidates on config-file mtime so edits during a long-
+    running deepening pass take effect on the next call. Cheap mtime
+    stat per call beats re-parsing the YAML for each artifact.
+    """
+    from opencomputer.agent.config_store import (
+        config_file_path,
+        load_config,
+    )
+
+    path = config_file_path()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    cached = _EXTRACTOR_CONFIG_CACHE.get("entry")
+    if cached and cached[0] == mtime:
+        return cached[1]
+    cfg = load_config(path)
+    _EXTRACTOR_CONFIG_CACHE["entry"] = (mtime, cfg)
+    return cfg
