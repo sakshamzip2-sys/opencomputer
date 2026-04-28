@@ -1257,7 +1257,7 @@ async def auth_monitor_loop(
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
                 return
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
 
