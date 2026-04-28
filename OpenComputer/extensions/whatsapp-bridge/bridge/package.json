@@ -1,0 +1,18 @@
+{
+  "name": "opencomputer-whatsapp-bridge",
+  "version": "0.1.0",
+  "description": "Node.js Baileys bridge for OpenComputer's WhatsApp adapter (PR 6.2). Speaks plain HTTP on 127.0.0.1 to the Python adapter; owns the encrypted WhatsApp websocket itself.",
+  "private": true,
+  "license": "MIT",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
