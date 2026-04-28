@@ -453,16 +453,35 @@ def test_bootstrap_zero_counters_when_consent_denied(
 # ─── V2.B-T7 — extract_and_emit_motif helper ─────────────────────────
 
 
-def test_extract_and_emit_motif_returns_false_when_ollama_unavailable():
+def _stub_extractor(extract_return=None, side_effect=None):
+    """Build a fake ArtifactExtractor for orchestrator tests.
+
+    2026-04-28: orchestrator now resolves the extractor via
+    :func:`get_extractor`; tests patch that factory rather than the
+    legacy free function ``extract_artifact``.
+    """
+    from unittest.mock import MagicMock
+    extractor = MagicMock()
+    if side_effect is not None:
+        extractor.extract.side_effect = side_effect
+    else:
+        extractor.extract.return_value = extract_return
+    return extractor
+
+
+def test_extract_and_emit_motif_returns_false_when_extractor_unavailable():
     from unittest.mock import MagicMock, patch
 
-    from opencomputer.profile_bootstrap.llm_extractor import OllamaUnavailableError
+    from opencomputer.profile_bootstrap.llm_extractor import (
+        ExtractorUnavailableError,
+    )
     from opencomputer.profile_bootstrap.orchestrator import extract_and_emit_motif
 
     bus = MagicMock()
+    extractor = _stub_extractor(side_effect=ExtractorUnavailableError("test"))
     with patch(
-        "opencomputer.profile_bootstrap.llm_extractor.extract_artifact",
-        side_effect=OllamaUnavailableError("test"),
+        "opencomputer.profile_bootstrap.llm_extractor.get_extractor",
+        return_value=extractor,
     ):
         emitted = extract_and_emit_motif(
             content="x", kind="file", source_path="/a", bus=bus,
@@ -479,9 +498,10 @@ def test_extract_and_emit_motif_publishes_when_extraction_nonempty():
 
     bus = MagicMock()
     fake = ArtifactExtraction(topic="stocks", sentiment="neutral")
+    extractor = _stub_extractor(extract_return=fake)
     with patch(
-        "opencomputer.profile_bootstrap.llm_extractor.extract_artifact",
-        return_value=fake,
+        "opencomputer.profile_bootstrap.llm_extractor.get_extractor",
+        return_value=extractor,
     ):
         emitted = extract_and_emit_motif(
             content="x", kind="file", source_path="/a", bus=bus,
@@ -500,9 +520,10 @@ def test_extract_and_emit_motif_returns_false_when_extraction_blank():
     from opencomputer.profile_bootstrap.orchestrator import extract_and_emit_motif
 
     bus = MagicMock()
+    extractor = _stub_extractor(extract_return=ArtifactExtraction())
     with patch(
-        "opencomputer.profile_bootstrap.llm_extractor.extract_artifact",
-        return_value=ArtifactExtraction(),
+        "opencomputer.profile_bootstrap.llm_extractor.get_extractor",
+        return_value=extractor,
     ):
         emitted = extract_and_emit_motif(
             content="x", kind="file", source_path="/a", bus=bus,

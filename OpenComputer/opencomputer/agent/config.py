@@ -300,6 +300,38 @@ class FullSystemControlConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DeepeningConfig:
+    """Layer 3 deepening — content extractor + cost controls (2026-04-28).
+
+    The extractor reads the *content* of recent files / browser pages /
+    calendar events and runs an LLM over each to extract structured
+    signals (topic, intent, people). Default backend is Ollama
+    (privacy-by-default — content never leaves the machine). Users
+    with an existing Anthropic/OpenAI key can switch via this config
+    block to skip installing a second LLM stack.
+
+    ``extractor`` is a free-form ``str`` rather than a closed Literal so
+    adding a new backend (Gemini, llama-cpp) doesn't break the schema.
+    The factory in :mod:`opencomputer.profile_bootstrap.llm_extractor`
+    validates against the canonical list at runtime.
+    """
+
+    extractor: str = "ollama"
+    """One of: "ollama" (default — local, private), "anthropic", "openai"."""
+
+    model: str = ""
+    """Model id passed to the extractor. Empty → backend default
+    (llama3.2:3b / claude-haiku-4-5-20251001 / gpt-4o-mini)."""
+
+    daily_cost_cap_usd: float = 0.50
+    """Per-day spend ceiling. Cost guard skips further extractions on
+    the same UTC day once exceeded. Ollama bypasses cost guard."""
+
+    max_artifacts_per_pass: int = 100
+    timeout_seconds: float = 15.0
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Root configuration — composed of small focused configs."""
 
@@ -309,6 +341,8 @@ class Config:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
+    #: 2026-04-28 — Layer 3 extractor + cost controls.
+    deepening: DeepeningConfig = field(default_factory=DeepeningConfig)
     #: III.6 — settings-declared shell-command hooks. Parsed from the
     #: top-level ``hooks:`` YAML block by
     #: :func:`opencomputer.agent.config_store._parse_hooks_block` and
@@ -332,6 +366,7 @@ __all__ = [
     "LoopConfig",
     "SessionConfig",
     "MemoryConfig",
+    "DeepeningConfig",
     "MCPConfig",
     "MCPServerConfig",
     "HookCommandConfig",

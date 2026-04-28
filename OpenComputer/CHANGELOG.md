@@ -4,34 +4,32 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
-### Fixed — Layer 2 → user-model graph: scans now actually populate the graph
+### Added — pluggable Layer 3 extractor (Ollama / Anthropic / OpenAI)
 
-Pre-2026-04-28 `opencomputer profile bootstrap` reported '1000 files /
-200 commits / 1115 browser visits scanned' but the
-`user_model/graph.sqlite` stayed pinned at 3 identity nodes — the
-orchestrator captured Layer 2 results into `BootstrapResult` counters
-and then dropped the rows on the floor. Only Layer 0 (identity) had a
-`write_*_to_graph` function. Four new writers added:
+`opencomputer profile deepen` now supports three extractor backends.
+**Default stays Ollama** — privacy-by-default, content never leaves
+the machine. Users with an existing `ANTHROPIC_API_KEY` /
+`OPENAI_API_KEY` can switch via `config.yaml`:
 
-- `write_recent_files_to_graph` — aggregates by project-root signature
-  (top 3 path segments under $HOME), top-N → `attribute`
-  (`"active_dir: ..."`). Skips paths outside $HOME.
-- `write_git_log_to_graph` — repos by commit count → `attribute`
-  (`"works_on_repo: /path"`); distinct author emails → `identity`.
-- `write_browser_history_to_graph` — aggregates by domain (host-only,
-  `www.`/`m.` stripped); top-N with ≥2 visits → `attribute`
-  (`"frequent_domain: example.com"`). Page titles and full URLs
-  deliberately not persisted.
-- `write_calendar_to_graph` — each non-empty event title → `attribute`
-  (`"upcoming: Standup"`); metadata in `Node.metadata`.
+```yaml
+deepening:
+  extractor: anthropic   # or openai, or ollama (default)
+  model: ""              # empty → backend-specific default
+  daily_cost_cap_usd: 0.50
+```
 
-All four are idempotent via `UserModelStore.upsert_node`. Confidence
-floors at 0.5 (single observation) and saturates at 0.95 (~50
-observations). Wired into `run_bootstrap` with per-source try/except so
-one bad reader can't mask the others. Four new counters surface in
-`BootstrapResult` + CLI output. Real run: graph went 3 → 28 nodes.
+First switch to a non-Ollama backend prints a one-time privacy
+banner and writes an ack marker per backend per profile. Cost is
+recorded via the existing `cost_guard` (USD estimated from token
+counts). Honors `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` for proxy
+setups (Claude Router).
 
-18 tests in `tests/test_profile_bootstrap_layer2_writers.py`.
+Public surface preserved: `extract_artifact()`, `is_ollama_available()`,
+`OllamaUnavailableError` (now an alias of `ExtractorUnavailableError`).
+Internals use a `Protocol` + 3 implementations + factory mirroring
+the `Classifier[L]` shape from PR #201. SDK-direct (no async wrapper).
+
+28 new tests in `tests/test_profile_bootstrap_extractor_pluggable.py`.
 
 ### Added (T2 batch — 4 skills closing remaining gap-fill roadmap items)
 
