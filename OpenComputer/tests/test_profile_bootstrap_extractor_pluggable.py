@@ -28,6 +28,8 @@ from opencomputer.profile_bootstrap.llm_extractor import (
     OllamaUnavailableError,
     OpenAIArtifactExtractor,
     _estimate_cost_usd,
+    _maybe_offer_extractor_setup,
+    _smart_fallback_candidate,
     extract_artifact,
     get_extractor,
 )
@@ -321,3 +323,186 @@ def test_yaml_load_overrides_extractor(tmp_path):
     cfg = load_config(p)
     assert cfg.deepening.extractor == "anthropic"
     assert cfg.deepening.daily_cost_cap_usd == 1.5
+
+
+# ── Smart fallback: Ollama-missing + cloud-key-present ───────────────
+
+
+def test_smart_fallback_candidate_prefers_anthropic(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-o")
+    assert _smart_fallback_candidate() == ("anthropic", "ANTHROPIC_API_KEY")
+
+
+def test_smart_fallback_candidate_falls_back_to_openai(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-o")
+    assert _smart_fallback_candidate() == ("openai", "OPENAI_API_KEY")
+
+
+def test_smart_fallback_candidate_returns_none_when_no_keys(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert _smart_fallback_candidate() is None
+
+
+def test_offer_skipped_when_stderr_not_tty(monkeypatch, tmp_path):
+    """CI / non-interactive runs must NEVER prompt — no stdin to answer."""
+    monkeypatch.setattr(
+        "opencomputer.agent.config._home", lambda: tmp_path,
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")
+    monkeypatch.setattr("sys.stderr.isatty", lambda: False)
+    assert _maybe_offer_extractor_setup() is None
+
+
+def test_offer_skipped_when_marker_exists(monkeypatch, tmp_path):
+    """Once the user has answered, never prompt again."""
+    monkeypatch.setattr(
+        "opencomputer.agent.config._home", lambda: tmp_path,
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    (tmp_path / "extractor_setup.json").write_text('{"answer": "n"}')
+    assert _maybe_offer_extractor_setup() is None
+
+
+def test_offer_skipped_when_no_api_key_in_env(monkeypatch, tmp_path):
+    """No fallback target → no offer."""
+    monkeypatch.setattr(
+        "opencomputer.agent.config._home", lambda: tmp_path,
+    )
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    assert _maybe_offer_extractor_setup() is None
+
+
+def test_offer_accepted_persists_config_and_marker(monkeypatch, tmp_path, capsys):
+    """Yes → config.yaml updated, marker written, privacy ack pre-written."""
+    # Point both _home and the config-file path at our tmp dir.
+    monkeypatch.setattr(
+        "opencomputer.agent.config._home", lambda: tmp_path,
+    )
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(
+        "opencomputer.agent.config_store.config_file_path", lambda: config_path,
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda: "y")
+
+    chosen = _maybe_offer_extractor_setup()
+    assert chosen == "anthropic"
+
+    # Marker written
+    marker = tmp_path / "extractor_setup.json"
+    assert marker.exists()
+    import json
+    payload = json.loads(marker.read_text())
+    assert payload["answer"] == "y"
+    assert payload["backend_offered"] == "anthropic"
+
+    # Privacy banner ack pre-written so the standard banner doesn't fire
+    assert (tmp_path / "deepening_consent_anthropic.acknowledged").exists()
+
+    # config.yaml has the new value
+    from opencomputer.agent.config_store import load_config
+    loaded = load_config(config_path)
+    assert loaded.deepening.extractor == "anthropic"
+
+
+def test_offer_declined_returns_none_and_writes_marker(
+    monkeypatch, tmp_path, capsys,
+):
+    """No → marker written so we don't pester; returns None so caller falls
+    through to Ollama (which then raises on extract)."""
+    monkeypatch.setattr(
+        "opencomputer.agent.config._home", lambda: tmp_path,
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda: "n")
+
+    assert _maybe_offer_extractor_setup() is None
+    assert (tmp_path / "extractor_setup.json").exists()
+    # Privacy ack must NOT be pre-written for a declined backend
+    assert not (tmp_path / "deepening_consent_anthropic.acknowledged").exists()
+
+
+def test_offer_eof_treated_as_decline(monkeypatch, tmp_path):
+    """Ctrl-D / piped-stdin-empty must not crash; treat as 'no'."""
+    monkeypatch.setattr(
+        "opencomputer.agent.config._home", lambda: tmp_path,
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    def _eof():
+        raise EOFError
+    monkeypatch.setattr("builtins.input", _eof)
+
+    assert _maybe_offer_extractor_setup() is None
+    assert (tmp_path / "extractor_setup.json").exists()
+
+
+def test_factory_triggers_smart_fallback_when_ollama_missing(
+    monkeypatch, tmp_path, capsys,
+):
+    """End-to-end through the factory: Ollama default + Ollama unavailable
+    + Anthropic key + tty → factory returns AnthropicArtifactExtractor."""
+    monkeypatch.setattr(
+        "opencomputer.agent.config._home", lambda: tmp_path,
+    )
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(
+        "opencomputer.agent.config_store.config_file_path", lambda: config_path,
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda: "y")
+    # Make Ollama "not available" by stubbing the module-level helper
+    monkeypatch.setattr(
+        "opencomputer.profile_bootstrap.llm_extractor.is_ollama_available",
+        lambda: False,
+    )
+
+    inst = get_extractor(_make_config(extractor="ollama"))
+    assert isinstance(inst, AnthropicArtifactExtractor)
+
+
+def test_factory_does_not_trigger_fallback_when_user_explicit(
+    monkeypatch, tmp_path,
+):
+    """If the user explicitly set extractor: anthropic, never run the
+    smart-fallback path — that path is exclusively for the
+    'ollama default + Ollama missing' case."""
+    monkeypatch.setattr(
+        "opencomputer.agent.config._home", lambda: tmp_path,
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+
+    # If smart fallback ran, it'd write a marker. We shouldn't see one.
+    inst = get_extractor(_make_config(extractor="anthropic"))
+    assert isinstance(inst, AnthropicArtifactExtractor)
+    assert not (tmp_path / "extractor_setup.json").exists()
+
+
+def test_factory_does_not_trigger_fallback_when_ollama_present(
+    monkeypatch, tmp_path,
+):
+    """If Ollama IS installed, the user picked the default for a reason —
+    don't second-guess."""
+    monkeypatch.setattr(
+        "opencomputer.agent.config._home", lambda: tmp_path,
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    monkeypatch.setattr(
+        "opencomputer.profile_bootstrap.llm_extractor.is_ollama_available",
+        lambda: True,
+    )
+
+    inst = get_extractor(_make_config(extractor="ollama"))
+    assert isinstance(inst, OllamaArtifactExtractor)
+    assert not (tmp_path / "extractor_setup.json").exists()
