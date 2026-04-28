@@ -26,12 +26,18 @@ import time
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 
 from opencomputer.cli_ui.clipboard import has_clipboard_image, save_clipboard_image
+from opencomputer.cli_ui.slash import SLASH_REGISTRY
+from opencomputer.cli_ui.slash_completer import (
+    SlashCommandCompleter,
+    longest_common_prefix,
+)
 from opencomputer.cli_ui.turn_cancel import TurnCancelScope
 
 #: Regex that finds image-attachment placeholders in a submitted message.
@@ -101,10 +107,18 @@ def build_prompt_session(
 
     @kb.add(Keys.Escape, eager=True)
     def _esc(event):  # noqa: ANN001
-        # ESC during *idle* prompt: clear the buffer (matches Claude Code).
+        # ESC during *idle* prompt: if a completion menu is open (slash
+        # autocomplete dropdown), close that first — only clear the
+        # buffer on a "fresh" Escape with no menu visible. Without this
+        # branch, opening the menu and pressing Escape would wipe the
+        # user's typed text instead of just dismissing the dropdown.
         # ESC during *streaming*: handled by KeyboardListener thread; the
         # prompt isn't the active app at that point.
-        event.current_buffer.text = ""
+        buf = event.current_buffer
+        if buf.complete_state is not None:
+            buf.cancel_completion()
+            return
+        buf.text = ""
 
     @kb.add(Keys.ControlJ)
     def _ctrl_j(event):  # noqa: ANN001
@@ -135,6 +149,51 @@ def build_prompt_session(
             return
         event.current_buffer.insert_text(data)
 
+    # --- Slash autocomplete: Tab → LCP semantics --------------------------
+    # Active only while the user is typing the command-name token of a
+    # slash command (line starts with '/' and no space yet). Outside that
+    # condition the binding doesn't fire and prompt_toolkit's default Tab
+    # handling applies — which, given our completer returns no completions
+    # for non-slash text, is effectively a no-op. This keeps the chat REPL
+    # behavior unchanged for normal messages.
+
+    def _in_slash_token() -> bool:
+        try:
+            from prompt_toolkit.application.current import get_app
+
+            txt = get_app().current_buffer.document.text_before_cursor
+        except Exception:
+            return False
+        return txt.startswith("/") and " " not in txt
+
+    @kb.add(Keys.ControlI, filter=Condition(_in_slash_token))
+    def _tab(event):  # noqa: ANN001
+        """Tab on a slash-command prefix:
+
+        - 0 matches  → no-op (consume the keypress; don't insert a tab).
+        - 1 match    → complete to ``/<name>``.
+        - many       → complete to the longest common prefix; if that's
+                       already what the user typed, open the menu so they
+                       can pick visually.
+        """
+        buf = event.current_buffer
+        text = buf.document.text_before_cursor
+        prefix = text[1:].lower()
+        matches = [
+            f"/{cmd.name}" for cmd in SLASH_REGISTRY if cmd.name.startswith(prefix)
+        ]
+        if not matches:
+            return
+        if len(matches) == 1:
+            target = matches[0]
+        else:
+            target = longest_common_prefix(matches)
+            if target == text:
+                buf.start_completion(select_first=False)
+                return
+        buf.delete_before_cursor(count=len(text))
+        buf.insert_text(target)
+
     return PromptSession(
         message=HTML("<ansigreen><b>you ›</b></ansigreen> "),
         history=FileHistory(str(history_path)),
@@ -142,7 +201,12 @@ def build_prompt_session(
         multiline=False,
         mouse_support=False,
         enable_history_search=True,
-        complete_while_typing=False,
+        # complete_while_typing=True opens the slash autocomplete dropdown
+        # automatically as the user types (no need to hit Tab first). The
+        # SlashCommandCompleter returns nothing for non-slash input, so
+        # plain chat messages don't trigger any visible menu.
+        complete_while_typing=True,
+        completer=SlashCommandCompleter(),
         # erase_when_done clears the typed prompt line on submit so the
         # chat loop can re-render the user's message inside a styled
         # boundary box (no duplicate "you › ..." line in scrollback).

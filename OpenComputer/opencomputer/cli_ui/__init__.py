@@ -13,6 +13,10 @@ from opencomputer.cli_ui.slash import (
     is_slash_command,
     resolve_command,
 )
+from opencomputer.cli_ui.slash_completer import (
+    SlashCommandCompleter,
+    longest_common_prefix,
+)
 from opencomputer.cli_ui.slash_handlers import SlashContext, dispatch_slash
 from opencomputer.cli_ui.streaming import StreamingRenderer, current_renderer
 from opencomputer.cli_ui.turn_cancel import TurnCancelScope
@@ -21,6 +25,7 @@ __all__ = [
     "SLASH_REGISTRY",
     "CommandDef",
     "KeyboardListener",
+    "SlashCommandCompleter",
     "SlashContext",
     "SlashResult",
     "StreamingRenderer",
@@ -29,6 +34,7 @@ __all__ = [
     "current_renderer",
     "dispatch_slash",
     "is_slash_command",
+    "longest_common_prefix",
     "read_user_input",
     "resolve_command",
 ]
