@@ -103,6 +103,12 @@ SLASH_REGISTRY: list[CommandDef] = [
         category="session",
         args_hint="[last|<session-id-prefix>]",
     ),
+    CommandDef(
+        name="queue",
+        description="Queue a prompt for the next turn (or list/clear pending).",
+        category="session",
+        args_hint="[<prompt>|list|clear]",
+    ),
 ]
 
 
