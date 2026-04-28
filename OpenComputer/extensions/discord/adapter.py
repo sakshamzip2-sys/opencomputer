@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any
 
@@ -44,6 +45,31 @@ from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import MessageEvent, Platform, SendResult
 
 logger = logging.getLogger("opencomputer.ext.discord")
+
+
+# PR 4.3 — Discord ``allowed_mentions`` safe defaults. By default we
+# disable @everyone / @here / role pings so a runaway agent cannot
+# accidentally page a whole guild. Operators can opt back in via env:
+#
+#   DISCORD_ALLOW_MENTION_EVERYONE  → enable @everyone / @here pings
+#   DISCORD_ALLOW_MENTION_ROLES     → enable @role pings
+#   DISCORD_ALLOW_MENTION_USERS     → user pings (default ON — disable
+#                                     to suppress reply pings entirely)
+#   DISCORD_ALLOW_MENTION_REPLIED_USER → ping the author of the
+#                                        message we replied to (default ON)
+#
+# Each var accepts ``"1"``, ``"true"``, ``"yes"`` (case-insensitive)
+# as truthy; everything else (including unset) takes the documented
+# default.
+_TRUTHY_ENV = {"1", "true", "yes", "on"}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Parse a truthy-string env var. Unset → default."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in _TRUTHY_ENV
 
 
 def _chunk_2000(text: str, limit: int = 2000) -> list[str]:
@@ -263,6 +289,24 @@ class DiscordAdapter(BaseChannelAdapter):
             except (asyncio.CancelledError, Exception):
                 pass
 
+    def _build_allowed_mentions(self) -> discord.AllowedMentions:
+        """PR 4.3 — safe-by-default allowed_mentions for outbound posts.
+
+        Defaults: ``everyone=False``, ``roles=False``, ``users=True``,
+        ``replied_user=True``. Each can be flipped via env var:
+
+        - ``DISCORD_ALLOW_MENTION_EVERYONE`` (default OFF)
+        - ``DISCORD_ALLOW_MENTION_ROLES`` (default OFF)
+        - ``DISCORD_ALLOW_MENTION_USERS`` (default ON)
+        - ``DISCORD_ALLOW_MENTION_REPLIED_USER`` (default ON)
+        """
+        return discord.AllowedMentions(
+            everyone=_env_bool("DISCORD_ALLOW_MENTION_EVERYONE", False),
+            roles=_env_bool("DISCORD_ALLOW_MENTION_ROLES", False),
+            users=_env_bool("DISCORD_ALLOW_MENTION_USERS", True),
+            replied_user=_env_bool("DISCORD_ALLOW_MENTION_REPLIED_USER", True),
+        )
+
     async def send(self, chat_id: str, text: str, **kwargs: Any) -> SendResult:
         channel = self._channel_cache.get(chat_id)
         if channel is None:
@@ -273,11 +317,15 @@ class DiscordAdapter(BaseChannelAdapter):
             except Exception as e:
                 return SendResult(success=False, error=f"channel lookup failed: {e}")
 
+        allowed_mentions = self._build_allowed_mentions()
+
         async def _do_send() -> SendResult:
             last_id: int | None = None
             try:
                 for chunk in _chunk_2000(text, limit=self.max_message_length):
-                    sent = await channel.send(chunk)
+                    sent = await channel.send(
+                        chunk, allowed_mentions=allowed_mentions
+                    )
                     last_id = sent.id
             except Exception as exc:  # noqa: BLE001
                 if self._is_retryable_error(exc):
@@ -350,7 +398,11 @@ class DiscordAdapter(BaseChannelAdapter):
                         success=False, error=f"channel {chat_id} not found"
                     )
                 msg = await channel.fetch_message(int(message_id))
-                await msg.edit(content=text[: self.max_message_length])
+                # PR 4.3 — same safe-by-default mention policy on edit.
+                await msg.edit(
+                    content=text[: self.max_message_length],
+                    allowed_mentions=self._build_allowed_mentions(),
+                )
                 return SendResult(success=True, message_id=str(msg.id))
             except discord.NotFound:
                 return SendResult(

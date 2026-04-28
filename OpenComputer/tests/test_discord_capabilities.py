@@ -119,7 +119,11 @@ class TestEditMessage:
         adapter, msg, _ = adapter_with_mocks
         result = await adapter.edit_message("999", "555", "updated text")
         assert result.success
-        msg.edit.assert_awaited_once_with(content="updated text")
+        # PR 4.3 — edit_message also passes allowed_mentions; assert
+        # on content only (mention-policy is covered in the
+        # test_discord_allowed_mentions module).
+        msg.edit.assert_awaited_once()
+        assert msg.edit.await_args.kwargs["content"] == "updated text"
 
     @pytest.mark.asyncio
     async def test_edit_truncates_to_max_length(self, adapter_with_mocks) -> None:
