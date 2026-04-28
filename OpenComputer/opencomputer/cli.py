@@ -1298,13 +1298,29 @@ def code(
     no_compact: bool = typer.Option(
         False, "--no-compact", help="Disable automatic context compaction (debugging)."
     ),
+    worktree: bool = typer.Option(
+        False,
+        "--worktree",
+        "-w",
+        help=(
+            "Spawn a fresh git worktree for this session under "
+            "<repo>/.opencomputer-worktrees/<id>/, chdir into it, and "
+            "auto-remove on exit. Requires the cwd to be inside a git repo."
+        ),
+    ),
+    keep_worktree: bool = typer.Option(
+        False,
+        "--keep-worktree",
+        help="Do NOT remove the worktree on exit (when --worktree is set).",
+    ),
 ) -> None:
     """Start the coding agent in [path] (or cwd). Snappy entry-point.
 
     Mirrors ``opencomputer chat`` but is tailored for coding work — Edit,
     MultiEdit, TodoWrite, RunTests etc. are enabled by default. Use
     ``--plan`` for read-only discovery; ``--yolo`` to skip per-action
-    confirmation prompts.
+    confirmation prompts. Use ``--worktree`` to isolate this session in a
+    fresh git worktree (auto-removed on exit).
     """
     if path:
         target = os.path.abspath(path)
@@ -1313,6 +1329,16 @@ def code(
             raise typer.Exit(code=1)
         os.chdir(target)
         console.print(f"[dim]cwd: {target}[/dim]")
+
+    if worktree:
+        from opencomputer.worktree import session_worktree
+
+        with session_worktree(Path.cwd(), keep=keep_worktree) as wt:
+            if wt != Path.cwd().parent:  # i.e. the worktree was actually created
+                console.print(f"[dim]worktree: {wt}[/dim]")
+            _run_chat_session(resume=resume, plan=plan, no_compact=no_compact, yolo=yolo)
+        return
+
     _run_chat_session(resume=resume, plan=plan, no_compact=no_compact, yolo=yolo)
 
 
