@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 from collections import OrderedDict
@@ -29,6 +30,12 @@ from typing import Any
 
 import httpx
 
+from extensions.telegram.network import (
+    TelegramFallbackTransport,
+    discover_fallback_ips,
+    is_auto_mode,
+    parse_fallback_ip_env,
+)
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import MessageEvent, Platform, SendResult
 from plugin_sdk.format_converters.markdownv2 import convert as _to_mdv2
@@ -216,6 +223,45 @@ class TelegramAdapter(BaseChannelAdapter):
             self._client.post, url, **kwargs,
         )
 
+    async def _build_fallback_transport(
+        self,
+    ) -> TelegramFallbackTransport | None:
+        """Build the IP-fallback transport iff the env opts in.
+
+        Reads ``TELEGRAM_FALLBACK_IPS``:
+        - unset / empty → ``None`` (default; caller uses plain httpx).
+        - ``"auto"`` → DoH discovery; if discovery returns at least one
+          IP, wrap with that list.
+        - comma-separated IPs → wrap with those after validation.
+        """
+        env_value = os.environ.get("TELEGRAM_FALLBACK_IPS", "")
+        if not env_value:
+            return None
+        if is_auto_mode(env_value):
+            try:
+                ips = await discover_fallback_ips()
+            except Exception as exc:  # noqa: BLE001 — discovery best-effort
+                logger.warning(
+                    "telegram fallback IP discovery failed (%s); "
+                    "continuing without fallback",
+                    exc,
+                )
+                return None
+            if not ips:
+                return None
+            logger.info("telegram fallback IPs (auto-discovered): %s", ips)
+            return TelegramFallbackTransport(ips)
+        ips = parse_fallback_ip_env(env_value)
+        if not ips:
+            logger.warning(
+                "TELEGRAM_FALLBACK_IPS=%r yielded no valid IPs; "
+                "continuing without fallback",
+                env_value,
+            )
+            return None
+        logger.info("telegram fallback IPs (configured): %s", ips)
+        return TelegramFallbackTransport(ips)
+
     #: Scope name for the per-bot-token machine-local lock. Mirrors
     #: hermes' ``"telegram-bot-token"`` scope so a future cross-tool
     #: convention could be uniformly recognised by tooling.
@@ -248,7 +294,15 @@ class TelegramAdapter(BaseChannelAdapter):
             return False
         self._lock_held = True
 
-        self._client = httpx.AsyncClient(timeout=35.0)
+        # PR 4.1 — optional IP-fallback transport for users in geo-blocked
+        # regions. Default behaviour (env unset) is unchanged: a regular
+        # httpx client. ``TELEGRAM_FALLBACK_IPS=auto`` triggers DoH
+        # discovery; a comma-separated list of IPs uses those directly.
+        transport = await self._build_fallback_transport()
+        if transport is not None:
+            self._client = httpx.AsyncClient(timeout=35.0, transport=transport)
+        else:
+            self._client = httpx.AsyncClient(timeout=35.0)
         # getMe to verify token and cache our bot id
         try:
             resp = await self._client.get(f"{self.base_url}/getMe")
