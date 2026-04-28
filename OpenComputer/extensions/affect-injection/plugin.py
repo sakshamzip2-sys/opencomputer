@@ -46,7 +46,7 @@ def _install_alias() -> None:
     parent = _sys.modules["extensions.affect_injection"]
     full_name = "extensions.affect_injection.provider"
     if full_name in _sys.modules:
-        setattr(parent, "provider", _sys.modules[full_name])
+        parent.provider = _sys.modules[full_name]
         return
     init = here / "provider.py"
     if not init.exists():
@@ -60,7 +60,7 @@ def _install_alias() -> None:
     sub_mod.__package__ = "extensions.affect_injection"
     _sys.modules[full_name] = sub_mod
     spec.loader.exec_module(sub_mod)
-    setattr(parent, "provider", sub_mod)
+    parent.provider = sub_mod
 
 
 def register(api) -> None:  # noqa: ANN001

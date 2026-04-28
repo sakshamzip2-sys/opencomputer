@@ -18,16 +18,15 @@ from __future__ import annotations
 import asyncio
 from typing import ClassVar
 
-from plugin_sdk.consent import CapabilityClaim, ConsentTier
-from plugin_sdk.core import ToolCall, ToolResult
-from plugin_sdk.tool_contract import BaseTool, ToolSchema
-
 from opencomputer.tools._gui_backends import (
     detect_linux_display_server,
     detect_platform,
     has_command,
     has_pyautogui,
 )
+from plugin_sdk.consent import CapabilityClaim, ConsentTier
+from plugin_sdk.core import ToolCall, ToolResult
+from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 _MAX_TEXT_LEN = 4000
 
@@ -114,9 +113,8 @@ class SystemKeystrokeTool(BaseTool):
 
 
 def _type_dispatch(platform: str, text: str) -> bool:
-    if platform in ("macos", "linux", "windows"):
-        if _type_pyautogui(text):
-            return True
+    if platform in ("macos", "linux", "windows") and _type_pyautogui(text):
+        return True
     if platform == "linux":
         return _type_xdotool(text)
     if platform == "macos":
@@ -125,9 +123,8 @@ def _type_dispatch(platform: str, text: str) -> bool:
 
 
 def _hotkey_dispatch(platform: str, keys: list[str]) -> bool:
-    if platform in ("macos", "linux", "windows"):
-        if _hotkey_pyautogui(keys):
-            return True
+    if platform in ("macos", "linux", "windows") and _hotkey_pyautogui(keys):
+        return True
     if platform == "linux":
         return _hotkey_xdotool(keys)
     return False

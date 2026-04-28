@@ -40,8 +40,13 @@ _KNOWN_MODELS: frozenset[str] = frozenset({
 })
 
 
-class GroqNotInstalled(RuntimeError):
+class GroqNotInstalledError(RuntimeError):
     """Raised when groq isn't installed but transcribe_audio_groq is called."""
+
+
+# Backwards-compat alias — the original name was used in tests / external callers
+# before the N818 lint convention required the *Error suffix.
+GroqNotInstalled = GroqNotInstalledError
 
 
 def _import_groq() -> Any:
@@ -49,7 +54,7 @@ def _import_groq() -> Any:
     try:
         import groq  # type: ignore[import-not-found]
     except ImportError as e:
-        raise GroqNotInstalled(
+        raise GroqNotInstalledError(
             "groq not installed. Install with `pip install groq` "
             "or `pip install opencomputer[stt-groq]`. Free tier "
             "available at https://console.groq.com — set GROQ_API_KEY."

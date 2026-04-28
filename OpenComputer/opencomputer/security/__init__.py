@@ -32,6 +32,8 @@ from opencomputer.security.instruction_detector import (
 )
 from opencomputer.security.redact import (
     is_enabled as redact_is_enabled,
+)
+from opencomputer.security.redact import (
     redact_runtime_mapping,
     redact_runtime_text,
     redact_runtime_text_with_counts,
