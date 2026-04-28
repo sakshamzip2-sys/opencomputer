@@ -7,5 +7,12 @@
   "enabled_by_default": false,
   "entry": "plugin",
   "author": "OpenComputer",
-  "license": "MIT"
+  "license": "MIT",
+  "tool_names": [
+    "browser_navigate",
+    "browser_click",
+    "browser_fill",
+    "browser_snapshot",
+    "browser_scrape"
+  ]
 }
