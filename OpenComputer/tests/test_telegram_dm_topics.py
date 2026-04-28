@@ -20,7 +20,6 @@ import pytest
 from extensions.telegram.dm_topics import DMTopicManager
 from plugin_sdk.core import MessageEvent, Platform
 
-
 # ─── DMTopicManager ─────────────────────────────────────────────────
 
 

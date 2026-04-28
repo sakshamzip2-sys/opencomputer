@@ -54,7 +54,10 @@ def exclusive_lock(path: Path) -> Iterator[IO[str]]:
     except OSError:
         pass
 
-    fh: IO[str] = open(path, "a+", encoding="utf-8")
+    # The handle MUST outlive the ``with`` block so the lock survives
+    # the caller's writes; a ``with open(...)`` would close it before
+    # ``yield``. The try/finally below guarantees cleanup.
+    fh: IO[str] = open(path, "a+", encoding="utf-8")  # noqa: SIM115
     try:
         if sys.platform != "win32":
             try:

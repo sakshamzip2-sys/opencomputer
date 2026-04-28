@@ -1800,6 +1800,11 @@ app.add_typer(session_app, name="session")
 app.add_typer(voice_app, name="voice")
 app.add_typer(webhook_app, name="webhook")
 
+# Hermes channel-port (PR 5.4) — Telegram DM Topics CLI
+from opencomputer.cli_telegram import telegram_app  # noqa: E402
+
+app.add_typer(telegram_app, name="telegram")
+
 # Sub-project F1 2.B.4 — audit-log viewer (`audit show` / `audit verify`)
 from opencomputer.cli_audit import audit_app  # noqa: E402
 
