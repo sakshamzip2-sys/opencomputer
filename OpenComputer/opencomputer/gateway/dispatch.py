@@ -16,6 +16,7 @@ queries). Mirrors OpenClaw's server-plugins request binding at
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import logging
 import time
@@ -125,6 +126,7 @@ class Dispatch:
         loop: AgentLoop,
         plugin_api: PluginAPI | None = None,
         channel_directory: ChannelDirectory | None = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
         self.loop = loop
         # One lock per chat_id — prevents interleaved turns from the same chat
@@ -136,6 +138,22 @@ class Dispatch:
         # existing CLI test paths constructing Dispatch without a
         # plugin_api keep working.
         self._plugin_api: PluginAPI | None = plugin_api
+        # Hermes channel-port (PR 2 Task 2.6 + amendment §A.1): photo-
+        # burst merging. When multiple pure-attachment events arrive
+        # within the burst window for the same session, we collapse
+        # them into ONE agent run with merged attachments. A text
+        # event arriving mid-burst CANCELS the pending dispatch and
+        # absorbs the photo's attachments into the text event (the
+        # text is the user's "go" signal).
+        cfg = config or {}
+        self._burst_window_seconds: float = float(
+            cfg.get("photo_burst_window", 0.8)
+        )
+        self._burst_pending: dict[str, MessageEvent] = {}
+        self._burst_tasks: dict[str, asyncio.Task[None]] = {}
+        # Joiners (subsequent pure-attachment events) await the same
+        # future so every caller sees the same final assistant text.
+        self._burst_futures: dict[str, asyncio.Future[str | None]] = {}
         # Task II.3: channel directory cache. Records every inbound
         # MessageEvent's (platform, chat_id, display_name) so future
         # send-message tools can resolve friendly names instead of raw
@@ -188,19 +206,28 @@ class Dispatch:
         Handle one inbound message. Runs the agent loop and returns the
         final assistant text for the adapter to send back.
 
-        Also starts a periodic typing-indicator heartbeat on the source
-        channel so the user sees "..." while the agent thinks.
+        PRESERVES the ``str | None`` return contract — 7 adapters
+        (slack/mattermost/email/signal/sms/imessage/webhook) await this
+        return and pass it to ``self.send(chat_id, response)``.
+
+        Hermes channel-port (PR 2 Task 2.6 + amendment §A.1) adds
+        photo-burst merging. Four cases:
+
+        1. Pure-attachment event arriving while a burst is pending →
+           merge attachments into the pending event and **join** its
+           future (every joiner gets the same answer).
+        2. Text event arriving while a burst is pending → CANCEL the
+           pending dispatch, absorb the photo's attachments into the
+           text event, dispatch immediately. Text is the user's "go".
+        3. Pure-attachment event with no pending burst → start the
+           timer; dispatch fires after ``_burst_window_seconds``.
+        4. Plain text event → direct dispatch.
 
         Task I.9 — when a ``plugin_api`` is bound, each dispatch wraps
-        the ``run_conversation`` call in ``plugin_api.in_request(ctx)``
-        so plugins can query their per-request scope. Empty-text
-        early-return skips the wrap entirely (no work → no scope).
+        ``run_conversation`` in ``plugin_api.in_request(ctx)``.
 
-        Task II.3 — before touching the agent loop, we record this
-        event into the channel directory so future send-message tools
-        can resolve friendly names instead of raw chat ids. Failures
-        are swallowed at WARNING level — the directory is best-effort
-        metadata and must never take dispatch down.
+        Task II.3 — records the inbound channel into the directory
+        cache so future send-message tools can resolve friendly names.
         """
         # Task II.3: cache the inbound channel. Best-effort; don't let a
         # write failure (full disk, permissions) break the reply path.
@@ -223,9 +250,105 @@ class Dispatch:
                     event.chat_id,
                     e,
                 )
-        if not event.text.strip():
+
+        # Empty event — preserve existing skip-blank behaviour.
+        text_present = bool(event.text and event.text.strip())
+        attach_present = bool(event.attachments)
+        if not text_present and not attach_present:
             return None
+
         session_id = self._session_id_for(event)
+        pure_attachment = attach_present and not text_present
+
+        # ── Case 1: pure-attachment arrival joins the in-flight burst.
+        if pure_attachment and session_id in self._burst_pending:
+            pending = self._burst_pending[session_id]
+            merged_meta = dict(pending.metadata or {})
+            new_meta = event.metadata or {}
+            if "attachment_meta" in new_meta:
+                merged_meta.setdefault("attachment_meta", []).extend(
+                    new_meta["attachment_meta"]
+                )
+            self._burst_pending[session_id] = dataclasses.replace(
+                pending,
+                attachments=list(pending.attachments) + list(event.attachments),
+                metadata=merged_meta,
+            )
+            future = self._burst_futures[session_id]
+            return await future
+
+        # ── Case 2: text arrival mid-burst — cancel + absorb + run inline.
+        if text_present and session_id in self._burst_tasks:
+            task = self._burst_tasks.pop(session_id)
+            task.cancel()
+            pending = self._burst_pending.pop(session_id, None)
+            future = self._burst_futures.pop(session_id, None)
+            if pending is not None:
+                event = dataclasses.replace(
+                    event,
+                    attachments=list(pending.attachments)
+                    + list(event.attachments),
+                )
+            try:
+                result = await self._do_dispatch(event, session_id)
+            except BaseException as exc:
+                if future is not None and not future.done():
+                    future.set_exception(exc)
+                raise
+            if future is not None and not future.done():
+                future.set_result(result)
+            return result
+
+        # ── Case 3: pure-attachment with no pending — start the timer.
+        if pure_attachment:
+            loop_ = asyncio.get_running_loop()
+            future_ = loop_.create_future()
+            self._burst_pending[session_id] = event
+            self._burst_futures[session_id] = future_
+            self._burst_tasks[session_id] = asyncio.create_task(
+                self._dispatch_after_burst_window(session_id),
+                name=f"dispatch-burst-{session_id[:8]}",
+            )
+            return await future_
+
+        # ── Case 4: plain text — direct dispatch.
+        return await self._do_dispatch(event, session_id)
+
+    async def _dispatch_after_burst_window(self, session_id: str) -> None:
+        """Background task: wait for the burst window then dispatch.
+
+        Cancellation (text arrival) returns cleanly. The future is
+        resolved here so every joiner sees the same answer; on any
+        exception the future carries the exception so joiners observe
+        it rather than hang forever.
+        """
+        try:
+            await asyncio.sleep(self._burst_window_seconds)
+        except asyncio.CancelledError:
+            return
+        event = self._burst_pending.pop(session_id, None)
+        future = self._burst_futures.pop(session_id, None)
+        self._burst_tasks.pop(session_id, None)
+        if event is None or future is None:
+            return
+        try:
+            result = await self._do_dispatch(event, session_id)
+            if not future.done():
+                future.set_result(result)
+        except BaseException as exc:
+            if not future.done():
+                future.set_exception(exc)
+
+    async def _do_dispatch(
+        self, event: MessageEvent, session_id: str
+    ) -> str | None:
+        """Run the agent loop for one (possibly burst-merged) MessageEvent.
+
+        Hermes channel-port (PR 2 Task 2.6). The body is what
+        ``handle_message`` previously did inline before the burst-
+        aware preamble was added. Same return contract — assistant
+        text or None.
+        """
         # Round 2a P-5 — record the (adapter, chat_id) binding so a
         # consent prompt later in this turn can find the right surface
         # to ask the user on. Best-effort: missing adapter = legacy
@@ -238,8 +361,8 @@ class Dispatch:
         # Hermes channel-port (PR 2 Task 2.2): fire on_processing_start
         # BEFORE acquiring the per-chat lock so a fast-clicking user
         # sees the 👀 reaction even if the previous turn is still
-        # holding the lock. The hook is fire-and-forget — failures
-        # never affect the reply path.
+        # holding the lock. Fire-and-forget — failures never affect
+        # the reply path.
         message_id: str | None = None
         if event.metadata:
             raw_id = event.metadata.get("message_id")
@@ -259,12 +382,7 @@ class Dispatch:
             heartbeat = asyncio.create_task(
                 self._typing_heartbeat(event.platform.value, event.chat_id)
             )
-            # Task I.9: build a per-request ctx. The channel is the
-            # MessageEvent platform; user_id is the chat_id (the
-            # channel-specific user-visible identifier the dispatcher
-            # already keys on); session_id is the deterministic hash
-            # computed above. ``time.monotonic()`` is the canonical
-            # request-start clock (used for request-timing metrics).
+            # Task I.9: build a per-request ctx.
             request_ctx = RequestContext(
                 request_id=str(uuid.uuid4()),
                 channel=event.platform.value if event.platform else None,
@@ -272,17 +390,26 @@ class Dispatch:
                 session_id=session_id,
                 started_at=time.monotonic(),
             )
+            # Hermes channel-port (PR 2 Task 2.6): pass attachments
+            # through to the agent loop as ``images=`` when present.
+            # ``user_message`` defaults to "" for pure-attachment
+            # events; the loop's prompt builder treats an empty message
+            # with non-empty images as a vision-only turn.
+            user_message = event.text or ""
+            images = list(event.attachments) if event.attachments else None
             try:
                 if self._plugin_api is not None:
                     with self._plugin_api.in_request(request_ctx):
                         result = await self.loop.run_conversation(
-                            user_message=event.text,
+                            user_message=user_message,
                             session_id=session_id,
+                            images=images,
                         )
                 else:
                     result = await self.loop.run_conversation(
-                        user_message=event.text,
+                        user_message=user_message,
                         session_id=session_id,
+                        images=images,
                     )
                 return result.final_message.content or None
             except Exception as e:  # noqa: BLE001

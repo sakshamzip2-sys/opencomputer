@@ -280,7 +280,7 @@ async def test_processing_lifecycle_during_consent_prompt() -> None:
     adapter = _ApprovalAdapter({})
 
     # ─── 3. Mock loop.run_conversation: triggers the consent prompt mid-flight
-    async def fake_run_conversation(*, user_message, session_id):
+    async def fake_run_conversation(*, user_message, session_id, images=None):
         # 3a. Mid-conversation, the agent hits a Tier-2 claim → gate prompts.
         prompt_task = asyncio.create_task(gate.trigger_prompt_during_run(session_id))
         # 3b. Yield once to let prompt-send fire.
