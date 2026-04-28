@@ -6,12 +6,12 @@ import pytest
 
 from plugin_sdk.network_utils import (
     _looks_like_image,
-    ssrf_redirect_guard,
     is_network_accessible,
     proxy_kwargs_for_aiohttp,
     proxy_kwargs_for_bot,
     resolve_proxy_url,
     safe_url_for_log,
+    ssrf_redirect_guard,
 )
 
 # ---------------------------------------------------------------------------
