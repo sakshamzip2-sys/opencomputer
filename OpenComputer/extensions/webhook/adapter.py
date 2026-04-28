@@ -169,11 +169,13 @@ class WebhookAdapter(BaseChannelAdapter):
         return True
 
     def _validate_deliver_only_tokens(self) -> bool:
-        """Check every deliver_only token's ``delivery_target.platform``
-        names a registered adapter. Returns True when every token is
-        either standard (no deliver_only) or pointed at a known
-        platform. Logs ERROR + returns False if any deliver_only token
-        is misconfigured — caller treats False as "refuse to start".
+        """Check every deliver_only / cross_platform token's
+        ``delivery_target.platform`` names a registered adapter.
+
+        Returns True when every token is either standard (no deliver_only
+        / no cross_platform) or pointed at a known platform. Logs ERROR
+        + returns False if any token is misconfigured — caller treats
+        False as "refuse to start".
 
         Tolerant of the "no PluginAPI bound" case (CLI / tests): the
         validator is a no-op when there's no api handle.
@@ -191,27 +193,45 @@ class WebhookAdapter(BaseChannelAdapter):
         known_platforms = set(getattr(self._plugin_api, "channels", {}) or {})
         ok = True
         for tid, meta in tokens.items():
-            if not meta.get("deliver_only"):
+            mode = self._delivery_mode(meta)
+            if mode is None:
                 continue
             target = meta.get("delivery_target") or {}
             platform = (target or {}).get("platform")
             chat_id = (target or {}).get("chat_id")
             if not platform or not chat_id:
                 logger.error(
-                    "webhook: token %s is deliver_only but delivery_target is "
+                    "webhook: token %s is %s but delivery_target is "
                     "missing platform or chat_id: %r",
-                    tid, target,
+                    tid, mode, target,
                 )
                 ok = False
                 continue
             if platform not in known_platforms:
                 logger.error(
-                    "webhook: token %s deliver_only target platform %r is "
+                    "webhook: token %s %s target platform %r is "
                     "not a registered adapter (registered: %s)",
-                    tid, platform, sorted(known_platforms),
+                    tid, mode, platform, sorted(known_platforms),
                 )
                 ok = False
         return ok
+
+    @staticmethod
+    def _delivery_mode(token_meta: dict[str, Any]) -> str | None:
+        """Return ``"deliver_only"`` / ``"cross_platform"`` / ``None``.
+
+        The two modes share nearly identical semantics — render an
+        optional template + enqueue on the outgoing queue — but
+        ``cross_platform`` makes the intent explicit ("this webhook
+        bridges platform X to platform Y") whereas ``deliver_only``
+        emphasises "skip the agent". Either flag (or both) flips the
+        token into delivery mode.
+        """
+        if token_meta.get("cross_platform"):
+            return "cross_platform"
+        if token_meta.get("deliver_only"):
+            return "deliver_only"
+        return None
 
     async def disconnect(self) -> None:
         if self._site is not None:
@@ -294,17 +314,21 @@ class WebhookAdapter(BaseChannelAdapter):
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"error": f"malformed body: {exc}"}, status=400)
 
-        # ── Deliver-only mode ──────────────────────────────────────
-        # When a token is configured with ``deliver_only: true``, the
-        # webhook does NOT run the agent. Instead it renders an optional
-        # template against the payload and enqueues the result on the
-        # outgoing-queue facade for delivery to ``delivery_target``.
+        # ── Deliver-only / cross-platform delivery ─────────────────
+        # ``deliver_only`` and ``cross_platform`` both bypass the agent
+        # and enqueue a templated body for delivery to a different
+        # adapter. cross_platform makes the bridging intent explicit.
         # Use case: cron-like external services (UptimeRobot, GitHub
         # Actions, TradingView "send-only" alerts) that already produce
-        # the final user-facing string.
-        if token_meta.get("deliver_only"):
+        # the final user-facing string, OR Slack→Telegram bridge
+        # webhooks that just want to ferry text.
+        delivery_mode = self._delivery_mode(token_meta)
+        if delivery_mode is not None:
             return await self._handle_deliver_only(
-                token_id=token_id, token_meta=token_meta, payload=payload
+                token_id=token_id,
+                token_meta=token_meta,
+                payload=payload,
+                mode=delivery_mode,
             )
 
         # Build MessageEvent for dispatch.
@@ -351,23 +375,37 @@ class WebhookAdapter(BaseChannelAdapter):
         token_id: str,
         token_meta: dict[str, Any],
         payload: Any,
+        mode: str = "deliver_only",
     ) -> web.Response:
-        """Deliver-only branch: render template + enqueue, no agent run."""
+        """Deliver-only / cross-platform branch: render template + enqueue, no agent run.
+
+        ``mode`` is ``"deliver_only"`` or ``"cross_platform"`` — only
+        difference is the metadata stamp and a marginally clearer
+        misconfiguration error message.
+        """
         target = token_meta.get("delivery_target") or {}
         platform = target.get("platform")
         chat_id = target.get("chat_id")
         if not platform or not chat_id:
             logger.error(
-                "webhook: token=%s deliver_only is set but delivery_target is "
+                "webhook: token=%s %s is set but delivery_target is "
                 "incomplete: %r",
-                token_id, target,
+                token_id, mode, target,
             )
             return web.json_response(
-                {"error": "deliver_only token misconfigured (delivery_target)"},
+                {"error": f"{mode} token misconfigured (delivery_target)"},
                 status=500,
             )
 
-        template = token_meta.get("template") or ""
+        # PR 4.5 — template can live either at the top level (PR 3c.5
+        # deliver_only convention) OR nested inside delivery_target.
+        # Prefer the nested form so cross_platform routes can express
+        # "this target uses this template" inline.
+        template = (
+            target.get("template")
+            or token_meta.get("template")
+            or ""
+        )
         body = _render_prompt(template, payload) if template else _coerce_text(payload)
         if not body:
             return web.json_response(
@@ -379,8 +417,8 @@ class WebhookAdapter(BaseChannelAdapter):
         queue = getattr(api, "outgoing_queue", None) if api is not None else None
         if queue is None:
             logger.error(
-                "webhook deliver_only: no outgoing_queue bound (token=%s); dropping",
-                token_id,
+                "webhook %s: no outgoing_queue bound (token=%s); dropping",
+                mode, token_id,
             )
             return web.json_response(
                 {"error": "outgoing_queue unavailable"},
@@ -393,13 +431,13 @@ class WebhookAdapter(BaseChannelAdapter):
                 chat_id=str(chat_id),
                 body=body,
                 metadata={
-                    "source": "webhook_deliver_only",
+                    "source": f"webhook_{mode}",
                     "webhook_token_id": token_id,
                     "webhook_token_name": token_meta.get("name"),
                 },
             )
         except Exception as exc:  # noqa: BLE001
-            logger.exception("webhook deliver_only enqueue failed token=%s", token_id)
+            logger.exception("webhook %s enqueue failed token=%s", mode, token_id)
             return web.json_response(
                 {"error": f"enqueue failed: {type(exc).__name__}: {exc}"},
                 status=500,
