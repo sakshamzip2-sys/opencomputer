@@ -103,6 +103,16 @@ SLASH_REGISTRY: list[CommandDef] = [
         category="session",
         args_hint="[last|<session-id-prefix>]",
     ),
+    CommandDef(
+        name="reload",
+        description="Re-read .env + config.yaml without restarting the session.",
+        category="config",
+    ),
+    CommandDef(
+        name="reload-mcp",
+        description="Disconnect + re-discover all MCP servers.",
+        category="config",
+    ),
 ]
 
 
