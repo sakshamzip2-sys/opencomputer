@@ -117,21 +117,35 @@ def run_resume_picker(rows: list[SessionRow]) -> str | None:
     def _header_text():
         total = len(rows)
         showing = len(state["filtered"])
+        out: list[tuple[str, str]] = [
+            ("", "\n  "),
+            ("class:header.label", "Resume Session"),
+            ("", "  "),
+        ]
         if showing == total:
-            return [("class:header", f"  Resume Session ({total})  ")]
-        return [("class:header", f"  Resume Session ({showing} of {total} match)  ")]
+            out.append(("class:header.count", f"({total})"))
+        else:
+            out.append(("class:header.count", f"({showing} of {total} match)"))
+        out.append(("", "\n"))
+        return out
+
+    def _divider_text():
+        return [("class:divider", "  ─────────────────────────────────────────────  \n")]
 
     def _footer_text():
         return [
-            (
-                "class:footer",
-                "  ↑↓  navigate     enter  resume     esc  cancel  ",
-            )
+            ("", "  "),
+            ("class:footer.key", "↑↓"),
+            ("class:footer", " navigate    "),
+            ("class:footer.key", "enter"),
+            ("class:footer", " resume    "),
+            ("class:footer.key", "esc"),
+            ("class:footer", " cancel"),
         ]
 
     def _list_text():
         if not state["filtered"]:
-            return [("class:empty", "\n  no sessions match\n")]
+            return [("", "\n"), ("class:empty", "  no sessions match\n")]
         out: list[tuple[str, str]] = [("", "\n")]
         for i, row in enumerate(state["filtered"]):
             is_sel = i == state["selected_idx"]
@@ -142,10 +156,17 @@ def run_resume_picker(rows: list[SessionRow]) -> str | None:
                 f"{row.message_count} message{'s' if row.message_count != 1 else ''}  ·  "
                 f"{row.id[:8]}"
             )
-            row_style = "class:row.selected" if is_sel else "class:row"
-            meta_style = "class:meta.selected" if is_sel else "class:meta"
-            out.append((row_style, f"{arrow}{title}\n"))
-            out.append((meta_style, f"    {meta}\n"))
+            # Selected: bright yellow arrow + bold cyan title (no heavy bg).
+            # Unselected: dim grey title, two-space indent so the column lines
+            # up with selected rows. fzf-inspired aesthetic.
+            arrow_cls = "class:row.cursor" if is_sel else "class:row.cursor.dim"
+            title_cls = "class:row.title.selected" if is_sel else "class:row.title"
+            meta_cls = "class:meta.selected" if is_sel else "class:meta"
+            out.append(("", "  "))  # left padding
+            out.append((arrow_cls, arrow))
+            out.append((title_cls, f"{title}\n"))
+            out.append(("", "      "))  # meta indent
+            out.append((meta_cls, f"{meta}\n"))
         return out
 
     kb = KeyBindings()
@@ -178,17 +199,23 @@ def run_resume_picker(rows: list[SessionRow]) -> str | None:
     def _ctrl_c(event):  # noqa: ANN001
         event.app.exit(result=None)
 
+    # fzf-inspired aesthetic: no heavy background blocks, bright accent
+    # colors only where the eye needs them (cursor + selected title).
     style = Style.from_dict(
         {
-            "header": "bold bg:#005f87 #ffffff",
-            "footer": "bg:#262626 #808080",
-            "search": "bg:#262626",
-            "search.label": "#5fafd7 bold",
-            "row": "#d0d0d0",
-            "row.selected": "bold #ffffff bg:#005f87",
-            "meta": "#6c6c6c",
-            "meta.selected": "#bcbcbc bg:#005f87",
-            "empty": "#808080 italic",
+            "header.label": "bold #61afef",
+            "header.count": "#5f5f5f",
+            "divider": "#3a3a3a",
+            "search.symbol": "bold #61afef",
+            "footer": "#5f5f5f",
+            "footer.key": "bold #afaf87",
+            "row.cursor": "bold #ffaf00",
+            "row.cursor.dim": "#3a3a3a",
+            "row.title": "#a8a8a8",
+            "row.title.selected": "bold #61afef",
+            "meta": "#5f5f5f",
+            "meta.selected": "#9e9e9e",
+            "empty": "italic #6c6c6c",
         }
     )
 
@@ -196,24 +223,40 @@ def run_resume_picker(rows: list[SessionRow]) -> str | None:
     search_window = Window(
         content=search_control,
         height=1,
-        style="class:search",
     )
+    # Search row: a single inline row with a colored magnifier-glass
+    # symbol followed by the buffer. Achieved via a VSplit so the symbol
+    # has fixed width and the buffer extends.
+    from prompt_toolkit.layout import VSplit
+
+    search_label_window = Window(
+        content=FormattedTextControl([("class:search.symbol", "  ⌕  ")]),
+        height=1,
+        dont_extend_width=True,
+    )
+    search_row = VSplit([search_label_window, search_window])
+
     layout = Layout(
         HSplit(
             [
                 Window(
                     content=FormattedTextControl(_header_text),
-                    height=1,
+                    height=2,  # leading blank line + label
                 ),
                 Window(
-                    content=FormattedTextControl(
-                        [("class:search.label", "  ⌕  search:  ")]
-                    ),
+                    content=FormattedTextControl(_divider_text),
                     height=1,
-                    style="class:search",
                 ),
-                search_window,
+                search_row,
+                Window(
+                    content=FormattedTextControl(_divider_text),
+                    height=1,
+                ),
                 Window(content=FormattedTextControl(_list_text)),
+                Window(
+                    content=FormattedTextControl(_divider_text),
+                    height=1,
+                ),
                 Window(
                     content=FormattedTextControl(_footer_text),
                     height=1,
