@@ -598,9 +598,17 @@ async def read_user_input(
     # editor terminals (VS Code, JetBrains), so dropdown-below-input was
     # silently being overwritten by the misplaced cursor on every render.
     # Putting dropdown ABOVE input removes the dependency entirely.
+    # Filler window at the TOP of the HSplit takes all remaining vertical
+    # space, pushing the dropdown + divider + title + input row to the
+    # bottom of the terminal. This makes the dropdown HUG the input
+    # instead of floating disconnected at the top of the screen — the
+    # conventional shell-completion UX (zsh autosuggest, fish, etc.)
+    # without the CPR dependency that dropdown-below-input would need.
+    filler = Window()
     layout = Layout(
         HSplit(
             [
+                filler,
                 dropdown_window,
                 dropdown_divider,
                 title_window,
