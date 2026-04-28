@@ -2016,6 +2016,10 @@ class AgentLoop:
             )
         )
 
+        # Tier 2.A — /reasoning + /fast slash commands wrote flags to
+        # runtime.custom; translate to provider kwargs.
+        from opencomputer.agent.runtime_flags import runtime_flags_from_custom
+        _runtime_extras = runtime_flags_from_custom(self._runtime.custom)
         if stream_callback is not None:
             final_response = None
             async for event in self.provider.stream_complete(
@@ -2025,6 +2029,7 @@ class AgentLoop:
                 tools=tool_schemas,
                 max_tokens=self.config.model.max_tokens,
                 temperature=self.config.model.temperature,
+                runtime_extras=_runtime_extras,
             ):
                 if event.kind == "text_delta":
                     stream_callback(event.text)
@@ -2047,6 +2052,7 @@ class AgentLoop:
                     tools=tool_schemas,
                     max_tokens=self.config.model.max_tokens,
                     temperature=self.config.model.temperature,
+                    runtime_extras=_runtime_extras,
                 )
 
             resp = await call_with_fallback(
