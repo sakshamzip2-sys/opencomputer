@@ -74,6 +74,18 @@ _MDV2_RE = re.compile(f"([{re.escape(_MDV2_SPECIAL)}])")
 # at least gets the message body.
 _MDV2_PARSE_ERROR_MARKER = "can't parse entities"
 
+# PR 4.2 — Telegram returns 400 with this marker when the bot tries to
+# post into a forum topic that has been deleted, archived, or that the
+# bot has been booted from. We retry once WITHOUT message_thread_id so
+# the message lands in the chat's General topic instead of disappearing.
+_THREAD_NOT_FOUND_MARKER = "message thread not found"
+
+# PR 4.2 — Telegram's "General" topic in a forum is conceptually
+# message_thread_id 1, but the API REJECTS explicit thread_id=1 with
+# "message thread not found". So we must omit message_thread_id when
+# the caller passes 1 (or "1") so the post lands in General.
+_GENERAL_TOPIC_THREAD_ID = "1"
+
 
 def _escape_mdv2(text: str) -> str:
     return _MDV2_RE.sub(r"\\\1", text)
@@ -82,6 +94,24 @@ def _escape_mdv2(text: str) -> str:
 def _utf16_len(s: str) -> int:
     """Telegram's message length limit is in UTF-16 code units."""
     return len(s.encode("utf-16-le")) // 2
+
+
+def _is_thread_not_found_error(resp: httpx.Response | None) -> bool:
+    """PR 4.2 — match Telegram's "message thread not found" 400.
+
+    Returns True iff the response is HTTP 400 AND the body (case-insens)
+    contains the marker phrase. Used by ``send`` to decide whether to
+    retry without ``message_thread_id``.
+    """
+    if resp is None:
+        return False
+    if resp.status_code != 400:
+        return False
+    try:
+        body = resp.text or ""
+    except Exception:  # noqa: BLE001
+        return False
+    return _THREAD_NOT_FOUND_MARKER in body.lower()
 
 
 def _chunk_for_telegram(text: str, limit: int = 4096) -> list[str]:
@@ -781,6 +811,17 @@ class TelegramAdapter(BaseChannelAdapter):
 
     async def send(self, chat_id: str, text: str, **kwargs: Any) -> SendResult:
         assert self._client is not None
+        # PR 4.2 — forum-topic support. Caller may pass
+        # ``message_thread_id`` to target a specific topic. We omit
+        # thread_id == "1" (Telegram's General topic) because the API
+        # rejects explicit thread_id=1 with "message thread not found".
+        # On a thread-not-found 400 from a non-General topic, we retry
+        # the same call WITHOUT message_thread_id so the message at
+        # least lands in General instead of vanishing.
+        thread_id = kwargs.get("message_thread_id")
+        if thread_id is not None and str(thread_id) == _GENERAL_TOPIC_THREAD_ID:
+            thread_id = None
+
         # PR 3a.2 — outbound MarkdownV2 formatting. Each chunk is
         # converted; on a parse-error (rare — usually overlap with
         # user-supplied backticks) we retry the SAME call without
@@ -790,31 +831,55 @@ class TelegramAdapter(BaseChannelAdapter):
         # network errors (ConnectError etc.) before we even see HTTP.
         for chunk in _chunk_for_telegram(text, limit=self.max_message_length):
             converted = _to_mdv2(chunk)
+            payload: dict[str, Any] = {
+                "chat_id": chat_id,
+                "text": converted,
+                "parse_mode": "MarkdownV2",
+                "disable_notification": False,
+            }
+            if thread_id is not None:
+                payload["message_thread_id"] = thread_id
             try:
                 resp = await self._post_with_retry(
                     f"{self.base_url}/sendMessage",
-                    json={
-                        "chat_id": chat_id,
-                        "text": converted,
-                        "parse_mode": "MarkdownV2",
-                        "disable_notification": False,
-                    },
+                    json=payload,
                 )
                 if isinstance(resp, SendResult):
                     return resp  # exhausted retries on transient errors
+                # PR 4.2 — thread-not-found fallback: retry without the
+                # thread id so the post lands in General. Only triggers
+                # when we actually had a thread id to begin with.
+                if thread_id is not None and _is_thread_not_found_error(resp):
+                    logger.warning(
+                        "telegram: message_thread_id=%s not found in chat %s; "
+                        "retrying without thread",
+                        thread_id, chat_id,
+                    )
+                    fallback_payload = {
+                        k: v for k, v in payload.items() if k != "message_thread_id"
+                    }
+                    resp = await self._post_with_retry(
+                        f"{self.base_url}/sendMessage",
+                        json=fallback_payload,
+                    )
+                    if isinstance(resp, SendResult):
+                        return resp
                 # Parse-error fallback: re-send with the original (un-converted)
                 # text and no parse_mode.
                 if (
                     resp.status_code == 400
                     and _MDV2_PARSE_ERROR_MARKER in resp.text.lower()
                 ):
+                    plain_payload: dict[str, Any] = {
+                        "chat_id": chat_id,
+                        "text": chunk,
+                        "disable_notification": False,
+                    }
+                    if thread_id is not None:
+                        plain_payload["message_thread_id"] = thread_id
                     resp = await self._post_with_retry(
                         f"{self.base_url}/sendMessage",
-                        json={
-                            "chat_id": chat_id,
-                            "text": chunk,
-                            "disable_notification": False,
-                        },
+                        json=plain_payload,
                     )
                     if isinstance(resp, SendResult):
                         return resp
