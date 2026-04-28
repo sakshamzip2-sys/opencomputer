@@ -756,6 +756,25 @@ class AgentLoop:
         if prefetched:
             system = system + "\n\n## Relevant memory\n\n" + prefetched
 
+        # OpenClaw 1.B-alt — local-FTS5 proactive recall prepend.
+        # Composes with Honcho prefetch above; gated by config flag (default OFF).
+        # Both append to the per-turn ``system`` so the prefix cache stays warm.
+        if getattr(self.config.memory, "active_memory_enabled", False):
+            from opencomputer.agent.active_memory import (
+                ActiveMemoryConfig,
+                ActiveMemoryInjector,
+            )
+
+            am_block = ActiveMemoryInjector(
+                self.db,
+                config=ActiveMemoryConfig(
+                    enabled=True,
+                    top_n=int(getattr(self.config.memory, "active_memory_top_n", 3)),
+                ),
+            ).recall_block(user_message)
+            if am_block:
+                system = system + "\n\n## Active memory\n\n" + am_block
+
         # Hermes channel-port (PR 5): per-channel ephemeral system
         # prompt + auto-loaded skills, threaded in via
         # ``RuntimeContext.custom`` by ``Dispatch._build_channel_runtime``.
