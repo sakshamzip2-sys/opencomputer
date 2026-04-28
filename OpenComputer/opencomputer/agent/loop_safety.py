@@ -29,7 +29,6 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque
 
 
 class LoopAbortError(RuntimeError):
@@ -54,8 +53,8 @@ class _Frame:
     """
 
     window_size: int
-    tool_window: Deque[tuple[str, str]] = field(default_factory=deque)
-    text_window: Deque[str] = field(default_factory=deque)
+    tool_window: deque[tuple[str, str]] = field(default_factory=deque)
+    text_window: deque[str] = field(default_factory=deque)
     consecutive_flags: int = 0
     last_warning: str = ""
 

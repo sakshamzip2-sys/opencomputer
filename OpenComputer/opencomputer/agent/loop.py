@@ -18,6 +18,8 @@ we studied condense to this:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import time
@@ -31,6 +33,7 @@ from opencomputer.agent.compaction import CompactionEngine
 from opencomputer.agent.config import Config
 from opencomputer.agent.episodic import EpisodicMemory
 from opencomputer.agent.injection import engine as injection_engine
+from opencomputer.agent.loop_safety import LoopAbortError, LoopDetector
 from opencomputer.agent.memory import MemoryManager
 from opencomputer.agent.memory_bridge import MemoryBridge
 from opencomputer.agent.memory_context import MemoryContext
@@ -396,6 +399,14 @@ class AgentLoop:
         except Exception:  # never break agent startup over an evolution bug
             self._evolution_subscription = None
 
+        # OpenClaw 1.C — sliding-window repetition detector. Frames are
+        # keyed on (session_id, delegation_depth) so a delegated subagent
+        # (which gets a fresh AgentLoop in practice — verified Phase 0.8)
+        # can't poison the parent's window even if a future refactor
+        # hot-paths a single LoopDetector across loops. Default thresholds
+        # are permissive; healthy sessions never trip.
+        self._loop_detector = LoopDetector()
+
         # Phase 3.F — when system-control is on at construction time,
         # attach the structured-logger bus listener so SignalEvents are
         # mirrored to ``agent.log``. Best-effort: a missing system_control
@@ -458,6 +469,18 @@ class AgentLoop:
         # Expose current session id to memory tools via the context provider.
         self._current_session_id = sid
 
+        # OpenClaw 1.C — push the (session_id, delegation_depth) frame for
+        # the repetition detector. Idempotent: re-entering the same session
+        # (resume mid-stream after an exception) keeps existing history so
+        # a model that was already looping doesn't get a clean slate.
+        # Stash both keys on ``self`` so internal helpers don't have to
+        # thread them through every call signature; ``finally`` pops the
+        # frame at the bottom of this method.
+        _loop_depth = self._runtime.delegation_depth
+        self._loop_detector_session_id = sid
+        self._loop_detector_depth = _loop_depth
+        self._loop_detector.push_frame(sid, _loop_depth)
+
         # T1 of auto-skill-evolution plan — anchor session wall-clock start
         # so SessionEndEvent.duration_seconds is meaningful from every exit
         # path (including the slash-command early return below). Set BEFORE
@@ -517,6 +540,13 @@ class AgentLoop:
             self._emit_before_message_write(session_id=sid, message=assistant_msg)
             self.db.append_message(sid, assistant_msg)
             self.db.end_session(sid)
+            # OpenClaw 1.C — slash-command path bypasses the iteration
+            # loop and its finally-block, so pop the detector frame here
+            # to keep frame state symmetric with push_frame above.
+            try:
+                self._loop_detector.pop_frame(sid, _loop_depth)
+            except Exception:  # noqa: BLE001 — never break a slash-command return
+                _log.debug("loop_detector.pop_frame failed (slash path)", exc_info=True)
             # T1 of auto-skill-evolution plan — slash-command path is a
             # session terminal too; emit so subscribers see consistent
             # session-end coverage.
@@ -988,6 +1018,25 @@ class AgentLoop:
                 total_input += step.input_tokens
                 total_output += step.output_tokens
 
+                # OpenClaw 1.C — record assistant text into the repetition
+                # detector. Only record non-empty text; an assistant turn
+                # whose only payload is a tool_call has empty content and
+                # would otherwise hash to a single constant that flags
+                # every multi-tool-call session as a "repeat".
+                _assistant_text = step.assistant_message.content or ""
+                if _assistant_text.strip():
+                    _text_hash = hashlib.sha256(
+                        _assistant_text.encode("utf-8"),
+                    ).hexdigest()[:16]
+                    self._loop_detector.record_assistant_text(
+                        sid, _loop_depth, _text_hash,
+                    )
+                    if self._loop_detector.must_stop(sid, _loop_depth):
+                        raise LoopAbortError(
+                            self._loop_detector.warning(sid, _loop_depth)
+                            or "loop detector aborted",
+                        )
+
                 # PR #221 follow-up Item 2 — persist the per-turn deltas onto
                 # the ``sessions`` row so ``/usage`` (and any future analytics)
                 # can read real cumulative counts. ``add_tokens`` is a no-op
@@ -1218,6 +1267,57 @@ class AgentLoop:
                     self._emit_before_message_write(session_id=sid, message=_msg)
                 self.db.append_messages_batch(sid, turn_messages)
 
+                # OpenClaw 1.C — record each tool call into the repetition
+                # detector AFTER dispatch (we want to see the args the agent
+                # actually executed, including any TRANSFORM_TOOL_RESULT
+                # mutations). On flag: append a single ``<system-reminder>``
+                # to the user-side of the conversation so the next LLM call
+                # sees it. On must-stop: raise ``LoopAbortError`` — the outer
+                # except handler below converts it into a clean final
+                # message rather than letting the model spin.
+                _flagged_this_turn = False
+                for _tc in step.assistant_message.tool_calls or []:
+                    try:
+                        _args_blob = json.dumps(
+                            _tc.arguments or {}, sort_keys=True, default=str,
+                        )
+                    except (TypeError, ValueError):
+                        # Args contained something json can't serialise even
+                        # with default=str — fall back to repr so we still
+                        # get a stable hash. Repetition detection on
+                        # un-hashable args is best-effort by definition.
+                        _args_blob = repr(_tc.arguments)
+                    _args_hash = hashlib.sha256(
+                        _args_blob.encode("utf-8"),
+                    ).hexdigest()[:16]
+                    self._loop_detector.record_tool_call(
+                        sid, _loop_depth, _tc.name, _args_hash,
+                    )
+                    if self._loop_detector.must_stop(sid, _loop_depth):
+                        raise LoopAbortError(
+                            self._loop_detector.warning(sid, _loop_depth)
+                            or "loop detector aborted",
+                        )
+                    if (
+                        not _flagged_this_turn
+                        and self._loop_detector.flagged(sid, _loop_depth)
+                    ):
+                        _flagged_this_turn = True
+                if _flagged_this_turn:
+                    _warning = self._loop_detector.warning(sid, _loop_depth)
+                    _reminder = Message(
+                        role="user",
+                        content=f"<system-reminder>{_warning}</system-reminder>",
+                    )
+                    messages.append(_reminder)
+                    # Persist so a resumed session sees the same context;
+                    # silently dropping the nudge would let the model
+                    # repeat the same loop on next start.
+                    self._emit_before_message_write(
+                        session_id=sid, message=_reminder,
+                    )
+                    self.db.append_message(sid, _reminder)
+
             # Budget exhausted
             final = Message(
                 role="assistant",
@@ -1242,12 +1342,47 @@ class AgentLoop:
             _session_end_reason = "timeout"
             _session_had_errors = True
             raise
+        except LoopAbortError as exc:
+            # OpenClaw 1.C — anti-loop / repetition detector signalled
+            # ``must_stop()``. Surface a single clean assistant message
+            # rather than re-raising so CLI/gateway callers don't have
+            # to special-case a new exception type. Persist the synthetic
+            # assistant turn so a resumed session sees the same final
+            # state. ``end_reason`` flags this as an error-class exit so
+            # the SessionEndEvent reflects truth.
+            _session_end_reason = "loop_aborted"
+            _session_had_errors = True
+            final = Message(
+                role="assistant",
+                content=f"Agent loop stopped: {exc}",
+            )
+            messages.append(final)
+            self._emit_before_message_write(session_id=sid, message=final)
+            self.db.append_message(sid, final)
+            self.db.end_session(sid)
+            return ConversationResult(
+                final_message=final,
+                messages=messages,
+                session_id=sid,
+                iterations=iterations,
+                input_tokens=total_input,
+                output_tokens=total_output,
+            )
         except Exception:
             _session_end_reason = "error"
             _session_had_errors = True
             raise
         finally:
             _session_iterations = iterations
+            # OpenClaw 1.C — pop the detector frame so a long-running
+            # daemon doesn't accumulate one frame per session id forever.
+            # ``pop_frame`` is safe-on-absent so a path that never made it
+            # past ``push_frame`` (rare; only if the push itself raised)
+            # still tears down cleanly.
+            try:
+                self._loop_detector.pop_frame(sid, _loop_depth)
+            except Exception:  # noqa: BLE001 — never let teardown break the loop
+                _log.debug("loop_detector.pop_frame failed", exc_info=True)
             await self._emit_session_end_event(
                 session_id=sid,
                 end_reason=_session_end_reason,

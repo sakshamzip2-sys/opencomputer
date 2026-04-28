@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import pytest
 
-
 # ─── single-frame happy paths ─────────────────────────────────────────
 
 
@@ -192,87 +191,102 @@ def test_loop_abort_error_is_subclass_of_runtime_error():
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_aborts_on_repeated_identical_tool_calls(monkeypatch, tmp_path):
+async def test_agent_loop_aborts_on_repeated_identical_tool_calls(tmp_path):
     """Synthetic: feed AgentLoop a provider that always asks for Bash(ls).
 
-    The detector defaults are 3 tool repeats + 2 consecutive flags, so
-    after enough identical Bash(ls) calls the loop must surface a
-    LoopAbortError-derived final message rather than letting the model
-    spin forever.
+    The detector with shortened thresholds (max_tool_repeats=2,
+    max_consecutive_flags=2) flips to ``must_stop`` after the second-and-
+    third identical tool call inside the same window. The loop must
+    surface a ``LoopAbortError`` and convert it to a clean
+    ``"Agent loop stopped: ..."`` final message rather than letting the
+    model spin to ``max_iterations``.
     """
-    from plugin_sdk.core import (
-        Message,
-        ProviderResponse,
-        ToolCall,
-        Usage,
+    from opencomputer.agent.config import (
+        Config,
+        LoopConfig,
+        MemoryConfig,
+        ModelConfig,
+        SessionConfig,
     )
-    from plugin_sdk.provider_contract import BaseProvider
-
-    from opencomputer.agent.config import Config, LoopConfig, ModelConfig, MemoryConfig, SessionConfig
     from opencomputer.agent.loop import AgentLoop
+    from opencomputer.tools.registry import registry as _registry
+    from plugin_sdk.core import Message, ToolCall, ToolResult
+    from plugin_sdk.provider_contract import BaseProvider, ProviderResponse, Usage
+    from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
-    # Provider stub: every call asks the agent to run Bash(ls) again.
-    class StubProvider(BaseProvider):
-        def __init__(self):
-            self._counter = 0
+    # Provider stub: every call asks the agent to run a tool with the
+    # exact same args, so args_hash is constant across iterations.
+    class _StubProvider(BaseProvider):
+        def __init__(self) -> None:
+            self.complete_calls = 0
+            self.name = "stub"
 
-        async def complete(self, *, model, messages, system, tools, max_tokens, temperature):
-            self._counter += 1
+        async def complete(self, **_kwargs):
+            self.complete_calls += 1
             tc = ToolCall(
-                id=f"call-{self._counter}",
-                name="Bash",
+                id=f"call-{self.complete_calls}",
+                name="_LoopSafetyStubTool",
                 arguments={"command": "ls"},
             )
-            msg = Message(role="assistant", content="", tool_calls=[tc])
             return ProviderResponse(
-                message=msg,
+                message=Message(role="assistant", content="", tool_calls=[tc]),
                 stop_reason="tool_use",
                 usage=Usage(input_tokens=1, output_tokens=1),
             )
 
-        async def stream_complete(self, *args, **kwargs):  # pragma: no cover
+        async def stream_complete(self, **_kwargs):  # pragma: no cover
             raise NotImplementedError
 
-    # Tool stub registry: dispatch returns a constant ToolResult so the
-    # args_hash for Bash({"command":"ls"}) is identical every iteration.
-    from opencomputer.tools.registry import registry as _registry
-    from plugin_sdk.core import ToolResult
-    from plugin_sdk.tool_contract import BaseTool, ToolSchema
-
-    class StubBashTool(BaseTool):
+    # Tool stub: returns a constant successful result. Registered under a
+    # unique name so we don't collide with the real Bash tool that other
+    # tests / live loop relies on.
+    class _StubTool(BaseTool):
         @property
         def schema(self) -> ToolSchema:
             return ToolSchema(
-                name="Bash",
-                description="stub",
-                input_schema={"type": "object", "properties": {}},
+                name="_LoopSafetyStubTool",
+                description="loop-safety integration test stub",
+                parameters={"type": "object", "properties": {}},
             )
 
-        async def execute(self, arguments, *, session_id="", turn_index=0):
-            return ToolResult(tool_call_id="ignored", content="ok", is_error=False)
+        async def execute(self, call: ToolCall) -> ToolResult:
+            return ToolResult(
+                tool_call_id=call.id,
+                content="ok",
+                is_error=False,
+            )
 
-    _registry.register(StubBashTool(), replace=True)
+    _registry.unregister("_LoopSafetyStubTool")  # idempotent
+    _registry.register(_StubTool())
+    try:
+        cfg = Config(
+            model=ModelConfig(provider="stub", model="stub-model"),
+            loop=LoopConfig(max_iterations=20),
+            session=SessionConfig(db_path=tmp_path / "sessions.db"),
+            memory=MemoryConfig(
+                declarative_path=tmp_path / "MEMORY.md",
+                user_path=tmp_path / "USER.md",
+                skills_path=tmp_path / "skills",
+                soul_path=tmp_path / "SOUL.md",
+            ),
+        )
 
-    # Build a minimal Config pointing the SQLite DB into tmp_path.
-    cfg = Config(
-        model=ModelConfig(model="stub", max_tokens=1024, temperature=0.0),
-        loop=LoopConfig(max_iterations=20),
-        session=SessionConfig(db_path=tmp_path / "sessions.db"),
-        memory=MemoryConfig(
-            declarative_path=tmp_path / "MEMORY.md",
-            skills_path=tmp_path / "skills",
-            user_path=tmp_path / "USER.md",
-            soul_path=tmp_path / "SOUL.md",
-        ),
+        loop = AgentLoop(provider=_StubProvider(), config=cfg)
+        # Tighten thresholds so the abort fires quickly and deterministically.
+        loop._loop_detector.max_tool_repeats = 2
+        loop._loop_detector.max_consecutive_flags = 2
+
+        result = await loop.run_conversation(
+            user_message="please list files",
+            session_id="loop-safety-integration-1",
+        )
+    finally:
+        _registry.unregister("_LoopSafetyStubTool")
+
+    assert "Agent loop stopped" in (result.final_message.content or ""), (
+        f"expected loop-aborted final message, got: "
+        f"{result.final_message.content!r}"
     )
-
-    loop = AgentLoop(provider=StubProvider(), config=cfg)
-    # Guard: shorten thresholds so the test is fast and deterministic.
-    loop._loop_detector.max_tool_repeats = 2
-    loop._loop_detector.max_consecutive_flags = 2
-
-    result = await loop.run_conversation("please list files")
-
-    # The final message must be a synthetic abort notice, not a tool-loop
-    # exhaustion message.
-    assert "Agent loop stopped" in (result.final_message.content or "")
+    # The loop must terminate well before the iteration budget runs out —
+    # otherwise the detector isn't doing its job.
+    assert result.iterations < 20
