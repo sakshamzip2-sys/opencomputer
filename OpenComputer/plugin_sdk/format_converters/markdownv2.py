@@ -84,32 +84,28 @@ def _convert_unsafe(text: str) -> str:
 
     text = _LINK_RE.sub(stash_link, text)
 
-    # 4. Convert formatting BEFORE escaping (so `**` doesn't get escaped first)
-    text = _BOLD_DOUBLE_RE.sub(
-        lambda m: f"\x01B{escape_mdv2(m.group(1))}\x01B", text
-    )
-    text = _BOLD_UNDER_RE.sub(
-        lambda m: f"\x01B{escape_mdv2(m.group(1))}\x01B", text
-    )
-    text = _STRIKE_RE.sub(
-        lambda m: f"\x01S{escape_mdv2(m.group(1))}\x01S", text
-    )
+    # 4. Convert formatting BEFORE escaping (so `**` doesn't get escaped first).
+    # IMPORTANT: do NOT call escape_mdv2 on the inner content here — step 5
+    # below escapes inter-marker text uniformly, so pre-escaping inside the
+    # markers would produce double-escaped output (e.g. `**1.5**` -> `*1\\.5*`
+    # instead of the correct `*1\.5*`).
+    text = _BOLD_DOUBLE_RE.sub(lambda m: f"\x01B{m.group(1)}\x01B", text)
+    text = _BOLD_UNDER_RE.sub(lambda m: f"\x01B{m.group(1)}\x01B", text)
+    text = _STRIKE_RE.sub(lambda m: f"\x01S{m.group(1)}\x01S", text)
     # Single-asterisk italic: only when surrounded by non-asterisk
     text = re.sub(
         r"(?<!\*)\*([^*\n]+)\*(?!\*)",
-        lambda m: f"\x01I{escape_mdv2(m.group(1))}\x01I",
+        lambda m: f"\x01I{m.group(1)}\x01I",
         text,
     )
     # Single-underscore italic
     text = re.sub(
         r"(?<!_)_([^_\n]+)_(?!_)",
-        lambda m: f"\x01I{escape_mdv2(m.group(1))}\x01I",
+        lambda m: f"\x01I{m.group(1)}\x01I",
         text,
     )
     # Headings -> bold
-    text = _HEADING_RE.sub(
-        lambda m: f"\x01B{escape_mdv2(m.group(2))}\x01B", text
-    )
+    text = _HEADING_RE.sub(lambda m: f"\x01B{m.group(2)}\x01B", text)
 
     # 5. Escape ALL remaining special chars in non-marker text.
     # Split on placeholders so we don't escape them.

@@ -105,6 +105,30 @@ def test_mdv2_fallback_does_not_raise():
     assert isinstance(out, str)
 
 
+# PR-1 review C1 — single-escape inside formatting markers.
+# The pipeline previously pre-escaped content inside **bold**/*italic*/~~strike~~/
+# # heading substitutions AND re-ran escape_mdv2 over inter-marker chunks in
+# step 5, double-escaping every special char. Telegram rendered the doubled
+# backslash as a literal, breaking every formatted run that contained
+# punctuation. Step 5 now handles all escaping uniformly.
+
+
+def test_mdv2_special_chars_inside_bold_single_escape():
+    assert to_mdv2("**1.5**") == r"*1\.5*"
+
+
+def test_mdv2_special_chars_inside_italic_single_escape():
+    assert to_mdv2("*hello (world)*") == r"_hello \(world\)_"
+
+
+def test_mdv2_special_chars_inside_heading_single_escape():
+    assert to_mdv2("# v1.0").strip() == r"*v1\.0*"
+
+
+def test_mdv2_special_chars_inside_strike_single_escape():
+    assert to_mdv2("~~beta v0.5~~") == r"~beta v0\.5~"
+
+
 # Amendment B.6 — fuzz test
 @pytest.mark.parametrize("seed", range(50))
 def test_markdownv2_fuzz_does_not_raise(seed):
