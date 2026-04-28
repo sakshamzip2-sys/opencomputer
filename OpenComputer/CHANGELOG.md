@@ -4,6 +4,33 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Fixed — vibe classifier: detached from companion gate, per-turn log added (Path A)
+
+Previously the vibe classifier was nested inside `if persona_id ==
+"companion":` in `loop.py`, so on technical/coding sessions (which
+classify as the `coding` persona, not `companion`) the classifier was
+never invoked. A `vibe` column existed on `sessions` and a verdict was
+*supposed* to be persisted, but the gate meant production carried
+**zero** verdicts in practice — i.e. no evidence to evaluate the
+classifier or A/B a future replacement against.
+
+- `opencomputer/agent/loop.py` — `classify_vibe` + `set_session_vibe`
+  now run on every user turn regardless of active persona. The
+  companion-only "PREVIOUS-SESSION VIBE" prompt anchor stays
+  companion-gated (it's a prompt-shaping concern, not a data-collection
+  one).
+- `opencomputer/agent/state.py` — schema bumped to **v6**. New table
+  `vibe_log(id, session_id, message_id, vibe, classifier_version,
+  timestamp)` records one row per classification call. The
+  `classifier_version` tag is the lever future swaps (regex → embedding
+  → LLM) will use to A/B against the regex baseline. `record_vibe()`
+  resolves the latest user `message_id` automatically when the caller
+  doesn't pass one, so the call site stays minimal.
+- 8 tests added in `tests/test_vibe_log.py` covering schema shape,
+  index presence, classifier-version preservation, message-id
+  resolution, ordering, the empty-session case, and the headline
+  regression (vibe logs even under non-companion persona).
+
 ### Added (T2 batch — 4 skills closing remaining gap-fill roadmap items)
 
 Four skills shipped together as a single PR (each was small enough that
