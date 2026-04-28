@@ -1056,23 +1056,18 @@ class AgentLoop:
                         turn_index=turn_start_index,
                         runtime=self._runtime,
                     )
-                    # TS-T6: kick off async title generation after the first
-                    # user→assistant exchange. Daemon thread, fire-and-forget;
-                    # ``maybe_auto_title`` self-skips on later turns and on
-                    # already-titled sessions, so we can call it
-                    # unconditionally here without checking the turn index.
-                    try:
-                        from opencomputer.agent.title_generator import maybe_auto_title
-
-                        maybe_auto_title(
-                            session_db=self.db,
-                            session_id=sid,
-                            user_message=user_message,
-                            assistant_response=step.assistant_message.content or "",
-                            conversation_history=messages,
-                        )
-                    except Exception:  # noqa: BLE001 — title gen is best-effort
-                        pass
+                    # Auto-titler intentionally DISABLED (2026-04-28).
+                    # The cheap-LLM call frequently returned a generic
+                    # "Hello! I'm Claude, an AI assistant made by
+                    # Anthropic..." greeting as the "title", which the
+                    # new corner indicator (PR #214) then showed above
+                    # the input — bad UX (user feedback Image #12).
+                    # Until we have a more reliable summarizing prompt
+                    # or a smaller dedicated title model, titles are
+                    # only set via explicit ``/rename``. The corner
+                    # indicator hides itself when no title is present,
+                    # so fresh sessions show no clutter.
+                    pass
                     self.db.end_session(sid)
                     return ConversationResult(
                         final_message=final_assistant_msg,
@@ -1261,6 +1256,31 @@ class AgentLoop:
         # real anchors to land — without them, the companion has nothing
         # specific to point at when asked "how are you?". The firing's
         # ``hint_text`` is concrete and actionable.
+        # Path A.4 (2026-04-27, generalised 2026-04-28): vibe classification
+        # runs on EVERY user turn regardless of active persona. The verdict
+        # is persisted on ``sessions.vibe`` (most-recent) AND appended to
+        # ``vibe_log`` (per-turn, with classifier_version) so:
+        #   1. companion overlay still has continuity for "you sounded
+        #      frustrated yesterday";
+        #   2. offline analysis has a real corpus to A/B future classifier
+        #      backends (regex vs embedding vs LLM) against the production
+        #      baseline. Previously this entire branch was gated behind
+        #      ``persona_id == "companion"`` which meant 100% NULL on
+        #      non-companion sessions — i.e. zero evidence to learn from.
+        try:
+            from opencomputer.agent.vibe_classifier import classify_vibe
+
+            if last_user_messages:
+                current_vibe = classify_vibe(list(last_user_messages))
+                self.db.set_session_vibe(session_id, current_vibe)
+                self.db.record_vibe(
+                    session_id,
+                    current_vibe,
+                    classifier_version="regex_v1",
+                )
+        except Exception:  # noqa: BLE001 — degrade silently
+            _log.debug("vibe-classify / per-turn log failed", exc_info=True)
+
         if result.persona_id == "companion":
             try:
                 from opencomputer.awareness.life_events.registry import (
@@ -1289,21 +1309,11 @@ class AgentLoop:
                     exc_info=True,
                 )
 
-            # Path A.4 (2026-04-27): mood thread.
-            # 1. Classify the user's apparent vibe from the last few
-            #    messages and persist on the session row.
-            # 2. Append a "PREVIOUS-SESSION VIBE" anchor referencing the
-            #    most recent OTHER-session vibe (so the companion can
-            #    naturally reference "you sounded frustrated yesterday").
+            # Look for the most-recent OTHER session's vibe (within the
+            # last ~72 hours) so the companion has continuity. The current
+            # session's vibe is set above; this only adds the prompt
+            # anchor and is companion-specific.
             try:
-                from opencomputer.agent.vibe_classifier import classify_vibe
-
-                if last_user_messages:
-                    current_vibe = classify_vibe(list(last_user_messages))
-                    self.db.set_session_vibe(session_id, current_vibe)
-
-                # Look for the most-recent OTHER session's vibe (within
-                # the last ~72 hours) so the companion has continuity.
                 import time as _time2
 
                 rows = self.db.list_recent_session_vibes(limit=10)
@@ -1340,7 +1350,7 @@ class AgentLoop:
                     )
             except Exception:  # noqa: BLE001 — degrade silently
                 _log.debug(
-                    "companion vibe-classify / previous-vibe lookup failed",
+                    "previous-vibe lookup failed",
                     exc_info=True,
                 )
 

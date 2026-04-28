@@ -257,6 +257,7 @@ async def read_user_input(
     *,
     profile_home: Path,
     scope: TurnCancelScope,
+    session_title: str | None = None,
 ) -> str:
     """Read one line of user input with an always-visible slash dropdown.
 
@@ -344,18 +345,16 @@ async def read_user_input(
         out: list[tuple[str, str]] = []
         for i, cmd in enumerate(state["matches"]):
             is_sel = i == state["selected_idx"]
-            arrow = "❯ " if is_sel else "  "
             args = f" {cmd.args_hint}" if cmd.args_hint else ""
-            cmd_str = f"{arrow}/{cmd.name}{args}"
-            cat_str = f"  ({cmd.category})"
-            desc_str = f"  {cmd.description}"
-            base = "class:dd.selected" if is_sel else "class:dd"
+            cursor_cls = "class:dd.cursor" if is_sel else "class:dd.cursor.dim"
+            title_cls = "class:dd.title.selected" if is_sel else "class:dd.title"
             cat_cls = "class:dd.cat.selected" if is_sel else "class:dd.cat"
             desc_cls = "class:dd.desc.selected" if is_sel else "class:dd.desc"
-            out.append((base, cmd_str))
-            out.append((cat_cls, cat_str))
-            out.append((desc_cls, desc_str))
-            out.append((base, "\n"))
+            out.append((cursor_cls, "❯ " if is_sel else "  "))
+            out.append((title_cls, f"/{cmd.name}{args}"))
+            out.append((cat_cls, f"  ({cmd.category})"))
+            out.append((desc_cls, f"  {cmd.description}"))
+            out.append(("", "\n"))
         return out
 
     def _dropdown_height():
@@ -435,15 +434,23 @@ async def read_user_input(
             return
         event.current_buffer.insert_text(data)
 
+    # fzf-inspired aesthetic: bright cyan title for the highlighted row,
+    # yellow ❯ cursor, no heavy bg blocks. Title indicator (right-aligned)
+    # uses a dim cyan box mirroring Claude Code's session-name corner tag.
     style = Style.from_dict(
         {
             "prompt": "ansigreen bold",
-            "dd": "#a8a8a8",
-            "dd.selected": "bold #ffffff bg:#005f87",
-            "dd.cat": "#5fafd7",
-            "dd.cat.selected": "#bcbcbc bg:#005f87",
-            "dd.desc": "#5fd75f",
-            "dd.desc.selected": "#5fd75f bg:#005f87 bold",
+            "dd.cursor": "bold #ffaf00",
+            "dd.cursor.dim": "#3a3a3a",
+            "dd.title": "#a8a8a8",
+            "dd.title.selected": "bold #61afef",
+            "dd.cat": "#5f87af",
+            "dd.cat.selected": "bold #61afef",
+            "dd.desc": "#6c6c6c",
+            "dd.desc.selected": "#bcbcbc",
+            "dd.divider": "#3a3a3a",
+            "title.box": "#5fafd7",
+            "title.text": "bold #5fafd7",
         }
     )
 
@@ -456,6 +463,39 @@ async def read_user_input(
         content=BufferControl(buffer=input_buffer),
         height=1,
     )
+
+    # Right-aligned session-title indicator above the input — mirrors the
+    # cyan corner tag in Claude Code (e.g. "UI-changes"). Hidden when the
+    # session has no manual title set.
+    from prompt_toolkit.layout import WindowAlign
+
+    def _title_text():
+        if not session_title:
+            return []
+        return [
+            ("class:title.box", "┤ "),
+            ("class:title.text", session_title),
+            ("class:title.box", " ├"),
+        ]
+
+    # Show the corner indicator only for sane-length titles (≤50 chars).
+    # Existing sessions may have a runaway auto-generated title (the now-
+    # disabled cheap-LLM titler sometimes returned the AI's greeting as
+    # a "title" — see Image #12). Filter those out at the UI layer so
+    # historical bad data doesn't surface.
+    def _title_is_displayable() -> bool:
+        return bool(session_title) and 1 <= len(session_title) <= 50
+
+    title_window = ConditionalContainer(
+        content=Window(
+            content=FormattedTextControl(_title_text),
+            height=1,
+            align=WindowAlign.RIGHT,
+            dont_extend_height=True,
+        ),
+        filter=Condition(_title_is_displayable),
+    )
+
     dropdown_window = ConditionalContainer(
         content=Window(
             content=FormattedTextControl(_dropdown_text),
@@ -464,16 +504,60 @@ async def read_user_input(
         ),
         filter=Condition(_has_dropdown),
     )
+    dropdown_divider = ConditionalContainer(
+        content=Window(
+            content=FormattedTextControl(
+                lambda: [("class:dd.divider", "─" * 80)]
+            ),
+            height=1,
+        ),
+        filter=Condition(_has_dropdown),
+    )
 
+    # CRITICAL: input row goes LAST in the HSplit. prompt_toolkit's
+    # renderer positions the cursor at the focused control after drawing
+    # the layout — if input is the last-drawn element, the cursor lands
+    # there NATURALLY without needing a relative-up cursor move (\x1b[NA).
+    # That relative move depends on Cursor-Position-Report which fails in
+    # editor terminals (VS Code, JetBrains), so dropdown-below-input was
+    # silently being overwritten by the misplaced cursor on every render.
+    # Putting dropdown ABOVE input removes the dependency entirely.
     layout = Layout(
         HSplit(
             [
-                VSplit([prompt_window, input_window]),
                 dropdown_window,
+                dropdown_divider,
+                title_window,
+                VSplit([prompt_window, input_window]),
             ]
         ),
         focused_element=input_window,
     )
+
+    # Construct the Output explicitly with enable_cpr=False so the
+    # renderer never sends `\x1b[6n` and never trusts CPR responses.
+    # Why: VS Code (and some JetBrains) terminals respond to CPR
+    # *partially or with a delay*, which tricks prompt_toolkit's
+    # renderer into using the CPR-dependent code path even when the
+    # response is unreliable. Forcing enable_cpr=False makes the
+    # renderer commit to the no-CPR fallback unconditionally — the
+    # path that actually works in those terminals.
+    import sys as _sys
+
+    from prompt_toolkit.output.defaults import create_output as _create_output
+
+    try:
+        _output = _create_output(stdout=_sys.stdout)
+        # The Vt100_Output instance from create_output has enable_cpr=True
+        # baked in by default; we forcibly disable it post-construction by
+        # patching the property's underlying flag. This is more robust
+        # than constructing a fresh Vt100_Output ourselves because
+        # create_output detects the right Output class for the current
+        # platform (Windows uses a different class entirely).
+        if hasattr(_output, "enable_cpr"):
+            _output.enable_cpr = False  # type: ignore[attr-defined]
+    except Exception:
+        _output = None  # let Application pick the default
 
     app: Application = Application(
         layout=layout,
@@ -482,6 +566,7 @@ async def read_user_input(
         full_screen=False,
         erase_when_done=True,
         mouse_support=False,
+        output=_output,
     )
 
     text = await app.run_async()

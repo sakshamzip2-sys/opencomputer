@@ -42,8 +42,12 @@ from typing import Any
 
 from opencomputer.profile_bootstrap.identity_reflex import gather_identity
 from opencomputer.profile_bootstrap.persistence import (
+    write_browser_history_to_graph,
+    write_calendar_to_graph,
+    write_git_log_to_graph,
     write_identity_to_graph,
     write_interview_answers_to_graph,
+    write_recent_files_to_graph,
 )
 from opencomputer.profile_bootstrap.recent_scan import (
     scan_git_log,
@@ -72,6 +76,14 @@ class BootstrapResult:
     git_commits_scanned: int = 0
     calendar_events_scanned: int = 0
     browser_visits_scanned: int = 0
+    # 2026-04-28: Layer 2 writers were unimplemented before this date.
+    # Scans returned data, BootstrapResult counted them, but the rows
+    # never made it to the user-model graph. These four counters track
+    # the actual graph write step per source.
+    recent_file_nodes_written: int = 0
+    git_nodes_written: int = 0
+    calendar_nodes_written: int = 0
+    browser_nodes_written: int = 0
     elapsed_seconds: float = 0.0
 
 
@@ -269,6 +281,43 @@ def run_bootstrap(
         else:
             _log.info("Skipping browser_history: consent not granted")
 
+    # 2026-04-28: persist Layer 2 scans to the user-model graph.
+    # Each writer is best-effort — a failure here must not block the
+    # rest of the bootstrap, so individual try/except per writer keeps
+    # one bad reader from masking the others. ``files`` is the only
+    # source that needs the user's home dir for the project-root
+    # collapse; the rest are self-contained.
+    recent_file_nodes_n = 0
+    git_nodes_n = 0
+    calendar_nodes_n = 0
+    browser_nodes_n = 0
+
+    if files:
+        try:
+            recent_file_nodes_n = write_recent_files_to_graph(
+                files, home=str(Path.home()), store=s,
+            )
+        except Exception:  # noqa: BLE001 — best-effort write
+            _log.exception("write_recent_files_to_graph failed")
+
+    if commits:
+        try:
+            git_nodes_n = write_git_log_to_graph(commits, store=s)
+        except Exception:  # noqa: BLE001
+            _log.exception("write_git_log_to_graph failed")
+
+    if calendar_events:
+        try:
+            calendar_nodes_n = write_calendar_to_graph(calendar_events, store=s)
+        except Exception:  # noqa: BLE001
+            _log.exception("write_calendar_to_graph failed")
+
+    if browser_visits:
+        try:
+            browser_nodes_n = write_browser_history_to_graph(browser_visits, store=s)
+        except Exception:  # noqa: BLE001
+            _log.exception("write_browser_history_to_graph failed")
+
     elapsed = time.monotonic() - started
     result = BootstrapResult(
         identity_nodes_written=identity_n,
@@ -277,6 +326,10 @@ def run_bootstrap(
         git_commits_scanned=len(commits),
         calendar_events_scanned=len(calendar_events),
         browser_visits_scanned=len(browser_visits),
+        recent_file_nodes_written=recent_file_nodes_n,
+        git_nodes_written=git_nodes_n,
+        calendar_nodes_written=calendar_nodes_n,
+        browser_nodes_written=browser_nodes_n,
         elapsed_seconds=elapsed,
     )
 
@@ -301,12 +354,14 @@ def extract_and_emit_motif(
     """
     from opencomputer.profile_bootstrap.llm_extractor import (
         ArtifactExtraction,
-        OllamaUnavailableError,
-        extract_artifact,
+        ExtractorUnavailableError,
+        get_extractor,
     )
     try:
-        extraction = extract_artifact(content)
-    except OllamaUnavailableError:
+        cfg = _load_config_for_extractor()
+        extractor = get_extractor(cfg)
+        extraction = extractor.extract(content)
+    except ExtractorUnavailableError:
         return False
     if extraction == ArtifactExtraction():
         # All defaults → nothing extracted.
@@ -332,3 +387,34 @@ def extract_and_emit_motif(
         },
     ))
     return True
+
+
+# ─── Cached config loader for the extractor path ─────────────────────
+
+
+_EXTRACTOR_CONFIG_CACHE: dict[str, Any] = {}
+
+
+def _load_config_for_extractor() -> Any:
+    """Load + cache config for the extractor.
+
+    Cache invalidates on config-file mtime so edits during a long-
+    running deepening pass take effect on the next call. Cheap mtime
+    stat per call beats re-parsing the YAML for each artifact.
+    """
+    from opencomputer.agent.config_store import (
+        config_file_path,
+        load_config,
+    )
+
+    path = config_file_path()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    cached = _EXTRACTOR_CONFIG_CACHE.get("entry")
+    if cached and cached[0] == mtime:
+        return cached[1]
+    cfg = load_config(path)
+    _EXTRACTOR_CONFIG_CACHE["entry"] = (mtime, cfg)
+    return cfg

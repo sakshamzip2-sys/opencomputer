@@ -34,6 +34,77 @@ Plan + spec:
 - `docs/superpowers/specs/2026-04-28-passive-education-design.md`
 - `docs/superpowers/plans/2026-04-28-passive-education.md`
 
+### Added — Layer 3 extractor: smart fallback to a cloud key when Ollama is missing
+
+Ollama-default is privacy-correct but felt clunky for users who already
+have an Anthropic or OpenAI key in their env — they had to install a
+second LLM stack just to make `oc profile deepen` work. New behavior:
+on the FIRST `deepen` run, when ALL of these hold —
+
+- `deepening.extractor` is the default (`ollama`),
+- `ollama` is not on PATH,
+- `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set in env,
+- stderr is a TTY (i.e. interactive run, not CI / daemon),
+- no `~/.opencomputer/<profile>/extractor_setup.json` marker exists,
+
+— the factory prompts:
+
+```
+Ollama is not installed, but ANTHROPIC_API_KEY is set in your environment.
+[ ... cost + privacy disclosure ... ]
+Use anthropic for now? You can switch later by editing config.yaml.
+[y/N]:
+```
+
+`y` writes `deepening.extractor: <backend>` to `config.yaml` AND
+pre-acks the privacy banner so it doesn't fire again. `n` writes a
+"declined" marker so the prompt never re-fires until the user clears
+it. Either way, the factory never asks twice.
+
+**Privacy posture preserved:** the prompt explicitly discloses cost,
+privacy implications, and the Ollama install instructions before
+asking. Default extractor is unchanged (`ollama`); the prompt only
+fires when the default would otherwise fail anyway.
+
+Also fixed a save-round-trip bug where `_to_yaml_dict` didn't
+serialize the `deepening` block (introduced when the field was added
+but never wired through the writer path) — `save_config(cfg)` followed
+by `load_config()` now preserves `deepening.extractor`.
+
+12 new tests in `tests/test_profile_bootstrap_extractor_pluggable.py`
+covering: candidate ordering (Anthropic preferred), all five
+no-prompt gates, accept-and-persist, decline-and-mark, EOF/Ctrl-D
+handling, and three end-to-end factory paths (fallback fires /
+fallback skipped on explicit choice / fallback skipped when Ollama
+present).
+
+### Added — pluggable Layer 3 extractor (Ollama / Anthropic / OpenAI)
+
+`opencomputer profile deepen` now supports three extractor backends.
+**Default stays Ollama** — privacy-by-default, content never leaves
+the machine. Users with an existing `ANTHROPIC_API_KEY` /
+`OPENAI_API_KEY` can switch via `config.yaml`:
+
+```yaml
+deepening:
+  extractor: anthropic   # or openai, or ollama (default)
+  model: ""              # empty → backend-specific default
+  daily_cost_cap_usd: 0.50
+```
+
+First switch to a non-Ollama backend prints a one-time privacy
+banner and writes an ack marker per backend per profile. Cost is
+recorded via the existing `cost_guard` (USD estimated from token
+counts). Honors `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` for proxy
+setups (Claude Router).
+
+Public surface preserved: `extract_artifact()`, `is_ollama_available()`,
+`OllamaUnavailableError` (now an alias of `ExtractorUnavailableError`).
+Internals use a `Protocol` + 3 implementations + factory mirroring
+the `Classifier[L]` shape from PR #201. SDK-direct (no async wrapper).
+
+28 new tests in `tests/test_profile_bootstrap_extractor_pluggable.py`.
+
 ### Added (T2 batch — 4 skills closing remaining gap-fill roadmap items)
 
 Four skills shipped together as a single PR (each was small enough that

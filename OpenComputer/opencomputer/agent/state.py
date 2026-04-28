@@ -34,7 +34,7 @@ from plugin_sdk.core import Message, ToolCall
 #: to NULL. v5 = Tier-A item 11 ``tool_usage`` table — per-tool-call
 #: telemetry for ``opencomputer insights`` (tool, duration_ms, error,
 #: model, ts). Existing data unaffected; the table starts empty.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -209,6 +209,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (2, 3): "_migrate_v2_to_v3",
     (3, 4): "_migrate_v3_to_v4",
     (4, 5): "_migrate_v4_to_v5",
+    (5, 6): "_migrate_v5_to_v6",
 }
 
 
@@ -331,6 +332,40 @@ def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
             ON tool_usage(ts DESC);
         CREATE INDEX IF NOT EXISTS idx_tool_usage_tool
             ON tool_usage(tool);
+        """
+    )
+
+
+def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
+    """Per-message vibe verdict log (2026-04-28).
+
+    The session-level ``sessions.vibe`` column only retains the most-recent
+    verdict and was previously gated behind the companion-persona overlay,
+    so production carried zero per-turn evidence to evaluate the
+    classifier against. ``vibe_log`` keeps every verdict — one row per
+    user turn — tagged with ``classifier_version`` so a future swap
+    (regex → embedding/LLM) can A/B against the existing baseline.
+
+    ``message_id`` is nullable: we record the verdict in the same lane
+    where the user message has just been written, but the FK is loose so
+    a cleanup of legacy messages does not orphan classifier evidence.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS vibe_log (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id          TEXT NOT NULL,
+            message_id          INTEGER,
+            vibe                TEXT NOT NULL,
+            classifier_version  TEXT NOT NULL,
+            timestamp           REAL NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_vibe_log_session
+            ON vibe_log(session_id, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_vibe_log_classifier
+            ON vibe_log(classifier_version, timestamp DESC);
         """
     )
 
@@ -569,6 +604,56 @@ class SessionDB:
                 "UPDATE sessions SET vibe = ?, vibe_updated = ? WHERE id = ?",
                 (vibe, time.time(), session_id),
             )
+
+    def record_vibe(
+        self,
+        session_id: str,
+        vibe: str,
+        *,
+        classifier_version: str = "regex_v1",
+        message_id: int | None = None,
+        timestamp: float | None = None,
+    ) -> int:
+        """Append one row to ``vibe_log``.
+
+        Returns the inserted row id. Caller should pass ``classifier_version``
+        whenever a new backend ships (e.g. ``"embed_v1"``) so offline A/B
+        analysis can partition by source. ``message_id`` is optional —
+        when omitted the latest user-role message id for the session is
+        looked up so the log entry still anchors to a turn.
+        """
+        ts = float(timestamp) if timestamp is not None else time.time()
+        with self._txn() as conn:
+            if message_id is None:
+                row = conn.execute(
+                    "SELECT id FROM messages "
+                    "WHERE session_id = ? AND role = 'user' "
+                    "ORDER BY id DESC LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+                resolved_message_id = int(row[0]) if row is not None else None
+            else:
+                resolved_message_id = int(message_id)
+            cur = conn.execute(
+                "INSERT INTO vibe_log "
+                "(session_id, message_id, vibe, classifier_version, timestamp) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, resolved_message_id, vibe, classifier_version, ts),
+            )
+            return int(cur.lastrowid or 0)
+
+    def list_vibe_log_for_session(
+        self, session_id: str, *, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return per-turn vibe verdicts for a session, newest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, session_id, message_id, vibe, classifier_version, timestamp "
+                "FROM vibe_log WHERE session_id = ? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (session_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def list_recent_session_vibes(self, limit: int = 5) -> list[dict[str, Any]]:
         """Return the N most-recent sessions that have a vibe classified.
