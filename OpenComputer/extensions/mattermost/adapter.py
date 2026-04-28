@@ -101,9 +101,15 @@ class MattermostAdapter(BaseChannelAdapter):
         if kwargs.get("root_id"):
             payload["root_id"] = kwargs["root_id"]
         try:
-            resp = await self._client.post(
-                f"{self._base_url}/api/v4/posts", json=payload
+            # PR #221 O2 — wrap REST POST with the base adapter's
+            # transient-error retry helper.
+            resp = await self._send_with_retry(
+                self._client.post,
+                f"{self._base_url}/api/v4/posts",
+                json=payload,
             )
+            if isinstance(resp, SendResult):
+                return resp  # exhausted retries on transient errors
             if resp.status_code != 201:
                 return SendResult(
                     success=False,
@@ -131,7 +137,9 @@ class MattermostAdapter(BaseChannelAdapter):
 
         name = _emoji_to_emoji_name(emoji)
         try:
-            resp = await self._client.post(
+            # PR #221 O2 — wrap reaction POST with the retry helper.
+            resp = await self._send_with_retry(
+                self._client.post,
                 f"{self._base_url}/api/v4/reactions",
                 json={
                     "user_id": self._user_id,
@@ -139,6 +147,8 @@ class MattermostAdapter(BaseChannelAdapter):
                     "emoji_name": name,
                 },
             )
+            if isinstance(resp, SendResult):
+                return resp  # exhausted retries on transient errors
             if resp.status_code != 201:
                 return SendResult(
                     success=False,
@@ -158,13 +168,17 @@ class MattermostAdapter(BaseChannelAdapter):
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
         try:
-            resp = await self._client.put(
+            # PR #221 O2 — wrap edit (REST PUT) with the retry helper.
+            resp = await self._send_with_retry(
+                self._client.put,
                 f"{self._base_url}/api/v4/posts/{message_id}",
                 json={
                     "id": message_id,
                     "message": text[: self.max_message_length],
                 },
             )
+            if isinstance(resp, SendResult):
+                return resp  # exhausted retries on transient errors
             if resp.status_code != 200:
                 return SendResult(
                     success=False,
@@ -180,9 +194,13 @@ class MattermostAdapter(BaseChannelAdapter):
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
         try:
-            resp = await self._client.delete(
-                f"{self._base_url}/api/v4/posts/{message_id}"
+            # PR #221 O2 — wrap delete (REST DELETE) with the retry helper.
+            resp = await self._send_with_retry(
+                self._client.delete,
+                f"{self._base_url}/api/v4/posts/{message_id}",
             )
+            if isinstance(resp, SendResult):
+                return resp  # exhausted retries on transient errors
             if resp.status_code != 200:
                 return SendResult(
                     success=False,

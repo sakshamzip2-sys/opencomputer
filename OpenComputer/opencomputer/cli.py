@@ -1479,7 +1479,7 @@ def gateway() -> None:
     if cfg.mcp.servers:
         console.print(f"[dim]mcp: deferring connection to {len(cfg.mcp.servers)} server(s)[/dim]")
 
-    gw = Gateway(loop=loop)
+    gw = Gateway(loop=loop, config=cfg.gateway)
     for platform_name, adapter in plugin_registry.channels.items():
         console.print(f"[dim]registering channel:[/dim] [cyan]{platform_name}[/cyan]")
         gw.register_adapter(adapter)
@@ -1799,6 +1799,11 @@ app.add_typer(pair_app, name="pair")
 app.add_typer(session_app, name="session")
 app.add_typer(voice_app, name="voice")
 app.add_typer(webhook_app, name="webhook")
+
+# Hermes channel-port (PR 5.4) — Telegram DM Topics CLI
+from opencomputer.cli_telegram import telegram_app  # noqa: E402
+
+app.add_typer(telegram_app, name="telegram")
 
 # Sub-project F1 2.B.4 — audit-log viewer (`audit show` / `audit verify`)
 from opencomputer.cli_audit import audit_app  # noqa: E402

@@ -67,7 +67,12 @@ async def test_send_approval_request_emits_three_inline_buttons() -> None:
     assert args[0].endswith("/sendMessage")
     payload = kwargs["json"]
     assert payload["chat_id"] == "5555"
-    assert "Allow read_files.metadata" in payload["text"]
+    # PR 3a.2 — text is now MarkdownV2-escaped; "_" and "." are escaped
+    # but the human-readable tokens remain present.
+    assert "Allow read" in payload["text"]
+    assert "files" in payload["text"]
+    assert "metadata" in payload["text"]
+    assert payload.get("parse_mode") == "MarkdownV2"
     keyboard = payload["reply_markup"]["inline_keyboard"]
     assert len(keyboard) == 1
     row = keyboard[0]

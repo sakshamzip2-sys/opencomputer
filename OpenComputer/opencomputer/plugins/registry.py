@@ -69,6 +69,13 @@ class PluginRegistry:
     # scope. ``None`` before any ``load_all`` call — the gateway must
     # have loaded plugins before dispatching.
     shared_api: PluginAPI | None = None
+    # Hermes channel-port (PR 2 / amendment §A.3): outgoing-queue facade
+    # threaded into every freshly-built ``PluginAPI`` so webhook-style
+    # plugins can enqueue messages without importing
+    # ``opencomputer.gateway.outgoing_queue``. Populated by the gateway
+    # (``Gateway._start_outgoing_drainer``) right before plugin
+    # registration; ``None`` outside the gateway.
+    outgoing_queue: Any = None
 
     def api(self) -> PluginAPI:
         # Surface the per-profile SQLite session DB path so plugins can
@@ -85,6 +92,7 @@ class PluginRegistry:
             doctor_contributions=self.doctor_contributions,
             session_db_path=cfg.session.db_path,
             slash_commands=self.slash_commands,
+            outgoing_queue=self.outgoing_queue,
         )
 
     def load_all(

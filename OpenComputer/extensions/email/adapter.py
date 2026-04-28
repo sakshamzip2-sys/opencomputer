@@ -32,6 +32,7 @@ import asyncio
 import email
 import imaplib
 import logging
+import re
 import smtplib
 import time
 from email.header import decode_header, make_header
@@ -48,6 +49,60 @@ logger = logging.getLogger("opencomputer.ext.email")
 _DEFAULT_POLL_INTERVAL = 60.0
 _DEFAULT_IMAP_PORT = 993
 _DEFAULT_SMTP_PORT = 465
+
+
+#: Local-parts that conventionally identify automated senders. We match
+#: the local-part *prefix* (case-insensitive) so subdomains and TLDs do
+#: not need enumerating. Hermes parity: gateway/platforms/email.py ports
+#: this list 1:1 from hermes-agent.
+_NOREPLY_PATTERNS = re.compile(
+    r"^(noreply|no-reply|donotreply|do-not-reply|postmaster|mailer-daemon|bounce|bounces)@",
+    re.IGNORECASE,
+)
+
+#: RFC-defined "this is automated" headers. Presence of ANY of these in
+#: an inbound message marks it as automated regardless of sender. Names
+#: are stored lowercase; we match case-insensitively against incoming
+#: header names.
+_AUTOMATED_HEADERS = (
+    "auto-submitted",
+    "precedence",
+    "x-auto-response-suppress",
+    "list-unsubscribe",
+    "list-id",
+)
+
+
+def _is_automated_sender(sender_addr: str, headers: dict[str, str]) -> bool:
+    """Return True if the message looks automated (noreply / list / bulk).
+
+    Three independent checks — first match wins:
+
+    1. Local-part matches :data:`_NOREPLY_PATTERNS` (noreply@…, postmaster@…).
+    2. ``Precedence`` header is one of ``bulk`` / ``list`` / ``junk``
+       (RFC 3834 §1, RFC 2076).
+    3. ANY of :data:`_AUTOMATED_HEADERS` other than ``Precedence`` is
+       present (``Auto-Submitted``, ``X-Auto-Response-Suppress``,
+       ``List-Unsubscribe``, ``List-Id``). For these, mere presence is
+       enough — the standards only emit them on automated traffic.
+
+    ``headers`` is a mapping of header-name → value as returned by
+    :class:`email.message.Message`. Header names are case-insensitive
+    per RFC 5322; we normalise on the read side.
+    """
+    if sender_addr and _NOREPLY_PATTERNS.match(sender_addr.strip()):
+        return True
+    # Lowercase the keys once for case-insensitive lookup.
+    lc_headers = {str(k).lower(): str(v) for k, v in headers.items()}
+    precedence = lc_headers.get("precedence", "").strip().lower()
+    if precedence in ("bulk", "list", "junk"):
+        return True
+    for header in _AUTOMATED_HEADERS:
+        if header == "precedence":
+            continue
+        if header in lc_headers:
+            return True
+    return False
 
 
 class EmailAdapter(BaseChannelAdapter):
@@ -207,6 +262,17 @@ class EmailAdapter(BaseChannelAdapter):
             logger.info("email: ignoring message from %s (not in allowed_senders)", from_addr)
             return None
 
+        # Drop automated mail (noreply, mailing lists, bulk senders) BEFORE
+        # constructing the MessageEvent — these are not conversational and
+        # would loop the agent into bouncing replies at postmaster@ etc.
+        # Item-by-item logging so users can audit *why* a given message
+        # was dropped (which header / which pattern matched).
+        headers = {k: v for k, v in msg.items()}
+        if _is_automated_sender(from_addr, headers):
+            reason = self._automated_reason(from_addr, headers)
+            logger.info("dropping automated mail: %s (reason=%s)", from_addr, reason)
+            return None
+
         subject = self._decode_header_safe(msg.get("Subject", ""))
         message_id = msg.get("Message-ID", "")
         body = self._extract_body(msg)
@@ -226,6 +292,26 @@ class EmailAdapter(BaseChannelAdapter):
                 "email_message_id": message_id,
             },
         )
+
+    @staticmethod
+    def _automated_reason(sender_addr: str, headers: dict[str, str]) -> str:
+        """Human-readable diagnostic for *why* a message was filtered.
+
+        Returns the first matching reason; never empty when called after
+        :func:`_is_automated_sender` returns True (caller's invariant).
+        """
+        if sender_addr and _NOREPLY_PATTERNS.match(sender_addr.strip()):
+            return f"noreply-pattern:{sender_addr}"
+        lc = {str(k).lower(): str(v) for k, v in headers.items()}
+        precedence = lc.get("precedence", "").strip().lower()
+        if precedence in ("bulk", "list", "junk"):
+            return f"precedence:{precedence}"
+        for header in _AUTOMATED_HEADERS:
+            if header == "precedence":
+                continue
+            if header in lc:
+                return f"header:{header}"
+        return "unknown"
 
     @staticmethod
     def _decode_header_safe(raw: str) -> str:
@@ -303,4 +389,4 @@ def _strip_html(html_text: str) -> str:
     return "\n".join(line.strip() for line in out.splitlines() if line.strip())
 
 
-__all__ = ["EmailAdapter", "_strip_html"]
+__all__ = ["EmailAdapter", "_is_automated_sender", "_strip_html"]

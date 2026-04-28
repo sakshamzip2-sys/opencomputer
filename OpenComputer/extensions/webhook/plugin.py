@@ -31,6 +31,11 @@ def register(api) -> None:  # PluginAPI duck-typed
         "port": int(os.environ.get("WEBHOOK_PORT", "18790")),
     }
     adapter = WebhookAdapter(config=config)
+    # PR 3c.5: hand the PluginAPI to the adapter so its deliver_only
+    # branch can reach ``api.outgoing_queue.enqueue`` without
+    # re-importing gateway internals (preserves the plugin_sdk →
+    # opencomputer one-way boundary).
+    adapter.bind_plugin_api(api)
     api.register_channel(Platform.WEBHOOK.value, adapter)
     logger.info(
         "webhook: registered (host=%s port=%d) — bind on gateway start",

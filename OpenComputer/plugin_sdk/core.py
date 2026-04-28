@@ -444,6 +444,23 @@ class SingleInstanceError(RuntimeError):
     """
 
 
+# ─── Processing lifecycle ──────────────────────────────────────────────
+
+
+class ProcessingOutcome(str, Enum):
+    """Outcome reported to ``BaseChannelAdapter.on_processing_complete``.
+
+    Used by the reaction lifecycle hook (PR 2 of the Hermes channel-port
+    series): adapters that opt into the REACTIONS capability translate
+    these outcomes into platform-native reactions (e.g. ✅ / ❌ on
+    Telegram messages) once the agent finishes processing a message.
+    """
+
+    SUCCESS = "success"
+    FAILURE = "failure"
+    CANCELLED = "cancelled"
+
+
 __all__ = [
     "Role",
     "Message",
@@ -456,6 +473,7 @@ __all__ = [
     "PluginManifest",
     "PluginActivationSource",
     "PluginSetup",
+    "ProcessingOutcome",
     "SetupChannel",
     "SetupProvider",
     "VALID_ACTIVATION_SOURCES",

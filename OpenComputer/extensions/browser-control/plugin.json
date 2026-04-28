@@ -8,11 +8,11 @@
   "entry": "plugin",
   "author": "OpenComputer",
   "license": "MIT",
-  "capabilities": [
-    "browser.navigate",
-    "browser.click",
-    "browser.fill",
-    "browser.snapshot",
-    "browser.scrape"
+  "tool_names": [
+    "browser_navigate",
+    "browser_click",
+    "browser_fill",
+    "browser_snapshot",
+    "browser_scrape"
   ]
 }

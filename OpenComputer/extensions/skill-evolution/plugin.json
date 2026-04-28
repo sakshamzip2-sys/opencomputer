@@ -8,10 +8,5 @@
   "kind": "mixed",
   "entry": "plugin",
   "enabled_by_default": false,
-  "tool_names": [],
-  "capabilities": [
-    "skill_evolution.observe",
-    "skill_evolution.propose",
-    "skill_evolution.auto_publish"
-  ]
+  "tool_names": []
 }

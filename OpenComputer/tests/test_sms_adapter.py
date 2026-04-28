@@ -74,11 +74,16 @@ def test_strip_markdown_basic():
 
 
 def test_strip_markdown_links():
+    # PR 3c.3: switched to plugin_sdk.channel_helpers.strip_markdown,
+    # which (matching every other channel adapter now) drops the URL
+    # rather than rendering it inline. Rationale: URLs in SMS look
+    # ugly twice over — once in the link text, once in parentheses.
     out = _mod._strip_markdown("see [here](https://example.com)")
     assert "[" not in out
     assert "]" not in out
+    assert "(" not in out
+    assert ")" not in out
     assert "here" in out
-    assert "https://example.com" in out
 
 
 def test_strip_markdown_headers():
@@ -89,8 +94,14 @@ def test_strip_markdown_headers():
 
 
 def test_strip_markdown_fenced_code_block():
+    # PR 3c.3: shared helper preserves fenced-code *content* (drops just
+    # the fence markers + language tag). The legacy local stripper
+    # removed the whole block — that loses information for SMS users
+    # asking "explain this snippet". The new behaviour matches what
+    # other text-only channels (signal, whatsapp) already do.
     out = _mod._strip_markdown("before\n```python\nhidden\n```\nafter")
-    assert "hidden" not in out
+    assert "```" not in out
+    assert "hidden" in out  # body preserved
     assert "before" in out
     assert "after" in out
 
@@ -98,17 +109,23 @@ def test_strip_markdown_fenced_code_block():
 # ── phone number redaction ────────────────────────────────────────────
 
 
-def test_redact_phone_keeps_country_code_and_last_two():
+def test_redact_phone_keeps_country_code_and_last_four():
+    # PR 3c.3: switched from local _redact_phone (kept last 2) to the
+    # shared plugin_sdk.channel_helpers.redact_phone (keeps last 4).
     out = _mod._redact_phone("+15551234567")
-    assert out.startswith("+15")
-    assert out.endswith("67")
+    assert out.startswith("+1")
+    assert out.endswith("4567")
     assert "12345" not in out
+    assert "555" not in out
 
 
 def test_redact_phone_handles_short_input():
-    assert _mod._redact_phone("") == "***"
+    # The shared helper returns "" for falsy phones (vs "***" in the
+    # legacy local implementation) and "***" only for short non-empty
+    # strings without enough digits to keep meaningful tail.
+    assert _mod._redact_phone("") == ""
     assert _mod._redact_phone("123") == "***"
-    assert _mod._redact_phone(None) == "***"
+    assert _mod._redact_phone(None) == ""
 
 
 # ── chunk for SMS ─────────────────────────────────────────────────────

@@ -300,6 +300,32 @@ class FullSystemControlConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class GatewayConfig:
+    """Gateway daemon configuration.
+
+    Currently exposes the photo-burst merge window — when several
+    pure-attachment events arrive in quick succession on the same
+    chat, :class:`opencomputer.gateway.dispatch.Dispatch` collapses
+    them into a single agent run with merged attachments. Tunable
+    via ``gateway.photo_burst_window`` in
+    ``~/.opencomputer/<profile>/config.yaml`` to match the user's
+    typical photo-album upload cadence.
+
+    Attributes:
+        photo_burst_window: Seconds the dispatcher waits for follow-up
+            attachments before firing the agent. Default ``0.8`` matches
+            Hermes's tuning (~95% of multi-photo selections in our
+            telemetry land within 0.8s on a fast network). Lower values
+            risk firing the agent twice for one mental "send"; higher
+            values add latency to single-photo sends. Set ``0.0`` to
+            disable burst merging entirely (every photo dispatches
+            immediately).
+    """
+
+    photo_burst_window: float = 0.8
+
+
+@dataclass(frozen=True, slots=True)
 class DeepeningConfig:
     """Layer 3 deepening — content extractor + cost controls (2026-04-28).
 
@@ -343,6 +369,8 @@ class Config:
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     #: 2026-04-28 — Layer 3 extractor + cost controls.
     deepening: DeepeningConfig = field(default_factory=DeepeningConfig)
+    #: Gateway daemon tunables — primarily the photo-burst window today.
+    gateway: GatewayConfig = field(default_factory=GatewayConfig)
     #: III.6 — settings-declared shell-command hooks. Parsed from the
     #: top-level ``hooks:`` YAML block by
     #: :func:`opencomputer.agent.config_store._parse_hooks_block` and
@@ -367,6 +395,7 @@ __all__ = [
     "SessionConfig",
     "MemoryConfig",
     "DeepeningConfig",
+    "GatewayConfig",
     "MCPConfig",
     "MCPServerConfig",
     "HookCommandConfig",

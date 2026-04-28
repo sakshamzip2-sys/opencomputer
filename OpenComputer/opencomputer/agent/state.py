@@ -776,6 +776,38 @@ class SessionDB:
             )
             return ids
 
+    def add_tokens(
+        self, session_id: str, input_tokens: int, output_tokens: int
+    ) -> None:
+        """Bump the per-session token counters by the given deltas.
+
+        PR #221 follow-up Item 2 — wires real numbers into the
+        ``input_tokens`` / ``output_tokens`` columns the schema has
+        always reserved but that no UPDATE site populated until now.
+        Callers (the agent loop) pass the per-turn deltas from
+        :class:`plugin_sdk.provider_contract.Usage`. Negative values are
+        clamped to ``0`` defensively — a buggy provider mustn't be able
+        to drag the running total backwards.
+
+        No-op when both deltas are zero (and when ``session_id`` is
+        empty), so callers don't need to branch on the common case
+        where a provider declined to surface usage.
+        """
+        if not session_id:
+            return
+        in_delta = max(0, int(input_tokens or 0))
+        out_delta = max(0, int(output_tokens or 0))
+        if in_delta == 0 and out_delta == 0:
+            return
+        with self._txn() as conn:
+            conn.execute(
+                "UPDATE sessions SET "
+                "input_tokens = input_tokens + ?, "
+                "output_tokens = output_tokens + ? "
+                "WHERE id = ?",
+                (in_delta, out_delta, session_id),
+            )
+
     def get_messages(self, session_id: str) -> list[Message]:
         with self._connect() as conn:
             rows = conn.execute(

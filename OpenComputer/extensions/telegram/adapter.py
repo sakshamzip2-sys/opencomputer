@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 from collections import OrderedDict
@@ -29,8 +30,17 @@ from typing import Any
 
 import httpx
 
+from extensions.telegram.dm_topics import DMTopicManager
+from extensions.telegram.network import (
+    TelegramFallbackTransport,
+    discover_fallback_ips,
+    is_auto_mode,
+    parse_fallback_ip_env,
+)
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import MessageEvent, Platform, SendResult
+from plugin_sdk.format_converters.markdownv2 import convert as _to_mdv2
+from plugin_sdk.sticker_cache import StickerCache
 
 logger = logging.getLogger("opencomputer.ext.telegram")
 
@@ -58,6 +68,25 @@ _STEER_PREFIX = "/steer "
 _MDV2_SPECIAL = r"_*[]()~`>#+-=|{}.!"
 _MDV2_RE = re.compile(f"([{re.escape(_MDV2_SPECIAL)}])")
 
+# PR 3a.2 — Telegram returns 400 with this error string when our
+# MarkdownV2 escaping produces output the parser rejects (e.g. an
+# entity offset overlap). On hit, we retry the same call WITHOUT
+# parse_mode and with the ORIGINAL (un-converted) text so the user
+# at least gets the message body.
+_MDV2_PARSE_ERROR_MARKER = "can't parse entities"
+
+# PR 4.2 — Telegram returns 400 with this marker when the bot tries to
+# post into a forum topic that has been deleted, archived, or that the
+# bot has been booted from. We retry once WITHOUT message_thread_id so
+# the message lands in the chat's General topic instead of disappearing.
+_THREAD_NOT_FOUND_MARKER = "message thread not found"
+
+# PR 4.2 — Telegram's "General" topic in a forum is conceptually
+# message_thread_id 1, but the API REJECTS explicit thread_id=1 with
+# "message thread not found". So we must omit message_thread_id when
+# the caller passes 1 (or "1") so the post lands in General.
+_GENERAL_TOPIC_THREAD_ID = "1"
+
 
 def _escape_mdv2(text: str) -> str:
     return _MDV2_RE.sub(r"\\\1", text)
@@ -66,6 +95,24 @@ def _escape_mdv2(text: str) -> str:
 def _utf16_len(s: str) -> int:
     """Telegram's message length limit is in UTF-16 code units."""
     return len(s.encode("utf-16-le")) // 2
+
+
+def _is_thread_not_found_error(resp: httpx.Response | None) -> bool:
+    """PR 4.2 — match Telegram's "message thread not found" 400.
+
+    Returns True iff the response is HTTP 400 AND the body (case-insens)
+    contains the marker phrase. Used by ``send`` to decide whether to
+    retry without ``message_thread_id``.
+    """
+    if resp is None:
+        return False
+    if resp.status_code != 400:
+        return False
+    try:
+        body = resp.text or ""
+    except Exception:  # noqa: BLE001
+        return False
+    return _THREAD_NOT_FOUND_MARKER in body.lower()
 
 
 def _chunk_for_telegram(text: str, limit: int = 4096) -> list[str]:
@@ -117,9 +164,47 @@ class TelegramAdapter(BaseChannelAdapter):
         self.base_url = f"https://api.telegram.org/bot{self.token}"
         self._client: httpx.AsyncClient | None = None
         self._bot_id: int | None = None
+        self._bot_username: str | None = None
         self._offset: int = 0
         self._polling_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+        # Hermes PR 3a.1 — mention-boundary gating (DEFAULT OFF). When
+        # ``require_mention`` is True, group messages must explicitly
+        # @-mention the bot (entity-based, NEVER substring) OR reply to
+        # one of the bot's messages, OR match a configured wake-word
+        # regex. ``free_response_chats`` lists chat ids exempt from the
+        # gate (e.g. the operator's 1:1 DM). 1:1 chats also bypass the
+        # gate by default — only group/supergroup chats are filtered.
+        self._require_mention: bool = bool(config.get("require_mention") or False)
+        self._free_response_chats: set[str] = {
+            str(c) for c in (config.get("free_response_chats") or [])
+        }
+        # Compile wake-word regexes once. Bad patterns are logged + dropped
+        # so a single mistyped entry doesn't break inbound delivery.
+        self._mention_patterns: list[re.Pattern[str]] = []
+        for pat in config.get("mention_patterns") or []:
+            try:
+                self._mention_patterns.append(re.compile(pat, re.IGNORECASE))
+            except re.error as exc:
+                logger.warning(
+                    "telegram mention_patterns: ignoring invalid regex %r: %s",
+                    pat, exc,
+                )
+        # PR 3a.5 — persistent sticker description cache. Keyed on
+        # ``file_unique_id`` (stable across sends). Cache hit short-
+        # circuits the vision-describe pipeline; misses are passed
+        # through unchanged (the agent / provider does the actual
+        # describing). ``profile_home`` is taken from config for
+        # plugin-side flexibility; falls back to ``~/.opencomputer``.
+        profile_home = Path(
+            config.get("profile_home")
+            or Path.home() / ".opencomputer"
+        )
+        try:
+            profile_home.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        self._sticker_cache = StickerCache(profile_home)
         # Round 4 Item 3 — webhook mode config. Defaults to "polling"
         # so existing users see no change. Set "webhook" + a public
         # ``webhook_url`` (HTTPS) to switch. ``webhook_port`` defaults
@@ -149,6 +234,105 @@ class TelegramAdapter(BaseChannelAdapter):
         # single response window. Insertion order eviction keeps the
         # working set small.
         self._seen_callback_ids: OrderedDict[str, None] = OrderedDict()
+
+        # PR 5 — DM Topics. Opt-in via ``config["dm_topics"]["enabled"]``.
+        # When enabled, the adapter loads a profile-local registry that
+        # maps Telegram ``message_thread_id`` to a per-topic descriptor
+        # (label / skill / system_prompt). Inbound messages with a
+        # ``message_thread_id`` get an extra ``channel_id`` slot in
+        # ``MessageEvent.metadata`` so the dispatcher (and the
+        # adapter's own ``resolve_channel_prompt`` hook) can route to
+        # the right ephemeral prompt + skill loadout.
+        self._dm_topics: DMTopicManager | None = None
+        dm_cfg = config.get("dm_topics") or {}
+        if isinstance(dm_cfg, dict) and bool(dm_cfg.get("enabled")):
+            self._dm_topics = DMTopicManager(profile_home)
+
+    # ------------------------------------------------------------------
+    # PR 5 — DM-Topics-aware overrides for the per-channel prompt /
+    # skill resolution. The DMTopicManager registry (when enabled)
+    # wins over ``config["channel_prompts"]`` /
+    # ``config["channel_skill_bindings"]`` so a CLI-issued
+    # ``telegram topic-create --skill stocks`` lands without a
+    # config-file edit. Adapters without dm_topics enabled fall
+    # straight through to the base implementation.
+    # ------------------------------------------------------------------
+
+    def resolve_channel_prompt(
+        self, channel_id: str, parent_id: str | None = None,
+    ) -> str | None:
+        if self._dm_topics is not None:
+            topic = self._dm_topics.get_topic(channel_id)
+            if topic is not None and topic.get("system_prompt"):
+                return str(topic["system_prompt"])
+        return super().resolve_channel_prompt(channel_id, parent_id)
+
+    def resolve_channel_skills(
+        self, channel_id: str, parent_id: str | None = None,
+    ) -> list[str]:
+        if self._dm_topics is not None:
+            topic = self._dm_topics.get_topic(channel_id)
+            if topic is not None and topic.get("skill"):
+                return [str(topic["skill"])]
+        return super().resolve_channel_skills(channel_id, parent_id)
+
+    async def _post_with_retry(
+        self,
+        url: str,
+        **kwargs: Any,
+    ) -> httpx.Response | SendResult:
+        """PR 3a.3 — wrap ``self._client.post`` with the base
+        ``_send_with_retry`` helper.
+
+        Returns either the live :class:`httpx.Response` on success (so
+        callers can inspect ``status_code`` and ``json()``) OR a
+        :class:`SendResult` carrying ``success=False`` after the helper
+        exhausts its retry budget on transient errors. Non-retryable
+        exceptions propagate.
+        """
+        assert self._client is not None
+        return await self._send_with_retry(  # type: ignore[return-value]
+            self._client.post, url, **kwargs,
+        )
+
+    async def _build_fallback_transport(
+        self,
+    ) -> TelegramFallbackTransport | None:
+        """Build the IP-fallback transport iff the env opts in.
+
+        Reads ``TELEGRAM_FALLBACK_IPS``:
+        - unset / empty → ``None`` (default; caller uses plain httpx).
+        - ``"auto"`` → DoH discovery; if discovery returns at least one
+          IP, wrap with that list.
+        - comma-separated IPs → wrap with those after validation.
+        """
+        env_value = os.environ.get("TELEGRAM_FALLBACK_IPS", "")
+        if not env_value:
+            return None
+        if is_auto_mode(env_value):
+            try:
+                ips = await discover_fallback_ips()
+            except Exception as exc:  # noqa: BLE001 — discovery best-effort
+                logger.warning(
+                    "telegram fallback IP discovery failed (%s); "
+                    "continuing without fallback",
+                    exc,
+                )
+                return None
+            if not ips:
+                return None
+            logger.info("telegram fallback IPs (auto-discovered): %s", ips)
+            return TelegramFallbackTransport(ips)
+        ips = parse_fallback_ip_env(env_value)
+        if not ips:
+            logger.warning(
+                "TELEGRAM_FALLBACK_IPS=%r yielded no valid IPs; "
+                "continuing without fallback",
+                env_value,
+            )
+            return None
+        logger.info("telegram fallback IPs (configured): %s", ips)
+        return TelegramFallbackTransport(ips)
 
     #: Scope name for the per-bot-token machine-local lock. Mirrors
     #: hermes' ``"telegram-bot-token"`` scope so a future cross-tool
@@ -182,7 +366,28 @@ class TelegramAdapter(BaseChannelAdapter):
             return False
         self._lock_held = True
 
-        self._client = httpx.AsyncClient(timeout=35.0)
+        # PR 4.1 — optional IP-fallback transport for users in geo-blocked
+        # regions. Default behaviour (env unset) is unchanged: a regular
+        # httpx client. ``TELEGRAM_FALLBACK_IPS=auto`` triggers DoH
+        # discovery; a comma-separated list of IPs uses those directly.
+        transport = await self._build_fallback_transport()
+        # PR #221 O3 — wire the SSRF redirect guard onto the response
+        # event hooks. The client downloads attachments via
+        # ``download_attachment`` from server-supplied CDN paths; even
+        # though ``follow_redirects`` defaults to False (so the guard is
+        # effectively defensive depth today), the guard refuses any 3xx
+        # whose Location points at loopback / private / link-local hosts
+        # so a future ``follow_redirects=True`` change can't accidentally
+        # turn the bot into an SSRF probe.
+        from plugin_sdk.network_utils import ssrf_redirect_guard
+
+        client_kwargs: dict[str, Any] = {
+            "timeout": 35.0,
+            "event_hooks": {"response": [ssrf_redirect_guard]},
+        }
+        if transport is not None:
+            client_kwargs["transport"] = transport
+        self._client = httpx.AsyncClient(**client_kwargs)
         # getMe to verify token and cache our bot id
         try:
             resp = await self._client.get(f"{self.base_url}/getMe")
@@ -193,9 +398,12 @@ class TelegramAdapter(BaseChannelAdapter):
                 self._release_lock()
                 return False
             self._bot_id = data["result"]["id"]
+            # PR 3a.1 — capture the bot's @username so entity-based
+            # mention matching can compare exactly (no substring).
+            self._bot_username = data["result"].get("username") or None
             logger.info(
                 "telegram: connected as @%s (id=%s)",
-                data["result"].get("username", "?"),
+                self._bot_username or "?",
                 self._bot_id,
             )
         except Exception as e:  # noqa: BLE001
@@ -306,6 +514,13 @@ class TelegramAdapter(BaseChannelAdapter):
             await self._client.aclose()
         self._release_lock()
 
+    # PR 3a.4 — exponential-ish backoff schedule for transient network
+    # errors during long-poll. After the 10th consecutive failure the
+    # supervisor is asked to take over (retryable=True so it restarts).
+    _NETWORK_BACKOFF_SCHEDULE: tuple[int, ...] = (5, 10, 20, 40, 60, 60, 60, 60, 60, 60)
+    _MAX_CONSECUTIVE_409S: int = 3
+    _CONFLICT_BACKOFF_SECONDS: int = 10
+
     async def _poll_forever(self) -> None:
         assert self._client is not None
         # OpenClaw parity (CHANGELOG #69873): a 409 "Conflict" from
@@ -314,7 +529,14 @@ class TelegramAdapter(BaseChannelAdapter):
         # locally, but cross-machine duplicates can still happen. Log
         # loudly + back off so we don't spam Telegram with rapid
         # re-polls if the conflict persists.
+        # PR 3a.4 — after 3 consecutive 409s (with 10s sleeps between),
+        # we set a fatal-non-retryable error and break: another process
+        # is durably holding the polling slot, restarting won't help.
+        # Network errors get up to 10 retries with the schedule above
+        # before we set fatal-retryable and let the gateway supervisor
+        # decide whether to reconnect.
         consecutive_409s = 0
+        consecutive_network_errors = 0
         while not self._stop_event.is_set():
             try:
                 # Round 2a P-5 — also subscribe to ``callback_query``
@@ -327,15 +549,21 @@ class TelegramAdapter(BaseChannelAdapter):
                 resp = await self._client.get(f"{self.base_url}/getUpdates", params=params)
                 if resp.status_code == 409:
                     consecutive_409s += 1
-                    backoff = min(30, 2 ** min(consecutive_409s, 4))
+                    if consecutive_409s > self._MAX_CONSECUTIVE_409S:
+                        self._set_fatal_error(
+                            "telegram-conflict",
+                            "another process is polling — stop it or rotate token",
+                            retryable=False,
+                        )
+                        break
                     logger.warning(
                         "telegram getUpdates returned 409 Conflict — another "
                         "process is also polling this bot's updates. "
                         "Sleeping %ss (attempt #%d). Stop the other client "
                         "or use a different bot token.",
-                        backoff, consecutive_409s,
+                        self._CONFLICT_BACKOFF_SECONDS, consecutive_409s,
                     )
-                    await asyncio.sleep(backoff)
+                    await asyncio.sleep(self._CONFLICT_BACKOFF_SECONDS)
                     continue
                 if resp.status_code != 200:
                     await asyncio.sleep(2)
@@ -344,15 +572,38 @@ class TelegramAdapter(BaseChannelAdapter):
                 if not data.get("ok"):
                     await asyncio.sleep(2)
                     continue
+                # Successful poll — reset both counters.
                 consecutive_409s = 0
+                consecutive_network_errors = 0
                 for update in data.get("result", []):
                     self._offset = max(self._offset, int(update["update_id"]) + 1)
                     await self._handle_update(update)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
-                logger.warning("telegram polling error: %s — sleeping 5s", e)
-                await asyncio.sleep(5)
+                consecutive_network_errors += 1
+                if consecutive_network_errors > len(self._NETWORK_BACKOFF_SCHEDULE):
+                    # PR 3a.4 — past the 10-retry budget. Hand off to
+                    # the gateway supervisor (retryable=True so it tries
+                    # to restart the adapter).
+                    self._set_fatal_error(
+                        "telegram-network",
+                        f"transport down: {type(e).__name__}: {str(e)[:200]}",
+                        retryable=True,
+                    )
+                    break
+                # Index is 1-based attempt number → 0-based schedule.
+                sleep_secs = self._NETWORK_BACKOFF_SCHEDULE[
+                    consecutive_network_errors - 1
+                ]
+                logger.warning(
+                    "telegram polling error #%d/%d: %s — sleeping %ss",
+                    consecutive_network_errors,
+                    len(self._NETWORK_BACKOFF_SCHEDULE),
+                    e,
+                    sleep_secs,
+                )
+                await asyncio.sleep(sleep_secs)
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
         # Round 2a P-5 — route inline-button clicks to the callback path
@@ -368,6 +619,12 @@ class TelegramAdapter(BaseChannelAdapter):
         frm = msg.get("from", {})
         # Skip self-messages (some platforms echo)
         if self._bot_id is not None and frm.get("id") == self._bot_id:
+            return
+
+        # PR 3a.1 — mention-boundary gate. Default-OFF; when enabled
+        # group messages must explicitly mention the bot or be replies
+        # to it. 1:1 DMs always pass through.
+        if not self._should_process_message(msg):
             return
 
         # Text — may be empty if the message is just an attachment with no caption
@@ -409,6 +666,36 @@ class TelegramAdapter(BaseChannelAdapter):
                      "duration": voice.get("duration")}
                 )
 
+        # PR 3a.5 — sticker handling. Cache hit short-circuits to
+        # ``[sticker: <description>]`` injected into the text body so
+        # the agent has something semantic to react to. Cache miss:
+        # surface as an attachment-style ``telegram:<file_id>`` ref
+        # plus an ``attachment_meta`` entry so the provider/vision
+        # pipeline can describe and ``put()`` the result later.
+        if sticker := msg.get("sticker"):
+            uniq = sticker.get("file_unique_id")
+            sticker_file_id = sticker.get("file_id")
+            cached = self._sticker_cache.get(uniq) if uniq else None
+            if cached:
+                # Inject as readable text so downstream agent code
+                # treats it like any other utterance.
+                text = (text + " " if text else "") + f"[sticker: {cached}]"
+            elif sticker_file_id:
+                # Pass-through — provider-side vision will describe and
+                # may call back into the cache via ``put()``.
+                attachments.append(f"telegram:{sticker_file_id}")
+                attachment_meta.append(
+                    {
+                        "type": "sticker",
+                        "file_id": sticker_file_id,
+                        "file_unique_id": uniq,
+                        "is_animated": bool(sticker.get("is_animated")),
+                        "is_video": bool(sticker.get("is_video")),
+                        "emoji": sticker.get("emoji"),
+                        "set_name": sticker.get("set_name"),
+                    }
+                )
+
         # Skip messages with no text and no attachments — they're metadata-only updates
         # (e.g., chat-photo-changed, member-added) we don't surface to the agent.
         if not text and not attachments:
@@ -430,6 +717,24 @@ class TelegramAdapter(BaseChannelAdapter):
         if attachment_meta:
             metadata["attachment_meta"] = attachment_meta
 
+        # PR 5 — DM Topics. When the inbound message carries a
+        # ``message_thread_id`` AND we have a registered topic for it,
+        # surface ``channel_id`` (and a ``parent_chat_id`` fallback) on
+        # the metadata. Downstream the dispatcher uses this slot to
+        # resolve the per-topic system prompt + skill bindings via
+        # ``BaseChannelAdapter.resolve_channel_prompt`` /
+        # ``resolve_channel_skills``. Unregistered thread ids leave
+        # metadata untouched so default behaviour is preserved.
+        thread_id = msg.get("message_thread_id")
+        if thread_id is not None and self._dm_topics is not None:
+            topic_id = str(thread_id)
+            topic = self._dm_topics.get_topic(topic_id)
+            if topic is not None:
+                metadata["channel_id"] = topic_id
+                metadata["message_thread_id"] = topic_id
+                if topic.get("parent_chat_id"):
+                    metadata["parent_channel_id"] = str(topic["parent_chat_id"])
+
         event = MessageEvent(
             platform=Platform.TELEGRAM,
             chat_id=str(msg["chat"]["id"]),
@@ -440,6 +745,106 @@ class TelegramAdapter(BaseChannelAdapter):
             metadata=metadata,
         )
         await self.handle_message(event)
+
+    # ------------------------------------------------------------------
+    # PR 3a.1 — mention-boundary helpers
+    # ------------------------------------------------------------------
+
+    def _message_mentions_bot(self, msg: dict[str, Any]) -> bool:
+        """Entity-based @-mention detection.
+
+        Telegram puts every @mention in the ``entities`` (or
+        ``caption_entities``) array with ``type="mention"`` for plain
+        ``@username`` references, or ``type="text_mention"`` for users
+        without a public username (which carries the user object inline).
+
+        We match strictly against ``self._bot_username`` (exact, case-
+        insensitive) and ``self._bot_id``. NEVER substring — that would
+        treat ``@hermes_bot_admin`` as a mention of ``@hermes_bot``.
+        """
+        entities = msg.get("entities") or msg.get("caption_entities") or []
+        if not entities:
+            return False
+        text = msg.get("text") or msg.get("caption") or ""
+        # UTF-16 indexing: Telegram entity offsets are in UTF-16 code units,
+        # but for the @mention case we just need the substring at the entity
+        # range; Python's str slice on the BMP-only ASCII bot username is
+        # fine because @-usernames are 7-bit ASCII per Telegram rules.
+        text_utf16 = text.encode("utf-16-le")
+        for ent in entities:
+            etype = ent.get("type")
+            if etype == "mention":
+                offset = int(ent.get("offset", 0))
+                length = int(ent.get("length", 0))
+                # Slice in UTF-16 code units, decode back to str.
+                try:
+                    raw = text_utf16[offset * 2 : (offset + length) * 2].decode(
+                        "utf-16-le"
+                    )
+                except UnicodeDecodeError:
+                    continue
+                # ``raw`` is e.g. "@hermes_bot". Compare case-insensitively
+                # against our @username; exact equality only.
+                if (
+                    raw.startswith("@")
+                    and self._bot_username is not None
+                    and raw[1:].lower() == self._bot_username.lower()
+                ):
+                    return True
+            elif etype == "text_mention":
+                user = ent.get("user") or {}
+                if (
+                    self._bot_id is not None
+                    and user.get("id") == self._bot_id
+                ):
+                    return True
+        return False
+
+    def _is_reply_to_bot(self, msg: dict[str, Any]) -> bool:
+        """``True`` iff the message is a reply to one of our messages."""
+        reply_to = msg.get("reply_to_message")
+        if not reply_to:
+            return False
+        sender = reply_to.get("from") or {}
+        return self._bot_id is not None and sender.get("id") == self._bot_id
+
+    def _should_process_message(self, msg: dict[str, Any]) -> bool:
+        """Apply the mention-boundary gate to a raw inbound message dict.
+
+        Default-OFF: when ``require_mention`` is False, every message
+        passes (preserves pre-3a behaviour exactly — see audit C4 mandate).
+
+        When enabled, the gate applies ONLY to group/supergroup chats.
+        Private (1:1) chats always pass — there's no ambiguity about
+        addressee in a DM. ``free_response_chats`` exempts specific
+        chat ids from the gate even in groups.
+        """
+        if not self._require_mention:
+            return True
+
+        chat = msg.get("chat") or {}
+        chat_type = chat.get("type") or "private"
+        if chat_type == "private":
+            return True
+
+        chat_id = str(chat.get("id", ""))
+        if chat_id in self._free_response_chats:
+            return True
+
+        if self._is_reply_to_bot(msg):
+            return True
+
+        if self._message_mentions_bot(msg):
+            return True
+
+        # Wake-word regex patterns operate on plain text — the user
+        # opted into matching specific tokens (e.g. r"\bhey hermes\b").
+        if self._mention_patterns:
+            text = msg.get("text") or msg.get("caption") or ""
+            if any(p.search(text) for p in self._mention_patterns):
+                return True
+
+        return False
 
     async def _handle_steer_command(self, *, chat_id: str, text: str) -> None:
         """Route a ``/steer <text>`` Telegram message into SteerRegistry.
@@ -479,14 +884,78 @@ class TelegramAdapter(BaseChannelAdapter):
 
     async def send(self, chat_id: str, text: str, **kwargs: Any) -> SendResult:
         assert self._client is not None
-        # Send as plain text for Phase 2 (no formatting) — easier to debug.
-        # Phase 3 can add MarkdownV2 handling with escape detection.
+        # PR 4.2 — forum-topic support. Caller may pass
+        # ``message_thread_id`` to target a specific topic. We omit
+        # thread_id == "1" (Telegram's General topic) because the API
+        # rejects explicit thread_id=1 with "message thread not found".
+        # On a thread-not-found 400 from a non-General topic, we retry
+        # the same call WITHOUT message_thread_id so the message at
+        # least lands in General instead of vanishing.
+        thread_id = kwargs.get("message_thread_id")
+        if thread_id is not None and str(thread_id) == _GENERAL_TOPIC_THREAD_ID:
+            thread_id = None
+
+        # PR 3a.2 — outbound MarkdownV2 formatting. Each chunk is
+        # converted; on a parse-error (rare — usually overlap with
+        # user-supplied backticks) we retry the SAME call without
+        # parse_mode and with the ORIGINAL text so the user gets the
+        # body.
+        # PR 3a.3 — httpx POST wrapped in _send_with_retry for transient
+        # network errors (ConnectError etc.) before we even see HTTP.
         for chunk in _chunk_for_telegram(text, limit=self.max_message_length):
+            converted = _to_mdv2(chunk)
+            payload: dict[str, Any] = {
+                "chat_id": chat_id,
+                "text": converted,
+                "parse_mode": "MarkdownV2",
+                "disable_notification": False,
+            }
+            if thread_id is not None:
+                payload["message_thread_id"] = thread_id
             try:
-                resp = await self._client.post(
+                resp = await self._post_with_retry(
                     f"{self.base_url}/sendMessage",
-                    json={"chat_id": chat_id, "text": chunk, "disable_notification": False},
+                    json=payload,
                 )
+                if isinstance(resp, SendResult):
+                    return resp  # exhausted retries on transient errors
+                # PR 4.2 — thread-not-found fallback: retry without the
+                # thread id so the post lands in General. Only triggers
+                # when we actually had a thread id to begin with.
+                if thread_id is not None and _is_thread_not_found_error(resp):
+                    logger.warning(
+                        "telegram: message_thread_id=%s not found in chat %s; "
+                        "retrying without thread",
+                        thread_id, chat_id,
+                    )
+                    fallback_payload = {
+                        k: v for k, v in payload.items() if k != "message_thread_id"
+                    }
+                    resp = await self._post_with_retry(
+                        f"{self.base_url}/sendMessage",
+                        json=fallback_payload,
+                    )
+                    if isinstance(resp, SendResult):
+                        return resp
+                # Parse-error fallback: re-send with the original (un-converted)
+                # text and no parse_mode.
+                if (
+                    resp.status_code == 400
+                    and _MDV2_PARSE_ERROR_MARKER in resp.text.lower()
+                ):
+                    plain_payload: dict[str, Any] = {
+                        "chat_id": chat_id,
+                        "text": chunk,
+                        "disable_notification": False,
+                    }
+                    if thread_id is not None:
+                        plain_payload["message_thread_id"] = thread_id
+                    resp = await self._post_with_retry(
+                        f"{self.base_url}/sendMessage",
+                        json=plain_payload,
+                    )
+                    if isinstance(resp, SendResult):
+                        return resp
                 if resp.status_code != 200:
                     return SendResult(
                         success=False,
@@ -503,7 +972,9 @@ class TelegramAdapter(BaseChannelAdapter):
         if self._client is None:
             return
         try:
-            await self._client.post(
+            # PR 3a.3 — typing is best-effort; retry transient errors but
+            # swallow any final-state failure (don't block the agent).
+            await self._post_with_retry(
                 f"{self.base_url}/sendChatAction",
                 json={"chat_id": chat_id, "action": "typing"},
             )
@@ -584,16 +1055,45 @@ class TelegramAdapter(BaseChannelAdapter):
             )
 
         try:
-            with p.open("rb") as fh:
-                files = {field_name: (p.name, fh, _guess_mime(p))}
+            # PR 3a.2 — outbound caption uses MarkdownV2 with parse-error
+            # fallback. We open the file twice (once per attempt) so the
+            # multipart upload sees a fresh file pointer if we have to
+            # retry without parse_mode.
+            def _build_form(use_mdv2: bool) -> dict[str, Any]:
                 form: dict[str, Any] = {"chat_id": chat_id}
                 if caption:
-                    form["caption"] = caption[:1024]  # Telegram caption limit
-                resp = await self._client.post(
+                    if use_mdv2:
+                        form["caption"] = _to_mdv2(caption)[:1024]
+                        form["parse_mode"] = "MarkdownV2"
+                    else:
+                        form["caption"] = caption[:1024]
+                return form
+
+            with p.open("rb") as fh:
+                files = {field_name: (p.name, fh, _guess_mime(p))}
+                resp = await self._post_with_retry(
                     f"{self.base_url}/{endpoint}",
-                    data=form,
+                    data=_build_form(use_mdv2=bool(caption)),
                     files=files,
                 )
+            if isinstance(resp, SendResult):
+                return resp
+            # Parse-error fallback — re-upload without parse_mode and
+            # with the ORIGINAL caption text.
+            if (
+                caption
+                and resp.status_code == 400
+                and _MDV2_PARSE_ERROR_MARKER in resp.text.lower()
+            ):
+                with p.open("rb") as fh:
+                    files = {field_name: (p.name, fh, _guess_mime(p))}
+                    resp = await self._post_with_retry(
+                        f"{self.base_url}/{endpoint}",
+                        data=_build_form(use_mdv2=False),
+                        files=files,
+                    )
+                    if isinstance(resp, SendResult):
+                        return resp
             if resp.status_code != 200:
                 return SendResult(
                     success=False,
@@ -621,7 +1121,7 @@ class TelegramAdapter(BaseChannelAdapter):
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
         try:
-            resp = await self._client.post(
+            resp = await self._post_with_retry(
                 f"{self.base_url}/setMessageReaction",
                 json={
                     "chat_id": chat_id,
@@ -629,6 +1129,8 @@ class TelegramAdapter(BaseChannelAdapter):
                     "reaction": [{"type": "emoji", "emoji": emoji}],
                 },
             )
+            if isinstance(resp, SendResult):
+                return resp
             if resp.status_code != 200:
                 return SendResult(
                     success=False,
@@ -657,14 +1159,34 @@ class TelegramAdapter(BaseChannelAdapter):
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
         try:
-            resp = await self._client.post(
+            # PR 3a.2 — MarkdownV2 + parse-error fallback for edits too.
+            truncated = text[: self.max_message_length]
+            converted = _to_mdv2(truncated)
+            resp = await self._post_with_retry(
                 f"{self.base_url}/editMessageText",
                 json={
                     "chat_id": chat_id,
                     "message_id": int(message_id),
-                    "text": text[: self.max_message_length],
+                    "text": converted,
+                    "parse_mode": "MarkdownV2",
                 },
             )
+            if isinstance(resp, SendResult):
+                return resp
+            if (
+                resp.status_code == 400
+                and _MDV2_PARSE_ERROR_MARKER in resp.text.lower()
+            ):
+                resp = await self._post_with_retry(
+                    f"{self.base_url}/editMessageText",
+                    json={
+                        "chat_id": chat_id,
+                        "message_id": int(message_id),
+                        "text": truncated,
+                    },
+                )
+                if isinstance(resp, SendResult):
+                    return resp
             if resp.status_code != 200:
                 return SendResult(
                     success=False,
@@ -687,10 +1209,12 @@ class TelegramAdapter(BaseChannelAdapter):
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
         try:
-            resp = await self._client.post(
+            resp = await self._post_with_retry(
                 f"{self.base_url}/deleteMessage",
                 json={"chat_id": chat_id, "message_id": int(message_id)},
             )
+            if isinstance(resp, SendResult):
+                return resp
             if resp.status_code != 200:
                 return SendResult(
                     success=False,
@@ -839,14 +1363,33 @@ class TelegramAdapter(BaseChannelAdapter):
             ]
         ]
         try:
-            resp = await self._client.post(
+            # PR 3a.2 — MarkdownV2 + parse-error fallback for approval prompt.
+            converted = _to_mdv2(prompt_text)
+            resp = await self._post_with_retry(
                 f"{self.base_url}/sendMessage",
                 json={
                     "chat_id": chat_id,
-                    "text": prompt_text,
+                    "text": converted,
+                    "parse_mode": "MarkdownV2",
                     "reply_markup": {"inline_keyboard": keyboard},
                 },
             )
+            if isinstance(resp, SendResult):
+                return resp
+            if (
+                resp.status_code == 400
+                and _MDV2_PARSE_ERROR_MARKER in resp.text.lower()
+            ):
+                resp = await self._post_with_retry(
+                    f"{self.base_url}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": prompt_text,
+                        "reply_markup": {"inline_keyboard": keyboard},
+                    },
+                )
+                if isinstance(resp, SendResult):
+                    return resp
             if resp.status_code != 200:
                 return SendResult(
                     success=False,

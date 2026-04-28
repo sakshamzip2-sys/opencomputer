@@ -600,6 +600,7 @@ class PluginAPI:
         session_db_path: Path | None = None,
         slash_commands: dict[str, Any] | None = None,
         activation_source: PluginActivationSource = "bundled",
+        outgoing_queue: Any = None,
     ) -> None:
         self.tools = tool_registry
         self.hooks = hook_engine
@@ -640,6 +641,27 @@ class PluginAPI:
         # inbound MessageEvent / wire call. Plugins read via the
         # ``request_context`` property.
         self._request_context: RequestContext | None = None
+        # Hermes channel-port (PR 2 / amendment §A.3): outgoing-queue
+        # facade. Lets webhook-style plugins enqueue outbound messages
+        # without importing ``opencomputer.gateway.outgoing_queue``
+        # directly — preserving the plugin_sdk → opencomputer one-way
+        # boundary. The accessor is a duck-typed object exposing
+        # ``.enqueue(platform=..., chat_id=..., body=..., attachments=...,
+        # metadata=...)`` (see :class:`opencomputer.gateway.outgoing_queue.
+        # OutgoingQueue`). ``None`` outside the gateway (CLI / tests)
+        # — plugins MUST handle the ``None`` case gracefully.
+        self._outgoing_queue: Any = outgoing_queue
+        # PR #221 follow-up: the live ``Dispatch`` instance the gateway
+        # is using. ``None`` outside the gateway (CLI / wire / tests).
+        # Plugins read this to query in-flight session locks
+        # (``_locks`` dict) so /reset can drop a stuck per-chat lock,
+        # and to call into the gateway's approval-callback machinery
+        # without coupling to ``opencomputer.gateway.dispatch``. Without
+        # the binding, the lock-clear branch in
+        # ``extensions/discord/adapter._reset_session`` silently
+        # no-ops. Gateway calls ``_bind_dispatch(disp)`` from
+        # :meth:`Gateway.__init__` right after constructing ``Dispatch``.
+        self._dispatch: Any = None
 
     @property
     def activation_source(self) -> PluginActivationSource:
@@ -673,6 +695,49 @@ class PluginAPI:
         ``sources/openclaw/src/gateway/server-plugins.ts:47-64, 107-144``.
         """
         return self._request_context
+
+    @property
+    def outgoing_queue(self) -> Any:
+        """Outgoing-message queue facade for plugins that enqueue async sends.
+
+        Hermes channel-port PR 2 / amendment §A.3. Webhook-style plugins
+        (HTTP receivers, cron-driven publishers) need to schedule a
+        message without holding a live adapter reference. Importing
+        ``opencomputer.gateway.outgoing_queue.OutgoingQueue`` directly
+        would violate the plugin_sdk → opencomputer one-way boundary, so
+        the gateway threads its queue through ``PluginAPI`` and plugins
+        access it via ``api.outgoing_queue.enqueue(...)``.
+
+        Returns ``None`` when no queue is bound (CLI / tests / direct
+        ``AgentLoop`` runs). Plugin code MUST handle the ``None`` case
+        — typically by logging a warning and dropping the message
+        rather than raising.
+        """
+        return self._outgoing_queue
+
+    def _bind_outgoing_queue(self, queue: Any) -> None:
+        """Late-bind the outgoing queue. Called by the gateway after
+        ``load_all`` ran but before adapters connect — at construction
+        time the queue's SQLite path isn't available yet (it depends on
+        per-profile config). Idempotent: replacing an existing binding
+        is harmless. Plugin code only ever sees the post-binding value
+        because dispatch starts after ``Gateway.start``.
+        """
+        self._outgoing_queue = queue
+
+    def _bind_dispatch(self, dispatch: Any) -> None:
+        """Late-bind the live ``Dispatch`` instance.
+
+        Called by :meth:`Gateway.__init__` immediately after constructing
+        ``Dispatch`` so plugin-side helpers (e.g. Discord ``/reset``)
+        can reach the live per-chat lock map without importing
+        ``opencomputer.gateway.dispatch`` directly.
+
+        Idempotent: replacing an existing binding is harmless. ``None``
+        outside the gateway is the documented default — plugins MUST
+        handle that path gracefully (typically by no-op).
+        """
+        self._dispatch = dispatch
 
     @contextmanager
     def in_request(self, ctx: RequestContext) -> Iterator[None]:

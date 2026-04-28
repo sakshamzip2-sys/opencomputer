@@ -17,6 +17,7 @@ import asyncio
 import logging
 from typing import Any
 
+from opencomputer.agent.config import GatewayConfig
 from opencomputer.agent.loop import AgentLoop
 from opencomputer.gateway.dispatch import Dispatch
 from opencomputer.gateway.outgoing_drainer import OutgoingDrainer
@@ -29,8 +30,19 @@ logger = logging.getLogger("opencomputer.gateway.server")
 class Gateway:
     """The gateway daemon."""
 
-    def __init__(self, loop: AgentLoop) -> None:
+    def __init__(
+        self,
+        loop: AgentLoop,
+        config: GatewayConfig | None = None,
+    ) -> None:
         self.loop = loop
+        # Gateway-level config (PR #221 follow-up). Defaults preserve
+        # legacy behavior — ``photo_burst_window=0.8``. Users can
+        # override via ``gateway.photo_burst_window: 0.5`` in their
+        # ``~/.opencomputer/<profile>/config.yaml``; the CLI's
+        # ``opencomputer gateway`` entry point reads :class:`Config`
+        # and threads ``cfg.gateway`` here.
+        self._config: GatewayConfig = config or GatewayConfig()
         # Task I.9: wire the shared PluginAPI through to Dispatch so
         # plugins see a per-request scope via ``api.request_context``.
         # ``shared_api`` is set by ``PluginRegistry.load_all``; if the
@@ -38,7 +50,20 @@ class Gateway:
         # silently falls back to the no-scope path.
         from opencomputer.plugins.registry import registry as plugin_registry
 
-        self.dispatch = Dispatch(loop, plugin_api=plugin_registry.shared_api)
+        self.dispatch = Dispatch(
+            loop,
+            plugin_api=plugin_registry.shared_api,
+            config={"photo_burst_window": self._config.photo_burst_window},
+        )
+        # PR #221 follow-up: bind the live Dispatch onto the shared
+        # PluginAPI so plugin-side helpers (e.g. Discord ``/reset``)
+        # can reach the per-chat session-lock map without importing
+        # ``opencomputer.gateway.dispatch``. Idempotent — re-binding
+        # in tests that construct a Gateway twice is harmless. ``None``
+        # before plugins are loaded; that's the wire / CLI path which
+        # never runs Discord interactions.
+        if plugin_registry.shared_api is not None:
+            plugin_registry.shared_api._bind_dispatch(self.dispatch)
         self._adapters: list[BaseChannelAdapter] = []
         self._drainer: OutgoingDrainer | None = None
         self._drainer_task: asyncio.Task[None] | None = None
@@ -49,6 +74,13 @@ class Gateway:
         # Subscribes to ``session_end`` on the F2 bus and stages SKILL.md
         # candidates for user review. Opt-in via ``oc skills evolution on``.
         self._evolution_subscriber: Any | None = None
+        # Hermes channel-port (PR 2 Task 2.3 / amendment §A.5):
+        # fatal-error supervisor. Ticks every 60s in ``start()`` to
+        # check ``adapter.has_fatal_error()``; reconnects retryable
+        # adapters and logs ERROR for non-retryable. Stop event lets
+        # ``stop()`` wake the loop promptly without waiting up to 60s.
+        self._fatal_supervisor_task: asyncio.Task[None] | None = None
+        self._fatal_supervisor_stop: asyncio.Event = asyncio.Event()
 
     def register_adapter(self, adapter: BaseChannelAdapter) -> None:
         """Register a channel adapter (usually from a loaded plugin)."""
@@ -87,13 +119,33 @@ class Gateway:
         # contract as the ambient daemon — never crashes gateway boot.
         await self._start_evolution_subscriber()
 
+        # Hermes channel-port (PR 2 Task 2.3): start the fatal-error
+        # supervisor so adapters that flag themselves with
+        # ``_set_fatal_error`` get auto-reconnected (retryable) or
+        # ERROR-logged (non-retryable). Always-on; runs at 60s cadence.
+        self._fatal_supervisor_stop.clear()
+        self._fatal_supervisor_task = asyncio.create_task(
+            self._check_fatal_errors_periodic(),
+            name="gateway-fatal-error-supervisor",
+        )
+
     async def _start_outgoing_drainer(self) -> None:
         from opencomputer.agent.config import _home
+        from opencomputer.plugins.registry import registry as plugin_registry
 
         adapters_by_platform = {
             a.platform.value: a for a in self._adapters
         }
         queue = OutgoingQueue(_home() / "sessions.db")
+        # Hermes channel-port PR 2 / amendment §A.3: thread the live
+        # queue into PluginAPI so webhook-style plugins can enqueue
+        # outbound messages via ``api.outgoing_queue.enqueue(...)``
+        # without importing opencomputer.* directly. Binding here (vs
+        # construction) because the queue's SQLite path is per-profile
+        # and only resolved after config init.
+        plugin_registry.outgoing_queue = queue
+        if plugin_registry.shared_api is not None:
+            plugin_registry.shared_api._bind_outgoing_queue(queue)
         self._drainer = OutgoingDrainer(queue, adapters_by_platform)
         await self._drainer.expire_stale_on_boot()
         self._drainer_task = asyncio.create_task(
@@ -213,8 +265,76 @@ class Gateway:
                 "failed to start skill-evolution subscriber — gateway continues without it"
             )
 
+    async def _tick_fatal_error_supervisor(self) -> None:
+        """One supervisor pass — public-ish so tests can drive a single tick.
+
+        Hermes channel-port (PR 2 Task 2.3 + amendment §A.5). Iterates
+        adapters; for each fatally-flagged one:
+
+        * ``retryable=True``  → disconnect, ``clear_fatal_error()``, connect.
+        * ``retryable=False`` → ERROR-log only; the adapter stays disconnected.
+
+        Per amendment §A.5, uses ``adapter.clear_fatal_error()`` rather
+        than mutating private fields directly.
+        """
+        for adapter in list(self._adapters):
+            if not adapter.has_fatal_error():
+                continue
+            code = adapter._fatal_error_code
+            retryable = adapter._fatal_error_retryable
+            if retryable:
+                logger.warning(
+                    "fatal-error supervisor: reconnecting adapter %s (code=%s)",
+                    adapter.platform,
+                    code,
+                )
+                try:
+                    await adapter.disconnect()
+                    adapter.clear_fatal_error()
+                    await adapter.connect()
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "fatal-error supervisor: reconnect failed for %s",
+                        adapter.platform,
+                    )
+            else:
+                logger.error(
+                    "fatal-error supervisor: %s non-retryable code=%s msg=%s",
+                    adapter.platform,
+                    code,
+                    adapter._fatal_error_message,
+                )
+
+    async def _check_fatal_errors_periodic(self, *, interval: float = 60.0) -> None:
+        """Periodic fatal-error sweep. Runs until ``_fatal_supervisor_stop`` fires.
+
+        Hermes channel-port (PR 2 Task 2.3). Default cadence 60s; tests
+        can pass a small interval to drive multiple iterations quickly.
+        """
+        while not self._fatal_supervisor_stop.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._fatal_supervisor_stop.wait(), timeout=interval
+                )
+                # Stop event fired — exit cleanly.
+                return
+            except TimeoutError:
+                pass
+            await self._tick_fatal_error_supervisor()
+
     async def stop(self) -> None:
         logger.info("gateway: stopping")
+        # Hermes channel-port (PR 2 Task 2.3): stop supervisor BEFORE we
+        # disconnect adapters so the loop doesn't race a final reconnect.
+        if self._fatal_supervisor_task is not None:
+            self._fatal_supervisor_stop.set()
+            try:
+                await asyncio.wait_for(
+                    self._fatal_supervisor_task, timeout=2.0
+                )
+            except (TimeoutError, asyncio.CancelledError):
+                self._fatal_supervisor_task.cancel()
+            self._fatal_supervisor_task = None
         if self._evolution_subscriber is not None:
             try:
                 self._evolution_subscriber.stop()

@@ -18,6 +18,15 @@ Setup:
 Capabilities: REACTIONS only. WhatsApp Cloud API does not currently support
 edit/delete on outbound messages from a business account, so the adapter
 declines those flags.
+
+Mention-gating note (PR 3b.4): unlike Hermes' WhatsApp Web/multi-device
+bridge that surfaces a ``mentions[]`` array on inbound messages, the Cloud
+API webhook payload doesn't include reliable mention metadata for
+outbound businesses (a business cannot be @-mentioned in the same way an
+end-user can). The Hermes ``_message_mentions_bot`` gate therefore has no
+analogue here — inbound mention-aware filtering would have to live in
+whichever component receives the webhook (e.g., extensions/webhook), not
+this adapter.
 """
 
 from __future__ import annotations
@@ -29,6 +38,7 @@ import httpx
 
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import Platform, SendResult
+from plugin_sdk.format_converters import whatsapp_format
 
 logger = logging.getLogger("opencomputer.ext.whatsapp")
 
@@ -90,8 +100,14 @@ class WhatsAppAdapter(BaseChannelAdapter):
         ``to`` field which expects the phone number; we strip the
         leading ``+`` since Meta accepts both forms but stores it
         without.
+
+        PR 3b.4: applies plugin_sdk.format_converters.whatsapp_format
+        so ``**bold**`` → ``*bold*``, ``__bold__`` → ``*bold*``,
+        ``~~strike~~`` → ``~strike~``, headers flatten to bold, links
+        flatten to ``label (url)``. Code fences pass through verbatim.
         """
-        body = (text or "")[: self.max_message_length]
+        formatted = whatsapp_format.convert(text or "")
+        body = formatted[: self.max_message_length]
         if not body:
             return SendResult(success=False, error="empty message body")
         recipient = chat_id.lstrip("+")
@@ -102,17 +118,24 @@ class WhatsAppAdapter(BaseChannelAdapter):
             "text": {"body": body},
         }
         url = f"{self._base_url}/{self._phone_id}/messages"
-        try:
-            resp = await self.client.post(url, json=payload)
-        except Exception as e:  # noqa: BLE001
-            return SendResult(success=False, error=f"http error: {e}")
-        if resp.status_code >= 400:
-            return SendResult(
-                success=False, error=f"{resp.status_code}: {resp.text[:200]}"
-            )
-        data = resp.json()
-        msg_id = (data.get("messages") or [{}])[0].get("id")
-        return SendResult(success=True, message_id=msg_id)
+
+        async def _do_send() -> SendResult:
+            try:
+                resp = await self.client.post(url, json=payload)
+            except Exception as exc:  # noqa: BLE001
+                if self._is_retryable_error(exc):
+                    raise
+                return SendResult(success=False, error=f"http error: {exc}")
+            if resp.status_code >= 400:
+                return SendResult(
+                    success=False,
+                    error=f"{resp.status_code}: {resp.text[:200]}",
+                )
+            data = resp.json()
+            msg_id = (data.get("messages") or [{}])[0].get("id")
+            return SendResult(success=True, message_id=msg_id)
+
+        return await self._send_with_retry(_do_send)
 
     # ─── Outbound: reaction ─────────────────────────────────────────
 
@@ -139,14 +162,21 @@ class WhatsAppAdapter(BaseChannelAdapter):
             "reaction": {"message_id": message_id, "emoji": emoji},
         }
         url = f"{self._base_url}/{self._phone_id}/messages"
-        try:
-            resp = await self.client.post(url, json=payload)
-        except Exception as e:  # noqa: BLE001
-            return SendResult(success=False, error=f"http error: {e}")
-        if resp.status_code >= 400:
-            return SendResult(
-                success=False, error=f"{resp.status_code}: {resp.text[:200]}"
-            )
-        data = resp.json()
-        msg_id = (data.get("messages") or [{}])[0].get("id")
-        return SendResult(success=True, message_id=msg_id)
+
+        async def _do_react() -> SendResult:
+            try:
+                resp = await self.client.post(url, json=payload)
+            except Exception as exc:  # noqa: BLE001
+                if self._is_retryable_error(exc):
+                    raise
+                return SendResult(success=False, error=f"http error: {exc}")
+            if resp.status_code >= 400:
+                return SendResult(
+                    success=False,
+                    error=f"{resp.status_code}: {resp.text[:200]}",
+                )
+            data = resp.json()
+            msg_id = (data.get("messages") or [{}])[0].get("id")
+            return SendResult(success=True, message_id=msg_id)
+
+        return await self._send_with_retry(_do_react)

@@ -29,15 +29,45 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
 import httpx
 
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
+from plugin_sdk.channel_helpers import redact_phone
 from plugin_sdk.core import MessageEvent, Platform, SendResult
 
 logger = logging.getLogger("opencomputer.ext.imessage")
+
+
+# BlueBubbles chat GUIDs come in two main shapes:
+#   - 1:1 iMessage: "iMessage;-;+15551234567"
+#   - 1:1 SMS bridge: "SMS;-;+15551234567"
+#   - Group: "iMessage;+;chat<hex>"
+# When we log a GUID we want to redact any embedded E.164 number so a
+# stolen log file doesn't leak a personal contact's full phone.
+_E164_IN_GUID = re.compile(r"\+\d{6,15}")
+
+
+def _redact_chat_guid(guid: str) -> str:
+    """Redact any E.164 phone number embedded in a BlueBubbles chat GUID."""
+    if not guid:
+        return ""
+    return _E164_IN_GUID.sub(lambda m: redact_phone(m.group(0)), guid)
+
+
+def _redact_handle(handle: str) -> str:
+    """Redact a sender handle. Phone numbers go through ``redact_phone``;
+    email-style handles (Apple ID emails) pass through — they're already
+    less sensitive than phones and the rest of the system logs emails as
+    user IDs anyway."""
+    if not handle:
+        return ""
+    if handle.startswith("+") or handle.replace("-", "").replace(" ", "").isdigit():
+        return redact_phone(handle)
+    return handle
 
 
 _DEFAULT_POLL_INTERVAL = 10.0
@@ -124,7 +154,10 @@ class IMessageAdapter(BaseChannelAdapter):
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
         try:
-            resp = await self._client.post(
+            # PR #221 O2 — wrap the BlueBubbles bridge POST with the
+            # base adapter's transient-error retry helper.
+            resp = await self._send_with_retry(
+                self._client.post,
                 f"{self._base_url}/api/v1/message/text",
                 params={"password": self._password},
                 json={
@@ -133,16 +166,34 @@ class IMessageAdapter(BaseChannelAdapter):
                     "method": "apple-script",
                 },
             )
+            if isinstance(resp, SendResult):
+                return resp  # exhausted retries on transient errors
             if resp.status_code != 200:
+                logger.warning(
+                    "imessage send: HTTP %d to %s",
+                    resp.status_code,
+                    _redact_chat_guid(chat_id),
+                )
                 return SendResult(
                     success=False,
                     error=f"bluebubbles HTTP {resp.status_code}: {resp.text[:200]}",
                 )
             data = resp.json()
             if data.get("status") not in (200, "success"):
+                logger.warning(
+                    "imessage send: bluebubbles error to %s: %s",
+                    _redact_chat_guid(chat_id),
+                    data.get("message") or data,
+                )
                 return SendResult(success=False, error=str(data.get("message") or data))
             return SendResult(success=True)
         except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "imessage send: %s to %s: %s",
+                type(exc).__name__,
+                _redact_chat_guid(chat_id),
+                exc,
+            )
             return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
 
     async def send_reaction(
@@ -164,7 +215,9 @@ class IMessageAdapter(BaseChannelAdapter):
                 error=f"emoji {emoji!r} not mappable to iMessage tapback",
             )
         try:
-            resp = await self._client.post(
+            # PR #221 O2 — wrap reaction POST with the retry helper.
+            resp = await self._send_with_retry(
+                self._client.post,
                 f"{self._base_url}/api/v1/message/react",
                 params={"password": self._password},
                 json={
@@ -173,16 +226,34 @@ class IMessageAdapter(BaseChannelAdapter):
                     "reaction": reaction,
                 },
             )
+            if isinstance(resp, SendResult):
+                return resp  # exhausted retries on transient errors
             if resp.status_code != 200:
+                logger.warning(
+                    "imessage react: HTTP %d to %s",
+                    resp.status_code,
+                    _redact_chat_guid(chat_id),
+                )
                 return SendResult(
                     success=False,
                     error=f"bluebubbles HTTP {resp.status_code}: {resp.text[:200]}",
                 )
             data = resp.json()
             if data.get("status") not in (200, "success"):
+                logger.warning(
+                    "imessage react: bluebubbles error to %s: %s",
+                    _redact_chat_guid(chat_id),
+                    data.get("message") or data,
+                )
                 return SendResult(success=False, error=str(data.get("message") or data))
             return SendResult(success=True)
         except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "imessage react: %s to %s: %s",
+                type(exc).__name__,
+                _redact_chat_guid(chat_id),
+                exc,
+            )
             return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
 
     # ------------------------------------------------------------------
@@ -266,6 +337,14 @@ class IMessageAdapter(BaseChannelAdapter):
         sender = handle.get("address") or "unknown"
         date_ms = raw.get("dateCreated") or 0
         ts = float(date_ms) / 1000.0 if date_ms else time.time()
+        # Debug log: redact phone numbers in both chat GUID and handle so
+        # the routine "received message" trace doesn't leak personal
+        # contacts into log files.
+        logger.info(
+            "imessage inbound chat=%s from=%s",
+            _redact_chat_guid(chat_guid),
+            _redact_handle(sender),
+        )
         return MessageEvent(
             platform=Platform.IMESSAGE,
             chat_id=chat_guid,
@@ -304,4 +383,9 @@ def _emoji_to_tapback(emoji: str) -> str | None:
     return _EMOJI_TAPBACK_MAP.get(emoji)
 
 
-__all__ = ["IMessageAdapter", "_emoji_to_tapback"]
+__all__ = [
+    "IMessageAdapter",
+    "_emoji_to_tapback",
+    "_redact_chat_guid",
+    "_redact_handle",
+]

@@ -32,6 +32,7 @@ from typing import Any
 import httpx
 
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
+from plugin_sdk.channel_helpers import redact_phone
 from plugin_sdk.core import Platform, SendResult
 
 logger = logging.getLogger("opencomputer.ext.signal")
@@ -66,12 +67,18 @@ class SignalAdapter(BaseChannelAdapter):
     async def connect(self) -> None:
         # No upfront check — signal-cli's first /send will surface auth /
         # connectivity errors. We don't pre-flight to keep startup fast.
+        logger.info(
+            "signal: connected (account=%s, base_url=%s)",
+            redact_phone(self._phone),
+            self._base_url,
+        )
         return None
 
     async def disconnect(self) -> None:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+        logger.info("signal: disconnected (account=%s)", redact_phone(self._phone))
 
     # ─── Outbound: text ─────────────────────────────────────────────
 
@@ -101,18 +108,38 @@ class SignalAdapter(BaseChannelAdapter):
             },
         }
         try:
-            resp = await self.client.post(
-                f"{self._base_url}/api/v1/rpc", json=payload
+            # PR #221 O2 — wrap signal-cli JSON-RPC POST with the base
+            # adapter's transient-error retry helper. ConnectError /
+            # network-blip retries; non-retryable errors propagate.
+            resp = await self._send_with_retry(
+                self.client.post,
+                f"{self._base_url}/api/v1/rpc",
+                json=payload,
             )
+            if isinstance(resp, SendResult):
+                return resp  # exhausted retries on transient errors
         except Exception as e:  # noqa: BLE001
+            logger.error(
+                "signal send: http error to %s: %s", redact_phone(chat_id), e
+            )
             return SendResult(success=False, error=f"http error: {e}")
         if resp.status_code >= 400:
+            logger.warning(
+                "signal send: HTTP %d to %s",
+                resp.status_code,
+                redact_phone(chat_id),
+            )
             return SendResult(
                 success=False, error=f"{resp.status_code}: {resp.text[:200]}"
             )
         data = resp.json()
         if "error" in data:
             err = data["error"]
+            logger.warning(
+                "signal send: signal-cli error to %s: %s",
+                redact_phone(chat_id),
+                err.get("message", err),
+            )
             return SendResult(
                 success=False, error=f"signal-cli error: {err.get('message', err)}"
             )
@@ -120,6 +147,7 @@ class SignalAdapter(BaseChannelAdapter):
         # signal-cli returns a timestamp that doubles as the message id
         # for reactions / edits.
         msg_id = str(result.get("timestamp", "")) or None
+        logger.info("signal send ok: %s msg_id=%s", redact_phone(chat_id), msg_id)
         return SendResult(success=True, message_id=msg_id)
 
     # ─── Outbound: reaction ─────────────────────────────────────────
@@ -158,18 +186,36 @@ class SignalAdapter(BaseChannelAdapter):
             },
         }
         try:
-            resp = await self.client.post(
-                f"{self._base_url}/api/v1/rpc", json=payload
+            # PR #221 O2 — wrap reaction RPC POST with the retry helper.
+            resp = await self._send_with_retry(
+                self.client.post,
+                f"{self._base_url}/api/v1/rpc",
+                json=payload,
             )
+            if isinstance(resp, SendResult):
+                return resp  # exhausted retries on transient errors
         except Exception as e:  # noqa: BLE001
+            logger.error(
+                "signal reaction: http error to %s: %s", redact_phone(chat_id), e
+            )
             return SendResult(success=False, error=f"http error: {e}")
         if resp.status_code >= 400:
+            logger.warning(
+                "signal reaction: HTTP %d to %s",
+                resp.status_code,
+                redact_phone(chat_id),
+            )
             return SendResult(
                 success=False, error=f"{resp.status_code}: {resp.text[:200]}"
             )
         data = resp.json()
         if "error" in data:
             err = data["error"]
+            logger.warning(
+                "signal reaction: signal-cli error to %s: %s",
+                redact_phone(chat_id),
+                err.get("message", err),
+            )
             return SendResult(
                 success=False, error=f"signal-cli error: {err.get('message', err)}"
             )
