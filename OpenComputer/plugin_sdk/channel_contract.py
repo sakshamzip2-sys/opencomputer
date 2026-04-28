@@ -589,6 +589,45 @@ class BaseChannelAdapter(ABC):
         except (ValueError, OSError):
             return False
 
+    # ------------------------------------------------------------------
+    # Per-channel prompt / skill resolution — Hermes (PR 2 Task 2.5)
+    # ------------------------------------------------------------------
+
+    def resolve_channel_prompt(
+        self, channel_id: str, parent_id: str | None = None,
+    ) -> str | None:
+        """Per-channel ephemeral system prompt. Falls back to ``parent_id``.
+
+        Default implementation reads ``self.config["channel_prompts"]``
+        (a ``{channel_id: prompt_text}`` mapping). Override per-platform
+        for richer schemas (e.g. Slack's per-thread prompts that live
+        inside a workspace overlay).
+
+        Returns ``None`` when no prompt is configured — the caller
+        falls through to the agent's default system prompt.
+        """
+        prompts = (self.config or {}).get("channel_prompts") or {}
+        if channel_id in prompts:
+            return prompts[channel_id]
+        if parent_id and parent_id in prompts:
+            return prompts[parent_id]
+        return None
+
+    def resolve_channel_skills(
+        self, channel_id: str, parent_id: str | None = None,
+    ) -> list[str]:
+        """Per-channel auto-load skill list. Falls back to ``parent_id``.
+
+        Returns a fresh list each call so the caller can mutate the
+        result without disturbing the underlying config dict.
+        """
+        bindings = (self.config or {}).get("channel_skill_bindings") or {}
+        if channel_id in bindings:
+            return list(bindings[channel_id])
+        if parent_id and parent_id in bindings:
+            return list(bindings[parent_id])
+        return []
+
     def extract_media(self, content: str) -> tuple[str, list[MediaItem]]:
         """Parse ``MEDIA: <path>`` and ``[[audio_as_voice]] <path>`` directives.
 
