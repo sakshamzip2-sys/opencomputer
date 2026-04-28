@@ -62,6 +62,17 @@ class SlashContext:
     on_queue_list: Callable[[], list[str]] = list
     #: ``/queue clear`` — drop all pending entries; return how many.
     on_queue_clear: Callable[[], int] = lambda: 0
+    #: ``/snapshot create [<label>]`` — archive critical state files;
+    #: returns the new snapshot id, or ``None`` if no eligible files.
+    on_snapshot_create: Callable[[str | None], str | None] = lambda label: None
+    #: ``/snapshot list`` — return snapshot manifests, newest first.
+    on_snapshot_list: Callable[[], list[dict]] = list
+    #: ``/snapshot restore <id>`` — overwrite current state from snapshot;
+    #: returns count of files restored (0 if id not found).
+    on_snapshot_restore: Callable[[str], int] = lambda sid: 0
+    #: ``/snapshot prune`` — drop snapshots beyond the keep cap; returns
+    #: count deleted.
+    on_snapshot_prune: Callable[[], int] = lambda: 0
 
 
 def _split_args(text: str) -> tuple[str, list[str]]:
@@ -241,6 +252,76 @@ def _handle_queue(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_snapshot(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/snapshot [create [<label>]|list|restore <id>|prune]``.
+
+    Default subcommand (no args) is ``list`` — show recent snapshots.
+    """
+    sub = (args[0].lower() if args else "list").strip()
+    if sub == "create":
+        label = " ".join(args[1:]).strip() or None
+        sid = ctx.on_snapshot_create(label)
+        if sid:
+            ctx.console.print(f"[green]snapshot created:[/green] {sid}")
+        else:
+            ctx.console.print(
+                "[yellow]snapshot empty[/yellow] — no eligible state files found "
+                "(profile_home may be uninitialized)."
+            )
+        return SlashResult(handled=True)
+
+    if sub == "list":
+        items = ctx.on_snapshot_list()
+        if not items:
+            ctx.console.print("[dim]no snapshots.[/dim]")
+            return SlashResult(handled=True)
+        ctx.console.print(f"[bold]snapshots ({len(items)}):[/bold]")
+        for i, m in enumerate(items, start=1):
+            sid = m.get("id", "?")
+            n = m.get("file_count", 0)
+            sz = m.get("total_size", 0)
+            label = m.get("label") or ""
+            label_part = f"  [cyan]{label}[/cyan]" if label else ""
+            ctx.console.print(
+                f"  [dim]{i}.[/dim] {sid}{label_part}  "
+                f"[dim]({n} files, {sz} bytes)[/dim]"
+            )
+        return SlashResult(handled=True)
+
+    if sub == "restore":
+        if len(args) < 2:
+            ctx.console.print(
+                "[red]usage:[/red] /snapshot restore <id>  "
+                "[dim](try /snapshot list first)[/dim]"
+            )
+            return SlashResult(handled=True)
+        sid = args[1].strip()
+        n = ctx.on_snapshot_restore(sid)
+        if n > 0:
+            ctx.console.print(
+                f"[green]restored {n} files[/green] from snapshot {sid}.\n"
+                "[yellow]restart recommended[/yellow] for state.db / config "
+                "changes to take effect."
+            )
+        else:
+            ctx.console.print(
+                f"[red]restore failed[/red] — snapshot {sid!r} not found "
+                "or has no manifest."
+            )
+        return SlashResult(handled=True)
+
+    if sub == "prune":
+        n = ctx.on_snapshot_prune()
+        ctx.console.print(f"[green]pruned[/green] — {n} snapshot(s) deleted.")
+        return SlashResult(handled=True)
+
+    ctx.console.print(
+        f"[red]unknown subcommand:[/red] /snapshot {sub}  "
+        "[dim](try create | list | restore <id> | prune)[/dim]"
+    )
+    return SlashResult(handled=True)
+
+
 _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "exit": _handle_exit,
     "clear": _handle_clear,
@@ -253,6 +334,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "rename": _handle_rename,
     "resume": _handle_resume,
     "queue": _handle_queue,
+    "snapshot": _handle_snapshot,
 }
 
 

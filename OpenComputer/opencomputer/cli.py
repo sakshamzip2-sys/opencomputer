@@ -1039,6 +1039,26 @@ def _run_chat_session(
         _session_queues.pop(session_id, None)
         console.clear()
 
+    def _on_snapshot_create(label: str | None) -> str | None:
+        from opencomputer.snapshot import create_snapshot
+
+        return create_snapshot(profile_home, label=label)
+
+    def _on_snapshot_list() -> list[dict]:
+        from opencomputer.snapshot import list_snapshots
+
+        return list_snapshots(profile_home, limit=50)
+
+    def _on_snapshot_restore(snapshot_id: str) -> int:
+        from opencomputer.snapshot import restore_snapshot
+
+        return restore_snapshot(profile_home, snapshot_id)
+
+    def _on_snapshot_prune() -> int:
+        from opencomputer.snapshot import prune_snapshots
+
+        return prune_snapshots(profile_home)
+
     def _get_cost_summary() -> dict[str, int]:
         return dict(_token_tally)
 
@@ -1232,6 +1252,10 @@ def _run_chat_session(
                 on_queue_add=_on_queue_add,
                 on_queue_list=_on_queue_list,
                 on_queue_clear=_on_queue_clear,
+                on_snapshot_create=_on_snapshot_create,
+                on_snapshot_list=_on_snapshot_list,
+                on_snapshot_restore=_on_snapshot_restore,
+                on_snapshot_prune=_on_snapshot_prune,
             )
             result = dispatch_slash(user_input, slash_ctx)
             if result.exit_loop:
