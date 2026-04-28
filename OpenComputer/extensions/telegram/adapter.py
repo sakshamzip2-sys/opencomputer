@@ -371,10 +371,23 @@ class TelegramAdapter(BaseChannelAdapter):
         # httpx client. ``TELEGRAM_FALLBACK_IPS=auto`` triggers DoH
         # discovery; a comma-separated list of IPs uses those directly.
         transport = await self._build_fallback_transport()
+        # PR #221 O3 — wire the SSRF redirect guard onto the response
+        # event hooks. The client downloads attachments via
+        # ``download_attachment`` from server-supplied CDN paths; even
+        # though ``follow_redirects`` defaults to False (so the guard is
+        # effectively defensive depth today), the guard refuses any 3xx
+        # whose Location points at loopback / private / link-local hosts
+        # so a future ``follow_redirects=True`` change can't accidentally
+        # turn the bot into an SSRF probe.
+        from plugin_sdk.network_utils import ssrf_redirect_guard
+
+        client_kwargs: dict[str, Any] = {
+            "timeout": 35.0,
+            "event_hooks": {"response": [ssrf_redirect_guard]},
+        }
         if transport is not None:
-            self._client = httpx.AsyncClient(timeout=35.0, transport=transport)
-        else:
-            self._client = httpx.AsyncClient(timeout=35.0)
+            client_kwargs["transport"] = transport
+        self._client = httpx.AsyncClient(**client_kwargs)
         # getMe to verify token and cache our bot id
         try:
             resp = await self._client.get(f"{self.base_url}/getMe")
