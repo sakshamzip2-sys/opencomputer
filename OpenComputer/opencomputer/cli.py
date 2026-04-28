@@ -1104,9 +1104,26 @@ def _run_chat_session(
         return
 
     while True:
-        async def _read_one() -> str:
+        # Fetch the session title each turn so a fresh /rename takes effect
+        # immediately (the title indicator updates on the very next prompt).
+        try:
+            from opencomputer.agent.state import SessionDB as _TitleDB
+
+            _title_db = _TitleDB(cfg.session.db_path)
+            _current_title = _title_db.get_session_title(session_id) or None
+        except Exception:  # noqa: BLE001 — never crash the prompt loop on a title fetch
+            _current_title = None
+
+        # Bind ``_current_title`` via default arg so each loop iteration's
+        # closure captures *that* iteration's title, not the late-bound
+        # outer name (ruff B023).
+        async def _read_one(_title: str | None = _current_title) -> str:
             scope = TurnCancelScope()
-            return await read_user_input(profile_home=profile_home, scope=scope)
+            return await read_user_input(
+                profile_home=profile_home,
+                scope=scope,
+                session_title=_title,
+            )
 
         try:
             user_input = asyncio.run(_read_one())
