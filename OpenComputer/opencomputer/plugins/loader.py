@@ -651,6 +651,17 @@ class PluginAPI:
         # OutgoingQueue`). ``None`` outside the gateway (CLI / tests)
         # — plugins MUST handle the ``None`` case gracefully.
         self._outgoing_queue: Any = outgoing_queue
+        # PR #221 follow-up: the live ``Dispatch`` instance the gateway
+        # is using. ``None`` outside the gateway (CLI / wire / tests).
+        # Plugins read this to query in-flight session locks
+        # (``_locks`` dict) so /reset can drop a stuck per-chat lock,
+        # and to call into the gateway's approval-callback machinery
+        # without coupling to ``opencomputer.gateway.dispatch``. Without
+        # the binding, the lock-clear branch in
+        # ``extensions/discord/adapter._reset_session`` silently
+        # no-ops. Gateway calls ``_bind_dispatch(disp)`` from
+        # :meth:`Gateway.__init__` right after constructing ``Dispatch``.
+        self._dispatch: Any = None
 
     @property
     def activation_source(self) -> PluginActivationSource:
@@ -713,6 +724,20 @@ class PluginAPI:
         because dispatch starts after ``Gateway.start``.
         """
         self._outgoing_queue = queue
+
+    def _bind_dispatch(self, dispatch: Any) -> None:
+        """Late-bind the live ``Dispatch`` instance.
+
+        Called by :meth:`Gateway.__init__` immediately after constructing
+        ``Dispatch`` so plugin-side helpers (e.g. Discord ``/reset``)
+        can reach the live per-chat lock map without importing
+        ``opencomputer.gateway.dispatch`` directly.
+
+        Idempotent: replacing an existing binding is harmless. ``None``
+        outside the gateway is the documented default — plugins MUST
+        handle that path gracefully (typically by no-op).
+        """
+        self._dispatch = dispatch
 
     @contextmanager
     def in_request(self, ctx: RequestContext) -> Iterator[None]:

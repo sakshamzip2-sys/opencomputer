@@ -915,16 +915,20 @@ class DiscordAdapter(BaseChannelAdapter):
         except Exception as e:  # noqa: BLE001
             logger.warning("discord: /reset end_session failed: %s", e)
             return f"reset partially failed ({type(e).__name__}); try again."
-        # Drop the per-chat lock from the live Dispatch (if accessible
-        # via plugin_registry) so the next inbound message doesn't
-        # block on a stale future.
+        # Drop the per-chat lock from the live Dispatch (bound onto
+        # ``plugin_registry.shared_api._dispatch`` by ``Gateway.__init__``)
+        # so the next inbound message doesn't block on a stale future.
+        # Outside the gateway (CLI / wire / tests without a Gateway) the
+        # binding is ``None`` — silently no-op in that case.
         try:
             from opencomputer.plugins.registry import registry as plugin_registry
 
             api = getattr(plugin_registry, "shared_api", None)
             disp = getattr(api, "_dispatch", None) if api is not None else None
-            if disp is not None and hasattr(disp, "_locks"):
-                disp._locks.pop(session_id, None)
+            if disp is not None:
+                locks = getattr(disp, "_locks", None)
+                if isinstance(locks, dict):
+                    locks.pop(session_id, None)
         except Exception:  # noqa: BLE001
             pass
         return (

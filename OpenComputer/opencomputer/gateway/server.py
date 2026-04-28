@@ -55,6 +55,15 @@ class Gateway:
             plugin_api=plugin_registry.shared_api,
             config={"photo_burst_window": self._config.photo_burst_window},
         )
+        # PR #221 follow-up: bind the live Dispatch onto the shared
+        # PluginAPI so plugin-side helpers (e.g. Discord ``/reset``)
+        # can reach the per-chat session-lock map without importing
+        # ``opencomputer.gateway.dispatch``. Idempotent — re-binding
+        # in tests that construct a Gateway twice is harmless. ``None``
+        # before plugins are loaded; that's the wire / CLI path which
+        # never runs Discord interactions.
+        if plugin_registry.shared_api is not None:
+            plugin_registry.shared_api._bind_dispatch(self.dispatch)
         self._adapters: list[BaseChannelAdapter] = []
         self._drainer: OutgoingDrainer | None = None
         self._drainer_task: asyncio.Task[None] | None = None
