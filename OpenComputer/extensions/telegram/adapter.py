@@ -359,6 +359,13 @@ class TelegramAdapter(BaseChannelAdapter):
             await self._client.aclose()
         self._release_lock()
 
+    # PR 3a.4 — exponential-ish backoff schedule for transient network
+    # errors during long-poll. After the 10th consecutive failure the
+    # supervisor is asked to take over (retryable=True so it restarts).
+    _NETWORK_BACKOFF_SCHEDULE: tuple[int, ...] = (5, 10, 20, 40, 60, 60, 60, 60, 60, 60)
+    _MAX_CONSECUTIVE_409S: int = 3
+    _CONFLICT_BACKOFF_SECONDS: int = 10
+
     async def _poll_forever(self) -> None:
         assert self._client is not None
         # OpenClaw parity (CHANGELOG #69873): a 409 "Conflict" from
@@ -367,7 +374,14 @@ class TelegramAdapter(BaseChannelAdapter):
         # locally, but cross-machine duplicates can still happen. Log
         # loudly + back off so we don't spam Telegram with rapid
         # re-polls if the conflict persists.
+        # PR 3a.4 — after 3 consecutive 409s (with 10s sleeps between),
+        # we set a fatal-non-retryable error and break: another process
+        # is durably holding the polling slot, restarting won't help.
+        # Network errors get up to 10 retries with the schedule above
+        # before we set fatal-retryable and let the gateway supervisor
+        # decide whether to reconnect.
         consecutive_409s = 0
+        consecutive_network_errors = 0
         while not self._stop_event.is_set():
             try:
                 # Round 2a P-5 — also subscribe to ``callback_query``
@@ -380,15 +394,21 @@ class TelegramAdapter(BaseChannelAdapter):
                 resp = await self._client.get(f"{self.base_url}/getUpdates", params=params)
                 if resp.status_code == 409:
                     consecutive_409s += 1
-                    backoff = min(30, 2 ** min(consecutive_409s, 4))
+                    if consecutive_409s > self._MAX_CONSECUTIVE_409S:
+                        self._set_fatal_error(
+                            "telegram-conflict",
+                            "another process is polling — stop it or rotate token",
+                            retryable=False,
+                        )
+                        break
                     logger.warning(
                         "telegram getUpdates returned 409 Conflict — another "
                         "process is also polling this bot's updates. "
                         "Sleeping %ss (attempt #%d). Stop the other client "
                         "or use a different bot token.",
-                        backoff, consecutive_409s,
+                        self._CONFLICT_BACKOFF_SECONDS, consecutive_409s,
                     )
-                    await asyncio.sleep(backoff)
+                    await asyncio.sleep(self._CONFLICT_BACKOFF_SECONDS)
                     continue
                 if resp.status_code != 200:
                     await asyncio.sleep(2)
@@ -397,15 +417,38 @@ class TelegramAdapter(BaseChannelAdapter):
                 if not data.get("ok"):
                     await asyncio.sleep(2)
                     continue
+                # Successful poll — reset both counters.
                 consecutive_409s = 0
+                consecutive_network_errors = 0
                 for update in data.get("result", []):
                     self._offset = max(self._offset, int(update["update_id"]) + 1)
                     await self._handle_update(update)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
-                logger.warning("telegram polling error: %s — sleeping 5s", e)
-                await asyncio.sleep(5)
+                consecutive_network_errors += 1
+                if consecutive_network_errors > len(self._NETWORK_BACKOFF_SCHEDULE):
+                    # PR 3a.4 — past the 10-retry budget. Hand off to
+                    # the gateway supervisor (retryable=True so it tries
+                    # to restart the adapter).
+                    self._set_fatal_error(
+                        "telegram-network",
+                        f"transport down: {type(e).__name__}: {str(e)[:200]}",
+                        retryable=True,
+                    )
+                    break
+                # Index is 1-based attempt number → 0-based schedule.
+                sleep_secs = self._NETWORK_BACKOFF_SCHEDULE[
+                    consecutive_network_errors - 1
+                ]
+                logger.warning(
+                    "telegram polling error #%d/%d: %s — sleeping %ss",
+                    consecutive_network_errors,
+                    len(self._NETWORK_BACKOFF_SCHEDULE),
+                    e,
+                    sleep_secs,
+                )
+                await asyncio.sleep(sleep_secs)
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
         # Round 2a P-5 — route inline-button clicks to the callback path
