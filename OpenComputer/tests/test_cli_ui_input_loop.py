@@ -84,3 +84,16 @@ def test_build_prompt_session_tab_keybinding_registered(tmp_path: Path):
     assert any(
         any(k in tab_keys for k in b.keys) for b in bindings
     ), "Tab keybinding missing from PromptSession"
+
+
+def test_build_prompt_session_uses_multicolumn_complete_style(tmp_path: Path):
+    """The dropdown must use MULTI_COLUMN style so it renders in editor
+    terminals (e.g. VS Code) that don't reliably respond to
+    Cursor-Position-Report (CPR) requests. The default COLUMN style
+    uses a Float widget that needs CPR; MULTI_COLUMN uses a Window
+    in the main layout and works without CPR."""
+    from prompt_toolkit.shortcuts import CompleteStyle
+
+    scope = TurnCancelScope()
+    session = build_prompt_session(profile_home=tmp_path, scope=scope)
+    assert session.complete_style == CompleteStyle.MULTI_COLUMN
