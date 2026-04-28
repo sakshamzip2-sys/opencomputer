@@ -489,26 +489,27 @@ def _resolve_resume_target(spec: str) -> str | None:
     if spec == "last":
         return str(rows[0]["id"])
 
-    # spec == "pick" — show numbered list, accept index.
-    console.print("\n[bold]Recent sessions[/bold]")
-    for i, row in enumerate(rows, 1):
-        title = row.get("title") or "(no title)"
-        platform = row.get("platform", "?")
-        msgs = row.get("message_count", 0)
-        console.print(
-            f"  [cyan]{i:>2}[/cyan]. [dim]{row['id'][:8]}[/dim] "
-            f"{platform:<8} {msgs:>3} msgs  [white]{title}[/white]"
-        )
-    from rich.prompt import Prompt
+    # spec == "pick" — open the polished alt-screen picker (PR #207).
+    # Falls back to None if the user cancels (Esc / Ctrl+C).
+    from opencomputer.cli_ui.resume_picker import SessionRow, run_resume_picker
 
-    choice = Prompt.ask(
-        "Pick a session (number, or blank for fresh)",
-        default="",
-        choices=[""] + [str(i) for i in range(1, len(rows) + 1)],
-    )
-    if not choice:
-        return None
-    return str(rows[int(choice) - 1]["id"])
+    def _coerce_started_at(v) -> float:
+        try:
+            return float(v) if v is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    picker_rows = [
+        SessionRow(
+            id=str(r.get("id", "")),
+            title=r.get("title") or "",
+            started_at=_coerce_started_at(r.get("started_at")),
+            message_count=int(r.get("message_count", 0) or 0),
+        )
+        for r in rows
+        if r.get("id")
+    ]
+    return run_resume_picker(picker_rows)
 
 
 _STREAM_HOOKS_WIRED = False
@@ -855,6 +856,52 @@ def _run_chat_session(
         )
     console.print("[dim]Type 'exit' to quit. Ctrl+C to interrupt.[/dim]\n")
 
+    # Resume mode: render the prior conversation so the user sees what
+    # they were doing rather than facing a blank prompt with only a
+    # session-id banner. Mirrors Claude Code's `claude --resume` UX.
+    # Skipped for fresh sessions (resume falsy → no prior messages).
+    if resume:
+        from rich.markdown import Markdown as _ResumeMarkdown
+        from rich.panel import Panel as _ResumePanel
+        from rich.text import Text as _ResumeText
+
+        from opencomputer.agent.state import SessionDB as _ResumeDB
+
+        try:
+            _resume_db = _ResumeDB(cfg.session.db_path)
+            _resume_msgs = _resume_db.get_messages(session_id)
+        except Exception as _e:  # noqa: BLE001 — never crash the chat loop on a resume render hiccup
+            _log.warning("resume history render failed: %s", _e)
+            _resume_msgs = []
+
+        if _resume_msgs:
+            console.print(
+                f"[dim]──── prior conversation ({len(_resume_msgs)} message"
+                f"{'s' if len(_resume_msgs) != 1 else ''}) ────[/dim]\n"
+            )
+            for _m in _resume_msgs:
+                _content = (_m.content or "").strip()
+                if not _content:
+                    continue
+                if _m.role == "user":
+                    console.print(
+                        _ResumePanel(
+                            _ResumeText(_content, style="bold"),
+                            border_style="green",
+                            padding=(0, 1),
+                            expand=False,
+                            title="[bold green]you[/bold green]",
+                            title_align="left",
+                        )
+                    )
+                elif _m.role == "assistant":
+                    console.print("[bold magenta]oc ›[/bold magenta]")
+                    console.print(_ResumeMarkdown(_content, code_theme="ansi_dark"))
+                    console.print()
+                # tool / system / etc. messages are intentionally skipped —
+                # they're noise for the user trying to recall context.
+            console.print("[dim]──── continue below ────[/dim]\n")
+
     # Round 5 — bridge agent loop tool dispatches → StreamingRenderer.
     # PRE_TOOL_USE hook fires on tool start; bus subscription on
     # ToolCallEvent fires on completion. Both check current_renderer()
@@ -1057,9 +1104,26 @@ def _run_chat_session(
         return
 
     while True:
-        async def _read_one() -> str:
+        # Fetch the session title each turn so a fresh /rename takes effect
+        # immediately (the title indicator updates on the very next prompt).
+        try:
+            from opencomputer.agent.state import SessionDB as _TitleDB
+
+            _title_db = _TitleDB(cfg.session.db_path)
+            _current_title = _title_db.get_session_title(session_id) or None
+        except Exception:  # noqa: BLE001 — never crash the prompt loop on a title fetch
+            _current_title = None
+
+        # Bind ``_current_title`` via default arg so each loop iteration's
+        # closure captures *that* iteration's title, not the late-bound
+        # outer name (ruff B023).
+        async def _read_one(_title: str | None = _current_title) -> str:
             scope = TurnCancelScope()
-            return await read_user_input(profile_home=profile_home, scope=scope)
+            return await read_user_input(
+                profile_home=profile_home,
+                scope=scope,
+                session_title=_title,
+            )
 
         try:
             user_input = asyncio.run(_read_one())
@@ -1160,6 +1224,14 @@ def _run_chat_session(
 
 @app.command()
 def chat(
+    action: str | None = typer.Argument(
+        None,
+        help=(
+            "Optional positional verb. ``resume`` opens the picker (same as "
+            "``oc resume``); any other value is treated as a session-id prefix "
+            "to resume directly."
+        ),
+    ),
     resume: str = typer.Option(
         "",
         "--resume",
@@ -1176,7 +1248,17 @@ def chat(
         False, "--no-compact", help="Disable automatic context compaction (debugging)."
     ),
 ) -> None:
-    """Start an interactive chat session."""
+    """Start an interactive chat session.
+
+    ``oc chat`` starts fresh. ``oc chat resume`` opens the polished
+    picker. ``oc chat <id-prefix>`` resumes that session directly.
+    """
+    if action == "resume":
+        # Delegate to the picker flow.
+        resume = "pick"
+    elif action:
+        # Treat as a session-id (or prefix) to resume directly.
+        resume = action
     _run_chat_session(resume=resume, plan=plan, no_compact=no_compact, yolo=False)
 
 

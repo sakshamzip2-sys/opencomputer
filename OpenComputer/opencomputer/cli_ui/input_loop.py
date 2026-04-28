@@ -257,12 +257,283 @@ async def read_user_input(
     *,
     profile_home: Path,
     scope: TurnCancelScope,
+    session_title: str | None = None,
 ) -> str:
-    """Read one line of user input via the prompt session.
+    """Read one line of user input with an always-visible slash dropdown.
 
-    Returns the trimmed string. Caller handles ``EOFError`` (Ctrl+D)
-    and ``KeyboardInterrupt`` (Ctrl+C with empty buffer).
+    Replaces the older :func:`build_prompt_session` path because
+    prompt_toolkit's built-in :class:`CompletionsMenu` (both
+    ``COLUMN`` and ``MULTI_COLUMN`` styles) silently fails to render in
+    editor terminals (VS Code, JetBrains) where Cursor-Position-Report
+    handling is unreliable. We build a custom :class:`Application` with
+    our own dropdown :class:`Window` in the main layout — pure layout
+    flow, no Float widgets, no CPR dependency — guaranteed to render.
+
+    UX:
+
+    - Type ``/`` → dropdown shows all 10 canonical slash commands with
+      ``(category)`` tag and description on each row
+    - Type ``/re`` → list narrows to commands starting with that prefix
+    - Up/Down arrow keys navigate the dropdown (highlighted row in bold
+      with a blue background)
+    - Tab → autocomplete to the highlighted command name
+    - Enter → if dropdown is open and a row is highlighted, expand to
+      that command name then submit; otherwise submit raw text
+    - Esc → dismiss the dropdown if open; clear buffer otherwise
+    - Ctrl+J / Alt+Enter → insert literal newline
+    - Ctrl+V / bracketed paste → handles clipboard images (existing flow)
+    - Ctrl+C / Ctrl+D (empty buffer) → raise to caller per shell convention
+
+    ``build_prompt_session`` is preserved as the legacy entry point used
+    by older callers and several test fixtures; new code should use this.
     """
-    session = build_prompt_session(profile_home=profile_home, scope=scope)
-    text = await session.prompt_async()
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.filters import Condition
+    from prompt_toolkit.layout import (
+        ConditionalContainer,
+        HSplit,
+        Layout,
+        VSplit,
+        Window,
+    )
+    from prompt_toolkit.layout.controls import (
+        BufferControl,
+        FormattedTextControl,
+    )
+    from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.styles import Style
+
+    from .slash import SLASH_REGISTRY
+
+    history_path = _history_file_path(profile_home)
+    history = FileHistory(str(history_path))
+
+    input_buffer = Buffer(
+        history=history,
+        multiline=False,
+        complete_while_typing=False,
+        enable_history_search=True,
+    )
+
+    # Mutable picker state. Updated on every keystroke via on_text_changed
+    # and consumed by the dropdown FormattedTextControl on each render.
+    state: dict = {"matches": [], "selected_idx": 0}
+
+    def _refilter(text: str) -> None:
+        if text.startswith("/") and " " not in text:
+            prefix = text[1:].lower()
+            state["matches"] = [
+                c for c in SLASH_REGISTRY if c.name.startswith(prefix)
+            ][:10]
+            state["selected_idx"] = 0
+        else:
+            state["matches"] = []
+            state["selected_idx"] = 0
+
+    def _on_text_changed(_buf):  # noqa: ANN001 — pt fires (sender,)
+        _refilter(input_buffer.text)
+
+    input_buffer.on_text_changed += _on_text_changed
+
+    def _has_dropdown() -> bool:
+        return bool(state["matches"])
+
+    def _dropdown_text():
+        if not state["matches"]:
+            return []
+        out: list[tuple[str, str]] = []
+        for i, cmd in enumerate(state["matches"]):
+            is_sel = i == state["selected_idx"]
+            args = f" {cmd.args_hint}" if cmd.args_hint else ""
+            cursor_cls = "class:dd.cursor" if is_sel else "class:dd.cursor.dim"
+            title_cls = "class:dd.title.selected" if is_sel else "class:dd.title"
+            cat_cls = "class:dd.cat.selected" if is_sel else "class:dd.cat"
+            desc_cls = "class:dd.desc.selected" if is_sel else "class:dd.desc"
+            out.append((cursor_cls, "❯ " if is_sel else "  "))
+            out.append((title_cls, f"/{cmd.name}{args}"))
+            out.append((cat_cls, f"  ({cmd.category})"))
+            out.append((desc_cls, f"  {cmd.description}"))
+            out.append(("", "\n"))
+        return out
+
+    def _dropdown_height():
+        # ``Dimension.exact(N)`` is the classmethod that builds a fixed-N
+        # dimension. Earlier code used ``Dimension(exact=N)`` which is
+        # invalid — the constructor only accepts ``min/max/weight/preferred``.
+        # Calling it crashed prompt_toolkit's renderer the moment the user
+        # typed ``/`` (PR #210 follow-up).
+        return Dimension.exact(min(len(state["matches"]), 10))
+
+    kb = KeyBindings()
+
+    @kb.add(Keys.Up, filter=Condition(_has_dropdown))
+    def _up(event):  # noqa: ANN001
+        if state["matches"]:
+            state["selected_idx"] = max(0, state["selected_idx"] - 1)
+
+    @kb.add(Keys.Down, filter=Condition(_has_dropdown))
+    def _down(event):  # noqa: ANN001
+        if state["matches"]:
+            state["selected_idx"] = min(
+                len(state["matches"]) - 1, state["selected_idx"] + 1
+            )
+
+    @kb.add(Keys.ControlI, filter=Condition(_has_dropdown))  # Tab
+    def _tab(event):  # noqa: ANN001
+        sel = state["matches"][state["selected_idx"]]
+        input_buffer.text = f"/{sel.name}"
+        input_buffer.cursor_position = len(input_buffer.text)
+
+    @kb.add(Keys.Enter)
+    def _enter(event):  # noqa: ANN001
+        # If dropdown is open and a row is selected, expand to that
+        # command before submitting (so the row visibly chosen wins).
+        if state["matches"] and 0 <= state["selected_idx"] < len(state["matches"]):
+            sel = state["matches"][state["selected_idx"]]
+            input_buffer.text = f"/{sel.name}"
+        event.app.exit(result=input_buffer.text)
+
+    @kb.add(Keys.Escape, eager=True)
+    def _esc(event):  # noqa: ANN001
+        # ESC dismisses the dropdown if open; otherwise clears the buffer
+        # (matches the prior PromptSession behavior).
+        if state["matches"]:
+            state["matches"] = []
+            state["selected_idx"] = 0
+        else:
+            input_buffer.text = ""
+
+    @kb.add(Keys.ControlC)
+    def _ctrl_c(event):  # noqa: ANN001
+        event.app.exit(exception=KeyboardInterrupt)
+
+    @kb.add(Keys.ControlD)
+    def _ctrl_d(event):  # noqa: ANN001
+        if not input_buffer.text:
+            event.app.exit(exception=EOFError)
+
+    @kb.add(Keys.ControlJ)
+    def _ctrl_j(event):  # noqa: ANN001
+        input_buffer.insert_text("\n")
+
+    @kb.add(Keys.Escape, Keys.Enter)
+    def _alt_enter(event):  # noqa: ANN001
+        input_buffer.insert_text("\n")
+
+    @kb.add(Keys.ControlV)
+    def _ctrl_v(event):  # noqa: ANN001
+        _try_attach_clipboard_image_into_buffer(event, profile_home=profile_home)
+
+    @kb.add(Keys.BracketedPaste)
+    def _bracketed_paste(event):  # noqa: ANN001
+        data: str = getattr(event, "data", "") or ""
+        if not data.strip() and _try_attach_clipboard_image_into_buffer(
+            event, profile_home=profile_home
+        ):
+            return
+        event.current_buffer.insert_text(data)
+
+    # fzf-inspired aesthetic: bright cyan title for the highlighted row,
+    # yellow ❯ cursor, no heavy bg blocks. Title indicator (right-aligned)
+    # uses a dim cyan box mirroring Claude Code's session-name corner tag.
+    style = Style.from_dict(
+        {
+            "prompt": "ansigreen bold",
+            "dd.cursor": "bold #ffaf00",
+            "dd.cursor.dim": "#3a3a3a",
+            "dd.title": "#a8a8a8",
+            "dd.title.selected": "bold #61afef",
+            "dd.cat": "#5f87af",
+            "dd.cat.selected": "bold #61afef",
+            "dd.desc": "#6c6c6c",
+            "dd.desc.selected": "#bcbcbc",
+            "dd.divider": "#3a3a3a",
+            "title.box": "#5fafd7",
+            "title.text": "bold #5fafd7",
+        }
+    )
+
+    prompt_window = Window(
+        content=FormattedTextControl([("class:prompt", "you › ")]),
+        height=1,
+        dont_extend_width=True,
+    )
+    input_window = Window(
+        content=BufferControl(buffer=input_buffer),
+        height=1,
+    )
+
+    # Right-aligned session-title indicator above the input — mirrors the
+    # cyan corner tag in Claude Code (e.g. "UI-changes"). Hidden when the
+    # session has no manual title set.
+    from prompt_toolkit.layout import WindowAlign
+
+    def _title_text():
+        if not session_title:
+            return []
+        return [
+            ("class:title.box", "┤ "),
+            ("class:title.text", session_title),
+            ("class:title.box", " ├"),
+        ]
+
+    title_window = ConditionalContainer(
+        content=Window(
+            content=FormattedTextControl(_title_text),
+            height=1,
+            align=WindowAlign.RIGHT,
+            dont_extend_height=True,
+        ),
+        filter=Condition(lambda: bool(session_title)),
+    )
+
+    dropdown_window = ConditionalContainer(
+        content=Window(
+            content=FormattedTextControl(_dropdown_text),
+            height=_dropdown_height,
+            wrap_lines=False,
+        ),
+        filter=Condition(_has_dropdown),
+    )
+    dropdown_divider = ConditionalContainer(
+        content=Window(
+            content=FormattedTextControl(
+                lambda: [("class:dd.divider", "─" * 80)]
+            ),
+            height=1,
+        ),
+        filter=Condition(_has_dropdown),
+    )
+
+    # CRITICAL: input row goes LAST in the HSplit. prompt_toolkit's
+    # renderer positions the cursor at the focused control after drawing
+    # the layout — if input is the last-drawn element, the cursor lands
+    # there NATURALLY without needing a relative-up cursor move (\x1b[NA).
+    # That relative move depends on Cursor-Position-Report which fails in
+    # editor terminals (VS Code, JetBrains), so dropdown-below-input was
+    # silently being overwritten by the misplaced cursor on every render.
+    # Putting dropdown ABOVE input removes the dependency entirely.
+    layout = Layout(
+        HSplit(
+            [
+                dropdown_window,
+                dropdown_divider,
+                title_window,
+                VSplit([prompt_window, input_window]),
+            ]
+        ),
+        focused_element=input_window,
+    )
+
+    app: Application = Application(
+        layout=layout,
+        key_bindings=kb,
+        style=style,
+        full_screen=False,
+        erase_when_done=True,
+        mouse_support=False,
+    )
+
+    text = await app.run_async()
     return _strip_trailing_whitespace(text or "")

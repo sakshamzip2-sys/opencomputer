@@ -20,10 +20,11 @@ def _fresh_conn() -> sqlite3.Connection:
     return conn
 
 
-def test_schema_version_is_5():
+def test_schema_version_is_6():
     # v1 = baseline; v2 = II.6 reasoning-chain metadata columns on ``messages``;
-    # v3 = F1 consent tables; v4 = P-18 episodic dreamed_into column.
-    assert SCHEMA_VERSION == 5
+    # v3 = F1 consent tables; v4 = P-18 episodic dreamed_into column;
+    # v5 = Tier-A item 11 tool_usage table; v6 = per-turn vibe_log.
+    assert SCHEMA_VERSION == 6
 
 
 def test_apply_migrations_on_fresh_db_creates_all_tables():
@@ -45,7 +46,7 @@ def test_apply_migrations_is_idempotent():
     conn = _fresh_conn()
     apply_migrations(conn)
     apply_migrations(conn)  # second call should be a no-op
-    assert _read_schema_version(conn) == 5
+    assert _read_schema_version(conn) == 6
 
 
 def test_existing_v1_db_migrates_with_data_preserved():
@@ -61,7 +62,7 @@ def test_existing_v1_db_migrates_with_data_preserved():
     conn.commit()
 
     apply_migrations(conn)
-    assert _read_schema_version(conn) == 5
+    assert _read_schema_version(conn) == 6
     got = conn.execute("SELECT id FROM sessions WHERE id='s1'").fetchone()
     assert got == ("s1",)  # data preserved
 
