@@ -199,7 +199,7 @@ def _register_skill_evolution_alias() -> None:
         sys.modules["extensions"].skill_evolution = mod
 
     parent = sys.modules["extensions.skill_evolution"]
-    for sub in ("pattern_detector", "skill_extractor", "candidate_store", "subscriber"):
+    for sub in ("pattern_detector", "skill_extractor", "candidate_store", "subscriber", "session_metrics"):
         full_name = f"extensions.skill_evolution.{sub}"
         if full_name in sys.modules:
             setattr(parent, sub, sys.modules[full_name])
