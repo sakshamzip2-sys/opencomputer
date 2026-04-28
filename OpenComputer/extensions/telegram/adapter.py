@@ -31,6 +31,7 @@ import httpx
 
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import MessageEvent, Platform, SendResult
+from plugin_sdk.format_converters.markdownv2 import convert as _to_mdv2
 
 logger = logging.getLogger("opencomputer.ext.telegram")
 
@@ -57,6 +58,13 @@ _STEER_PREFIX = "/steer "
 # Telegram MarkdownV2 requires escaping these characters
 _MDV2_SPECIAL = r"_*[]()~`>#+-=|{}.!"
 _MDV2_RE = re.compile(f"([{re.escape(_MDV2_SPECIAL)}])")
+
+# PR 3a.2 — Telegram returns 400 with this error string when our
+# MarkdownV2 escaping produces output the parser rejects (e.g. an
+# entity offset overlap). On hit, we retry the same call WITHOUT
+# parse_mode and with the ORIGINAL (un-converted) text so the user
+# at least gets the message body.
+_MDV2_PARSE_ERROR_MARKER = "can't parse entities"
 
 
 def _escape_mdv2(text: str) -> str:
@@ -611,14 +619,37 @@ class TelegramAdapter(BaseChannelAdapter):
 
     async def send(self, chat_id: str, text: str, **kwargs: Any) -> SendResult:
         assert self._client is not None
-        # Send as plain text for Phase 2 (no formatting) — easier to debug.
-        # Phase 3 can add MarkdownV2 handling with escape detection.
+        # PR 3a.2 — outbound MarkdownV2 formatting. Each chunk is
+        # converted; on a parse-error (rare — usually overlap with
+        # user-supplied backticks) we retry the SAME call without
+        # parse_mode and with the ORIGINAL text so the user gets the
+        # body.
         for chunk in _chunk_for_telegram(text, limit=self.max_message_length):
+            converted = _to_mdv2(chunk)
             try:
                 resp = await self._client.post(
                     f"{self.base_url}/sendMessage",
-                    json={"chat_id": chat_id, "text": chunk, "disable_notification": False},
+                    json={
+                        "chat_id": chat_id,
+                        "text": converted,
+                        "parse_mode": "MarkdownV2",
+                        "disable_notification": False,
+                    },
                 )
+                # Parse-error fallback: re-send with the original (un-converted)
+                # text and no parse_mode.
+                if (
+                    resp.status_code == 400
+                    and _MDV2_PARSE_ERROR_MARKER in resp.text.lower()
+                ):
+                    resp = await self._client.post(
+                        f"{self.base_url}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": chunk,
+                            "disable_notification": False,
+                        },
+                    )
                 if resp.status_code != 200:
                     return SendResult(
                         success=False,
@@ -716,16 +747,41 @@ class TelegramAdapter(BaseChannelAdapter):
             )
 
         try:
-            with p.open("rb") as fh:
-                files = {field_name: (p.name, fh, _guess_mime(p))}
+            # PR 3a.2 — outbound caption uses MarkdownV2 with parse-error
+            # fallback. We open the file twice (once per attempt) so the
+            # multipart upload sees a fresh file pointer if we have to
+            # retry without parse_mode.
+            def _build_form(use_mdv2: bool) -> dict[str, Any]:
                 form: dict[str, Any] = {"chat_id": chat_id}
                 if caption:
-                    form["caption"] = caption[:1024]  # Telegram caption limit
+                    if use_mdv2:
+                        form["caption"] = _to_mdv2(caption)[:1024]
+                        form["parse_mode"] = "MarkdownV2"
+                    else:
+                        form["caption"] = caption[:1024]
+                return form
+
+            with p.open("rb") as fh:
+                files = {field_name: (p.name, fh, _guess_mime(p))}
                 resp = await self._client.post(
                     f"{self.base_url}/{endpoint}",
-                    data=form,
+                    data=_build_form(use_mdv2=bool(caption)),
                     files=files,
                 )
+            # Parse-error fallback — re-upload without parse_mode and
+            # with the ORIGINAL caption text.
+            if (
+                caption
+                and resp.status_code == 400
+                and _MDV2_PARSE_ERROR_MARKER in resp.text.lower()
+            ):
+                with p.open("rb") as fh:
+                    files = {field_name: (p.name, fh, _guess_mime(p))}
+                    resp = await self._client.post(
+                        f"{self.base_url}/{endpoint}",
+                        data=_build_form(use_mdv2=False),
+                        files=files,
+                    )
             if resp.status_code != 200:
                 return SendResult(
                     success=False,
@@ -789,14 +845,30 @@ class TelegramAdapter(BaseChannelAdapter):
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
         try:
+            # PR 3a.2 — MarkdownV2 + parse-error fallback for edits too.
+            truncated = text[: self.max_message_length]
+            converted = _to_mdv2(truncated)
             resp = await self._client.post(
                 f"{self.base_url}/editMessageText",
                 json={
                     "chat_id": chat_id,
                     "message_id": int(message_id),
-                    "text": text[: self.max_message_length],
+                    "text": converted,
+                    "parse_mode": "MarkdownV2",
                 },
             )
+            if (
+                resp.status_code == 400
+                and _MDV2_PARSE_ERROR_MARKER in resp.text.lower()
+            ):
+                resp = await self._client.post(
+                    f"{self.base_url}/editMessageText",
+                    json={
+                        "chat_id": chat_id,
+                        "message_id": int(message_id),
+                        "text": truncated,
+                    },
+                )
             if resp.status_code != 200:
                 return SendResult(
                     success=False,
@@ -971,14 +1043,29 @@ class TelegramAdapter(BaseChannelAdapter):
             ]
         ]
         try:
+            # PR 3a.2 — MarkdownV2 + parse-error fallback for approval prompt.
+            converted = _to_mdv2(prompt_text)
             resp = await self._client.post(
                 f"{self.base_url}/sendMessage",
                 json={
                     "chat_id": chat_id,
-                    "text": prompt_text,
+                    "text": converted,
+                    "parse_mode": "MarkdownV2",
                     "reply_markup": {"inline_keyboard": keyboard},
                 },
             )
+            if (
+                resp.status_code == 400
+                and _MDV2_PARSE_ERROR_MARKER in resp.text.lower()
+            ):
+                resp = await self._client.post(
+                    f"{self.base_url}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": prompt_text,
+                        "reply_markup": {"inline_keyboard": keyboard},
+                    },
+                )
             if resp.status_code != 200:
                 return SendResult(
                     success=False,
