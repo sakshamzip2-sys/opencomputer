@@ -4,6 +4,35 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Fixed — Layer 2 → user-model graph: scans now actually populate the graph
+
+Pre-2026-04-28 `opencomputer profile bootstrap` reported '1000 files /
+200 commits / 1115 browser visits scanned' but the
+`user_model/graph.sqlite` stayed pinned at 3 identity nodes — the
+orchestrator captured Layer 2 results into `BootstrapResult` counters
+and then dropped the rows on the floor. Only Layer 0 (identity) had a
+`write_*_to_graph` function. Four new writers added:
+
+- `write_recent_files_to_graph` — aggregates by project-root signature
+  (top 3 path segments under $HOME), top-N → `attribute`
+  (`"active_dir: ..."`). Skips paths outside $HOME.
+- `write_git_log_to_graph` — repos by commit count → `attribute`
+  (`"works_on_repo: /path"`); distinct author emails → `identity`.
+- `write_browser_history_to_graph` — aggregates by domain (host-only,
+  `www.`/`m.` stripped); top-N with ≥2 visits → `attribute`
+  (`"frequent_domain: example.com"`). Page titles and full URLs
+  deliberately not persisted.
+- `write_calendar_to_graph` — each non-empty event title → `attribute`
+  (`"upcoming: Standup"`); metadata in `Node.metadata`.
+
+All four are idempotent via `UserModelStore.upsert_node`. Confidence
+floors at 0.5 (single observation) and saturates at 0.95 (~50
+observations). Wired into `run_bootstrap` with per-source try/except so
+one bad reader can't mask the others. Four new counters surface in
+`BootstrapResult` + CLI output. Real run: graph went 3 → 28 nodes.
+
+18 tests in `tests/test_profile_bootstrap_layer2_writers.py`.
+
 ### Added (T2 batch — 4 skills closing remaining gap-fill roadmap items)
 
 Four skills shipped together as a single PR (each was small enough that
