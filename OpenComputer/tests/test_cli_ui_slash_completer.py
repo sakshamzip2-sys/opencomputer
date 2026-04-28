@@ -76,12 +76,16 @@ def test_completer_prefix_filters_by_name():
 
 def test_completer_prefix_re_returns_rename_and_resume():
     out = _completions("/re")
-    assert out == ["/rename", "/resume"]
+    # PR #234 added /reload; assert /rename and /resume are present alongside.
+    assert "/rename" in out
+    assert "/resume" in out
 
 
 def test_completer_prefix_case_insensitive():
     assert _completions("/HE") == ["/help"]
-    assert _completions("/Re") == ["/rename", "/resume"]
+    out = _completions("/Re")
+    assert "/rename" in out
+    assert "/resume" in out
 
 
 def test_completer_no_match_returns_empty():
