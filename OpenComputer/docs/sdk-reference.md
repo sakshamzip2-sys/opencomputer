@@ -178,6 +178,15 @@ Enum of reasons a turn ended: `END_TURN`, `TOOL_USE`, `MAX_TOKENS`,
 `INTERRUPTED`, `BUDGET_EXHAUSTED`, `ERROR`. Providers set it on
 `ProviderResponse.stop_reason`.
 
+### `ProcessingOutcome`
+
+String enum reported to `BaseChannelAdapter.on_processing_complete`
+once the agent finishes handling an inbound message: `SUCCESS`,
+`FAILURE`, `CANCELLED`. Adapters that opt into the `REACTIONS`
+capability translate these into platform-native reactions (e.g. ✅ /
+❌ on Telegram). The value is a plain string so log lines can compare
+against `"success"` etc. without enum imports.
+
 ### `SingleInstanceError`
 
 `RuntimeError` subclass raised by the plugin loader when a
