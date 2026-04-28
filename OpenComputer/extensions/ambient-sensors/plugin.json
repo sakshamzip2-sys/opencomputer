@@ -8,6 +8,5 @@
   "kind": "mixed",
   "entry": "plugin",
   "enabled_by_default": false,
-  "tool_names": [],
-  "capabilities": ["ambient.foreground.observe"]
+  "tool_names": []
 }

@@ -7,6 +7,5 @@
   "enabled_by_default": false,
   "entry": "plugin",
   "author": "OpenComputer",
-  "license": "MIT",
-  "capabilities": ["voice.capture", "voice.playback"]
+  "license": "MIT"
 }
