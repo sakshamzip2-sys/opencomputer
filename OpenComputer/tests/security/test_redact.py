@@ -14,7 +14,6 @@ from opencomputer.security.redact import (
     redact_runtime_text_with_counts,
 )
 
-
 # ---------------------------------------------------------------------------
 # Vendor-specific keys
 # ---------------------------------------------------------------------------

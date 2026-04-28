@@ -15,11 +15,10 @@ from __future__ import annotations
 import asyncio
 from typing import ClassVar
 
+from opencomputer.tools._gui_backends import detect_platform, has_command
 from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
-
-from opencomputer.tools._gui_backends import detect_platform, has_command
 
 _VALID_URGENCY = ("low", "normal", "critical")
 _MAX_TITLE = 200

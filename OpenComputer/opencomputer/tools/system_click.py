@@ -19,16 +19,15 @@ from __future__ import annotations
 import asyncio
 from typing import ClassVar
 
-from plugin_sdk.consent import CapabilityClaim, ConsentTier
-from plugin_sdk.core import ToolCall, ToolResult
-from plugin_sdk.tool_contract import BaseTool, ToolSchema
-
 from opencomputer.tools._gui_backends import (
     detect_linux_display_server,
     detect_platform,
     has_command,
     has_pyautogui,
 )
+from plugin_sdk.consent import CapabilityClaim, ConsentTier
+from plugin_sdk.core import ToolCall, ToolResult
+from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 _MIN_COORD = 0
 _MAX_COORD = 8000

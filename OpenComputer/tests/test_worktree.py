@@ -21,7 +21,6 @@ from opencomputer.worktree import (
     session_worktree,
 )
 
-
 pytestmark = pytest.mark.skipif(
     shutil.which("git") is None, reason="git not on PATH"
 )

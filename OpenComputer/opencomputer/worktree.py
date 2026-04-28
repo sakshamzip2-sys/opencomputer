@@ -22,9 +22,9 @@ import os
 import shutil
 import subprocess
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 logger = logging.getLogger("opencomputer.worktree")
 
