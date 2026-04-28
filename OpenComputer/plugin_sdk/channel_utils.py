@@ -94,15 +94,27 @@ def truncate_message_smart(
     if len_fn(content) <= max_length:
         return [content]
 
-    # Reserve indicator overhead. " (NN/NN)" worst case ~10 chars.
-    indicator_overhead = 10
-    budget = max(1, max_length - indicator_overhead)
+    # Reserve indicator overhead. The worst-case " (i/N)" string scales with
+    # the chunk count, so estimate an upper bound from total content length
+    # rather than hard-coding 10 (which underestimates for n >= 100 chunks).
+    estimated_chunks = max(1, (len_fn(content) // max_length) + 1)
+    indicator_overhead = len(f" ({estimated_chunks}/{estimated_chunks})") + 1
 
     chunks: list[str] = []
     remaining = content
     open_fence_lang: str | None = None
 
     while remaining:
+        # When inside a fenced code block, each emitted chunk gets a
+        # ```lang\n prefix and a \n``` suffix wrapped around its slice. The
+        # cut budget must account for both so the wrapped chunk stays within
+        # max_length. Recompute on every iteration: the second-and-later
+        # chunks pay this overhead, the first one doesn't.
+        fence_overhead = 0
+        if open_fence_lang is not None:
+            fence_overhead = len(f"```{open_fence_lang}\n") + len("\n```")
+        budget = max(1, max_length - indicator_overhead - fence_overhead)
+
         if len_fn(remaining) <= budget:
             chunk = remaining
             remaining = ""

@@ -59,6 +59,16 @@ def test_truncate_message_smart_reopens_code_fence():
         assert chunk.count("```") % 2 == 0, f"Unbalanced fences in chunk: {chunk!r}"
 
 
+def test_truncate_message_smart_fenced_chunks_within_budget():
+    # PR-1 review I1: a chunk that falls inside a fenced block gets a
+    # ```lang\n prefix and \n``` suffix wrapped around its slice. The cut
+    # budget must account for that overhead so no chunk exceeds max_length.
+    text = "intro\n```python\n" + "x = 1\n" * 50 + "```\nouter"
+    chunks = truncate_message_smart(text, max_length=80)
+    for c in chunks:
+        assert len(c) <= 80, f"len={len(c)}: {c!r}"
+
+
 def test_truncate_message_smart_indicator_appended():
     text = "x" * 250
     chunks = truncate_message_smart(text, max_length=50)
