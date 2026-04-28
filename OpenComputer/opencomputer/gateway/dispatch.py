@@ -23,7 +23,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from opencomputer.agent.loop import AgentLoop
-from plugin_sdk.core import MessageEvent
+from plugin_sdk.core import MessageEvent, ProcessingOutcome
 from plugin_sdk.runtime_context import RequestContext
 
 if TYPE_CHECKING:
@@ -235,7 +235,24 @@ class Dispatch:
         )
         if adapter is not None:
             self._session_channels[session_id] = (adapter, event.chat_id)
+        # Hermes channel-port (PR 2 Task 2.2): fire on_processing_start
+        # BEFORE acquiring the per-chat lock so a fast-clicking user
+        # sees the 👀 reaction even if the previous turn is still
+        # holding the lock. The hook is fire-and-forget — failures
+        # never affect the reply path.
+        message_id: str | None = None
+        if event.metadata:
+            raw_id = event.metadata.get("message_id")
+            if isinstance(raw_id, str | int) and raw_id != "":
+                message_id = str(raw_id)
+        if adapter is not None:
+            asyncio.create_task(
+                self._safe_lifecycle_hook(
+                    adapter.on_processing_start(event.chat_id, message_id)
+                )
+            )
         lock = self._locks.setdefault(session_id, asyncio.Lock())
+        outcome: ProcessingOutcome = ProcessingOutcome.SUCCESS
         async with lock:
             # Start a typing heartbeat (Telegram's typing state expires after
             # ~5s, so we re-send every 4s until the turn completes).
@@ -273,6 +290,7 @@ class Dispatch:
                 # sees the one-liner from _format_user_facing_error so
                 # SDK internals / prompt fragments don't leak to chat.
                 logger.exception("dispatch error for %s: %s", event.platform, e)
+                outcome = ProcessingOutcome.FAILURE
                 return _format_user_facing_error(e)
             finally:
                 heartbeat.cancel()
@@ -280,6 +298,31 @@ class Dispatch:
                     await heartbeat
                 except (asyncio.CancelledError, Exception):
                     pass
+                # Hermes channel-port (PR 2 Task 2.2): fire
+                # on_processing_complete after the turn settles, with
+                # the outcome captured above. Fire-and-forget so a
+                # failing reaction send doesn't mask the actual reply.
+                if adapter is not None:
+                    asyncio.create_task(
+                        self._safe_lifecycle_hook(
+                            adapter.on_processing_complete(
+                                event.chat_id, message_id, outcome
+                            )
+                        )
+                    )
+
+    async def _safe_lifecycle_hook(self, coro) -> None:
+        """Fire-and-forget lifecycle hook with error swallowing.
+
+        Hermes channel-port (PR 2 Task 2.2). Hooks are decoration —
+        their failure must never affect the user's reply. We log at
+        DEBUG so the failures are surfaced for adapter authors but
+        invisible at INFO+ in normal operation.
+        """
+        try:
+            await coro
+        except Exception:  # noqa: BLE001
+            logger.debug("lifecycle hook raised", exc_info=True)
 
     async def _typing_heartbeat(self, platform: str, chat_id: str) -> None:
         """Send typing indicator every 4s until cancelled."""

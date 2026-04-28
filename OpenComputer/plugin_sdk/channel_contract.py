@@ -31,7 +31,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from plugin_sdk.core import MessageEvent, Platform, SendResult
+from plugin_sdk.core import MessageEvent, Platform, ProcessingOutcome, SendResult
 
 logger = logging.getLogger("plugin_sdk.channel_contract")
 
@@ -327,6 +327,74 @@ class BaseChannelAdapter(ABC):
             f"{str(last_exc)[:300] if last_exc else 'no exc'}"
         )
         return SendResult(success=False, error=err)
+
+    # ------------------------------------------------------------------
+    # Reaction lifecycle hooks — Hermes channel-port (PR 2 Task 2.2)
+    # ------------------------------------------------------------------
+
+    async def on_processing_start(
+        self, chat_id: str, message_id: str | None
+    ) -> None:
+        """Hook: called when the agent begins processing this message.
+
+        Default behaviour: if :attr:`ChannelCapabilities.REACTIONS` is set
+        AND ``message_id`` is provided, post a 👀 reaction so the user
+        sees the bot picked up their message. Override per-platform for
+        custom UX (typing indicator, status thread, etc.).
+
+        Errors raised by ``send_reaction`` are swallowed — a hook
+        failure must never take dispatch down.
+        """
+        if not message_id:
+            return
+        if not (self.capabilities & ChannelCapabilities.REACTIONS):
+            return
+        await self._run_processing_hook(
+            self.send_reaction(chat_id, message_id, "👀")
+        )
+
+    async def on_processing_complete(
+        self,
+        chat_id: str,
+        message_id: str | None,
+        outcome: ProcessingOutcome,
+    ) -> None:
+        """Hook: called when the agent finishes processing.
+
+        Default behaviour: replace the 👀 reaction with ✅ on
+        :attr:`ProcessingOutcome.SUCCESS`, ❌ on
+        :attr:`ProcessingOutcome.FAILURE`, or leave the eye in place on
+        :attr:`ProcessingOutcome.CANCELLED` (the user stopped the run;
+        a final-state emoji would be misleading).
+        """
+        if not message_id:
+            return
+        if not (self.capabilities & ChannelCapabilities.REACTIONS):
+            return
+        emoji_map = {
+            ProcessingOutcome.SUCCESS: "✅",
+            ProcessingOutcome.FAILURE: "❌",
+            ProcessingOutcome.CANCELLED: "",
+        }
+        emoji = emoji_map.get(outcome, "")
+        if not emoji:
+            return
+        await self._run_processing_hook(
+            self.send_reaction(chat_id, message_id, emoji)
+        )
+
+    async def _run_processing_hook(self, coro: Awaitable[Any]) -> None:
+        """Swallow exceptions from a fire-and-forget lifecycle coroutine.
+
+        Lifecycle hooks (reactions, status updates) are decoration —
+        their failure must never bubble into the user-facing reply path.
+        """
+        try:
+            await coro
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "processing-hook coroutine raised; swallowing", exc_info=True
+            )
 
 
 __all__ = ["BaseChannelAdapter", "ChannelCapabilities"]
