@@ -30,8 +30,22 @@ import httpx
 
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import Platform, SendResult
+from plugin_sdk.format_converters import matrix_html
 
 logger = logging.getLogger("opencomputer.ext.matrix")
+
+
+def _is_plain_markdown(text: str) -> bool:
+    """Heuristic: does ``text`` contain markdown that would benefit from
+    HTML formatting? When False the adapter omits ``formatted_body`` to
+    keep payloads small (and avoid noisy "*" → "<em>*</em>" for symbols
+    that aren't actually meant to be markdown)."""
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in ("**", "__", "~~", "[", "`", "# ", "## ", "### ")
+    )
 
 
 class MatrixAdapter(BaseChannelAdapter):
@@ -98,31 +112,48 @@ class MatrixAdapter(BaseChannelAdapter):
         have an alias.
 
         ``kwargs`` may include ``thread_root`` (an event id) to thread under.
+
+        PR 3b.3: when ``text`` contains markdown, also includes a
+        ``formatted_body`` rendered via
+        :mod:`plugin_sdk.format_converters.matrix_html` (org.matrix.custom.html
+        format). Plain text is preserved in ``body`` for clients that
+        don't support HTML rendering.
         """
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
         txn_id = uuid.uuid4().hex[:16]
         body = text[: self.max_message_length]
         content: dict[str, Any] = {"msgtype": "m.text", "body": body}
+        if _is_plain_markdown(body):
+            content["format"] = "org.matrix.custom.html"
+            content["formatted_body"] = matrix_html.convert(body)
         if kwargs.get("thread_root"):
             content["m.relates_to"] = {
                 "rel_type": "m.thread",
                 "event_id": kwargs["thread_root"],
             }
-        try:
-            resp = await self._client.put(
-                f"{self._homeserver}/_matrix/client/v3/rooms/{quote(chat_id)}/send/m.room.message/{txn_id}",
-                json=content,
-            )
-            if resp.status_code != 200:
-                return SendResult(
-                    success=False,
-                    error=f"matrix HTTP {resp.status_code}: {resp.text[:200]}",
+
+        async def _do_send() -> SendResult:
+            try:
+                resp = await self._client.put(
+                    f"{self._homeserver}/_matrix/client/v3/rooms/{quote(chat_id)}/send/m.room.message/{txn_id}",
+                    json=content,
                 )
-            data = resp.json()
-            return SendResult(success=True, message_id=str(data.get("event_id") or ""))
-        except Exception as exc:  # noqa: BLE001
-            return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+                if resp.status_code != 200:
+                    return SendResult(
+                        success=False,
+                        error=f"matrix HTTP {resp.status_code}: {resp.text[:200]}",
+                    )
+                data = resp.json()
+                return SendResult(
+                    success=True, message_id=str(data.get("event_id") or "")
+                )
+            except Exception as exc:  # noqa: BLE001
+                if self._is_retryable_error(exc):
+                    raise
+                return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+
+        return await self._send_with_retry(_do_send)
 
     # ------------------------------------------------------------------
     # Reactions — send an m.reaction event referencing the target event
@@ -144,19 +175,25 @@ class MatrixAdapter(BaseChannelAdapter):
                 "key": emoji,
             }
         }
-        try:
-            resp = await self._client.put(
-                f"{self._homeserver}/_matrix/client/v3/rooms/{quote(chat_id)}/send/m.reaction/{txn_id}",
-                json=content,
-            )
-            if resp.status_code != 200:
-                return SendResult(
-                    success=False,
-                    error=f"matrix HTTP {resp.status_code}: {resp.text[:200]}",
+
+        async def _do_react() -> SendResult:
+            try:
+                resp = await self._client.put(
+                    f"{self._homeserver}/_matrix/client/v3/rooms/{quote(chat_id)}/send/m.reaction/{txn_id}",
+                    json=content,
                 )
-            return SendResult(success=True)
-        except Exception as exc:  # noqa: BLE001
-            return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+                if resp.status_code != 200:
+                    return SendResult(
+                        success=False,
+                        error=f"matrix HTTP {resp.status_code}: {resp.text[:200]}",
+                    )
+                return SendResult(success=True)
+            except Exception as exc:  # noqa: BLE001
+                if self._is_retryable_error(exc):
+                    raise
+                return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+
+        return await self._send_with_retry(_do_react)
 
     # ------------------------------------------------------------------
     # Edit — Matrix represents edits via m.replace events
@@ -169,31 +206,50 @@ class MatrixAdapter(BaseChannelAdapter):
 
         Matrix clients render edits by combining the original event with
         the latest m.replace; servers don't change the original event.
+
+        PR 3b.3: emits ``formatted_body`` + ``format`` on both the
+        fallback body and ``m.new_content`` when the text carries
+        markdown.
         """
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
         txn_id = uuid.uuid4().hex[:16]
         body = text[: self.max_message_length]
-        content = {
+        new_content: dict[str, Any] = {"msgtype": "m.text", "body": body}
+        content: dict[str, Any] = {
             "msgtype": "m.text",
             "body": f"* {body}",  # convention: "* " prefix in fallback body
-            "m.new_content": {"msgtype": "m.text", "body": body},
+            "m.new_content": new_content,
             "m.relates_to": {"rel_type": "m.replace", "event_id": message_id},
         }
-        try:
-            resp = await self._client.put(
-                f"{self._homeserver}/_matrix/client/v3/rooms/{quote(chat_id)}/send/m.room.message/{txn_id}",
-                json=content,
-            )
-            if resp.status_code != 200:
-                return SendResult(
-                    success=False,
-                    error=f"matrix HTTP {resp.status_code}: {resp.text[:200]}",
+        if _is_plain_markdown(body):
+            html = matrix_html.convert(body)
+            content["format"] = "org.matrix.custom.html"
+            content["formatted_body"] = f"* {html}"
+            new_content["format"] = "org.matrix.custom.html"
+            new_content["formatted_body"] = html
+
+        async def _do_edit() -> SendResult:
+            try:
+                resp = await self._client.put(
+                    f"{self._homeserver}/_matrix/client/v3/rooms/{quote(chat_id)}/send/m.room.message/{txn_id}",
+                    json=content,
                 )
-            data = resp.json()
-            return SendResult(success=True, message_id=str(data.get("event_id") or ""))
-        except Exception as exc:  # noqa: BLE001
-            return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+                if resp.status_code != 200:
+                    return SendResult(
+                        success=False,
+                        error=f"matrix HTTP {resp.status_code}: {resp.text[:200]}",
+                    )
+                data = resp.json()
+                return SendResult(
+                    success=True, message_id=str(data.get("event_id") or "")
+                )
+            except Exception as exc:  # noqa: BLE001
+                if self._is_retryable_error(exc):
+                    raise
+                return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+
+        return await self._send_with_retry(_do_edit)
 
     # ------------------------------------------------------------------
     # Delete — Matrix uses redactions
@@ -213,19 +269,25 @@ class MatrixAdapter(BaseChannelAdapter):
         content: dict[str, Any] = {}
         if kwargs.get("reason"):
             content["reason"] = str(kwargs["reason"])
-        try:
-            resp = await self._client.put(
-                f"{self._homeserver}/_matrix/client/v3/rooms/{quote(chat_id)}/redact/{quote(message_id)}/{txn_id}",
-                json=content,
-            )
-            if resp.status_code != 200:
-                return SendResult(
-                    success=False,
-                    error=f"matrix HTTP {resp.status_code}: {resp.text[:200]}",
+
+        async def _do_delete() -> SendResult:
+            try:
+                resp = await self._client.put(
+                    f"{self._homeserver}/_matrix/client/v3/rooms/{quote(chat_id)}/redact/{quote(message_id)}/{txn_id}",
+                    json=content,
                 )
-            return SendResult(success=True)
-        except Exception as exc:  # noqa: BLE001
-            return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+                if resp.status_code != 200:
+                    return SendResult(
+                        success=False,
+                        error=f"matrix HTTP {resp.status_code}: {resp.text[:200]}",
+                    )
+                return SendResult(success=True)
+            except Exception as exc:  # noqa: BLE001
+                if self._is_retryable_error(exc):
+                    raise
+                return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+
+        return await self._send_with_retry(_do_delete)
 
 
 __all__ = ["MatrixAdapter"]
