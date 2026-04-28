@@ -80,13 +80,17 @@ honcho = [
 menubar = [
   "rumps>=0.4.0; platform_system == 'Darwin'",
 ]
-# Optional: native macOS GUI control (Phase 2.1 of catch-up plan).
-# Enables PointAndClickTool's Quartz CGEvent path (faster + supports
-# right-click). Without this extra, PointAndClick falls back to
-# osascript which is left-click-only. macOS only — Linux/Windows skip
-# the wheel via the platform marker.
+# Optional: GUI automation backend.
+# - pyobjc-framework-Quartz: native macOS event injection for
+#   PointAndClickTool (faster + supports right-click). macOS only via
+#   platform marker; Linux/Windows skip the wheel.
+# - pyautogui: cross-platform fallback for SystemClick / SystemKeystroke
+#   / SystemNotify. Works the same on macOS / Linux / Windows. Without
+#   this extra, those tools fall back to platform-native shell-outs
+#   (osascript / xdotool / notify-send / PowerShell).
 gui = [
   "pyobjc-framework-Quartz>=10.0; platform_system == 'Darwin'",
+  "pyautogui>=0.9.54",
 ]
 # Optional: voice-mode (continuous push-to-talk audio + VAD gating).
 # Install with `pip install opencomputer[voice]`. ``sounddevice`` provides

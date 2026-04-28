@@ -275,6 +275,16 @@ def _register_builtin_tools() -> None:
         registry.register(PointAndClickTool())
         registry.register(AppleScriptRunTool())
 
+    # Cross-platform GUI tools — register unconditionally; they self-detect
+    # the platform at call time and dispatch to the right backend (Quartz /
+    # pyautogui / xdotool / ydotool / osascript / PowerShell).
+    from opencomputer.tools.system_click import SystemClickTool
+    from opencomputer.tools.system_keystroke import SystemKeystrokeTool
+    from opencomputer.tools.system_notify import SystemNotifyTool
+    registry.register(SystemClickTool())
+    registry.register(SystemKeystrokeTool())
+    registry.register(SystemNotifyTool())
+
 
 def _resolve_plugin_filter():
     """Resolve the active ``enabled_ids`` filter for plugin loading.
