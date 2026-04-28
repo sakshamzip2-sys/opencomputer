@@ -170,6 +170,7 @@ def test_strip_markdown_basic(input_text, expected):
         ("+919876543210", "+91***3210"),
         ("+447911123456", "+44***3456"),
         ("5551234567", "***4567"),  # no country code
+        ("+1234", "+1***"),  # short number with country code (plan §1.1.10)
         ("", ""),
         (None, ""),
     ],

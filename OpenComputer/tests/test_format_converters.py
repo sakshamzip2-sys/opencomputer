@@ -186,6 +186,12 @@ def test_mrkdwn_no_double_escape_numeric_entity():
     assert to_mrkdwn("&#39;") == "&#39;"
 
 
+# Spec-reviewer follow-up: hex-form numeric entities (e.g. &#x27;) must not
+# get the leading & re-escaped to &amp; either.
+def test_mrkdwn_no_double_escape_hex_entity():
+    assert to_mrkdwn("&#x27;") == "&#x27;"
+
+
 def test_mrkdwn_empty_input():
     assert to_mrkdwn("") == ""
 
