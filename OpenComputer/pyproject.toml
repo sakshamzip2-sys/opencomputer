@@ -107,6 +107,13 @@ voice-local = [
 voice-mlx = [
   "mlx-whisper>=0.4; platform_system == 'Darwin'",
 ]
+# Optional: cloud STT via Groq's Whisper-large-v3. ~10x faster + ~5x cheaper
+# than OpenAI's whisper-1 for the same accuracy class — great for high-volume
+# voice-message transcription. Free tier at https://console.groq.com.
+# Install with `pip install opencomputer[stt-groq]`. See opencomputer/voice/groq_stt.py.
+stt-groq = [
+  "groq>=0.11",
+]
 # Optional: browser-control plugin (Playwright-based automation).
 # Install with `pip install opencomputer[browser]`, then:
 #   playwright install chromium

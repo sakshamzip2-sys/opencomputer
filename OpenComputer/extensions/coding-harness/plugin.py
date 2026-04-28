@@ -45,6 +45,7 @@ from slash_commands.accept_edits import AcceptEditsCommand  # type: ignore[impor
 from slash_commands.checkpoint import CheckpointCommand  # type: ignore[import-not-found]
 from slash_commands.diff import DiffCommand  # type: ignore[import-not-found]
 from slash_commands.plan import PlanOffCommand, PlanOnCommand  # type: ignore[import-not-found]
+from slash_commands.rollback import RollbackCommand  # type: ignore[import-not-found]
 from slash_commands.undo import UndoCommand  # type: ignore[import-not-found]
 from state.store import SessionStateStore  # type: ignore[import-not-found]
 from tools.background import (  # type: ignore[import-not-found]
@@ -159,6 +160,7 @@ def register(api) -> None:  # PluginAPI duck-typed
         api.register_slash_command(CheckpointCommand(harness_ctx=ctx))
         api.register_slash_command(DiffCommand(harness_ctx=ctx))
         api.register_slash_command(UndoCommand(harness_ctx=ctx))
+        api.register_slash_command(RollbackCommand(harness_ctx=ctx))
 
     # Native introspection tools — Tier 1 only.
     #

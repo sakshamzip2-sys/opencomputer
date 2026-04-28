@@ -30,6 +30,12 @@ from opencomputer.security.instruction_detector import (
     InstructionDetectorConfig,
     default_detector,
 )
+from opencomputer.security.redact import (
+    is_enabled as redact_is_enabled,
+    redact_runtime_mapping,
+    redact_runtime_text,
+    redact_runtime_text_with_counts,
+)
 from opencomputer.security.sanitize import sanitize_external_content
 
 __all__ = [
@@ -37,5 +43,9 @@ __all__ = [
     "InstructionDetector",
     "InstructionDetectorConfig",
     "default_detector",
+    "redact_is_enabled",
+    "redact_runtime_mapping",
+    "redact_runtime_text",
+    "redact_runtime_text_with_counts",
     "sanitize_external_content",
 ]

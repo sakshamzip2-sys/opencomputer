@@ -1006,11 +1006,37 @@ def _run_chat_session(
 
     profile_home = _profile_home_fn()
 
+    # Per-session next-turn prompt buffer for /queue. FIFO, capped to keep
+    # a runaway agent from filling memory. Drained one item per outer loop
+    # iteration *before* reading from the user — so a queued prompt fires
+    # the next turn even when the user hasn't pressed Enter.
+    _QUEUE_CAP = 50
+    _session_queues: dict[str, list[str]] = {}
+
+    def _on_queue_add(text: str) -> bool:
+        q = _session_queues.setdefault(session_id, [])
+        if len(q) >= _QUEUE_CAP:
+            return False
+        q.append(text)
+        return True
+
+    def _on_queue_list() -> list[str]:
+        return list(_session_queues.get(session_id, []))
+
+    def _on_queue_clear() -> int:
+        q = _session_queues.get(session_id, [])
+        n = len(q)
+        _session_queues[session_id] = []
+        return n
+
     def _on_clear() -> None:
         nonlocal session_id
         session_id = str(uuid.uuid4())
         _token_tally["in"] = 0
         _token_tally["out"] = 0
+        # Drop the queue when starting a fresh session — queued prompts
+        # were authored against the old session's context.
+        _session_queues.pop(session_id, None)
         console.clear()
 
     def _on_snapshot_create(label: str | None) -> str | None:
@@ -1154,12 +1180,20 @@ def _run_chat_session(
                 session_title=_title,
             )
 
-        try:
-            user_input = asyncio.run(_read_one())
-        except (KeyboardInterrupt, EOFError):
-            console.print("\n[dim]bye.[/dim]")
-            _print_update_hint_if_any()
-            return
+        # Drain a queued prompt (set via /queue <text>) before prompting
+        # the user. FIFO order — oldest queued first. Visible "(queued)"
+        # marker so the user knows what's running.
+        _q = _session_queues.get(session_id, [])
+        if _q:
+            user_input = _q.pop(0)
+            console.print(f"[dim](queued)[/dim] [bold]{user_input}[/bold]")
+        else:
+            try:
+                user_input = asyncio.run(_read_one())
+            except (KeyboardInterrupt, EOFError):
+                console.print("\n[dim]bye.[/dim]")
+                _print_update_hint_if_any()
+                return
         if not user_input.strip():
             continue
 
@@ -1215,6 +1249,9 @@ def _run_chat_session(
                 get_session_list=_get_session_list,
                 on_rename=_on_rename,
                 on_resume=_on_resume,
+                on_queue_add=_on_queue_add,
+                on_queue_list=_on_queue_list,
+                on_queue_clear=_on_queue_clear,
                 on_snapshot_create=_on_snapshot_create,
                 on_snapshot_list=_on_snapshot_list,
                 on_snapshot_restore=_on_snapshot_restore,
@@ -1322,13 +1359,29 @@ def code(
     no_compact: bool = typer.Option(
         False, "--no-compact", help="Disable automatic context compaction (debugging)."
     ),
+    worktree: bool = typer.Option(
+        False,
+        "--worktree",
+        "-w",
+        help=(
+            "Spawn a fresh git worktree for this session under "
+            "<repo>/.opencomputer-worktrees/<id>/, chdir into it, and "
+            "auto-remove on exit. Requires the cwd to be inside a git repo."
+        ),
+    ),
+    keep_worktree: bool = typer.Option(
+        False,
+        "--keep-worktree",
+        help="Do NOT remove the worktree on exit (when --worktree is set).",
+    ),
 ) -> None:
     """Start the coding agent in [path] (or cwd). Snappy entry-point.
 
     Mirrors ``opencomputer chat`` but is tailored for coding work — Edit,
     MultiEdit, TodoWrite, RunTests etc. are enabled by default. Use
     ``--plan`` for read-only discovery; ``--yolo`` to skip per-action
-    confirmation prompts.
+    confirmation prompts. Use ``--worktree`` to isolate this session in a
+    fresh git worktree (auto-removed on exit).
     """
     if path:
         target = os.path.abspath(path)
@@ -1337,6 +1390,16 @@ def code(
             raise typer.Exit(code=1)
         os.chdir(target)
         console.print(f"[dim]cwd: {target}[/dim]")
+
+    if worktree:
+        from opencomputer.worktree import session_worktree
+
+        with session_worktree(Path.cwd(), keep=keep_worktree) as wt:
+            if wt != Path.cwd().parent:  # i.e. the worktree was actually created
+                console.print(f"[dim]worktree: {wt}[/dim]")
+            _run_chat_session(resume=resume, plan=plan, no_compact=no_compact, yolo=yolo)
+        return
+
     _run_chat_session(resume=resume, plan=plan, no_compact=no_compact, yolo=yolo)
 
 

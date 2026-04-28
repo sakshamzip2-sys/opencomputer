@@ -53,6 +53,15 @@ class SlashContext:
     #: loop swapped to the target session; False on no-match / ambiguous
     #: prefix / DB error.
     on_resume: Callable[[str], bool] = lambda target: False
+    #: ``/queue <prompt>`` — append a prompt to the per-session next-turn
+    #: buffer. Returns True on success, False if the queue is full
+    #: (default cap = 50). The buffer is FIFO; drained one item per turn
+    #: by the chat outer loop ahead of reading from the user.
+    on_queue_add: Callable[[str], bool] = lambda text: False
+    #: ``/queue list`` — return current pending entries (oldest-first).
+    on_queue_list: Callable[[], list[str]] = list
+    #: ``/queue clear`` — drop all pending entries; return how many.
+    on_queue_clear: Callable[[], int] = lambda: 0
     #: ``/snapshot create [<label>]`` — archive critical state files;
     #: returns the new snapshot id, or ``None`` if no eligible files.
     on_snapshot_create: Callable[[str | None], str | None] = lambda label: None
@@ -193,6 +202,56 @@ def _handle_resume(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_queue(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/queue [<prompt>|list|clear]`` — manage the next-turn prompt buffer.
+
+    No args: print current count + usage hint.
+    ``list``: list pending entries.
+    ``clear``: drop all pending; print drop count.
+    Anything else: treat the full ``args`` joined with spaces as the
+    prompt to queue.
+    """
+    if not args:
+        pending = ctx.on_queue_list()
+        ctx.console.print(
+            f"[dim]queue: {len(pending)} pending. "
+            f"Use [cyan]/queue <prompt>[/cyan] to add, "
+            f"[cyan]/queue list[/cyan] to show, "
+            f"[cyan]/queue clear[/cyan] to drop all.[/dim]"
+        )
+        return SlashResult(handled=True)
+    sub = args[0].lower()
+    if sub == "list":
+        pending = ctx.on_queue_list()
+        if not pending:
+            ctx.console.print("[dim]queue is empty.[/dim]")
+            return SlashResult(handled=True)
+        ctx.console.print(f"[bold]queue ({len(pending)} pending):[/bold]")
+        for i, p in enumerate(pending, start=1):
+            preview = p if len(p) <= 80 else p[:77] + "..."
+            ctx.console.print(f"  [dim]{i}.[/dim] {preview}")
+        return SlashResult(handled=True)
+    if sub == "clear":
+        n = ctx.on_queue_clear()
+        ctx.console.print(f"[green]queue cleared[/green] — {n} dropped.")
+        return SlashResult(handled=True)
+    text = " ".join(args).strip()
+    if not text:
+        ctx.console.print("[red]queue: empty prompt[/red]")
+        return SlashResult(handled=True)
+    ok = ctx.on_queue_add(text)
+    if ok:
+        preview = text if len(text) <= 80 else text[:77] + "..."
+        ctx.console.print(
+            f"[green]queued[/green] — will fire on next turn: [dim]{preview}[/dim]"
+        )
+    else:
+        ctx.console.print(
+            "[red]queue full[/red] — drain with [cyan]/queue clear[/cyan] first."
+        )
+    return SlashResult(handled=True)
+
+
 def _handle_snapshot(ctx: SlashContext, args: list[str]) -> SlashResult:
     """``/snapshot [create [<label>]|list|restore <id>|prune]``.
 
@@ -274,6 +333,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "sessions": _handle_sessions,
     "rename": _handle_rename,
     "resume": _handle_resume,
+    "queue": _handle_queue,
     "snapshot": _handle_snapshot,
 }
 
