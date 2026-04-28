@@ -4,6 +4,44 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — passive education v2: empty-state pass + failure teach + `oc help tour`
+
+Closes the cosmetic half of v2 (the architectural half landed in PR #218).
+Three pieces:
+
+**Empty-state pass on 5 CLI commands.** "No data" outputs replaced with
+4-line teaching blocks via the new `cli_ui.empty_state.render_empty_state`
+helper:
+
+- `oc cost show` — explains what the table shows when populated, why
+  it's empty (no API spend yet), and how to set a cap
+- `oc memory show` — for both MEMORY.md and USER.md, explains what
+  each is for, why empty, and how to populate (different message
+  per file)
+- `oc recall <query>` — explains episodic recall with a personalised
+  why ("you have N sessions but none match" vs. "you haven't run any
+  sessions yet")
+- `oc skills` — explains skills + where to find them
+- `oc plugins` — explains the plugin model + suggests `oc doctor`
+
+**Better failure messages on 3 paths.** New `render_failure_with_teach`
+helper. Generalises the smart-fallback prompt pattern from PR #209 —
+every error names the feature that would have helped + how to fix:
+
+- `oc batch` missing `ANTHROPIC_API_KEY`
+- `_resolve_provider` (chat path) when provider plugin not registered
+- `oc memory setup` when Honcho plugin missing / Docker absent / compose
+  v2 missing (3 sub-paths, all converted)
+
+**`oc help tour`** — opt-in 7-step capability walkthrough for users
+who explicitly want a guided introduction. Read-only (no state
+changes), one screen per step. Never auto-runs; never suggested.
+Covers identity → memory → vibe → cost → skills → plugins → next
+steps.
+
+8 new tests covering the helpers' shape, integration tests for the
+cost / recall empty paths, and tour state-isolation.
+
 ### Added — passive education v2: mechanisms B + C + 3 new moments
 
 Builds on v1. Adds two new reveal surfaces and three new

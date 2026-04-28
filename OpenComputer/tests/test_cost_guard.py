@@ -222,7 +222,8 @@ class TestCLI:
 
         result = runner.invoke(cost_app, ["show"])
         assert result.exit_code == 0
-        assert "No usage" in result.stdout
+        # 2026-04-28: empty-state pass — "No usage recorded" → teaching block
+        assert "Cost tracking (empty)" in result.stdout
 
     def test_set_limit_then_show(self, runner: CliRunner) -> None:
         from opencomputer.cli_cost import cost_app
