@@ -33,7 +33,9 @@ from opencomputer.skills_hub.audit_log import AuditLog
 from opencomputer.skills_hub.installer import Installer, InstallError
 from opencomputer.skills_hub.lockfile import HubLockFile
 from opencomputer.skills_hub.router import SkillSourceRouter
+from opencomputer.skills_hub.sources.github import GitHubSource
 from opencomputer.skills_hub.sources.well_known import WellKnownSource
+from opencomputer.skills_hub.taps import TapsManager
 
 console = Console()
 
@@ -59,7 +61,12 @@ def _hub_root() -> Path:
 
 
 def _build_router() -> SkillSourceRouter:
-    return SkillSourceRouter([WellKnownSource()])
+    sources: list = [WellKnownSource()]
+    taps_path = _hub_root() / "taps.json"
+    clone_root = _hub_root() / "_clones"
+    for repo in TapsManager(taps_path).list():
+        sources.append(GitHubSource(repo=repo, clone_root=clone_root))
+    return SkillSourceRouter(sources)
 
 
 def _build_installer() -> Installer:
@@ -267,3 +274,41 @@ def attach_hub_commands(app: typer.Typer) -> None:
         yes: bool = typer.Option(False, "--yes", "-y"),
     ) -> None:
         do_update(identifier, yes=yes)
+
+    # Tap subgroup — manage GitHub repos as additional skill sources.
+    tap_app = typer.Typer(
+        name="tap",
+        help="Manage GitHub repo taps for the skills hub.",
+        no_args_is_help=True,
+    )
+    app.add_typer(tap_app, name="tap")
+
+    @tap_app.command("add")
+    def cmd_tap_add(repo: str) -> None:
+        mgr = TapsManager(_hub_root() / "taps.json")
+        try:
+            mgr.add(repo)
+        except ValueError as e:
+            console.print(f"[red]{e}[/]")
+            raise typer.Exit(code=1) from e
+        console.print(f"[green]Tapped[/] {repo}")
+
+    @tap_app.command("remove")
+    def cmd_tap_remove(repo: str) -> None:
+        mgr = TapsManager(_hub_root() / "taps.json")
+        try:
+            mgr.remove(repo)
+        except ValueError as e:
+            console.print(f"[red]{e}[/]")
+            raise typer.Exit(code=1) from e
+        console.print(f"[green]Untapped[/] {repo}")
+
+    @tap_app.command("list")
+    def cmd_tap_list() -> None:
+        mgr = TapsManager(_hub_root() / "taps.json")
+        taps = mgr.list()
+        if not taps:
+            console.print("[dim]No taps registered.[/]")
+            return
+        for t in taps:
+            console.print(f"  {t}")

@@ -112,3 +112,27 @@ def test_audit_with_action_filter(monkeypatch, tmp_path):
     r_uninst = runner.invoke(app, ["audit", "--action", "uninstall"])
     assert "install" in r_inst.stdout
     assert "uninstall" in r_uninst.stdout
+
+
+def test_tap_add_then_list(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    r1 = runner.invoke(app, ["tap", "add", "alice/skills"])
+    assert r1.exit_code == 0
+    r2 = runner.invoke(app, ["tap", "list"])
+    assert r2.exit_code == 0
+    assert "alice/skills" in r2.stdout
+
+
+def test_tap_invalid_form_nonzero(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    r = runner.invoke(app, ["tap", "add", "not-valid"])
+    assert r.exit_code != 0
+
+
+def test_tap_remove(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    runner.invoke(app, ["tap", "add", "alice/skills"])
+    r = runner.invoke(app, ["tap", "remove", "alice/skills"])
+    assert r.exit_code == 0
+    r2 = runner.invoke(app, ["tap", "list"])
+    assert "alice/skills" not in r2.stdout
