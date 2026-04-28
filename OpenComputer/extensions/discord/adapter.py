@@ -884,13 +884,11 @@ class DiscordAdapter(BaseChannelAdapter):
         sid = self._dispatch_thread_session(
             chat_id, self._thread_parent_channel(chat_id)
         )
-        try:
-            from opencomputer.gateway.dispatch import default_dispatch as _dd  # type: ignore  # noqa: F401
-            # Best-effort — the gateway exposes its own /reset path; the
-            # adapter just forwards. We don't import a hard dep here so
-            # tests can run without the gateway.
-        except Exception:  # noqa: BLE001
-            pass
+        # Best-effort — the gateway exposes its own /reset path; the
+        # adapter just forwards. We don't bind a hard dep here so tests
+        # can run without a live gateway. A future follow-up can wire
+        # the actual session-clear call once the gateway exposes a
+        # public clear-session API.
         await interaction.response.send_message(
             f"session reset (id={sid[:8]}…).", ephemeral=True
         )
