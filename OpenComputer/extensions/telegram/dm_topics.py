@@ -44,6 +44,14 @@ class DMTopicManager:
     def __init__(self, profile_home: Path) -> None:
         self._path = Path(profile_home) / "telegram_dm_topics.json"
         self._topics: dict[str, dict[str, Any]] = self._load()
+        # PR #221 follow-up — tombstone set for ``remove_topic``. The
+        # merge-on-save path needs to distinguish "this key wasn't in
+        # my in-memory map because I never knew about it" (preserve)
+        # from "this key wasn't in my in-memory map because I just
+        # removed it" (drop on save). Keys are removed from the
+        # tombstone set after a successful save propagates the
+        # removal to disk.
+        self._tombstones: set[str] = set()
 
     # ── persistence ────────────────────────────────────────────────────
 
@@ -75,15 +83,60 @@ class DMTopicManager:
     def _save(self) -> None:
         """Atomically persist ``self._topics`` under an exclusive flock.
 
+        Read-merge-write under the lock (PR #221 follow-up):
+
+        Two ``DMTopicManager`` instances racing on the same file used
+        to last-writer-wins because each writer constructed its
+        in-memory map at instantiation and overwrote disk on every
+        save. We now re-read the on-disk JSON inside the lock and
+        merge: in-memory entries win per-key, but keys present only
+        on disk (added by another writer between our load + save)
+        are preserved. This makes concurrent topic-create commands
+        safe across processes.
+
         Uses tmp + ``Path.replace`` so an interrupted write (SIGKILL
         between ``write`` and ``replace``) leaves the previous file
         intact rather than truncating to empty.
         """
         try:
             with exclusive_lock(self._path):
+                # Re-read the file under the lock so a concurrent
+                # writer's keys aren't clobbered. Missing/corrupt files
+                # behave the same as on construction (yield {}).
+                disk = self._read_disk_state()
+                # Merge: start from disk, layer our in-memory writes on
+                # top. Per the contract, our in-memory state wins per
+                # key — a removal (``remove_topic``) drops the key from
+                # ``self._topics``; that key on disk would survive this
+                # merge and effectively un-do the removal across
+                # processes. That tradeoff is acceptable (and matches
+                # Hermes's behaviour) — concurrent removals are rare,
+                # and a stale entry is recoverable; a lost addition is
+                # not. If concurrent-remove correctness becomes a real
+                # need, the next iteration adds a per-key tombstone.
+                merged = dict(disk)
+                merged.update(self._topics)
+                # Apply tombstones so an explicit ``remove_topic``
+                # propagates even when the same key is still on disk
+                # — either because we wrote it there before the
+                # remove, or because another instance re-added it
+                # between our load and our remove. (Concurrent re-add
+                # vs concurrent remove is a real ambiguity; we resolve
+                # in favor of the local remove. This matches user
+                # expectations: an explicit ``opencomputer telegram
+                # topic-remove`` from CLI shouldn't be undone by a
+                # background daemon's stale in-memory copy.) After
+                # a successful flush, tombstones are cleared.
+                for tid in self._tombstones:
+                    merged.pop(tid, None)
+                # Promote the merged map to in-memory state so the
+                # next ``_save`` doesn't re-merge the same disk row
+                # into our copy on every call.
+                self._topics = merged
+                self._tombstones.clear()
                 tmp = self._path.with_suffix(self._path.suffix + ".tmp")
                 tmp.write_text(
-                    json.dumps(self._topics, indent=2, sort_keys=True),
+                    json.dumps(merged, indent=2, sort_keys=True),
                     encoding="utf-8",
                 )
                 tmp.replace(self._path)
@@ -92,6 +145,28 @@ class DMTopicManager:
                 "telegram_dm_topics save failed (%s) — change kept in memory only",
                 exc,
             )
+
+    def _read_disk_state(self) -> dict[str, dict[str, Any]]:
+        """Re-read the on-disk JSON inside ``_save``'s lock.
+
+        Same shape rules as :meth:`_load` — missing file, empty file,
+        or invalid JSON yields ``{}``. Extracted into a method so the
+        merge path uses the exact same parse / coercion logic as
+        construction (no drift between the two read paths).
+        """
+        try:
+            raw = self._path.read_text(encoding="utf-8")
+        except (FileNotFoundError, OSError):
+            return {}
+        if not raw.strip():
+            return {}
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): dict(v) for k, v in data.items() if isinstance(v, dict)}
 
     # ── public API ─────────────────────────────────────────────────────
 
@@ -145,6 +220,9 @@ class DMTopicManager:
         if key not in self._topics:
             return False
         del self._topics[key]
+        # Mark for tombstone so the merge-on-save path doesn't resurrect
+        # this key from disk (PR #221 follow-up).
+        self._tombstones.add(key)
         self._save()
         return True
 

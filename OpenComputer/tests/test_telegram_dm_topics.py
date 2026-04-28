@@ -103,12 +103,15 @@ class TestDMTopicManager:
     def test_concurrent_writes_do_not_lose_data(self, tmp_path: Path) -> None:
         """Two threads writing different keys: both survive.
 
-        flock serializes the writes; whichever lands second still sees
-        the first's entry because each instance reloads on construction
-        and ``_save`` writes the merged in-memory map.
+        PR #221 follow-up — ``_save`` now re-reads + merges under the
+        flock so concurrent writers never stomp each other's entries.
+        Tightened from the earlier "≥1 survives" assertion to "ALL
+        writers' entries survive" so a regression of the merge logic
+        gets caught.
         """
         # Pre-create one instance so both writers share the same disk file.
         m = DMTopicManager(tmp_path)
+        del m  # we just want the file initialized; drop the handle
 
         results: list[str] = []
         errors: list[BaseException] = []
@@ -129,18 +132,89 @@ class TestDMTopicManager:
 
         assert not errors, f"writer raised: {errors}"
         assert sorted(results) == ["0", "1", "2", "3", "4"]
-        # Disk has at least one of the entries (writes can stomp because
-        # we don't merge on save — flock makes this serial but each
-        # writer started with whatever was on disk at construction time).
-        # The contract we need: no torn JSON, no hard failure.
+        # All 5 writers' entries must be visible to a fresh reader.
         final = DMTopicManager(tmp_path)
-        # ``register_topic`` always persists at least its own entry, so
-        # the LAST writer to land is observable.
         loaded = final.list_topics()
-        assert len(loaded) >= 1
+        loaded_ids = {row["topic_id"] for row in loaded}
+        assert loaded_ids == {"0", "1", "2", "3", "4"}, (
+            f"expected all 5 writers to persist; got {sorted(loaded_ids)}"
+        )
         # And the on-disk file is parseable JSON.
         raw = (tmp_path / "telegram_dm_topics.json").read_text()
         json.loads(raw)
+
+    def test_concurrent_writes_preserve_all_writers_entries(
+        self, tmp_path: Path
+    ) -> None:
+        """Stronger variant of the above — explicitly named for the
+        merge contract introduced in PR #221 follow-up. Five instances
+        each register a different topic on a worker thread; all five
+        survive the concurrent saves. Distinct from
+        ``test_concurrent_writes_do_not_lose_data`` because this one
+        also asserts that EACH writer can later observe its OWN entry
+        when it re-instantiates after the race resolves.
+        """
+        DMTopicManager(tmp_path)  # touch file once
+
+        errors: list[BaseException] = []
+
+        def writer(tid: str) -> None:
+            try:
+                local = DMTopicManager(tmp_path)
+                local.register_topic(
+                    tid,
+                    label=f"label-{tid}",
+                    skill=f"skill-{tid}",
+                    parent_chat_id=f"chat-{tid}",
+                )
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(str(i),)) for i in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"writer raised: {errors}"
+
+        # Final on-disk state must contain every writer's entry, with
+        # the writer-specific fields intact (label / skill / chat).
+        final = DMTopicManager(tmp_path)
+        rows = {row["topic_id"]: row for row in final.list_topics()}
+        assert set(rows.keys()) == {"0", "1", "2", "3", "4"}
+        for tid in ["0", "1", "2", "3", "4"]:
+            r = rows[tid]
+            assert r["label"] == f"label-{tid}"
+            assert r["skill"] == f"skill-{tid}"
+            assert r["parent_chat_id"] == f"chat-{tid}"
+
+    def test_concurrent_save_preserves_external_writes(
+        self, tmp_path: Path
+    ) -> None:
+        """Direct test of the read-merge-write contract.
+
+        m1 loads (sees nothing). External writer writes "B" directly to
+        disk. m1 then registers "A" — its save MUST preserve "B"
+        rather than overwriting with just {A}. This pins the merge
+        semantics independently of thread scheduling.
+        """
+        m1 = DMTopicManager(tmp_path)
+        # Simulate an external writer (another process) landing "B".
+        path = tmp_path / "telegram_dm_topics.json"
+        path.write_text(
+            json.dumps({"B": {"label": "external", "skill": None,
+                              "system_prompt": None, "parent_chat_id": None}}),
+            encoding="utf-8",
+        )
+        # m1's in-memory map has no "B" — its save must merge it back.
+        m1.register_topic("A", label="local")
+
+        on_disk = json.loads(path.read_text())
+        assert "A" in on_disk, "local write must land"
+        assert "B" in on_disk, "external write must survive merge"
+        assert on_disk["A"]["label"] == "local"
+        assert on_disk["B"]["label"] == "external"
 
 
 # ─── TelegramAdapter integration ────────────────────────────────────
