@@ -32,6 +32,7 @@ import httpx
 
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import Platform, SendResult
+from plugin_sdk.format_converters import slack_mrkdwn
 
 logger = logging.getLogger("opencomputer.ext.slack")
 
@@ -87,6 +88,19 @@ class SlackAdapter(BaseChannelAdapter):
             self._client = None
 
     # ------------------------------------------------------------------
+    # Format-message — markdown → Slack mrkdwn (PR 3b.2)
+    # ------------------------------------------------------------------
+
+    def format_message(self, text: str) -> str:
+        """Convert generic markdown into Slack mrkdwn.
+
+        ``**bold**`` → ``*bold*``, ``[label](url)`` → ``<url|label>``,
+        code fences preserved, etc. The converter falls back to plain
+        text on parse error so a malformed input never crashes send.
+        """
+        return slack_mrkdwn.convert(text or "")
+
+    # ------------------------------------------------------------------
     # Outbound — chat.postMessage
     # ------------------------------------------------------------------
 
@@ -99,25 +113,34 @@ class SlackAdapter(BaseChannelAdapter):
         """
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
+        formatted = self.format_message(text or "")
         payload: dict[str, Any] = {
             "channel": chat_id,
-            "text": text[: self.max_message_length],
+            "text": formatted[: self.max_message_length],
         }
         if kwargs.get("thread_ts"):
             payload["thread_ts"] = kwargs["thread_ts"]
             if kwargs.get("broadcast"):
                 payload["reply_broadcast"] = True
-        try:
-            resp = await self._client.post(
-                f"{_SLACK_API_BASE}/chat.postMessage",
-                json=payload,
-            )
-            data = resp.json()
-            if not data.get("ok"):
-                return SendResult(success=False, error=str(data.get("error") or data))
-            return SendResult(success=True, message_id=str(data.get("ts") or ""))
-        except Exception as exc:  # noqa: BLE001
-            return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+
+        async def _do_send() -> SendResult:
+            try:
+                resp = await self._client.post(
+                    f"{_SLACK_API_BASE}/chat.postMessage",
+                    json=payload,
+                )
+                data = resp.json()
+                if not data.get("ok"):
+                    return SendResult(
+                        success=False, error=str(data.get("error") or data)
+                    )
+                return SendResult(success=True, message_id=str(data.get("ts") or ""))
+            except Exception as exc:  # noqa: BLE001
+                if self._is_retryable_error(exc):
+                    raise
+                return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+
+        return await self._send_with_retry(_do_send)
 
     # ------------------------------------------------------------------
     # Reactions
@@ -132,20 +155,28 @@ class SlackAdapter(BaseChannelAdapter):
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
         name = _emoji_to_slack_name(emoji)
-        try:
-            resp = await self._client.post(
-                f"{_SLACK_API_BASE}/reactions.add",
-                json={"channel": chat_id, "timestamp": message_id, "name": name},
-            )
-            data = resp.json()
-            if not data.get("ok"):
-                # already_reacted is harmless idempotent; surface as success
-                if data.get("error") == "already_reacted":
-                    return SendResult(success=True)
-                return SendResult(success=False, error=str(data.get("error") or data))
-            return SendResult(success=True)
-        except Exception as exc:  # noqa: BLE001
-            return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+
+        async def _do_react() -> SendResult:
+            try:
+                resp = await self._client.post(
+                    f"{_SLACK_API_BASE}/reactions.add",
+                    json={"channel": chat_id, "timestamp": message_id, "name": name},
+                )
+                data = resp.json()
+                if not data.get("ok"):
+                    # already_reacted is harmless idempotent; surface as success
+                    if data.get("error") == "already_reacted":
+                        return SendResult(success=True)
+                    return SendResult(
+                        success=False, error=str(data.get("error") or data)
+                    )
+                return SendResult(success=True)
+            except Exception as exc:  # noqa: BLE001
+                if self._is_retryable_error(exc):
+                    raise
+                return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+
+        return await self._send_with_retry(_do_react)
 
     # ------------------------------------------------------------------
     # Edit / Delete
@@ -156,38 +187,55 @@ class SlackAdapter(BaseChannelAdapter):
     ) -> SendResult:
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
-        try:
-            resp = await self._client.post(
-                f"{_SLACK_API_BASE}/chat.update",
-                json={
-                    "channel": chat_id,
-                    "ts": message_id,
-                    "text": text[: self.max_message_length],
-                },
-            )
-            data = resp.json()
-            if not data.get("ok"):
-                return SendResult(success=False, error=str(data.get("error") or data))
-            return SendResult(success=True, message_id=str(data.get("ts") or ""))
-        except Exception as exc:  # noqa: BLE001
-            return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+        formatted = self.format_message(text or "")
+
+        async def _do_edit() -> SendResult:
+            try:
+                resp = await self._client.post(
+                    f"{_SLACK_API_BASE}/chat.update",
+                    json={
+                        "channel": chat_id,
+                        "ts": message_id,
+                        "text": formatted[: self.max_message_length],
+                    },
+                )
+                data = resp.json()
+                if not data.get("ok"):
+                    return SendResult(
+                        success=False, error=str(data.get("error") or data)
+                    )
+                return SendResult(success=True, message_id=str(data.get("ts") or ""))
+            except Exception as exc:  # noqa: BLE001
+                if self._is_retryable_error(exc):
+                    raise
+                return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+
+        return await self._send_with_retry(_do_edit)
 
     async def delete_message(
         self, chat_id: str, message_id: str, **kwargs: Any
     ) -> SendResult:
         if self._client is None:
             return SendResult(success=False, error="adapter not connected")
-        try:
-            resp = await self._client.post(
-                f"{_SLACK_API_BASE}/chat.delete",
-                json={"channel": chat_id, "ts": message_id},
-            )
-            data = resp.json()
-            if not data.get("ok"):
-                return SendResult(success=False, error=str(data.get("error") or data))
-            return SendResult(success=True)
-        except Exception as exc:  # noqa: BLE001
-            return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+
+        async def _do_delete() -> SendResult:
+            try:
+                resp = await self._client.post(
+                    f"{_SLACK_API_BASE}/chat.delete",
+                    json={"channel": chat_id, "ts": message_id},
+                )
+                data = resp.json()
+                if not data.get("ok"):
+                    return SendResult(
+                        success=False, error=str(data.get("error") or data)
+                    )
+                return SendResult(success=True)
+            except Exception as exc:  # noqa: BLE001
+                if self._is_retryable_error(exc):
+                    raise
+                return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
+
+        return await self._send_with_retry(_do_delete)
 
 
 # ---------------------------------------------------------------------------
