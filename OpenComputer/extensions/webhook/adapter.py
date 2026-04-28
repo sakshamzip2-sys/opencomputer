@@ -27,6 +27,7 @@ Self-audit verifications applied:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import time
@@ -74,6 +75,21 @@ logger = logging.getLogger("opencomputer.ext.webhook")
 _RATE_LIMIT_REQS = 60
 _RATE_LIMIT_WINDOW_SECONDS = 60.0
 
+# PR 4.4 — idempotency cache TTL. Most provider retries occur within
+# seconds of the original delivery; 1 h is generous enough to absorb
+# even GitHub's hours-long redelivery window without bloating memory.
+_IDEMPOTENCY_TTL_SECONDS = 3600.0
+
+# PR 4.4 — request headers we honour as the upstream-provided idempotency
+# key. ORDER MATTERS — we prefer GitHub's well-known header over
+# generic ones, and only fall back to a body-hash if none are present.
+_IDEMPOTENCY_HEADERS: tuple[str, ...] = (
+    "X-Github-Delivery",  # GitHub Webhooks
+    "X-Delivery-ID",      # Generic
+    "X-Idempotency-Key",  # Stripe / Idempotency-Keys spec
+    "Stripe-Signature",   # Stripe (signature is per-delivery)
+)
+
 
 class WebhookAdapter(BaseChannelAdapter):
     platform = Platform.WEBHOOK
@@ -96,6 +112,15 @@ class WebhookAdapter(BaseChannelAdapter):
         self._site: web.TCPSite | None = None
         # Per-token rate-limit window: {token_id: [timestamp, ...]}
         self._rate_window: dict[str, list[float]] = defaultdict(list)
+        # PR 4.4 — per-token idempotency cache:
+        #   {token_id: {delivery_id: first_seen_ts}}
+        # 1 h TTL via lazy purge on every check. Bounds: a runaway
+        # provider that hammers thousands of unique deliveries will
+        # grow this until TTL evictions catch up — acceptable given the
+        # rate-limit (60/min/token) caps the worst case at ~3,600
+        # entries per token before eviction. We prune on every check so
+        # that's the steady-state ceiling.
+        self._seen_deliveries: dict[str, dict[str, float]] = defaultdict(dict)
         # Hermes channel-port PR 3c.5: handle to the PluginAPI so we can
         # reach ``api.outgoing_queue`` at delivery time. Set by the
         # plugin's ``register(api)`` via ``bind_plugin_api(api)`` —
@@ -242,6 +267,23 @@ class WebhookAdapter(BaseChannelAdapter):
         signature = request.headers.get("X-Webhook-Signature", "")
         if not verify_signature(body=body, signature_header=signature, secret=token_meta["secret"]):
             return web.json_response({"error": "invalid signature"}, status=403)
+
+        # PR 4.4 — idempotency: providers retry deliveries (GitHub,
+        # Stripe etc.) and we've seen runaway double-fires from
+        # external schedulers. Compute a delivery id from headers (or
+        # body+token hash as a fallback) and short-circuit duplicates
+        # within a 1 h window.
+        delivery_id = self._delivery_id(request, body, token_id)
+        first_seen = self._idempotency_check(token_id, delivery_id)
+        if first_seen is not None:
+            logger.info(
+                "webhook duplicate delivery token=%s delivery_id=%s "
+                "first_seen=%s; skipping dispatch",
+                token_id, delivery_id[:16], first_seen,
+            )
+            return web.json_response(
+                {"status": "duplicate", "first_seen": first_seen}
+            )
 
         # Parse payload — accept JSON or text/plain.
         try:
@@ -393,6 +435,52 @@ class WebhookAdapter(BaseChannelAdapter):
             return False
         window.append(now)
         return True
+
+    # ------------------------------------------------------------------
+    # PR 4.4 — idempotency cache
+    # ------------------------------------------------------------------
+
+    def _delivery_id(
+        self, request: web.Request, body: bytes, token_id: str
+    ) -> str:
+        """Derive a stable per-delivery id.
+
+        Header preference order: ``X-Github-Delivery`` → ``X-Delivery-ID``
+        → ``X-Idempotency-Key`` → ``Stripe-Signature``. If none are
+        present, fall back to ``sha256(body + token_id)`` so providers
+        without explicit idempotency headers still get duplicate-
+        absorbing semantics for byte-identical retries.
+        """
+        for header in _IDEMPOTENCY_HEADERS:
+            value = request.headers.get(header)
+            if value:
+                return f"{header}:{value.strip()}"
+        digest = hashlib.sha256(body + token_id.encode("utf-8")).hexdigest()
+        return f"sha256:{digest}"
+
+    def _idempotency_check(
+        self, token_id: str, delivery_id: str
+    ) -> float | None:
+        """Lookup + record. Returns ``first_seen_ts`` if duplicate, else None.
+
+        Lazy TTL purge: every call sweeps entries older than
+        :data:`_IDEMPOTENCY_TTL_SECONDS` for the same token before the
+        lookup. Steady-state ceiling per token is bounded by the rate
+        limiter (60 req/min × 60 min = 3,600 entries) so memory growth
+        is fine.
+        """
+        now = time.time()
+        cutoff = now - _IDEMPOTENCY_TTL_SECONDS
+        bucket = self._seen_deliveries[token_id]
+        # Lazy purge — drop expired entries before consulting.
+        if bucket:
+            stale = [k for k, ts in bucket.items() if ts < cutoff]
+            for k in stale:
+                bucket.pop(k, None)
+        if delivery_id in bucket:
+            return bucket[delivery_id]
+        bucket[delivery_id] = now
+        return None
 
 
 # ---------------------------------------------------------------------------
