@@ -4,32 +4,34 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
-### Fixed — vibe classifier: detached from companion gate, per-turn log added (Path A)
+### Fixed — Layer 2 → user-model graph: scans now actually populate the graph
 
-Previously the vibe classifier was nested inside `if persona_id ==
-"companion":` in `loop.py`, so on technical/coding sessions (which
-classify as the `coding` persona, not `companion`) the classifier was
-never invoked. A `vibe` column existed on `sessions` and a verdict was
-*supposed* to be persisted, but the gate meant production carried
-**zero** verdicts in practice — i.e. no evidence to evaluate the
-classifier or A/B a future replacement against.
+Pre-2026-04-28 `opencomputer profile bootstrap` reported '1000 files /
+200 commits / 1115 browser visits scanned' but the
+`user_model/graph.sqlite` stayed pinned at 3 identity nodes — the
+orchestrator captured Layer 2 results into `BootstrapResult` counters
+and then dropped the rows on the floor. Only Layer 0 (identity) had a
+`write_*_to_graph` function. Four new writers added:
 
-- `opencomputer/agent/loop.py` — `classify_vibe` + `set_session_vibe`
-  now run on every user turn regardless of active persona. The
-  companion-only "PREVIOUS-SESSION VIBE" prompt anchor stays
-  companion-gated (it's a prompt-shaping concern, not a data-collection
-  one).
-- `opencomputer/agent/state.py` — schema bumped to **v6**. New table
-  `vibe_log(id, session_id, message_id, vibe, classifier_version,
-  timestamp)` records one row per classification call. The
-  `classifier_version` tag is the lever future swaps (regex → embedding
-  → LLM) will use to A/B against the regex baseline. `record_vibe()`
-  resolves the latest user `message_id` automatically when the caller
-  doesn't pass one, so the call site stays minimal.
-- 8 tests added in `tests/test_vibe_log.py` covering schema shape,
-  index presence, classifier-version preservation, message-id
-  resolution, ordering, the empty-session case, and the headline
-  regression (vibe logs even under non-companion persona).
+- `write_recent_files_to_graph` — aggregates by project-root signature
+  (top 3 path segments under $HOME), top-N → `attribute`
+  (`"active_dir: ..."`). Skips paths outside $HOME.
+- `write_git_log_to_graph` — repos by commit count → `attribute`
+  (`"works_on_repo: /path"`); distinct author emails → `identity`.
+- `write_browser_history_to_graph` — aggregates by domain (host-only,
+  `www.`/`m.` stripped); top-N with ≥2 visits → `attribute`
+  (`"frequent_domain: example.com"`). Page titles and full URLs
+  deliberately not persisted.
+- `write_calendar_to_graph` — each non-empty event title → `attribute`
+  (`"upcoming: Standup"`); metadata in `Node.metadata`.
+
+All four are idempotent via `UserModelStore.upsert_node`. Confidence
+floors at 0.5 (single observation) and saturates at 0.95 (~50
+observations). Wired into `run_bootstrap` with per-source try/except so
+one bad reader can't mask the others. Four new counters surface in
+`BootstrapResult` + CLI output. Real run: graph went 3 → 28 nodes.
+
+18 tests in `tests/test_profile_bootstrap_layer2_writers.py`.
 
 ### Added (T2 batch — 4 skills closing remaining gap-fill roadmap items)
 
