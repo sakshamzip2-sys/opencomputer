@@ -4,6 +4,36 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — passive education ("learning moments") v1
+
+OpenComputer's discoverability gap closes a notch. New mechanism that
+surfaces ONE inline-tail reveal per UTC-day (max 3 per rolling 7-day
+window) when user behavior matches a hand-curated trigger.
+
+v1 ships 3 moments:
+- `memory_continuity_first_recall` — user references a fact in MEMORY.md
+- `vibe_first_nonneutral` — first non-calm vibe in a session
+- `recent_files_paste` — user types a path-like string
+
+Each moment fires AT MOST ONCE per profile, EVER. First ever reveal
+includes one-time `(turn these off: oc memory learning-off)` hint so
+users discover the disable path when it becomes relevant. Returning
+users (≥5 prior sessions) seeded as "already-fired" so a fresh
+`learning_moments.json` doesn't produce a noise burst.
+
+CLI: `oc memory learning-off` / `learning-on` / `learning-status`.
+
+Severity: tips respect the off-flag + caps; load-bearing reveals
+(e.g. PR #209's smart-fallback) bypass both.
+
+Architecture: `opencomputer/awareness/learning_moments/` package.
+Inline-tail surface only in v1; system-prompt overlay + session-end
+reflection surfaces declared but deferred to v2.
+
+Plan + spec:
+- `docs/superpowers/specs/2026-04-28-passive-education-design.md`
+- `docs/superpowers/plans/2026-04-28-passive-education.md`
+
 ### Added (T2 batch — 4 skills closing remaining gap-fill roadmap items)
 
 Four skills shipped together as a single PR (each was small enough that

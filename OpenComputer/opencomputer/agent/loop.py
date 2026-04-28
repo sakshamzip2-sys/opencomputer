@@ -936,11 +936,85 @@ class AgentLoop:
 
                 if not step.should_continue:
                     # No tool calls — safe to persist the assistant message alone. (PR #1)
-                    messages.append(step.assistant_message)
+                    # Passive education hook (2026-04-28): build a tail-clause
+                    # "learning moment" reveal if any registered moment fires.
+                    # Cap, dedup, and severity all enforced inside select_reveal.
+                    # Best-effort — never raises into the loop.
+                    final_assistant_msg = step.assistant_message
+                    try:
+                        from dataclasses import replace as _replace
+
+                        from opencomputer.agent.config import _home as _profile_home_fn
+                        from opencomputer.awareness.learning_moments import (
+                            Context as _LMCtx,
+                        )
+                        from opencomputer.awareness.learning_moments import (
+                            maybe_seed_returning_user as _seed_returning,
+                        )
+                        from opencomputer.awareness.learning_moments import (
+                            select_reveal as _select_reveal,
+                        )
+
+                        _ph = _profile_home_fn()
+                        _total_sessions = self.db.count_sessions()
+                        _seed_returning(_ph, _total_sessions)
+                        try:
+                            _mem_text = self.config.memory.declarative_path.read_text(
+                                encoding="utf-8",
+                            )
+                        except (OSError, UnicodeError):
+                            _mem_text = ""
+                        # vibe_log lives in PR #205 — degrade gracefully
+                        # if this branch is rebased onto a base without it.
+                        # Returning [] here just means the
+                        # vibe_first_nonneutral moment never fires (the
+                        # other two moments don't depend on vibe_log).
+                        try:
+                            _vibe_rows = self.db.list_vibe_log_for_session(sid)
+                        except AttributeError:
+                            _vibe_rows = []
+
+                        # Default-arg binding pins the closure values to
+                        # this iteration of the outer ``while iterations``
+                        # loop — without it ruff B023 (and reality) flags
+                        # the late-bound capture as a footgun.
+                        def _build_lm_ctx(
+                            _ph_=_ph,
+                            _mem_text_=_mem_text,
+                            _vibe_rows_=_vibe_rows,
+                            _total_sessions_=_total_sessions,
+                            _sid_=sid,
+                            _user_msg_=user_message or "",
+                        ) -> _LMCtx:
+                            return _LMCtx(
+                                session_id=_sid_,
+                                profile_home=_ph_,
+                                user_message=_user_msg_,
+                                memory_md_text=_mem_text_,
+                                vibe_log_session_count_total=len(_vibe_rows_),
+                                vibe_log_session_count_noncalm=sum(
+                                    1 for r in _vibe_rows_
+                                    if r.get("vibe") != "calm"
+                                ),
+                                sessions_db_total_sessions=_total_sessions_,
+                            )
+
+                        _reveal = _select_reveal(
+                            ctx_builder=_build_lm_ctx, profile_home=_ph,
+                        )
+                        if _reveal:
+                            final_assistant_msg = _replace(
+                                step.assistant_message,
+                                content=(step.assistant_message.content or "") + _reveal,
+                            )
+                    except Exception:  # noqa: BLE001 — never break the turn
+                        _log.debug("learning_moments hook failed", exc_info=True)
+
+                    messages.append(final_assistant_msg)
                     self._emit_before_message_write(
-                        session_id=sid, message=step.assistant_message
+                        session_id=sid, message=final_assistant_msg
                     )
-                    self.db.append_message(sid, step.assistant_message)
+                    self.db.append_message(sid, final_assistant_msg)
                     # Record an episodic event for this completed turn — pass the
                     # tool messages this turn produced so file paths get extracted. (PR #6)
                     if self._episodic is not None:
@@ -1001,7 +1075,7 @@ class AgentLoop:
                         pass
                     self.db.end_session(sid)
                     return ConversationResult(
-                        final_message=step.assistant_message,
+                        final_message=final_assistant_msg,
                         messages=messages,
                         session_id=sid,
                         iterations=iterations,

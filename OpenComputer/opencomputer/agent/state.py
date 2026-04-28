@@ -463,6 +463,14 @@ class SessionDB:
         except Exception:  # noqa: BLE001 — never let logging glue break sessions
             pass
 
+    def count_sessions(self) -> int:
+        """Total session count. Used by the learning-moments
+        returning-user seed to decide whether the user has enough
+        history to skip the v1 reveal cycle."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+        return int(row[0]) if row else 0
+
     def end_session(self, session_id: str) -> None:
         with self._txn() as conn:
             conn.execute(
