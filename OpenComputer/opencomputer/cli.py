@@ -1059,6 +1059,60 @@ def _run_chat_session(
 
         return prune_snapshots(profile_home)
 
+    def _on_reload() -> dict:
+        """Re-read .env + config.yaml. Mutates live cfg in place."""
+        out: dict = {"env_keys_changed": 0, "config_changed": False, "error": None}
+        try:
+            from opencomputer.agent.config_store import load_config
+
+            try:
+                from dotenv import dotenv_values, load_dotenv
+
+                env_path = profile_home / ".env"
+                if env_path.exists():
+                    new_vals = dotenv_values(str(env_path))
+                    load_dotenv(str(env_path), override=True)
+                    out["env_keys_changed"] = sum(1 for v in new_vals.values() if v is not None)
+            except ImportError:
+                pass
+
+            cfg_path = profile_home / "config.yaml"
+            if cfg_path.exists():
+                new_cfg = load_config(cfg_path)
+                if new_cfg != cfg:
+                    for f in cfg.__dataclass_fields__:
+                        setattr(cfg, f, getattr(new_cfg, f))
+                    out["config_changed"] = True
+        except Exception as e:  # noqa: BLE001
+            out["error"] = f"{type(e).__name__}: {e}"
+        return out
+
+    def _on_reload_mcp() -> dict:
+        """Disconnect every MCP server, re-discover, re-register tools."""
+        out: dict = {
+            "servers_before": 0,
+            "servers_after": 0,
+            "tools_after": 0,
+            "error": None,
+        }
+        try:
+            out["servers_before"] = len(mcp_mgr.connections)
+            asyncio.run(mcp_mgr.shutdown())
+            servers = getattr(cfg, "mcp", None)
+            server_list = list(getattr(servers, "servers", [])) if servers else []
+            n = asyncio.run(
+                mcp_mgr.connect_all(
+                    server_list,
+                    osv_check_enabled=getattr(servers, "osv_check_enabled", True) if servers else True,
+                    osv_check_fail_closed=getattr(servers, "osv_check_fail_closed", False) if servers else False,
+                )
+            )
+            out["servers_after"] = len(mcp_mgr.connections)
+            out["tools_after"] = n
+        except Exception as e:  # noqa: BLE001
+            out["error"] = f"{type(e).__name__}: {e}"
+        return out
+
     def _get_cost_summary() -> dict[str, int]:
         return dict(_token_tally)
 
@@ -1256,6 +1310,8 @@ def _run_chat_session(
                 on_snapshot_list=_on_snapshot_list,
                 on_snapshot_restore=_on_snapshot_restore,
                 on_snapshot_prune=_on_snapshot_prune,
+                on_reload=_on_reload,
+                on_reload_mcp=_on_reload_mcp,
             )
             result = dispatch_slash(user_input, slash_ctx)
             if result.exit_loop:

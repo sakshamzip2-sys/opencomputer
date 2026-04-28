@@ -73,6 +73,14 @@ class SlashContext:
     #: ``/snapshot prune`` — drop snapshots beyond the keep cap; returns
     #: count deleted.
     on_snapshot_prune: Callable[[], int] = lambda: 0
+    #: ``/reload`` — re-read .env + config.yaml. Returns a small status dict
+    #: describing what changed (``{"env_keys_changed": int,
+    #: "config_changed": bool, "error": str | None}``).
+    on_reload: Callable[[], dict] = dict
+    #: ``/reload-mcp`` — disconnect + re-discover MCP servers. Returns
+    #: ``{"servers_before": int, "servers_after": int, "tools_after": int,
+    #: "error": str | None}``.
+    on_reload_mcp: Callable[[], dict] = dict
 
 
 def _split_args(text: str) -> tuple[str, list[str]]:
@@ -322,6 +330,51 @@ def _handle_snapshot(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_reload(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/reload`` — re-read .env + config.yaml."""
+    res = ctx.on_reload()
+    if not res:
+        ctx.console.print(
+            "[red]reload not wired[/red] — chat loop didn't provide a callback."
+        )
+        return SlashResult(handled=True)
+    if res.get("error"):
+        ctx.console.print(f"[red]reload failed:[/red] {res['error']}")
+        return SlashResult(handled=True)
+    env_n = res.get("env_keys_changed", 0)
+    cfg_changed = res.get("config_changed", False)
+    parts: list[str] = []
+    if env_n:
+        parts.append(f"{env_n} env var(s) updated")
+    if cfg_changed:
+        parts.append("config.yaml reloaded")
+    if not parts:
+        parts.append("no changes detected")
+    ctx.console.print("[green]reload:[/green] " + ", ".join(parts) + ".")
+    return SlashResult(handled=True)
+
+
+def _handle_reload_mcp(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/reload-mcp`` — disconnect + re-discover MCP servers."""
+    res = ctx.on_reload_mcp()
+    if not res:
+        ctx.console.print(
+            "[red]reload-mcp not wired[/red] — chat loop didn't provide a callback."
+        )
+        return SlashResult(handled=True)
+    if res.get("error"):
+        ctx.console.print(f"[red]reload-mcp failed:[/red] {res['error']}")
+        return SlashResult(handled=True)
+    before = res.get("servers_before", 0)
+    after = res.get("servers_after", 0)
+    tools = res.get("tools_after", 0)
+    ctx.console.print(
+        f"[green]reload-mcp:[/green] {before} → {after} servers, "
+        f"{tools} tool(s) registered."
+    )
+    return SlashResult(handled=True)
+
+
 _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "exit": _handle_exit,
     "clear": _handle_clear,
@@ -335,6 +388,8 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "resume": _handle_resume,
     "queue": _handle_queue,
     "snapshot": _handle_snapshot,
+    "reload": _handle_reload,
+    "reload-mcp": _handle_reload_mcp,
 }
 
 
