@@ -313,6 +313,17 @@ def _register_builtin_tools() -> None:
         registry.register(PointAndClickTool())
         registry.register(AppleScriptRunTool())
 
+    # PowerShellRun — Windows AppleScriptRun-equivalent. Hard-gates
+    # internally to sys.platform == "win32"; safe to register on every
+    # platform (returns an error if invoked off Windows).
+    from opencomputer.tools.powershell_run import PowerShellRunTool
+    registry.register(PowerShellRunTool())
+
+    # DBusCall — Linux desktop AppleScriptRun-equivalent. Hard-gates
+    # internally to Linux; safe to register on every platform.
+    from opencomputer.tools.dbus_call import DBusCallTool
+    registry.register(DBusCallTool())
+
     # Cross-platform GUI tools — register unconditionally; they self-detect
     # the platform at call time and dispatch to the right backend (Quartz /
     # pyautogui / xdotool / ydotool / osascript / PowerShell).
