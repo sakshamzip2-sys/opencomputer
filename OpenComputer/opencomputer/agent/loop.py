@@ -2272,7 +2272,7 @@ class AgentLoop:
         if self._consent_gate is not None:
             from opencomputer.agent.consent.bypass import BypassManager
             from plugin_sdk.consent import ConsentTier
-            if not BypassManager.is_active():
+            if not BypassManager.is_active(self._runtime):
                 for c in calls:
                     tool = registry.get(c.name)
                     if tool is None:
