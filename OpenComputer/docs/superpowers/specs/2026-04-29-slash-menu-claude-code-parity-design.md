@@ -34,20 +34,18 @@ Confirmed from the public Claude Code CHANGELOG and reference docs in `sources/c
 
 ## 3. Architecture
 
-### 3.1 Two layers, two PRs
+### 3.1 Two layers, one PR (updated 2026-04-29)
 
-The fix splits cleanly across two layers, mapping to two PRs:
+**Coordination update**: archit's PRs #220 / #222 / #223 / #224 / #225 / #226 / #227 all merged into `main` at sha `fdab4367` on 2026-04-29 ~05:30 UTC. The original two-PR split (TUI surface in PR 1, Hybrid wrap in PR 2 gated on #225 merging) is no longer necessary — `agent/loop.py` is settled, `slash_skill_fallback.py` is on `main`, and the Hybrid wrap can land in the same PR as the TUI surface.
 
-| Layer | What | Where | PR |
-|---|---|---|---|
-| **TUI surface** | Dropdown source, filter, ranking, MRU, rendering | `opencomputer/cli_ui/*` only | This PR (independent of archit's open PRs) |
-| **Hybrid dispatch wrap** | When the slash dispatcher returns a skill-fallback result, wrap it as a synthetic `SkillTool` `tool_use`/`tool_result` pair so the agent sees skill content the way it would see SkillTool output | 1 surgical change in `agent/loop.py` (~15 lines) | Follow-up PR after archit's #225 merges |
+The fix has two layers, both shipping in this PR:
 
-Splitting these is deliberate. archit's PRs #223/#224/#225 ALL touch `agent/loop.py`. Landing the TUI surface in its own PR (zero `agent/` touches) means: (a) no merge-conflict cascade with archit, (b) the user gets the visible improvement immediately, (c) the Hybrid wrap lands after #225 stabilizes so it can target the actual final shape of `loop.py`.
+| Layer | What | Where |
+|---|---|---|
+| **TUI surface** | Dropdown source, filter, ranking, MRU, rendering | `opencomputer/cli_ui/*` |
+| **Hybrid dispatch wrap** | When the slash dispatcher returns a skill-fallback result, wrap it as a synthetic `SkillTool` `tool_use`/`tool_result` pair so the agent sees skill content the way it would see SkillTool output | 1 surgical change in `agent/loop.py` (~15 lines) + 1-line addition in `agent/slash_skill_fallback.py` to mark `result.source = "skill"` |
 
-This is honest deferral, not feature-cutting. Both pieces are scoped, owned, and tracked. Sub-PR 2 is gated only on archit's #225 merging.
-
-### 3.2 Component diagram (Sub-PR 1 — TUI surface)
+### 3.2 Component diagram (TUI surface — Layer 1)
 
 ```
                  user types '/' or '/re' or '/pead'
@@ -94,24 +92,23 @@ This is honest deferral, not feature-cutting. Both pieces are scoped, owned, and
                        chat loop submits
                        "/<name> <inline-args>"
                                 │
-                                ▼ (Sub-PR 1 stops here)
-              agent/slash_dispatcher.py — current behaviour
+                                ▼ (Layer 1 ends here)
+              agent/slash_dispatcher.py
               (commands -> handlers; skills -> archit's
               slash_skill_fallback returns SKILL.md as
-              SlashCommandResult.output, surfaced as
-              assistant text reply)
+              SlashCommandResult)
 
-         ────────────────  Sub-PR 2 boundary ────────────────
+         ───────────────  Layer 2 (Hybrid dispatch)  ──────────────
 
                                 ▼
-              agent/loop.py — Hybrid wrap (NEW in Sub-PR 2):
+              agent/loop.py — Hybrid wrap:
               if result.source == "skill":
                   synthesize tool_use (SkillTool) +
                   tool_result (SKILL.md body), inject into
                   conversation, continue agent loop
 ```
 
-### 3.3 New + modified files (Sub-PR 1)
+### 3.3 New + modified files
 
 | File | Action | Approx LOC | Responsibility |
 |---|---|---|---|
@@ -125,7 +122,16 @@ This is honest deferral, not feature-cutting. Both pieces are scoped, owned, and
 | `tests/test_slash_completer.py` | Modify | +80 | Substring matches, fuzzy matches, source tags, 250-char trim, descriptions truncated at word boundary with ellipsis. |
 | `tests/test_input_loop_skill_picker.py` | **New** | ~140 | Integration: `/` shows all, `/re` ranks correctly, MRU bias works after picking, Enter records pick, dropdown stays bounded at 20 visible (`+N more` hint when exceeded). |
 
-**Sub-PR 1 totals: 5 source files (3 new + 2 modified) + 4 test files (3 new + 1 modified). ~700 LOC.**
+Layer-2 additions for Hybrid dispatch:
+
+| File | Action | Approx LOC | Responsibility |
+|---|---|---|---|
+| `plugin_sdk/slash_command.py` | Modify | +3 | Add `source: Literal["command", "skill"] = "command"` field on `SlashCommandResult` dataclass. Default keeps backward compat. |
+| `opencomputer/agent/slash_skill_fallback.py` | Modify | +1 | Set `source="skill"` on the `SlashCommandResult` returned from `make_skill_fallback`. |
+| `opencomputer/agent/loop.py` | Modify | +20 / -2 | When dispatcher returns a `result` with `source == "skill"`, synthesize `tool_use` (`SkillTool`) + `tool_result` (SKILL body) message pair, append to `messages`, continue the loop so the model sees skill content as a tool result. |
+| `tests/test_hybrid_skill_dispatch.py` | **New** | ~120 | Skill dispatch produces tool_use+tool_result pair; command dispatch unchanged; agent reads skill content from tool_result on next turn. |
+
+**Total (both layers): 8 source files (3 new + 5 modified) + 5 test files (4 new + 1 modified). ~870 LOC.**
 
 ### 3.4 Ranking algorithm (stdlib only — no new deps)
 
@@ -202,9 +208,9 @@ Tag classes (in the existing `Style.from_dict`): `dd.tag.command` → cyan; `dd.
 - **Plugin-defined commands** discovery. Already exists via `agent/slash_commands.py`; this PR doesn't change that surface — the `UnifiedSlashSource` reads from `SLASH_REGISTRY` (TUI-side) which is the existing source of truth for the picker. Plugin-defined `agent/slash_commands_impl/*` are dispatched at the agent layer; making those discoverable from the TUI is a follow-up.
 - **rapidfuzz** as a new dependency. Stdlib `difflib` is sufficient at picker scale.
 
-## 6. Hybrid dispatch (Sub-PR 2 — small follow-up)
+## 6. Hybrid dispatch (now part of this PR)
 
-Lands after archit's #225 merges so the `loop.py` shape is final.
+archit's #225 is merged on `main` (sha `6b24b8a8`). `agent/loop.py` shape is final. The Hybrid wrap lands in this PR.
 
 ```python
 # In agent/loop.py, post-dispatch hook (~15 LOC):
@@ -235,7 +241,7 @@ if result and getattr(result, "source", "command") == "skill":
     # model gets a turn to act on the skill content
 ```
 
-This requires a tiny tweak to `slash_skill_fallback.py` to set `SlashCommandResult.source = "skill"` on the returned object. That tweak is one line and can land in either Sub-PR 2 or as a coordinated edit to archit's branch — TBD when #225 merges.
+This requires a 1-line tweak to `slash_skill_fallback.py` to set `SlashCommandResult.source = "skill"` on the returned object, plus a 3-line addition to `plugin_sdk/slash_command.py` adding the `source` field to the dataclass with default `"command"` (backward compatible).
 
 ## 7. Error handling
 
@@ -260,43 +266,48 @@ All tests independent — no order dependencies, no shared state, all use `tmp_p
 
 ## 9. Acceptance criteria
 
-Sub-PR 1 ships when:
+This PR ships when:
+
+**TUI surface (Layer 1):**
 
 1. Typing `/` shows a mixed list of commands AND skills, MRU-first, alphabetical-second, capped at 20 with `+N more` hint when truncated.
 2. Typing `/re` ranks: tier-1 commands first, then word-boundary skill matches like `/code-review`, then anywhere-substring matches.
-3. Selecting a skill row + Enter submits `/<skill-name>` and lands in the existing slash dispatch path — works today via archit's #225 fallback (or via plain "unknown command" message if #225 hasn't merged).
+3. Selecting a skill row + Enter submits `/<skill-name>` and lands in the existing slash dispatch path (archit's #225 fallback resolves it).
 4. The MRU store survives across sessions (saved to `~/.opencomputer/<profile>/slash_mru.json`).
 5. Source tags (`(command)` / `(skill)`) render with distinct colours.
 6. Descriptions trim at 250 chars on word boundary with `…`.
-7. New tests pass + existing tests stay green.
-8. Zero touch to `agent/`, `extensions/`, `plugin_sdk/`. Pure `cli_ui/` PR.
 
-Sub-PR 2 ships when (post-archit-#225-merge):
+**Hybrid dispatch (Layer 2):**
 
-9. `SlashCommandResult` gains a `source: Literal["command", "skill"]` field defaulting to `"command"`.
-10. `slash_skill_fallback.py` sets `source="skill"` on returned results.
-11. `agent/loop.py` wraps skill-source results as synthetic `SkillTool` `tool_use`/`tool_result` pairs.
-12. The model receives the skill body as a tool result on the next turn (Claude-Code parity).
-13. Existing tests for slash dispatch stay green.
+7. `SlashCommandResult` gains a `source: Literal["command", "skill"]` field defaulting to `"command"`.
+8. `agent/slash_skill_fallback.py` sets `source="skill"` on returned results.
+9. `agent/loop.py` wraps skill-source results as synthetic `SkillTool` `tool_use`/`tool_result` pairs.
+10. The model receives the skill body as a tool result on the next turn (Claude-Code parity).
 
-## 10. Coordination with archit (parallel session)
+**Cross-cutting:**
 
-archit currently has 4 PRs open touching the slash space:
+11. New tests pass + existing tests stay green (5443+ in main suite).
+12. ruff clean on all new code.
 
-| PR | Layer | Files | Conflict with this work? |
+## 10. Coordination with archit (parallel session) — RESOLVED
+
+archit's PRs all merged into `main` on 2026-04-29:
+
+| PR | Status | Sha | Notes |
 |---|---|---|---|
-| #220 | skills hub | `skills_hub/`, `cli_skills_hub.py`, `MemoryManager.list_skills` extension | No — extends my data source helpfully |
-| #223 | Tier 2.A — 6 self-contained slash commands | `agent/slash_commands*` only | No |
-| #224 | provider runtime flags (`/reasoning` `/fast`) | providers + `runtime_flags.py` | No |
-| #225 | `/<skill-name>` auto-dispatch (agent layer) | `agent/loop.py`, `agent/slash_dispatcher.py`, `agent/slash_skill_fallback.py` | No file overlap with Sub-PR 1; complementary |
+| #220 | merged | `47b5141b` | skills hub + `MemoryManager.list_skills` extension — feeds our `UnifiedSlashSource` |
+| #222 | merged | `1bc6aaad` | first-class generative tools (independent) |
+| #223 | merged | `b0b40d9f` | Tier 2.A — 6 slash commands (`/copy /yolo /reasoning /fast /usage /platforms`) — these become rows in our dropdown automatically |
+| #224 | merged | `fdab4367` | provider runtime flags |
+| #225 | merged | `6b24b8a8` | `/<skill-name>` auto-dispatch — the dispatch leg of Hybrid is on `main` |
+| #226 | merged | `45c8b6de` | bell + external editor |
+| #227 | merged | `10231e24` | Edge TTS |
 
-**Mitigation:**
+**Resolution:**
 
-1. Branch from latest `main` at start of each implementation session, not from any of archit's open branches.
-2. Sub-PR 1 touches `cli_ui/*` ONLY. Verified by file-name diff against archit's PR file lists.
-3. Re-fetch + re-list archit's open PRs every ~30 minutes during active implementation. If archit pushes anything new to `cli_ui/`, pause and replan.
-4. Sub-PR 2 explicitly waits for archit's #225 to merge before opening — avoids three-way conflict in `agent/loop.py`.
-5. The 1-line tweak to `slash_skill_fallback.py` (adding `source="skill"`) coordinates with archit at Sub-PR 2 time — either land in our PR or push as a coordinated edit to archit's branch.
+1. Branched from new `main` after archit's merges. No conflicts, clean fast-forward.
+2. Single-PR delivery (was originally planned as two PRs).
+3. Continue 30-minute re-survey during implementation in case other parallel sessions open new TUI work — but archit is now off the slash queue.
 
 ## 11. Risks and unknowns
 
@@ -308,24 +319,26 @@ archit currently has 4 PRs open touching the slash space:
 
 ## 12. Sequencing summary
 
-- **Now**: This spec → user reviews → `writing-plans` produces task plan → `executing-plans` ships Sub-PR 1.
-- **After archit's #225 merges**: open Sub-PR 2 (Hybrid wrap in `agent/loop.py`).
+- **Now**: This spec → user reviews → `writing-plans` produces task plan → `executing-plans` ships single PR (TUI surface + Hybrid dispatch wrap).
 - **Dogfood** for 1-2 weeks before considering the deferred follow-ups (separate `/skills` modal, argument-hint pane, rapidfuzz upgrade).
 
 ---
 
 ## Spec self-review (run before user review)
 
-**1. Placeholder scan.** No "TBD" / "TODO" / "fill in later" remaining. The "TBD when #225 merges" in §6 is a coordination note, not a content gap — the actual code change is fully specified there. **Pass.**
+**1. Placeholder scan.** No "TBD" / "TODO" / "fill in later". After the archit-merge update, the "Sub-PR 2 — TBD when #225 merges" note from the original draft was rewritten to a concrete 1-line + 3-line change description. **Pass.**
 
-**2. Internal consistency.** §3.4 ranking tiers, §4 worked examples, §8 testing all reference the same tier numbers and bonus values. §3.3 file list and §8 test list match (every new file has a matching test row). §10 coordination matches §3.1 sequencing. **Pass.**
+**2. Internal consistency.** §3.4 ranking tiers, §4 worked examples, §8 testing all reference the same tier numbers and bonus values. §3.3 file list and §8 test list match (every new file has a matching test row). §9 acceptance criteria for both layers map back to specific files in §3.3. §10 coordination matches §3.1 sequencing (single PR after archit merges). **Pass.**
 
-**3. Scope check.** Sub-PR 1 is ~700 LOC across 9 files (5 source + 4 test). Sub-PR 2 is ~30 LOC across 2 files. Both are single-implementation-plan sized. Splitting them is justified by the merge-conflict argument, not by hidden scope. **Pass.**
+**3. Scope check.** ~870 LOC across 13 files (5 source + 4 test for Layer 1 + 3 source + 1 test for Layer 2). Single-implementation-plan sized. **Pass.**
 
 **4. Ambiguity check.**
-- "MRU bonus +0.05" explicit. **Pass.**
-- "20-item cap with `+N more` hint" explicit. **Pass.**
-- "Description truncated at 250 chars on word boundary with `…`" explicit. **Pass.**
-- "Source tag colours: cyan for command, green for skill" explicit. **Pass.**
+- "MRU bonus +0.05" explicit.
+- "20-item cap with `+N more` hint" explicit.
+- "Description truncated at 250 chars on word boundary with `…`" explicit.
+- "Source tag colours: cyan for command, green for skill" explicit.
+- "Hybrid wrap: synthesize tool_use + tool_result, append to messages, fall through (don't return)" explicit with code snippet.
+- "`SlashCommandResult.source` defaults to `'command'`, fallback sets `'skill'`" explicit.
+**Pass.**
 
 **Result: spec is internally consistent and unambiguous. Ready for user review.**
