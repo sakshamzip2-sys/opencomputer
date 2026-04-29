@@ -1,16 +1,13 @@
 """``/mode <name>`` — show or set the permission mode for this session.
 
-Plus shorthand commands:
+``/auto``, ``/accept-edits``, and ``/plan`` (plus ``/plan-off``) are defined
+elsewhere (auto_cmd in core; ``/accept-edits``/``/plan`` in
+extensions/coding-harness) but follow the same writeback pattern via
+:func:`_set_mode` — mutate ``runtime.custom["permission_mode"]`` plus the
+legacy session key (``custom["plan_mode"]`` / ``custom["yolo_session"]`` /
+``custom["accept_edits"]``) so old readers and the canonical helper agree.
 
-  * ``/accept-edits`` — set ACCEPT_EDITS mode
-
-``/auto`` and ``/plan`` (and ``/plan-off``) are defined elsewhere (auto_cmd
-in core, plan in extensions/coding-harness) but follow the same writeback
-pattern: mutate ``runtime.custom["permission_mode"]`` plus the legacy
-session-key (``custom["plan_mode"]`` / ``custom["yolo_session"]``) so old
-readers and the canonical helper agree.
-
-State writes go through :func:`_set_mode` which clears all three legacy
+State writes go through :func:`_set_mode` which clears all legacy mirror
 keys before writing the chosen mode — prevents the situation where a user
 goes ``/auto on`` then ``/plan`` and ends up with both ``yolo_session=True``
 and ``plan_mode=True`` set.
@@ -30,17 +27,20 @@ def _set_mode(runtime: RuntimeContext, mode: PermissionMode) -> None:
     """Set the canonical mode plus all legacy mirror keys, exclusively.
 
     Single source of truth for "switch this session's permission mode" —
-    used by ``/mode``, ``/accept-edits``, the future Shift+Tab cycle, and
-    any other surface that wants to override the active mode.
+    used by ``/mode``, ``/accept-edits`` (extension), ``/auto``, ``/plan``,
+    the Shift+Tab cycle in the TUI, and any other surface that wants to
+    override the active mode.
     """
     if mode == PermissionMode.DEFAULT:
         runtime.custom.pop("permission_mode", None)
         runtime.custom.pop("plan_mode", None)
         runtime.custom.pop("yolo_session", None)
+        runtime.custom.pop("accept_edits", None)
         return
     runtime.custom["permission_mode"] = mode.value
     runtime.custom["plan_mode"] = mode == PermissionMode.PLAN
     runtime.custom["yolo_session"] = mode == PermissionMode.AUTO
+    runtime.custom["accept_edits"] = mode == PermissionMode.ACCEPT_EDITS
 
 
 class ModeCommand(SlashCommand):
@@ -63,21 +63,4 @@ class ModeCommand(SlashCommand):
         return SlashCommandResult(output=f"Mode set to {mode.value}.", handled=True)
 
 
-class AcceptEditsCommand(SlashCommand):
-    name = "accept-edits"
-    description = (
-        "Set mode to accept-edits (auto-approve Edit/Write/MultiEdit/NotebookEdit)"
-    )
-
-    async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
-        _set_mode(runtime, PermissionMode.ACCEPT_EDITS)
-        return SlashCommandResult(
-            output=(
-                "Mode set to accept-edits. Edit/Write/MultiEdit/NotebookEdit will "
-                "auto-approve; Bash and network calls still prompt."
-            ),
-            handled=True,
-        )
-
-
-__all__ = ["ModeCommand", "AcceptEditsCommand", "_set_mode"]
+__all__ = ["ModeCommand", "_set_mode"]

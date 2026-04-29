@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from opencomputer.agent.slash_commands_impl.mode_cmd import (
-    AcceptEditsCommand,
-    ModeCommand,
-)
+from opencomputer.agent.slash_commands_impl.mode_cmd import ModeCommand
 from plugin_sdk import PermissionMode, RuntimeContext, effective_permission_mode
 
 
@@ -56,9 +53,5 @@ class TestModeCommand:
         assert rt.custom["yolo_session"] is True
 
 
-@pytest.mark.asyncio
-class TestAcceptEditsShorthand:
-    async def test_sets_accept_edits(self) -> None:
-        rt = RuntimeContext()
-        await AcceptEditsCommand().execute("", rt)
-        assert effective_permission_mode(rt) == PermissionMode.ACCEPT_EDITS
+# /accept-edits lives in extensions/coding-harness/slash_commands/accept_edits.py
+# — see test coverage in tests/test_accept_edits_hook.py + extension tests.

@@ -36,10 +36,7 @@ from opencomputer.agent.slash_commands_impl.display_toggles_cmd import (
 )
 from opencomputer.agent.slash_commands_impl.fast_cmd import FastCommand
 from opencomputer.agent.slash_commands_impl.history_cmd import HistoryCommand
-from opencomputer.agent.slash_commands_impl.mode_cmd import (
-    AcceptEditsCommand,
-    ModeCommand,
-)
+from opencomputer.agent.slash_commands_impl.mode_cmd import ModeCommand
 from opencomputer.agent.slash_commands_impl.platforms_cmd import PlatformsCommand
 from opencomputer.agent.slash_commands_impl.reasoning_cmd import ReasoningCommand
 from opencomputer.agent.slash_commands_impl.save_cmd import SaveCommand
@@ -65,7 +62,9 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     AutoCommand,         # canonical name (replaces YoloCommand below in priority)
     YoloCommand,         # deprecated alias — forwards to AutoCommand
     ModeCommand,         # /mode <name> — unified permission-mode setter
-    AcceptEditsCommand,  # /accept-edits shorthand
+    # /accept-edits is provided by extensions/coding-harness (existing) —
+    # see slash_commands/accept_edits.py. Updated to write canonical
+    # permission_mode key in PR-3.
     ReasoningCommand,
     FastCommand,
     UsageCommand,

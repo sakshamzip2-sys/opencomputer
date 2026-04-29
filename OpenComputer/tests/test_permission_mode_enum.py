@@ -54,6 +54,10 @@ class TestEffectivePermissionModeResolution:
         rt = RuntimeContext(custom={"yolo_session": True})
         assert effective_permission_mode(rt) == PermissionMode.AUTO
 
+    def test_legacy_custom_accept_edits(self) -> None:
+        rt = RuntimeContext(custom={"accept_edits": True})
+        assert effective_permission_mode(rt) == PermissionMode.ACCEPT_EDITS
+
     def test_canonical_custom_wins_over_legacy(self) -> None:
         rt = RuntimeContext(
             yolo_mode=True,

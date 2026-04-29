@@ -45,6 +45,8 @@ def effective_permission_mode(runtime: RuntimeContext) -> PermissionMode:
         return PermissionMode.PLAN
     if runtime.custom.get("yolo_session"):
         return PermissionMode.AUTO
+    if runtime.custom.get("accept_edits"):
+        return PermissionMode.ACCEPT_EDITS
 
     # 3. Canonical CLI-set frozen field.
     if runtime.permission_mode != PermissionMode.DEFAULT:
