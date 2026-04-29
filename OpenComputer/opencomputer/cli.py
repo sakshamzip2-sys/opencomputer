@@ -515,7 +515,18 @@ def _resolve_provider(provider_name: str):
 def default(
     ctx: typer.Context,
     version: bool = typer.Option(False, "--version", "-V", help="Show version and exit."),
+    headless: bool = typer.Option(
+        False, "--headless",
+        help=(
+            "Force headless mode: no Rich Live, no prompt-toolkit pickers, "
+            "no terminal bell. Sets OPENCOMPUTER_HEADLESS=1 for the rest "
+            "of the process. Auto-detected from sys.stdin.isatty() when "
+            "the flag isn't passed."
+        ),
+    ),
 ) -> None:
+    if headless:
+        os.environ["OPENCOMPUTER_HEADLESS"] = "1"
     if version:
         console.print(f"opencomputer {__version__}")
         raise typer.Exit()
