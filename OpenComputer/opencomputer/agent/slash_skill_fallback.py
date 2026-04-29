@@ -56,11 +56,13 @@ def make_skill_fallback(memory_manager) -> object:  # noqa: ANN001 — duck-type
                     return SlashCommandResult(
                         output=f"failed to load skill '{name}': {type(e).__name__}: {e}",
                         handled=True,
+                        source="skill",
                     )
                 if not body:
                     return SlashCommandResult(
                         output=f"skill '{name}' has empty body",
                         handled=True,
+                        source="skill",
                     )
                 if len(body) > _MAX_BODY_CHARS:
                     body = body[:_MAX_BODY_CHARS] + (
@@ -71,6 +73,7 @@ def make_skill_fallback(memory_manager) -> object:  # noqa: ANN001 — duck-type
                 return SlashCommandResult(
                     output=f"## {title}\n\n{body}",
                     handled=True,
+                    source="skill",
                 )
         # Not a known skill — return None so dispatcher can report
         # unknown-slash to the caller's intended path.

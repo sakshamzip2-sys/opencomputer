@@ -226,3 +226,48 @@ def test_slash_command_result_source_type_is_literal() -> None:
     # Literal["command", "skill"]
     assert "command" in get_args(source_type)
     assert "skill" in get_args(source_type)
+
+
+# ─── Task 11: fallback marks results source="skill" ───────────────
+
+
+def test_skill_fallback_result_has_source_skill():
+    """The fallback closure must mark its result with source='skill'
+    so the agent loop's Hybrid wrap fires."""
+    mm = _FakeMemoryManager(skills_data=[{"id": "hello"}])
+    mm.bodies["hello"] = "body"
+    fallback = make_skill_fallback(mm)
+    result = fallback("hello", "", DEFAULT_RUNTIME_CONTEXT)
+    assert result is not None
+    assert result.source == "skill"
+
+
+def test_skill_fallback_empty_body_marked_skill():
+    """Empty body returns an error-shaped result — must still be
+    source='skill' so the agent loop knows it came from the fallback."""
+    mm = _FakeMemoryManager(skills_data=[{"id": "empty"}])
+    mm.bodies["empty"] = ""  # empty body → fallback returns error result
+    fallback = make_skill_fallback(mm)
+    result = fallback("empty", "", DEFAULT_RUNTIME_CONTEXT)
+    assert result is not None
+    assert result.source == "skill"
+
+
+def test_skill_fallback_load_failure_marked_skill():
+    """If load_skill_body raises, fallback returns an error-marked
+    SlashCommandResult — must still be source='skill'."""
+
+    class _BoomMemory:
+        def list_skills(self):
+            from types import SimpleNamespace
+
+            return [SimpleNamespace(id="exploding", name="exploding")]
+
+        def load_skill_body(self, sid):
+            raise RuntimeError("boom")
+
+    fallback = make_skill_fallback(_BoomMemory())
+    result = fallback("exploding", "", DEFAULT_RUNTIME_CONTEXT)
+    assert result is not None
+    assert result.source == "skill"
+    assert "failed to load skill" in result.output
