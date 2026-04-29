@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import time
 
-from plugin_sdk.injection import InjectionContext
-from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT
-
 from extensions.screen_awareness.injection_provider import ScreenContextProvider
 from extensions.screen_awareness.ring_buffer import ScreenCapture, ScreenRingBuffer
+
+from plugin_sdk.injection import InjectionContext
+from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT
 
 
 def _ctx(session_id: str = "s1") -> InjectionContext:

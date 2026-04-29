@@ -51,10 +51,7 @@ def is_app_sensitive(app_name: str) -> bool:
     """
     if not app_name:
         return False
-    for pat in _COMPILED:
-        if pat.search(app_name):
-            return True
-    return False
+    return any(pat.search(app_name) for pat in _COMPILED)
 
 
 __all__ = ["is_app_sensitive"]

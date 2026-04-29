@@ -65,8 +65,10 @@ def test_thread_safe_concurrent_append():
         ))
 
     threads = [threading.Thread(target=append_one, args=(i,)) for i in range(100)]
-    for t in threads: t.start()
-    for t in threads: t.join()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
     assert len(buf) == 100
 
 

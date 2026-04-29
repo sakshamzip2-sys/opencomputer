@@ -4,10 +4,10 @@ from __future__ import annotations
 import asyncio
 import time
 
-from plugin_sdk.core import ToolCall
-
 from extensions.screen_awareness.recall_tool import RecallScreenTool
 from extensions.screen_awareness.ring_buffer import ScreenCapture, ScreenRingBuffer
+
+from plugin_sdk.core import ToolCall
 
 
 def _run(coro):
