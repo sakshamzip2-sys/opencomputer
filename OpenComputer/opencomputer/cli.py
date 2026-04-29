@@ -313,6 +313,17 @@ def _register_builtin_tools() -> None:
         registry.register(PointAndClickTool())
         registry.register(AppleScriptRunTool())
 
+    # PowerShellRun — Windows AppleScriptRun-equivalent. Hard-gates
+    # internally to sys.platform == "win32"; safe to register on every
+    # platform (returns an error if invoked off Windows).
+    from opencomputer.tools.powershell_run import PowerShellRunTool
+    registry.register(PowerShellRunTool())
+
+    # DBusCall — Linux desktop AppleScriptRun-equivalent. Hard-gates
+    # internally to Linux; safe to register on every platform.
+    from opencomputer.tools.dbus_call import DBusCallTool
+    registry.register(DBusCallTool())
+
     # Cross-platform GUI tools — register unconditionally; they self-detect
     # the platform at call time and dispatch to the right backend (Quartz /
     # pyautogui / xdotool / ydotool / osascript / PowerShell).
@@ -515,7 +526,18 @@ def _resolve_provider(provider_name: str):
 def default(
     ctx: typer.Context,
     version: bool = typer.Option(False, "--version", "-V", help="Show version and exit."),
+    headless: bool = typer.Option(
+        False, "--headless",
+        help=(
+            "Force headless mode: no Rich Live, no prompt-toolkit pickers, "
+            "no terminal bell. Sets OPENCOMPUTER_HEADLESS=1 for the rest "
+            "of the process. Auto-detected from sys.stdin.isatty() when "
+            "the flag isn't passed."
+        ),
+    ),
 ) -> None:
+    if headless:
+        os.environ["OPENCOMPUTER_HEADLESS"] = "1"
     if version:
         console.print(f"opencomputer {__version__}")
         raise typer.Exit()
@@ -969,7 +991,8 @@ def _run_chat_session(
     # status + thinking panel + token-rate readout. Falls back to the
     # plain-stream path on non-TTY (Rich.Live escape sequences would
     # pollute a piped stdout).
-    use_live_ui = sys.stdout.isatty()
+    from opencomputer.headless import is_headless
+    use_live_ui = sys.stdout.isatty() and not is_headless()
 
     # Phase 1 TUI uplift — closure-captured cumulative token tally so
     # /cost can read it. Mutated (not rebound) inside both _run_turn
@@ -2055,6 +2078,58 @@ from opencomputer.cli_webhook import webhook_app  # noqa: E402
 
 app.add_typer(adapter_app, name="adapter")
 app.add_typer(consent_app, name="consent")
+
+# ─── service (systemd-user, Linux deployment) ─────────────────────────
+service_app = typer.Typer(help="Install/uninstall the systemd user service (Linux).")
+app.add_typer(service_app, name="service")
+
+
+@service_app.command("install")
+def _service_install(
+    profile: str = typer.Option("default", help="Which profile to run."),
+    extra_args: str = typer.Option(
+        # 'gateway' (NOT 'chat') is the right default for a service unit:
+        # 'chat' is interactive and would exit immediately under systemd
+        # (no stdin). 'gateway' is the long-running channel daemon.
+        "gateway",
+        help=(
+            "Args after `opencomputer --headless --profile <p>`. "
+            "Default: 'gateway' (long-running channel daemon). "
+            "Note: systemd splits on whitespace and does NOT invoke a "
+            "shell — args containing spaces are not supported."
+        ),
+    ),
+) -> None:
+    """Write and reload a systemd user unit. Run `systemctl --user enable --now opencomputer` after."""
+    import shutil as _shutil
+
+    from opencomputer import service as _service_mod
+
+    exe = _shutil.which("opencomputer") or f"{sys.executable} -m opencomputer"
+    path = _service_mod.install_systemd_unit(
+        executable=exe,
+        workdir=str(Path.home()),
+        profile=profile,
+        extra_args=extra_args,
+    )
+    typer.echo(f"installed: {path}")
+    typer.echo("next: systemctl --user enable --now opencomputer")
+
+
+@service_app.command("uninstall")
+def _service_uninstall() -> None:
+    """Stop, disable, and remove the systemd user unit."""
+    from opencomputer import service as _service_mod
+    path = _service_mod.uninstall_systemd_unit()
+    typer.echo(f"removed: {path}" if path else "no unit installed")
+
+
+@service_app.command("status")
+def _service_status() -> None:
+    """Report whether the unit is active."""
+    from opencomputer import service as _service_mod
+    typer.echo("active" if _service_mod.is_active() else "inactive")
+
 app.add_typer(cost_app, name="cost")
 app.add_typer(cron_app, name="cron")
 app.add_typer(pair_app, name="pair")

@@ -161,3 +161,28 @@ def configure(home: Path) -> None:
     # Errors channel is restricted; the agent / gateway trees keep
     # whatever the root level is (typically WARNING via Python defaults).
     logging.getLogger("opencomputer.errors").setLevel(logging.ERROR)
+
+    # Headless + systemd journald — attach a JournalHandler so
+    # `journalctl --user -u opencomputer` shows structured agent logs.
+    # Silently skipped when python3-systemd isn't installed (Pi minimal
+    # image). De-duped by class-name so repeat configure() calls don't
+    # double-attach.
+    from opencomputer.headless import is_headless
+
+    if is_headless():
+        try:
+            from systemd.journal import JournalHandler  # type: ignore[import-not-found]
+        except ImportError:
+            return  # not available — keep file/stderr handlers only
+        oc_logger = logging.getLogger("opencomputer")
+        already_attached = any(
+            type(h).__name__ == "JournalHandler" for h in oc_logger.handlers
+        )
+        if already_attached:
+            return
+        try:
+            handler = JournalHandler(SYSLOG_IDENTIFIER="opencomputer")
+            handler.setLevel(logging.INFO)
+            oc_logger.addHandler(handler)
+        except Exception:  # noqa: BLE001 — never fail logging setup
+            return

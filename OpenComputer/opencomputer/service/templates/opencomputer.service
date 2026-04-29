@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenComputer agent ({profile})
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={executable} --headless --profile {profile} {extra_args}
+WorkingDirectory={workdir}
+Restart=always
+RestartSec=5
+# Log to journald (default).
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
