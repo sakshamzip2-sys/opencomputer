@@ -193,3 +193,36 @@ async def test_dispatcher_async_fallback_supported():
     )
     assert result is not None
     assert "async-resolved" in result.output
+
+
+# ─── Task 10: SlashCommandResult.source field ─────────────────────
+
+
+def test_slash_command_result_source_defaults_to_command() -> None:
+    """Backwards-compat: existing call sites that don't pass source
+    get source='command'."""
+    from plugin_sdk.slash_command import SlashCommandResult
+
+    r = SlashCommandResult(output="hi")
+    assert r.source == "command"
+
+
+def test_slash_command_result_source_can_be_skill() -> None:
+    """source='skill' is the marker for the Hybrid dispatch path."""
+    from plugin_sdk.slash_command import SlashCommandResult
+
+    r = SlashCommandResult(output="x", source="skill")
+    assert r.source == "skill"
+
+
+def test_slash_command_result_source_type_is_literal() -> None:
+    """Source field is restricted to 'command' or 'skill'."""
+    from typing import get_args, get_type_hints
+
+    from plugin_sdk.slash_command import SlashCommandResult
+
+    hints = get_type_hints(SlashCommandResult)
+    source_type = hints["source"]
+    # Literal["command", "skill"]
+    assert "command" in get_args(source_type)
+    assert "skill" in get_args(source_type)
