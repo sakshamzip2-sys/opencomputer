@@ -643,6 +643,8 @@ async def read_user_input(
             "dd.title.selected": "bold #61afef",
             "dd.cat": "#5f87af",
             "dd.cat.selected": "bold #61afef",
+            "dd.tag.command": "#5fafd7",  # cyan — built-in commands
+            "dd.tag.skill": "#5faf5f",  # green — installed skills
             "dd.desc": "#6c6c6c",
             "dd.desc.selected": "#bcbcbc",
             "dd.divider": "#3a3a3a",

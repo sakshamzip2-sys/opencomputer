@@ -73,3 +73,63 @@ def test_refilter_re_ranks_correctly(tmp_path: Path) -> None:
     rename_pos = names.index("rename")
     code_review_pos = names.index("code-review")
     assert rename_pos < code_review_pos
+
+
+# ─── Task 8: dropdown rendering ────────────────────────────────────
+
+
+def test_dropdown_text_renders_skill_with_skill_tag() -> None:
+    """The internal _render_dropdown_for_state helper renders SkillEntry
+    rows with a (skill) tag instead of a category."""
+    state = {
+        "matches": [
+            CommandDef(name="rename", description="Set a friendly title", category="session"),
+            SkillEntry(id="my-skill", name="My Skill", description="Use when foo"),
+        ],
+        "selected_idx": 0,
+        "mode": "slash",
+        "at_token_range": None,
+    }
+    rendered = _render_dropdown(state)
+    rendered_text = "".join(text for _cls, text in rendered)
+    assert "/rename" in rendered_text
+    assert "/my-skill" in rendered_text
+    # Source tag for the skill must say (skill).
+    assert "(skill)" in rendered_text
+    assert "(command)" in rendered_text  # rename is a command
+
+
+def test_dropdown_text_truncates_descriptions_at_250() -> None:
+    """Long descriptions get word-boundary truncated with ellipsis."""
+    long = "this is a very long description " * 20  # ~640 chars
+    state = {
+        "matches": [SkillEntry(id="long", name="long", description=long)],
+        "selected_idx": 0,
+        "mode": "slash",
+        "at_token_range": None,
+    }
+    rendered = _render_dropdown(state)
+    text = "".join(t for _c, t in rendered)
+    # Original 640 chars must not appear in full.
+    assert long not in text
+    # Trimmed form ends in ellipsis.
+    assert "…" in text
+
+
+def _render_dropdown(state):
+    """Tap into input_loop's lifted module-level renderer."""
+    from opencomputer.cli_ui.input_loop import _render_dropdown_for_state
+
+    return _render_dropdown_for_state(state)
+
+
+def test_style_dict_includes_command_and_skill_tags() -> None:
+    """The style dict must define dd.tag.command and dd.tag.skill so
+    the dropdown can render them with distinct colors."""
+    import inspect
+
+    from opencomputer.cli_ui import input_loop
+
+    src = inspect.getsource(input_loop.read_user_input)
+    assert '"dd.tag.command"' in src or "'dd.tag.command'" in src
+    assert '"dd.tag.skill"' in src or "'dd.tag.skill'" in src
