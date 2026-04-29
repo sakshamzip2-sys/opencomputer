@@ -93,6 +93,72 @@ def _strip_trailing_whitespace(text: str) -> str:
     return text.rstrip()
 
 
+def _render_dropdown_for_state(state: dict) -> list[tuple[str, str]]:
+    """Render a dropdown row list from the picker state dict.
+
+    Pulled out of ``read_user_input`` (was a closure) so unit tests can
+    exercise the rendering logic without spinning up an Application.
+
+    Returns a list of (style-class, text) pairs suitable for
+    :class:`FormattedTextControl`.
+    """
+    from .slash import CommandDef, SkillEntry
+    from .slash_completer import _trim_description
+
+    matches = state.get("matches") or []
+    if not matches:
+        return []
+    out: list[tuple[str, str]] = []
+    if state.get("mode") == "file":
+        # File-completion rendering — unchanged.
+        from opencomputer.cli_ui.file_completer import format_size_label
+
+        for i, p in enumerate(matches):
+            is_sel = i == state["selected_idx"]
+            cursor_cls = "class:dd.cursor" if is_sel else "class:dd.cursor.dim"
+            title_cls = "class:dd.title.selected" if is_sel else "class:dd.title"
+            desc_cls = "class:dd.desc.selected" if is_sel else "class:dd.desc"
+            size = format_size_label(p, base=Path.cwd())
+            out.append((cursor_cls, "❯ " if is_sel else "  "))
+            out.append((title_cls, f"@{p}"))
+            if size:
+                out.append((desc_cls, f"  ({size})"))
+            out.append(("", "\n"))
+        return out
+    # Slash command + skill rendering — handles both SlashItem variants.
+    for i, item in enumerate(matches):
+        is_sel = i == state["selected_idx"]
+        cursor_cls = "class:dd.cursor" if is_sel else "class:dd.cursor.dim"
+        title_cls = "class:dd.title.selected" if is_sel else "class:dd.title"
+        desc_cls = "class:dd.desc.selected" if is_sel else "class:dd.desc"
+        if isinstance(item, CommandDef):
+            args = f" {item.args_hint}" if item.args_hint else ""
+            label = f"/{item.name}{args}"
+            tag = "(command)"
+            desc = item.description
+            if is_sel:
+                cat_cls = "class:dd.cat.selected"
+            else:
+                cat_cls = "class:dd.tag.command"
+        elif isinstance(item, SkillEntry):
+            label = f"/{item.id}"
+            tag = "(skill)"
+            desc = item.description
+            if is_sel:
+                cat_cls = "class:dd.cat.selected"
+            else:
+                cat_cls = "class:dd.tag.skill"
+        else:
+            # Unknown item kind — skip rather than render garbage.
+            continue
+        out.append((cursor_cls, "❯ " if is_sel else "  "))
+        out.append((title_cls, label))
+        out.append((cat_cls, f"  {tag}"))
+        out.append((desc_cls, f"  {_trim_description(desc)}"))
+        out.append(("", "\n"))
+    return out
+
+
 def build_prompt_session(
     *,
     profile_home: Path,
@@ -412,39 +478,7 @@ async def read_user_input(
         return bool(state["matches"])
 
     def _dropdown_text():
-        if not state["matches"]:
-            return []
-        out: list[tuple[str, str]] = []
-        if state["mode"] == "file":
-            # File-completion rendering: path + size label.
-            from opencomputer.cli_ui.file_completer import format_size_label
-
-            for i, p in enumerate(state["matches"]):
-                is_sel = i == state["selected_idx"]
-                cursor_cls = "class:dd.cursor" if is_sel else "class:dd.cursor.dim"
-                title_cls = "class:dd.title.selected" if is_sel else "class:dd.title"
-                desc_cls = "class:dd.desc.selected" if is_sel else "class:dd.desc"
-                size = format_size_label(p, base=Path.cwd())
-                out.append((cursor_cls, "❯ " if is_sel else "  "))
-                out.append((title_cls, f"@{p}"))
-                if size:
-                    out.append((desc_cls, f"  ({size})"))
-                out.append(("", "\n"))
-            return out
-        # Slash command rendering (unchanged).
-        for i, cmd in enumerate(state["matches"]):
-            is_sel = i == state["selected_idx"]
-            args = f" {cmd.args_hint}" if cmd.args_hint else ""
-            cursor_cls = "class:dd.cursor" if is_sel else "class:dd.cursor.dim"
-            title_cls = "class:dd.title.selected" if is_sel else "class:dd.title"
-            cat_cls = "class:dd.cat.selected" if is_sel else "class:dd.cat"
-            desc_cls = "class:dd.desc.selected" if is_sel else "class:dd.desc"
-            out.append((cursor_cls, "❯ " if is_sel else "  "))
-            out.append((title_cls, f"/{cmd.name}{args}"))
-            out.append((cat_cls, f"  ({cmd.category})"))
-            out.append((desc_cls, f"  {cmd.description}"))
-            out.append(("", "\n"))
-        return out
+        return _render_dropdown_for_state(state)
 
     def _dropdown_height():
         # ``Dimension.exact(N)`` is the classmethod that builds a fixed-N
@@ -452,7 +486,9 @@ async def read_user_input(
         # invalid — the constructor only accepts ``min/max/weight/preferred``.
         # Calling it crashed prompt_toolkit's renderer the moment the user
         # typed ``/`` (PR #210 follow-up).
-        return Dimension.exact(min(len(state["matches"]), 10))
+        # Cap raised from 10 → 20 in Task 8 to match the picker source's
+        # default top_n. Skills + commands are mixed so 10 was too tight.
+        return Dimension.exact(min(len(state["matches"]), 20))
 
     kb = KeyBindings()
 
@@ -470,7 +506,13 @@ async def read_user_input(
 
     def _apply_selection() -> None:
         """Replace the active token (slash prefix or @<query>) with the
-        selected dropdown row's expansion. Updates buffer + cursor."""
+        selected dropdown row's expansion. Updates buffer + cursor.
+
+        Slash mode handles both CommandDef (uses .name) and SkillEntry
+        (uses .id) — the user's slash text is the same in both cases.
+        """
+        from .slash import CommandDef, SkillEntry
+
         if not state["matches"] or not (
             0 <= state["selected_idx"] < len(state["matches"])
         ):
@@ -487,7 +529,13 @@ async def read_user_input(
             # closes since the cursor lands at end-of-token).
             _refilter(new_text)
         else:
-            input_buffer.text = f"/{sel.name}"
+            if isinstance(sel, CommandDef):
+                slash_text = sel.name
+            elif isinstance(sel, SkillEntry):
+                slash_text = sel.id
+            else:
+                return
+            input_buffer.text = f"/{slash_text}"
             input_buffer.cursor_position = len(input_buffer.text)
 
     @kb.add(Keys.ControlI, filter=Condition(_has_dropdown))  # Tab
@@ -505,8 +553,22 @@ async def read_user_input(
                 # same Enter — let the user keep editing or press Enter
                 # again to send.
                 return
+            from .slash import CommandDef, SkillEntry
+
             sel = state["matches"][state["selected_idx"]]
-            input_buffer.text = f"/{sel.name}"
+            if isinstance(sel, CommandDef):
+                slash_text = sel.name
+            elif isinstance(sel, SkillEntry):
+                slash_text = sel.id
+            else:
+                event.app.exit(result=input_buffer.text)
+                return
+            input_buffer.text = f"/{slash_text}"
+            # Record the pick to MRU so it floats next session.
+            try:
+                mru_store.record(slash_text)
+            except Exception:  # noqa: BLE001 — never break submit
+                pass
         event.app.exit(result=input_buffer.text)
 
     @kb.add(Keys.Escape, eager=True)
