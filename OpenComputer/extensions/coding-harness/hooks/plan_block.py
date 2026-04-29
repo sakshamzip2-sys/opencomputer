@@ -32,7 +32,11 @@ DESTRUCTIVE_TOOLS = frozenset(
 
 
 async def plan_mode_block_hook(ctx: HookContext) -> HookDecision | None:
-    if ctx.runtime is None or not ctx.runtime.plan_mode:
+    from plugin_sdk import PermissionMode, effective_permission_mode
+
+    if ctx.runtime is None:
+        return None
+    if effective_permission_mode(ctx.runtime) != PermissionMode.PLAN:
         return None
     if ctx.tool_call is None:
         return None

@@ -22,7 +22,9 @@ class PlanOnCommand(SlashCommand):
     description = "Enable plan mode (read-only planning; destructive tools refused)."
 
     async def execute(self, args: str, runtime: Any) -> SlashCommandResult:
-        runtime.custom["plan_mode"] = True
+        runtime.custom["permission_mode"] = "plan"  # canonical
+        runtime.custom["plan_mode"] = True           # legacy mirror
+        runtime.custom["yolo_session"] = False        # exclusive with auto
         self.harness_ctx.session_state.set("mode:plan", True)
         return SlashCommandResult(
             output=(
@@ -38,6 +40,9 @@ class PlanOffCommand(SlashCommand):
     description = "Disable plan mode and allow destructive tool calls again."
 
     async def execute(self, args: str, runtime: Any) -> SlashCommandResult:
+        # Clear canonical only if it was PLAN — don't clobber a different mode.
+        if runtime.custom.get("permission_mode") == "plan":
+            runtime.custom.pop("permission_mode", None)
         runtime.custom["plan_mode"] = False
         self.harness_ctx.session_state.set("mode:plan", False)
         return SlashCommandResult(output="Plan mode disabled.", handled=True)

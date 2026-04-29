@@ -1051,6 +1051,41 @@ loop / approval flow can render the right warnings.
 
 ---
 
+## Permission modes (2026-04-29)
+
+Canonical taxonomy of session-wide tool-approval modes. New code should
+read modes through the `effective_permission_mode()` helper rather than
+the legacy `runtime.plan_mode` / `runtime.yolo_mode` bools — the helper
+accounts for slash-command toggles in `runtime.custom`.
+
+### `PermissionMode`
+
+`StrEnum` with four members:
+
+| Member | Value | Behaviour |
+|---|---|---|
+| `PermissionMode.DEFAULT` | `"default"` | Per-action ConsentGate prompts (status quo). |
+| `PermissionMode.PLAN` | `"plan"` | Destructive tools refused; agent describes the plan. |
+| `PermissionMode.ACCEPT_EDITS` | `"accept-edits"` | Auto-approve Edit/Write/MultiEdit/NotebookEdit; Bash and network still prompt. |
+| `PermissionMode.AUTO` | `"auto"` | Skip per-action prompts. Audit-logged via `actor='bypass'`. |
+
+### `effective_permission_mode(runtime: RuntimeContext) -> PermissionMode`
+
+Resolves "what mode is this session in right now?" through this
+precedence chain (top wins):
+
+1. `runtime.custom["permission_mode"]` (canonical session-mutable key)
+2. `runtime.custom["plan_mode"] == True` → `PLAN` (legacy `/plan`)
+   `runtime.custom["yolo_session"] == True` → `AUTO` (legacy `/yolo`)
+3. `runtime.permission_mode` (canonical CLI-set frozen field)
+4. `runtime.plan_mode == True` → `PLAN` (legacy `--plan`)
+   `runtime.yolo_mode == True` → `AUTO` (legacy `--yolo`)
+5. `PermissionMode.DEFAULT`
+
+Plan beats auto on conflict (matches existing CLI precedence).
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute

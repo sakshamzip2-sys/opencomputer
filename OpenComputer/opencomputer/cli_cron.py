@@ -111,7 +111,8 @@ def cron_create(
     prompt: Annotated[str | None, typer.Option("--prompt", "-p", help="Free-text prompt (threat-scanned).")] = None,
     repeat: Annotated[int | None, typer.Option("--repeat", help="Run N times then auto-remove. Omit for infinite.")] = None,
     notify: Annotated[str | None, typer.Option("--notify", help="Where to deliver: 'telegram', 'discord', 'telegram:<chat_id>', or omit.")] = None,
-    yolo: Annotated[bool, typer.Option("--yolo", help="Disable plan_mode (USE WITH CAUTION — destructive tools run unguarded).")] = False,
+    auto: Annotated[bool, typer.Option("--auto", help="Disable plan_mode (USE WITH CAUTION — destructive tools run unguarded).")] = False,
+    yolo: Annotated[bool, typer.Option("--yolo", help="[deprecated] Alias for --auto.")] = False,
 ) -> None:
     """Create a new scheduled job.
 
@@ -122,6 +123,11 @@ def cron_create(
         typer.secho("Error: must supply --skill or --prompt", fg="red", err=True)
         raise typer.Exit(2)
 
+    if yolo:
+        from opencomputer.cli import _emit_yolo_deprecation
+        _emit_yolo_deprecation()
+        auto = True
+
     try:
         job = create_job(
             schedule=schedule,
@@ -130,7 +136,7 @@ def cron_create(
             prompt=prompt,
             repeat=repeat,
             notify=notify,
-            plan_mode=not yolo,
+            plan_mode=not auto,
         )
     except CronThreatBlocked as exc:
         typer.secho(f"Blocked by threat scan: {exc}", fg="red", err=True)

@@ -51,7 +51,9 @@ class PlanModeInjectionProvider(DynamicInjectionProvider):
         return "coding-harness:plan-mode"
 
     async def collect(self, ctx: InjectionContext) -> str | None:
-        if not ctx.runtime.plan_mode:
+        from plugin_sdk import PermissionMode, effective_permission_mode
+
+        if effective_permission_mode(ctx.runtime) != PermissionMode.PLAN:
             return None
         if _is_full_turn(ctx.turn_index):
             return render("plan_mode.j2", blocked_tools=sorted(DESTRUCTIVE_TOOLS))
