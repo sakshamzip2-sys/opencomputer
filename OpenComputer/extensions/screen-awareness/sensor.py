@@ -43,10 +43,12 @@ class ScreenAwarenessSensor:
     # ─── Injectable dependency boundaries (mocked in tests) ────────────
 
     def _ocr_screen(self) -> str:
-        """OCR the primary monitor. Raises on capture / OCR failure."""
-        from extensions.coding_harness.introspection.ocr import (  # type: ignore[import-not-found]
-            ocr_text_from_screen,
-        )
+        """OCR the primary monitor. Raises on capture / OCR failure.
+
+        Uses the inline OCR helper rather than reaching into
+        coding-harness — cross-plugin boundary stays clean.
+        """
+        from .ocr_inline import ocr_text_from_screen
 
         return ocr_text_from_screen()
 
@@ -56,20 +58,21 @@ class ScreenAwarenessSensor:
         return is_screen_locked()
 
     def _foreground_app_name(self) -> str:
-        """Best-effort foreground app — used by the sensitive filter."""
-        try:
-            from extensions.ambient_sensors.foreground import (  # type: ignore[import-not-found]
-                sample_foreground,
-            )
-        except ImportError:
-            return ""
-        try:
-            snap = sample_foreground()
-            return snap.app_name if snap else ""
-        except Exception:  # noqa: BLE001
-            return ""
+        """Best-effort foreground app — empty string by default.
+
+        Foreground-app detection is intentionally NOT cross-imported
+        from ambient-sensors (cross-plugin boundary). Callers can
+        override this method or the sensor's hosting code can wire a
+        runtime callback that injects the active app name. For v1 the
+        sensitive-app filter operates on OCR text content (see
+        :meth:`_is_sensitive`), not on the active app name.
+        """
+        return ""
 
     def _is_sensitive(self, app_name: str) -> bool:
+        """True iff the active app name OR the OCR text suggests a
+        sensitive context. ``app_name`` is the value returned from
+        :meth:`_foreground_app_name` (empty by default for v1)."""
         from .sensitive_apps import is_app_sensitive
 
         return is_app_sensitive(app_name)
