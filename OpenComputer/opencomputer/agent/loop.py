@@ -787,6 +787,7 @@ class AgentLoop:
                 # disabled or no bridge is wired. The snapshot is still frozen
                 # per session — ambient blocks are evaluated once at session
                 # start and cached, matching the prefix-cache invariant.
+                from plugin_sdk import effective_permission_mode as _epm
                 snapshot = await self.prompt_builder.build_with_memory(
                     skills=skills,
                     declarative_memory=declarative,
@@ -800,6 +801,7 @@ class AgentLoop:
                     enable_ambient_blocks=self.config.memory.enable_ambient_blocks,
                     max_ambient_block_chars=self.config.memory.max_ambient_block_chars,
                     workspace_context=workspace_context,
+                    permission_mode=_epm(self._runtime).value if self._runtime else "default",
                     persona_overlay=persona_overlay,
                     active_persona_id=self._active_persona_id,
                     user_tone=user_tone,

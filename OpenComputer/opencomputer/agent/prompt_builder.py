@@ -188,6 +188,11 @@ class PromptContext:
     #: standard prompt (no plan/yolo bumper sections).
     plan_mode: bool = False
     yolo_mode: bool = False
+    #: 2026-04-29 — canonical permission mode value (string form of
+    #: :class:`plugin_sdk.PermissionMode`). ``base.j2`` dispatches on this
+    #: into one of four branches. Defaults to ``"default"`` so legacy
+    #: callers passing only the bools still render a sensible mode block.
+    permission_mode: str = "default"
 
 
 class PromptBuilder:
@@ -218,6 +223,7 @@ class PromptBuilder:
         workspace_context: str = "",
         plan_mode: bool = False,
         yolo_mode: bool = False,
+        permission_mode: str = "default",
         persona_overlay: str = "",
         active_persona_id: str = "",
         user_tone: str = "",
@@ -238,6 +244,7 @@ class PromptBuilder:
             workspace_context=workspace_context,
             plan_mode=plan_mode,
             yolo_mode=yolo_mode,
+            permission_mode=permission_mode,
             persona_overlay=persona_overlay,
             active_persona_id=active_persona_id,
             user_tone=user_tone,
@@ -257,6 +264,7 @@ class PromptBuilder:
             workspace_context=ctx.workspace_context,
             plan_mode=ctx.plan_mode,
             yolo_mode=ctx.yolo_mode,
+            permission_mode=ctx.permission_mode,
             persona_overlay=ctx.persona_overlay,
             active_persona_id=ctx.active_persona_id,
             user_tone=ctx.user_tone,
@@ -355,6 +363,7 @@ class PromptBuilder:
         workspace_context: str = "",
         plan_mode: bool = False,
         yolo_mode: bool = False,
+        permission_mode: str = "default",
         persona_overlay: str = "",
         active_persona_id: str = "",
         user_tone: str = "",
@@ -385,6 +394,7 @@ class PromptBuilder:
             workspace_context=workspace_context,
             plan_mode=plan_mode,
             yolo_mode=yolo_mode,
+            permission_mode=permission_mode,
             persona_overlay=persona_overlay,
             active_persona_id=active_persona_id,
             user_tone=user_tone,

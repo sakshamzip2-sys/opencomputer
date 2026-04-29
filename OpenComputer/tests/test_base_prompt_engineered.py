@@ -31,10 +31,12 @@ def test_base_prompt_contains_required_sections() -> None:
     assert "Working rules" in rendered
     assert "Tool-use discipline" in rendered
     assert "Error recovery" in rendered
-    # Plan / yolo bumpers always render *something* — either the active or
+    # Plan / auto bumpers always render *something* — either the active or
     # the inactive variant — so just check the section header exists.
+    # 2026-04-29: "# Yolo mode" header renamed to "# Auto mode" as part of
+    # the permission-modes rename. yolo is now a deprecated alias.
     assert "# Plan mode" in rendered
-    assert "# Yolo mode" in rendered
+    assert "# Auto mode" in rendered
     # Wrap-up
     assert "Wrapping up" in rendered
 
