@@ -193,6 +193,14 @@ class PromptContext:
     #: into one of four branches. Defaults to ``"default"`` so legacy
     #: callers passing only the bools still render a sensible mode block.
     permission_mode: str = "default"
+    #: 2026-04-29 PR-5 — user-set output-style overlay. One of:
+    #: ``helpful`` / ``concise`` / ``technical`` / ``creative`` / ``teacher``
+    #: / ``hype``. Empty string or ``helpful`` renders no overlay (baseline).
+    #: Set via ``/personality <name>``; written into
+    #: ``runtime.custom["personality"]`` and passed through here by the
+    #: agent loop. Distinct from ``active_persona_id`` (the V2.C plural-
+    #: persona auto-classifier) — both can be set independently.
+    personality: str = ""
 
 
 class PromptBuilder:
@@ -224,6 +232,7 @@ class PromptBuilder:
         plan_mode: bool = False,
         yolo_mode: bool = False,
         permission_mode: str = "default",
+        personality: str = "",
         persona_overlay: str = "",
         active_persona_id: str = "",
         user_tone: str = "",
@@ -245,6 +254,7 @@ class PromptBuilder:
             plan_mode=plan_mode,
             yolo_mode=yolo_mode,
             permission_mode=permission_mode,
+            personality=personality,
             persona_overlay=persona_overlay,
             active_persona_id=active_persona_id,
             user_tone=user_tone,
@@ -265,6 +275,7 @@ class PromptBuilder:
             plan_mode=ctx.plan_mode,
             yolo_mode=ctx.yolo_mode,
             permission_mode=ctx.permission_mode,
+            personality=ctx.personality,
             persona_overlay=ctx.persona_overlay,
             active_persona_id=ctx.active_persona_id,
             user_tone=ctx.user_tone,
@@ -364,6 +375,7 @@ class PromptBuilder:
         plan_mode: bool = False,
         yolo_mode: bool = False,
         permission_mode: str = "default",
+        personality: str = "",
         persona_overlay: str = "",
         active_persona_id: str = "",
         user_tone: str = "",
@@ -395,6 +407,7 @@ class PromptBuilder:
             plan_mode=plan_mode,
             yolo_mode=yolo_mode,
             permission_mode=permission_mode,
+            personality=personality,
             persona_overlay=persona_overlay,
             active_persona_id=active_persona_id,
             user_tone=user_tone,

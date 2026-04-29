@@ -802,6 +802,10 @@ class AgentLoop:
                     max_ambient_block_chars=self.config.memory.max_ambient_block_chars,
                     workspace_context=workspace_context,
                     permission_mode=_epm(self._runtime).value if self._runtime else "default",
+                    personality=(
+                        self._runtime.custom.get("personality", "")
+                        if self._runtime else ""
+                    ),
                     persona_overlay=persona_overlay,
                     active_persona_id=self._active_persona_id,
                     user_tone=user_tone,
@@ -1610,6 +1614,13 @@ class AgentLoop:
         # when active_persona == "companion" so the companion overlay's
         # warm-but-honest register isn't fighting the action-bias rules).
         self._active_persona_id = str(result.persona_id)
+        # PR-5: mirror into runtime.custom so the TUI mode badge can surface
+        # the active persona without needing a reference to the loop. Use
+        # getattr defensively — some test fixtures construct AgentLoop-like
+        # objects (or use mocks) without going through __init__.
+        _rt = getattr(self, "_runtime", None)
+        if _rt is not None and self._active_persona_id:
+            _rt.custom["active_persona_id"] = self._active_persona_id
         # Prompt C follow-up (2026-04-28): expose the persona's
         # ``preferred_tone`` so prompt assembly can render it as a
         # ``<persona-tone>`` block (suppressed when user_tone is set —

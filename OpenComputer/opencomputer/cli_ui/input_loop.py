@@ -389,11 +389,19 @@ _MODE_STYLE = {
 
 
 def _render_mode_badge(runtime: object) -> list[tuple[str, str]]:
-    """Render the bottom-bar permission-mode badge as FormattedText.
+    """Render the bottom-bar status badge as FormattedText.
 
-    Includes both an ASCII glyph (for ``NO_COLOR`` and screen readers) and
-    a colour style. Returns ``[]`` for callers that pass no runtime so the
-    badge collapses gracefully.
+    Surfaces three independent axes when set:
+    - **mode** (always shown): default / accept-edits / auto / plan
+    - **persona** (when set): the V2.C plural-persona auto-classifier id,
+      mirrored from ``loop._active_persona_id`` into
+      ``runtime.custom["active_persona_id"]``
+    - **personality** (when set to anything other than helpful/empty): the
+      ``/personality`` slash-command value
+
+    Includes ASCII glyphs for ``NO_COLOR`` / screen-reader accessibility.
+    Returns ``[]`` for callers that pass no runtime so the badge
+    collapses gracefully (e.g. piped-input mode).
     """
     if runtime is None:
         return []
@@ -402,7 +410,18 @@ def _render_mode_badge(runtime: object) -> list[tuple[str, str]]:
     mode = effective_permission_mode(runtime).value
     glyph = _MODE_GLYPH.get(mode, "[?]")
     style = _MODE_STYLE.get(mode, "")
-    return [(style, f" {glyph} mode: {mode} "), ("", "  Shift+Tab to cycle")]
+    segments: list[tuple[str, str]] = [(style, f" {glyph} mode: {mode} ")]
+
+    persona = runtime.custom.get("active_persona_id", "")
+    if persona:
+        segments.append(("fg:ansicyan", f"· persona: {persona} "))
+
+    personality = runtime.custom.get("personality", "")
+    if personality and personality != "helpful":
+        segments.append(("fg:ansimagenta", f"· personality: {personality} "))
+
+    segments.append(("", "  Shift+Tab to cycle"))
+    return segments
 
 
 async def read_user_input(

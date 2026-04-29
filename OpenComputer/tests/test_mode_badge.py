@@ -77,3 +77,49 @@ class TestModeBadgeRender:
 
     def test_badge_collapses_when_no_runtime(self) -> None:
         assert _render_mode_badge(None) == []
+
+
+class TestBadgeIncludesPersonaAndPersonality:
+    """PR-5: extended mode badge surfaces persona + personality."""
+
+    def test_badge_shows_personality_when_set(self) -> None:
+        rt = RuntimeContext(custom={"personality": "concise"})
+        text = "".join(seg[1] for seg in _render_mode_badge(rt))
+        assert "concise" in text
+        assert "personality:" in text
+
+    def test_badge_omits_personality_when_helpful(self) -> None:
+        # 'helpful' is the implicit default — don't clutter the badge with it.
+        rt = RuntimeContext(custom={"personality": "helpful"})
+        text = "".join(seg[1] for seg in _render_mode_badge(rt))
+        assert "personality:" not in text
+        assert "helpful" not in text
+
+    def test_badge_omits_personality_when_empty(self) -> None:
+        rt = RuntimeContext()
+        text = "".join(seg[1] for seg in _render_mode_badge(rt))
+        assert "personality:" not in text
+
+    def test_badge_includes_persona_when_set(self) -> None:
+        rt = RuntimeContext(custom={"active_persona_id": "coder"})
+        text = "".join(seg[1] for seg in _render_mode_badge(rt))
+        assert "coder" in text
+        assert "persona:" in text
+
+    def test_badge_omits_persona_when_empty(self) -> None:
+        rt = RuntimeContext()
+        text = "".join(seg[1] for seg in _render_mode_badge(rt))
+        assert "persona:" not in text
+
+    def test_badge_shows_all_three_axes(self) -> None:
+        rt = RuntimeContext(
+            permission_mode=PermissionMode.AUTO,
+            custom={
+                "active_persona_id": "coder",
+                "personality": "concise",
+            },
+        )
+        text = "".join(seg[1] for seg in _render_mode_badge(rt))
+        assert "auto" in text
+        assert "coder" in text
+        assert "concise" in text
