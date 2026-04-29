@@ -83,6 +83,19 @@ class SlackAdapter(BaseChannelAdapter):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
+        # OpenClaw 1.A wiring (ship-now Sub-project C) — streaming chunker.
+        # 1100 ms floor on human_delay_min_ms is Slack's safe rate
+        # (~1 message/sec on chat.postMessage tier).
+        streaming = config.get("streaming") or {}
+        self.streaming_block_chunker: bool = bool(streaming.get("block_chunker", False))
+        self.streaming_min_chars: int = int(streaming.get("min_chars", 80))
+        self.streaming_max_chars: int = int(streaming.get("max_chars", 1500))
+        self.streaming_human_delay_min_ms: int = int(
+            streaming.get("human_delay_min_ms", 1100)
+        )
+        self.streaming_human_delay_max_ms: int = int(
+            streaming.get("human_delay_max_ms", 2500)
+        )
         self._token = config["bot_token"]
         self._client: httpx.AsyncClient | None = None
         # PR 4.6 — track per-thread typing status so we can restore it
