@@ -335,4 +335,49 @@ def session_resume(
     console.print(f"  [bold]opencomputer chat --resume {session_id}[/bold]")
 
 
+@session_app.command("delete")
+def session_delete(
+    session_id: str = typer.Argument(
+        ..., help="Session id to delete (full UUID hex or 8-char prefix)."
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt. Required for non-interactive use.",
+    ),
+) -> None:
+    """Delete a session and all its messages.
+
+    Cascades through messages / episodic_events / vibe_log / tool_usage
+    via FOREIGN KEY ... ON DELETE CASCADE. The F1 audit_log is preserved
+    (append-only by trigger).
+    """
+    db = _db()
+    src = db.get_session(session_id)
+    if src is None:
+        console.print(f"[red]error:[/red] session {session_id!r} not found.")
+        raise typer.Exit(1)
+    title = (src.get("title") or f"(untitled · {session_id[:8]})").strip()
+    msg_count = src.get("message_count", 0)
+    if not yes:
+        console.print(
+            f"Delete session [cyan]{session_id[:8]}[/cyan] "
+            f"({title}, {msg_count} message(s))? [y/N] ",
+            end="",
+        )
+        try:
+            answer = input().strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in {"y", "yes"}:
+            console.print("[dim]aborted.[/dim]")
+            raise typer.Exit(1)
+    db.delete_session(session_id)
+    console.print(
+        f"[green]deleted[/green] {session_id[:8]} "
+        f"({msg_count} message(s) removed)"
+    )
+
+
 __all__ = ["session_app"]
