@@ -196,6 +196,144 @@ def prune_snapshots(profile_home: Path, *, keep: int = DEFAULT_KEEP) -> int:
     return _prune(snapshot_root(profile_home), keep=keep)
 
 
+def export_snapshot(
+    profile_home: Path,
+    snapshot_id: str,
+    *,
+    dest_path: Path | None = None,
+) -> Path:
+    """Tar.gz a snapshot directory for migration / backup.
+
+    Args:
+        profile_home: profile root containing ``state-snapshots/<id>/``.
+        snapshot_id: id returned by :func:`create_snapshot`.
+        dest_path: where to write the archive. Default
+            ``~/oc-snapshot-<id>-<unix-ts>.tar.gz``.
+
+    Returns:
+        Path to the created archive.
+
+    Raises:
+        ValueError: if the snapshot id is not found in this profile.
+    """
+    import tarfile
+    import time as _time
+
+    src = snapshot_root(profile_home) / snapshot_id
+    if not src.is_dir():
+        raise ValueError(
+            f"snapshot {snapshot_id!r} not found in {profile_home}"
+        )
+    if dest_path is None:
+        ts = int(_time.time())
+        dest_path = Path.home() / f"oc-snapshot-{snapshot_id}-{ts}.tar.gz"
+    dest_path = Path(dest_path)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(dest_path, "w:gz") as tf:
+        tf.add(str(src), arcname=snapshot_id)
+    return dest_path
+
+
+def import_snapshot(
+    profile_home: Path,
+    *,
+    archive_path: Path,
+    label: str | None = None,
+) -> str:
+    """Extract a snapshot archive into ``<profile_home>/state-snapshots/<new_id>/``.
+
+    Generates a fresh id (so importing the same archive twice doesn't
+    collide). Pre-screens tarball members for special types
+    (symlinks/hard-links/devices/FIFOs) and uses Python 3.12+'s
+    ``tarfile.data_filter`` to defend against tar-slip and absolute paths.
+
+    Returns:
+        The new snapshot id.
+
+    Raises:
+        ValueError: archive not found, unsafe member types, or extraction
+            target collides on uuid (very rare).
+        tarfile.TarError, OSError: corrupt archive.
+    """
+    import tarfile
+    import uuid
+
+    archive_path = Path(archive_path)
+    if not archive_path.is_file():
+        raise ValueError(f"archive not found: {archive_path}")
+
+    new_id = uuid.uuid4().hex[:12]
+    if label:
+        # Limit label length so directory names stay readable + filesystem-safe.
+        safe_label = "".join(c for c in label[:40] if c.isalnum() or c in "-_")
+        if safe_label:
+            new_id = f"{new_id}-{safe_label}"
+    dest = snapshot_root(profile_home) / new_id
+    try:
+        dest.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        # Astronomically rare; retry with a fresh uuid.
+        new_id = uuid.uuid4().hex[:12]
+        if label:
+            safe_label = "".join(c for c in label[:40] if c.isalnum() or c in "-_")
+            if safe_label:
+                new_id = f"{new_id}-{safe_label}"
+        dest = snapshot_root(profile_home) / new_id
+        dest.mkdir(parents=True, exist_ok=False)
+
+    with tarfile.open(archive_path, "r:gz") as tf:
+        # Defense-in-depth: reject special-type members on top of data_filter.
+        for member in tf.getmembers():
+            if member.type in (
+                tarfile.SYMTYPE,
+                tarfile.LNKTYPE,
+                tarfile.CHRTYPE,
+                tarfile.BLKTYPE,
+                tarfile.FIFOTYPE,
+                tarfile.CONTTYPE,
+            ):
+                # Clean up partial dest before raising.
+                try:
+                    shutil.rmtree(dest)
+                except OSError:
+                    pass
+                raise ValueError(
+                    f"unsafe member type {member.type!r} in archive — refusing"
+                )
+        # Strip top-level dir injected by export_snapshot (arcname=snapshot_id).
+        members_to_extract: list[tarfile.TarInfo] = []
+        for m in tf.getmembers():
+            stripped = m.name.split("/", 1)
+            if len(stripped) != 2:
+                # Top-level dir entry itself — skip; we already created dest.
+                continue
+            m.name = stripped[1]
+            members_to_extract.append(m)
+        # Python 3.12+ data_filter handles tar-slip + absolute paths + PAX
+        # tricks + Windows-style paths automatically.
+        tf.extractall(
+            path=str(dest), members=members_to_extract, filter="data"
+        )
+
+    # Rewrite the manifest's `id` to the new local id so list_snapshots
+    # surfaces the imported snapshot under the id we just minted.
+    manifest = dest / "manifest.json"
+    if manifest.exists():
+        try:
+            data = json.loads(manifest.read_text())
+            original_id = data.get("id")
+            data["id"] = new_id
+            if original_id:
+                data["imported_from"] = original_id
+            manifest.write_text(json.dumps(data, indent=2))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "import: could not rewrite manifest for %s: %s", new_id, exc
+            )
+
+    return new_id
+
+
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
