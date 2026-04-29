@@ -118,6 +118,61 @@ class ConversationResult:
     output_tokens: int
 
 
+#: Synthetic tool name used for Hybrid skill dispatch wrap. Must match
+#: the ``name`` returned by :class:`SkillTool.schema`. Pulled into a
+#: constant so a future tool rename surfaces here as a single-place
+#: edit rather than a silent breakage.
+SKILL_TOOL_NAME = "Skill"
+
+
+def _wrap_skill_result_as_tool_messages(
+    *,
+    skill_name: str,
+    args: str,
+    result,  # SlashCommandResult — typed loosely to avoid import cycle
+) -> list[Message]:
+    """Hybrid dispatch — wrap a skill-source slash result as a synthetic
+    ``Skill`` tool_use + tool_result message pair.
+
+    Returns an empty list when ``result.source != "skill"`` so the caller
+    falls through to the existing user/assistant emission for command
+    results.
+
+    The model receives the SKILL body as a tool_result on the next turn
+    — exactly the shape it would see if it had auto-invoked SkillTool.
+    Claude-Code parity for the dispatch path.
+
+    Trade-off note: an alternative was to discard ``result.output`` and
+    let the agent invoke ``SkillTool`` naturally on the next turn. We
+    synthesize both halves instead because (a) the fallback already
+    loaded SKILL.md — re-loading is wasteful — and (b) the natural-
+    invoke path requires intercepting model output to inject a tool_use,
+    a much uglier control-flow change than this branch.
+    """
+    import secrets
+
+    if getattr(result, "source", "command") != "skill":
+        return []
+    call_id = f"toolu_skill_{secrets.token_hex(6)}"
+    tool_call = ToolCall(
+        id=call_id,
+        name=SKILL_TOOL_NAME,
+        arguments={"name": skill_name, "args": args or ""},
+    )
+    assistant = Message(
+        role="assistant",
+        content="",
+        tool_calls=[tool_call],
+    )
+    tool_message = Message(
+        role="tool",
+        content=result.output,
+        tool_call_id=call_id,
+        name=SKILL_TOOL_NAME,
+    )
+    return [assistant, tool_message]
+
+
 def merge_adjacent_user_messages(messages: list[Message]) -> list[Message]:
     """Merge consecutive text-only user messages into one, joining with ``"\\n\\n"``.
 
@@ -554,42 +609,71 @@ class AgentLoop:
             fallback=make_skill_fallback(self.memory),
         )
         if _slash_result is not None and _slash_result.handled:
+            # Always emit the user message first.
             user_msg = Message(role="user", content=user_message)
-            assistant_msg = Message(
-                role="assistant", content=_slash_result.output
-            )
             messages.append(user_msg)
-            messages.append(assistant_msg)
             self._emit_before_message_write(session_id=sid, message=user_msg)
             self.db.append_message(sid, user_msg)
-            self._emit_before_message_write(session_id=sid, message=assistant_msg)
-            self.db.append_message(sid, assistant_msg)
-            self.db.end_session(sid)
-            # OpenClaw 1.C — slash-command path bypasses the iteration
-            # loop and its finally-block, so pop the detector frame here
-            # to keep frame state symmetric with push_frame above.
-            try:
-                self._loop_detector.pop_frame(sid, _loop_depth)
-            except Exception:  # noqa: BLE001 — never break a slash-command return
-                _log.debug("loop_detector.pop_frame failed (slash path)", exc_info=True)
-            # T1 of auto-skill-evolution plan — slash-command path is a
-            # session terminal too; emit so subscribers see consistent
-            # session-end coverage.
-            await self._emit_session_end_event(
-                session_id=sid,
-                end_reason="completed",
-                turn_count=0,
-                duration_seconds=time.monotonic() - _session_started_at,
-                had_errors=False,
+
+            # Hybrid dispatch — skill-source result becomes a synthetic
+            # SkillTool tool_use + tool_result pair so the model sees the
+            # skill body as authoritative tool output. Command-source
+            # result emits the standard assistant text reply + ends the
+            # session (existing behavior preserved).
+            from opencomputer.agent.slash_dispatcher import parse_slash
+
+            parsed = parse_slash(user_message)
+            skill_name = parsed[0] if parsed else ""
+            args_str = parsed[1] if parsed else ""
+            wrap = _wrap_skill_result_as_tool_messages(
+                skill_name=skill_name, args=args_str, result=_slash_result
             )
-            return ConversationResult(
-                final_message=assistant_msg,
-                messages=messages,
-                session_id=sid,
-                iterations=0,
-                input_tokens=0,
-                output_tokens=0,
-            )
+            if wrap:
+                # Skill — append the assistant tool_use + tool result, but
+                # DO NOT end the session: fall through to the normal agent
+                # loop so the model takes a turn on the skill content.
+                for m in wrap:
+                    messages.append(m)
+                    self._emit_before_message_write(session_id=sid, message=m)
+                    self.db.append_message(sid, m)
+                # Allow the loop to continue past this branch — the model
+                # response from the next iteration is the assistant's
+                # reply on top of the tool_result. We do NOT call
+                # self.db.end_session(sid) here.
+            else:
+                # Command — preserve the original behavior.
+                assistant_msg = Message(
+                    role="assistant", content=_slash_result.output
+                )
+                messages.append(assistant_msg)
+                self._emit_before_message_write(session_id=sid, message=assistant_msg)
+                self.db.append_message(sid, assistant_msg)
+                self.db.end_session(sid)
+                # OpenClaw 1.C — slash-command path bypasses the iteration
+                # loop and its finally-block, so pop the detector frame here
+                # to keep frame state symmetric with push_frame above.
+                try:
+                    self._loop_detector.pop_frame(sid, _loop_depth)
+                except Exception:  # noqa: BLE001 — never break a slash-command return
+                    _log.debug("loop_detector.pop_frame failed (slash path)", exc_info=True)
+                # T1 of auto-skill-evolution plan — slash-command path is a
+                # session terminal too; emit so subscribers see consistent
+                # session-end coverage.
+                await self._emit_session_end_event(
+                    session_id=sid,
+                    end_reason="completed",
+                    turn_count=0,
+                    duration_seconds=time.monotonic() - _session_started_at,
+                    had_errors=False,
+                )
+                return ConversationResult(
+                    final_message=assistant_msg,
+                    messages=messages,
+                    session_id=sid,
+                    iterations=0,
+                    input_tokens=0,
+                    output_tokens=0,
+                )
 
         # System prompt is frozen per session: built once on the first turn,
         # then reused verbatim so the prefix cache hits on turn 2+. Memory
