@@ -60,6 +60,36 @@ _STATE_QUERY_PATTERN = re.compile(
 )
 
 
+#: Emotion-anchor lexicon. When a recent user message contains one of
+#: these terms — without necessarily leading with a greeting — the
+#: register is companion-shaped. Inserted into :func:`classify` AFTER
+#: trading/relaxed (which are explicit user-app choices that still win)
+#: but BEFORE coding-app / file-fallback / time-of-day so the warm
+#: register lands on emotional content even while the user is in a
+#: terminal.
+_EMOTION_PATTERN = re.compile(
+    r"\b("
+    r"sad|lonely|heartbroken|grieving|depressed|anxious|"
+    r"stressed|frustrated|burnt\s+out|burned\s+out|exhausted|"
+    r"happy|excited|grateful|relieved|"
+    r"break\s*up|breakup|broke\s+up|"
+    r"miss\s+(her|him|them|my|you)|"
+    r"died|passed\s+away|funeral|"
+    r"feeling\s+(\w+)|"  # 'feeling X' — generic emotion shape
+    r"i('?m|\s+am)\s+(sad|happy|stressed|anxious|tired|done|broken|hurt|fine|ok|okay)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def has_emotion_anchor(text: str) -> bool:
+    """True iff *text* contains an emotion-anchor term.
+
+    Exposed for tests; used internally by :func:`classify`.
+    """
+    return bool(_EMOTION_PATTERN.search(text or ""))
+
+
 def is_state_query(text: str) -> bool:
     """True iff *text* leads with a state-query / greeting / "how are you" pattern.
 
@@ -99,6 +129,18 @@ def classify(ctx: ClassificationContext) -> ClassificationResult:
         return ClassificationResult(
             "companion", 0.9,
             f"state-query / greeting detected in last message: {last_msg[:40]!r}",
+        )
+    # Emotion-anchor scan over the last 3 messages. Same precedence as
+    # state-query: trading/relaxed app overrides win, but coding-app
+    # and file-fallback yield to emotional content.
+    emotion_msg = next(
+        (m for m in reversed(ctx.last_messages[-3:]) if has_emotion_anchor(m)),
+        None,
+    )
+    if emotion_msg is not None:
+        return ClassificationResult(
+            "companion", 0.75,
+            f"emotion-anchor term detected in recent messages: {emotion_msg[:40]!r}",
         )
     if any(a in app_lower for a in _CODING_APPS):
         return ClassificationResult("coding", 0.85, f"foreground app '{ctx.foreground_app}' suggests coding")

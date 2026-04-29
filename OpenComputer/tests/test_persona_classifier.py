@@ -150,3 +150,57 @@ def test_hinglish_state_query_matches():
         )
         result = classify(ctx)
         assert result.persona_id == "companion", f"failed for {opener!r}"
+
+
+# ── Persona-uplift 2026-04-29 — Task 4: emotion-lexicon rule ─────────
+
+
+def test_emotion_anchor_message_classifies_companion():
+    ctx = ClassificationContext(
+        foreground_app="iTerm2",  # would normally trigger coding
+        time_of_day_hour=14,
+        last_messages=("i am sad just went through a break up",),
+    )
+    result = classify(ctx)
+    assert result.persona_id == "companion"
+    assert "emotion" in result.reason.lower()
+
+
+def test_emotion_lexicon_does_not_override_trading_app():
+    """Strong app signals (trading) are explicit user choice — should
+    still win over emotion lexicon. The lexicon only beats coding /
+    file-fallback / time-of-day."""
+    ctx = ClassificationContext(
+        foreground_app="Zerodha Kite",
+        time_of_day_hour=14,
+        last_messages=("im stressed about this loss",),
+    )
+    result = classify(ctx)
+    assert result.persona_id == "trading"
+
+
+def test_emotion_lexicon_does_not_override_relaxed_app():
+    ctx = ClassificationContext(
+        foreground_app="Spotify",
+        time_of_day_hour=22,
+        last_messages=("im exhausted today",),
+    )
+    result = classify(ctx)
+    assert result.persona_id == "relaxed"
+
+
+def test_multiple_emotion_terms_match():
+    for msg in (
+        "feeling lonely tonight",
+        "i'm heartbroken",
+        "really stressed about work",
+        "grieving my dog",
+        "im happy we shipped it!",
+    ):
+        ctx = ClassificationContext(
+            foreground_app="iTerm2",
+            time_of_day_hour=14,
+            last_messages=(msg,),
+        )
+        result = classify(ctx)
+        assert result.persona_id == "companion", f"failed for {msg!r}"
