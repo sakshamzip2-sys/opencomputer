@@ -4,6 +4,32 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Skills Hub MVP (Tier 1.A: closes the largest visible Hermes gap)
+
+Skills can now be discovered, installed, and managed from a network of sources via `oc skills` — closing the single largest visible-to-user gap identified in the Hermes deep gap audit (`docs/refs/hermes-agent/2026-04-28-major-gaps.md` Tier 1.A + 1.D).
+
+**End-user surface** (8 new commands attached to existing `oc skills` Typer app):
+- `oc skills search [query]` — multi-source fuzzy search
+- `oc skills browse` — list all available skills
+- `oc skills inspect <id>` — rich metadata view
+- `oc skills install <id>` — fetch, scan via Skills Guard, write to `.hub/`
+- `oc skills uninstall <id>` — remove an installed hub skill
+- `oc skills installed` — list hub-installed skills (NOT `list`, which remains for evolution proposals)
+- `oc skills audit [--action]` — append-only JSONL install/uninstall log
+- `oc skills update <id>` — uninstall + reinstall
+- `oc skills tap add|remove|list <repo>` — register arbitrary GitHub repos as sources
+
+**Architecture (3 layers):**
+1. `plugin_sdk.skill_source` (public ABC) — `SkillSource`, `SkillMeta`, `SkillBundle`. Plugins can ship custom sources.
+2. `opencomputer/skills_hub/` — bundled `WellKnownSource` (offline-first, manifest in wheel) + `GitHubSource` (subprocess `git clone --depth=1`), `SkillSourceRouter` (fault-tolerant fan-out), `Installer` (staging dir → scan → atomic move), `HubLockFile` (cross-platform via `filelock`), append-only `AuditLog`, `agentskills_validator` (kebab-case name, 20-500-char description, semver version), `TapsManager`.
+3. `opencomputer/cli_skills_hub.py` — Typer commands attached into existing `oc skills` app via `attach_hub_commands(app)` (no second `add_typer` to avoid namespace collision per DECISIONS doc).
+
+**Skill loader update** — `MemoryManager.list_skills` now walks `<skills_path>/.hub/<source>/<skill-name>/SKILL.md` so hub-installed skills are visible to the agent (without this, the hub would be decorative).
+
+**Tests:** 110 new tests including 3 e2e tests covering the full lifecycle, loader pickup, and blocked-install state cleanup.
+
+**Out of scope (future PRs):** `oc skills publish` flow, `oc skills snapshot export|import`, ClawHub/SkillsSh/LobeHub/ClaudeMarketplace sources.
+
 ### Added — passive education v2: empty-state pass + failure teach + `oc help tour`
 
 Closes the cosmetic half of v2 (the architectural half landed in PR #218).

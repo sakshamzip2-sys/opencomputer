@@ -80,6 +80,46 @@ opencomputer config get KEY  # read one config value (e.g. model.provider)
 opencomputer config set KEY VALUE
 ```
 
+## Skills Hub
+
+OpenComputer skills come from three places:
+
+1. **Bundled** — ship in the wheel under `opencomputer/skills/`. Always available.
+2. **User** — your own SKILL.md files at `~/.opencomputer/<profile>/skills/`. Created by you, by `SkillManageTool`, or by the auto-skill-evolution loop after approval.
+3. **Hub** — installed from a remote source via `oc skills install`. Stored at `~/.opencomputer/<profile>/skills/.hub/<source>/<name>/SKILL.md`.
+
+### Browsing & installing
+
+```bash
+oc skills browse                                       # list all hub skills
+oc skills search "screener"                            # fuzzy search across sources
+oc skills inspect well-known/api-design                # rich metadata view
+oc skills install well-known/api-design                # fetch + scan + install
+oc skills installed                                    # what's hub-installed (vs `list` = evolution proposals)
+oc skills uninstall well-known/api-design              # remove
+oc skills audit                                        # install/uninstall log
+oc skills update well-known/api-design                 # uninstall + reinstall
+```
+
+### Adding GitHub repos as sources (taps)
+
+Any public GitHub repo that contains one or more `SKILL.md` files can be a source:
+
+```bash
+oc skills tap add anthropics/skills                    # repo specs or full URLs accepted
+oc skills tap list
+oc skills search ""                                    # tapped skills now in results
+oc skills install anthropics/skills/<skill-name>
+oc skills tap remove anthropics/skills
+```
+
+### Standards & safety
+
+- All hub skills are validated against the [agentskills.io](https://agentskills.io) frontmatter standard before install (name kebab-case, description 20-500 chars, optional semver version, optional list-of-string tags).
+- Every install runs through Skills Guard's threat scanner. Verdicts of `dangerous` block the install; `caution` for community sources requires `--force`. Trusted sources (e.g. bundled `well-known`) install on `safe` or `caution`.
+- `~/.opencomputer/<profile>/skills/.hub/audit.log` is an append-only JSONL of install/uninstall/scan_blocked events.
+- Skills tapped from arbitrary GitHub repos default to `community` trust level.
+
 ## Coding mode
 
 OpenComputer ships with a `coding-harness` plugin that turns the agent into a

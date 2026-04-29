@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "updated_at": "2026-04-28T00:00:00+00:00",
+  "entries": [
+    {
+      "identifier": "well-known/api-design",
+      "name": "api-design",
+      "description": "Use when designing REST or RPC endpoints, OpenAPI schemas, request/response contracts, or HTTP integrations between services",
+      "version": "0.1.0",
+      "author": "opencomputer",
+      "tags": ["api", "design", "rest", "rpc"],
+      "trust_level": "trusted",
+      "skill_md": "---\nname: api-design\ndescription: Use when designing REST or RPC endpoints, OpenAPI schemas, request/response contracts, or HTTP integrations between services\nversion: 0.1.0\n---\n\n# API Design\n\n## When to use\n\n- Adding a new endpoint to a service\n- Reviewing a PR that changes a public contract\n- Choosing between REST, gRPC, or GraphQL for a new project\n\n## Process\n\n1. Identify the resource model first; verbs come from HTTP, not your domain.\n2. Pick consistent error shapes — RFC 7807 Problem Details is the safe default.\n3. Plan idempotency tokens for any non-GET endpoint that mutates remote state.\n4. Version through URL prefix (/v1/, /v2/) or header — pick one and document it.\n5. Document with OpenAPI 3.1; keep schemas as the source of truth, not prose.\n",
+      "files": {}
+    },
+    {
+      "identifier": "well-known/accessibility-audit",
+      "name": "accessibility-audit",
+      "description": "Use when checking WCAG compliance, ARIA roles, keyboard navigation, screen reader testing, or accessibility issues in UI",
+      "version": "0.1.0",
+      "author": "opencomputer",
+      "tags": ["accessibility", "wcag", "a11y", "ui"],
+      "trust_level": "trusted",
+      "skill_md": "---\nname: accessibility-audit\ndescription: Use when checking WCAG compliance, ARIA roles, keyboard navigation, screen reader testing, or accessibility issues in UI\nversion: 0.1.0\n---\n\n# Accessibility Audit\n\n## When to use\n\n- New UI component / page\n- Bug report mentioning screen readers or keyboard nav\n- Pre-launch accessibility review\n\n## Checklist\n\n- All interactive elements reachable via Tab/Shift-Tab\n- Visible focus indicator on every focusable element\n- Form fields have associated <label>\n- Images have meaningful alt text (or alt='' if decorative)\n- Color contrast >= 4.5:1 for body text, 3:1 for large text\n- ARIA roles only when native HTML is insufficient\n- No keyboard trap in modals or custom widgets\n",
+      "files": {}
+    },
+    {
+      "identifier": "well-known/code-review",
+      "name": "code-review",
+      "description": "Use when reviewing pull requests for correctness, security, performance, and maintainability before approving merges",
+      "version": "0.1.0",
+      "author": "opencomputer",
+      "tags": ["code-review", "quality", "pr"],
+      "trust_level": "trusted",
+      "skill_md": "---\nname: code-review\ndescription: Use when reviewing pull requests for correctness, security, performance, and maintainability before approving merges\nversion: 0.1.0\n---\n\n# Code Review\n\n## Order of concerns\n\n1. **Correctness** — does the code do what its description claims?\n2. **Security** — input trust boundaries, auth, secrets, injection vectors.\n3. **Tests** — are the new code paths covered? Do tests actually fail without the change?\n4. **Performance** — only flag if it crosses an SLA, not aesthetic micro-optimisation.\n5. **Maintainability** — naming, layering, deletion-safety, comment quality.\n\n## Things to never block on\n\n- Personal style (use the linter)\n- Speculative future use cases\n- Refactoring unrelated to the diff\n",
+      "files": {}
+    },
+    {
+      "identifier": "well-known/database-schema-design",
+      "name": "database-schema-design",
+      "description": "Use when designing tables, indexes, foreign keys, normalization, partitioning, and migration strategy for relational databases",
+      "version": "0.1.0",
+      "author": "opencomputer",
+      "tags": ["database", "schema", "sql", "indexing"],
+      "trust_level": "trusted",
+      "skill_md": "---\nname: database-schema-design\ndescription: Use when designing tables, indexes, foreign keys, normalization, partitioning, and migration strategy for relational databases\nversion: 0.1.0\n---\n\n# Database Schema Design\n\n## Process\n\n1. Identify entities and their primary keys (prefer surrogate UUIDv7 over natural keys)\n2. Identify relationships; foreign-key cardinality before column types\n3. Indexes: every FK gets one; composite indexes match query WHERE order\n4. Plan migrations as forward-only; never assume rollback works in prod\n5. Document the read patterns each table is optimized for in a comment block\n",
+      "files": {}
+    },
+    {
+      "identifier": "well-known/dependency-audit",
+      "name": "dependency-audit",
+      "description": "Use when reviewing third-party dependencies for licensing, security CVEs, supply-chain risk, and version pinning hygiene",
+      "version": "0.1.0",
+      "author": "opencomputer",
+      "tags": ["security", "dependencies", "supply-chain"],
+      "trust_level": "trusted",
+      "skill_md": "---\nname: dependency-audit\ndescription: Use when reviewing third-party dependencies for licensing, security CVEs, supply-chain risk, and version pinning hygiene\nversion: 0.1.0\n---\n\n# Dependency Audit\n\n## Steps\n\n1. List direct deps with versions and licenses\n2. Run a vulnerability scanner (osv-scanner, pip-audit, npm audit)\n3. Flag any GPL/AGPL deps if shipping a non-copyleft product\n4. Flag deps with no commits in 12+ months — orphan risk\n5. Pin versions; allow patch-range only with auto-bump in CI\n",
+      "files": {}
+    }
+  ]
+}

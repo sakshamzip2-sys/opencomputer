@@ -10,6 +10,7 @@ backwards-compatible guarantees across minor releases.
 __version__ = "0.1.0"
 
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
+from plugin_sdk.skill_source import SkillBundle, SkillMeta, SkillSource, TrustLevel
 from plugin_sdk.classifier import (
     AggregationPolicy,
     Classifier,
@@ -223,4 +224,9 @@ __all__ = [
     "NormalizedRequest",
     "NormalizedResponse",
     "TransportBase",
+    # skills hub (Tier 1.A)
+    "SkillSource",
+    "SkillMeta",
+    "SkillBundle",
+    "TrustLevel",
 ]

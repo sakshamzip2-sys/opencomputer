@@ -516,4 +516,16 @@ def evolution_status() -> None:
         typer.echo("last heartbeat: never (no events observed yet)")
 
 
+# Skills Hub commands (Tier 1.A) — attached to the same `app` so
+# `oc skills <browse|search|inspect|install|installed|uninstall|audit|update>`
+# coexists with the evolution review commands above. Per
+# docs/superpowers/plans/2026-04-28-hermes-tier1a-DECISIONS.md D-0.6,
+# we use `installed` not `list` to avoid colliding with the evolution
+# `list` command, and we DO NOT register a second add_typer for "skills"
+# in cli.py.
+from opencomputer.cli_skills_hub import attach_hub_commands  # noqa: E402
+
+attach_hub_commands(app)
+
+
 __all__ = ["app", "evolution_app", "skill_app"]

@@ -1,5 +1,7 @@
-# Reference repos cloned for study — not part of OpenComputer
-sources/
+# Reference repos cloned for study — not part of OpenComputer.
+# Anchor with leading slash so this only matches the top-level sources/ dir,
+# not arbitrary subpackages named 'sources/' inside OpenComputer.
+/sources/
 
 # OS
 .DS_Store
