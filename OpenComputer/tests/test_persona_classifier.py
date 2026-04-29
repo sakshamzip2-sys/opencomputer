@@ -121,3 +121,32 @@ def test_state_query_in_recent_messages_not_just_latest():
     result = classify(ctx)
     # 'hi' on the first message should keep us in companion territory.
     assert result.persona_id == "companion"
+
+
+# ── Persona-uplift 2026-04-29 — Task 3: Hindi/Hinglish patterns ──────
+
+
+def test_hindi_state_query_matches():
+    ctx = ClassificationContext(
+        foreground_app="iTerm2",
+        time_of_day_hour=14,
+        last_messages=("kaise ho",),
+    )
+    result = classify(ctx)
+    assert result.persona_id == "companion"
+
+
+def test_hinglish_state_query_matches():
+    for opener in (
+        "kya haal hai bhai",
+        "theek ho?",
+        "sab badhiya?",
+        "kya chal raha hai",
+    ):
+        ctx = ClassificationContext(
+            foreground_app="iTerm2",
+            time_of_day_hour=14,
+            last_messages=(opener,),
+        )
+        result = classify(ctx)
+        assert result.persona_id == "companion", f"failed for {opener!r}"

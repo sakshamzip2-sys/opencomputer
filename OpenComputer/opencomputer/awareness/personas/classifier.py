@@ -49,7 +49,13 @@ _STATE_QUERY_PATTERN = re.compile(
     r"good\s+(morning|afternoon|evening|night)|"
     r"you\s+(doing|feeling)\s+(ok|alright|good)|"
     r"how('?re|\s+are)\s+you\s+holding\s+up|"
-    r"(are\s+you\s+)?ok\??\s*$)",
+    r"(are\s+you\s+)?ok\??\s*$|"
+    # Hindi / Hinglish — common openers in en_IN scripts.
+    r"kaise\s+ho|kaisa\s+hai|kaise\s+hain|"
+    r"kya\s+haal|kya\s+chal|kya\s+ho\s+raha|"
+    r"theek\s+ho|theek\s+hain|"
+    r"sab\s+badhiya|sab\s+theek|"
+    r"namaste|namaskar)",
     re.IGNORECASE,
 )
 
