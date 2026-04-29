@@ -969,7 +969,8 @@ def _run_chat_session(
     # status + thinking panel + token-rate readout. Falls back to the
     # plain-stream path on non-TTY (Rich.Live escape sequences would
     # pollute a piped stdout).
-    use_live_ui = sys.stdout.isatty()
+    from opencomputer.headless import is_headless
+    use_live_ui = sys.stdout.isatty() and not is_headless()
 
     # Phase 1 TUI uplift — closure-captured cumulative token tally so
     # /cost can read it. Mutated (not rebound) inside both _run_turn

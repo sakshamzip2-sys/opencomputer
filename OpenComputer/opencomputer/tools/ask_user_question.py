@@ -36,10 +36,12 @@ class AskUserQuestionTool(BaseTool):
     parallel_safe = False
 
     def __init__(self, *, cli_mode: bool | None = None) -> None:
-        # cli_mode auto-detects: if stdin is a TTY we're CLI; else gateway.
-        # Tests pass cli_mode explicitly to avoid TTY detection.
+        # cli_mode auto-detects: if stdin is a TTY AND we're not in
+        # headless mode, treat as CLI; else gateway. Tests pass cli_mode
+        # explicitly to avoid this detection.
         if cli_mode is None:
-            cli_mode = sys.stdin.isatty()
+            from opencomputer.headless import is_headless
+            cli_mode = sys.stdin.isatty() and not is_headless()
         self._cli_mode = cli_mode
 
     @property
