@@ -80,15 +80,51 @@ def format_time_ago(ts: float, *, now: float | None = None) -> str:
     return f"{days} day{'s' if days != 1 else ''} ago"
 
 
-def run_resume_picker(rows: list[SessionRow]) -> str | None:
+# ─── Confirm-delete state machine helpers (importable for tests) ──────
+
+
+def _enter_confirm_delete(state: dict) -> None:
+    """Flip the picker into confirm-delete mode for the selected row.
+
+    No-op if the filtered list is empty or no row is selected — there
+    is nothing to delete.
+    """
+    if state["filtered"] and state["selected_idx"] >= 0:
+        state["mode"] = "confirm-delete"
+
+
+def _exit_confirm_delete(state: dict) -> None:
+    """Cancel the pending delete and return to navigation mode."""
+    state["mode"] = "navigate"
+
+
+def _commit_confirm_delete(state: dict, db) -> None:  # noqa: ANN001 — db is SessionDB
+    """Commit the pending delete: drop row from DB + both lists, clamp cursor."""
+    state["mode"] = "navigate"
+    if not state["filtered"] or state["selected_idx"] < 0:
+        return
+    target = state["filtered"][state["selected_idx"]]
+    db.delete_session(target.id)
+    state["rows"] = [r for r in state["rows"] if r.id != target.id]
+    state["filtered"] = [r for r in state["filtered"] if r.id != target.id]
+    if state["selected_idx"] >= len(state["filtered"]):
+        state["selected_idx"] = max(0, len(state["filtered"]) - 1)
+
+
+def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: ANN001
     """Open a full-screen picker and return the selected session id.
 
     Returns ``None`` if the user cancels (Esc, Ctrl+C, or empty input).
     Alternate-screen mode is used so the user's terminal state is restored
     cleanly when the picker exits regardless of outcome.
+
+    ``db`` is an optional :class:`SessionDB` reference used to commit
+    in-picker deletes (Ctrl+D → y). Callers without delete support can
+    omit it; pressing Ctrl+D is a no-op when ``db is None``.
     """
     from prompt_toolkit.application import Application
     from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.filters import Condition
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.keys import Keys
     from prompt_toolkit.layout import HSplit, Layout, Window
@@ -100,10 +136,30 @@ def run_resume_picker(rows: list[SessionRow]) -> str | None:
 
     # Mutable state captured by the closures below. Plain dict keeps the
     # whole picker in one closure scope without needing a class.
-    state = {"query": "", "selected_idx": 0, "filtered": list(rows)}
+    # ``mode`` switches between "navigate" (cursor + search) and
+    # "confirm-delete" (y/n only). ``rows`` is the canonical mutable
+    # backing list — `_commit_confirm_delete` removes from it so a
+    # subsequent search won't bring the row back.
+    state = {
+        "query": "",
+        "selected_idx": 0,
+        "filtered": list(rows),
+        "rows": list(rows),
+        "mode": "navigate",
+    }
+
+    def _is_navigating() -> bool:
+        return state["mode"] == "navigate"
+
+    def _is_confirming() -> bool:
+        return state["mode"] == "confirm-delete"
 
     def _refilter() -> None:
-        state["filtered"] = filter_rows(rows, state["query"])
+        # Don't refilter mid-confirm — keeps the highlighted row visible
+        # while the y/n decision is pending.
+        if state["mode"] != "navigate":
+            return
+        state["filtered"] = filter_rows(state["rows"], state["query"])
         state["selected_idx"] = 0 if state["filtered"] else -1
 
     search_buffer = Buffer()
@@ -133,12 +189,22 @@ def run_resume_picker(rows: list[SessionRow]) -> str | None:
         return [("class:divider", "  ─────────────────────────────────────────────  \n")]
 
     def _footer_text():
+        if state["mode"] == "confirm-delete":
+            return [
+                ("", "  "),
+                ("class:footer.key", "y"),
+                ("class:footer", " confirm    "),
+                ("class:footer.key", "n / esc"),
+                ("class:footer", " cancel"),
+            ]
         return [
             ("", "  "),
             ("class:footer.key", "↑↓"),
             ("class:footer", " navigate    "),
             ("class:footer.key", "enter"),
             ("class:footer", " resume    "),
+            ("class:footer.key", "Ctrl+D"),
+            ("class:footer", " delete    "),
             ("class:footer.key", "esc"),
             ("class:footer", " cancel"),
         ]
@@ -149,6 +215,7 @@ def run_resume_picker(rows: list[SessionRow]) -> str | None:
         out: list[tuple[str, str]] = [("", "\n")]
         for i, row in enumerate(state["filtered"]):
             is_sel = i == state["selected_idx"]
+            is_confirming = is_sel and state["mode"] == "confirm-delete"
             arrow = "❯ " if is_sel else "  "
             title = row.title or f"(untitled · {row.id[:8]})"
             meta = (
@@ -156,34 +223,46 @@ def run_resume_picker(rows: list[SessionRow]) -> str | None:
                 f"{row.message_count} message{'s' if row.message_count != 1 else ''}  ·  "
                 f"{row.id[:8]}"
             )
-            # Selected: bright yellow arrow + bold cyan title (no heavy bg).
-            # Unselected: dim grey title, two-space indent so the column lines
-            # up with selected rows. fzf-inspired aesthetic.
             arrow_cls = "class:row.cursor" if is_sel else "class:row.cursor.dim"
             title_cls = "class:row.title.selected" if is_sel else "class:row.title"
             meta_cls = "class:meta.selected" if is_sel else "class:meta"
             out.append(("", "  "))  # left padding
             out.append((arrow_cls, arrow))
-            out.append((title_cls, f"{title}\n"))
+            if is_confirming:
+                out.append(
+                    (
+                        "class:row.confirm.delete",
+                        f"delete '{title[:40]}'? [y / N]\n",
+                    )
+                )
+            else:
+                out.append((title_cls, f"{title}\n"))
             out.append(("", "      "))  # meta indent
             out.append((meta_cls, f"{meta}\n"))
         return out
 
     kb = KeyBindings()
 
-    @kb.add(Keys.Up)
+    # Critical: plain-character bindings ('d', 'y', 'n') would shadow
+    # letters typed into the search buffer (focused below). Use Ctrl+D
+    # for the delete request (a control sequence, never a typed
+    # character) and gate y/n with filter=Condition(_is_confirming) so
+    # they only intercept input while the picker is in confirm mode —
+    # otherwise they fall through to the search buffer.
+
+    @kb.add(Keys.Up, filter=Condition(_is_navigating))
     def _up(event):  # noqa: ANN001
         if state["filtered"]:
             state["selected_idx"] = max(0, state["selected_idx"] - 1)
 
-    @kb.add(Keys.Down)
+    @kb.add(Keys.Down, filter=Condition(_is_navigating))
     def _down(event):  # noqa: ANN001
         if state["filtered"]:
             state["selected_idx"] = min(
                 len(state["filtered"]) - 1, state["selected_idx"] + 1
             )
 
-    @kb.add(Keys.Enter)
+    @kb.add(Keys.Enter, filter=Condition(_is_navigating))
     def _enter(event):  # noqa: ANN001
         if state["filtered"] and 0 <= state["selected_idx"] < len(state["filtered"]):
             sel = state["filtered"][state["selected_idx"]]
@@ -191,8 +270,26 @@ def run_resume_picker(rows: list[SessionRow]) -> str | None:
         else:
             event.app.exit(result=None)
 
+    @kb.add(Keys.ControlD, filter=Condition(_is_navigating))
+    def _delete_request(event):  # noqa: ANN001
+        if state["filtered"]:
+            _enter_confirm_delete(state)
+
+    @kb.add("y", filter=Condition(_is_confirming))
+    def _confirm_yes(event):  # noqa: ANN001
+        if db is not None:
+            _commit_confirm_delete(state, db)
+
+    @kb.add("n", filter=Condition(_is_confirming))
+    def _confirm_no(event):  # noqa: ANN001
+        _exit_confirm_delete(state)
+
     @kb.add(Keys.Escape, eager=True)
     def _esc(event):  # noqa: ANN001
+        # Mid-confirm: Esc cancels the pending delete instead of closing the picker.
+        if state["mode"] == "confirm-delete":
+            _exit_confirm_delete(state)
+            return
         event.app.exit(result=None)
 
     @kb.add(Keys.ControlC)
@@ -213,6 +310,7 @@ def run_resume_picker(rows: list[SessionRow]) -> str | None:
             "row.cursor.dim": "#3a3a3a",
             "row.title": "#a8a8a8",
             "row.title.selected": "bold #61afef",
+            "row.confirm.delete": "bold #ff5f5f",
             "meta": "#5f5f5f",
             "meta.selected": "#9e9e9e",
             "empty": "italic #6c6c6c",
