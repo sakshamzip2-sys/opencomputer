@@ -32,6 +32,7 @@ _SKILL_EVO_DIR = _EXT_DIR / "skill-evolution"
 _VOICE_MODE_DIR = _EXT_DIR / "voice-mode"
 _BROWSER_CONTROL_DIR = _EXT_DIR / "browser-control"
 _AFFECT_INJECTION_DIR = _EXT_DIR / "affect-injection"
+_SCREEN_AWARENESS_DIR = _EXT_DIR / "screen-awareness"
 
 
 def _ensure_extensions_pkg() -> None:
@@ -342,6 +343,56 @@ def _register_affect_injection_alias() -> None:
         setattr(parent, sub, sub_mod)
 
 
+def _register_screen_awareness_alias() -> None:
+    """Register extensions.screen_awareness → extensions/screen-awareness/.
+
+    Same lazy-exec pattern as voice_mode / browser_control / affect_injection
+    — hyphenated directory exposed as underscore module name. Tests import
+    via ``from extensions.screen_awareness.X import Y``; runtime lazily
+    execs each submodule on first attribute access.
+    """
+    _ensure_extensions_pkg()
+
+    if not _SCREEN_AWARENESS_DIR.exists():
+        return
+
+    if "extensions.screen_awareness" not in sys.modules:
+        mod = types.ModuleType("extensions.screen_awareness")
+        mod.__path__ = [str(_SCREEN_AWARENESS_DIR)]
+        mod.__package__ = "extensions.screen_awareness"
+        sys.modules["extensions.screen_awareness"] = mod
+        sys.modules["extensions"].screen_awareness = mod
+
+    parent = sys.modules["extensions.screen_awareness"]
+    for sub in (
+        "lock_detect",
+        "sensitive_apps",
+        "diff",
+        "ring_buffer",
+        "sensor",
+        "persist",
+        "recall_tool",
+        "injection_provider",
+        "state",
+        "plugin",
+    ):
+        full_name = f"extensions.screen_awareness.{sub}"
+        if full_name in sys.modules:
+            setattr(parent, sub, sys.modules[full_name])
+            continue
+        init = _SCREEN_AWARENESS_DIR / f"{sub}.py"
+        if not init.exists():
+            continue
+        spec = importlib.util.spec_from_file_location(full_name, str(init))
+        if spec is None or spec.loader is None:
+            continue
+        sub_mod = importlib.util.module_from_spec(spec)
+        sub_mod.__package__ = "extensions.screen_awareness"
+        sys.modules[full_name] = sub_mod
+        spec.loader.exec_module(sub_mod)
+        setattr(parent, sub, sub_mod)
+
+
 _register_coding_harness_alias()
 _register_aws_bedrock_provider_alias()
 _register_browser_bridge_alias()
@@ -350,3 +401,4 @@ _register_skill_evolution_alias()
 _register_voice_mode_alias()
 _register_browser_control_alias()
 _register_affect_injection_alias()
+_register_screen_awareness_alias()
