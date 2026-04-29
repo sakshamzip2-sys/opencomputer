@@ -12,7 +12,18 @@
 
 **Branch:** `feat/screen-awareness` (already cut from `main` at `2d72878e`).
 
-**Tasks:** 14 numbered tasks. Approximately ~1850 LOC across 21 files. Each task is a single TDD cycle: failing test → minimal impl → green test → commit.
+**Tasks:** 15 numbered tasks (Task 9.5 inserted post-audit for plugin-state plumbing). Approximately ~1850 LOC across 22 files. Approximately **~54 new tests**. Each task is a single TDD cycle: failing test → minimal impl → green test → commit.
+
+## Verified API contracts (read against current `main` 2d72878e during audit)
+
+These are what the plan code targets — locking in to prevent drift:
+
+- `plugin_sdk/hooks.py::HookSpec` fields: `event: HookEvent`, **`handler: HookHandler`** (NOT `callback`), `matcher: str | None`, `fire_and_forget: bool = True`, `priority: int = 100`. **No `plugin_name` field.**
+- `HookHandler = Callable[[HookContext], Awaitable[HookDecision | None]]` — handlers are **async**.
+- `HookContext` fields: `event`, `session_id`, `tool_call: ToolCall | None`, `tool_result: ToolResult | None`, `message: Message | None`, `runtime: RuntimeContext | None`, plus event-specific. Tool name reached via `ctx.tool_call.name`; tool-call-id via `ctx.tool_call.id`.
+- `HookDecision` shape: `decision: Literal["approve","block","pass"] = "pass"`, `reason: str = ""`, `modified_message: str = ""`. For `TRANSFORM_TOOL_RESULT`, `modified_message` is a STRING that REPLACES the tool-result content (not a structured field).
+- `plugin_sdk/consent.py` exports `CapabilityClaim`, `ConsentTier`. Existing tools use `from plugin_sdk.consent import CapabilityClaim, ConsentTier`.
+- `opencomputer/plugins/loader.py::PluginAPI` methods: `register_tool(tool)`, `register_hook(spec)`, `register_injection_provider(provider)`. **No `api.config` attribute** — plugins read their state from per-profile state files (mirror of ambient-sensors's `AmbientState` / `load_state`).
 
 ---
 
@@ -480,22 +491,22 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 
 ---
 
-## Task 3: Sensitive-app filter passthrough
+## Task 3: Sensitive-app filter (inline regex list — no cross-plugin import)
 
 **Files:**
 - Create: `OpenComputer/extensions/screen-awareness/sensitive_apps.py`
 - Test: `OpenComputer/extensions/screen-awareness/tests/test_sensitive_apps.py`
+
+**Audit BLOCKER B1 fix:** Don't passthrough-import from ambient-sensors. If ambient-sensors plugin isn't installed, the import fails and screen-awareness silently disables. Inline the regex list here. Sync drift cost is minimal — both lists are small + rarely changed.
 
 - [ ] **Step 1: Write the failing test**
 
 Create `OpenComputer/extensions/screen-awareness/tests/test_sensitive_apps.py`:
 
 ```python
-"""Tests for the sensitive-app filter passthrough.
-
-We re-export the filter from extensions/ambient-sensors/ rather than
-duplicating the regex list — single-source ensures both sensors honor
-the same denylist.
+"""Tests for the sensitive-app filter — inline regex list, no cross-
+plugin import dependency. Mirrors the ambient-sensors denylist in
+content but not in code path.
 """
 from __future__ import annotations
 
@@ -520,6 +531,12 @@ def test_is_app_sensitive_safe_app_returns_false():
     assert is_app_sensitive("iTerm2") is False
 
 
+def test_is_app_sensitive_empty_string_returns_false():
+    from extensions.screen_awareness.sensitive_apps import is_app_sensitive
+
+    assert is_app_sensitive("") is False
+
+
 def test_filter_returns_only_bool_no_diagnostics():
     """Contract: filter returns bool ONLY. Never returns the matched
     pattern, never logs the match. Privacy-by-construction."""
@@ -529,8 +546,7 @@ def test_filter_returns_only_bool_no_diagnostics():
 
     src = inspect.getsource(sensitive_apps)
     # No logging that could leak app names
-    assert "_log.info" not in src or "matched" not in src
-    assert "_log.debug" not in src or "matched" not in src
+    assert "matched" not in src.lower() or "matched_pattern" not in src
 ```
 
 - [ ] **Step 2: Run tests — confirm they fail**
@@ -541,72 +557,68 @@ python -m pytest extensions/screen-awareness/tests/test_sensitive_apps.py -v 2>&
 
 Expected: ImportError.
 
-- [ ] **Step 3: Create the passthrough module**
+- [ ] **Step 3: Create the inline filter module**
 
 Create `OpenComputer/extensions/screen-awareness/sensitive_apps.py`:
 
 ```python
-"""Sensitive-app filter — passthrough re-export from ambient-sensors.
+"""Sensitive-app filter — inline regex denylist.
 
-Single-source: extensions/ambient-sensors/sensitive_apps.py owns the
-regex list. We re-export ``is_app_sensitive`` here as a thin shim so
-the screen-awareness sensor doesn't need to import across plugins
-directly.
+Mirrors ambient-sensors's denylist content but is its own module so
+screen-awareness doesn't depend on ambient-sensors being installed.
+Sync drift cost is minimal — both lists are small + rarely changed.
 
-Contract: ``is_app_sensitive(app_name) -> bool``. Never returns the
-matched pattern, never logs the match. Privacy-by-construction.
+Contract: ``is_app_sensitive(app_name) -> bool``. Returns bool only.
+Never returns the matched pattern. Never logs the match. Privacy-by-
+construction.
 """
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
+import re
 
-# Lazy-import the ambient-sensors module via spec_from_file_location so
-# the hyphen in the dirname doesn't trip Python's import machinery.
-_AMBIENT_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "ambient-sensors"
-    / "sensitive_apps.py"
+#: Regex denylist — case-insensitive. Mirrors ambient-sensors content.
+_DEFAULT_PATTERNS: tuple[str, ...] = (
+    # Password managers
+    r"(?i)1Password",
+    r"(?i)Bitwarden",
+    r"(?i)KeePass",
+    r"(?i)Dashlane",
+    r"(?i)LastPass",
+    # Banking — generic + region-specific
+    r"(?i)\bbank\b",
+    r"(?i)Chase",
+    r"(?i)HDFC",
+    r"(?i)ICICI",
+    r"(?i)\bSBI\b",
+    r"(?i)Robinhood",
+    r"(?i)Coinbase",
+    r"(?i)MetaMask",
+    r"(?i)Zerodha",
+    r"(?i)Groww",
+    r"(?i)Schwab",
+    r"(?i)Fidelity",
+    r"(?i)Vanguard",
+    # Crypto wallets / 2FA apps
+    r"(?i)Authy",
+    r"(?i)Authenticator",
+    r"(?i)Ledger Live",
 )
 
-
-def _load_ambient_module():
-    if "extensions.ambient_sensors.sensitive_apps" in sys.modules:
-        return sys.modules["extensions.ambient_sensors.sensitive_apps"]
-    spec = importlib.util.spec_from_file_location(
-        "extensions.ambient_sensors.sensitive_apps", _AMBIENT_PATH
-    )
-    if spec is None or spec.loader is None:
-        raise ImportError(f"could not load {_AMBIENT_PATH}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["extensions.ambient_sensors.sensitive_apps"] = mod
-    spec.loader.exec_module(mod)
-    return mod
+_COMPILED: tuple[re.Pattern[str], ...] = tuple(re.compile(p) for p in _DEFAULT_PATTERNS)
 
 
 def is_app_sensitive(app_name: str) -> bool:
-    """True iff ``app_name`` matches any regex in the ambient-sensors
-    denylist (passthrough). Returns bool only — never the matched
-    pattern."""
-    try:
-        mod = _load_ambient_module()
-    except Exception:  # noqa: BLE001 — fail-safe
-        # If we can't load the filter, treat everything as sensitive
-        # so we err on the side of NOT capturing.
-        return True
-    # ambient-sensors filter takes a ForegroundSnapshot. We synthesize a
-    # minimal one with the app_name.
-    try:
-        from extensions.ambient_sensors.foreground import ForegroundSnapshot  # type: ignore[import-not-found]
-    except ImportError:
-        return True
-    snap = ForegroundSnapshot(
-        app_name=app_name,
-        window_title="",
-        captured_at=0.0,
-    )
-    return bool(mod.is_sensitive(snap))
+    """True iff ``app_name`` matches any pattern in the denylist.
+
+    Returns bool only — never the matched pattern, never logs.
+    Empty/None input returns False (no app to check).
+    """
+    if not app_name:
+        return False
+    for pat in _COMPILED:
+        if pat.search(app_name):
+            return True
+    return False
 
 
 __all__ = ["is_app_sensitive"]
@@ -1600,6 +1612,10 @@ Expected: ImportError.
 
 - [ ] **Step 3: Create the RecallScreen tool**
 
+**Audit BLOCKER C1 fix:** Import path is `from plugin_sdk.consent import CapabilityClaim, ConsentTier` (verified vs current `main`). Existing `ScreenshotTool` uses the same import.
+
+**Audit REFINE C2 fix:** JSON schema includes `minimum`/`maximum` constraints on `n`.
+
 Create `OpenComputer/extensions/screen-awareness/recall_tool.py`:
 
 ```python
@@ -1616,9 +1632,9 @@ captures already in memory doesn't require a fresh consent.
 """
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import ClassVar
 
-from opencomputer.consent.types import CapabilityClaim, ConsentTier
+from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -1659,7 +1675,9 @@ class RecallScreenTool(BaseTool):
                 "properties": {
                     "n": {
                         "type": "integer",
-                        "description": "Max captures to return. Default 5, max 20.",
+                        "description": "Max captures to return. Default 5.",
+                        "minimum": 1,
+                        "maximum": 20,
                     },
                     "window_seconds": {
                         "type": "number",
@@ -1667,6 +1685,7 @@ class RecallScreenTool(BaseTool):
                             "Optional time-window filter — only return captures "
                             "from the last N seconds. Default unbounded."
                         ),
+                        "minimum": 0,
                     },
                 },
                 "required": [],
@@ -1916,11 +1935,194 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 
 ---
 
+## Task 9.5: Plugin state file (audit BLOCKER B2)
+
+**Files:**
+- Create: `OpenComputer/extensions/screen-awareness/state.py`
+- Test: `OpenComputer/extensions/screen-awareness/tests/test_state.py`
+
+**Why this exists:** PluginAPI doesn't expose `api.config` for per-plugin settings. Mirroring ambient-sensors's pattern: each plugin owns a tiny state file under `<profile_home>/<plugin_name>_state.json`. Default OFF until written.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `OpenComputer/extensions/screen-awareness/tests/test_state.py`:
+
+```python
+"""Tests for ScreenAwarenessState — per-profile plugin state file."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from extensions.screen_awareness.state import (
+    ScreenAwarenessState,
+    load_state,
+    save_state,
+)
+
+
+def test_default_state_is_disabled():
+    s = ScreenAwarenessState()
+    assert s.enabled is False
+    assert s.persist is False
+
+
+def test_load_state_missing_file_returns_default(tmp_path: Path):
+    s = load_state(tmp_path)
+    assert s.enabled is False
+    assert s.persist is False
+
+
+def test_save_then_load_roundtrip(tmp_path: Path):
+    save_state(tmp_path, ScreenAwarenessState(
+        enabled=True,
+        persist=True,
+        cooldown_seconds=2.0,
+        ring_size=30,
+        freshness_seconds=120.0,
+        max_chars=2000,
+    ))
+    loaded = load_state(tmp_path)
+    assert loaded.enabled is True
+    assert loaded.persist is True
+    assert loaded.cooldown_seconds == 2.0
+    assert loaded.ring_size == 30
+
+
+def test_load_state_corrupt_file_returns_default(tmp_path: Path):
+    (tmp_path / "screen_awareness_state.json").write_text("{not valid", encoding="utf-8")
+    s = load_state(tmp_path)
+    assert s.enabled is False  # fail-safe to disabled
+
+
+def test_save_atomic_no_tmp_leftover(tmp_path: Path):
+    save_state(tmp_path, ScreenAwarenessState(enabled=True))
+    assert not (tmp_path / "screen_awareness_state.json.tmp").exists()
+```
+
+- [ ] **Step 2: Run tests — confirm they fail**
+
+```bash
+python -m pytest extensions/screen-awareness/tests/test_state.py -v 2>&1 | tail -5
+```
+
+Expected: ImportError.
+
+- [ ] **Step 3: Create the state module**
+
+Create `OpenComputer/extensions/screen-awareness/state.py`:
+
+```python
+"""Per-profile state for screen-awareness — opt-in flags + tunables.
+
+State lives at ``<profile_home>/screen_awareness_state.json``. Default
+is fully disabled. Mirrors ambient-sensors's AmbientState pattern.
+"""
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+#: State file basename — placed under profile_home.
+_STATE_FILENAME = "screen_awareness_state.json"
+
+
+@dataclass(frozen=True, slots=True)
+class ScreenAwarenessState:
+    """Per-profile screen-awareness configuration."""
+
+    enabled: bool = False  # master switch — must be True for any capture
+    persist: bool = False  # opt-in JSONL append log
+    cooldown_seconds: float = 1.0
+    ring_size: int = 20
+    freshness_seconds: float = 60.0
+    max_chars: int = 4_000
+
+
+def _state_path(profile_home: Path) -> Path:
+    return profile_home / _STATE_FILENAME
+
+
+def load_state(profile_home: Path) -> ScreenAwarenessState:
+    """Load state from disk; return default if missing or corrupt."""
+    path = _state_path(profile_home)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return ScreenAwarenessState()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return ScreenAwarenessState()
+    if not isinstance(data, dict):
+        return ScreenAwarenessState()
+    # Filter unknown keys defensively — adding/removing fields shouldn't
+    # crash on stale state files.
+    valid_fields = ScreenAwarenessState.__dataclass_fields__.keys()
+    clean = {k: v for k, v in data.items() if k in valid_fields}
+    try:
+        return ScreenAwarenessState(**clean)
+    except TypeError:
+        return ScreenAwarenessState()
+
+
+def save_state(profile_home: Path, state: ScreenAwarenessState) -> None:
+    """Atomic write — temp file + rename."""
+    profile_home.mkdir(parents=True, exist_ok=True)
+    path = _state_path(profile_home)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(asdict(state), indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+__all__ = ["ScreenAwarenessState", "load_state", "save_state"]
+```
+
+- [ ] **Step 4: Run tests — confirm they pass**
+
+```bash
+python -m pytest extensions/screen-awareness/tests/test_state.py -v 2>&1 | tail -5
+```
+
+Expected: 5 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add OpenComputer/extensions/screen-awareness/state.py \
+        OpenComputer/extensions/screen-awareness/tests/test_state.py
+git commit -m "feat(screen): per-profile state file — opt-in flags + tunables
+
+ScreenAwarenessState dataclass + load_state()/save_state() at
+<profile_home>/screen_awareness_state.json. Default fully disabled.
+Mirrors ambient-sensors's AmbientState pattern. Unknown keys
+filtered; corrupt JSON falls back to default; atomic write via
+temp + rename.
+
+Audit BLOCKER B2 fix — PluginAPI has no api.config; per-plugin state
+travels via per-profile state file.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+```
+
+---
+
 ## Task 10: Plugin wiring — register hooks + tool + provider
 
 **Files:**
 - Modify: `OpenComputer/extensions/screen-awareness/plugin.py`
 - Test: `OpenComputer/tests/test_screen_awareness_plugin_wiring.py`
+
+**Audit-corrected against verified API contracts.** All 6 BLOCKERs A1/A2/A3/B4/C2 folded in:
+- `HookSpec` uses `handler=` (not `callback`); no `plugin_name` field
+- Handlers are `async def` returning `HookDecision | None`
+- `HookContext`: tool name via `ctx.tool_call.name`, tool-call-id via `ctx.tool_call.id`
+- `BEFORE_MESSAGE_WRITE` filter: just `msg.role == "user"` and `not msg.tool_calls`
+- Capture hooks set `fire_and_forget=True` (default) — engine handles non-blocking dispatch
+- `TRANSFORM_TOOL_RESULT` returns `HookDecision(modified_message=<text>)` to APPEND delta as text
+- Plugin reads state via `load_state(profile_home)` from Task 9.5 — not `api.config`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1928,57 +2130,96 @@ Create `OpenComputer/tests/test_screen_awareness_plugin_wiring.py`:
 
 ```python
 """Tests that the screen-awareness plugin's register(api) wires the
-tool, hooks, and injection provider when enabled."""
+tool, hooks, and injection provider when state.enabled=True."""
 from __future__ import annotations
 
+from pathlib import Path
 from unittest import mock
 
 
-def test_register_disabled_by_default():
-    """Without explicit enabled=True config, plugin registers nothing
-    (privacy-first default)."""
+def test_register_disabled_by_default(tmp_path: Path):
+    """Default state file (or missing file) → enabled=False → register
+    is a no-op (privacy-first)."""
     from extensions.screen_awareness.plugin import register
 
     api = mock.MagicMock()
-    api.config = {"screen_awareness": {"enabled": False}}
+    api.profile_home = tmp_path  # state file under tmp_path
     register(api)
     api.register_tool.assert_not_called()
     api.register_injection_provider.assert_not_called()
+    api.register_hook.assert_not_called()
 
 
-def test_register_when_enabled_wires_tool_and_provider():
+def test_register_when_enabled_wires_tool_and_provider(tmp_path: Path):
     from extensions.screen_awareness.plugin import register
+    from extensions.screen_awareness.state import (
+        ScreenAwarenessState,
+        save_state,
+    )
 
+    save_state(tmp_path, ScreenAwarenessState(enabled=True))
     api = mock.MagicMock()
-    api.config = {"screen_awareness": {"enabled": True}}
+    api.profile_home = tmp_path
     register(api)
     api.register_tool.assert_called_once()
     api.register_injection_provider.assert_called_once()
-    # Hooks: one for BEFORE_MESSAGE_WRITE, one for PRE_TOOL_USE,
-    # one for POST_TOOL_USE, one for TRANSFORM_TOOL_RESULT.
+    # Hooks: BEFORE_MESSAGE_WRITE + PRE_TOOL_USE + POST_TOOL_USE + TRANSFORM_TOOL_RESULT
     assert api.register_hook.call_count == 4
 
 
-def test_registered_tool_is_recall_screen():
+def test_registered_tool_is_recall_screen(tmp_path: Path):
     from extensions.screen_awareness.plugin import register
     from extensions.screen_awareness.recall_tool import RecallScreenTool
+    from extensions.screen_awareness.state import (
+        ScreenAwarenessState,
+        save_state,
+    )
 
+    save_state(tmp_path, ScreenAwarenessState(enabled=True))
     api = mock.MagicMock()
-    api.config = {"screen_awareness": {"enabled": True}}
+    api.profile_home = tmp_path
     register(api)
     tool_arg = api.register_tool.call_args[0][0]
     assert isinstance(tool_arg, RecallScreenTool)
 
 
-def test_registered_provider_is_screen_context():
+def test_registered_provider_is_screen_context(tmp_path: Path):
     from extensions.screen_awareness.injection_provider import ScreenContextProvider
     from extensions.screen_awareness.plugin import register
+    from extensions.screen_awareness.state import (
+        ScreenAwarenessState,
+        save_state,
+    )
 
+    save_state(tmp_path, ScreenAwarenessState(enabled=True))
     api = mock.MagicMock()
-    api.config = {"screen_awareness": {"enabled": True}}
+    api.profile_home = tmp_path
     register(api)
     provider_arg = api.register_injection_provider.call_args[0][0]
     assert isinstance(provider_arg, ScreenContextProvider)
+
+
+def test_registered_hooks_use_async_handlers(tmp_path: Path):
+    """Verify HookSpec.handler is async — not a sync callback."""
+    import asyncio
+    import inspect
+
+    from extensions.screen_awareness.plugin import register
+    from extensions.screen_awareness.state import (
+        ScreenAwarenessState,
+        save_state,
+    )
+
+    save_state(tmp_path, ScreenAwarenessState(enabled=True))
+    api = mock.MagicMock()
+    api.profile_home = tmp_path
+    register(api)
+    for call in api.register_hook.call_args_list:
+        spec = call[0][0]
+        # HookSpec.handler must be async
+        assert asyncio.iscoroutinefunction(spec.handler), (
+            f"hook {spec.event} handler must be async"
+        )
 ```
 
 - [ ] **Step 2: Run tests — confirm they fail**
@@ -1987,29 +2228,31 @@ def test_registered_provider_is_screen_context():
 python -m pytest tests/test_screen_awareness_plugin_wiring.py -v 2>&1 | tail -5
 ```
 
-Expected: 4 failures — `register()` is currently a no-op.
+Expected: 5 failures — `register()` is currently a no-op.
 
-- [ ] **Step 3: Wire the plugin**
+- [ ] **Step 3: Wire the plugin (audit-corrected)**
 
 Replace `OpenComputer/extensions/screen-awareness/plugin.py`:
 
 ```python
-"""Plugin entry — wires sensor, hooks, tool, and injection provider when
-``screen_awareness.enabled = True`` in config.
+"""Plugin entry — wires sensor, hooks, tool, and injection provider
+when ScreenAwarenessState.enabled=True at the active profile_home.
 
 Default OFF: a no-op register call leaves nothing wired.
 """
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
-from plugin_sdk.hooks import HookEvent, HookSpec
+from plugin_sdk.hooks import HookDecision, HookEvent, HookSpec
 
 from .injection_provider import ScreenContextProvider
 from .recall_tool import RecallScreenTool
 from .ring_buffer import ScreenRingBuffer
 from .sensor import ScreenAwarenessSensor
+from .state import load_state
 
 _log = logging.getLogger("opencomputer.screen_awareness.plugin")
 
@@ -2025,18 +2268,24 @@ GUI_MUTATING_TOOLS: frozenset[str] = frozenset({
 
 
 def register(api: Any) -> None:  # noqa: ANN001 — duck-typed PluginAPI
-    """Wire everything iff screen_awareness.enabled=True in config.
-    Otherwise leave plugin inert."""
-    cfg = getattr(api, "config", {}) or {}
-    sa_cfg = cfg.get("screen_awareness", {}) or {}
-    if not sa_cfg.get("enabled", False):
-        _log.debug("screen-awareness disabled by config — plugin inert")
+    """Wire iff screen_awareness state.enabled=True for active profile."""
+    profile_home = getattr(api, "profile_home", None)
+    if profile_home is None:
+        # Some test contexts pass api without profile_home; bail.
+        _log.debug("api.profile_home unavailable — plugin inert")
+        return
+    if isinstance(profile_home, str):
+        profile_home = Path(profile_home)
+
+    state = load_state(profile_home)
+    if not state.enabled:
+        _log.debug("screen-awareness disabled by state.json — plugin inert")
         return
 
-    ring = ScreenRingBuffer(max_size=int(sa_cfg.get("ring_size", 20)))
+    ring = ScreenRingBuffer(max_size=state.ring_size)
     sensor = ScreenAwarenessSensor(
         ring_buffer=ring,
-        cooldown_seconds=float(sa_cfg.get("cooldown_seconds", 1.0)),
+        cooldown_seconds=state.cooldown_seconds,
     )
 
     # Tool — RecallScreen
@@ -2046,71 +2295,74 @@ def register(api: Any) -> None:  # noqa: ANN001 — duck-typed PluginAPI
     api.register_injection_provider(
         ScreenContextProvider(
             ring_buffer=ring,
-            freshness_seconds=float(sa_cfg.get("freshness_seconds", 60.0)),
-            max_chars=int(sa_cfg.get("max_chars", 4_000)),
+            freshness_seconds=state.freshness_seconds,
+            max_chars=state.max_chars,
         )
     )
 
-    # Hook 1: BEFORE_MESSAGE_WRITE filtered to user-role messages
-    def _on_before_message_write(ctx: Any) -> None:  # noqa: ANN001
+    # Hook 1: BEFORE_MESSAGE_WRITE filtered to user-role messages with no tool_calls
+    async def _on_before_message_write(ctx: Any) -> HookDecision | None:  # noqa: ANN001
         msg = getattr(ctx, "message", None)
-        if msg is None or msg.role != "user" or msg.tool_call_id is not None:
-            return
+        if msg is None or msg.role != "user" or msg.tool_calls:
+            return None
         sensor.capture_now(
             session_id=getattr(ctx, "session_id", "") or "",
             trigger="user_message",
         )
+        return None
 
     api.register_hook(HookSpec(
         event=HookEvent.BEFORE_MESSAGE_WRITE,
-        callback=_on_before_message_write,
-        plugin_name="screen-awareness",
+        handler=_on_before_message_write,
+        fire_and_forget=True,  # don't block message commit on OCR
     ))
 
     # Hook 2: PRE_TOOL_USE filtered to GUI-mutating tools
-    def _on_pre_tool_use(ctx: Any) -> None:  # noqa: ANN001
-        tool_name = getattr(ctx, "tool_name", "")
-        if tool_name not in GUI_MUTATING_TOOLS:
-            return
+    async def _on_pre_tool_use(ctx: Any) -> HookDecision | None:  # noqa: ANN001
+        tool_call = getattr(ctx, "tool_call", None)
+        if tool_call is None or tool_call.name not in GUI_MUTATING_TOOLS:
+            return None
         sensor.capture_now(
             session_id=getattr(ctx, "session_id", "") or "",
             trigger="pre_tool_use",
-            tool_call_id=getattr(ctx, "tool_call_id", None),
+            tool_call_id=tool_call.id,
         )
+        return None
 
     api.register_hook(HookSpec(
         event=HookEvent.PRE_TOOL_USE,
-        callback=_on_pre_tool_use,
-        plugin_name="screen-awareness",
+        handler=_on_pre_tool_use,
+        fire_and_forget=True,
     ))
 
     # Hook 3: POST_TOOL_USE filtered to GUI-mutating tools
-    def _on_post_tool_use(ctx: Any) -> None:  # noqa: ANN001
-        tool_name = getattr(ctx, "tool_name", "")
-        if tool_name not in GUI_MUTATING_TOOLS:
-            return
+    async def _on_post_tool_use(ctx: Any) -> HookDecision | None:  # noqa: ANN001
+        tool_call = getattr(ctx, "tool_call", None)
+        if tool_call is None or tool_call.name not in GUI_MUTATING_TOOLS:
+            return None
         sensor.capture_now(
             session_id=getattr(ctx, "session_id", "") or "",
             trigger="post_tool_use",
-            tool_call_id=getattr(ctx, "tool_call_id", None),
+            tool_call_id=tool_call.id,
         )
+        return None
 
     api.register_hook(HookSpec(
         event=HookEvent.POST_TOOL_USE,
-        callback=_on_post_tool_use,
-        plugin_name="screen-awareness",
+        handler=_on_post_tool_use,
+        fire_and_forget=True,
     ))
 
-    # Hook 4: TRANSFORM_TOOL_RESULT — attach pre/post delta to tool result
-    def _on_transform_tool_result(ctx: Any) -> Any:  # noqa: ANN001
+    # Hook 4: TRANSFORM_TOOL_RESULT — append pre/post delta as text
+    # to the tool result. fire_and_forget=False because we need to
+    # actually return a HookDecision that modifies the result.
+    async def _on_transform_tool_result(ctx: Any) -> HookDecision | None:  # noqa: ANN001
         from .diff import compute_screen_delta
 
-        tool_name = getattr(ctx, "tool_name", "")
-        if tool_name not in GUI_MUTATING_TOOLS:
+        tool_call = getattr(ctx, "tool_call", None)
+        if tool_call is None or tool_call.name not in GUI_MUTATING_TOOLS:
             return None
-        tool_call_id = getattr(ctx, "tool_call_id", None)
-        if tool_call_id is None:
-            return None
+        tool_call_id = tool_call.id
         # Find pre + post entries for this tool_call_id.
         pre = None
         post = None
@@ -2128,24 +2380,34 @@ def register(api: Any) -> None:  # noqa: ANN001 — duck-typed PluginAPI
         delta = compute_screen_delta(pre.text, post.text)
         if not delta.added and not delta.removed:
             return None
-        # Side-effect-only: log + attach via ctx.attach if available.
-        result = getattr(ctx, "result", None)
-        if result is not None and hasattr(result, "_attach"):
-            result._attach("_screen_delta", {
-                "pre_sha": pre.sha256,
-                "post_sha": post.sha256,
-                "added_lines": list(delta.added),
-                "removed_lines": list(delta.removed),
-            })
-        return None
+        # modified_message is a string that REPLACES the result content.
+        # Append a small annotation so the agent sees what changed.
+        existing = ""
+        result = getattr(ctx, "tool_result", None)
+        if result is not None:
+            existing = getattr(result, "content", "") or ""
+        annotation = (
+            f"\n\n[screen-awareness] +{len(delta.added)} / -{len(delta.removed)} lines\n"
+        )
+        if delta.added:
+            annotation += "added: " + " | ".join(delta.added[:5]) + "\n"
+        if delta.removed:
+            annotation += "removed: " + " | ".join(delta.removed[:5]) + "\n"
+        return HookDecision(
+            decision="pass",
+            modified_message=existing + annotation,
+        )
 
     api.register_hook(HookSpec(
         event=HookEvent.TRANSFORM_TOOL_RESULT,
-        callback=_on_transform_tool_result,
-        plugin_name="screen-awareness",
+        handler=_on_transform_tool_result,
+        fire_and_forget=False,  # we need to return a HookDecision
     ))
 
-    _log.info("screen-awareness plugin wired (sensor + tool + provider + 4 hooks)")
+    _log.info(
+        "screen-awareness plugin wired (sensor + tool + provider + 4 hooks; "
+        "primary monitor only — multi-monitor is a follow-up)"
+    )
 
 
 __all__ = ["GUI_MUTATING_TOOLS", "register"]
@@ -2559,14 +2821,32 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 
 ## Task 14: Final verification + push + open PR
 
-- [ ] **Step 1: Re-check archit's status**
+- [ ] **Step 1: Branch-state pin (audit BLOCKER D1)**
+
+This session has had 2 instances of another process moving HEAD/branch refs. Pin state before push:
+
+```bash
+echo "expected branch: feat/screen-awareness"
+echo "actual branch: $(git branch --show-current)"
+[ "$(git branch --show-current)" = "feat/screen-awareness" ] || { echo "WRONG BRANCH — abort"; exit 1; }
+
+echo "expected: local feat/screen-awareness HEAD == origin/feat/screen-awareness OR no upstream yet"
+LOCAL=$(git rev-parse HEAD)
+REMOTE=$(git rev-parse origin/feat/screen-awareness 2>/dev/null || echo "no-upstream")
+echo "local : $LOCAL"
+echo "remote: $REMOTE"
+```
+
+If branch != `feat/screen-awareness`, **STOP and replan** — another session moved HEAD.
+
+- [ ] **Step 2: Re-check parallel session status**
 
 ```bash
 git fetch origin --prune
 gh pr list --state open --json number,title,headRefName 2>&1 | head -5
 ```
 
-Expected: only PR #265 (slash-menu, mine) plus this new PR if you've already created it. Anything else touching `extensions/screen-awareness/` or `opencomputer/doctor.py` should pause us for replan.
+Expected: only PR #265 (slash-menu, mine) plus this new PR if you've already created it. Anything else touching `extensions/screen-awareness/`, `opencomputer/doctor.py`, or `tests/test_ambient_no_cloud_egress.py` should pause us for replan.
 
 - [ ] **Step 2: Stash any orphaned uncommitted changes (parallel-session sweep)**
 
@@ -2674,6 +2954,39 @@ gh pr view --json number,state,mergeable,headRefOid 2>&1
 ```
 
 Expected: `state: OPEN`, `mergeable: MERGEABLE`.
+
+---
+
+## Expert-critic audit log (run 2026-04-29)
+
+After the initial plan was written, I ran an adversarial self-audit per the user's standing rule. Findings + their resolution, in-place:
+
+**BLOCKERs fixed (6):**
+
+| # | Finding | Fix in plan |
+|---|---|---|
+| A1 | `HookSpec` real fields are `event/handler/matcher/fire_and_forget/priority` — no `callback` or `plugin_name` | Task 10 rewritten with `handler=` and no `plugin_name` |
+| A2 | `TRANSFORM_TOOL_RESULT` requires returning `HookDecision(modified_message=str)` — not `result._attach()` | Task 10's hook 4 returns proper HookDecision with text annotation appended |
+| B1 | Task 3 cross-plugin import fails if ambient-sensors not installed | Task 3 inlines the regex denylist; no cross-plugin import |
+| B2 | PluginAPI has no `api.config` for per-plugin settings | New Task 9.5: `state.py` + per-profile JSON state file mirroring ambient-sensors's `AmbientState` |
+| C1 | `opencomputer.consent.types` doesn't exist | Task 8 import path corrected to `from plugin_sdk.consent import CapabilityClaim, ConsentTier` |
+| D1 | Branch refs being moved by another process during this session | Task 14 step 1 explicit branch-state pin with abort-on-mismatch |
+
+**REFINEs folded (7):**
+
+| # | Refinement | Where |
+|---|---|---|
+| A3 | BEFORE_MESSAGE_WRITE filter: just `role=="user"` and `not msg.tool_calls` | Task 10's hook 1 |
+| A4 | Lock-detect lazy-import documented | Already correct in Task 2 |
+| B3 | Doctor probe gated to avoid TCC dialog spam — only run on `--check screen-recording` | Defer to Task 12 follow-up; v1 runs in default `oc doctor` (acceptable trade for visibility) |
+| B4 | Hook callbacks fire-and-forget instead of blocking — use HookSpec `fire_and_forget=True` | Task 10's hooks 1-3 set `fire_and_forget=True`; hook 4 is `False` (must return HookDecision) |
+| B5 | "primary monitor only" log on plugin wire-up | Task 10's `_log.info` final line |
+| C2 | RecallScreen schema has `minimum`/`maximum` on `n` and `minimum: 0` on `window_seconds` | Task 8 |
+| D2 | Test count corrected to ~54 | Header updated |
+
+**NOTED (acceptable risks, no plan change):** A4 (lazy import contract), D3 (conftest alias guarded), E1 (ring buffer vs F2 bus), E2 (in-process OCR vs subprocess), F2 (AGENTS.md updates deferred).
+
+**Audit verdict:** plan is now defensible against real-code-contract drift. All 6 BLOCKERs fixed. Proceeding to execution.
 
 ---
 
