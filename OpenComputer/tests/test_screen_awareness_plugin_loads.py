@@ -6,8 +6,10 @@ from pathlib import Path
 
 
 def test_plugin_module_importable():
-    import importlib.util
-
+    """Loadable via the package path the conftest sets up — this is
+    how tests + the plugin loader actually import it. (The plugin uses
+    relative imports for its sibling modules; loading via spec without
+    a parent package would fail those.)"""
     plugin_path = (
         Path(__file__).resolve().parent.parent
         / "extensions"
@@ -15,12 +17,8 @@ def test_plugin_module_importable():
         / "plugin.py"
     )
     assert plugin_path.exists(), f"plugin.py missing at {plugin_path}"
-    spec = importlib.util.spec_from_file_location(
-        "screen_awareness_plugin", plugin_path
-    )
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    from extensions.screen_awareness import plugin as module
+
     assert hasattr(module, "register"), "plugin.py must expose register(api)"
 
 
