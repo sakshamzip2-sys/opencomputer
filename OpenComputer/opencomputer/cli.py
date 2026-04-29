@@ -2067,6 +2067,58 @@ from opencomputer.cli_webhook import webhook_app  # noqa: E402
 
 app.add_typer(adapter_app, name="adapter")
 app.add_typer(consent_app, name="consent")
+
+# ─── service (systemd-user, Linux deployment) ─────────────────────────
+service_app = typer.Typer(help="Install/uninstall the systemd user service (Linux).")
+app.add_typer(service_app, name="service")
+
+
+@service_app.command("install")
+def _service_install(
+    profile: str = typer.Option("default", help="Which profile to run."),
+    extra_args: str = typer.Option(
+        # 'gateway' (NOT 'chat') is the right default for a service unit:
+        # 'chat' is interactive and would exit immediately under systemd
+        # (no stdin). 'gateway' is the long-running channel daemon.
+        "gateway",
+        help=(
+            "Args after `opencomputer --headless --profile <p>`. "
+            "Default: 'gateway' (long-running channel daemon). "
+            "Note: systemd splits on whitespace and does NOT invoke a "
+            "shell — args containing spaces are not supported."
+        ),
+    ),
+) -> None:
+    """Write and reload a systemd user unit. Run `systemctl --user enable --now opencomputer` after."""
+    import shutil as _shutil
+
+    from opencomputer import service as _service_mod
+
+    exe = _shutil.which("opencomputer") or f"{sys.executable} -m opencomputer"
+    path = _service_mod.install_systemd_unit(
+        executable=exe,
+        workdir=str(Path.home()),
+        profile=profile,
+        extra_args=extra_args,
+    )
+    typer.echo(f"installed: {path}")
+    typer.echo("next: systemctl --user enable --now opencomputer")
+
+
+@service_app.command("uninstall")
+def _service_uninstall() -> None:
+    """Stop, disable, and remove the systemd user unit."""
+    from opencomputer import service as _service_mod
+    path = _service_mod.uninstall_systemd_unit()
+    typer.echo(f"removed: {path}" if path else "no unit installed")
+
+
+@service_app.command("status")
+def _service_status() -> None:
+    """Report whether the unit is active."""
+    from opencomputer import service as _service_mod
+    typer.echo("active" if _service_mod.is_active() else "inactive")
+
 app.add_typer(cost_app, name="cost")
 app.add_typer(cron_app, name="cron")
 app.add_typer(pair_app, name="pair")
