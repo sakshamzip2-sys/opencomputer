@@ -145,3 +145,137 @@ def test_skill_collides_with_command_alias_hidden(tmp_path: Path) -> None:
     assert "quit" not in skill_ids
     assert "reset" not in skill_ids
     assert "legit-skill" in skill_ids
+
+
+# ─── Ranking tests (Task 4) ────────────────────────────────────────
+
+
+def _name_of(item) -> str:
+    """Test helper — extract the rendering name from a SlashItem."""
+    if isinstance(item, CommandDef):
+        return item.name
+    if isinstance(item, SkillEntry):
+        return item.id
+    raise AssertionError(f"unknown item type: {type(item)}")
+
+
+def test_rank_empty_prefix_returns_all_alphabetical(tmp_path: Path) -> None:
+    """Spec §3.4: empty prefix bypasses ranking and returns all items
+    sorted alphabetically (post-MRU sort applied in Task 5)."""
+    mem = _FakeMemory(
+        [
+            _FakeSkillMeta(id="zebra-skill", name="Zebra", description=""),
+            _FakeSkillMeta(id="alpha-skill", name="Alpha", description=""),
+        ]
+    )
+    src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
+    matches = src.rank("")
+    names = [_name_of(m.item) for m in matches]
+    # Alphabetical across BOTH kinds (commands + skills mixed).
+    assert names == sorted(names)
+
+
+def test_rank_tier1_prefix_match(tmp_path: Path) -> None:
+    """Items whose canonical name starts with prefix (case-insensitive)
+    score 1.0 — Tier 1."""
+    mem = _FakeMemory([])
+    src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
+    matches = src.rank("re")
+    # All tier-1 hits — these come from SLASH_REGISTRY: rename, reload,
+    # reload-mcp, resume.
+    tier1_names = [_name_of(m.item) for m in matches if m.score == 1.0]
+    assert "rename" in tier1_names
+    assert "reload" in tier1_names
+    assert "reload-mcp" in tier1_names
+    assert "resume" in tier1_names
+
+
+def test_rank_tier2_alias_match(tmp_path: Path) -> None:
+    """Aliases that start with prefix score 0.85 — Tier 2."""
+    mem = _FakeMemory([])
+    src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
+    matches = src.rank("res")
+    # `/clear` has alias `reset` — `res` matches alias not canonical.
+    found = [m for m in matches if _name_of(m.item) == "clear"]
+    assert len(found) == 1
+    assert found[0].score == 0.85
+
+
+def test_rank_tier3_word_boundary(tmp_path: Path) -> None:
+    """Word-boundary substring matches score 0.70 — Tier 3.
+    'review' inside 'code-review' starts a new word."""
+    mem = _FakeMemory(
+        [_FakeSkillMeta(id="code-review", name="Code Review", description="")]
+    )
+    src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
+    matches = src.rank("rev")
+    found = [m for m in matches if _name_of(m.item) == "code-review"]
+    assert len(found) == 1
+    assert found[0].score == 0.70
+
+
+def test_rank_tier4_anywhere_substring(tmp_path: Path) -> None:
+    """Anywhere-in-name substring matches score 0.55 — Tier 4."""
+    mem = _FakeMemory(
+        [_FakeSkillMeta(id="learning-mode", name="learning-mode", description="")]
+    )
+    src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
+    matches = src.rank("ning")  # mid-word substring
+    found = [m for m in matches if _name_of(m.item) == "learning-mode"]
+    assert len(found) == 1
+    assert found[0].score == 0.55
+
+
+def test_rank_tier5_fuzzy_typo(tmp_path: Path) -> None:
+    """Typo-tolerance via difflib — score in 0.40-0.50 range."""
+    mem = _FakeMemory(
+        [_FakeSkillMeta(id="pead-screener", name="pead-screener", description="")]
+    )
+    src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
+    matches = src.rank("pad-screener")  # typo: pad instead of pead
+    found = [m for m in matches if _name_of(m.item) == "pead-screener"]
+    assert len(found) == 1
+    assert 0.40 <= found[0].score <= 0.50
+
+
+def test_rank_orders_by_score_desc(tmp_path: Path) -> None:
+    """Higher score wins. Tier 1 above tier 3 above tier 4."""
+    mem = _FakeMemory(
+        [
+            _FakeSkillMeta(id="reckon-skill", name="reckon-skill", description=""),
+            _FakeSkillMeta(id="code-review", name="code-review", description=""),
+        ]
+    )
+    src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
+    matches = src.rank("re")
+    scores = [m.score for m in matches]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_rank_caps_at_top_n(tmp_path: Path) -> None:
+    """Default cap is 20; passing top_n overrides."""
+    mem = _FakeMemory(
+        [_FakeSkillMeta(id=f"skill-{i:02d}", name=f"skill-{i:02d}", description="") for i in range(50)]
+    )
+    src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
+    assert len(src.rank("", top_n=20)) == 20
+    assert len(src.rank("", top_n=5)) == 5
+
+
+def test_rank_returns_empty_when_no_items(tmp_path: Path) -> None:
+    """BLOCKER C4 — defensive: if SLASH_REGISTRY is empty AND list_skills
+    returns nothing, rank returns an empty list — no crash."""
+    import opencomputer.cli_ui.slash as slash_mod
+
+    mem = _FakeMemory([])
+    src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
+    # Monkeypatch out the registry for this assertion only — restore after.
+    real_registry = slash_mod.SLASH_REGISTRY
+    try:
+        slash_mod.SLASH_REGISTRY = []  # type: ignore[misc]
+        # Empty prefix.
+        assert src.rank("") == []
+        # Non-empty prefix.
+        assert src.rank("foo") == []
+    finally:
+        slash_mod.SLASH_REGISTRY = real_registry  # type: ignore[misc]
