@@ -166,4 +166,113 @@ def voice_talk(
         typer.echo("\nvoice-mode: stopped")
 
 
+@voice_app.command("realtime")
+def voice_realtime(
+    voice: str = typer.Option(
+        "alloy",
+        "--voice",
+        help="OpenAI realtime voice (alloy/ash/ballad/cedar/coral/echo/marin/sage/shimmer/verse).",
+    ),
+    model: str = typer.Option(
+        "gpt-realtime-1.5",
+        "--model",
+        help="OpenAI realtime model id.",
+    ),
+    instructions: str = typer.Option(
+        "",
+        "--instructions",
+        help="Initial system-style instructions for the voice agent.",
+    ),
+) -> None:
+    """Two-way streaming voice via OpenAI Realtime API.
+
+    Connects mic → OpenAI Realtime → speaker. Tool calls dispatch through
+    OC's tool registry. Press Ctrl+C to exit.
+    """
+    import asyncio
+    import os
+
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        typer.echo(
+            "OPENAI_API_KEY not set. Realtime voice requires an OpenAI key — "
+            "fall back to `opencomputer voice talk` for the Whisper+Edge-TTS path.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    typer.echo("🎤 voice realtime: connecting (Ctrl+C to exit)…")
+    asyncio.run(_run_realtime_loop(
+        api_key=api_key, model=model, voice=voice, instructions=instructions,
+    ))
+
+
+async def _run_realtime_loop(
+    *, api_key: str, model: str, voice: str, instructions: str,
+) -> None:
+    """Build the bridge + audio I/O + tool router and run until Ctrl+C.
+
+    Pulled out as a module-level coroutine so tests can call it with
+    monkey-patched bridge/audio without spinning the CLI runner.
+    """
+    import asyncio
+
+    from extensions.openai_provider.realtime import OpenAIRealtimeBridge
+
+    from opencomputer.tools.registry import registry  # singleton, audit B1
+    from opencomputer.voice.audio_io import LocalAudioIO
+    from opencomputer.voice.realtime_session import create_realtime_voice_session
+    from opencomputer.voice.tool_router import dispatch_realtime_tool_call
+    from plugin_sdk.runtime_context import RuntimeContext
+
+    runtime = RuntimeContext()
+
+    audio: LocalAudioIO | None = None
+    session = None  # type: ignore[var-annotated]
+
+    def _on_mic_chunk(chunk: bytes) -> None:
+        if session is None:
+            return
+        session.send_audio(chunk)
+
+    audio = LocalAudioIO(on_mic_chunk=_on_mic_chunk)
+
+    def _on_tool_call(event, sess) -> None:
+        asyncio.create_task(dispatch_realtime_tool_call(
+            event=event, registry=registry, bridge=sess.bridge, runtime=runtime,
+        ))
+
+    def _create_bridge(callbacks):
+        return OpenAIRealtimeBridge(
+            api_key=api_key,
+            model=model,
+            voice=voice,
+            instructions=instructions or None,
+            on_audio=callbacks["on_audio"],
+            on_clear_audio=callbacks["on_clear_audio"],
+            on_transcript=callbacks.get("on_transcript"),
+            on_tool_call=callbacks.get("on_tool_call"),
+            on_ready=callbacks.get("on_ready"),
+            on_error=callbacks.get("on_error"),
+            on_close=callbacks.get("on_close"),
+        )
+
+    session = create_realtime_voice_session(
+        create_bridge=_create_bridge,
+        audio_sink=audio,
+        on_tool_call=_on_tool_call,
+    )
+
+    audio.start()
+    try:
+        await session.connect()
+        while True:
+            await asyncio.sleep(1.0)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        session.close()
+        audio.stop()
+
+
 __all__ = ["voice_app"]
