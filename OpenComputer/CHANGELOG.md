@@ -4,6 +4,28 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Permission modes (renames `yolo` → `auto`, adds `accept-edits`)
+
+`PermissionMode` enum + `effective_permission_mode()` helper exported from `plugin_sdk` — single source of truth for "what mode is this session in right now?" across CLI flags, slash commands, hooks, and the prompt template. Resolution chains canonical session-mutable keys, legacy custom-dict keys, the new frozen field, and legacy `plan_mode`/`yolo_mode` bools.
+
+PR-1 (this commit wave) ships the foundation:
+- Enum with four members: `default`, `plan`, `accept-edits`, `auto`.
+- New frozen field `RuntimeContext.permission_mode`; legacy `plan_mode`/`yolo_mode` retained as deprecated reads.
+- `BypassManager.is_active()` now also bypasses the F1 ConsentGate when effective mode is `auto`. **This closes a pre-existing gap** — `--yolo` and `/yolo` were cosmetic before; only the env-var bypass actually skipped per-call prompts. Auto-mode actions remain audit-logged via the existing `actor='bypass'` path.
+- `/plan` slash command now actually engages the plan_block hard-block hook. Previously the hook only read the frozen field, so `/plan` was soft-only despite the message claiming otherwise.
+- `protocol_v2.ChatParams` gains an optional `permission_mode` string field (backwards-compatible — old wire clients work unchanged).
+- Shell-hook env payload (`OPENCOMPUTER_*` blob piped to settings-declared hooks) now includes `permission_mode` alongside the legacy `plan_mode`/`yolo_mode` bools.
+
+PR-2 (next wave) will add `--auto` / `--accept-edits` CLI flags, `/auto` / `/mode` / `/accept-edits` slash commands, and the four-branch `base.j2` dispatch.
+PR-3 will add the new `accept-edits` hook + injection provider.
+PR-4 will add Shift+Tab cycling + a TUI mode badge.
+
+### Deprecated
+- `--yolo` CLI flag — use `--auto` (PR-2). Removal target: v1.2 / 4 weeks of merges.
+- `/yolo` slash command — use `/auto` (PR-2). Same removal target.
+- `runtime.yolo_mode`, `runtime.plan_mode` direct reads — use `effective_permission_mode(runtime)`. Same removal target.
+- `runtime.custom["yolo_session"]`, `runtime.custom["plan_mode"]` direct writes — slash commands will write `runtime.custom["permission_mode"]` (PR-2).
+
 ### Added — Skills Hub MVP (Tier 1.A: closes the largest visible Hermes gap)
 
 Skills can now be discovered, installed, and managed from a network of sources via `oc skills` — closing the single largest visible-to-user gap identified in the Hermes deep gap audit (`docs/refs/hermes-agent/2026-04-28-major-gaps.md` Tier 1.A + 1.D).
