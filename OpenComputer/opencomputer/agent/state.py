@@ -615,6 +615,35 @@ class SessionDB:
                 (session_id, time.time(), title),
             )
 
+    def delete_session(self, session_id: str) -> bool:
+        """Delete a session and every row that cascades from it.
+
+        Returns ``True`` if a session row was removed, ``False`` if no
+        session had that id.
+
+        Cascades automatically — every child table has
+        ``FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE``
+        and ``PRAGMA foreign_keys=ON`` is set on every connection
+        (line 448), so the single parent delete cleans up:
+
+            - messages → messages_fts (FTS delete trigger fires on cascade)
+            - episodic_events → episodic_fts
+            - vibe_log
+            - tool_usage
+
+        Untouched (by design):
+
+            - audit_log (F1: append-only by trigger; tamper-evident)
+            - consent_grants / consent_counters (per-capability scope,
+              not per-session)
+        """
+        with self._txn() as conn:
+            cur = conn.execute(
+                "DELETE FROM sessions WHERE id = ?", (session_id,)
+            )
+            deleted = cur.rowcount > 0
+        return deleted
+
     # ─── A.4 mood thread (2026-04-27) ─────────────────────────────
 
     def get_session_vibe(self, session_id: str) -> tuple[str | None, float | None]:
