@@ -46,7 +46,7 @@ def test_journald_handler_silently_skipped_when_systemd_missing(
     logging_config.configure(home=tmp_path)
 
 
-def test_journald_handler_NOT_added_when_not_headless(
+def test_journald_handler_not_added_when_not_headless(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     """Even if python3-systemd is installed, interactive runs shouldn't
