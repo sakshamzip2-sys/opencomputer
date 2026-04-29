@@ -136,18 +136,16 @@ def _render_dropdown_for_state(state: dict) -> list[tuple[str, str]]:
             label = f"/{item.name}{args}"
             tag = "(command)"
             desc = item.description
-            if is_sel:
-                cat_cls = "class:dd.cat.selected"
-            else:
-                cat_cls = "class:dd.tag.command"
+            cat_cls = (
+                "class:dd.cat.selected" if is_sel else "class:dd.tag.command"
+            )
         elif isinstance(item, SkillEntry):
             label = f"/{item.id}"
             tag = "(skill)"
             desc = item.description
-            if is_sel:
-                cat_cls = "class:dd.cat.selected"
-            else:
-                cat_cls = "class:dd.tag.skill"
+            cat_cls = (
+                "class:dd.cat.selected" if is_sel else "class:dd.tag.skill"
+            )
         else:
             # Unknown item kind — skip rather than render garbage.
             continue
