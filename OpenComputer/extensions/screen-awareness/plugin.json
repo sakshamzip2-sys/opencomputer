@@ -1,0 +1,8 @@
+{
+  "name": "screen-awareness",
+  "version": "0.1.0",
+  "kind": "sensor",
+  "description": "Event-driven screen OCR capture for agent self-understanding. Default OFF; opt-in.",
+  "entry": "plugin.py",
+  "platforms": ["darwin", "linux", "win32"]
+}
