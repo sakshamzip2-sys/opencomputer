@@ -1002,6 +1002,40 @@ Enum that selects how multiple matched rules combine into a verdict:
 
 ---
 
+## Realtime Voice (2026-04-29)
+
+Port of OpenClaw's `realtime-voice` abstraction. Plugins implementing
+two-way streaming voice (e.g. OpenAI Realtime API) inherit
+`BaseRealtimeVoiceBridge` and implement seven abstract methods. Audio
+is PCM16 raw bytes; μ-law (telephony) is intentionally out of scope.
+
+### `BaseRealtimeVoiceBridge`
+
+ABC. Required methods: `connect()` (async), `send_audio(bytes)`,
+`send_user_message(text)`, `submit_tool_result(call_id, result)`,
+`trigger_greeting(instructions=None)`, `close()`, `is_connected()`.
+
+### `RealtimeVoiceTool`
+
+Frozen dataclass — function-tool schema sent to the realtime model on
+session.update. Fields: `type` (`"function"`), `name`, `description`,
+`parameters` (JSON-Schema dict).
+
+### `RealtimeVoiceToolCallEvent`
+
+Frozen dataclass — emitted by the bridge when the model invokes a tool
+mid-stream. Fields: `item_id`, `call_id`, `name`, `args` (decoded JSON).
+
+### `RealtimeVoiceRole`
+
+`Literal["user", "assistant"]` — the role on `on_transcript` callbacks.
+
+### `RealtimeVoiceCloseReason`
+
+`Literal["completed", "error"]` — the reason passed to `on_close`.
+
+---
+
 ## Skills Hub (2026-04-28)
 
 Public ABC + dataclasses for the Skills Hub system. Plugins and OC's bundled

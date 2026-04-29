@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from typer.testing import CliRunner
 
 from opencomputer.cli import _derive_permission_mode, app
 from plugin_sdk import PermissionMode
+
+# Typer renders help in CI's TTY environment with ANSI color codes that
+# break the dashes apart (e.g. ``-\x1b[1;36m-auto`` instead of ``--auto``)
+# — locally Typer detects non-TTY and renders plain text, so the same
+# substring check passes locally but fails in CI. Strip ANSI before the
+# ``in`` check.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub("", s)
 
 
 @pytest.fixture
@@ -18,24 +31,27 @@ class TestCodeFlags:
     def test_help_lists_all_modes(self, runner: CliRunner) -> None:
         result = runner.invoke(app, ["code", "--help"])
         assert result.exit_code == 0
-        assert "--auto" in result.stdout
-        assert "--accept-edits" in result.stdout
-        assert "--plan" in result.stdout
+        out = _strip_ansi(result.stdout)
+        assert "--auto" in out
+        assert "--accept-edits" in out
+        assert "--plan" in out
         # --yolo still listed (deprecated alias).
-        assert "--yolo" in result.stdout
+        assert "--yolo" in out
 
     def test_chat_help_lists_all_modes(self, runner: CliRunner) -> None:
         result = runner.invoke(app, ["chat", "--help"])
         assert result.exit_code == 0
-        assert "--auto" in result.stdout
-        assert "--accept-edits" in result.stdout
-        assert "--yolo" in result.stdout
+        out = _strip_ansi(result.stdout)
+        assert "--auto" in out
+        assert "--accept-edits" in out
+        assert "--yolo" in out
 
     def test_resume_help_lists_all_modes(self, runner: CliRunner) -> None:
         result = runner.invoke(app, ["resume", "--help"])
         assert result.exit_code == 0
-        assert "--auto" in result.stdout
-        assert "--accept-edits" in result.stdout
+        out = _strip_ansi(result.stdout)
+        assert "--auto" in out
+        assert "--accept-edits" in out
 
 
 class TestDerivePermissionMode:
