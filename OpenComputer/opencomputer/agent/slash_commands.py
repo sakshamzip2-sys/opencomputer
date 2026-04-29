@@ -45,7 +45,11 @@ from opencomputer.agent.slash_commands_impl.skin_personality_cmd import (
 )
 from opencomputer.agent.slash_commands_impl.title_cmd import TitleCommand
 from opencomputer.agent.slash_commands_impl.usage_cmd import UsageCommand
-from opencomputer.agent.slash_commands_impl.yolo_cmd import YoloCommand
+from opencomputer.agent.slash_commands_impl.auto_cmd import AutoCommand, YoloCommand
+from opencomputer.agent.slash_commands_impl.mode_cmd import (
+    AcceptEditsCommand,
+    ModeCommand,
+)
 from opencomputer.plugins.registry import registry as _plugin_registry
 
 # The built-in slash command classes. Each is instantiated by
@@ -58,7 +62,10 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # docs/refs/hermes-agent/2026-04-28-major-gaps.md
     # Batch 1 — runtime-only:
     CopyCommand,
-    YoloCommand,
+    AutoCommand,         # canonical name (replaces YoloCommand below in priority)
+    YoloCommand,         # deprecated alias — forwards to AutoCommand
+    ModeCommand,         # /mode <name> — unified permission-mode setter
+    AcceptEditsCommand,  # /accept-edits shorthand
     ReasoningCommand,
     FastCommand,
     UsageCommand,
