@@ -57,9 +57,18 @@ _STATE_QUERY_PATTERN = re.compile(
 def is_state_query(text: str) -> bool:
     """True iff *text* leads with a state-query / greeting / "how are you" pattern.
 
+    Splits on newlines and checks each line independently — a multi-line
+    paste like ``source .venv/bin/activate\\nhi`` should match because
+    line 2 leads with a greeting.
+
     Exposed for tests; used internally by :func:`classify`.
     """
-    return bool(_STATE_QUERY_PATTERN.match(text or ""))
+    if not text:
+        return False
+    for line in text.split("\n"):
+        if _STATE_QUERY_PATTERN.match(line):
+            return True
+    return False
 
 
 def classify(ctx: ClassificationContext) -> ClassificationResult:
