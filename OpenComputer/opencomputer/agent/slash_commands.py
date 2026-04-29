@@ -24,13 +24,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from opencomputer.agent.slash_commands_impl.bell_cmd import BellCommand
 from opencomputer.agent.slash_commands_impl.scrape import ScrapeCommand
 from opencomputer.plugins.registry import registry as _plugin_registry
 
 # The built-in slash command classes. Each is instantiated by
 # ``register_builtin_slash_commands`` — list lets new built-ins drop in
 # without touching the registration function body.
-_BUILTIN_COMMANDS: tuple[type, ...] = (ScrapeCommand,)
+_BUILTIN_COMMANDS: tuple[type, ...] = (
+    ScrapeCommand,
+    BellCommand,  # Tier 2.B — terminal bell on turn complete
+)
 
 
 def register_builtin_slash_commands() -> None:

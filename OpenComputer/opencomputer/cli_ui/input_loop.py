@@ -138,6 +138,19 @@ def build_prompt_session(
     def _ctrl_v(event):  # noqa: ANN001
         _try_attach_clipboard_image_into_buffer(event, profile_home=profile_home)
 
+    # Tier 2.B — Ctrl+X Ctrl+E opens the current buffer in $EDITOR
+    # (bash convention). Useful for composing long prompts with full
+    # editor affordances (vim/nvim/code/etc.) before sending.
+    # prompt_toolkit's Buffer.open_in_editor handles the spawn + read-back.
+    @kb.add(Keys.ControlX, Keys.ControlE)
+    def _ctrl_x_ctrl_e(event):  # noqa: ANN001
+        try:
+            event.current_buffer.open_in_editor()
+        except Exception:  # noqa: BLE001
+            # Editor missing or spawn failed — keep buffer intact rather
+            # than crashing the prompt session.
+            pass
+
     @kb.add(Keys.BracketedPaste)
     def _bracketed_paste(event):  # noqa: ANN001
         # ``data`` is the text that was bracket-pasted. If it's empty /

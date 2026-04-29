@@ -993,6 +993,9 @@ def _run_chat_session(
                 out_tok=result.output_tokens,
                 elapsed_s=elapsed,
             )
+            # Tier 2.B — terminal bell on turn complete (if /bell on).
+            from opencomputer.cli_ui.bell import maybe_emit_bell
+            maybe_emit_bell(runtime)
 
     async def _run_turn_plain(
         user_input: str, images: list[str] | None = None
@@ -1014,6 +1017,9 @@ def _run_chat_session(
             stream_callback=on_chunk,
             images=images,
         )
+        # Tier 2.B — terminal bell on turn complete (if /bell on).
+        from opencomputer.cli_ui.bell import maybe_emit_bell
+        maybe_emit_bell(runtime)
         _token_tally["in"] += result.input_tokens
         _token_tally["out"] += result.output_tokens
         if printed_header["val"]:
