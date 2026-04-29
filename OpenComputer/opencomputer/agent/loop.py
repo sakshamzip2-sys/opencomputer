@@ -1554,6 +1554,36 @@ class AgentLoop:
         )
         from opencomputer.awareness.personas.registry import get_persona
 
+        # Persona-uplift (2026-04-29): user override wins over the
+        # auto-classifier. ``runtime.custom["persona_id_override"]`` is
+        # set by the ``/persona-mode <id>`` slash command. An invalid id
+        # (e.g. user-deleted persona) falls through to the classifier
+        # path so the agent never wedges over a bad override.
+        override_id = ""
+        rt = getattr(self, "_runtime", None)
+        if rt is not None:
+            override_id = str(
+                rt.custom.get("persona_id_override", "") or ""
+            ).strip()
+
+        if override_id:
+            override_persona = get_persona(override_id)
+            if override_persona is not None:
+                self._active_persona_id = str(override_id)
+                if rt is not None:
+                    rt.custom["active_persona_id"] = self._active_persona_id
+                self._active_persona_preferred_tone = str(
+                    override_persona.get("preferred_tone", "") or ""
+                ).strip()
+                overlay = override_persona.get("system_prompt_overlay", "") or ""
+                return str(overlay).strip()
+            # Invalid override id — log and fall through. We do NOT
+            # clear the override; the user can fix or `/persona-mode auto`.
+            _log.debug(
+                "persona override id %r not found; falling through to classifier",
+                override_id,
+            )
+
         try:
             foreground_app = detect_frontmost_app()
         except Exception:  # noqa: BLE001 — defensive: never break loop

@@ -123,3 +123,66 @@ def test_loop_helper_degrades_to_empty_on_classifier_failure(tmp_path, monkeypat
     ):
         overlay = loop._build_persona_overlay("test-session")
     assert overlay == ""
+
+
+# ── Persona-uplift 2026-04-29 — Task 5: override short-circuits ──────
+
+
+def test_persona_override_short_circuits_classifier(tmp_path, monkeypatch):
+    """When runtime.custom['persona_id_override'] is set to a known
+    persona id, _build_persona_overlay must return that persona's
+    overlay regardless of foreground app or messages."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+
+    from opencomputer.agent.loop import AgentLoop
+    from plugin_sdk.runtime_context import RuntimeContext
+
+    class _StubDB:
+        def get_messages(self, sid: str):
+            return []
+
+    loop = AgentLoop.__new__(AgentLoop)
+    loop.db = _StubDB()
+    loop._runtime = RuntimeContext()
+    loop._runtime.custom["persona_id_override"] = "companion"
+
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="Cursor",  # would normally trigger coding
+    ):
+        overlay = loop._build_persona_overlay("test-session")
+
+    assert (
+        "honest answer" in overlay.lower()
+        or "warm" in overlay.lower()
+        or "companion" in overlay.lower()
+    )
+    assert loop._active_persona_id == "companion"
+
+
+def test_persona_override_invalid_id_falls_back_to_classifier(tmp_path, monkeypatch):
+    """An override pointing at a deleted/invalid persona id must NOT
+    break the loop — fall through to the classifier path."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+
+    from opencomputer.agent.loop import AgentLoop
+    from plugin_sdk.runtime_context import RuntimeContext
+
+    class _StubDB:
+        def get_messages(self, sid: str):
+            return []
+
+    loop = AgentLoop.__new__(AgentLoop)
+    loop.db = _StubDB()
+    loop._runtime = RuntimeContext()
+    loop._runtime.custom["persona_id_override"] = "nonexistent_persona"
+
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="Cursor",
+    ):
+        overlay = loop._build_persona_overlay("test-session")
+
+    assert isinstance(overlay, str)
+    # Falls through to classifier → coding (Cursor is a coding app).
+    assert loop._active_persona_id == "coding"
