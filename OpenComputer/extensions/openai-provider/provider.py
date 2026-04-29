@@ -320,6 +320,7 @@ class OpenAIProvider(BaseProvider):
         tools: list[ToolSchema] | None = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
+        runtime_extras: dict | None = None,
     ) -> ProviderResponse:
         """Low-level complete using the given API key (pool-rotation target)."""
         # TS-T7 — short-circuit before the SDK so concurrent sessions
@@ -335,6 +336,17 @@ class OpenAIProvider(BaseProvider):
         }
         if tools:
             kwargs["tools"] = [t.to_openai_format() for t in tools]
+        # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
+        if runtime_extras:
+            from opencomputer.agent.runtime_flags import (
+                openai_kwargs_from_runtime,
+            )
+            kwargs.update(
+                openai_kwargs_from_runtime(
+                    reasoning_effort=runtime_extras.get("reasoning_effort"),
+                    service_tier=runtime_extras.get("service_tier"),
+                )
+            )
         try:
             resp = await client.chat.completions.create(**kwargs)
         except OpenAIRateLimitError as exc:
@@ -352,6 +364,7 @@ class OpenAIProvider(BaseProvider):
         max_tokens: int = 4096,
         temperature: float = 1.0,
         stream: bool = False,
+        runtime_extras: dict | None = None,
     ) -> ProviderResponse:
         if self._credential_pool is None:
             return await self._do_complete(
@@ -362,6 +375,7 @@ class OpenAIProvider(BaseProvider):
                 tools=tools,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                runtime_extras=runtime_extras,
             )
 
         def _is_auth_failure(exc: Exception) -> bool:
@@ -376,6 +390,7 @@ class OpenAIProvider(BaseProvider):
                 tools=tools,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                runtime_extras=runtime_extras,
             ),
             is_auth_failure=_is_auth_failure,
         )
@@ -390,6 +405,7 @@ class OpenAIProvider(BaseProvider):
         tools: list[ToolSchema] | None = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
+        runtime_extras: dict | None = None,
     ) -> ProviderResponse:
         """Low-level streaming that aggregates into a ProviderResponse (pool target)."""
         # TS-T7 — short-circuit before the SDK.
@@ -405,6 +421,17 @@ class OpenAIProvider(BaseProvider):
         }
         if tools:
             kwargs["tools"] = [t.to_openai_format() for t in tools]
+        # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
+        if runtime_extras:
+            from opencomputer.agent.runtime_flags import (
+                openai_kwargs_from_runtime,
+            )
+            kwargs.update(
+                openai_kwargs_from_runtime(
+                    reasoning_effort=runtime_extras.get("reasoning_effort"),
+                    service_tier=runtime_extras.get("service_tier"),
+                )
+            )
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -490,6 +517,7 @@ class OpenAIProvider(BaseProvider):
         tools: list[ToolSchema] | None = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
+        runtime_extras: dict | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream via OpenAI's chat.completions.create(stream=True)."""
         if self._credential_pool is not None:
@@ -506,6 +534,7 @@ class OpenAIProvider(BaseProvider):
                     tools=tools,
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    runtime_extras=runtime_extras,
                 ),
                 is_auth_failure=_is_auth_failure,
             )
@@ -524,6 +553,17 @@ class OpenAIProvider(BaseProvider):
         }
         if tools:
             kwargs["tools"] = [t.to_openai_format() for t in tools]
+        # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
+        if runtime_extras:
+            from opencomputer.agent.runtime_flags import (
+                openai_kwargs_from_runtime,
+            )
+            kwargs.update(
+                openai_kwargs_from_runtime(
+                    reasoning_effort=runtime_extras.get("reasoning_effort"),
+                    service_tier=runtime_extras.get("service_tier"),
+                )
+            )
 
         # Aggregate state while streaming — used to build the final ProviderResponse
         content_parts: list[str] = []

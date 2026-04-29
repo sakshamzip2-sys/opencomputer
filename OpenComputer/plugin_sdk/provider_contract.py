@@ -129,8 +129,19 @@ class BaseProvider(ABC):
         max_tokens: int = 4096,
         temperature: float = 1.0,
         stream: bool = False,
+        runtime_extras: dict | None = None,
     ) -> ProviderResponse:
-        """Send messages to the provider, return a single ProviderResponse."""
+        """Send messages to the provider, return a single ProviderResponse.
+
+        ``runtime_extras`` carries provider-agnostic runtime flags
+        (currently ``reasoning_effort`` and ``service_tier``) that the
+        agent loop reads from ``runtime.custom`` (set by ``/reasoning``
+        and ``/fast`` slash commands). Concrete providers should merge
+        these into their API request via the helpers in
+        ``opencomputer.agent.runtime_flags``. ``None`` (the default)
+        means no flags active — providers must treat this identically to
+        an empty dict.
+        """
         ...
 
     @abstractmethod
@@ -143,6 +154,7 @@ class BaseProvider(ABC):
         tools: list[ToolSchema] | None = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
+        runtime_extras: dict | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream the response.
 

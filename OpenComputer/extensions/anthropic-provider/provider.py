@@ -421,6 +421,7 @@ class AnthropicProvider(BaseProvider):
         tools: list[ToolSchema] | None = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
+        runtime_extras: dict | None = None,
     ) -> ProviderResponse:
         """Low-level complete using the given API key (pool-rotation target)."""
         # TS-T7 — short-circuit before the SDK so concurrent sessions
@@ -444,6 +445,17 @@ class AnthropicProvider(BaseProvider):
             kwargs["system"] = sys_for_sdk
         if tools:
             kwargs["tools"] = [t.to_anthropic_format() for t in tools]
+        # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
+        if runtime_extras:
+            from opencomputer.agent.runtime_flags import (
+                anthropic_kwargs_from_runtime,
+            )
+            kwargs.update(
+                anthropic_kwargs_from_runtime(
+                    reasoning_effort=runtime_extras.get("reasoning_effort"),
+                    service_tier=runtime_extras.get("service_tier"),
+                )
+            )
         try:
             resp = await client.messages.create(**kwargs)
         except AnthropicRateLimitError as exc:
@@ -463,6 +475,7 @@ class AnthropicProvider(BaseProvider):
         max_tokens: int = 4096,
         temperature: float = 1.0,
         stream: bool = False,
+        runtime_extras: dict | None = None,
     ) -> ProviderResponse:
         if self._credential_pool is None:
             return await self._do_complete(
@@ -473,6 +486,7 @@ class AnthropicProvider(BaseProvider):
                 tools=tools,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                runtime_extras=runtime_extras,
             )
 
         def _is_auth_failure(exc: Exception) -> bool:
@@ -487,6 +501,7 @@ class AnthropicProvider(BaseProvider):
                 tools=tools,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                runtime_extras=runtime_extras,
             ),
             is_auth_failure=_is_auth_failure,
         )
@@ -501,6 +516,7 @@ class AnthropicProvider(BaseProvider):
         tools: list[ToolSchema] | None = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
+        runtime_extras: dict | None = None,
     ) -> ProviderResponse:
         """Low-level stream_complete that aggregates into a ProviderResponse (pool target)."""
         # TS-T7 — same cross-session guard as the non-streaming path.
@@ -520,6 +536,17 @@ class AnthropicProvider(BaseProvider):
             kwargs["system"] = sys_for_sdk
         if tools:
             kwargs["tools"] = [t.to_anthropic_format() for t in tools]
+        # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
+        if runtime_extras:
+            from opencomputer.agent.runtime_flags import (
+                anthropic_kwargs_from_runtime,
+            )
+            kwargs.update(
+                anthropic_kwargs_from_runtime(
+                    reasoning_effort=runtime_extras.get("reasoning_effort"),
+                    service_tier=runtime_extras.get("service_tier"),
+                )
+            )
         try:
             async with client.messages.stream(**kwargs) as stream_ctx:
                 final = await stream_ctx.get_final_message()
@@ -537,6 +564,7 @@ class AnthropicProvider(BaseProvider):
         tools: list[ToolSchema] | None = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
+        runtime_extras: dict | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream response events via Anthropic's `messages.stream()` context.
 
@@ -556,6 +584,17 @@ class AnthropicProvider(BaseProvider):
             kwargs["system"] = sys_for_sdk
         if tools:
             kwargs["tools"] = [t.to_anthropic_format() for t in tools]
+        # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
+        if runtime_extras:
+            from opencomputer.agent.runtime_flags import (
+                anthropic_kwargs_from_runtime,
+            )
+            kwargs.update(
+                anthropic_kwargs_from_runtime(
+                    reasoning_effort=runtime_extras.get("reasoning_effort"),
+                    service_tier=runtime_extras.get("service_tier"),
+                )
+            )
 
         if self._credential_pool is not None:
             # Pool path: stream_complete falls back to aggregated response on rotation.
@@ -572,6 +611,7 @@ class AnthropicProvider(BaseProvider):
                     tools=tools,
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    runtime_extras=runtime_extras,
                 ),
                 is_auth_failure=_is_auth_failure,
             )
