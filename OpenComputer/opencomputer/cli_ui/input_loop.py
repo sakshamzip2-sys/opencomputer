@@ -273,6 +273,7 @@ async def read_user_input(
     scope: TurnCancelScope,
     session_title: str | None = None,
     paste_folder: PasteFolder | None = None,
+    memory_manager: object | None = None,
 ) -> str:
     """Read one line of user input with an always-visible slash dropdown.
 
@@ -299,6 +300,11 @@ async def read_user_input(
     - Ctrl+V / bracketed paste → handles clipboard images (existing flow)
     - Ctrl+C / Ctrl+D (empty buffer) → raise to caller per shell convention
 
+    ``memory_manager``: optional MemoryManager for sourcing skills into
+    the dropdown. When provided, the picker mixes commands and skills
+    via UnifiedSlashSource. When ``None``, only built-in commands appear
+    (legacy fallback for callers that haven't been updated yet).
+
     ``build_prompt_session`` is preserved as the legacy entry point used
     by older callers and several test fixtures; new code should use this.
     """
@@ -320,9 +326,22 @@ async def read_user_input(
     from prompt_toolkit.styles import Style
 
     from .slash import SLASH_REGISTRY
+    from .slash_mru import MruStore
+    from .slash_picker_source import UnifiedSlashSource
 
     history_path = _history_file_path(profile_home)
     history = FileHistory(str(history_path))
+
+    # MRU store + picker source — lifted out of the legacy SLASH_REGISTRY
+    # path so skills surface in the dropdown alongside commands. When
+    # ``memory_manager`` is None (legacy callers), picker_source stays
+    # None and _refilter falls back to startswith-on-commands.
+    mru_store = MruStore(profile_home / "slash_mru.json")
+    picker_source: UnifiedSlashSource | None = (
+        UnifiedSlashSource(memory_manager, mru_store)
+        if memory_manager is not None
+        else None
+    )
 
     input_buffer = Buffer(
         history=history,
@@ -343,12 +362,17 @@ async def read_user_input(
     }
 
     def _refilter(text: str) -> None:
-        # Slash prefix wins (existing behavior).
+        # Slash prefix wins (commands + skills via picker source).
         if text.startswith("/") and " " not in text:
-            prefix = text[1:].lower()
-            state["matches"] = [
-                c for c in SLASH_REGISTRY if c.name.startswith(prefix)
-            ][:10]
+            prefix = text[1:]
+            if picker_source is not None:
+                matches = picker_source.rank(prefix)
+                state["matches"] = [m.item for m in matches]
+            else:
+                # Legacy path — registry only, startswith filter.
+                state["matches"] = [
+                    c for c in SLASH_REGISTRY if c.name.startswith(prefix.lower())
+                ][:20]
             state["selected_idx"] = 0
             state["mode"] = "slash"
             state["at_token_range"] = None
