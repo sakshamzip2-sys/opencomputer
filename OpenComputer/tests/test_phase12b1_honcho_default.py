@@ -747,7 +747,13 @@ async def test_agent_loop_calls_bridge_prefetch_in_chat_context(
     kwargs = call.kwargs
     assert kwargs.get("query") == "hello world"
     assert kwargs.get("turn_index") == 0
-    assert kwargs.get("runtime") is chat_runtime
+    # The loop rebuilds ``self._runtime`` (via dataclasses.replace) to
+    # plumb session_id + session_db into ``custom`` for slash commands —
+    # so identity drifts. Check the agent_context flag instead, which is
+    # what MemoryBridge actually branches on.
+    runtime_arg = kwargs.get("runtime")
+    assert runtime_arg is not None
+    assert runtime_arg.agent_context == chat_runtime.agent_context
 
 
 @pytest.mark.asyncio
@@ -796,7 +802,13 @@ async def test_agent_loop_calls_bridge_sync_turn_on_end_turn(
     assert kwargs.get("user") == "a user line"
     assert kwargs.get("assistant") == "response text"
     assert kwargs.get("turn_index") == 0
-    assert kwargs.get("runtime") is chat_runtime
+    # The loop rebuilds ``self._runtime`` (via dataclasses.replace) to
+    # plumb session_id + session_db into ``custom`` for slash commands —
+    # so identity drifts. Check the agent_context flag instead, which is
+    # what MemoryBridge actually branches on.
+    runtime_arg = kwargs.get("runtime")
+    assert runtime_arg is not None
+    assert runtime_arg.agent_context == chat_runtime.agent_context
 
 
 @pytest.mark.asyncio

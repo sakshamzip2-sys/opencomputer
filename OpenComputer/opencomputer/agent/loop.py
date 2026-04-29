@@ -25,7 +25,7 @@ import os
 import time
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from opencomputer.agent.cheap_route import should_route_cheap
@@ -531,9 +531,21 @@ class AgentLoop:
         # runtime.custom so slash commands like /branch /title /history
         # /save /agents can read the active session_id and a SessionDB
         # handle without needing a separate dispatcher signature change.
-        # Custom is a mutable dict on the otherwise-frozen RuntimeContext.
-        self._runtime.custom["session_id"] = sid
-        self._runtime.custom["session_db"] = self.db
+        # ``custom`` is a mutable dict on the otherwise-frozen
+        # RuntimeContext, so we rebuild ``self._runtime`` with a copy
+        # rather than mutating in place — otherwise loops that started
+        # with ``DEFAULT_RUNTIME_CONTEXT`` (no explicit runtime passed,
+        # e.g. test fixtures, scripted callers) would silently scribble
+        # ``session_id`` / ``session_db`` onto the module-level
+        # singleton and pollute every later consumer.
+        self._runtime = replace(
+            self._runtime,
+            custom={
+                **self._runtime.custom,
+                "session_id": sid,
+                "session_db": self.db,
+            },
+        )
 
         _slash_result = await _slash_dispatch(
             user_message,
@@ -2017,9 +2029,18 @@ class AgentLoop:
         )
 
         # Tier 2.A — /reasoning + /fast slash commands wrote flags to
-        # runtime.custom; translate to provider kwargs.
+        # runtime.custom; translate to provider kwargs. Only pass
+        # ``runtime_extras=`` when non-empty so stub providers in tests
+        # (and 3rd-party plugins) that don't accept the kwarg still work.
         from opencomputer.agent.runtime_flags import runtime_flags_from_custom
         _runtime_extras = runtime_flags_from_custom(self._runtime.custom)
+        # Only pass ``runtime_extras=`` when at least one flag is non-None
+        # so stub providers in tests (and 3rd-party plugins that haven't
+        # adopted the kwarg) keep working.
+        _has_extras = any(v is not None for v in _runtime_extras.values())
+        _extra_kwargs: dict[str, Any] = (
+            {"runtime_extras": _runtime_extras} if _has_extras else {}
+        )
         if stream_callback is not None:
             final_response = None
             async for event in self.provider.stream_complete(
@@ -2029,7 +2050,7 @@ class AgentLoop:
                 tools=tool_schemas,
                 max_tokens=self.config.model.max_tokens,
                 temperature=self.config.model.temperature,
-                runtime_extras=_runtime_extras,
+                **_extra_kwargs,
             ):
                 if event.kind == "text_delta":
                     stream_callback(event.text)
@@ -2052,7 +2073,7 @@ class AgentLoop:
                     tools=tool_schemas,
                     max_tokens=self.config.model.max_tokens,
                     temperature=self.config.model.temperature,
-                    runtime_extras=_runtime_extras,
+                    **_extra_kwargs,
                 )
 
             resp = await call_with_fallback(
