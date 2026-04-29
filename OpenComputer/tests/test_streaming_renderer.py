@@ -56,6 +56,9 @@ def test_finalize_emits_thinking_panel_when_reasoning_present() -> None:
             in_tok=10,
             out_tok=5,
             elapsed_s=0.5,
+            # New default is collapsed-summary; pass True to keep the
+            # full panel visible (this test asserts the panel renders).
+            show_reasoning=True,
         )
     output = console.export_text()
     assert "Thinking" in output
@@ -209,12 +212,17 @@ def test_on_tool_end_for_unknown_idx_is_noop() -> None:
         assert len(r._tool_calls) == 0
 
 
-def test_thinking_chunk_is_noop_for_v1() -> None:
-    """v1 renders thinking post-hoc (not live); the live-stream hook
-    is reserved but does nothing yet."""
+def test_thinking_chunk_does_not_pollute_answer_buffer() -> None:
+    """Live-thinking chunks land in ``_thinking_buffer``, never ``_buffer``.
+
+    The two streams are separate so a re-render only touches the side
+    that changed, and so finalize can branch on show_reasoning without
+    losing the answer text.
+    """
     from opencomputer.cli_ui import StreamingRenderer
 
     console = _make_console()
     with StreamingRenderer(console) as r:
         r.on_thinking_chunk("internal monologue")
         assert r._buffer == [], "thinking should not pollute the answer buffer"
+        assert r._thinking_buffer == ["internal monologue"]

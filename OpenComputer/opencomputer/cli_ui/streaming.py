@@ -93,6 +93,12 @@ class StreamingRenderer:
     def __init__(self, console: Console) -> None:
         self.console = console
         self._buffer: list[str] = []
+        # Live thinking buffer + first-chunk timestamp. Both are written
+        # by on_thinking_chunk and read by _render / finalize. The
+        # timestamp anchors the panel duration label and the collapsed
+        # "Thought for X.Xs" summary at finalize.
+        self._thinking_buffer: list[str] = []
+        self._thinking_started_at: float = 0.0
         # Tool calls keyed by ``(name, idx)`` so concurrent dispatches
         # of the same tool don't collide. ``OrderedDict`` makes the
         # eviction order deterministic (FIFO).
@@ -153,16 +159,19 @@ class StreamingRenderer:
         self._refresh()
 
     def on_thinking_chunk(self, text: str) -> None:
-        """Hook for live thinking streaming (deferred — currently a no-op).
+        """Append a thinking-delta chunk and live-refresh the panel.
 
-        Anthropic's SDK exposes thinking chunks separately from
-        assistant chunks. For v1 we render the thinking PANEL at
-        finalize from the persisted ``ProviderResponse.reasoning``
-        field. Live thinking-stream is a follow-up if the post-hoc
-        render feels insufficient.
+        The panel renders ABOVE the answer markdown; the spinner / tool
+        panel render below as before. First chunk anchors the duration
+        timestamp used by both the live panel header and (at finalize)
+        the collapsed summary.
         """
-        # Intentional no-op for v1. Reserved hook for the follow-up.
-        return
+        if not text:
+            return
+        if not self._thinking_buffer:
+            self._thinking_started_at = time.monotonic()
+        self._thinking_buffer.append(text)
+        self._refresh()
 
     def on_tool_start(self, name: str, args_preview: str) -> int:
         """Register the start of a tool call. Returns an opaque id the
@@ -202,10 +211,21 @@ class StreamingRenderer:
         in_tok: int,
         out_tok: int,
         elapsed_s: float,
+        show_reasoning: bool = False,
     ) -> None:
-        """Stop the Live, render the final markdown + thinking panel
-        + token-rate footer. Caller MUST exit the context manager
-        after calling this."""
+        """Stop the Live, render the final markdown + thinking panel /
+        collapsed summary + token-rate footer. Caller MUST exit the
+        context manager after calling this.
+
+        ``show_reasoning`` (default ``False``, set by ``/reasoning show``
+        via ``runtime.custom["show_reasoning"]``) controls whether the
+        full thinking panel stays visible after streaming completes:
+
+        * ``False`` (default) → panel collapses to a one-line
+          ``💭 Thought for 3.2s — /reasoning show to expand`` summary.
+          The live panel that streamed during the turn is replaced.
+        * ``True`` → full panel rendered with the reasoning text.
+        """
         # Stop Live first so subsequent console.print writes go to the
         # real terminal cleanly.
         if self._live is not None:
@@ -215,19 +235,35 @@ class StreamingRenderer:
                 pass
             self._live = None
 
-        # Thinking panel above the answer (post-hoc — see class docstring).
         if reasoning and reasoning.strip():
-            self.console.print(
-                Panel(
-                    Text(reasoning.strip(), style="dim"),
-                    title=Text(
-                        f"💭 Thinking ({_fmt_duration(elapsed_s)})",
-                        style="dim cyan",
-                    ),
-                    border_style="grey50",
-                    padding=(0, 1),
-                )
+            # Prefer the panel-anchored timestamp (set on the FIRST
+            # thinking chunk) so the duration reflects how long the
+            # model spent thinking, not the wall-clock since turn-start.
+            # Falls back to the caller-provided elapsed_s if no live
+            # thinking arrived this turn.
+            thinking_elapsed = (
+                (time.monotonic() - self._thinking_started_at)
+                if self._thinking_started_at > 0.0
+                else elapsed_s
             )
+            if show_reasoning:
+                self.console.print(
+                    Panel(
+                        Text(reasoning.strip(), style="dim"),
+                        title=Text(
+                            f"💭 Thinking ({_fmt_duration(thinking_elapsed)})",
+                            style="dim cyan",
+                        ),
+                        border_style="grey50",
+                        padding=(0, 1),
+                    )
+                )
+            else:
+                self.console.print(
+                    f"[dim cyan]💭 Thought for "
+                    f"{_fmt_duration(thinking_elapsed)} "
+                    f"— /reasoning show to expand[/dim cyan]"
+                )
 
         # Final answer as Markdown — re-rendered from the full buffer
         # so code blocks get proper syntax highlighting. ``code_theme=
@@ -261,22 +297,38 @@ class StreamingRenderer:
             pass
 
     def _render(self) -> Group:
-        """Compose the streaming-text view + thinking spinner + tool panel.
+        """Compose the live thinking panel + streaming-text view +
+        spinner + tool panel.
 
-        Spinner visibility rule: show whenever the AI is still working —
+        Order matters: the thinking panel ALWAYS goes first when
+        present, so users see the chain-of-thought stream above the
+        answer markdown (matches every other LLM dropdown UX). Spinner
+        visibility rule: show whenever the AI is still working —
         i.e. before the first text chunk OR while any tool is currently
-        running. This keeps "thinking" feedback continuous across the
-        whole turn, including the gap between tool dispatch and the
-        next text chunk (which used to leave the user staring at static
-        markdown wondering if anything was happening).
+        running.
         """
         renderables = []
+
+        # Live thinking panel — first when present, so it stays above
+        # the answer markdown and the tool panel.
+        if self._thinking_buffer:
+            thinking_text = "".join(self._thinking_buffer)
+            elapsed = time.monotonic() - self._thinking_started_at
+            renderables.append(
+                Panel(
+                    Text(thinking_text, style="dim"),
+                    title=Text(
+                        f"💭 Thinking ({_fmt_duration(elapsed)})",
+                        style="dim cyan",
+                    ),
+                    border_style="grey50",
+                    padding=(0, 1),
+                )
+            )
 
         # Detect whether the AI is "still working":
         #   - no text yet (haven't streamed first chunk)  → spinner
         #   - any tool currently running                  → spinner
-        # Otherwise the assistant is actively streaming text and the
-        # markdown re-render IS the feedback.
         any_tool_running = any(
             row.ok is None for row in self._tool_calls.values()
         )

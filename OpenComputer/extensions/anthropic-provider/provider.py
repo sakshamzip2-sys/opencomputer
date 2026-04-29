@@ -620,14 +620,34 @@ class AnthropicProvider(BaseProvider):
             yield StreamEvent(kind="done", response=response)
             return
 
-        # No pool — native streaming path (unchanged behavior).
+        # No pool — native streaming path.
         # TS-T7 — short-circuit if a previous 429 hasn't reset.
         _check_rate_limit()
         try:
             async with self.client.messages.stream(**kwargs) as stream:
-                async for text in stream.text_stream:
-                    if text:
-                        yield StreamEvent(kind="text_delta", text=text)
+                # Drop down to the raw event iterator (NOT
+                # stream.text_stream) so thinking_delta events surface
+                # alongside text_delta events. Each content_block_delta
+                # carries a delta whose .type tells us the channel.
+                async for event in stream:
+                    if getattr(event, "type", None) != "content_block_delta":
+                        continue
+                    delta = getattr(event, "delta", None)
+                    if delta is None:
+                        continue
+                    dtype = getattr(delta, "type", None)
+                    if dtype == "text_delta":
+                        chunk = getattr(delta, "text", "") or ""
+                        if chunk:
+                            yield StreamEvent(kind="text_delta", text=chunk)
+                    elif dtype == "thinking_delta":
+                        chunk = getattr(delta, "thinking", "") or ""
+                        if chunk:
+                            yield StreamEvent(
+                                kind="thinking_delta", text=chunk
+                            )
+                    # Other delta kinds (input_json_delta, signature_delta)
+                    # roll up into the final message via get_final_message.
                 final = await stream.get_final_message()
         except AnthropicRateLimitError as exc:
             _record_429(exc)

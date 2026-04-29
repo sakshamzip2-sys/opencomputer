@@ -81,12 +81,18 @@ class StreamEvent:
     """One event emitted by `provider.stream_complete()`.
 
     Types:
-      - "text_delta": incremental text chunk (`text` field)
-      - "tool_call": full tool call has been assembled (`tool_call` field)
-      - "done": streaming finished (`response` field carries the final ProviderResponse)
+      - "text_delta":     incremental answer text chunk (`text` field)
+      - "thinking_delta": incremental reasoning text chunk (`text` field) —
+                          providers that surface reasoning (Anthropic
+                          extended thinking, OpenAI o-series reasoning)
+                          emit these alongside text_delta. Renderers that
+                          don't care about thinking can ignore this kind.
+      - "tool_call":      full tool call has been assembled (`tool_call` field)
+      - "done":           streaming finished (`response` field carries the final
+                          ProviderResponse)
     """
 
-    kind: Literal["text_delta", "tool_call", "done"]
+    kind: Literal["text_delta", "thinking_delta", "tool_call", "done"]
     text: str = ""
     response: ProviderResponse | None = None
 

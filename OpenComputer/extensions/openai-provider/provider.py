@@ -586,15 +586,20 @@ class OpenAIProvider(BaseProvider):
             delta = choice.delta
             if delta is None:
                 continue
-            if delta.content:
-                content_parts.append(delta.content)
-                yield StreamEvent(kind="text_delta", text=delta.content)
             # OpenAI o1/o3 / DeepSeek R1 / OpenRouter reasoning routes
             # surface ``reasoning_content`` as a vendor extension on the
-            # delta. Aggregate; surface on final ProviderResponse.
+            # delta. Yield first so the renderer's thinking panel updates
+            # before any text in the same chunk; also aggregate for the
+            # final ProviderResponse.reasoning field.
             delta_reasoning = getattr(delta, "reasoning_content", None)
             if delta_reasoning:
                 reasoning_parts.append(str(delta_reasoning))
+                yield StreamEvent(
+                    kind="thinking_delta", text=str(delta_reasoning)
+                )
+            if delta.content:
+                content_parts.append(delta.content)
+                yield StreamEvent(kind="text_delta", text=delta.content)
             # Accumulate tool calls by index
             if delta.tool_calls:
                 for tc in delta.tool_calls:
