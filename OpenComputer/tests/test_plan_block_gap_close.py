@@ -9,10 +9,10 @@ hook reads through ``effective_permission_mode()`` and engages correctly.
 from __future__ import annotations
 
 import pytest
-
 from extensions.coding_harness.hooks.plan_block import (  # type: ignore[import-not-found]
     plan_mode_block_hook,
 )
+
 from plugin_sdk import PermissionMode, RuntimeContext
 from plugin_sdk.core import ToolCall
 from plugin_sdk.hooks import HookContext, HookEvent

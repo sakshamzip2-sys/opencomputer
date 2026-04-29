@@ -31,7 +31,7 @@ class PermissionMode(StrEnum):
     AUTO = "auto"
 
 
-def effective_permission_mode(runtime: "RuntimeContext") -> PermissionMode:
+def effective_permission_mode(runtime: RuntimeContext) -> PermissionMode:
     # 1. Canonical session-mutable key.
     custom_mode = runtime.custom.get("permission_mode")
     if custom_mode:

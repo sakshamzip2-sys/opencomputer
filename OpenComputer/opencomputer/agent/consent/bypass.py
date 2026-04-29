@@ -29,12 +29,10 @@ class BypassManager:
     ENV_FLAG = "OPENCOMPUTER_CONSENT_BYPASS"
 
     @classmethod
-    def is_active(cls, runtime: "RuntimeContext | None" = None) -> bool:
+    def is_active(cls, runtime: RuntimeContext | None = None) -> bool:
         if cls._env_active():
             return True
-        if runtime is not None and cls._auto_mode_active(runtime):
-            return True
-        return False
+        return runtime is not None and cls._auto_mode_active(runtime)
 
     @classmethod
     def _env_active(cls) -> bool:
@@ -43,7 +41,7 @@ class BypassManager:
         )
 
     @staticmethod
-    def _auto_mode_active(runtime: "RuntimeContext") -> bool:
+    def _auto_mode_active(runtime: RuntimeContext) -> bool:
         # Local import to keep plugin_sdk dependency direction (sdk → no opencomputer).
         from plugin_sdk.permission_mode import (
             PermissionMode,
