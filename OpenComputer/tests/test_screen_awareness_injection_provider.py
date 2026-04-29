@@ -2,6 +2,7 @@
 <screen_context> overlay from the ring buffer's latest capture."""
 from __future__ import annotations
 
+import asyncio
 import time
 
 from plugin_sdk.injection import InjectionContext
@@ -19,11 +20,20 @@ def _ctx(session_id: str = "s1") -> InjectionContext:
     )
 
 
+def _run(coro):
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def test_provider_id_is_unique_string():
+    provider = ScreenContextProvider(ring_buffer=ScreenRingBuffer(max_size=5))
+    assert provider.provider_id == "screen_context"
+
+
 def test_empty_buffer_returns_empty_string():
     provider = ScreenContextProvider(
         ring_buffer=ScreenRingBuffer(max_size=5)
     )
-    assert provider.collect(_ctx()) == ""
+    assert _run(provider.collect(_ctx())) == ""
 
 
 def test_latest_capture_emitted_as_screen_context():
@@ -36,7 +46,7 @@ def test_latest_capture_emitted_as_screen_context():
         session_id="s1",
     ))
     provider = ScreenContextProvider(ring_buffer=buf)
-    out = provider.collect(_ctx())
+    out = _run(provider.collect(_ctx()))
     assert "<screen_context>" in out
     assert "hello world" in out
     assert "</screen_context>" in out
@@ -54,7 +64,7 @@ def test_stale_capture_skipped_when_freshness_window_set():
     provider = ScreenContextProvider(
         ring_buffer=buf, freshness_seconds=10.0
     )
-    assert provider.collect(_ctx()) == ""
+    assert _run(provider.collect(_ctx())) == ""
 
 
 def test_text_truncated_to_max_chars():
@@ -68,7 +78,7 @@ def test_text_truncated_to_max_chars():
         session_id="s1",
     ))
     provider = ScreenContextProvider(ring_buffer=buf, max_chars=4_000)
-    out = provider.collect(_ctx())
+    out = _run(provider.collect(_ctx()))
     body = out.split("<screen_context>")[1].split("</screen_context>")[0]
     assert len(body) <= 4_000 + 80  # 80 for ellipsis + metadata line
     assert "…" in body  # truncation marker present

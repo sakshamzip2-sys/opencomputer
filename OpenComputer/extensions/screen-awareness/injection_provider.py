@@ -22,8 +22,6 @@ DEFAULT_MAX_CHARS = 4_000
 class ScreenContextProvider(DynamicInjectionProvider):
     """Inject <screen_context> overlay from latest ring entry."""
 
-    name = "screen_context"
-
     def __init__(
         self,
         *,
@@ -35,7 +33,11 @@ class ScreenContextProvider(DynamicInjectionProvider):
         self._freshness = freshness_seconds
         self._max_chars = max_chars
 
-    def collect(self, ctx: InjectionContext) -> str:
+    @property
+    def provider_id(self) -> str:
+        return "screen_context"
+
+    async def collect(self, ctx: InjectionContext) -> str | None:
         latest = self._ring.latest()
         if latest is None:
             return ""
