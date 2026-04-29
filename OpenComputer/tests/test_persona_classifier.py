@@ -100,3 +100,24 @@ def test_non_greeting_multi_line_does_not_match_state_query():
     result = classify(ctx)
     # Falls through to coding-app rule — NOT to companion.
     assert result.persona_id == "coding"
+
+
+# ── Persona-uplift 2026-04-29 — Task 2: scan last 3 messages ─────────
+
+
+def test_state_query_in_recent_messages_not_just_latest():
+    """If any of the last 3 user messages is a state-query, the
+    classifier should consider it. Conversation often opens with
+    'hi' then continues with 'btw can you check this thing'."""
+    ctx = ClassificationContext(
+        foreground_app="iTerm2",
+        time_of_day_hour=14,
+        last_messages=(
+            "hi",
+            "how was your day",
+            "ok cool",
+        ),
+    )
+    result = classify(ctx)
+    # 'hi' on the first message should keep us in companion territory.
+    assert result.persona_id == "companion"

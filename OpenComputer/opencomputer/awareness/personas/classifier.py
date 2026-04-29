@@ -78,8 +78,11 @@ def classify(ctx: ClassificationContext) -> ClassificationResult:
     # win because those are explicit user-context choices, but the default
     # coding signal yields to companion when the actual message is a
     # state-query.
+    # Scan the last up-to-3 messages. State-query in any one of them
+    # signals social register. Latest-message-only was too brittle —
+    # users often open with "hi" then ask a follow-up like "ok cool".
+    state_query = any(is_state_query(m) for m in ctx.last_messages[-3:])
     last_msg = ctx.last_messages[-1] if ctx.last_messages else ""
-    state_query = is_state_query(last_msg)
 
     app_lower = ctx.foreground_app.lower()
     if any(a in app_lower for a in _TRADING_APPS):
