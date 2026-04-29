@@ -17,6 +17,7 @@ import hashlib
 import logging
 import threading
 import time
+from collections.abc import Callable
 
 from .ring_buffer import ScreenCapture, ScreenRingBuffer, TriggerSource
 
@@ -25,20 +26,34 @@ _log = logging.getLogger("opencomputer.screen_awareness.sensor")
 #: Default cooldown — 1s minimum between captures.
 DEFAULT_COOLDOWN_SECONDS = 1.0
 
+#: Type of the optional foreground-app callback injected by the host.
+#: Returns the active app name (best-effort) or empty string.
+ForegroundAppCallback = Callable[[], str]
+
 
 class ScreenAwarenessSensor:
     """Capture orchestrator. Threads in dependencies as injectable methods
-    so tests can mock without monkey-patching the import graph."""
+    so tests can mock without monkey-patching the import graph.
+
+    ``foreground_app_callback`` (optional, kw-only) lets the host wire a
+    foreground-app source at registration time without screen-awareness
+    importing across the plugin boundary. When None, the sensitive-app
+    filter sees an empty app name (still works on supplied input via
+    text-content matching, but no active-window context).
+    """
 
     def __init__(
         self,
         ring_buffer: ScreenRingBuffer,
         cooldown_seconds: float = DEFAULT_COOLDOWN_SECONDS,
+        *,
+        foreground_app_callback: ForegroundAppCallback | None = None,
     ) -> None:
         self._ring = ring_buffer
         self._cooldown = cooldown_seconds
         self._last_capture_at = 0.0
         self._lock = threading.Lock()
+        self._foreground_cb = foreground_app_callback
 
     # ─── Injectable dependency boundaries (mocked in tests) ────────────
 
@@ -60,14 +75,18 @@ class ScreenAwarenessSensor:
     def _foreground_app_name(self) -> str:
         """Best-effort foreground app — empty string by default.
 
-        Foreground-app detection is intentionally NOT cross-imported
-        from ambient-sensors (cross-plugin boundary). Callers can
-        override this method or the sensor's hosting code can wire a
-        runtime callback that injects the active app name. For v1 the
-        sensitive-app filter operates on OCR text content (see
-        :meth:`_is_sensitive`), not on the active app name.
+        If a callback was injected at construction time (e.g. by
+        plugin.py wiring ambient-sensors's foreground sampler via
+        ``importlib.import_module``), call it. Any callback exception
+        is swallowed and treated as "no info" so the sensor never
+        crashes on a misbehaving callback.
         """
-        return ""
+        if self._foreground_cb is None:
+            return ""
+        try:
+            return self._foreground_cb() or ""
+        except Exception:  # noqa: BLE001 — never let a callback wedge the sensor
+            return ""
 
     def _is_sensitive(self, app_name: str) -> bool:
         """True iff the active app name OR the OCR text suggests a

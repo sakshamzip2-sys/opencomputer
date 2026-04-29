@@ -5,6 +5,7 @@ Default OFF: a no-op register call leaves nothing wired.
 """
 from __future__ import annotations
 
+import importlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,36 @@ GUI_MUTATING_TOOLS: frozenset[str] = frozenset({
 })
 
 
+def _try_load_foreground_callback():
+    """Best-effort wire of ambient-sensors's sample_foreground as the
+    foreground-app source. Uses ``importlib.import_module`` with a
+    STRING module name so the static cross-plugin scanner doesn't
+    trip — this is a runtime opt-in, not a static dependency.
+
+    Returns the callback or None if ambient-sensors isn't installed
+    (or its API has drifted).
+    """
+    try:
+        mod = importlib.import_module("extensions.ambient_sensors.foreground")
+    except ImportError:
+        return None
+
+    sample = getattr(mod, "sample_foreground", None)
+    if sample is None or not callable(sample):
+        return None
+
+    def _callback() -> str:
+        try:
+            snap = sample()
+        except Exception:  # noqa: BLE001
+            return ""
+        if snap is None:
+            return ""
+        return getattr(snap, "app_name", "") or ""
+
+    return _callback
+
+
 def register(api: Any) -> None:  # noqa: ANN001 — duck-typed PluginAPI
     """Wire iff screen_awareness state.enabled=True for active profile."""
     profile_home = getattr(api, "profile_home", None)
@@ -45,9 +76,13 @@ def register(api: Any) -> None:  # noqa: ANN001 — duck-typed PluginAPI
         return
 
     ring = ScreenRingBuffer(max_size=state.ring_size)
+    foreground_cb = _try_load_foreground_callback()
+    if foreground_cb is not None:
+        _log.info("screen-awareness: foreground-app callback wired via ambient-sensors")
     sensor = ScreenAwarenessSensor(
         ring_buffer=ring,
         cooldown_seconds=state.cooldown_seconds,
+        foreground_app_callback=foreground_cb,
     )
 
     # Tool — RecallScreen

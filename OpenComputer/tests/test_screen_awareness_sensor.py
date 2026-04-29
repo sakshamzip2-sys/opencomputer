@@ -101,3 +101,52 @@ def test_capture_records_tool_call_id():
         )
     assert result is not None
     assert result.tool_call_id == "toolu_abc123"
+
+
+# ─── Foreground-app callback injection (follow-up 1) ───────────────
+
+
+def test_foreground_callback_returns_empty_when_none():
+    sensor = ScreenAwarenessSensor(
+        ring_buffer=ScreenRingBuffer(max_size=5),
+        cooldown_seconds=0.0,
+        foreground_app_callback=None,
+    )
+    assert sensor._foreground_app_name() == ""
+
+
+def test_foreground_callback_invoked_when_set():
+    sensor = ScreenAwarenessSensor(
+        ring_buffer=ScreenRingBuffer(max_size=5),
+        cooldown_seconds=0.0,
+        foreground_app_callback=lambda: "Visual Studio Code",
+    )
+    assert sensor._foreground_app_name() == "Visual Studio Code"
+
+
+def test_foreground_callback_exception_treated_as_empty():
+    """A misbehaving callback never wedges the sensor — its exception
+    is swallowed and we report empty (no app info)."""
+    def boom() -> str:
+        raise RuntimeError("callback exploded")
+
+    sensor = ScreenAwarenessSensor(
+        ring_buffer=ScreenRingBuffer(max_size=5),
+        cooldown_seconds=0.0,
+        foreground_app_callback=boom,
+    )
+    assert sensor._foreground_app_name() == ""
+
+
+def test_foreground_callback_with_sensitive_app_skips_capture():
+    """Real-world flow: callback returns 1Password → sensitive → skip."""
+    sensor = ScreenAwarenessSensor(
+        ring_buffer=ScreenRingBuffer(max_size=5),
+        cooldown_seconds=0.0,
+        foreground_app_callback=lambda: "1Password 7",
+    )
+    with mock.patch.object(sensor, "_is_locked", return_value=False):
+        # _is_sensitive is the real one — checks against the inline denylist.
+        result = sensor.capture_now(session_id="s1", trigger="user_message")
+    assert result is None
+    assert len(sensor._ring) == 0
