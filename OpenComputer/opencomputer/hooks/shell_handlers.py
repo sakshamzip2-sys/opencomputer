@@ -70,6 +70,8 @@ def _ctx_payload(ctx: HookContext) -> dict[str, Any]:
     if ctx.message is not None:
         payload["message"] = {"role": ctx.message.role, "content": ctx.message.content}
     if ctx.runtime is not None:
+        from plugin_sdk import effective_permission_mode
+
         try:
             payload["runtime"] = dataclasses.asdict(ctx.runtime)
         except TypeError:
@@ -77,6 +79,12 @@ def _ctx_payload(ctx: HookContext) -> dict[str, Any]:
                 "plan_mode": getattr(ctx.runtime, "plan_mode", False),
                 "yolo_mode": getattr(ctx.runtime, "yolo_mode", False),
             }
+        # Canonical mode value alongside the legacy bools — settings-hooks
+        # can read OPENCOMPUTER_PERMISSION_MODE without inferring from the
+        # two-bool combination.
+        payload["runtime"]["permission_mode"] = effective_permission_mode(
+            ctx.runtime
+        ).value
     return payload
 
 
