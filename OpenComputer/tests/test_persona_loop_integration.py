@@ -475,3 +475,112 @@ def test_reclassify_dirty_flag_bypasses_cooldown(tmp_path, monkeypatch):
         loop._maybe_reclassify_persona("test-session")
 
     assert "test-session" in evicted  # dirty flag evicted despite cooldown
+
+
+# ── Persona-uplift 2026-04-29 — Task 10: end-to-end acceptance ───────
+
+
+def test_acceptance_multi_line_first_message_picks_companion(tmp_path, monkeypatch):
+    """Spec acceptance criterion 1: multi-line first message with greeting
+    on a non-first line picks companion, not coding."""
+    from opencomputer.awareness.personas.classifier import (
+        ClassificationContext,
+        classify,
+    )
+
+    ctx = ClassificationContext(
+        foreground_app="iTerm2",
+        time_of_day_hour=14,
+        last_messages=("source /path/.venv/bin/activate\nhi\nhello",),
+    )
+    result = classify(ctx)
+    assert result.persona_id == "companion"
+
+
+def test_acceptance_emotion_message_eventually_flips_to_companion(tmp_path, monkeypatch):
+    """Spec acceptance criterion 2: starting in coding mode, two
+    emotion-shaped turns flips persona to companion."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    loop = _make_loop_with_db(["fix this bug", "i am sad"])
+
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="iTerm2",
+    ):
+        loop._maybe_reclassify_persona("acceptance-session")
+        assert loop._active_persona_id == "coding"  # gate not yet passed
+        loop.db._msgs.append(type(loop.db._msgs[0])(
+            "user", "feeling lonely tonight"
+        ))
+        loop._maybe_reclassify_persona("acceptance-session")
+
+    assert loop._active_persona_id == "companion"
+
+
+def test_acceptance_persona_mode_override_renders_companion(tmp_path, monkeypatch):
+    """Spec acceptance criterion 3: /persona-mode companion forces the
+    companion overlay regardless of foreground app."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+
+    from opencomputer.agent.loop import AgentLoop
+    from plugin_sdk.runtime_context import RuntimeContext
+
+    class _StubDB:
+        def get_messages(self, sid):
+            return []
+
+    loop = AgentLoop.__new__(AgentLoop)
+    loop.db = _StubDB()
+    loop._runtime = RuntimeContext()
+    loop._runtime.custom["persona_id_override"] = "companion"
+
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="Cursor",
+    ):
+        overlay = loop._build_persona_overlay("acceptance-session")
+
+    assert loop._active_persona_id == "companion"
+    assert overlay  # non-empty
+
+
+def test_acceptance_persona_mode_auto_clears_and_reclassifies(tmp_path, monkeypatch):
+    """Spec acceptance criterion 4: /persona-mode auto clears the
+    override and the classifier resumes."""
+    import asyncio
+
+    from opencomputer.agent.slash_commands_impl.persona_mode_cmd import (
+        PersonaModeCommand,
+    )
+    from plugin_sdk.runtime_context import RuntimeContext
+
+    cmd = PersonaModeCommand()
+    rt = RuntimeContext()
+    rt.custom["persona_id_override"] = "companion"
+    asyncio.run(cmd.execute("auto", rt))
+
+    assert "persona_id_override" not in rt.custom or not rt.custom.get(
+        "persona_id_override"
+    )
+    assert rt.custom.get("_persona_dirty") is True
+
+
+def test_acceptance_persona_mode_rejects_invalid():
+    """Spec acceptance criterion 5: /persona-mode <invalid> rejects with
+    list of valid ids."""
+    import asyncio
+
+    from opencomputer.agent.slash_commands_impl.persona_mode_cmd import (
+        PersonaModeCommand,
+    )
+    from plugin_sdk.runtime_context import RuntimeContext
+
+    cmd = PersonaModeCommand()
+    rt = RuntimeContext()
+    result = asyncio.run(cmd.execute("definitely_not_a_persona", rt))
+
+    assert "Unknown" in result.output
+    assert "companion" in result.output  # available list rendered
+    assert "persona_id_override" not in rt.custom or not rt.custom.get(
+        "persona_id_override"
+    )

@@ -37,13 +37,13 @@ from opencomputer.agent.slash_commands_impl.display_toggles_cmd import (
 from opencomputer.agent.slash_commands_impl.fast_cmd import FastCommand
 from opencomputer.agent.slash_commands_impl.history_cmd import HistoryCommand
 from opencomputer.agent.slash_commands_impl.mode_cmd import ModeCommand
+from opencomputer.agent.slash_commands_impl.persona_mode_cmd import (
+    PersonaModeCommand,
+)
 from opencomputer.agent.slash_commands_impl.platforms_cmd import PlatformsCommand
 from opencomputer.agent.slash_commands_impl.reasoning_cmd import ReasoningCommand
 from opencomputer.agent.slash_commands_impl.save_cmd import SaveCommand
 from opencomputer.agent.slash_commands_impl.scrape import ScrapeCommand
-from opencomputer.agent.slash_commands_impl.persona_mode_cmd import (
-    PersonaModeCommand,
-)
 from opencomputer.agent.slash_commands_impl.skin_personality_cmd import (
     PersonalityCommand,
     SkinCommand,

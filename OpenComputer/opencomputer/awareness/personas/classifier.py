@@ -101,10 +101,7 @@ def is_state_query(text: str) -> bool:
     """
     if not text:
         return False
-    for line in text.split("\n"):
-        if _STATE_QUERY_PATTERN.match(line):
-            return True
-    return False
+    return any(_STATE_QUERY_PATTERN.match(line) for line in text.split("\n"))
 
 
 def classify(ctx: ClassificationContext) -> ClassificationResult:

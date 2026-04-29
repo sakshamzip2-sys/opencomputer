@@ -773,8 +773,19 @@ class AgentLoop:
                 # and prefix-cache hits on turn 2+ stay valid. Classifier
                 # failure degrades to "" — agent startup must NEVER break
                 # over a persona miss.
+                # Persona-uplift (2026-04-29): pass the just-arrived
+                # ``user_message`` so initial classification sees the
+                # current turn's content. Without this, _build_persona_overlay
+                # classifies on the empty session-start history (likely
+                # "coding" from foreground app) and then the per-turn
+                # _maybe_reclassify_persona — which does see the user
+                # message — reclassifies to e.g. "companion" and evicts
+                # the just-built snapshot. Threading user_message in
+                # keeps the two classifications consistent on turn 1.
                 try:
-                    persona_overlay = self._build_persona_overlay(sid)
+                    persona_overlay = self._build_persona_overlay(
+                        sid, user_message=user_message
+                    )
                 except Exception:  # noqa: BLE001 — defensive: never break loop
                     _log.debug(
                         "_build_persona_overlay failed; degrading to empty",
@@ -1557,7 +1568,9 @@ class AgentLoop:
 
     # ─── V2.C-T5 persona auto-classifier ───────────────────────────
 
-    def _build_persona_overlay(self, session_id: str) -> str:
+    def _build_persona_overlay(
+        self, session_id: str, user_message: str = ""
+    ) -> str:
         """Run the persona classifier and return the matched persona's overlay.
 
         V2.C-T5 — invoked once per session in the same lane as
@@ -1567,9 +1580,13 @@ class AgentLoop:
         Pulls a SIMPLIFIED context for V2.C: foreground app via
         ``osascript`` (macOS only, "" elsewhere), current hour, last 10
         recent file paths from the session message log (best effort), and
-        the last 3 user messages. Any failure degrades to ``""`` (no
-        persona section in the prompt) — startup must NEVER break over a
-        classifier issue. V2.D may swap in a richer context source.
+        the last 3 user messages. ``user_message`` (the just-arrived
+        turn's content) is appended to the message list so initial
+        classification sees the same content as per-turn re-classification
+        — see persona-uplift 2026-04-29 for the asymmetry that prompted
+        this. Any failure degrades to ``""`` (no persona section in the
+        prompt) — startup must NEVER break over a classifier issue. V2.D
+        may swap in a richer context source.
         """
         import datetime as _dt
 
@@ -1651,6 +1668,16 @@ class AgentLoop:
                                 file_paths.append(v)
             recent_files = tuple(file_paths[-10:])
             last_user_messages = tuple(user_texts[-3:])
+
+        # Persona-uplift (2026-04-29): append the just-arrived user
+        # message so the initial classification sees this turn's content.
+        # Without this, _build_persona_overlay (snapshot-build path) and
+        # _maybe_reclassify_persona (per-turn path) disagree on turn 1
+        # and cause an immediate snapshot eviction.
+        if user_message:
+            last_user_messages = tuple(
+                list(last_user_messages) + [user_message]
+            )[-3:]
 
         try:
             ctx = ClassificationContext(
