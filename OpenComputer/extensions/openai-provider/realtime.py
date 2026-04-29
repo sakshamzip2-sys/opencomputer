@@ -202,14 +202,17 @@ class OpenAIRealtimeBridge(BaseRealtimeVoiceBridge):
                 self._handle_event(event)
         except websockets.exceptions.ConnectionClosed:
             pass
-        finally:
-            self._connected = False
-            self._session_configured = False
-            if self._intentionally_closed:
-                if self._on_close:
-                    self._on_close("completed")
-                return
-            await self._attempt_reconnect()
+        # The original TS used a try/finally; Python ruff (B012) flags
+        # ``return`` inside a finally block. Restructure: cleanup in the
+        # main body, not finally — works because the only exception path
+        # we care about is ConnectionClosed (already caught above).
+        self._connected = False
+        self._session_configured = False
+        if self._intentionally_closed:
+            if self._on_close:
+                self._on_close("completed")
+            return
+        await self._attempt_reconnect()
 
     async def _attempt_reconnect(self) -> None:
         if self._intentionally_closed:
