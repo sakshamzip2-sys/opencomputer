@@ -49,17 +49,59 @@ _STATE_QUERY_PATTERN = re.compile(
     r"good\s+(morning|afternoon|evening|night)|"
     r"you\s+(doing|feeling)\s+(ok|alright|good)|"
     r"how('?re|\s+are)\s+you\s+holding\s+up|"
-    r"(are\s+you\s+)?ok\??\s*$)",
+    r"(are\s+you\s+)?ok\??\s*$|"
+    # Hindi / Hinglish — common openers in en_IN scripts.
+    r"kaise\s+ho|kaisa\s+hai|kaise\s+hain|"
+    r"kya\s+haal|kya\s+chal|kya\s+ho\s+raha|"
+    r"theek\s+ho|theek\s+hain|"
+    r"sab\s+badhiya|sab\s+theek|"
+    r"namaste|namaskar)",
     re.IGNORECASE,
 )
+
+
+#: Emotion-anchor lexicon. When a recent user message contains one of
+#: these terms — without necessarily leading with a greeting — the
+#: register is companion-shaped. Inserted into :func:`classify` AFTER
+#: trading/relaxed (which are explicit user-app choices that still win)
+#: but BEFORE coding-app / file-fallback / time-of-day so the warm
+#: register lands on emotional content even while the user is in a
+#: terminal.
+_EMOTION_PATTERN = re.compile(
+    r"\b("
+    r"sad|lonely|heartbroken|grieving|depressed|anxious|"
+    r"stressed|frustrated|burnt\s+out|burned\s+out|exhausted|"
+    r"happy|excited|grateful|relieved|"
+    r"break\s*up|breakup|broke\s+up|"
+    r"miss\s+(her|him|them|my|you)|"
+    r"died|passed\s+away|funeral|"
+    r"feeling\s+(\w+)|"  # 'feeling X' — generic emotion shape
+    r"i('?m|\s+am)\s+(sad|happy|stressed|anxious|tired|done|broken|hurt|fine|ok|okay)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def has_emotion_anchor(text: str) -> bool:
+    """True iff *text* contains an emotion-anchor term.
+
+    Exposed for tests; used internally by :func:`classify`.
+    """
+    return bool(_EMOTION_PATTERN.search(text or ""))
 
 
 def is_state_query(text: str) -> bool:
     """True iff *text* leads with a state-query / greeting / "how are you" pattern.
 
+    Splits on newlines and checks each line independently — a multi-line
+    paste like ``source .venv/bin/activate\\nhi`` should match because
+    line 2 leads with a greeting.
+
     Exposed for tests; used internally by :func:`classify`.
     """
-    return bool(_STATE_QUERY_PATTERN.match(text or ""))
+    if not text:
+        return False
+    return any(_STATE_QUERY_PATTERN.match(line) for line in text.split("\n"))
 
 
 def classify(ctx: ClassificationContext) -> ClassificationResult:
@@ -69,8 +111,11 @@ def classify(ctx: ClassificationContext) -> ClassificationResult:
     # win because those are explicit user-context choices, but the default
     # coding signal yields to companion when the actual message is a
     # state-query.
+    # Scan the last up-to-3 messages. State-query in any one of them
+    # signals social register. Latest-message-only was too brittle —
+    # users often open with "hi" then ask a follow-up like "ok cool".
+    state_query = any(is_state_query(m) for m in ctx.last_messages[-3:])
     last_msg = ctx.last_messages[-1] if ctx.last_messages else ""
-    state_query = is_state_query(last_msg)
 
     app_lower = ctx.foreground_app.lower()
     if any(a in app_lower for a in _TRADING_APPS):
@@ -81,6 +126,18 @@ def classify(ctx: ClassificationContext) -> ClassificationResult:
         return ClassificationResult(
             "companion", 0.9,
             f"state-query / greeting detected in last message: {last_msg[:40]!r}",
+        )
+    # Emotion-anchor scan over the last 3 messages. Same precedence as
+    # state-query: trading/relaxed app overrides win, but coding-app
+    # and file-fallback yield to emotional content.
+    emotion_msg = next(
+        (m for m in reversed(ctx.last_messages[-3:]) if has_emotion_anchor(m)),
+        None,
+    )
+    if emotion_msg is not None:
+        return ClassificationResult(
+            "companion", 0.75,
+            f"emotion-anchor term detected in recent messages: {emotion_msg[:40]!r}",
         )
     if any(a in app_lower for a in _CODING_APPS):
         return ClassificationResult("coding", 0.85, f"foreground app '{ctx.foreground_app}' suggests coding")
