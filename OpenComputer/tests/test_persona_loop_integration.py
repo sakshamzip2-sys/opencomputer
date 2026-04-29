@@ -218,3 +218,260 @@ def test_cached_foreground_app_returns_cached_within_ttl(tmp_path, monkeypatch):
     assert second == "App1"  # cached
     assert third == "App2"   # refreshed
     assert call_count["n"] == 2
+
+
+# ── Persona-uplift 2026-04-29 — Task 9: re-classification ────────────
+
+
+def _make_loop_with_db(messages):
+    """Build a stub AgentLoop with a fixed message history."""
+    from opencomputer.agent.loop import AgentLoop
+    from plugin_sdk.runtime_context import RuntimeContext
+
+    class _Msg:
+        def __init__(self, role, content):
+            self.role = role
+            self.content = content
+            self.tool_calls = ()
+
+    class _StubDB:
+        def __init__(self, msgs):
+            self._msgs = msgs
+
+        def get_messages(self, sid):
+            return self._msgs
+
+    loop = AgentLoop.__new__(AgentLoop)
+    loop.db = _StubDB([_Msg("user", m) for m in messages])
+    loop._runtime = RuntimeContext()
+    loop._active_persona_id = "coding"
+    loop._active_persona_preferred_tone = ""
+    loop._foreground_app_cache = ""
+    loop._foreground_app_cache_at = 0.0
+    loop._pending_persona_id = ""
+    loop._pending_persona_count = 0
+    loop._reclassify_calls_since_flip = 999  # no cooldown active
+    loop._prompt_snapshots = type(
+        "D", (), {"pop": lambda self, k, d=None: None}
+    )()
+    return loop
+
+
+def test_reclassify_does_not_flap_on_single_signal(tmp_path, monkeypatch):
+    """One emotional message in an otherwise-coding session should NOT
+    flip persona on its own. Stability gate requires 2 consecutive
+    same-classification turns OR confidence >= 0.85."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    loop = _make_loop_with_db(
+        ["fix this bug", "i am sad about this regression"]
+    )
+
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="iTerm2",
+    ):
+        loop._maybe_reclassify_persona("test-session")
+
+    # First sighting of 'companion' — gate not yet passed.
+    assert loop._active_persona_id == "coding"
+    assert loop._pending_persona_id == "companion"
+    assert loop._pending_persona_count == 1
+
+
+def test_reclassify_flips_after_two_consecutive_signals(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    loop = _make_loop_with_db(
+        ["fix this bug", "i am sad about this regression"]
+    )
+
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="iTerm2",
+    ):
+        loop._maybe_reclassify_persona("test-session")  # first sighting
+        # Second user turn — same classification result.
+        loop.db._msgs.append(type(loop.db._msgs[0])(
+            "user", "feeling really lonely tonight"
+        ))
+        loop._maybe_reclassify_persona("test-session")  # second sighting → flip
+
+    assert loop._active_persona_id == "companion"
+    assert loop._pending_persona_count == 0  # reset after flip
+
+
+def test_reclassify_high_confidence_short_circuits_gate(tmp_path, monkeypatch):
+    """Confidence >= 0.85 (e.g. trading-app foreground) flips immediately."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    loop = _make_loop_with_db(["how's the market today"])
+
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="Zerodha Kite",
+    ):
+        loop._maybe_reclassify_persona("test-session")
+
+    # Trading app -> confidence 0.85 -> immediate flip.
+    assert loop._active_persona_id == "trading"
+
+
+def test_reclassify_skipped_when_override_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    loop = _make_loop_with_db(["i am sad"])
+    loop._runtime.custom["persona_id_override"] = "admin"
+    loop._active_persona_id = "admin"
+
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="iTerm2",
+    ):
+        loop._maybe_reclassify_persona("test-session")
+
+    assert loop._active_persona_id == "admin"  # unchanged
+    assert loop._pending_persona_id == ""      # gate untouched
+
+
+def test_reclassify_evicts_prompt_snapshot_on_flip(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    loop = _make_loop_with_db(["how's the market today"])
+    # OrderedDict-shaped pop captures whether eviction happened.
+    evicted = []
+
+    class _Snap:
+        def pop(self, key, default=None):
+            evicted.append(key)
+            return default
+
+    loop._prompt_snapshots = _Snap()
+
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="Zerodha Kite",
+    ):
+        loop._maybe_reclassify_persona("test-session")
+
+    # Confidence 0.85 short-circuit -> flip -> snapshot evicted.
+    assert "test-session" in evicted
+
+
+def test_reclassify_honours_persona_dirty_flag_from_slash_command(tmp_path, monkeypatch):
+    """When /persona-mode sets _persona_dirty=True, the loop must evict
+    the snapshot on the next reclassification call regardless of whether
+    persona changed."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    loop = _make_loop_with_db(["fix this bug"])
+    loop._runtime.custom["_persona_dirty"] = True
+    evicted = []
+
+    class _Snap:
+        def pop(self, key, default=None):
+            evicted.append(key)
+            return default
+
+    loop._prompt_snapshots = _Snap()
+
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="iTerm2",
+    ):
+        loop._maybe_reclassify_persona("test-session")
+
+    assert "test-session" in evicted
+    assert loop._runtime.custom.get("_persona_dirty") is None  # cleared
+
+
+def test_reclassify_cooldown_prevents_thrashing(tmp_path, monkeypatch):
+    """After a flip, refuse to flip again within 3 reclassify calls.
+    Prevents thrash when user Cmd-Tabs between coding and trading apps
+    in quick succession."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    loop = _make_loop_with_db(["how's the market today"])
+
+    # First flip — Zerodha → trading (immediate, conf 0.85).
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="Zerodha Kite",
+    ):
+        loop._maybe_reclassify_persona("test-session")
+    assert loop._active_persona_id == "trading"
+    assert loop._reclassify_calls_since_flip == 0
+
+    # User immediately switches back to iTerm — would normally flip to
+    # coding but cooldown prevents it.
+    loop.db._msgs.append(type(loop.db._msgs[0])("user", "fix this bug"))
+    loop._foreground_app_cache = ""  # force refresh
+    loop._foreground_app_cache_at = 0.0
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="iTerm2",
+    ):
+        loop._maybe_reclassify_persona("test-session")
+    assert loop._active_persona_id == "trading"  # cooldown blocked the flip
+
+
+def test_reclassify_cooldown_clears_after_threshold(tmp_path, monkeypatch):
+    """After 3 reclassify calls, the cooldown lifts and flips can fire."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    loop = _make_loop_with_db(["how's the market today"])
+
+    # Flip to trading.
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="Zerodha Kite",
+    ):
+        loop._maybe_reclassify_persona("test-session")
+    assert loop._active_persona_id == "trading"
+
+    # Three more reclassify calls in trading mode — cooldown counter
+    # increments past 3.
+    for _ in range(3):
+        with patch(
+            "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+            return_value="Zerodha Kite",
+        ):
+            loop._maybe_reclassify_persona("test-session")
+
+    # Now switch app — should flip.
+    loop.db._msgs.append(type(loop.db._msgs[0])("user", "fix this bug"))
+    loop._foreground_app_cache = ""
+    loop._foreground_app_cache_at = 0.0
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="iTerm2",
+    ):
+        loop._maybe_reclassify_persona("test-session")
+    assert loop._active_persona_id == "coding"
+
+
+def test_reclassify_dirty_flag_bypasses_cooldown(tmp_path, monkeypatch):
+    """Slash-command override (dirty flag) must always evict the snapshot
+    even if the cooldown is active. Explicit user choice wins."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    loop = _make_loop_with_db(["how's the market today"])
+
+    # Flip first to set up cooldown.
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="Zerodha Kite",
+    ):
+        loop._maybe_reclassify_persona("test-session")
+    assert loop._reclassify_calls_since_flip == 0
+
+    # User runs `/persona-mode admin` mid-cooldown.
+    loop._runtime.custom["persona_id_override"] = "admin"
+    loop._runtime.custom["_persona_dirty"] = True
+    evicted = []
+
+    class _Snap:
+        def pop(self, key, default=None):
+            evicted.append(key)
+            return default
+
+    loop._prompt_snapshots = _Snap()
+
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        return_value="Zerodha Kite",
+    ):
+        loop._maybe_reclassify_persona("test-session")
+
+    assert "test-session" in evicted  # dirty flag evicted despite cooldown

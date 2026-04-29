@@ -869,6 +869,18 @@ class AgentLoop:
         messages.append(user_msg)
         self._emit_before_message_write(session_id=sid, message=user_msg)
         self.db.append_message(sid, user_msg)
+
+        # Persona-uplift (2026-04-29): per-turn re-classification with
+        # stability gate + cooldown. Pass the in-memory ``messages`` list
+        # so the helper doesn't re-read SQLite. On a confirmed flip the
+        # snapshot for ``sid`` is evicted; the NEXT turn rebuilds the
+        # system prompt with the new overlay. Defensive: never raises.
+        try:
+            self._maybe_reclassify_persona(sid, messages=messages)
+        except Exception:  # noqa: BLE001
+            _log.debug(
+                "_maybe_reclassify_persona raised (suppressed)", exc_info=True
+            )
         # Track where this turn's messages start so episodic recording can
         # walk only the new tool messages (not the whole prior history).
         turn_start_index = len(messages) - 1
@@ -1881,6 +1893,148 @@ class AgentLoop:
         self._foreground_app_cache = value
         self._foreground_app_cache_at = now
         return value
+
+    def _recent_user_messages(
+        self, session_id: str, messages: list | None = None
+    ) -> tuple[str, ...]:
+        """Return the last 3 user-message contents for classifier context.
+
+        Accepts ``messages`` from the caller (the loop already holds the
+        in-memory list) to avoid re-reading the SQLite session DB. When
+        ``messages`` is None, falls back to ``db.get_messages``.
+        """
+        if messages is None:
+            try:
+                messages = self.db.get_messages(session_id)
+            except Exception:  # noqa: BLE001 — defensive
+                return ()
+        texts = [
+            m.content for m in messages
+            if getattr(m, "role", "") == "user"
+            and isinstance(getattr(m, "content", None), str)
+        ]
+        return tuple(texts[-3:])
+
+    def _maybe_reclassify_persona(
+        self, session_id: str, messages: list | None = None
+    ) -> None:
+        """Per-turn re-classification with stability gate + cooldown.
+
+        Called from the user-turn boundary in :meth:`run_conversation`
+        AFTER the user message is persisted. ``messages`` is the
+        in-memory message list the loop already holds; we accept it so
+        we don't re-read from SQLite. ``messages=None`` falls back to
+        ``db.get_messages(session_id)``.
+
+        Behavior:
+        - The slash-command dirty flag (``runtime.custom["_persona_dirty"]``)
+          forces a snapshot evict regardless. Set by ``/persona-mode``;
+          the slash-command path always wins.
+        - When ``runtime.custom["persona_id_override"]`` is set, skip
+          re-classification entirely.
+        - Otherwise classify, apply stability gate (2 consecutive
+          same-id matches OR confidence >= 0.85), then a cooldown gate
+          (no flip within 3 reclassify calls of the last flip).
+        - On a confirmed flip: update ``_active_persona_id``, mirror to
+          ``runtime.custom``, reset pending + cooldown counters, evict
+          ``_prompt_snapshots[session_id]``, and log at DEBUG level.
+
+        Defensive: any failure is caught and logged; the active persona
+        is left unchanged. The agent loop must NEVER break over a
+        re-classification miss.
+        """
+        import datetime as _dt
+
+        from opencomputer.awareness.personas.classifier import (
+            ClassificationContext,
+            classify,
+        )
+
+        rt = getattr(self, "_runtime", None)
+
+        # Honour the slash-command dirty flag — the user just set or
+        # cleared an override, snapshot must be rebuilt next turn even
+        # if the active persona id didn't change. This bypasses the
+        # cooldown — an explicit user choice always wins.
+        if rt is not None and rt.custom.pop("_persona_dirty", False):
+            try:
+                self._prompt_snapshots.pop(session_id, None)
+            except Exception:  # noqa: BLE001
+                _log.debug(
+                    "snapshot evict on _persona_dirty failed", exc_info=True
+                )
+
+        # Override-locked: skip the classifier entirely.
+        if rt is not None and rt.custom.get("persona_id_override"):
+            return
+
+        # Cooldown bookkeeping happens BEFORE classify (so even a no-op
+        # call increments). Cap at a large number to avoid overflow on
+        # ultra-long sessions; any value >= 3 satisfies the threshold.
+        self._reclassify_calls_since_flip = min(
+            self._reclassify_calls_since_flip + 1, 1_000_000
+        )
+
+        try:
+            ctx = ClassificationContext(
+                foreground_app=self._cached_foreground_app(),
+                time_of_day_hour=_dt.datetime.now().hour,
+                recent_file_paths=(),  # not used for re-classification
+                last_messages=self._recent_user_messages(session_id, messages),
+            )
+            result = classify(ctx)
+        except Exception:  # noqa: BLE001 — defensive: never break loop
+            _log.debug("re-classify failed; persona unchanged", exc_info=True)
+            return
+
+        # Already in the same persona — reset gate, done.
+        if result.persona_id == self._active_persona_id:
+            self._pending_persona_id = ""
+            self._pending_persona_count = 0
+            return
+
+        # Stability gate: 2 consecutive matches required, OR confidence
+        # >= 0.85 short-circuits (strong-app signal).
+        flip_now = result.confidence >= 0.85
+        if not flip_now:
+            if result.persona_id == self._pending_persona_id:
+                self._pending_persona_count += 1
+                if self._pending_persona_count >= 2:
+                    flip_now = True
+            else:
+                self._pending_persona_id = result.persona_id
+                self._pending_persona_count = 1
+
+        if not flip_now:
+            return
+
+        # Cooldown gate: refuse to flip again within 3 reclassify calls
+        # of the last flip. Prevents thrashing when the user briefly
+        # Cmd-Tabs between apps.
+        if self._reclassify_calls_since_flip < 3:
+            return
+
+        prev = self._active_persona_id
+        self._active_persona_id = result.persona_id
+        self._pending_persona_id = ""
+        self._pending_persona_count = 0
+        self._reclassify_calls_since_flip = 0
+        if rt is not None:
+            rt.custom["active_persona_id"] = self._active_persona_id
+
+        # Evict snapshot so the next turn rebuilds with the new overlay.
+        try:
+            self._prompt_snapshots.pop(session_id, None)
+        except Exception:  # noqa: BLE001 — defensive
+            _log.debug("snapshot evict on flip failed", exc_info=True)
+
+        _log.debug(
+            "persona_classifier.flip session=%s from=%s to=%s reason=%s",
+            session_id,
+            prev or "(unset)",
+            self._active_persona_id,
+            result.reason,
+        )
 
     def _compute_cross_session_topic_hits(
         self, session_id: str,
