@@ -1331,6 +1331,28 @@ def _run_chat_session(
         )
 
         if is_slash_command(user_input):
+            def _on_model_swap(new_model: str) -> tuple[bool, str]:
+                """``/model <id>`` mid-session swap (Sub-project C).
+
+                Resolves alias, mutates ``loop.config`` via dataclasses.replace
+                so subsequent turns pick up the new id. Same provider only —
+                cross-provider swap is a future PR.
+                """
+                import dataclasses as _dc
+
+                from opencomputer.agent.model_resolver import resolve_model
+
+                aliases = getattr(loop.config.model, "model_aliases", None) or {}
+                try:
+                    canonical = resolve_model(new_model, aliases)
+                except ValueError as e:
+                    return (False, str(e))
+                if not canonical or not isinstance(canonical, str):
+                    return (False, f"invalid model id: {new_model!r}")
+                new_model_cfg = _dc.replace(loop.config.model, model=canonical)
+                loop.config = _dc.replace(loop.config, model=new_model_cfg)
+                return (True, f"swapped to {canonical}")
+
             slash_ctx = SlashContext(
                 console=console,
                 session_id=session_id,
@@ -1349,6 +1371,7 @@ def _run_chat_session(
                 on_snapshot_prune=_on_snapshot_prune,
                 on_reload=_on_reload,
                 on_reload_mcp=_on_reload_mcp,
+                on_model_swap=_on_model_swap,
             )
             result = dispatch_slash(user_input, slash_ctx)
             if result.exit_loop:

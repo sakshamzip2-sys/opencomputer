@@ -354,9 +354,18 @@ class AnthropicProvider(BaseProvider):
         """Convert an Anthropic response back to our canonical Message + metadata."""
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
+        thinking_parts: list[str] = []
         for block in resp.content:
             if block.type == "text":
                 text_parts.append(block.text)
+            elif block.type == "thinking":
+                # Extended thinking surfaces as ``thinking`` blocks with a
+                # ``.thinking`` field carrying the chain. Aggregate across
+                # blocks and surface on ProviderResponse.reasoning so the
+                # SDK has a provider-agnostic reasoning field populated.
+                thinking_text = getattr(block, "thinking", None)
+                if thinking_text:
+                    thinking_parts.append(str(thinking_text))
             elif block.type == "tool_use":
                 tool_calls.append(
                     ToolCall(
@@ -370,14 +379,21 @@ class AnthropicProvider(BaseProvider):
             content="\n".join(text_parts),
             tool_calls=tool_calls if tool_calls else None,
         )
+        # Anthropic exposes prompt-cache token counts on usage when the
+        # request hit its caching path. Surface them on canonical Usage so
+        # cost reporting is provider-agnostic.
         usage = Usage(
             input_tokens=resp.usage.input_tokens,
             output_tokens=resp.usage.output_tokens,
+            cache_read_tokens=int(getattr(resp.usage, "cache_read_input_tokens", 0) or 0),
+            cache_write_tokens=int(getattr(resp.usage, "cache_creation_input_tokens", 0) or 0),
         )
+        reasoning = "\n".join(thinking_parts) if thinking_parts else None
         return ProviderResponse(
             message=msg,
             stop_reason=resp.stop_reason or "end_turn",
             usage=usage,
+            reasoning=reasoning,
         )
 
     # ─── completion ────────────────────────────────────────────────

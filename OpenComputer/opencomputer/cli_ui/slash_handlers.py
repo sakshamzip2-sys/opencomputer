@@ -81,6 +81,13 @@ class SlashContext:
     #: ``{"servers_before": int, "servers_after": int, "tools_after": int,
     #: "error": str | None}``.
     on_reload_mcp: Callable[[], dict] = dict
+    #: ``/model <id>`` — swap the active model on the running AgentLoop.
+    #: Returns ``(success, message)`` so the slash handler can echo why
+    #: the swap failed (unknown alias, invalid model id, provider mismatch).
+    on_model_swap: Callable[[str], tuple[bool, str]] = lambda _model: (
+        False,
+        "model swap callback not wired",
+    )
 
 
 def _split_args(text: str) -> tuple[str, list[str]]:
@@ -163,10 +170,13 @@ def _handle_model(ctx: SlashContext, args: list[str]) -> SlashResult:
         p = getattr(ctx.config.model, "provider", "?")
         ctx.console.print(f"[bold]active model[/bold]  {m}  ({p})")
         return SlashResult(handled=True)
-    # Switching mid-session is intentionally not implemented in Phase 1.
-    ctx.console.print(
-        "[yellow]switching mid-session not implemented yet — restart with --model[/yellow]"
-    )
+    # Mid-session swap (Sub-project C of model-agnosticism plan).
+    new_model = args[0].strip()
+    success, message = ctx.on_model_swap(new_model)
+    if success:
+        ctx.console.print(f"[green]model →[/green] {message}")
+    else:
+        ctx.console.print(f"[red]swap failed:[/red] {message}")
     return SlashResult(handled=True)
 
 
