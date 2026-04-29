@@ -388,6 +388,47 @@ _MODE_STYLE = {
 }
 
 
+#: 2026-04-29 PR-6: persona ids where the mode badge is *not* useful — these
+#: are non-coding registers (chat/companion). When the auto-classifier lands
+#: on one of these AND the user hasn't explicitly switched modes, hide the
+#: badge to keep the chat surface uncluttered.
+_CHAT_PERSONAS = frozenset({"companion"})
+
+
+def _badge_has_meaningful_content(runtime: object) -> bool:
+    """Decide whether the badge has anything worth showing.
+
+    Show when the user has actively set state:
+    - non-default permission mode (CLI flag or ``/mode`` / ``/auto`` / ``/plan``)
+    - non-default ``/personality`` (anything other than ``helpful``)
+    - persona auto-classified into a non-chat register (e.g. ``coder``)
+
+    Hide when in a chat register (companion persona) with nothing overridden
+    — the badge would just be visual noise during casual conversation.
+
+    Fresh sessions (persona not yet classified) keep the badge visible so
+    new users discover Shift+Tab cycling — only hidden once the classifier
+    confirms a chat register.
+    """
+    if runtime is None:
+        return False
+    from plugin_sdk import effective_permission_mode
+
+    if effective_permission_mode(runtime).value != "default":
+        return True
+
+    personality = runtime.custom.get("personality", "")
+    if personality and personality != "helpful":
+        return True
+
+    persona = runtime.custom.get("active_persona_id", "")
+    if persona in _CHAT_PERSONAS:
+        return False
+
+    # Persona unset (early session) OR set to a non-chat persona → show.
+    return True
+
+
 def _render_mode_badge(runtime: object) -> list[tuple[str, str]]:
     """Render the bottom-bar status badge as FormattedText.
 
@@ -400,10 +441,11 @@ def _render_mode_badge(runtime: object) -> list[tuple[str, str]]:
       ``/personality`` slash-command value
 
     Includes ASCII glyphs for ``NO_COLOR`` / screen-reader accessibility.
-    Returns ``[]`` for callers that pass no runtime so the badge
-    collapses gracefully (e.g. piped-input mode).
+    Returns ``[]`` when there is no runtime, no actionable state, and the
+    persona indicates a chat register — keeps casual conversations
+    uncluttered. See :func:`_badge_has_meaningful_content` for the rule.
     """
-    if runtime is None:
+    if not _badge_has_meaningful_content(runtime):
         return []
     from plugin_sdk import effective_permission_mode
 

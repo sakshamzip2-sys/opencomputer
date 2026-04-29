@@ -79,6 +79,48 @@ class TestModeBadgeRender:
         assert _render_mode_badge(None) == []
 
 
+class TestBadgeChatRegisterGate:
+    """PR-6: hide badge during chat-register conversations with nothing overridden.
+
+    The mode badge is visual noise when the user is having a casual
+    conversation. Hide it once the classifier confirms a chat persona
+    (``companion``), unless the user has actively set a mode or personality.
+    """
+
+    def test_hidden_when_companion_persona_and_default_mode(self) -> None:
+        rt = RuntimeContext(custom={"active_persona_id": "companion"})
+        assert _render_mode_badge(rt) == []
+
+    def test_visible_when_companion_but_mode_overridden(self) -> None:
+        # Even in chat register, an explicit /auto deserves to be visible
+        # — the user opted into a non-default mode.
+        rt = RuntimeContext(
+            permission_mode=PermissionMode.AUTO,
+            custom={"active_persona_id": "companion"},
+        )
+        text = "".join(seg[1] for seg in _render_mode_badge(rt))
+        assert "auto" in text
+
+    def test_visible_when_companion_but_personality_overridden(self) -> None:
+        rt = RuntimeContext(
+            custom={"active_persona_id": "companion", "personality": "concise"},
+        )
+        text = "".join(seg[1] for seg in _render_mode_badge(rt))
+        assert "concise" in text
+
+    def test_visible_when_persona_unset_fresh_session(self) -> None:
+        # Fresh sessions (no persona classified yet) keep the badge
+        # so new users discover Shift+Tab.
+        rt = RuntimeContext()
+        text = "".join(seg[1] for seg in _render_mode_badge(rt))
+        assert "default" in text
+
+    def test_visible_when_coder_persona(self) -> None:
+        rt = RuntimeContext(custom={"active_persona_id": "coder"})
+        text = "".join(seg[1] for seg in _render_mode_badge(rt))
+        assert "coder" in text and "default" in text
+
+
 class TestBadgeIncludesPersonaAndPersonality:
     """PR-5: extended mode badge surfaces persona + personality."""
 
