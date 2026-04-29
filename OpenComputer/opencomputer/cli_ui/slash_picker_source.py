@@ -157,26 +157,48 @@ class UnifiedSlashSource:
     def rank(self, prefix: str, top_n: int = _DEFAULT_TOP_N) -> list[Match]:
         """Rank all items against ``prefix`` and return top-``top_n``.
 
-        Empty prefix bypasses scoring and returns all items sorted
-        alphabetically. Ties on score break by name alphabetically;
-        Task 5 layers MRU recency on top.
+        Empty prefix: MRU-recent items first (top 5), then everything
+        else alphabetically. Non-empty prefix: tiered ranking + MRU
+        bonus, score desc with alphabetical tie-break.
         """
         items = list(self.iter_items())
         prefix_lc = prefix.lower().strip()
 
         if not prefix_lc:
-            sorted_items = sorted(items, key=self._name_of)
-            return [Match(item=i, score=1.0) for i in sorted_items[:top_n]]
+            # Empty prefix: MRU items first (most-recent first), then
+            # alphabetical for the rest.
+            mru_names = self._mru_recent_names()
+            mru_top5 = mru_names[:5]
+            mru_set = set(mru_top5)
+            mru_floated: list[Match] = []
+            for name in mru_top5:
+                for i in items:
+                    if self._name_of(i) == name:
+                        mru_floated.append(Match(item=i, score=1.0))
+                        break
+            tail = sorted(
+                (i for i in items if self._name_of(i) not in mru_set),
+                key=self._name_of,
+            )
+            tail_matches = [Match(item=i, score=1.0) for i in tail]
+            return (mru_floated + tail_matches)[:top_n]
 
         scored: list[Match] = []
         for item in items:
             s = self._score_one(item, prefix_lc)
             if s > 0:
-                scored.append(Match(item=item, score=s))
+                bonus = self._mru.recency_bonus(self._name_of(item))
+                final = min(1.0, s + bonus)
+                scored.append(Match(item=item, score=final))
 
         # Sort: score desc, then name asc.
         scored.sort(key=lambda m: (-m.score, self._name_of(m.item)))
         return scored[:top_n]
+
+    def _mru_recent_names(self) -> list[str]:
+        """Names from MRU log, most-recent first."""
+        # Newest entries are appended to the end; reverse for most-recent-first.
+        return [e["name"] for e in reversed(self._mru._entries)]
 
 
 __all__ = ["Match", "UnifiedSlashSource"]

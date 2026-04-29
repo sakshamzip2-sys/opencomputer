@@ -279,3 +279,102 @@ def test_rank_returns_empty_when_no_items(tmp_path: Path) -> None:
         assert src.rank("foo") == []
     finally:
         slash_mod.SLASH_REGISTRY = real_registry  # type: ignore[misc]
+
+
+# ─── MRU bonus + empty-prefix MRU sort (Task 5) ────────────────────
+
+
+def test_rank_mru_bonus_floats_recently_used_above_alphabetical(tmp_path: Path) -> None:
+    """When two items have the same tier score, the MRU-recent one
+    wins. Use prefix 'll' which is anywhere-substring (tier 4) for
+    both 'apple-skill' and 'banana-skill' — neither starts with 'll'
+    nor has 'll' at any word boundary."""
+    mem = _FakeMemory(
+        [
+            _FakeSkillMeta(id="apple-skill", name="apple-skill", description=""),
+            _FakeSkillMeta(id="banana-skill", name="banana-skill", description=""),
+        ]
+    )
+    mru = MruStore(tmp_path / "mru.json")
+    mru.record("banana-skill")  # banana was used recently
+    src = UnifiedSlashSource(mem, mru)
+    matches = src.rank("ll")  # both contain 'll' inside 'skill' → tier 4
+    names = [_name_of(m.item) for m in matches]
+    # banana-skill should rank above apple-skill thanks to MRU bonus
+    # (otherwise alphabetical would put apple first).
+    apple_pos = names.index("apple-skill")
+    banana_pos = names.index("banana-skill")
+    assert banana_pos < apple_pos
+
+
+def test_rank_mru_bonus_does_not_exceed_one(tmp_path: Path) -> None:
+    """A tier-1 match plus MRU bonus must cap at 1.0."""
+    mem = _FakeMemory([])
+    mru = MruStore(tmp_path / "mru.json")
+    mru.record("rename")  # rename is a tier-1 prefix hit on "re"
+    src = UnifiedSlashSource(mem, mru)
+    matches = src.rank("re")
+    rename_match = next(m for m in matches if _name_of(m.item) == "rename")
+    assert rename_match.score == 1.0  # capped, not 1.05
+
+
+def test_rank_empty_prefix_floats_mru_recent_above_alphabetical(tmp_path: Path) -> None:
+    """Empty prefix: MRU items show first (top 5), then alphabetical."""
+    mem = _FakeMemory(
+        [_FakeSkillMeta(id=f"skill-{c}", name=f"skill-{c}", description="") for c in "abcdef"]
+    )
+    mru = MruStore(tmp_path / "mru.json")
+    mru.record("skill-e")
+    mru.record("skill-c")
+    src = UnifiedSlashSource(mem, mru)
+    matches = src.rank("", top_n=20)
+    names = [_name_of(m.item) for m in matches]
+    # MRU-recent show first — order is "most recent first" so skill-c then skill-e.
+    assert names[0] == "skill-c"
+    assert names[1] == "skill-e"
+    # The rest are alphabetical: skill-a, skill-b, skill-d, skill-f, then commands.
+    rest_skills = [n for n in names[2:] if n.startswith("skill-")]
+    assert rest_skills == sorted(rest_skills)
+
+
+def test_rank_mru_top_5_cap(tmp_path: Path) -> None:
+    """Empty prefix: only top 5 MRU items are floated; the 6th+ MRU
+    items appear in the alphabetical tail."""
+    mem = _FakeMemory(
+        [_FakeSkillMeta(id=f"s-{i:02d}", name=f"s-{i:02d}", description="") for i in range(10)]
+    )
+    mru = MruStore(tmp_path / "mru.json")
+    # Record 7 items (most recent last).
+    for i in range(7):
+        mru.record(f"s-{i:02d}")
+    src = UnifiedSlashSource(mem, mru)
+    matches = src.rank("", top_n=20)
+    names = [_name_of(m.item) for m in matches]
+    # First 5 should be MRU items (last-recorded first): s-06, s-05, s-04, s-03, s-02.
+    assert names[0] == "s-06"
+    assert names[1] == "s-05"
+    assert names[2] == "s-04"
+    assert names[3] == "s-03"
+    assert names[4] == "s-02"
+    # s-00 and s-01 are MRU-but-not-top-5; they appear in the alphabetical tail.
+    s00_pos = names.index("s-00")
+    s01_pos = names.index("s-01")
+    assert s00_pos > 4
+    assert s01_pos > 4
+
+
+def test_rank_empty_prefix_with_uninstalled_mru_entries(tmp_path: Path) -> None:
+    """BLOCKER B2 (refined) — MRU file may reference skills the user
+    has since uninstalled. Empty-prefix sort silently skips them rather
+    than crashing or rendering ghost rows."""
+    mem = _FakeMemory(
+        [_FakeSkillMeta(id="still-here", name="still-here")]
+    )
+    mru = MruStore(tmp_path / "mru.json")
+    mru.record("uninstalled-skill")  # not in the current skill list
+    mru.record("still-here")
+    src = UnifiedSlashSource(mem, mru)
+    matches = src.rank("")
+    names = [m.item.id for m in matches if isinstance(m.item, SkillEntry)]
+    assert "still-here" in names
+    assert "uninstalled-skill" not in names  # silently skipped
