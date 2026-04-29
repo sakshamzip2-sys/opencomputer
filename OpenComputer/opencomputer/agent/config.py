@@ -163,6 +163,15 @@ class MemoryConfig:
     config.yaml; today's CLI does not start a background scheduler — users
     drive consolidation via cron/launchd/systemd or by running
     ``dream-now`` manually."""
+    # OpenClaw 1.B-alt — proactive local recall prepend.
+    active_memory_enabled: bool = False
+    """When True, the agent loop unconditionally queries local FTS5
+    indices (episodic + messages) for the user's most recent turn and
+    prepends a `<relevant-memories>` block to the per-turn system prompt.
+    Different from Honcho prefetch (network-based external store). Default
+    OFF — opt-in via config.yaml::memory.active_memory_enabled = true."""
+    active_memory_top_n: int = 3
+    """Cap on combined episodic + message hits prepended."""
 
 
 @dataclass(frozen=True, slots=True)
