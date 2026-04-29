@@ -41,6 +41,9 @@ from opencomputer.agent.slash_commands_impl.platforms_cmd import PlatformsComman
 from opencomputer.agent.slash_commands_impl.reasoning_cmd import ReasoningCommand
 from opencomputer.agent.slash_commands_impl.save_cmd import SaveCommand
 from opencomputer.agent.slash_commands_impl.scrape import ScrapeCommand
+from opencomputer.agent.slash_commands_impl.persona_mode_cmd import (
+    PersonaModeCommand,
+)
 from opencomputer.agent.slash_commands_impl.skin_personality_cmd import (
     PersonalityCommand,
     SkinCommand,
@@ -77,6 +80,7 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # Batch 2 — runtime-only state setters:
     SkinCommand,
     PersonalityCommand,
+    PersonaModeCommand,  # /persona-mode — auto-classifier override
     # Batch 3 — quick wins:
     SaveCommand,
     AgentsCommand,

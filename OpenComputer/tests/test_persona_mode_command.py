@@ -93,3 +93,16 @@ def test_persona_mode_set_evicts_prompt_snapshot_via_runtime_flag():
     asyncio.run(cmd.execute("companion", rt))
 
     assert rt.custom.get("_persona_dirty") is True
+
+
+def test_persona_mode_command_is_registered():
+    """The /persona-mode command must be in the built-ins registry so
+    dispatch can find it."""
+    from opencomputer.agent.slash_commands import (
+        get_registered_commands,
+        register_builtin_slash_commands,
+    )
+
+    register_builtin_slash_commands()
+    names = {getattr(c, "name", "") for c in get_registered_commands()}
+    assert "persona-mode" in names
