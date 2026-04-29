@@ -421,12 +421,9 @@ def _badge_has_meaningful_content(runtime: object) -> bool:
     if personality and personality != "helpful":
         return True
 
+    # Persona unset (early session) OR non-chat → show; chat persona → hide.
     persona = runtime.custom.get("active_persona_id", "")
-    if persona in _CHAT_PERSONAS:
-        return False
-
-    # Persona unset (early session) OR set to a non-chat persona → show.
-    return True
+    return persona not in _CHAT_PERSONAS
 
 
 def _render_mode_badge(runtime: object) -> list[tuple[str, str]]:
