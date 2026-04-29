@@ -1335,8 +1335,9 @@ def _run_chat_session(
                 """``/model <id>`` mid-session swap (Sub-project C).
 
                 Resolves alias, mutates ``loop.config`` via dataclasses.replace
-                so subsequent turns pick up the new id. Same provider only —
-                cross-provider swap is a future PR.
+                so subsequent turns pick up the new id. AgentLoop reads
+                ``self.config.model.model`` per turn (loop.py:1971), so the
+                swap takes effect immediately.
                 """
                 import dataclasses as _dc
 
@@ -1352,6 +1353,29 @@ def _run_chat_session(
                 new_model_cfg = _dc.replace(loop.config.model, model=canonical)
                 loop.config = _dc.replace(loop.config, model=new_model_cfg)
                 return (True, f"swapped to {canonical}")
+
+            def _on_provider_swap(new_provider: str) -> tuple[bool, str]:
+                """``/provider <name>`` mid-session swap (Sub-project D).
+
+                Looks up the provider plugin by name, instantiates it
+                (provider.__init__ raises if env keys missing), swaps
+                ``loop.provider`` AND mutates ``loop.config.model.provider``
+                so subsequent calls route through the new provider.
+                """
+                import dataclasses as _dc
+
+                from opencomputer.agent.provider_swap import lookup_provider
+
+                try:
+                    new_prov = lookup_provider(new_provider)
+                except (ValueError, RuntimeError) as e:
+                    return (False, str(e))
+                loop.provider = new_prov
+                new_model_cfg = _dc.replace(
+                    loop.config.model, provider=new_provider
+                )
+                loop.config = _dc.replace(loop.config, model=new_model_cfg)
+                return (True, f"swapped to {new_provider}")
 
             slash_ctx = SlashContext(
                 console=console,
@@ -1372,6 +1396,7 @@ def _run_chat_session(
                 on_reload=_on_reload,
                 on_reload_mcp=_on_reload_mcp,
                 on_model_swap=_on_model_swap,
+                on_provider_swap=_on_provider_swap,
             )
             result = dispatch_slash(user_input, slash_ctx)
             if result.exit_loop:

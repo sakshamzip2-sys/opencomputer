@@ -88,6 +88,12 @@ class SlashContext:
         False,
         "model swap callback not wired",
     )
+    #: ``/provider <name>`` — swap the active provider plugin instance.
+    #: Returns ``(success, message)``. Sub-project D of model-agnosticism.
+    on_provider_swap: Callable[[str], tuple[bool, str]] = lambda _name: (
+        False,
+        "provider swap callback not wired",
+    )
 
 
 def _split_args(text: str) -> tuple[str, list[str]]:
@@ -164,6 +170,24 @@ def _handle_cost(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+_NATIVE_VENDOR_PREFIXES = {"anthropic", "openai", "bedrock", "openrouter"}
+
+
+def _handle_provider(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/provider [<name>]`` — show or swap the active provider (Sub-project D)."""
+    if not args:
+        p = getattr(ctx.config.model, "provider", "?")
+        ctx.console.print(f"[bold]active provider[/bold]  {p}")
+        return SlashResult(handled=True)
+    new_provider = args[0].strip()
+    success, message = ctx.on_provider_swap(new_provider)
+    if success:
+        ctx.console.print(f"[green]provider →[/green] {message}")
+    else:
+        ctx.console.print(f"[red]swap failed:[/red] {message}")
+    return SlashResult(handled=True)
+
+
 def _handle_model(ctx: SlashContext, args: list[str]) -> SlashResult:
     if not args:
         m = getattr(ctx.config.model, "model", "?")
@@ -172,6 +196,22 @@ def _handle_model(ctx: SlashContext, args: list[str]) -> SlashResult:
         return SlashResult(handled=True)
     # Mid-session swap (Sub-project C of model-agnosticism plan).
     new_model = args[0].strip()
+
+    # Sub-project D — vendor-prefix triggers cross-provider swap. OpenRouter
+    # accepts vendor/model verbatim (routes on its end). Native providers
+    # use only the model id after the slash.
+    if "/" in new_model:
+        vendor, model_only = new_model.split("/", 1)
+        if vendor in _NATIVE_VENDOR_PREFIXES:
+            prov_ok, prov_msg = ctx.on_provider_swap(vendor)
+            if not prov_ok:
+                ctx.console.print(
+                    f"[red]provider swap failed:[/red] {prov_msg}"
+                )
+                return SlashResult(handled=True)
+            if vendor != "openrouter":
+                new_model = model_only
+
     success, message = ctx.on_model_swap(new_model)
     if success:
         ctx.console.print(f"[green]model →[/green] {message}")
@@ -446,6 +486,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "export": _handle_export,
     "cost": _handle_cost,
     "model": _handle_model,
+    "provider": _handle_provider,
     "sessions": _handle_sessions,
     "rename": _handle_rename,
     "resume": _handle_resume,
