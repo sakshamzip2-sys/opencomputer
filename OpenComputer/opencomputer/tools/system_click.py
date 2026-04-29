@@ -140,8 +140,17 @@ def _click_dispatch(platform: str, x: int, y: int, button: str, double: bool) ->
     if platform == "linux":
         return _click_pyautogui(x, y, button, double) or _click_xdotool(x, y, button, double)
     if platform == "windows":
-        return _click_pyautogui(x, y, button, double)
+        return (
+            _click_win32_sendinput(x, y, button, double)
+            or _click_pyautogui(x, y, button, double)
+        )
     return False
+
+
+def _click_win32_sendinput(x: int, y: int, button: str, double: bool) -> bool:
+    """Stock-Windows ctypes SendInput. Zero-dep fallback before pyautogui."""
+    from opencomputer.tools._win32_input import click_at
+    return click_at(x, y, button=button, double=double)
 
 
 def _click_pyautogui(x: int, y: int, button: str, double: bool) -> bool:

@@ -113,6 +113,11 @@ class SystemKeystrokeTool(BaseTool):
 
 
 def _type_dispatch(platform: str, text: str) -> bool:
+    # Windows-first: try the zero-dep ctypes shim before pyautogui so
+    # stock-Windows installs (no `[gui]` extra) still work. macos/linux
+    # branches unchanged.
+    if platform == "windows" and _type_win32_sendinput(text):
+        return True
     if platform in ("macos", "linux", "windows") and _type_pyautogui(text):
         return True
     if platform == "linux":
@@ -120,6 +125,12 @@ def _type_dispatch(platform: str, text: str) -> bool:
     if platform == "macos":
         return _type_osascript(text)
     return False
+
+
+def _type_win32_sendinput(text: str) -> bool:
+    """Stock-Windows ctypes SendInput. Returns False on non-Windows."""
+    from opencomputer.tools._win32_input import type_text
+    return type_text(text)
 
 
 def _hotkey_dispatch(platform: str, keys: list[str]) -> bool:
