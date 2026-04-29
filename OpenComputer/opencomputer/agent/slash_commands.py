@@ -123,18 +123,23 @@ def dispatch_slash(message: str) -> str:
     import asyncio
 
     from opencomputer.agent.slash_dispatcher import dispatch
-    from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT
+    from plugin_sdk.runtime_context import RuntimeContext
 
     # Make sure built-ins are present before we dispatch — callers that
     # import this module just to call dispatch_slash shouldn't need a
     # separate registration step.
     register_builtin_slash_commands()
 
+    # Use a fresh RuntimeContext per call rather than the module-level
+    # ``DEFAULT_RUNTIME_CONTEXT`` singleton: many slash commands mutate
+    # ``runtime.custom[...]`` (e.g. ``/yolo``, ``/fast``, ``/reasoning``),
+    # and threading the global singleton through here would leak state
+    # across calls — including across test cases that import this helper.
     result = asyncio.run(
         dispatch(
             message,
             _plugin_registry.slash_commands,
-            DEFAULT_RUNTIME_CONTEXT,
+            RuntimeContext(),
         )
     )
     if result is None:

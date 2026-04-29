@@ -1002,6 +1002,55 @@ Enum that selects how multiple matched rules combine into a verdict:
 
 ---
 
+## Skills Hub (2026-04-28)
+
+Public ABC + dataclasses for the Skills Hub system. Plugins and OC's bundled
+hub adapters both implement `SkillSource` to expose searchable skill registries
+to the agent. Skill metadata flowing through the hub is a `SkillMeta`; full
+installable content (SKILL.md + auxiliary files) is a `SkillBundle`.
+
+### `SkillSource`
+
+Abstract base class for skill registry adapters. Implementations expose three
+methods:
+
+- `search(query: str, limit: int = 10) -> list[SkillMeta]` — return up to
+  `limit` skills matching the query.
+- `fetch(identifier: str) -> SkillBundle | None` — return the full bundle for
+  an identifier, or `None` if unknown.
+- `inspect(identifier: str) -> SkillMeta | None` — return rich metadata for
+  an identifier, or `None` if unknown.
+
+Adapters declare a stable `name` (e.g. `"well-known"`, `"github"`,
+`"agentskills_io"`) used in the `<source>/<name>` identifier form so the
+router can route `fetch()` calls back to the right source.
+
+### `SkillMeta`
+
+Frozen dataclass — lightweight descriptor returned by
+`SkillSource.search` / `inspect`. Required fields: `identifier`,
+`name`, `description`. Optional: `version`, `author`, `homepage`, `tags`,
+`trust_level` (defaults to `"community"`), `extra` (free-form dict).
+
+`identifier` MUST be `<source>/<name>` form so a router can route
+`fetch()` calls back to the right source.
+
+### `SkillBundle`
+
+Frozen dataclass — full installable content of a skill. Fields:
+
+- `identifier: str` — same `<source>/<name>` form as `SkillMeta`
+- `skill_md: str` — the SKILL.md body
+- `files: dict[str, str]` — auxiliary file paths → contents
+
+### `TrustLevel`
+
+`Literal["builtin", "trusted", "community", "untrusted"]`. Used on
+`SkillMeta.trust_level` to label the provenance of a skill so the agent
+loop / approval flow can render the right warnings.
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute

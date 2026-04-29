@@ -10,7 +10,6 @@ backwards-compatible guarantees across minor releases.
 __version__ = "0.1.0"
 
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
-from plugin_sdk.skill_source import SkillBundle, SkillMeta, SkillSource, TrustLevel
 from plugin_sdk.classifier import (
     AggregationPolicy,
     Classifier,
@@ -105,6 +104,7 @@ from plugin_sdk.sandbox import (
     SandboxStrategyName,
     SandboxUnavailable,
 )
+from plugin_sdk.skill_source import SkillBundle, SkillMeta, SkillSource, TrustLevel
 from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 from plugin_sdk.transports import NormalizedRequest, NormalizedResponse, TransportBase
