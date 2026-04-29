@@ -9,7 +9,6 @@ without importing Rich/prompt_toolkit.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Union
 
 
 @dataclass(frozen=True)
@@ -42,7 +41,7 @@ class SkillEntry:
 
 
 #: Either kind of row that can appear in the slash dropdown.
-SlashItem = Union[CommandDef, SkillEntry]
+SlashItem = CommandDef | SkillEntry
 
 
 @dataclass

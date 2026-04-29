@@ -17,7 +17,7 @@ from collections.abc import Iterable
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
 
-from .slash import SLASH_REGISTRY, CommandDef, SkillEntry, SlashItem
+from .slash import SLASH_REGISTRY, CommandDef, SlashItem
 from .slash_picker_source import UnifiedSlashSource
 
 #: Spec §3.6 — descriptions trimmed at this length on word boundary.

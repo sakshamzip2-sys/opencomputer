@@ -16,7 +16,12 @@ These tests focus on the message-shape contract:
 """
 from __future__ import annotations
 
+import pytest
+
+from plugin_sdk.core import Message
+from plugin_sdk.provider_contract import BaseProvider, ProviderResponse, Usage
 from plugin_sdk.slash_command import SlashCommandResult
+from plugin_sdk.tool_contract import ToolSchema
 
 
 def test_skill_result_wraps_as_tool_use_pair():
@@ -82,12 +87,6 @@ def test_skill_args_passed_into_tool_call_arguments():
 
 
 # ─── Task 12.5: full-turn provider integration (audit BLOCKER A1+D3) ──
-
-
-import pytest
-from plugin_sdk.core import Message, ToolCall
-from plugin_sdk.provider_contract import BaseProvider, ProviderResponse, Usage
-from plugin_sdk.tool_contract import ToolSchema
 
 
 class _RecordingProvider(BaseProvider):
