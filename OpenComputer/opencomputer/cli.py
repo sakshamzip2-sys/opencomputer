@@ -1373,6 +1373,7 @@ def _run_chat_session(
                 session_title=_title,
                 paste_folder=paste_folder,
                 memory_manager=loop.memory if loop is not None else None,
+                runtime=loop._runtime if loop is not None else None,
             )
 
         # Drain a queued prompt (set via /queue <text>) before prompting

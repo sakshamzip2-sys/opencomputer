@@ -331,6 +331,80 @@ def _try_attach_clipboard_image_into_buffer(
     return True
 
 
+#: 2026-04-29 — order in which Shift+Tab cycles permission modes. Matches
+#: Claude Code's "default → accept-edits → auto → plan" pattern.
+_PERMISSION_MODE_CYCLE: tuple = (
+    "default",
+    "accept-edits",
+    "auto",
+    "plan",
+)
+
+
+def _cycle_permission_mode(runtime: object) -> str:
+    """Advance the runtime's permission mode through the canonical cycle.
+
+    Mutates ``runtime.custom`` in place (the same pattern slash commands
+    use). Returns the new mode value as a string. Safe to call with the
+    minimal RuntimeContext-like surface — only requires ``.custom`` dict.
+    """
+    from plugin_sdk import PermissionMode, effective_permission_mode
+
+    current_value = effective_permission_mode(runtime).value
+    try:
+        idx = _PERMISSION_MODE_CYCLE.index(current_value)
+    except ValueError:
+        idx = -1
+    new_value = _PERMISSION_MODE_CYCLE[(idx + 1) % len(_PERMISSION_MODE_CYCLE)]
+    new_mode = PermissionMode(new_value)
+
+    # Mirror the _set_mode helper from mode_cmd.py — clear all legacy keys
+    # before writing so /auto then Shift+Tab+Tab can't leak stale state.
+    if new_mode == PermissionMode.DEFAULT:
+        runtime.custom.pop("permission_mode", None)
+        runtime.custom.pop("plan_mode", None)
+        runtime.custom.pop("yolo_session", None)
+        runtime.custom.pop("accept_edits", None)
+    else:
+        runtime.custom["permission_mode"] = new_mode.value
+        runtime.custom["plan_mode"] = new_mode == PermissionMode.PLAN
+        runtime.custom["yolo_session"] = new_mode == PermissionMode.AUTO
+        runtime.custom["accept_edits"] = new_mode == PermissionMode.ACCEPT_EDITS
+    return new_value
+
+
+_MODE_GLYPH = {
+    "default": "[D]",
+    "accept-edits": "[E]",
+    "auto": "[A]",
+    "plan": "[P]",
+}
+
+_MODE_STYLE = {
+    "default": "fg:ansigreen",
+    "accept-edits": "fg:ansiblue",
+    "auto": "fg:ansired bold",
+    "plan": "fg:ansiyellow",
+}
+
+
+def _render_mode_badge(runtime: object) -> list[tuple[str, str]]:
+    """Render the bottom-bar permission-mode badge as FormattedText.
+
+    Includes both an ASCII glyph (for ``NO_COLOR`` and screen readers) and
+    a colour style. Returns ``[]`` for callers that pass no runtime so the
+    badge collapses gracefully.
+    """
+    if runtime is None:
+        return []
+    from plugin_sdk import effective_permission_mode
+
+    mode = effective_permission_mode(runtime).value
+    glyph = _MODE_GLYPH.get(mode, "[?]")
+    style = _MODE_STYLE.get(mode, "")
+    return [(style, f" {glyph} mode: {mode} "), ("", "  Shift+Tab to cycle")]
+
+
 async def read_user_input(
     *,
     profile_home: Path,
@@ -338,6 +412,7 @@ async def read_user_input(
     session_title: str | None = None,
     paste_folder: PasteFolder | None = None,
     memory_manager: object | None = None,
+    runtime: object | None = None,
 ) -> str:
     """Read one line of user input with an always-visible slash dropdown.
 
@@ -539,6 +614,18 @@ async def read_user_input(
     @kb.add(Keys.ControlI, filter=Condition(_has_dropdown))  # Tab
     def _tab(event):  # noqa: ANN001
         _apply_selection()
+
+    @kb.add(Keys.BackTab)  # Shift+Tab — cycle permission modes
+    def _shift_tab(event):  # noqa: ANN001
+        # Only cycles when a runtime is wired. Tests + legacy callers
+        # that don't pass runtime get a no-op (safe).
+        if runtime is None:
+            return
+        try:
+            _cycle_permission_mode(runtime)
+        except Exception:  # noqa: BLE001 — never crash the input loop
+            return
+        event.app.invalidate()
 
     @kb.add(Keys.Enter)
     def _enter(event):  # noqa: ANN001
@@ -755,6 +842,22 @@ async def read_user_input(
         filter=Condition(_has_paste_hint),
     )
 
+    # 2026-04-29 — permission-mode badge. Bottom-most row when a runtime
+    # is wired and we're rendering to a real TTY (piped input mode skips).
+    import sys as _sys_for_tty
+    _badge_visible = runtime is not None and _sys_for_tty.stdout.isatty()
+
+    def _badge_text() -> list[tuple[str, str]]:
+        return _render_mode_badge(runtime)
+
+    badge_window = ConditionalContainer(
+        content=Window(
+            content=FormattedTextControl(_badge_text),
+            height=1,
+        ),
+        filter=Condition(lambda: _badge_visible),
+    )
+
     layout = Layout(
         HSplit(
             [
@@ -764,6 +867,7 @@ async def read_user_input(
                 title_window,
                 VSplit([prompt_window, input_window]),
                 paste_hint_window,
+                badge_window,
             ]
         ),
         focused_element=input_window,
