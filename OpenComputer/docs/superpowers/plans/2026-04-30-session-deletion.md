@@ -189,11 +189,12 @@ Find the existing `set_session_title` method around line 586 and add `delete_ses
         Returns True if a session row was removed, False if no session
         had that id.
 
-        Cascades automatically (ON DELETE CASCADE FK + FTS triggers):
-            - messages → messages_fts
-            - episodic_events → episodic_fts
+        Cascades automatically — every child table has ``FOREIGN KEY
+        (session_id) REFERENCES sessions(id) ON DELETE CASCADE`` and
+        ``PRAGMA foreign_keys=ON`` is set on every connection (line 448):
 
-        Removed explicitly in the same transaction (no FK):
+            - messages → messages_fts (delete trigger fires on cascade)
+            - episodic_events → episodic_fts
             - vibe_log
             - tool_usage
 
@@ -202,24 +203,10 @@ Find the existing `set_session_title` method around line 586 and add `delete_ses
             - consent_grants / consent_counters (per-capability scope,
               not per-session)
         """
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                # Side tables that lack FK cascade.
-                conn.execute(
-                    "DELETE FROM vibe_log WHERE session_id = ?", (session_id,)
-                )
-                conn.execute(
-                    "DELETE FROM tool_usage WHERE session_id = ?", (session_id,)
-                )
-                cur = conn.execute(
-                    "DELETE FROM sessions WHERE id = ?", (session_id,)
-                )
-                conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
-            return cur.rowcount > 0
+        with self._txn() as conn:
+            cur = conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            deleted = cur.rowcount > 0
+        return deleted
 ```
 
 - [ ] **Step 2.2: Run the tests, expect green**
@@ -406,7 +393,17 @@ EOF
 ## Task 5: Failing test for picker delete keybinding
 
 **Files:**
+- Create: `tests/cli_ui/` directory if it does not exist
 - Create: `tests/cli_ui/test_resume_picker_delete.py`
+
+- [ ] **Step 5.0: Ensure target directory exists**
+
+```bash
+mkdir -p tests/cli_ui
+ls tests/cli_ui
+```
+
+(pytest's namespace-package discovery picks the new dir up without `__init__.py`.)
 
 - [ ] **Step 5.1: Write the failing test (state-machine focused — pure-logic, no PT app run)**
 
@@ -619,48 +616,55 @@ def _list_text():
     return out
 ```
 
-Add the new keybindings (and gate existing ones on mode):
+**Critical:** plain-character keybindings (`d`, `y`, `n`) would shadow letters typed into the search buffer. Use `Ctrl+D` for delete (a control sequence, never a typed character) and gate `y` / `n` with `filter=Condition(...)` so they only intercept keys when in confirm-delete mode — otherwise they fall through to the search buffer normally. This matches the existing pattern at [input_loop.py:248](../../opencomputer/cli_ui/input_loop.py#L248) (`@kb.add(Keys.ControlI, filter=Condition(_in_slash_token))`).
+
+Add the import at the top of `resume_picker.py`:
 
 ```python
-@kb.add("d")
-def _delete_request(event):  # noqa: ANN001
-    if state["mode"] == "navigate" and state["filtered"]:
-        _enter_confirm_delete(state)
-
-@kb.add("y")
-def _confirm_yes(event):  # noqa: ANN001
-    if state["mode"] == "confirm-delete" and db is not None:
-        _commit_confirm_delete(state, db)
-
-@kb.add("n")
-def _confirm_no(event):  # noqa: ANN001
-    if state["mode"] == "confirm-delete":
-        _exit_confirm_delete(state)
+from prompt_toolkit.filters import Condition
 ```
 
-Gate the existing Up/Down/Enter so they don't fire mid-confirm:
+Add the filter helpers and keybindings:
 
 ```python
-@kb.add(Keys.Up)
+def _is_navigating() -> bool:
+    return state["mode"] == "navigate"
+
+def _is_confirming() -> bool:
+    return state["mode"] == "confirm-delete"
+
+@kb.add(Keys.ControlD, filter=Condition(_is_navigating))
+def _delete_request(event):  # noqa: ANN001
+    if state["filtered"]:
+        _enter_confirm_delete(state)
+
+@kb.add("y", filter=Condition(_is_confirming))
+def _confirm_yes(event):  # noqa: ANN001
+    if db is not None:
+        _commit_confirm_delete(state, db)
+
+@kb.add("n", filter=Condition(_is_confirming))
+def _confirm_no(event):  # noqa: ANN001
+    _exit_confirm_delete(state)
+```
+
+Gate the existing Up/Down/Enter with the same `Condition(_is_navigating)` filter so they don't fire mid-confirm (and so confirm-mode key handling is fully exclusive):
+
+```python
+@kb.add(Keys.Up, filter=Condition(_is_navigating))
 def _up(event):  # noqa: ANN001
-    if state["mode"] != "navigate":
-        return
     if state["filtered"]:
         state["selected_idx"] = max(0, state["selected_idx"] - 1)
 
-@kb.add(Keys.Down)
+@kb.add(Keys.Down, filter=Condition(_is_navigating))
 def _down(event):  # noqa: ANN001
-    if state["mode"] != "navigate":
-        return
     if state["filtered"]:
         state["selected_idx"] = min(
             len(state["filtered"]) - 1, state["selected_idx"] + 1
         )
 
-@kb.add(Keys.Enter)
+@kb.add(Keys.Enter, filter=Condition(_is_navigating))
 def _enter(event):  # noqa: ANN001
-    if state["mode"] != "navigate":
-        return
     if state["filtered"] and 0 <= state["selected_idx"] < len(state["filtered"]):
         sel = state["filtered"][state["selected_idx"]]
         event.app.exit(result=sel.id)
@@ -690,7 +694,7 @@ style = Style.from_dict(
 )
 ```
 
-Update the footer to include the new key:
+Update the footer to include the new key (`Ctrl+D` shown explicitly so the user discovers it):
 
 ```python
 def _footer_text():
@@ -708,7 +712,7 @@ def _footer_text():
         ("class:footer", " navigate    "),
         ("class:footer.key", "enter"),
         ("class:footer", " resume    "),
-        ("class:footer.key", "d"),
+        ("class:footer.key", "Ctrl+D"),
         ("class:footer", " delete    "),
         ("class:footer.key", "esc"),
         ("class:footer", " cancel"),
@@ -1243,12 +1247,16 @@ After `delete_session` add:
     ) -> int:
         """Delete stale sessions matching either of two policies.
 
-        Policy A: any session whose started_at is older than
+        Policy A: any session whose ``started_at`` is older than
                   ``older_than_days`` days. Disabled when set to 0.
         Policy B: untitled sessions with fewer than ``min_messages``
-                  messages whose started_at is older than
-                  ``untitled_days`` days. Disabled when ``untitled_days``
-                  is 0.
+                  messages whose ``started_at`` is older than
+                  ``untitled_days`` days. Disabled when
+                  ``untitled_days`` is 0.
+
+        Either or both policies may be active. The two clauses combine
+        with SQL ``OR`` so we run a single SELECT (no client-side dedupe
+        and no fragile ``NOT IN`` empty-set handling).
 
         Caps deletion at ``cap`` rows per call to keep startup fast.
         Returns the count of sessions actually removed.
@@ -1256,31 +1264,26 @@ After `delete_session` add:
         if older_than_days <= 0 and untitled_days <= 0:
             return 0
         now = time.time()
-        ids: list[str] = []
+        clauses: list[str] = []
+        params: list[Any] = []
+        if older_than_days > 0:
+            clauses.append("started_at < ?")
+            params.append(now - older_than_days * 86400)
+        if untitled_days > 0:
+            clauses.append(
+                "(started_at < ? AND (title IS NULL OR title = '') "
+                "AND COALESCE(message_count, 0) < ?)"
+            )
+            params.append(now - untitled_days * 86400)
+            params.append(min_messages)
+        where = " OR ".join(clauses)
         with self._connect() as conn:
-            if older_than_days > 0:
-                cutoff = now - older_than_days * 86400
-                rows = conn.execute(
-                    "SELECT id FROM sessions WHERE started_at < ? LIMIT ?",
-                    (cutoff, cap),
-                ).fetchall()
-                ids.extend(r[0] for r in rows)
-            if untitled_days > 0 and len(ids) < cap:
-                cutoff = now - untitled_days * 86400
-                remaining = cap - len(ids)
-                rows = conn.execute(
-                    "SELECT id FROM sessions WHERE started_at < ? "
-                    "AND (title IS NULL OR title = '') "
-                    "AND COALESCE(message_count, 0) < ? "
-                    "AND id NOT IN ({}) "
-                    "LIMIT ?".format(
-                        ",".join(["?"] * len(ids)) if ids else "''"
-                    ),
-                    (cutoff, min_messages, *ids, remaining),
-                ).fetchall()
-                ids.extend(r[0] for r in rows)
+            rows = conn.execute(
+                f"SELECT id FROM sessions WHERE {where} LIMIT ?",
+                (*params, cap),
+            ).fetchall()
         deleted = 0
-        for sid in ids[:cap]:
+        for (sid,) in rows:
             if self.delete_session(sid):
                 deleted += 1
         return deleted
@@ -1303,25 +1306,19 @@ git commit -m "feat(state): SessionDB.auto_prune with age + untitled policies, c
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 ```
 
-## Task 14: Add `SessionConfig` dataclass + load wiring
+## Task 14: Extend existing `SessionConfig` with auto-prune fields
 
 **Files:**
-- Modify: `opencomputer/agent/config.py`
+- Modify: `opencomputer/agent/config.py:118-123` — extend the existing `SessionConfig` dataclass.
 
-- [ ] **Step 14.1: Read the current config dataclass shapes**
+**Important:** A `SessionConfig` dataclass **already exists** at [config.py:118-123](../../opencomputer/agent/config.py#L118-L123) with `db_path` and `session_id` fields and is wired into `Config.session` already. Do NOT create a new one — extend the existing one with the three new fields. Because the loader uses `_apply_overrides` ([config_store.py:35](../../opencomputer/agent/config_store.py#L35)) which recursively maps YAML dicts to nested dataclasses, simply adding fields to `SessionConfig` is sufficient — no manual parsing in `config_store.py` is needed.
 
-```bash
-grep -n "^class.*Config\|@dataclass" opencomputer/agent/config.py | head
-```
-
-This shows the existing config classes (`ModelConfig`, `LoopConfig`, `MemoryConfig`, etc.). Pick the same pattern.
-
-- [ ] **Step 14.2: Failing test**
+- [ ] **Step 14.1: Failing test**
 
 Create `tests/test_session_config.py`:
 
 ```python
-"""SessionConfig dataclass + YAML loader."""
+"""SessionConfig auto-prune fields + YAML loader integration."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -1332,14 +1329,24 @@ from opencomputer.agent.config import SessionConfig
 from opencomputer.agent.config_store import load_config
 
 
-def test_session_config_defaults() -> None:
+def test_session_config_existing_fields_preserved() -> None:
     cfg = SessionConfig()
-    assert cfg.auto_prune_days == 0
+    # Pre-existing fields unchanged.
+    assert cfg.session_id is None
+    assert str(cfg.db_path).endswith("sessions.db")
+
+
+def test_session_config_auto_prune_defaults() -> None:
+    cfg = SessionConfig()
+    assert cfg.auto_prune_days == 0  # disabled by default
     assert cfg.auto_prune_untitled_days == 7
     assert cfg.auto_prune_min_messages == 3
 
 
-def test_load_config_reads_session_block(tmp_path: Path) -> None:
+def test_load_config_reads_auto_prune_block(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(yaml.safe_dump({
         "session": {"auto_prune_days": 90, "auto_prune_untitled_days": 14}
@@ -1350,76 +1357,76 @@ def test_load_config_reads_session_block(tmp_path: Path) -> None:
     assert cfg.session.auto_prune_min_messages == 3  # default kept
 
 
-def test_load_config_missing_session_block_uses_defaults(tmp_path: Path) -> None:
+def test_load_config_missing_session_block_uses_defaults(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(yaml.safe_dump({"model": {"name": "claude-sonnet-4"}}))
     cfg = load_config(cfg_path)
     assert cfg.session.auto_prune_days == 0
 ```
 
-- [ ] **Step 14.3: Run, expect ImportError or AttributeError**
+- [ ] **Step 14.2: Run, expect AttributeError on `auto_prune_days`**
 
 ```bash
 pytest tests/test_session_config.py -v 2>&1 | tail -10
 ```
 
-Expected: failures.
+Expected: failures because the field doesn't exist yet.
 
-- [ ] **Step 14.4: Add `SessionConfig` to `opencomputer/agent/config.py`**
+- [ ] **Step 14.3: Extend the existing SessionConfig**
 
-Add (location: alongside the other `*Config` dataclasses):
+In `opencomputer/agent/config.py`, replace the existing class at lines 118-123:
 
 ```python
-@dataclass
+@dataclass(frozen=True, slots=True)
 class SessionConfig:
-    """Session lifecycle / cleanup config.
+    """Where sessions are stored, how, and lifecycle policy."""
 
-    All defaults preserve current behaviour: auto_prune_days=0 means no
-    automatic deletion at startup. Operators opt in by setting it to a
-    positive integer (recommended: 90).
-    """
+    db_path: Path = field(default_factory=lambda: _home() / "sessions.db")
+    session_id: str | None = None  # None = create new session each run
 
+    # 2026-04-30: opt-in auto-prune at AgentLoop startup. Defaults to disabled
+    # so existing configs keep current behaviour. Recommended override: 90.
     auto_prune_days: int = 0
     auto_prune_untitled_days: int = 7
     auto_prune_min_messages: int = 3
 ```
 
-Add the field to whatever the top-level `Config` dataclass is named (search the file for `class Config` or `class OCConfig`). Example field addition:
+No changes to `config_store.py` — `_apply_overrides` handles the new fields automatically.
 
-```python
-    session: SessionConfig = field(default_factory=SessionConfig)
-```
-
-- [ ] **Step 14.5: Wire into `config_store.load_config`**
-
-In `opencomputer/agent/config_store.py`, find the section where `Config(...)` is constructed from the YAML dict and add:
-
-```python
-    session_data = raw.get("session", {}) if isinstance(raw, dict) else {}
-    session = SessionConfig(
-        auto_prune_days=int(session_data.get("auto_prune_days", 0)),
-        auto_prune_untitled_days=int(session_data.get("auto_prune_untitled_days", 7)),
-        auto_prune_min_messages=int(session_data.get("auto_prune_min_messages", 3)),
-    )
-```
-
-…then pass `session=session` to the `Config(...)` constructor.
-
-- [ ] **Step 14.6: Run config tests**
+- [ ] **Step 14.4: Run tests, expect green**
 
 ```bash
 pytest tests/test_session_config.py -v 2>&1 | tail -10
 ```
 
-Expected: 3 passed.
+Expected: 4 passed.
 
-- [ ] **Step 14.7: Commit**
+- [ ] **Step 14.5: Run the full SessionConfig consumer set to confirm no regression**
 
 ```bash
-git add opencomputer/agent/config.py opencomputer/agent/config_store.py tests/test_session_config.py
-git commit -m "feat(config): add session.auto_prune_* config schema (defaults disabled)
+pytest -q -k "config or session" --ignore=tests/integration 2>&1 | tail -8
+```
 
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+Expected: existing config tests still green.
+
+- [ ] **Step 14.6: Commit**
+
+```bash
+git add opencomputer/agent/config.py tests/test_session_config.py
+git commit -m "$(cat <<'EOF'
+feat(config): extend SessionConfig with auto_prune_* fields (defaults disabled)
+
+Adds three fields to the existing dataclass: auto_prune_days,
+auto_prune_untitled_days, auto_prune_min_messages. _apply_overrides
+already handles nested dataclass YAML mapping, so no config_store.py
+changes are needed.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+EOF
+)"
 ```
 
 ## Task 15: Wire `auto_prune` into AgentLoop startup
@@ -1578,9 +1585,15 @@ Expected: 30+ untitled sessions cleared in one command. The screenshot pile is g
 
 ---
 
-## Self-review checklist (already applied; record only)
+## Self-review checklist (audit-corrected on 2026-04-30)
 
 - [x] **Spec coverage:** every section of the design doc maps to a task — §4.1 → Task 2; §4.2 → Task 4; §4.3 → Task 6; §4.4 → Tasks 13-15; §4.5 → Task 11; §6 tests → Tasks 1, 3, 5, 8, 10, 13, 14, 15.
-- [x] **Placeholder scan:** no TBD / TODO / "implement later" / "fill in details" / vague exception messages — every step shows actual code, exact paths, exact commands.
-- [x] **Type consistency:** `delete_session(session_id) -> bool` used identically across SessionDB → CLI → picker → auto_prune. `_parse_age(spec) -> int` returns seconds everywhere. `SessionConfig.auto_prune_days` field name unchanged from spec → config dataclass → AgentLoop.
-- [x] **Audit-log handling:** spec said "write per-delete audit row". Plan defers audit writes — `delete_session` does not currently write to `audit_log` because the SessionDB layer doesn't have an `AuditLogger` reference; the audit-write would need plumbing through every caller. Recommend deferring this to a follow-up issue (call it out in PR-1's body) rather than blocking the ship; the spec table called it `MEDIUM` impact, and the `audit_log` triggers prevent any tampering anyway.
+- [x] **Placeholder scan:** no TBD / TODO / "implement later" — every step shows actual code, exact paths, exact commands.
+- [x] **Type consistency:** `delete_session(session_id) -> bool`, `_parse_age(spec) -> int` (seconds), `SessionConfig.auto_prune_*` field names match across plan, spec, and (now extended) existing dataclass.
+- [x] **BLOCKER 1 — `SessionConfig` name collision:** Audit found existing dataclass at config.py:118 with `db_path` + `session_id`. Task 14 rewritten to **extend** it, not replace. `_apply_overrides` handles nested-dataclass YAML mapping automatically — no `config_store.py` changes.
+- [x] **BLOCKER 2 — `_txn()` not `_connect()`:** Task 2's `delete_session` rewritten to use the existing `_txn()` context manager (handles BEGIN IMMEDIATE / COMMIT / SQLITE_BUSY retry / `conn.close()`). Manual transaction handling removed.
+- [x] **BLOCKER 3 — keybinding shadowing:** Task 6 switched from `d/y/n` raw bindings to `Ctrl+D` (control sequence, never typed) for delete; `y`/`n` gated with `filter=Condition(_is_confirming)` so they fall through to the search buffer when not in confirm mode. Pattern matches `input_loop.py:248`.
+- [x] **BLOCKER 4 — `NOT IN ('')` empty-set bug:** Task 13's `auto_prune` SQL rewritten as a single `WHERE clause1 OR clause2` SELECT — no client-side accumulator, no `NOT IN` pseudo-exclusion, no fragile empty-list path.
+- [x] **HIGH — cascade fact correction:** Audit confirmed `vibe_log` (line 362) and `tool_usage` (line 326) BOTH have `ON DELETE CASCADE`. Plan's `delete_session` simplified to a single `DELETE FROM sessions WHERE id = ?` — every child table cleans up via cascade + FTS triggers.
+- [x] **MEDIUM — `tests/cli_ui/` directory:** Step 5.0 added to `mkdir -p` it before writing the test file.
+- [x] **Audit-log handling:** spec said "write per-delete audit row". Plan defers audit writes — `delete_session` does not currently write to `audit_log` because the SessionDB layer doesn't have an `AuditLogger` reference; plumbing audit through every caller is out of scope for this slice. Called out in PR body as a follow-up. Risk is bounded — the `audit_log_no_update` / `audit_log_no_delete` triggers ensure existing audit history can't be tampered with.

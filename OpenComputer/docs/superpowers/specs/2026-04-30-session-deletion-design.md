@@ -55,11 +55,11 @@ def delete_session(self, session_id: str) -> bool:
 
     Returns True if a row was removed, False if no session had that id.
 
-    Cascades (via FOREIGN KEY ... ON DELETE CASCADE):
+    Cascades (every child table has FOREIGN KEY ... ON DELETE CASCADE):
         - messages → also clears messages_fts via DELETE trigger
         - episodic_events → also clears episodic_fts via DELETE trigger
-        - vibe_log (no cascade FK; manual DELETE).
-        - tool_usage (no cascade FK; manual DELETE).
+        - vibe_log (cascade FK at state.py:362)
+        - tool_usage (cascade FK at state.py:326)
 
     Does NOT touch:
         - audit_log (F1 immutable audit log; kept for compliance).
@@ -69,10 +69,10 @@ def delete_session(self, session_id: str) -> bool:
 
 Implementation notes:
 
-- Uses the same `with self._connect() as conn:` context manager. `PRAGMA foreign_keys=ON` is already set in `_connect` at [state.py:448](../../opencomputer/agent/state.py#L448), so cascade fires correctly.
-- For `vibe_log` and `tool_usage` (which lack cascade FKs in the v5/v6 schema additions), explicit `DELETE FROM <table> WHERE session_id = ?` runs in the same transaction.
+- Uses `self._txn()` (the existing `@contextmanager` at [state.py:456-476](../../opencomputer/agent/state.py#L456-L476)) to get retry-on-busy + commit/rollback + close handling — every other write method in `SessionDB` uses this. `PRAGMA foreign_keys=ON` is set at [state.py:448](../../opencomputer/agent/state.py#L448), so cascade fires correctly across all four child tables.
+- Body is a single `DELETE FROM sessions WHERE id = ?`. No explicit pre-deletes for child tables (audit found that the prior plan-v1 pre-deletes were redundant — the FKs cascade on the parent delete).
 - Returns `bool` from `cursor.rowcount > 0`. Allows callers to print "session not found" without an extra `SELECT`.
-- Writes one audit-log row per delete (capability `session.delete`, scope `session_id`) for traceability — F1 contract compatible.
+- **Audit log writes are deferred** to a follow-up. The `SessionDB` layer doesn't currently hold an `AuditLogger` reference; plumbing it through is out of scope for this slice. The append-only triggers on `audit_log` (`audit_log_no_update`, `audit_log_no_delete`) ensure existing audit history is not at risk regardless.
 
 ### 4.2 CLI — `oc session delete <id>`
 
