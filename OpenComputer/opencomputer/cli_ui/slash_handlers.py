@@ -375,6 +375,14 @@ def _handle_reload_mcp(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_debug(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/debug`` — print a sanitized diagnostic dump to console."""
+    from opencomputer.cli_ui.debug_dump import build_debug_dump
+
+    ctx.console.print(build_debug_dump())
+    return SlashResult(handled=True)
+
+
 _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "exit": _handle_exit,
     "clear": _handle_clear,
@@ -390,6 +398,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "snapshot": _handle_snapshot,
     "reload": _handle_reload,
     "reload-mcp": _handle_reload_mcp,
+    "debug": _handle_debug,
 }
 
 

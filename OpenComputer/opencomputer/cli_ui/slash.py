@@ -125,6 +125,11 @@ SLASH_REGISTRY: list[CommandDef] = [
         description="Disconnect + re-discover all MCP servers.",
         category="config",
     ),
+    CommandDef(
+        name="debug",
+        description="Sanitized diagnostic dump for bug reports (no secrets).",
+        category="meta",
+    ),
 ]
 
 
