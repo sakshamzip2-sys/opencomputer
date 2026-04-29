@@ -45,6 +45,19 @@ from opencomputer.awareness.learning_moments.predicates import (
     cross_session_recall,
     memory_continuity_first_recall,
     recent_files_paste,
+    suggest_auto_mode_for_long_task,
+    suggest_btw_for_aside,
+    suggest_checkpoint_before_rewrite,
+    suggest_diff_for_silent_edits,
+    suggest_history_for_lookback,
+    suggest_persona_for_companion_signals,
+    suggest_personality_after_friction,
+    suggest_plan_for_complex_task,
+    suggest_scrape_for_url,
+    suggest_skill_save_after_long_session,
+    suggest_undo_after_unwanted_edits,
+    suggest_usage_at_token_milestone,
+    suggest_voice_for_voice_user,
     user_md_unfilled,
     vibe_first_nonneutral,
 )
@@ -65,6 +78,12 @@ def _ctx(
     vibe_noncalm: int = 0,
     profile_home: Path | None = None,
     total_sessions: int = 0,
+    permission_mode_str: str = "",
+    recent_edit_count_this_turn: int = 0,
+    checkpoint_count_session: int = 0,
+    session_token_total: int = 0,
+    has_openai_key: bool = False,
+    turn_count: int = 0,
 ) -> Context:
     return Context(
         session_id="s-test",
@@ -74,6 +93,12 @@ def _ctx(
         vibe_log_session_count_total=vibe_total,
         vibe_log_session_count_noncalm=vibe_noncalm,
         sessions_db_total_sessions=total_sessions,
+        permission_mode_str=permission_mode_str,
+        recent_edit_count_this_turn=recent_edit_count_this_turn,
+        checkpoint_count_session=checkpoint_count_session,
+        session_token_total=session_token_total,
+        has_openai_key=has_openai_key,
+        turn_count=turn_count,
     )
 
 
@@ -632,6 +657,7 @@ def test_load_bearing_b_moment_bypasses_caps(tmp_path, monkeypatch):
 
 
 def test_registry_has_six_moments_with_three_surfaces():
+    """v1+v2 IDs must always be present; v3 adds 13 more on top."""
     ids = {m.id for m in all_moments()}
     assert "memory_continuity_first_recall" in ids
     assert "vibe_first_nonneutral" in ids
@@ -643,3 +669,262 @@ def test_registry_has_six_moments_with_three_surfaces():
     assert Surface.INLINE_TAIL in surfaces
     assert Surface.SYSTEM_PROMPT in surfaces
     assert Surface.SESSION_END in surfaces
+
+
+# ── v3 predicates (2026-04-30) ───────────────────────────────────────
+
+
+def test_suggest_plan_fires_on_long_multistep_request_outside_plan_mode():
+    msg = (
+        "Let's build the new authentication flow step by step — first "
+        "the login page with email and password, then the session "
+        "middleware that validates JWT tokens, then the password reset "
+        "flow with email verification, and finally the rate-limiting "
+        "and brute-force protection. Plan it out carefully first."
+    )
+    assert len(msg) >= 200, f"test fixture too short: {len(msg)}"
+    ctx = _ctx(user_message=msg, permission_mode_str="DEFAULT")
+    assert suggest_plan_for_complex_task(ctx) is True
+
+
+def test_suggest_plan_silent_in_plan_mode():
+    msg = "Let's plan this step by step across three phases of work " * 5
+    ctx = _ctx(user_message=msg, permission_mode_str="PLAN")
+    assert suggest_plan_for_complex_task(ctx) is False
+
+
+def test_suggest_plan_silent_for_short_messages():
+    ctx = _ctx(user_message="step by step please", permission_mode_str="DEFAULT")
+    assert suggest_plan_for_complex_task(ctx) is False
+
+
+def test_suggest_auto_fires_on_build_request_in_default_mode():
+    msg = "Can you build a new feature for managing user notifications?"
+    ctx = _ctx(user_message=msg, permission_mode_str="DEFAULT")
+    assert suggest_auto_mode_for_long_task(ctx) is True
+
+
+def test_suggest_auto_silent_when_already_in_auto():
+    msg = "Build a new feature for managing user notifications"
+    ctx = _ctx(user_message=msg, permission_mode_str="AUTO")
+    assert suggest_auto_mode_for_long_task(ctx) is False
+
+
+def test_suggest_auto_silent_in_plan_or_accept_edits():
+    msg = "Implement the new authentication module from scratch"
+    for mode in ("PLAN", "ACCEPT_EDITS"):
+        ctx = _ctx(user_message=msg, permission_mode_str=mode)
+        assert suggest_auto_mode_for_long_task(ctx) is False, mode
+
+
+def test_suggest_checkpoint_fires_on_rewrite_with_no_checkpoints():
+    ctx = _ctx(
+        user_message="Let's refactor the entire database layer from scratch",
+        checkpoint_count_session=0,
+    )
+    assert suggest_checkpoint_before_rewrite(ctx) is True
+
+
+def test_suggest_checkpoint_silent_when_checkpoints_exist():
+    ctx = _ctx(
+        user_message="Let's rewrite this whole module",
+        checkpoint_count_session=2,
+    )
+    assert suggest_checkpoint_before_rewrite(ctx) is False
+
+
+def test_suggest_undo_fires_after_three_edits_with_undo_keyword():
+    ctx = _ctx(
+        user_message="That's wrong, please revert",
+        recent_edit_count_this_turn=4,
+    )
+    assert suggest_undo_after_unwanted_edits(ctx) is True
+
+
+def test_suggest_undo_silent_with_few_edits():
+    ctx = _ctx(
+        user_message="That's wrong, please revert",
+        recent_edit_count_this_turn=1,
+    )
+    assert suggest_undo_after_unwanted_edits(ctx) is False
+
+
+def test_suggest_undo_silent_without_undo_keywords():
+    ctx = _ctx(
+        user_message="Looks great, thanks!",
+        recent_edit_count_this_turn=5,
+    )
+    assert suggest_undo_after_unwanted_edits(ctx) is False
+
+
+def test_suggest_diff_fires_on_what_changed_after_edits():
+    ctx = _ctx(
+        user_message="What did you change in there?",
+        recent_edit_count_this_turn=3,
+    )
+    assert suggest_diff_for_silent_edits(ctx) is True
+
+
+def test_suggest_diff_silent_with_no_recent_edits():
+    ctx = _ctx(user_message="what changed", recent_edit_count_this_turn=0)
+    assert suggest_diff_for_silent_edits(ctx) is False
+
+
+def test_suggest_usage_fires_above_100k_tokens():
+    ctx = _ctx(session_token_total=120_000)
+    assert suggest_usage_at_token_milestone(ctx) is True
+
+
+def test_suggest_usage_silent_below_100k():
+    ctx = _ctx(session_token_total=42_000)
+    assert suggest_usage_at_token_milestone(ctx) is False
+
+
+def test_suggest_history_fires_on_lookback_question():
+    ctx = _ctx(user_message="Earlier we were talking about authentication")
+    assert suggest_history_for_lookback(ctx) is True
+
+
+def test_suggest_history_silent_on_unrelated_message():
+    ctx = _ctx(user_message="Add a button to the page")
+    assert suggest_history_for_lookback(ctx) is False
+
+
+def test_suggest_btw_fires_on_aside_marker():
+    msg = (
+        "Can you finish the auth feature first. By the way, "
+        "remember we still need to update the docs."
+    )
+    ctx = _ctx(user_message=msg)
+    assert suggest_btw_for_aside(ctx) is True
+
+
+def test_suggest_btw_silent_on_too_short_message():
+    ctx = _ctx(user_message="btw hi")
+    assert suggest_btw_for_aside(ctx) is False
+
+
+def test_suggest_scrape_fires_on_bare_url():
+    ctx = _ctx(user_message="check this out https://example.com/docs/page")
+    assert suggest_scrape_for_url(ctx) is True
+
+
+def test_suggest_scrape_silent_when_user_already_says_scrape():
+    ctx = _ctx(
+        user_message="please scrape this https://example.com/docs/page for me",
+    )
+    assert suggest_scrape_for_url(ctx) is False
+
+
+def test_suggest_scrape_silent_when_no_url():
+    ctx = _ctx(user_message="just a normal message with no URL inside it")
+    assert suggest_scrape_for_url(ctx) is False
+
+
+def test_suggest_voice_fires_with_keyword_and_openai_key():
+    ctx = _ctx(
+        user_message="I want to talk to you in voice mode",
+        has_openai_key=True,
+    )
+    assert suggest_voice_for_voice_user(ctx) is True
+
+
+def test_suggest_voice_silent_without_openai_key():
+    ctx = _ctx(
+        user_message="I want to talk to you in voice mode",
+        has_openai_key=False,
+    )
+    assert suggest_voice_for_voice_user(ctx) is False
+
+
+def test_suggest_personality_fires_after_three_noncalm_vibes():
+    ctx = _ctx(vibe_total=10, vibe_noncalm=4)
+    assert suggest_personality_after_friction(ctx) is True
+
+
+def test_suggest_personality_silent_with_two_or_fewer_noncalm():
+    ctx = _ctx(vibe_total=10, vibe_noncalm=2)
+    assert suggest_personality_after_friction(ctx) is False
+
+
+def test_suggest_persona_companion_fires_on_emotion_anchor():
+    ctx = _ctx(user_message="rough day today, feeling overwhelmed by work")
+    assert suggest_persona_for_companion_signals(ctx) is True
+
+
+def test_suggest_persona_companion_silent_on_neutral_message():
+    ctx = _ctx(user_message="please add a new feature to the codebase")
+    assert suggest_persona_for_companion_signals(ctx) is False
+
+
+def test_suggest_skill_save_fires_at_twenty_turns():
+    ctx = _ctx(turn_count=20)
+    assert suggest_skill_save_after_long_session(ctx) is True
+
+
+def test_suggest_skill_save_silent_below_twenty_turns():
+    ctx = _ctx(turn_count=15)
+    assert suggest_skill_save_after_long_session(ctx) is False
+
+
+# ── v3 integration tests via select_reveal ───────────────────────────
+
+
+def test_v3_plan_suggestion_fires_via_select_reveal(tmp_path):
+    long_msg = (
+        "Let me build this step by step: first refactor the schema, "
+        "then migrate data, then update the API, then rewrite the UI."
+    )
+    ctx = _ctx(
+        profile_home=tmp_path,
+        user_message=long_msg * 3,
+        permission_mode_str="DEFAULT",
+    )
+    out = select_reveal(ctx_builder=lambda: ctx, profile_home=tmp_path)
+    assert out is not None
+    assert "/plan" in out
+
+
+def test_v3_skill_save_fires_via_session_end(tmp_path):
+    ctx = _ctx(profile_home=tmp_path, turn_count=25)
+    out = select_session_end_reflection(
+        ctx_builder=lambda: ctx, profile_home=tmp_path,
+    )
+    assert out is not None
+    assert "skills new" in out
+
+
+def test_v3_voice_fires_via_system_prompt_overlay(tmp_path):
+    ctx = _ctx(
+        profile_home=tmp_path,
+        user_message="I'd love to speak to me out loud, voice mode would be cool",
+        has_openai_key=True,
+    )
+    out = select_system_prompt_overlay(
+        ctx_builder=lambda: ctx, profile_home=tmp_path,
+    )
+    assert out is not None
+    assert "oc voice realtime" in out
+
+
+def test_registry_has_v3_moments_registered():
+    moments = all_moments()
+    ids = [m.id for m in moments]
+    assert len(moments) >= 19, f"expected ≥19 moments, got {len(moments)}"
+    assert len(set(ids)) == len(ids), "duplicate ids in registry"
+    v3_ids = {
+        "suggest_plan_for_complex_task",
+        "suggest_auto_mode_for_long_task",
+        "suggest_checkpoint_before_rewrite",
+        "suggest_undo_after_unwanted_edits",
+        "suggest_diff_for_silent_edits",
+        "suggest_usage_at_token_milestone",
+        "suggest_history_for_lookback",
+        "suggest_btw_for_aside",
+        "suggest_scrape_for_url",
+        "suggest_voice_for_voice_user",
+        "suggest_personality_after_friction",
+        "suggest_persona_for_companion_signals",
+        "suggest_skill_save_after_long_session",
+    }
+    assert v3_ids.issubset(set(ids))
