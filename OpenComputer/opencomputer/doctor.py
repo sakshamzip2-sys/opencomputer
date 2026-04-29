@@ -1261,4 +1261,50 @@ async def auth_monitor_loop(
                 continue
 
 
-__all__ = ["run_doctor", "auth_monitor_once", "auth_monitor_loop"]
+def _macos_screen_recording_granted() -> bool:
+    """Probe whether the current process has Screen Recording permission.
+
+    The cleanest probe is to attempt a 1×1 mss capture. If it returns a
+    non-empty result, permission is granted. If it raises or returns
+    empty, permission is missing.
+    """
+    try:
+        import mss  # type: ignore[import-not-found]
+
+        with mss.mss() as sct:
+            mons = sct.monitors
+            if not mons:
+                return False
+            grab = sct.grab({"left": 0, "top": 0, "width": 1, "height": 1})
+            return bool(grab) and bool(grab.rgb)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def check_macos_screen_recording_permission() -> str:
+    """Doctor check: macOS Screen Recording permission for screen-awareness.
+
+    Returns:
+      - "skipped (non-macOS)" on non-macOS
+      - "ok: Screen Recording permission granted" when granted
+      - "warning: macOS Screen Recording not granted ..." when missing
+    """
+    import sys as _sys
+
+    if _sys.platform != "darwin":
+        return "skipped (non-macOS)"
+    if _macos_screen_recording_granted():
+        return "ok: Screen Recording permission granted"
+    return (
+        "warning: macOS Screen Recording not granted. screen-awareness "
+        "will silently no-op until you grant via System Settings → "
+        "Privacy & Security → Screen Recording."
+    )
+
+
+__all__ = [
+    "run_doctor",
+    "auth_monitor_once",
+    "auth_monitor_loop",
+    "check_macos_screen_recording_permission",
+]
