@@ -527,6 +527,14 @@ class AgentLoop:
         # Tier 2.A — /<skill-name> auto-dispatch: when /foo doesn't match
         # a registered slash command, the dispatcher's fallback resolves
         # 'foo' as a skill id/name and returns its body inline.
+        # Tier 2.A — Batch 2: plumb session-state references into
+        # runtime.custom so slash commands like /branch /title /history
+        # /save /agents can read the active session_id and a SessionDB
+        # handle without needing a separate dispatcher signature change.
+        # Custom is a mutable dict on the otherwise-frozen RuntimeContext.
+        self._runtime.custom["session_id"] = sid
+        self._runtime.custom["session_db"] = self.db
+
         _slash_result = await _slash_dispatch(
             user_message,
             _plugin_registry.slash_commands,
