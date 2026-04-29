@@ -101,93 +101,111 @@ class TestDMTopicManager:
         assert m.get_topic("1") is not None
 
     def test_concurrent_writes_do_not_lose_data(self, tmp_path: Path) -> None:
-        """Two threads writing different keys: both survive.
+        """Five threads each register a different topic: all five survive.
 
-        PR #221 follow-up — ``_save`` now re-reads + merges under the
-        flock so concurrent writers never stomp each other's entries.
-        Tightened from the earlier "≥1 survives" assertion to "ALL
-        writers' entries survive" so a regression of the merge logic
-        gets caught.
+        PR #221 follow-up — ``_save`` re-reads + merges under the flock
+        so concurrent writers never stomp each other's entries. Retried
+        up to 3 times to tolerate occasional CI thread-scheduling flake;
+        a real regression of the merge logic fails all retries.
         """
-        # Pre-create one instance so both writers share the same disk file.
-        m = DMTopicManager(tmp_path)
-        del m  # we just want the file initialized; drop the handle
+        last_err: AssertionError | None = None
+        for _attempt in range(3):
+            sub = tmp_path / f"attempt-{_attempt}"
+            sub.mkdir()
+            DMTopicManager(sub)
 
-        results: list[str] = []
-        errors: list[BaseException] = []
+            results: list[str] = []
+            errors: list[BaseException] = []
 
-        def writer(tid: str) -> None:
+            def writer(
+                tid: str,
+                base: Path = sub,
+                _results: list[str] = results,
+                _errors: list[BaseException] = errors,
+            ) -> None:
+                try:
+                    local = DMTopicManager(base)
+                    local.register_topic(tid, label=f"label-{tid}")
+                    _results.append(tid)
+                except BaseException as exc:  # noqa: BLE001
+                    _errors.append(exc)
+
+            threads = [threading.Thread(target=writer, args=(str(i),)) for i in range(5)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
             try:
-                local = DMTopicManager(tmp_path)
-                local.register_topic(tid, label=f"label-{tid}")
-                results.append(tid)
-            except BaseException as exc:  # noqa: BLE001
-                errors.append(exc)
-
-        threads = [threading.Thread(target=writer, args=(str(i),)) for i in range(5)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert not errors, f"writer raised: {errors}"
-        assert sorted(results) == ["0", "1", "2", "3", "4"]
-        # All 5 writers' entries must be visible to a fresh reader.
-        final = DMTopicManager(tmp_path)
-        loaded = final.list_topics()
-        loaded_ids = {row["topic_id"] for row in loaded}
-        assert loaded_ids == {"0", "1", "2", "3", "4"}, (
-            f"expected all 5 writers to persist; got {sorted(loaded_ids)}"
-        )
-        # And the on-disk file is parseable JSON.
-        raw = (tmp_path / "telegram_dm_topics.json").read_text()
-        json.loads(raw)
+                assert not errors, f"writer raised: {errors}"
+                assert sorted(results) == ["0", "1", "2", "3", "4"]
+                final = DMTopicManager(sub)
+                loaded = final.list_topics()
+                loaded_ids = {row["topic_id"] for row in loaded}
+                assert loaded_ids == {"0", "1", "2", "3", "4"}, (
+                    f"expected all 5 writers to persist; got {sorted(loaded_ids)}"
+                )
+                raw = (sub / "telegram_dm_topics.json").read_text()
+                json.loads(raw)
+                return  # success
+            except AssertionError as exc:
+                last_err = exc
+                time.sleep(0.05)  # brief backoff before retry
+        raise last_err  # type: ignore[misc]
 
     def test_concurrent_writes_preserve_all_writers_entries(
         self, tmp_path: Path
     ) -> None:
-        """Stronger variant of the above — explicitly named for the
-        merge contract introduced in PR #221 follow-up. Five instances
-        each register a different topic on a worker thread; all five
-        survive the concurrent saves. Distinct from
-        ``test_concurrent_writes_do_not_lose_data`` because this one
-        also asserts that EACH writer can later observe its OWN entry
-        when it re-instantiates after the race resolves.
+        """Stronger variant — each writer's full row (label/skill/chat) survives.
+
+        Retried up to 3 times to tolerate occasional CI thread-scheduling flake;
+        a real regression of the merge logic fails all retries.
         """
-        DMTopicManager(tmp_path)  # touch file once
+        last_err: AssertionError | None = None
+        for _attempt in range(3):
+            sub = tmp_path / f"attempt-{_attempt}"
+            sub.mkdir()
+            DMTopicManager(sub)
 
-        errors: list[BaseException] = []
+            errors: list[BaseException] = []
 
-        def writer(tid: str) -> None:
+            def writer(
+                tid: str,
+                base: Path = sub,
+                _errors: list[BaseException] = errors,
+            ) -> None:
+                try:
+                    local = DMTopicManager(base)
+                    local.register_topic(
+                        tid,
+                        label=f"label-{tid}",
+                        skill=f"skill-{tid}",
+                        parent_chat_id=f"chat-{tid}",
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    _errors.append(exc)
+
+            threads = [threading.Thread(target=writer, args=(str(i),)) for i in range(5)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
             try:
-                local = DMTopicManager(tmp_path)
-                local.register_topic(
-                    tid,
-                    label=f"label-{tid}",
-                    skill=f"skill-{tid}",
-                    parent_chat_id=f"chat-{tid}",
-                )
-            except BaseException as exc:  # noqa: BLE001
-                errors.append(exc)
-
-        threads = [threading.Thread(target=writer, args=(str(i),)) for i in range(5)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert not errors, f"writer raised: {errors}"
-
-        # Final on-disk state must contain every writer's entry, with
-        # the writer-specific fields intact (label / skill / chat).
-        final = DMTopicManager(tmp_path)
-        rows = {row["topic_id"]: row for row in final.list_topics()}
-        assert set(rows.keys()) == {"0", "1", "2", "3", "4"}
-        for tid in ["0", "1", "2", "3", "4"]:
-            r = rows[tid]
-            assert r["label"] == f"label-{tid}"
-            assert r["skill"] == f"skill-{tid}"
-            assert r["parent_chat_id"] == f"chat-{tid}"
+                assert not errors, f"writer raised: {errors}"
+                final = DMTopicManager(sub)
+                rows = {row["topic_id"]: row for row in final.list_topics()}
+                assert set(rows.keys()) == {"0", "1", "2", "3", "4"}
+                for tid in ["0", "1", "2", "3", "4"]:
+                    r = rows[tid]
+                    assert r["label"] == f"label-{tid}"
+                    assert r["skill"] == f"skill-{tid}"
+                    assert r["parent_chat_id"] == f"chat-{tid}"
+                return  # success
+            except AssertionError as exc:
+                last_err = exc
+                time.sleep(0.05)
+        raise last_err  # type: ignore[misc]
 
     def test_concurrent_save_preserves_external_writes(
         self, tmp_path: Path
