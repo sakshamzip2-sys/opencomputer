@@ -156,6 +156,19 @@ class DiscordAdapter(BaseChannelAdapter):
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
+        # OpenClaw 1.A wiring (ship-now Sub-project C) — streaming chunker
+        # config. 1100 ms floor on human_delay_min_ms is Discord's safe
+        # per-channel rate (5 messages / 5 sec = 1100 ms minimum gap).
+        streaming = config.get("streaming") or {}
+        self.streaming_block_chunker: bool = bool(streaming.get("block_chunker", False))
+        self.streaming_min_chars: int = int(streaming.get("min_chars", 80))
+        self.streaming_max_chars: int = int(streaming.get("max_chars", 1500))
+        self.streaming_human_delay_min_ms: int = int(
+            streaming.get("human_delay_min_ms", 1100)
+        )
+        self.streaming_human_delay_max_ms: int = int(
+            streaming.get("human_delay_max_ms", 2500)
+        )
         self.token = config["bot_token"]
         intents = discord.Intents.default()
         intents.message_content = True  # required for reading message text
