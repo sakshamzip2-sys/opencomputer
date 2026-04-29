@@ -344,6 +344,22 @@ class AgentLoop:
         #: persona-specific Jinja conditionals (e.g. softening "no filler"
         #: rules under the companion persona).
         self._active_persona_id: str = ""
+        #: Persona-uplift (2026-04-29): cached foreground-app value with
+        #: 30s TTL so per-turn re-classification doesn't spawn osascript
+        #: every turn. Empty string is a valid cache state.
+        self._foreground_app_cache: str = ""
+        self._foreground_app_cache_at: float = 0.0
+        #: Stability gate state for re-classification: track candidate
+        #: persona id + how many consecutive turns it has been seen.
+        self._pending_persona_id: str = ""
+        self._pending_persona_count: int = 0
+        #: Cooldown counter — reset to 0 on a confirmed persona flip.
+        #: Increments on every reclassify call. We refuse to flip again
+        #: until this exceeds the cooldown threshold (3) — prevents
+        #: thrash when the user briefly Cmd-Tabs between apps. The
+        #: dirty-flag path (slash-command override) bypasses this
+        #: cooldown so an explicit user choice always wins.
+        self._reclassify_calls_since_flip: int = 999
         self.memory_context = MemoryContext(
             manager=self.memory,
             db=self.db,
@@ -1834,6 +1850,37 @@ class AgentLoop:
             _log.debug("learning_moments mechanism-B failed", exc_info=True)
 
         return overlay
+
+    # ─── Persona-uplift 2026-04-29 — adaptive classifier ──────────
+
+    def _cached_foreground_app(self, now: float | None = None) -> str:
+        """Return foreground app name with a 30-second TTL cache.
+
+        Per-turn re-classification calls this on every user turn; the
+        underlying ``detect_frontmost_app()`` spawns ``osascript`` with a
+        2-second timeout which is too slow to run unconditionally.
+        ``now`` is for testing — production callers omit it.
+        """
+        import time as _time
+
+        from opencomputer.awareness.personas._foreground import (
+            detect_frontmost_app,
+        )
+
+        if now is None:
+            now = _time.monotonic()
+        if (
+            self._foreground_app_cache_at != 0.0
+            and now - self._foreground_app_cache_at < 30.0
+        ):
+            return self._foreground_app_cache
+        try:
+            value = detect_frontmost_app()
+        except Exception:  # noqa: BLE001 — defensive: never break loop
+            value = ""
+        self._foreground_app_cache = value
+        self._foreground_app_cache_at = now
+        return value
 
     def _compute_cross_session_topic_hits(
         self, session_id: str,

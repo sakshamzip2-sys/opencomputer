@@ -186,3 +186,35 @@ def test_persona_override_invalid_id_falls_back_to_classifier(tmp_path, monkeypa
     assert isinstance(overlay, str)
     # Falls through to classifier → coding (Cursor is a coding app).
     assert loop._active_persona_id == "coding"
+
+
+# ── Persona-uplift 2026-04-29 — Task 8: foreground-app cache ─────────
+
+
+def test_cached_foreground_app_returns_cached_within_ttl(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+
+    from opencomputer.agent.loop import AgentLoop
+
+    loop = AgentLoop.__new__(AgentLoop)
+    loop._foreground_app_cache = ""
+    loop._foreground_app_cache_at = 0.0
+
+    call_count = {"n": 0}
+
+    def _fake_detect():
+        call_count["n"] += 1
+        return f"App{call_count['n']}"
+
+    with patch(
+        "opencomputer.awareness.personas._foreground.detect_frontmost_app",
+        side_effect=_fake_detect,
+    ):
+        first = loop._cached_foreground_app(now=1000.0)
+        second = loop._cached_foreground_app(now=1010.0)  # +10s, within TTL
+        third = loop._cached_foreground_app(now=1031.0)  # +31s, past TTL
+
+    assert first == "App1"
+    assert second == "App1"  # cached
+    assert third == "App2"   # refreshed
+    assert call_count["n"] == 2
