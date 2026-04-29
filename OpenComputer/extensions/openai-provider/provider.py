@@ -130,6 +130,41 @@ def _build_openai_multimodal_content(
     return blocks
 
 
+def _extract_cached_tokens(usage: Any) -> int:
+    """Pull ``prompt_tokens_details.cached_tokens`` off an OpenAI Usage.
+
+    OpenAI does automatic prompt caching for >1024-token prompts on
+    supported models; the cached count surfaces via the optional
+    ``prompt_tokens_details.cached_tokens`` field on the response usage
+    object. Older SDKs / non-cached responses lack the field.
+
+    Returns 0 when absent. Never raises — defensive on every hop.
+    """
+    if usage is None:
+        return 0
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is None:
+        return 0
+    return int(getattr(details, "cached_tokens", 0) or 0)
+
+
+def _extract_reasoning_content(msg: Any) -> str | None:
+    """Pull ``reasoning_content`` off an OpenAI choice.message.
+
+    OpenAI o1/o3 + DeepSeek R1 + several OpenRouter-routed reasoning
+    models surface reasoning_content. Field is absent on regular models;
+    return None to keep ``ProviderResponse.reasoning`` at its no-thinking
+    default. Empty string normalised to None for consistency with
+    Anthropic's None-on-no-thinking semantics.
+    """
+    if msg is None:
+        return None
+    content = getattr(msg, "reasoning_content", None)
+    if not content:
+        return None
+    return str(content)
+
+
 class OpenAIProvider(BaseProvider):
     name = "openai"
     default_model = "gpt-5.4"
@@ -247,6 +282,7 @@ class OpenAIProvider(BaseProvider):
         usage = Usage(
             input_tokens=resp.usage.prompt_tokens if resp.usage else 0,
             output_tokens=resp.usage.completion_tokens if resp.usage else 0,
+            cache_read_tokens=_extract_cached_tokens(resp.usage),
         )
         # OpenAI stop_reason names aren't identical to Anthropic's; normalize.
         finish = choice.finish_reason or "stop"
@@ -258,7 +294,12 @@ class OpenAIProvider(BaseProvider):
             "content_filter": "end_turn",
         }
         stop_reason = stop_map.get(finish, "end_turn")
-        return ProviderResponse(message=msg, stop_reason=stop_reason, usage=usage)
+        return ProviderResponse(
+            message=msg,
+            stop_reason=stop_reason,
+            usage=usage,
+            reasoning=_extract_reasoning_content(raw_msg),
+        )
 
     # ─── completion ────────────────────────────────────────────────
 
@@ -366,6 +407,7 @@ class OpenAIProvider(BaseProvider):
             kwargs["tools"] = [t.to_openai_format() for t in tools]
 
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tool_calls_accum: dict[int, dict[str, Any]] = {}
         finish_reason = "stop"
         usage: Usage = Usage()
@@ -384,6 +426,12 @@ class OpenAIProvider(BaseProvider):
                 continue
             if delta.content:
                 content_parts.append(delta.content)
+            # OpenAI o1/o3 / DeepSeek R1 / OpenRouter reasoning routes
+            # surface ``reasoning_content`` as a vendor extension on the
+            # delta. Aggregate across chunks; surface on final response.
+            delta_reasoning = getattr(delta, "reasoning_content", None)
+            if delta_reasoning:
+                reasoning_parts.append(str(delta_reasoning))
             if delta.tool_calls:
                 for tc in delta.tool_calls:
                     idx = tc.index
@@ -403,6 +451,7 @@ class OpenAIProvider(BaseProvider):
                 usage = Usage(
                     input_tokens=chunk.usage.prompt_tokens or 0,
                     output_tokens=chunk.usage.completion_tokens or 0,
+                    cache_read_tokens=_extract_cached_tokens(chunk.usage),
                 )
 
         tool_calls: list[ToolCall] = []
@@ -429,6 +478,7 @@ class OpenAIProvider(BaseProvider):
             message=msg,
             stop_reason=stop_map.get(finish_reason, "end_turn"),
             usage=usage,
+            reasoning="".join(reasoning_parts) if reasoning_parts else None,
         )
 
     async def stream_complete(
@@ -477,6 +527,7 @@ class OpenAIProvider(BaseProvider):
 
         # Aggregate state while streaming — used to build the final ProviderResponse
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tool_calls_accum: dict[int, dict[str, Any]] = {}
         finish_reason = "stop"
         usage: Usage = Usage()
@@ -498,6 +549,12 @@ class OpenAIProvider(BaseProvider):
             if delta.content:
                 content_parts.append(delta.content)
                 yield StreamEvent(kind="text_delta", text=delta.content)
+            # OpenAI o1/o3 / DeepSeek R1 / OpenRouter reasoning routes
+            # surface ``reasoning_content`` as a vendor extension on the
+            # delta. Aggregate; surface on final ProviderResponse.
+            delta_reasoning = getattr(delta, "reasoning_content", None)
+            if delta_reasoning:
+                reasoning_parts.append(str(delta_reasoning))
             # Accumulate tool calls by index
             if delta.tool_calls:
                 for tc in delta.tool_calls:
@@ -518,6 +575,7 @@ class OpenAIProvider(BaseProvider):
                 usage = Usage(
                     input_tokens=chunk.usage.prompt_tokens or 0,
                     output_tokens=chunk.usage.completion_tokens or 0,
+                    cache_read_tokens=_extract_cached_tokens(chunk.usage),
                 )
 
         # Reconstruct the final ProviderResponse
@@ -545,6 +603,7 @@ class OpenAIProvider(BaseProvider):
             message=msg,
             stop_reason=stop_map.get(finish_reason, "end_turn"),
             usage=usage,
+            reasoning="".join(reasoning_parts) if reasoning_parts else None,
         )
         yield StreamEvent(kind="done", response=final)
 

@@ -82,7 +82,16 @@ SLASH_REGISTRY: list[CommandDef] = [
         name="model",
         description="Show or switch the active model.",
         category="config",
-        args_hint="[provider/model]",
+        args_hint="[<model-id>|<alias>|<vendor>/<model>]",
+    ),
+    CommandDef(
+        name="provider",
+        description=(
+            "Show or switch the active provider plugin "
+            "(anthropic/openai/openrouter/bedrock)."
+        ),
+        category="config",
+        args_hint="[<provider-name>]",
     ),
     CommandDef(
         name="sessions",
