@@ -323,9 +323,54 @@ def _handle_snapshot(ctx: SlashContext, args: list[str]) -> SlashResult:
         ctx.console.print(f"[green]pruned[/green] — {n} snapshot(s) deleted.")
         return SlashResult(handled=True)
 
+    if sub == "export":
+        if len(args) < 2:
+            ctx.console.print(
+                "[red]usage:[/red] /snapshot export <id> [path]  "
+                "[dim](default: ~/oc-snapshot-<id>-<ts>.tar.gz)[/dim]"
+            )
+            return SlashResult(handled=True)
+        from opencomputer.agent.config import default_config
+        from opencomputer.snapshot.quick import export_snapshot
+
+        sid = args[1].strip()
+        dest = Path(" ".join(args[2:])).expanduser() if len(args) >= 3 else None
+        try:
+            cfg = default_config()
+            profile_home = cfg.session.db_path.parent
+            out = export_snapshot(profile_home, sid, dest_path=dest)
+            ctx.console.print(f"[green]exported →[/green] {out}")
+        except (ValueError, OSError) as exc:
+            ctx.console.print(f"[red]export failed:[/red] {exc}")
+        return SlashResult(handled=True)
+
+    if sub == "import":
+        if len(args) < 2:
+            ctx.console.print(
+                "[red]usage:[/red] /snapshot import <archive-path> [label]"
+            )
+            return SlashResult(handled=True)
+        import tarfile
+
+        from opencomputer.agent.config import default_config
+        from opencomputer.snapshot.quick import import_snapshot
+
+        archive = Path(args[1]).expanduser()
+        label = " ".join(args[2:]).strip() or None
+        try:
+            cfg = default_config()
+            profile_home = cfg.session.db_path.parent
+            new_id = import_snapshot(
+                profile_home, archive_path=archive, label=label
+            )
+            ctx.console.print(f"[green]imported as snapshot[/green] {new_id}")
+        except (ValueError, OSError, tarfile.TarError) as exc:
+            ctx.console.print(f"[red]import failed:[/red] {exc}")
+        return SlashResult(handled=True)
+
     ctx.console.print(
         f"[red]unknown subcommand:[/red] /snapshot {sub}  "
-        "[dim](try create | list | restore <id> | prune)[/dim]"
+        "[dim](try create | list | restore <id> | prune | export <id> | import <path>)[/dim]"
     )
     return SlashResult(handled=True)
 

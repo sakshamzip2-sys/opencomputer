@@ -113,7 +113,10 @@ SLASH_REGISTRY: list[CommandDef] = [
         name="snapshot",
         description="Archive critical state files (session db + config + .env + ...).",
         category="session",
-        args_hint="[create [<label>]|list|restore <id>|prune]",
+        args_hint=(
+            "[create [<label>]|list|restore <id>|prune|export <id> [path]"
+            "|import <path> [label]]"
+        ),
     ),
     CommandDef(
         name="reload",
