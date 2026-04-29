@@ -12,6 +12,8 @@
 
 **Branch:** `feat/slash-menu-cc-parity` (already cut from `main` at `fdab4367`, includes archit's #220-#227).
 
+**Tasks:** 14 numbered tasks (1-14) plus Task 12.5 inserted post-audit for Hybrid full-turn integration coverage. Approximately ~870 LOC across 13 files. Each task is a single TDD cycle: failing test → minimal impl → green test → commit.
+
 ---
 
 ## Pre-flight checks (do once before Task 1)
@@ -490,6 +492,99 @@ def test_skill_with_missing_description_uses_empty_string(tmp_path: Path) -> Non
     src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
     items = [i for i in src.iter_items() if isinstance(i, SkillEntry)]
     assert any(s.id == "bare" and s.description == "" for s in items)
+
+
+def test_iter_items_skips_skill_with_falsy_id(tmp_path: Path) -> None:
+    """BLOCKER C2 — a SkillMeta with empty / None id must not surface
+    in the dropdown. Skipping protects against a malformed frontmatter."""
+
+    @dataclass
+    class _Bad:
+        id: str
+        name: str
+
+    mem = _FakeMemory(
+        [
+            _Bad(id="", name="empty"),
+            _Bad(id="valid", name="ok"),  # type: ignore[list-item]
+        ]
+    )
+    src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
+    skill_ids = {i.id for i in src.iter_items() if isinstance(i, SkillEntry)}
+    assert skill_ids == {"valid"}
+
+
+def test_iter_items_skips_skill_with_unsafe_id_chars(tmp_path: Path) -> None:
+    """BLOCKER B4 — skill ids with whitespace or non-shell-safe chars
+    can't be invoked as `/<id>` (the picker's space-guard kicks in or
+    the user can't type the id). Skip them."""
+    mem = _FakeMemory(
+        [
+            _FakeSkillMeta(id="my skill", name="space"),       # space
+            _FakeSkillMeta(id="bad/slash", name="slash"),       # slash
+            _FakeSkillMeta(id="emoji-✓", name="emoji"),         # non-ascii
+            _FakeSkillMeta(id="ok-id_2", name="alpha-numeric"),  # safe
+        ]
+    )
+    src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
+    ids = {i.id for i in src.iter_items() if isinstance(i, SkillEntry)}
+    assert "ok-id_2" in ids
+    assert "my skill" not in ids
+    assert "bad/slash" not in ids
+    assert "emoji-✓" not in ids
+
+
+def test_skill_collides_with_command_alias_hidden(tmp_path: Path) -> None:
+    """BLOCKER C1 — alias collision: a skill named `quit` collides with
+    the `/quit` alias of `/exit`. Command (and its aliases) win."""
+    mem = _FakeMemory(
+        [
+            _FakeSkillMeta(id="quit", name="quit"),  # /quit is alias of /exit
+            _FakeSkillMeta(id="reset", name="reset"),  # /reset is alias of /clear
+            _FakeSkillMeta(id="legit-skill", name="ok"),
+        ]
+    )
+    src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
+    skill_ids = {i.id for i in src.iter_items() if isinstance(i, SkillEntry)}
+    assert "quit" not in skill_ids
+    assert "reset" not in skill_ids
+    assert "legit-skill" in skill_ids
+
+
+def test_rank_returns_empty_when_no_items(tmp_path: Path) -> None:
+    """BLOCKER C4 — defensive: if SLASH_REGISTRY is empty AND list_skills
+    returns nothing, rank returns an empty list — no crash."""
+    import opencomputer.cli_ui.slash as slash_mod
+
+    mem = _FakeMemory([])
+    src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
+    # Monkeypatch out the registry for this assertion only — restore after.
+    real_registry = slash_mod.SLASH_REGISTRY
+    try:
+        slash_mod.SLASH_REGISTRY = []  # type: ignore[misc]
+        # Empty prefix.
+        assert src.rank("") == []
+        # Non-empty prefix.
+        assert src.rank("foo") == []
+    finally:
+        slash_mod.SLASH_REGISTRY = real_registry  # type: ignore[misc]
+
+
+def test_rank_empty_prefix_with_uninstalled_mru_entries(tmp_path: Path) -> None:
+    """BLOCKER B2 (refined) — MRU file may reference skills the user
+    has since uninstalled. Empty-prefix sort silently skips them rather
+    than crashing or rendering ghost rows."""
+    mem = _FakeMemory(
+        [_FakeSkillMeta(id="still-here", name="still-here")]
+    )
+    mru = MruStore(tmp_path / "mru.json")
+    mru.record("uninstalled-skill")  # not in the current skill list
+    mru.record("still-here")
+    src = UnifiedSlashSource(mem, mru)
+    matches = src.rank("")
+    names = [m.item.id for m in matches if isinstance(m.item, SkillEntry)]
+    assert "still-here" in names
+    assert "uninstalled-skill" not in names  # silently skipped
 ```
 
 - [ ] **Step 2: Run the test — confirm it fails**
@@ -557,7 +652,15 @@ class UnifiedSlashSource:
         collide with a command name suppressed. Skills are yielded in
         the order ``MemoryManager.list_skills`` returns them; sorting
         is the ranker's job, not the source's.
+
+        Skills with non-shell-safe ids (whitespace, non-ascii, slashes)
+        are silently skipped — the user couldn't invoke them as
+        ``/<id>`` even if shown.
         """
+        import re as _re
+
+        _SAFE_ID = _re.compile(r"^[A-Za-z0-9_-]+$")
+
         # Commands — direct from registry.
         yield from SLASH_REGISTRY
 
@@ -571,6 +674,11 @@ class UnifiedSlashSource:
         for s in skills:
             sid = getattr(s, "id", None)
             if not sid:
+                continue
+            if not _SAFE_ID.match(sid):
+                _log.info(
+                    "skill %r has unsafe id chars — hiding from picker", sid
+                )
                 continue
             if sid in cmd_names:
                 _log.info("skill %r collides with command name — hiding from picker", sid)
@@ -828,10 +936,13 @@ class UnifiedSlashSource:
 
         Commands are yielded first (registry order — preserves the
         order curated in ``slash.py``). Skills follow, with any that
-        collide with a command name suppressed. Skills are yielded in
-        the order ``MemoryManager.list_skills`` returns them; sorting
-        is the ranker's job, not the source's.
+        collide with a command name suppressed. Skills with unsafe
+        ids (whitespace, non-ascii, slashes) are also skipped.
         """
+        import re as _re
+
+        _SAFE_ID = _re.compile(r"^[A-Za-z0-9_-]+$")
+
         yield from SLASH_REGISTRY
 
         try:
@@ -843,6 +954,9 @@ class UnifiedSlashSource:
         for s in skills:
             sid = getattr(s, "id", None)
             if not sid:
+                continue
+            if not _SAFE_ID.match(sid):
+                _log.info("skill %r has unsafe id chars — hiding from picker", sid)
                 continue
             if sid in cmd_names:
                 _log.info("skill %r collides with command name — hiding from picker", sid)
@@ -1187,7 +1301,9 @@ def test_completer_yields_skills_when_source_provided(tmp_path) -> None:
 
 def test_completer_truncates_long_descriptions_at_250_chars() -> None:
     """Spec §3.6 — descriptions over 250 chars are word-boundary trimmed
-    with ellipsis."""
+    with ellipsis. Whitespace (incl. newlines, tabs, multi-space) is
+    normalized to single spaces before trimming so YAML frontmatter
+    multi-line descriptions don't break the dropdown columns."""
     from prompt_toolkit.document import Document
 
     from opencomputer.cli_ui.slash_completer import (
@@ -1201,9 +1317,13 @@ def test_completer_truncates_long_descriptions_at_250_chars() -> None:
     assert trimmed.endswith("…")
     # Trimming happens at a word boundary — never mid-word.
     assert not trimmed[:-1].endswith(" ")
-    # Short descriptions are returned untouched.
+    # Short descriptions are returned with whitespace normalized.
     assert _trim_description("short") == "short"
     assert _trim_description("") == ""
+    # Newlines and runs of whitespace get collapsed (BLOCKER B1).
+    assert _trim_description("line one\nline two") == "line one line two"
+    assert _trim_description("a   b\t\tc") == "a b c"
+    assert _trim_description("  leading and trailing  ") == "leading and trailing"
 
 
 def test_completer_renders_source_tag_in_display_meta(tmp_path) -> None:
@@ -1292,12 +1412,21 @@ def longest_common_prefix(strs: list[str]) -> str:
 
 
 def _trim_description(desc: str) -> str:
-    """Spec §3.6 — trim at the last word boundary before 250 chars,
-    append ``…``. Short descriptions returned untouched."""
-    if len(desc) <= _DESC_TRIM_LIMIT:
-        return desc
+    """Spec §3.6 — collapse whitespace, trim at the last word boundary
+    before 250 chars, append ``…``. Short descriptions returned with
+    just the whitespace normalization (newlines/runs of spaces collapsed
+    to single spaces) so they don't break the dropdown's column layout
+    when a YAML frontmatter description spans multiple lines.
+    """
+    import re
+
+    # Normalize whitespace first — frontmatter descriptions can contain
+    # newlines or tabs that would visibly break the dropdown row.
+    normalized = re.sub(r"\s+", " ", desc).strip()
+    if len(normalized) <= _DESC_TRIM_LIMIT:
+        return normalized
     # Find the last whitespace before the limit so we don't cut mid-word.
-    head = desc[:_DESC_TRIM_LIMIT]
+    head = normalized[:_DESC_TRIM_LIMIT]
     cut = head.rfind(" ")
     if cut <= 0:
         cut = _DESC_TRIM_LIMIT
@@ -1595,6 +1724,8 @@ Note: `state["matches"]` now holds `SlashItem` (CommandDef OR SkillEntry) object
 
 - [ ] **Step 4: Find the chat loop call site and pass the memory_manager**
 
+VERIFIED in audit: cli.py line 1263 (`read_user_input` call) lives inside `_run_chat_session()` (declared at line 792), where `loop = AgentLoop(...)` exists at line 846. `AgentLoop.__init__` sets `self.memory = memory or MemoryManager(...)` at `agent/loop.py:269`, so `loop.memory` is the `MemoryManager` instance. Thread it through with one parameter.
+
 Edit `OpenComputer/opencomputer/cli.py` around line 1263. Find the existing `read_user_input` call:
 
 ```python
@@ -1614,11 +1745,11 @@ Replace with:
                 scope=scope,
                 session_title=_title,
                 paste_folder=paste_folder,
-                memory_manager=memory_manager,
+                memory_manager=loop.memory if loop is not None else None,
             )
 ```
 
-If `memory_manager` isn't already in scope at the call site, find where the chat loop constructs/has access to its `MemoryManager` (search for `MemoryManager(` near the surrounding function) and pass that instance through.
+The `if loop is not None` guard handles a defensive case where the chat loop might not have constructed `loop` yet (e.g. early-error path) — graceful degradation to commands-only picker.
 
 - [ ] **Step 5: Run the tests — confirm they pass**
 
@@ -2372,6 +2503,13 @@ import secrets
 from plugin_sdk.core import Message, ToolCall
 
 
+#: Synthetic tool name used for Hybrid skill dispatch wrap. Must match
+#: the ``name`` returned by :class:`SkillTool.schema`. Pulled into a
+#: constant so a future tool rename surfaces here as a single-place
+#: edit rather than a silent breakage.
+SKILL_TOOL_NAME = "Skill"
+
+
 def _wrap_skill_result_as_tool_messages(
     *,
     skill_name: str,
@@ -2388,13 +2526,20 @@ def _wrap_skill_result_as_tool_messages(
     The model receives the SKILL body as a tool_result on the next turn
     — exactly the shape it would see if it had auto-invoked SkillTool.
     Claude-Code parity for the dispatch path.
+
+    Trade-off note: an alternative was to discard ``result.output`` and
+    let the agent invoke ``SkillTool`` naturally on the next turn. We
+    synthesize both halves instead because (a) the fallback already
+    loaded SKILL.md — re-loading is wasteful — and (b) the natural-
+    invoke path requires intercepting model output to inject a tool_use,
+    a much uglier control-flow change than this branch.
     """
     if getattr(result, "source", "command") != "skill":
         return []
     call_id = f"toolu_skill_{secrets.token_hex(6)}"
     tool_call = ToolCall(
         id=call_id,
-        name="Skill",
+        name=SKILL_TOOL_NAME,
         arguments={"name": skill_name, "args": args or ""},
     )
     assistant = Message(
@@ -2406,7 +2551,7 @@ def _wrap_skill_result_as_tool_messages(
         role="tool",
         content=result.output,
         tool_call_id=call_id,
-        name="Skill",
+        name=SKILL_TOOL_NAME,
     )
     return [assistant, tool_message]
 ```
@@ -2513,6 +2658,139 @@ Command-source results retain the original user/assistant text shape +
 session-end early return. Backward compat preserved.
 
 Claude-Code parity for the dispatch path.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+```
+
+---
+
+## Task 12.5: Hybrid full-turn provider integration test
+
+**Files:**
+- Modify: `OpenComputer/tests/test_hybrid_skill_dispatch.py` (append integration test)
+
+This addresses audit BLOCKER A1 + D3: verify that after the Hybrid wrap fires, the iteration loop correctly invokes the provider with the synthetic tool_use+tool_result already in `messages`, and that the model's response gets appended cleanly. The unit-shape tests in Task 12 only proved the helper produces the right two messages; this task proves the loop wires them through to the provider.
+
+- [ ] **Step 1: Append the integration test**
+
+Append to `OpenComputer/tests/test_hybrid_skill_dispatch.py`:
+
+```python
+
+
+import asyncio
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_hybrid_skill_dispatch_provider_sees_tool_result(tmp_path):
+    """Full-turn integration: when the user types '/<skill-name>', the
+    Hybrid wrap fires, the iteration loop continues, the provider's
+    first call receives the synthetic tool_use+tool_result already in
+    the messages list, and the model's response is appended cleanly."""
+    from dataclasses import dataclass
+
+    from opencomputer.agent.config import default_config
+    from opencomputer.agent.loop import AgentLoop
+    from opencomputer.agent.memory import MemoryManager
+    from plugin_sdk.core import Message
+    from plugin_sdk.provider_contract import BaseProvider, ProviderResponse, Usage
+
+    @dataclass
+    class _SkillMeta:
+        id: str
+        name: str
+        description: str = ""
+        path: str = ""
+        version: str = "0.1.0"
+        references: tuple = ()
+        examples: tuple = ()
+
+    class _RecordingProvider(BaseProvider):
+        """Captures the messages it receives and returns a canned reply."""
+
+        def __init__(self):
+            self.captured_messages = None
+
+        async def complete(self, *, system, messages, tools, max_tokens, temperature, **kwargs):
+            self.captured_messages = list(messages)
+            return ProviderResponse(
+                content="ack",
+                usage=Usage(input_tokens=10, output_tokens=2),
+                stop_reason="end_turn",
+            )
+
+        async def stream_complete(self, *args, **kwargs):
+            raise NotImplementedError
+
+    # Build a memory manager with one skill whose body is "BODY-FOR-TEST".
+    mem_path = tmp_path / "skills"
+    mem_path.mkdir()
+    (mem_path / "test-skill").mkdir()
+    (mem_path / "test-skill" / "SKILL.md").write_text(
+        "---\nname: test-skill\ndescription: Test\n---\nBODY-FOR-TEST",
+        encoding="utf-8",
+    )
+    decl = tmp_path / "MEMORY.md"
+    decl.write_text("", encoding="utf-8")
+
+    cfg = default_config()
+    cfg.memory.declarative_path = decl
+    cfg.memory.skills_path = mem_path
+    cfg.session.db_path = tmp_path / "sessions.db"
+
+    provider = _RecordingProvider()
+    loop = AgentLoop(provider=provider, config=cfg)
+
+    result = await loop.run_conversation("/test-skill", session_id="sess-1")
+
+    # Provider should have been called.
+    assert provider.captured_messages is not None
+    msgs = provider.captured_messages
+    # Sequence: user (slash text), assistant (tool_use), tool (tool_result), ...
+    user = next(m for m in msgs if m.role == "user" and "/test-skill" in (m.content or ""))
+    assistant_with_tool = next(
+        m for m in msgs if m.role == "assistant" and m.tool_calls
+    )
+    tool_msg = next(m for m in msgs if m.role == "tool")
+
+    assert user is not None
+    assert assistant_with_tool.tool_calls[0].name == "Skill"
+    assert tool_msg.tool_call_id == assistant_with_tool.tool_calls[0].id
+    assert "BODY-FOR-TEST" in tool_msg.content
+    # The model's response landed as the conversation's final message.
+    assert result.final_message.role == "assistant"
+    assert result.final_message.content == "ack"
+```
+
+- [ ] **Step 2: Run the test — confirm it passes**
+
+```bash
+python -m pytest tests/test_hybrid_skill_dispatch.py::test_hybrid_skill_dispatch_provider_sees_tool_result -v 2>&1 | tail -10
+```
+
+Expected: 1 passed.
+
+If it fails, the most likely causes are:
+- The iteration loop doesn't continue past the slash branch when the wrap returns non-empty (revisit the Task 12 control-flow change in `loop.py`).
+- The synthetic tool_use+tool_result aren't being passed to `provider.complete` because the loop's message-building step replaces them. Re-read the iteration logic and ensure `messages` carries through.
+- `_loop_detector` / session-lifecycle artifacts assert in the wrong order.
+
+If you hit any of these, do NOT skip the test — fix the loop. This integration test is the contract proof that the Hybrid wrap actually works end-to-end.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add OpenComputer/tests/test_hybrid_skill_dispatch.py
+git commit -m "test(slash): full-turn provider integration for Hybrid skill dispatch
+
+Captures provider's first call after the Hybrid wrap fires; verifies
+the synthetic tool_use+tool_result are present in messages, the body
+content is correct, and the model's response is appended cleanly.
+
+This is the contract proof that the Hybrid wrap actually works end-
+to-end — not just that the helper produces the right two messages
+(Task 12 unit tests).
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 ```
@@ -2741,12 +3019,25 @@ Expected: still empty or no `cli_ui/` overlap.
 
 - [ ] **Step 2: Rebase onto latest main if anything new landed**
 
+If `git status` shows uncommitted changes (orphaned bits from another session bleeding through, as happened during the planning phase), stash them first to keep the rebase clean. The fresh stash is preserved — never lost.
+
+```bash
+git status --short
+# If output is non-empty (excluding untracked), stash:
+git stash push -m "pre-push-stash-2026-04-29"
+git stash list | head -3  # confirm the stash landed
+```
+
+Now rebase:
+
 ```bash
 git fetch origin main
 git rebase origin/main 2>&1 | tail -5
 ```
 
-If conflicts: stop, investigate, do not force through. The conflict is the parallel-session signal you've been watching for.
+**If the rebase reports conflicts**: stop, investigate, do not force through. The conflict is the parallel-session signal you've been watching for. Re-check `gh pr list --state open` — if a new PR overlapping `cli_ui/`, `agent/loop.py`, or `plugin_sdk/slash_command.py` opened during execution, pause and replan with the user before resolving. Do NOT use `git rebase --skip` or `git checkout --theirs` blindly.
+
+**If the rebase succeeds cleanly**: continue with step 3.
 
 - [ ] **Step 3: Run the full suite once more from clean state**
 
@@ -2831,6 +3122,46 @@ gh pr view --web 2>&1 | tail -2 || gh pr view --json url,number 2>&1 | head -3
 ```
 
 Expected: a printed PR URL.
+
+---
+
+## Expert-critic audit log (run 2026-04-29)
+
+After the initial plan was written, I ran an adversarial self-audit per the user's instruction. Findings + their resolution, in-place:
+
+**BLOCKERS fixed (9):**
+
+| # | Finding | Fix in plan |
+|---|---|---|
+| A1 | Hybrid wrap changes session lifecycle without provider-integration test | Added Task 12.5 — full-turn integration test with `_RecordingProvider` |
+| B1 | `_trim_description` doesn't normalize whitespace; YAML multi-line descs break columns | `_trim_description` now collapses `\s+` to single spaces before truncation. Test added. |
+| B4 | Skills with non-shell-safe ids (spaces, slashes, emoji) crash the picker | `iter_items` now applies `^[A-Za-z0-9_-]+$` regex filter. Test added. |
+| C1 | No test for "skill collides with command alias" (e.g. skill named `quit` vs `/quit` alias) | Test `test_skill_collides_with_command_alias_hidden` added. Existing `_command_names()` already covers aliases — test pins the contract. |
+| C2 | No test for skill with falsy `id` | Test `test_iter_items_skips_skill_with_falsy_id` added. |
+| C4 | No test for "registry empty AND no skills" | Test `test_rank_returns_empty_when_no_items` added with monkeypatch to empty `SLASH_REGISTRY`. |
+| D1 | `memory_manager` scope at cli.py:1263 was hand-waved | Verified: lives in `_run_chat_session`'s `loop = AgentLoop(...)` at line 846; `loop.memory` is the `MemoryManager`. Plan now spells out `loop.memory if loop is not None else None`. |
+| D3 | Hybrid wrap interaction with `_loop_detector`, session-end events, and the iteration loop wasn't covered | Task 12.5 covers via integration test. |
+| F2 | Task 14 `git rebase` had no instructions for orphaned-changes case (which I HIT during planning) | Step 2 now says: stash any uncommitted bits before rebasing, document conflict-pause path. |
+
+**REFINEs folded in (6):**
+
+| # | Refinement | Where |
+|---|---|---|
+| A2 | `SKILL_TOOL_NAME` constant in loop.py | Task 12 |
+| B3 | `loop.memory if loop is not None else None` defensive guard | Task 7 step 4 |
+| C3 | Module-level `_render_dropdown_for_state` for testability | Already in Task 8 |
+| D2 | Test for nonexistent-dir MRU file path | `test_missing_file_silently_empty` already in Task 1 |
+| E1 | Docstring note on synthesizing-both-halves trade-off | Task 12 |
+| F1 | Comment in e2e test pinning MRU JSON-array format | Acceptable as-is — Task 13 e2e covers the contract; format-pin comment is cosmetic |
+
+**NOTED (acceptable risks, no plan change):**
+
+- A3 — `difflib` perf at 1000+ skills (~50ms still under perception)
+- B5 — MRU `+0.05` can cross tier boundaries by design
+- E2 — Single-PR delivery confirmed by user
+- E3 — Stdlib-only ranking confirmed by spec
+
+**Audit verdict:** plan is now defensible against the failure modes I could imagine. Proceeding to execution.
 
 ---
 
