@@ -55,7 +55,16 @@ class ModelConfig:
     # — feature off when no aliases configured. The YAML loader in
     # ``config_store._apply_overrides`` round-trips dict fields automatically;
     # no extra plumbing needed.
-    model_aliases: dict[str, str] = field(default_factory=dict)
+    model_aliases: dict[str, str] = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+    )
+    # ``compare=False, hash=False`` keeps ``ModelConfig`` hashable
+    # (frozen+slots dataclasses get auto-generated __hash__ over all
+    # fields; dict is unhashable so it must be excluded). The SDK
+    # relies on ModelConfig hashability for memoisation
+    # (see test_dataclass_remains_hashable in test_model_fallback.py).
 
 
 @dataclass(frozen=True, slots=True)
