@@ -86,6 +86,7 @@ from plugin_sdk.ingestion import (
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
 from plugin_sdk.interaction import InteractionRequest, InteractionResponse
 from plugin_sdk.memory import MemoryProvider
+from plugin_sdk.permission_mode import PermissionMode, effective_permission_mode
 from plugin_sdk.provider_contract import (
     BaseProvider,
     ProviderResponse,
@@ -174,6 +175,9 @@ __all__ = [
     "InteractionResponse",
     # memory (Phase 10f)
     "MemoryProvider",
+    # permission modes (2026-04-29)
+    "PermissionMode",
+    "effective_permission_mode",
     # slash commands (Phase 12b.6, Task D8)
     "SlashCommand",
     "SlashCommandResult",

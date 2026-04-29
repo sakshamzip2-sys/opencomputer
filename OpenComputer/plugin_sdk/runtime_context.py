@@ -19,6 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from plugin_sdk.permission_mode import PermissionMode
+
 if TYPE_CHECKING:
     from plugin_sdk.core import Message
 
@@ -34,6 +36,12 @@ class RuntimeContext:
     #: Yolo mode — auto-approve dangerous operations. Mutually exclusive with plan_mode
     #: (we enforce this in the CLI; if both set, plan_mode wins).
     yolo_mode: bool = False
+
+    #: Canonical permission mode. Set by CLI flags at session start. New
+    #: code should resolve through :func:`plugin_sdk.effective_permission_mode`
+    #: rather than reading this field directly — the helper accounts for
+    #: slash-command toggles living in ``custom["permission_mode"]``.
+    permission_mode: PermissionMode = PermissionMode.DEFAULT
 
     #: Which agent context this invocation belongs to. ``Literal`` narrows the
     #: allowed values at type-check time so typos like ``"Cron"`` fail mypy
