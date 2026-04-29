@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Literal
 
 from plugin_sdk.runtime_context import RuntimeContext
 
@@ -35,6 +36,19 @@ class SlashCommandResult:
     #: False means the agent loop proceeds as normal (command was a side-
     #: effect like ``/plan`` that sets a flag and lets chat continue).
     handled: bool = True
+    #: Origin of this result.
+    #:
+    #: ``"command"`` (default) — handler was a registered command (built-in
+    #: or plugin-authored). The agent loop emits the output as a normal
+    #: assistant text reply.
+    #:
+    #: ``"skill"`` — handler was the slash-skill fallback that loaded a
+    #: SKILL.md body. The agent loop wraps the result as a synthetic
+    #: ``Skill`` ``tool_use`` + ``tool_result`` pair so the model sees the
+    #: skill content as authoritative tool output (Claude-Code parity).
+    #:
+    #: Default ``"command"`` keeps existing call sites working unchanged.
+    source: Literal["command", "skill"] = "command"
 
 
 class SlashCommand(ABC):

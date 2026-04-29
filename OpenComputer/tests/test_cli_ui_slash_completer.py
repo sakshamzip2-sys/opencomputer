@@ -111,23 +111,26 @@ def _display_plain(c) -> str:
     return "".join(text for _style, text in c.display)
 
 
-def test_completer_display_includes_args_hint_and_category_for_rename():
+def test_completer_display_includes_args_hint_and_source_tag_for_rename():
+    """Updated for Claude Code parity (Task 6): the (category) tag was
+    replaced by a (command)/(skill) source tag — see spec §3.5."""
     completer = SlashCommandCompleter()
     doc = Document(text="/rename", cursor_position=7)
     [c] = list(completer.get_completions(doc, CompleteEvent()))
     plain = _display_plain(c)
     assert "rename" in plain
     assert "<new title>" in plain
-    assert "(session)" in plain
+    assert "(command)" in plain
 
 
-def test_completer_display_omits_hint_but_includes_category_for_argless():
+def test_completer_display_omits_hint_but_includes_source_tag_for_argless():
+    """Updated for Claude Code parity (Task 6): unified (command) tag."""
     completer = SlashCommandCompleter()
     doc = Document(text="/help", cursor_position=5)
     [c] = list(completer.get_completions(doc, CompleteEvent()))
     plain = _display_plain(c)
     assert "/help" in plain
-    assert "(meta)" in plain
+    assert "(command)" in plain
     assert "<" not in plain
 
 
@@ -138,3 +141,83 @@ def test_completer_results_sorted_alphabetically():
 
 def test_completer_double_slash_yields_nothing():
     assert _completions("//") == []
+
+
+# ─── Task 6: source-aware completer ────────────────────────────────
+
+
+def test_completer_yields_skills_when_source_provided(tmp_path) -> None:
+    """When constructed with a UnifiedSlashSource, the completer yields
+    skill rows alongside command rows."""
+    from opencomputer.cli_ui.slash_completer import SlashCommandCompleter
+    from opencomputer.cli_ui.slash_mru import MruStore
+    from opencomputer.cli_ui.slash_picker_source import UnifiedSlashSource
+
+    class _Fake:
+        def list_skills(self):
+            from dataclasses import dataclass
+
+            @dataclass
+            class _M:
+                id: str
+                name: str
+                description: str = ""
+
+            return [_M(id="my-skill", name="My Skill", description="x")]
+
+    src = UnifiedSlashSource(_Fake(), MruStore(tmp_path / "mru.json"))
+    comp = SlashCommandCompleter(source=src)
+    completions = list(comp.get_completions(Document("/my"), CompleteEvent()))
+    texts = [c.text for c in completions]
+    assert "/my-skill" in texts
+
+
+def test_completer_truncates_long_descriptions_at_250_chars() -> None:
+    """Spec §3.6 — descriptions over 250 chars are word-boundary trimmed
+    with ellipsis. Whitespace (newlines, tabs, multi-space) is normalized
+    to single spaces before trimming so YAML frontmatter multi-line
+    descriptions don't break the dropdown columns (BLOCKER B1)."""
+    from opencomputer.cli_ui.slash_completer import _trim_description
+
+    long = "this is a long description " * 20  # ~ 540 chars
+    trimmed = _trim_description(long)
+    assert len(trimmed) <= 251  # 250 + 1 for the ellipsis
+    assert trimmed.endswith("…")
+    # Trimming happens at a word boundary — never mid-word.
+    assert not trimmed[:-1].endswith(" ")
+    # Short descriptions are returned with whitespace normalized.
+    assert _trim_description("short") == "short"
+    assert _trim_description("") == ""
+    # Newlines and runs of whitespace get collapsed.
+    assert _trim_description("line one\nline two") == "line one line two"
+    assert _trim_description("a   b\t\tc") == "a b c"
+    assert _trim_description("  leading and trailing  ") == "leading and trailing"
+
+
+def test_completer_renders_source_tag_in_display(tmp_path) -> None:
+    """Display should mark commands as `(command)` and skills as
+    `(skill)` so the user can tell them apart."""
+    from opencomputer.cli_ui.slash_completer import SlashCommandCompleter
+    from opencomputer.cli_ui.slash_mru import MruStore
+    from opencomputer.cli_ui.slash_picker_source import UnifiedSlashSource
+
+    class _Fake:
+        def list_skills(self):
+            from dataclasses import dataclass
+
+            @dataclass
+            class _M:
+                id: str
+                name: str
+                description: str = "skill desc"
+
+            return [_M(id="my-skill", name="My Skill")]
+
+    src = UnifiedSlashSource(_Fake(), MruStore(tmp_path / "mru.json"))
+    comp = SlashCommandCompleter(source=src)
+    completions = list(comp.get_completions(Document("/"), CompleteEvent()))
+    by_text = {c.text: c for c in completions}
+    # Command row.
+    assert "(command)" in str(by_text["/help"].display)
+    # Skill row.
+    assert "(skill)" in str(by_text["/my-skill"].display)
