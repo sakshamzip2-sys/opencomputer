@@ -1967,8 +1967,17 @@ class AgentLoop:
         ``model`` overrides ``config.model.model`` for this turn only —
         used by the cheap-route gate on iteration 0. ``None`` = use the
         config default.
+
+        Resolves any user-defined alias (``config.model.model_aliases``)
+        to its canonical id before the provider call so users can write
+        ``model: fast`` in config and have it map to the configured target.
         """
-        model_name = model if model is not None else self.config.model.model
+        from opencomputer.agent.model_resolver import resolve_model
+
+        raw_model = model if model is not None else self.config.model.model
+        model_name = resolve_model(
+            raw_model, getattr(self.config.model, "model_aliases", None) or {}
+        )
         tool_schemas = sort_tools_for_request(self._filtered_schemas())
         # IV.3: normalize the message list right before the wire call.
         # If multiple providers somehow stacked standalone user messages

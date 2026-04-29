@@ -46,6 +46,16 @@ class ModelConfig:
     # has subtle implications for tool schemas, streaming shape, prompt
     # cache identity).
     fallback_models: tuple[str, ...] = ()
+    # User-defined alias map, e.g.
+    #   model_aliases:
+    #     fast: claude-haiku-4-5-20251001
+    #     smart: claude-opus-4-7
+    # Resolved at provider-call sites via
+    # :func:`opencomputer.agent.model_resolver.resolve_model`. Default empty
+    # — feature off when no aliases configured. The YAML loader in
+    # ``config_store._apply_overrides`` round-trips dict fields automatically;
+    # no extra plumbing needed.
+    model_aliases: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
