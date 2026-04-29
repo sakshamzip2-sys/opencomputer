@@ -431,6 +431,7 @@ class AgentLoop:
         system_override: str | None = None,
         runtime: RuntimeContext | None = None,
         stream_callback=None,
+        thinking_callback=None,
         system_prompt_override: str | None = None,
         initial_messages: list[Message] | None = None,
         images: list[str] | None = None,
@@ -1050,6 +1051,7 @@ class AgentLoop:
                     messages=messages,
                     system=system,
                     stream_callback=stream_callback,
+                    thinking_callback=thinking_callback,
                     model=model_for_turn,
                     session_id=sid,
                 )
@@ -1981,6 +1983,7 @@ class AgentLoop:
         messages: list[Message],
         system: str,
         stream_callback=None,
+        thinking_callback=None,
         model: str | None = None,
         session_id: str = "",
     ) -> StepOutcome:
@@ -2054,6 +2057,9 @@ class AgentLoop:
             ):
                 if event.kind == "text_delta":
                     stream_callback(event.text)
+                elif event.kind == "thinking_delta":
+                    if thinking_callback is not None:
+                        thinking_callback(event.text)
                 elif event.kind == "done":
                     final_response = event.response
             if final_response is None:
