@@ -62,13 +62,13 @@ class _KEYBDINPUT(ctypes.Structure):
     ]
 
 
-class _INPUT_UNION(ctypes.Union):
+class _InputUnion(ctypes.Union):  # noqa: N801 — ctypes pattern; suffix "Union" is intentional
     _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT)]
 
 
-class _INPUT(ctypes.Structure):
+class _INPUT(ctypes.Structure):  # noqa: N801 — mirrors WinUser.h INPUT struct name
     _anonymous_ = ("u",)
-    _fields_ = [("type", wintypes.DWORD), ("u", _INPUT_UNION)]
+    _fields_ = [("type", wintypes.DWORD), ("u", _InputUnion)]
 
 
 def click_at(x: int, y: int, *, button: str, double: bool) -> bool:
