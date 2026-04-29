@@ -141,7 +141,7 @@ def test_screen_awareness_has_no_network_imports():
             findings.append(f"{py_file.relative_to(root)}:{line_no}: {statement}")
     assert findings == [], (
         "Network imports found in screen-awareness — privacy contract "
-        f"break. Findings:\n" + "\n".join(findings)
+        "break. Findings:\n" + "\n".join(findings)
     )
 
 
