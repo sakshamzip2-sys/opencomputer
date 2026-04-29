@@ -480,10 +480,25 @@ class SessionDB:
     def create_session(
         self, session_id: str, platform: str = "cli", model: str = "", title: str = ""
     ) -> None:
+        """Create or upsert a session row.
+
+        Uses ON CONFLICT DO UPDATE rather than INSERT OR REPLACE so a
+        pre-existing row's ``title`` survives — important when ``/rename``
+        ran before the user's first message and pre-created the row via
+        :meth:`set_session_title`. Other metadata (``started_at``,
+        ``platform``, ``model``) is updated to current values, which
+        matches what callers expect when they invoke this.
+        """
         with self._txn() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO sessions (id, started_at, platform, model, title) "
-                "VALUES (?, ?, ?, ?, ?)",
+                """
+                INSERT INTO sessions (id, started_at, platform, model, title)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  started_at = excluded.started_at,
+                  platform   = excluded.platform,
+                  model      = excluded.model
+                """,
                 (session_id, time.time(), platform, model, title),
             )
         # Round 2B P-4 — bind the session id onto the
@@ -569,8 +584,20 @@ class SessionDB:
         return title if title else None
 
     def set_session_title(self, session_id: str, title: str) -> None:
-        """Persist ``title`` on the session row. No-op if the session
-        doesn't exist yet.
+        """Persist ``title`` on the session row, creating a minimal row
+        if it doesn't exist yet.
+
+        Why upsert: ``/rename`` can fire BEFORE the user's first message
+        (which is what triggers :meth:`create_session`). A bare UPDATE
+        would silently no-op against a missing row — the slash-handler
+        would print "session renamed →" while nothing actually changed
+        in the DB, and the title indicator would never appear. The
+        ``ON CONFLICT DO UPDATE`` keeps the post-create-session case
+        atomic too (idempotent across re-runs).
+
+        :meth:`create_session` is the matching half — it now uses an
+        UPSERT that *preserves* an existing title, so a row pre-created
+        by ``/rename`` survives the first turn intact.
 
         Called from a daemon thread by
         :func:`opencomputer.agent.title_generator.maybe_auto_title`, so
@@ -580,8 +607,12 @@ class SessionDB:
         """
         with self._txn() as conn:
             conn.execute(
-                "UPDATE sessions SET title = ? WHERE id = ?",
-                (title, session_id),
+                """
+                INSERT INTO sessions (id, started_at, platform, model, title)
+                VALUES (?, ?, '', '', ?)
+                ON CONFLICT(id) DO UPDATE SET title = excluded.title
+                """,
+                (session_id, time.time(), title),
             )
 
     # ─── A.4 mood thread (2026-04-27) ─────────────────────────────
