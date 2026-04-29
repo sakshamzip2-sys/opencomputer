@@ -125,3 +125,15 @@ def test_finalize_no_thinking_emits_nothing_about_reasoning() -> None:
     out = _con.export_text()
     assert "Thought" not in out
     assert "💭" not in out
+
+
+def test_chat_loop_passes_thinking_callback_to_step_once() -> None:
+    """The CLI's ``_build_thinking_callback`` helper forwards each
+    thinking-delta chunk to the underlying renderer hook."""
+    from opencomputer.cli import _build_thinking_callback
+
+    captured: list[str] = []
+    cb = _build_thinking_callback(captured.append)
+    cb("a")
+    cb("b")
+    assert captured == ["a", "b"]

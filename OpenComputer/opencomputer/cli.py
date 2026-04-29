@@ -62,6 +62,18 @@ attachment when multiple Typer subcommands run inside a single process
 (tests, REPLs)."""
 
 
+def _build_thinking_callback(forward):
+    """Return a callback that forwards each thinking-delta chunk to ``forward``.
+
+    Pulled out as a function so the wiring is testable without spinning
+    up a full chat loop. The ``forward`` argument is typically
+    ``StreamingRenderer.on_thinking_chunk``.
+    """
+    def _cb(text: str) -> None:
+        forward(text)
+    return _cb
+
+
 def _configure_logging_once() -> None:
     """Wire :mod:`opencomputer.observability.logging_config` once per process.
 
@@ -981,6 +993,9 @@ def _run_chat_session(
                 session_id=session_id,
                 runtime=runtime,
                 stream_callback=renderer.on_chunk,
+                thinking_callback=_build_thinking_callback(
+                    renderer.on_thinking_chunk
+                ),
                 images=images,
             )
             elapsed = _time.monotonic() - t_start
@@ -992,6 +1007,7 @@ def _run_chat_session(
                 in_tok=result.input_tokens,
                 out_tok=result.output_tokens,
                 elapsed_s=elapsed,
+                show_reasoning=runtime.custom.get("show_reasoning", False),
             )
             # Tier 2.B — terminal bell on turn complete (if /bell on).
             from opencomputer.cli_ui.bell import maybe_emit_bell
