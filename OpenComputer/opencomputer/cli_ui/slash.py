@@ -9,6 +9,7 @@ without importing Rich/prompt_toolkit.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Union
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,26 @@ class CommandDef:
     category: str = "general"
     aliases: tuple[str, ...] = field(default_factory=tuple)
     args_hint: str = ""
+
+
+@dataclass(frozen=True)
+class SkillEntry:
+    """One installed skill, surfaced in the picker dropdown.
+
+    Mirrors :class:`opencomputer.agent.memory.SkillMeta` but keeps only
+    the fields the dropdown needs — id (slash text), human name, and
+    description (truncated for display). The picker source converts
+    SkillMeta → SkillEntry at enumeration time so the picker layer
+    doesn't depend on agent.memory.
+    """
+
+    id: str
+    name: str
+    description: str
+
+
+#: Either kind of row that can appear in the slash dropdown.
+SlashItem = Union[CommandDef, SkillEntry]
 
 
 @dataclass
