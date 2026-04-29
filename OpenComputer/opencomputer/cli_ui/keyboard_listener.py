@@ -67,7 +67,8 @@ class KeyboardListener:
         """Begin watching stdin. No-op if stdin isn't a TTY or already running."""
         if self._thread is not None and self._thread.is_alive():
             return
-        if not sys.stdin.isatty():
+        from opencomputer.headless import is_headless
+        if not sys.stdin.isatty() or is_headless():
             return
         self._stop_event.clear()
         self._thread = threading.Thread(

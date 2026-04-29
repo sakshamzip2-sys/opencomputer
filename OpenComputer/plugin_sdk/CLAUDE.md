@@ -17,6 +17,11 @@ discouraged in plugin code.
    `from plugin_sdk.specific_module import X`.
    - `SlashCommand` + `SlashCommandResult` — for plugin-authored slash
      commands (Phase 12b6).
+   - `PermissionMode` + `effective_permission_mode` (2026-04-29) — canonical
+     mode resolution for plugin authors. New code should use the helper
+     rather than reading `runtime.plan_mode` / `runtime.yolo_mode`
+     directly; the helper accounts for slash-command toggles in
+     `runtime.custom`.
 
 3. **Every public class/dataclass is `@dataclass(frozen=True, slots=True)`**
    unless it must be subclassed (the contract ABCs:

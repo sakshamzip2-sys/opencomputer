@@ -24,6 +24,26 @@ class CommandDef:
     args_hint: str = ""
 
 
+@dataclass(frozen=True)
+class SkillEntry:
+    """One installed skill, surfaced in the picker dropdown.
+
+    Mirrors :class:`opencomputer.agent.memory.SkillMeta` but keeps only
+    the fields the dropdown needs — id (slash text), human name, and
+    description (truncated for display). The picker source converts
+    SkillMeta → SkillEntry at enumeration time so the picker layer
+    doesn't depend on agent.memory.
+    """
+
+    id: str
+    name: str
+    description: str
+
+
+#: Either kind of row that can appear in the slash dropdown.
+SlashItem = CommandDef | SkillEntry
+
+
 @dataclass
 class SlashResult:
     """What happened when a slash command ran.

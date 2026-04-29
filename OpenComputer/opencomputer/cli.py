@@ -51,8 +51,45 @@ from opencomputer.tools.voice_transcribe import VoiceTranscribeTool
 from opencomputer.tools.web_fetch import WebFetchTool
 from opencomputer.tools.web_search import WebSearchTool
 from opencomputer.tools.write import WriteTool
+from plugin_sdk import PermissionMode
 from plugin_sdk.hooks import HookEvent, HookSpec
 from plugin_sdk.runtime_context import RuntimeContext
+
+_DEPRECATION_WARNED: set[str] = set()
+
+
+def _derive_permission_mode(
+    *, plan: bool, auto: bool, accept_edits: bool
+) -> PermissionMode:
+    """Map the three CLI mode flags onto the canonical ``PermissionMode``.
+
+    Precedence: ``plan > auto > accept-edits > default``. Mirrors the
+    pre-existing ``cli.py:879`` rule that "if both set, plan_mode wins".
+    """
+    if plan:
+        return PermissionMode.PLAN
+    if auto:
+        return PermissionMode.AUTO
+    if accept_edits:
+        return PermissionMode.ACCEPT_EDITS
+    return PermissionMode.DEFAULT
+
+
+def _emit_yolo_deprecation() -> None:
+    """One-shot stderr deprecation warning when --yolo / /yolo is used.
+
+    Fires at most once per process so we don't spam logs when both the CLI
+    flag and the slash command alias trigger the warning.
+    """
+    if "yolo" in _DEPRECATION_WARNED:
+        return
+    _DEPRECATION_WARNED.add("yolo")
+    typer.secho(
+        "[deprecated] --yolo / /yolo will be removed in a future release — "
+        "use --auto / /auto.",
+        fg=typer.colors.YELLOW,
+        err=True,
+    )
 
 _log = logging.getLogger("opencomputer.cli")
 
@@ -313,6 +350,17 @@ def _register_builtin_tools() -> None:
         registry.register(PointAndClickTool())
         registry.register(AppleScriptRunTool())
 
+    # PowerShellRun — Windows AppleScriptRun-equivalent. Hard-gates
+    # internally to sys.platform == "win32"; safe to register on every
+    # platform (returns an error if invoked off Windows).
+    from opencomputer.tools.powershell_run import PowerShellRunTool
+    registry.register(PowerShellRunTool())
+
+    # DBusCall — Linux desktop AppleScriptRun-equivalent. Hard-gates
+    # internally to Linux; safe to register on every platform.
+    from opencomputer.tools.dbus_call import DBusCallTool
+    registry.register(DBusCallTool())
+
     # Cross-platform GUI tools — register unconditionally; they self-detect
     # the platform at call time and dispatch to the right backend (Quartz /
     # pyautogui / xdotool / ydotool / osascript / PowerShell).
@@ -515,7 +563,18 @@ def _resolve_provider(provider_name: str):
 def default(
     ctx: typer.Context,
     version: bool = typer.Option(False, "--version", "-V", help="Show version and exit."),
+    headless: bool = typer.Option(
+        False, "--headless",
+        help=(
+            "Force headless mode: no Rich Live, no prompt-toolkit pickers, "
+            "no terminal bell. Sets OPENCOMPUTER_HEADLESS=1 for the rest "
+            "of the process. Auto-detected from sys.stdin.isatty() when "
+            "the flag isn't passed."
+        ),
+    ),
 ) -> None:
+    if headless:
+        os.environ["OPENCOMPUTER_HEADLESS"] = "1"
     if version:
         console.print(f"opencomputer {__version__}")
         raise typer.Exit()
@@ -807,6 +866,8 @@ def _run_chat_session(
     plan: bool,
     no_compact: bool,
     yolo: bool = False,
+    accept_edits: bool = False,
+    permission_mode: PermissionMode = PermissionMode.DEFAULT,
 ) -> None:
     """Shared interactive REPL used by ``chat`` and ``code`` commands.
 
@@ -854,7 +915,9 @@ def _run_chat_session(
     _discover_and_register_agents()
     n_settings_hooks = _register_settings_hooks(cfg)
     provider = _resolve_provider(cfg.model.provider)
-    runtime = RuntimeContext(plan_mode=plan, yolo_mode=yolo)
+    runtime = RuntimeContext(
+        plan_mode=plan, yolo_mode=yolo, permission_mode=permission_mode,
+    )
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
     mcp_mgr = MCPManager(tool_registry=registry)
 
@@ -899,11 +962,20 @@ def _run_chat_session(
     # that depend on n_plugins / n_agents in the same scope.
     if n_settings_hooks:
         console.print(f"[dim]hooks:   {n_settings_hooks} from settings.yaml[/dim]")
-    if plan:
-        console.print("[bold yellow]plan mode ON[/bold yellow] — destructive tools will be refused")
-    if yolo:
+    # Banner reflects the canonical effective mode (handles --plan / --auto /
+    # --accept-edits / legacy --yolo uniformly via the resolution helper).
+    if permission_mode == PermissionMode.PLAN:
         console.print(
-            "[bold red]yolo mode ON[/bold red] — per-action confirmation prompts skipped"
+            "[bold yellow]plan mode ON[/bold yellow] — destructive tools will be refused"
+        )
+    elif permission_mode == PermissionMode.AUTO:
+        console.print(
+            "[bold red]auto mode ON[/bold red] — per-action confirmation prompts skipped"
+        )
+    elif permission_mode == PermissionMode.ACCEPT_EDITS:
+        console.print(
+            "[bold blue]accept-edits mode ON[/bold blue] — Edit/Write/MultiEdit/NotebookEdit "
+            "auto-approved; Bash and network still prompt"
         )
     if no_compact:
         console.print("[dim]compaction disabled[/dim]")
@@ -969,7 +1041,8 @@ def _run_chat_session(
     # status + thinking panel + token-rate readout. Falls back to the
     # plain-stream path on non-TTY (Rich.Live escape sequences would
     # pollute a piped stdout).
-    use_live_ui = sys.stdout.isatty()
+    from opencomputer.headless import is_headless
+    use_live_ui = sys.stdout.isatty() and not is_headless()
 
     # Phase 1 TUI uplift — closure-captured cumulative token tally so
     # /cost can read it. Mutated (not rebound) inside both _run_turn
@@ -1299,6 +1372,8 @@ def _run_chat_session(
                 scope=scope,
                 session_title=_title,
                 paste_folder=paste_folder,
+                memory_manager=loop.memory if loop is not None else None,
+                runtime=loop._runtime if loop is not None else None,
             )
 
         # Drain a queued prompt (set via /queue <text>) before prompting
@@ -1489,6 +1564,21 @@ def chat(
     plan: bool = typer.Option(
         False, "--plan", help="Plan mode — agent describes actions, refuses destructive tools."
     ),
+    auto: bool = typer.Option(
+        False,
+        "--auto",
+        help="Auto mode — skip per-action confirmation prompts (USE WITH CAUTION).",
+    ),
+    accept_edits: bool = typer.Option(
+        False,
+        "--accept-edits",
+        help="Accept-edits mode — auto-approve Edit/Write/MultiEdit/NotebookEdit; Bash/network still prompt.",
+    ),
+    yolo: bool = typer.Option(
+        False,
+        "--yolo",
+        help="[deprecated] Alias for --auto.",
+    ),
     no_compact: bool = typer.Option(
         False, "--no-compact", help="Disable automatic context compaction (debugging)."
     ),
@@ -1504,7 +1594,18 @@ def chat(
     elif action:
         # Treat as a session-id (or prefix) to resume directly.
         resume = action
-    _run_chat_session(resume=resume, plan=plan, no_compact=no_compact, yolo=False)
+    if yolo:
+        _emit_yolo_deprecation()
+        auto = True
+    permission_mode = _derive_permission_mode(plan=plan, auto=auto, accept_edits=accept_edits)
+    _run_chat_session(
+        resume=resume,
+        plan=plan,
+        no_compact=no_compact,
+        yolo=auto,
+        accept_edits=accept_edits,
+        permission_mode=permission_mode,
+    )
 
 
 @app.command()
@@ -1526,10 +1627,20 @@ def code(
         "--plan",
         help="Start in plan mode — agent describes actions, refuses destructive tools.",
     ),
+    auto: bool = typer.Option(
+        False,
+        "--auto",
+        help="Auto mode — skip per-action confirmation prompts (USE WITH CAUTION).",
+    ),
+    accept_edits: bool = typer.Option(
+        False,
+        "--accept-edits",
+        help="Accept-edits mode — auto-approve Edit/Write/MultiEdit/NotebookEdit; Bash/network still prompt.",
+    ),
     yolo: bool = typer.Option(
         False,
         "--yolo",
-        help="Skip per-action confirmation prompts (USE WITH CAUTION).",
+        help="[deprecated] Alias for --auto.",
     ),
     no_compact: bool = typer.Option(
         False, "--no-compact", help="Disable automatic context compaction (debugging)."
@@ -1566,22 +1677,56 @@ def code(
         os.chdir(target)
         console.print(f"[dim]cwd: {target}[/dim]")
 
+    if yolo:
+        _emit_yolo_deprecation()
+        auto = True
+    permission_mode = _derive_permission_mode(plan=plan, auto=auto, accept_edits=accept_edits)
+
     if worktree:
         from opencomputer.worktree import session_worktree
 
         with session_worktree(Path.cwd(), keep=keep_worktree) as wt:
             if wt != Path.cwd().parent:  # i.e. the worktree was actually created
                 console.print(f"[dim]worktree: {wt}[/dim]")
-            _run_chat_session(resume=resume, plan=plan, no_compact=no_compact, yolo=yolo)
+            _run_chat_session(
+                resume=resume,
+                plan=plan,
+                no_compact=no_compact,
+                yolo=auto,
+                accept_edits=accept_edits,
+                permission_mode=permission_mode,
+            )
         return
 
-    _run_chat_session(resume=resume, plan=plan, no_compact=no_compact, yolo=yolo)
+    _run_chat_session(
+        resume=resume,
+        plan=plan,
+        no_compact=no_compact,
+        yolo=auto,
+        accept_edits=accept_edits,
+        permission_mode=permission_mode,
+    )
 
 
 @app.command()
 def resume(
     plan: bool = typer.Option(
         False, "--plan", help="Resume in plan mode."
+    ),
+    auto: bool = typer.Option(
+        False,
+        "--auto",
+        help="Resume in auto mode (skip per-action confirmation prompts).",
+    ),
+    accept_edits: bool = typer.Option(
+        False,
+        "--accept-edits",
+        help="Resume in accept-edits mode (auto-approve Edit/Write/MultiEdit/NotebookEdit).",
+    ),
+    yolo: bool = typer.Option(
+        False,
+        "--yolo",
+        help="[deprecated] Alias for --auto.",
     ),
     no_compact: bool = typer.Option(
         False, "--no-compact", help="Disable automatic context compaction."
@@ -1627,7 +1772,18 @@ def resume(
         console.print("[dim]cancelled.[/dim]")
         return
 
-    _run_chat_session(resume=selected_id, plan=plan, no_compact=no_compact, yolo=False)
+    if yolo:
+        _emit_yolo_deprecation()
+        auto = True
+    permission_mode = _derive_permission_mode(plan=plan, auto=auto, accept_edits=accept_edits)
+    _run_chat_session(
+        resume=selected_id,
+        plan=plan,
+        no_compact=no_compact,
+        yolo=auto,
+        accept_edits=accept_edits,
+        permission_mode=permission_mode,
+    )
 
 
 @app.command()
@@ -2055,6 +2211,58 @@ from opencomputer.cli_webhook import webhook_app  # noqa: E402
 
 app.add_typer(adapter_app, name="adapter")
 app.add_typer(consent_app, name="consent")
+
+# ─── service (systemd-user, Linux deployment) ─────────────────────────
+service_app = typer.Typer(help="Install/uninstall the systemd user service (Linux).")
+app.add_typer(service_app, name="service")
+
+
+@service_app.command("install")
+def _service_install(
+    profile: str = typer.Option("default", help="Which profile to run."),
+    extra_args: str = typer.Option(
+        # 'gateway' (NOT 'chat') is the right default for a service unit:
+        # 'chat' is interactive and would exit immediately under systemd
+        # (no stdin). 'gateway' is the long-running channel daemon.
+        "gateway",
+        help=(
+            "Args after `opencomputer --headless --profile <p>`. "
+            "Default: 'gateway' (long-running channel daemon). "
+            "Note: systemd splits on whitespace and does NOT invoke a "
+            "shell — args containing spaces are not supported."
+        ),
+    ),
+) -> None:
+    """Write and reload a systemd user unit. Run `systemctl --user enable --now opencomputer` after."""
+    import shutil as _shutil
+
+    from opencomputer import service as _service_mod
+
+    exe = _shutil.which("opencomputer") or f"{sys.executable} -m opencomputer"
+    path = _service_mod.install_systemd_unit(
+        executable=exe,
+        workdir=str(Path.home()),
+        profile=profile,
+        extra_args=extra_args,
+    )
+    typer.echo(f"installed: {path}")
+    typer.echo("next: systemctl --user enable --now opencomputer")
+
+
+@service_app.command("uninstall")
+def _service_uninstall() -> None:
+    """Stop, disable, and remove the systemd user unit."""
+    from opencomputer import service as _service_mod
+    path = _service_mod.uninstall_systemd_unit()
+    typer.echo(f"removed: {path}" if path else "no unit installed")
+
+
+@service_app.command("status")
+def _service_status() -> None:
+    """Report whether the unit is active."""
+    from opencomputer import service as _service_mod
+    typer.echo("active" if _service_mod.is_active() else "inactive")
+
 app.add_typer(cost_app, name="cost")
 app.add_typer(cron_app, name="cron")
 app.add_typer(pair_app, name="pair")

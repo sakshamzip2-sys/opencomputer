@@ -82,6 +82,10 @@ class ChatParams(_StrictModel):
     message: str
     session_id: str | None = None
     plan_mode: bool = False
+    #: Canonical permission mode (default | plan | accept-edits | auto). Old
+    #: clients that omit this field still decode fine; servers fall back to
+    #: the legacy ``plan_mode`` bool when ``permission_mode == "default"``.
+    permission_mode: str = "default"
 
 
 class ChatResult(_StrictModel):

@@ -1002,6 +1002,40 @@ Enum that selects how multiple matched rules combine into a verdict:
 
 ---
 
+## Realtime Voice (2026-04-29)
+
+Port of OpenClaw's `realtime-voice` abstraction. Plugins implementing
+two-way streaming voice (e.g. OpenAI Realtime API) inherit
+`BaseRealtimeVoiceBridge` and implement seven abstract methods. Audio
+is PCM16 raw bytes; μ-law (telephony) is intentionally out of scope.
+
+### `BaseRealtimeVoiceBridge`
+
+ABC. Required methods: `connect()` (async), `send_audio(bytes)`,
+`send_user_message(text)`, `submit_tool_result(call_id, result)`,
+`trigger_greeting(instructions=None)`, `close()`, `is_connected()`.
+
+### `RealtimeVoiceTool`
+
+Frozen dataclass — function-tool schema sent to the realtime model on
+session.update. Fields: `type` (`"function"`), `name`, `description`,
+`parameters` (JSON-Schema dict).
+
+### `RealtimeVoiceToolCallEvent`
+
+Frozen dataclass — emitted by the bridge when the model invokes a tool
+mid-stream. Fields: `item_id`, `call_id`, `name`, `args` (decoded JSON).
+
+### `RealtimeVoiceRole`
+
+`Literal["user", "assistant"]` — the role on `on_transcript` callbacks.
+
+### `RealtimeVoiceCloseReason`
+
+`Literal["completed", "error"]` — the reason passed to `on_close`.
+
+---
+
 ## Skills Hub (2026-04-28)
 
 Public ABC + dataclasses for the Skills Hub system. Plugins and OC's bundled
@@ -1048,6 +1082,41 @@ Frozen dataclass — full installable content of a skill. Fields:
 `Literal["builtin", "trusted", "community", "untrusted"]`. Used on
 `SkillMeta.trust_level` to label the provenance of a skill so the agent
 loop / approval flow can render the right warnings.
+
+---
+
+## Permission modes (2026-04-29)
+
+Canonical taxonomy of session-wide tool-approval modes. New code should
+read modes through the `effective_permission_mode()` helper rather than
+the legacy `runtime.plan_mode` / `runtime.yolo_mode` bools — the helper
+accounts for slash-command toggles in `runtime.custom`.
+
+### `PermissionMode`
+
+`StrEnum` with four members:
+
+| Member | Value | Behaviour |
+|---|---|---|
+| `PermissionMode.DEFAULT` | `"default"` | Per-action ConsentGate prompts (status quo). |
+| `PermissionMode.PLAN` | `"plan"` | Destructive tools refused; agent describes the plan. |
+| `PermissionMode.ACCEPT_EDITS` | `"accept-edits"` | Auto-approve Edit/Write/MultiEdit/NotebookEdit; Bash and network still prompt. |
+| `PermissionMode.AUTO` | `"auto"` | Skip per-action prompts. Audit-logged via `actor='bypass'`. |
+
+### `effective_permission_mode(runtime: RuntimeContext) -> PermissionMode`
+
+Resolves "what mode is this session in right now?" through this
+precedence chain (top wins):
+
+1. `runtime.custom["permission_mode"]` (canonical session-mutable key)
+2. `runtime.custom["plan_mode"] == True` → `PLAN` (legacy `/plan`)
+   `runtime.custom["yolo_session"] == True` → `AUTO` (legacy `/yolo`)
+3. `runtime.permission_mode` (canonical CLI-set frozen field)
+4. `runtime.plan_mode == True` → `PLAN` (legacy `--plan`)
+   `runtime.yolo_mode == True` → `AUTO` (legacy `--yolo`)
+5. `PermissionMode.DEFAULT`
+
+Plan beats auto on conflict (matches existing CLI precedence).
 
 ---
 

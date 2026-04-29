@@ -86,11 +86,19 @@ from plugin_sdk.ingestion import (
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
 from plugin_sdk.interaction import InteractionRequest, InteractionResponse
 from plugin_sdk.memory import MemoryProvider
+from plugin_sdk.permission_mode import PermissionMode, effective_permission_mode
 from plugin_sdk.provider_contract import (
     BaseProvider,
     ProviderResponse,
     StreamEvent,
     Usage,
+)
+from plugin_sdk.realtime_voice import (
+    BaseRealtimeVoiceBridge,
+    RealtimeVoiceCloseReason,
+    RealtimeVoiceRole,
+    RealtimeVoiceTool,
+    RealtimeVoiceToolCallEvent,
 )
 from plugin_sdk.runtime_context import (
     DEFAULT_RUNTIME_CONTEXT,
@@ -174,6 +182,15 @@ __all__ = [
     "InteractionResponse",
     # memory (Phase 10f)
     "MemoryProvider",
+    # permission modes (2026-04-29)
+    "PermissionMode",
+    "effective_permission_mode",
+    # realtime voice (2026-04-29) — port of openclaw/src/realtime-voice/
+    "BaseRealtimeVoiceBridge",
+    "RealtimeVoiceCloseReason",
+    "RealtimeVoiceRole",
+    "RealtimeVoiceTool",
+    "RealtimeVoiceToolCallEvent",
     # slash commands (Phase 12b.6, Task D8)
     "SlashCommand",
     "SlashCommandResult",

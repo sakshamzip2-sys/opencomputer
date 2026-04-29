@@ -32,6 +32,7 @@ _SKILL_EVO_DIR = _EXT_DIR / "skill-evolution"
 _VOICE_MODE_DIR = _EXT_DIR / "voice-mode"
 _BROWSER_CONTROL_DIR = _EXT_DIR / "browser-control"
 _AFFECT_INJECTION_DIR = _EXT_DIR / "affect-injection"
+_OPENAI_PROVIDER_DIR = _EXT_DIR / "openai-provider"
 _SCREEN_AWARENESS_DIR = _EXT_DIR / "screen-awareness"
 
 
@@ -263,6 +264,45 @@ def _register_voice_mode_alias() -> None:
         setattr(parent, sub, sub_mod)
 
 
+def _register_openai_provider_alias() -> None:
+    """Register extensions.openai_provider → extensions/openai-provider/.
+
+    Mirrors the voice_mode pattern. Realtime voice port (2026-04-29) needs
+    underscore-form imports for the realtime / realtime_helpers / plugin /
+    provider submodules. The loop below skips files that don't yet exist,
+    so this stays correct as the plugin grows.
+    """
+    _ensure_extensions_pkg()
+
+    if not _OPENAI_PROVIDER_DIR.exists():
+        return
+
+    if "extensions.openai_provider" not in sys.modules:
+        mod = types.ModuleType("extensions.openai_provider")
+        mod.__path__ = [str(_OPENAI_PROVIDER_DIR)]
+        mod.__package__ = "extensions.openai_provider"
+        sys.modules["extensions.openai_provider"] = mod
+        sys.modules["extensions"].openai_provider = mod
+
+    parent = sys.modules["extensions.openai_provider"]
+    for sub in ("provider", "realtime", "realtime_helpers", "plugin"):
+        full_name = f"extensions.openai_provider.{sub}"
+        if full_name in sys.modules:
+            setattr(parent, sub, sys.modules[full_name])
+            continue
+        init = _OPENAI_PROVIDER_DIR / f"{sub}.py"
+        if not init.exists():
+            continue
+        spec = importlib.util.spec_from_file_location(full_name, str(init))
+        if spec is None or spec.loader is None:
+            continue
+        sub_mod = importlib.util.module_from_spec(spec)
+        sub_mod.__package__ = "extensions.openai_provider"
+        sys.modules[full_name] = sub_mod
+        spec.loader.exec_module(sub_mod)
+        setattr(parent, sub, sub_mod)
+
+
 def _register_browser_control_alias() -> None:
     """Register extensions.browser_control → extensions/browser-control/.
 
@@ -399,6 +439,7 @@ _register_browser_bridge_alias()
 _register_ambient_sensors_alias()
 _register_skill_evolution_alias()
 _register_voice_mode_alias()
+_register_openai_provider_alias()
 _register_browser_control_alias()
 _register_affect_injection_alias()
 _register_screen_awareness_alias()

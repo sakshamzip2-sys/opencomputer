@@ -150,6 +150,9 @@ packages = ["opencomputer", "plugin_sdk"]
 # available" on first use. Caught by the v2026.4.26 E2E install test.
 [tool.hatch.build.targets.wheel.force-include]
 "extensions" = "extensions"
+# systemd unit template — shipped alongside opencomputer.service so
+# `opencomputer service install` can read it from the installed wheel.
+"opencomputer/service/templates/opencomputer.service" = "opencomputer/service/templates/opencomputer.service"
 
 [tool.ruff]
 line-length = 100

@@ -22,6 +22,9 @@ from pathlib import Path
 
 # Sibling imports — loader-assisted (plugin dir on sys.path).
 from context import HarnessContext  # type: ignore[import-not-found]
+from hooks.accept_edits_hook import (
+    build_accept_edits_hook_spec,  # type: ignore[import-not-found]
+)
 from hooks.auto_checkpoint import build_auto_checkpoint_hook_spec  # type: ignore[import-not-found]
 from hooks.cleanup_session import build_cleanup_session_hook_spec  # type: ignore[import-not-found]
 from hooks.plan_block import build_plan_mode_hook_spec  # type: ignore[import-not-found]
@@ -131,6 +134,9 @@ def register(api) -> None:  # PluginAPI duck-typed
     # the completion on its next turn (P-8).
     api.register_hook(build_scope_check_hook_spec())
     api.register_hook(build_plan_mode_hook_spec())
+    # PR-3 (2026-04-29): auto-approve Edit/Write/MultiEdit/NotebookEdit when
+    # effective mode is ACCEPT_EDITS. Bash and network still prompt.
+    api.register_hook(build_accept_edits_hook_spec())
     api.register_hook(build_auto_checkpoint_hook_spec(harness_ctx=ctx))
     api.register_hook(build_post_edit_review_hook_spec(harness_ctx=ctx))
     api.register_hook(build_session_bootstrap_hook_spec(harness_ctx=ctx))

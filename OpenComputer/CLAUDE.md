@@ -378,7 +378,7 @@ See `RELEASE.md` — basically bump version in two places, tag `vX.Y.Z`, push. C
 
 6. **The plugin SDK boundary is enforced by a test.** `tests/test_phase6a.py::test_plugin_sdk_does_not_import_opencomputer` scans `plugin_sdk/*.py` for `from opencomputer` imports and fails if any exist. Do not bypass this — it's how the contract stays honest.
 
-7. **HookContext.runtime is optional for backwards compat.** Hooks written before Phase 6a don't pass it. New hooks should use `ctx.runtime.plan_mode` etc.
+7. **HookContext.runtime is optional for backwards compat.** Hooks written before Phase 6a don't pass it. New hooks should read modes through `effective_permission_mode(ctx.runtime)` (exported from `plugin_sdk`) rather than `ctx.runtime.plan_mode` / `ctx.runtime.yolo_mode` directly — the helper accounts for slash-command toggles living in `runtime.custom`.
 
 ---
 

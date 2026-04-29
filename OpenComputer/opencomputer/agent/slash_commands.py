@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 from opencomputer.agent.slash_commands_impl.agents_cmd import AgentsCommand
+from opencomputer.agent.slash_commands_impl.auto_cmd import AutoCommand, YoloCommand
 from opencomputer.agent.slash_commands_impl.bell_cmd import BellCommand
 from opencomputer.agent.slash_commands_impl.branch_cmd import BranchCommand
 from opencomputer.agent.slash_commands_impl.btw_cmd import BtwCommand
@@ -35,6 +36,10 @@ from opencomputer.agent.slash_commands_impl.display_toggles_cmd import (
 )
 from opencomputer.agent.slash_commands_impl.fast_cmd import FastCommand
 from opencomputer.agent.slash_commands_impl.history_cmd import HistoryCommand
+from opencomputer.agent.slash_commands_impl.mode_cmd import ModeCommand
+from opencomputer.agent.slash_commands_impl.persona_mode_cmd import (
+    PersonaModeCommand,
+)
 from opencomputer.agent.slash_commands_impl.platforms_cmd import PlatformsCommand
 from opencomputer.agent.slash_commands_impl.reasoning_cmd import ReasoningCommand
 from opencomputer.agent.slash_commands_impl.save_cmd import SaveCommand
@@ -45,7 +50,6 @@ from opencomputer.agent.slash_commands_impl.skin_personality_cmd import (
 )
 from opencomputer.agent.slash_commands_impl.title_cmd import TitleCommand
 from opencomputer.agent.slash_commands_impl.usage_cmd import UsageCommand
-from opencomputer.agent.slash_commands_impl.yolo_cmd import YoloCommand
 from opencomputer.plugins.registry import registry as _plugin_registry
 
 # The built-in slash command classes. Each is instantiated by
@@ -58,7 +62,12 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # docs/refs/hermes-agent/2026-04-28-major-gaps.md
     # Batch 1 — runtime-only:
     CopyCommand,
-    YoloCommand,
+    AutoCommand,         # canonical name (replaces YoloCommand below in priority)
+    YoloCommand,         # deprecated alias — forwards to AutoCommand
+    ModeCommand,         # /mode <name> — unified permission-mode setter
+    # /accept-edits is provided by extensions/coding-harness (existing) —
+    # see slash_commands/accept_edits.py. Updated to write canonical
+    # permission_mode key in PR-3.
     ReasoningCommand,
     FastCommand,
     UsageCommand,
@@ -71,6 +80,7 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # Batch 2 — runtime-only state setters:
     SkinCommand,
     PersonalityCommand,
+    PersonaModeCommand,  # /persona-mode — auto-classifier override
     # Batch 3 — quick wins:
     SaveCommand,
     AgentsCommand,

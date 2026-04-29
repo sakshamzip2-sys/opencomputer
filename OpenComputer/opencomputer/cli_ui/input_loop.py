@@ -93,6 +93,70 @@ def _strip_trailing_whitespace(text: str) -> str:
     return text.rstrip()
 
 
+def _render_dropdown_for_state(state: dict) -> list[tuple[str, str]]:
+    """Render a dropdown row list from the picker state dict.
+
+    Pulled out of ``read_user_input`` (was a closure) so unit tests can
+    exercise the rendering logic without spinning up an Application.
+
+    Returns a list of (style-class, text) pairs suitable for
+    :class:`FormattedTextControl`.
+    """
+    from .slash import CommandDef, SkillEntry
+    from .slash_completer import _trim_description
+
+    matches = state.get("matches") or []
+    if not matches:
+        return []
+    out: list[tuple[str, str]] = []
+    if state.get("mode") == "file":
+        # File-completion rendering — unchanged.
+        from opencomputer.cli_ui.file_completer import format_size_label
+
+        for i, p in enumerate(matches):
+            is_sel = i == state["selected_idx"]
+            cursor_cls = "class:dd.cursor" if is_sel else "class:dd.cursor.dim"
+            title_cls = "class:dd.title.selected" if is_sel else "class:dd.title"
+            desc_cls = "class:dd.desc.selected" if is_sel else "class:dd.desc"
+            size = format_size_label(p, base=Path.cwd())
+            out.append((cursor_cls, "❯ " if is_sel else "  "))
+            out.append((title_cls, f"@{p}"))
+            if size:
+                out.append((desc_cls, f"  ({size})"))
+            out.append(("", "\n"))
+        return out
+    # Slash command + skill rendering — handles both SlashItem variants.
+    for i, item in enumerate(matches):
+        is_sel = i == state["selected_idx"]
+        cursor_cls = "class:dd.cursor" if is_sel else "class:dd.cursor.dim"
+        title_cls = "class:dd.title.selected" if is_sel else "class:dd.title"
+        desc_cls = "class:dd.desc.selected" if is_sel else "class:dd.desc"
+        if isinstance(item, CommandDef):
+            args = f" {item.args_hint}" if item.args_hint else ""
+            label = f"/{item.name}{args}"
+            tag = "(command)"
+            desc = item.description
+            cat_cls = (
+                "class:dd.cat.selected" if is_sel else "class:dd.tag.command"
+            )
+        elif isinstance(item, SkillEntry):
+            label = f"/{item.id}"
+            tag = "(skill)"
+            desc = item.description
+            cat_cls = (
+                "class:dd.cat.selected" if is_sel else "class:dd.tag.skill"
+            )
+        else:
+            # Unknown item kind — skip rather than render garbage.
+            continue
+        out.append((cursor_cls, "❯ " if is_sel else "  "))
+        out.append((title_cls, label))
+        out.append((cat_cls, f"  {tag}"))
+        out.append((desc_cls, f"  {_trim_description(desc)}"))
+        out.append(("", "\n"))
+    return out
+
+
 def build_prompt_session(
     *,
     profile_home: Path,
@@ -267,12 +331,146 @@ def _try_attach_clipboard_image_into_buffer(
     return True
 
 
+#: 2026-04-29 — order in which Shift+Tab cycles permission modes. Matches
+#: Claude Code's "default → accept-edits → auto → plan" pattern.
+_PERMISSION_MODE_CYCLE: tuple = (
+    "default",
+    "accept-edits",
+    "auto",
+    "plan",
+)
+
+
+def _cycle_permission_mode(runtime: object) -> str:
+    """Advance the runtime's permission mode through the canonical cycle.
+
+    Mutates ``runtime.custom`` in place (the same pattern slash commands
+    use). Returns the new mode value as a string. Safe to call with the
+    minimal RuntimeContext-like surface — only requires ``.custom`` dict.
+    """
+    from plugin_sdk import PermissionMode, effective_permission_mode
+
+    current_value = effective_permission_mode(runtime).value
+    try:
+        idx = _PERMISSION_MODE_CYCLE.index(current_value)
+    except ValueError:
+        idx = -1
+    new_value = _PERMISSION_MODE_CYCLE[(idx + 1) % len(_PERMISSION_MODE_CYCLE)]
+    new_mode = PermissionMode(new_value)
+
+    # Mirror the _set_mode helper from mode_cmd.py — clear all legacy keys
+    # before writing so /auto then Shift+Tab+Tab can't leak stale state.
+    if new_mode == PermissionMode.DEFAULT:
+        runtime.custom.pop("permission_mode", None)
+        runtime.custom.pop("plan_mode", None)
+        runtime.custom.pop("yolo_session", None)
+        runtime.custom.pop("accept_edits", None)
+    else:
+        runtime.custom["permission_mode"] = new_mode.value
+        runtime.custom["plan_mode"] = new_mode == PermissionMode.PLAN
+        runtime.custom["yolo_session"] = new_mode == PermissionMode.AUTO
+        runtime.custom["accept_edits"] = new_mode == PermissionMode.ACCEPT_EDITS
+    return new_value
+
+
+_MODE_GLYPH = {
+    "default": "[D]",
+    "accept-edits": "[E]",
+    "auto": "[A]",
+    "plan": "[P]",
+}
+
+_MODE_STYLE = {
+    "default": "fg:ansigreen",
+    "accept-edits": "fg:ansiblue",
+    "auto": "fg:ansired bold",
+    "plan": "fg:ansiyellow",
+}
+
+
+#: 2026-04-29 PR-6: persona ids where the mode badge is *not* useful — these
+#: are non-coding registers (chat/companion). When the auto-classifier lands
+#: on one of these AND the user hasn't explicitly switched modes, hide the
+#: badge to keep the chat surface uncluttered.
+_CHAT_PERSONAS = frozenset({"companion"})
+
+
+def _badge_has_meaningful_content(runtime: object) -> bool:
+    """Decide whether the badge has anything worth showing.
+
+    Show when the user has actively set state:
+    - non-default permission mode (CLI flag or ``/mode`` / ``/auto`` / ``/plan``)
+    - non-default ``/personality`` (anything other than ``helpful``)
+    - persona auto-classified into a non-chat register (e.g. ``coder``)
+
+    Hide when in a chat register (companion persona) with nothing overridden
+    — the badge would just be visual noise during casual conversation.
+
+    Fresh sessions (persona not yet classified) keep the badge visible so
+    new users discover Shift+Tab cycling — only hidden once the classifier
+    confirms a chat register.
+    """
+    if runtime is None:
+        return False
+    from plugin_sdk import effective_permission_mode
+
+    if effective_permission_mode(runtime).value != "default":
+        return True
+
+    personality = runtime.custom.get("personality", "")
+    if personality and personality != "helpful":
+        return True
+
+    # Persona unset (early session) OR non-chat → show; chat persona → hide.
+    persona = runtime.custom.get("active_persona_id", "")
+    return persona not in _CHAT_PERSONAS
+
+
+def _render_mode_badge(runtime: object) -> list[tuple[str, str]]:
+    """Render the bottom-bar status badge as FormattedText.
+
+    Surfaces three independent axes when set:
+    - **mode** (always shown): default / accept-edits / auto / plan
+    - **persona** (when set): the V2.C plural-persona auto-classifier id,
+      mirrored from ``loop._active_persona_id`` into
+      ``runtime.custom["active_persona_id"]``
+    - **personality** (when set to anything other than helpful/empty): the
+      ``/personality`` slash-command value
+
+    Includes ASCII glyphs for ``NO_COLOR`` / screen-reader accessibility.
+    Returns ``[]`` when there is no runtime, no actionable state, and the
+    persona indicates a chat register — keeps casual conversations
+    uncluttered. See :func:`_badge_has_meaningful_content` for the rule.
+    """
+    if not _badge_has_meaningful_content(runtime):
+        return []
+    from plugin_sdk import effective_permission_mode
+
+    mode = effective_permission_mode(runtime).value
+    glyph = _MODE_GLYPH.get(mode, "[?]")
+    style = _MODE_STYLE.get(mode, "")
+    segments: list[tuple[str, str]] = [(style, f" {glyph} mode: {mode} ")]
+
+    persona = runtime.custom.get("active_persona_id", "")
+    if persona:
+        segments.append(("fg:ansicyan", f"· persona: {persona} "))
+
+    personality = runtime.custom.get("personality", "")
+    if personality and personality != "helpful":
+        segments.append(("fg:ansimagenta", f"· personality: {personality} "))
+
+    segments.append(("", "  Shift+Tab to cycle"))
+    return segments
+
+
 async def read_user_input(
     *,
     profile_home: Path,
     scope: TurnCancelScope,
     session_title: str | None = None,
     paste_folder: PasteFolder | None = None,
+    memory_manager: object | None = None,
+    runtime: object | None = None,
 ) -> str:
     """Read one line of user input with an always-visible slash dropdown.
 
@@ -299,6 +497,11 @@ async def read_user_input(
     - Ctrl+V / bracketed paste → handles clipboard images (existing flow)
     - Ctrl+C / Ctrl+D (empty buffer) → raise to caller per shell convention
 
+    ``memory_manager``: optional MemoryManager for sourcing skills into
+    the dropdown. When provided, the picker mixes commands and skills
+    via UnifiedSlashSource. When ``None``, only built-in commands appear
+    (legacy fallback for callers that haven't been updated yet).
+
     ``build_prompt_session`` is preserved as the legacy entry point used
     by older callers and several test fixtures; new code should use this.
     """
@@ -320,9 +523,22 @@ async def read_user_input(
     from prompt_toolkit.styles import Style
 
     from .slash import SLASH_REGISTRY
+    from .slash_mru import MruStore
+    from .slash_picker_source import UnifiedSlashSource
 
     history_path = _history_file_path(profile_home)
     history = FileHistory(str(history_path))
+
+    # MRU store + picker source — lifted out of the legacy SLASH_REGISTRY
+    # path so skills surface in the dropdown alongside commands. When
+    # ``memory_manager`` is None (legacy callers), picker_source stays
+    # None and _refilter falls back to startswith-on-commands.
+    mru_store = MruStore(profile_home / "slash_mru.json")
+    picker_source: UnifiedSlashSource | None = (
+        UnifiedSlashSource(memory_manager, mru_store)
+        if memory_manager is not None
+        else None
+    )
 
     input_buffer = Buffer(
         history=history,
@@ -343,12 +559,17 @@ async def read_user_input(
     }
 
     def _refilter(text: str) -> None:
-        # Slash prefix wins (existing behavior).
+        # Slash prefix wins (commands + skills via picker source).
         if text.startswith("/") and " " not in text:
-            prefix = text[1:].lower()
-            state["matches"] = [
-                c for c in SLASH_REGISTRY if c.name.startswith(prefix)
-            ][:10]
+            prefix = text[1:]
+            if picker_source is not None:
+                matches = picker_source.rank(prefix)
+                state["matches"] = [m.item for m in matches]
+            else:
+                # Legacy path — registry only, startswith filter.
+                state["matches"] = [
+                    c for c in SLASH_REGISTRY if c.name.startswith(prefix.lower())
+                ][:20]
             state["selected_idx"] = 0
             state["mode"] = "slash"
             state["at_token_range"] = None
@@ -388,39 +609,7 @@ async def read_user_input(
         return bool(state["matches"])
 
     def _dropdown_text():
-        if not state["matches"]:
-            return []
-        out: list[tuple[str, str]] = []
-        if state["mode"] == "file":
-            # File-completion rendering: path + size label.
-            from opencomputer.cli_ui.file_completer import format_size_label
-
-            for i, p in enumerate(state["matches"]):
-                is_sel = i == state["selected_idx"]
-                cursor_cls = "class:dd.cursor" if is_sel else "class:dd.cursor.dim"
-                title_cls = "class:dd.title.selected" if is_sel else "class:dd.title"
-                desc_cls = "class:dd.desc.selected" if is_sel else "class:dd.desc"
-                size = format_size_label(p, base=Path.cwd())
-                out.append((cursor_cls, "❯ " if is_sel else "  "))
-                out.append((title_cls, f"@{p}"))
-                if size:
-                    out.append((desc_cls, f"  ({size})"))
-                out.append(("", "\n"))
-            return out
-        # Slash command rendering (unchanged).
-        for i, cmd in enumerate(state["matches"]):
-            is_sel = i == state["selected_idx"]
-            args = f" {cmd.args_hint}" if cmd.args_hint else ""
-            cursor_cls = "class:dd.cursor" if is_sel else "class:dd.cursor.dim"
-            title_cls = "class:dd.title.selected" if is_sel else "class:dd.title"
-            cat_cls = "class:dd.cat.selected" if is_sel else "class:dd.cat"
-            desc_cls = "class:dd.desc.selected" if is_sel else "class:dd.desc"
-            out.append((cursor_cls, "❯ " if is_sel else "  "))
-            out.append((title_cls, f"/{cmd.name}{args}"))
-            out.append((cat_cls, f"  ({cmd.category})"))
-            out.append((desc_cls, f"  {cmd.description}"))
-            out.append(("", "\n"))
-        return out
+        return _render_dropdown_for_state(state)
 
     def _dropdown_height():
         # ``Dimension.exact(N)`` is the classmethod that builds a fixed-N
@@ -428,7 +617,9 @@ async def read_user_input(
         # invalid — the constructor only accepts ``min/max/weight/preferred``.
         # Calling it crashed prompt_toolkit's renderer the moment the user
         # typed ``/`` (PR #210 follow-up).
-        return Dimension.exact(min(len(state["matches"]), 10))
+        # Cap raised from 10 → 20 in Task 8 to match the picker source's
+        # default top_n. Skills + commands are mixed so 10 was too tight.
+        return Dimension.exact(min(len(state["matches"]), 20))
 
     kb = KeyBindings()
 
@@ -446,7 +637,13 @@ async def read_user_input(
 
     def _apply_selection() -> None:
         """Replace the active token (slash prefix or @<query>) with the
-        selected dropdown row's expansion. Updates buffer + cursor."""
+        selected dropdown row's expansion. Updates buffer + cursor.
+
+        Slash mode handles both CommandDef (uses .name) and SkillEntry
+        (uses .id) — the user's slash text is the same in both cases.
+        """
+        from .slash import CommandDef, SkillEntry
+
         if not state["matches"] or not (
             0 <= state["selected_idx"] < len(state["matches"])
         ):
@@ -463,12 +660,30 @@ async def read_user_input(
             # closes since the cursor lands at end-of-token).
             _refilter(new_text)
         else:
-            input_buffer.text = f"/{sel.name}"
+            if isinstance(sel, CommandDef):
+                slash_text = sel.name
+            elif isinstance(sel, SkillEntry):
+                slash_text = sel.id
+            else:
+                return
+            input_buffer.text = f"/{slash_text}"
             input_buffer.cursor_position = len(input_buffer.text)
 
     @kb.add(Keys.ControlI, filter=Condition(_has_dropdown))  # Tab
     def _tab(event):  # noqa: ANN001
         _apply_selection()
+
+    @kb.add(Keys.BackTab)  # Shift+Tab — cycle permission modes
+    def _shift_tab(event):  # noqa: ANN001
+        # Only cycles when a runtime is wired. Tests + legacy callers
+        # that don't pass runtime get a no-op (safe).
+        if runtime is None:
+            return
+        try:
+            _cycle_permission_mode(runtime)
+        except Exception:  # noqa: BLE001 — never crash the input loop
+            return
+        event.app.invalidate()
 
     @kb.add(Keys.Enter)
     def _enter(event):  # noqa: ANN001
@@ -481,8 +696,22 @@ async def read_user_input(
                 # same Enter — let the user keep editing or press Enter
                 # again to send.
                 return
+            from .slash import CommandDef, SkillEntry
+
             sel = state["matches"][state["selected_idx"]]
-            input_buffer.text = f"/{sel.name}"
+            if isinstance(sel, CommandDef):
+                slash_text = sel.name
+            elif isinstance(sel, SkillEntry):
+                slash_text = sel.id
+            else:
+                event.app.exit(result=input_buffer.text)
+                return
+            input_buffer.text = f"/{slash_text}"
+            # Record the pick to MRU so it floats next session.
+            try:
+                mru_store.record(slash_text)
+            except Exception:  # noqa: BLE001 — never break submit
+                pass
         event.app.exit(result=input_buffer.text)
 
     @kb.add(Keys.Escape, eager=True)
@@ -557,6 +786,8 @@ async def read_user_input(
             "dd.title.selected": "bold #61afef",
             "dd.cat": "#5f87af",
             "dd.cat.selected": "bold #61afef",
+            "dd.tag.command": "#5fafd7",  # cyan — built-in commands
+            "dd.tag.skill": "#5faf5f",  # green — installed skills
             "dd.desc": "#6c6c6c",
             "dd.desc.selected": "#bcbcbc",
             "dd.divider": "#3a3a3a",
@@ -669,6 +900,22 @@ async def read_user_input(
         filter=Condition(_has_paste_hint),
     )
 
+    # 2026-04-29 — permission-mode badge. Bottom-most row when a runtime
+    # is wired and we're rendering to a real TTY (piped input mode skips).
+    import sys as _sys_for_tty
+    _badge_visible = runtime is not None and _sys_for_tty.stdout.isatty()
+
+    def _badge_text() -> list[tuple[str, str]]:
+        return _render_mode_badge(runtime)
+
+    badge_window = ConditionalContainer(
+        content=Window(
+            content=FormattedTextControl(_badge_text),
+            height=1,
+        ),
+        filter=Condition(lambda: _badge_visible),
+    )
+
     layout = Layout(
         HSplit(
             [
@@ -678,6 +925,7 @@ async def read_user_input(
                 title_window,
                 VSplit([prompt_window, input_window]),
                 paste_hint_window,
+                badge_window,
             ]
         ),
         focused_element=input_window,

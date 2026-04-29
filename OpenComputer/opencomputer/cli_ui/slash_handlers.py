@@ -126,6 +126,13 @@ def _handle_help(ctx: SlashContext, args: list[str]) -> SlashResult:
             ctx_name = f"{ctx_name} {cmd.args_hint}"
         table.add_row(ctx_name, aliases, cmd.description)
     ctx.console.print(table)
+    # 2026-04-29: legend for Shift+Tab cycling, in addition to /mode + aliases.
+    ctx.console.print(
+        "\n[dim]Modes:[/dim] [bold]Shift+Tab[/bold] cycles "
+        "default → accept-edits → auto → plan → default. "
+        "Or use [cyan]/mode <name>[/cyan], [cyan]/auto[/cyan], "
+        "[cyan]/plan[/cyan], [cyan]/accept-edits[/cyan]."
+    )
     return SlashResult(handled=True)
 
 

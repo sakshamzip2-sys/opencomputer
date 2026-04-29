@@ -211,9 +211,20 @@ def test_protocol_v2_chat_params_round_trip() -> None:
 
     p = ChatParams(message="hello", session_id="s-1", plan_mode=True)
     j = p.model_dump()
-    assert j == {"message": "hello", "session_id": "s-1", "plan_mode": True}
+    assert j == {
+        "message": "hello",
+        "session_id": "s-1",
+        "plan_mode": True,
+        "permission_mode": "default",  # 2026-04-29: optional canonical field
+    }
     p2 = ChatParams.model_validate(j)
     assert p2 == p
+
+    # Old clients omit permission_mode; server still decodes them.
+    legacy = ChatParams.model_validate(
+        {"message": "hi", "session_id": "s-2", "plan_mode": False}
+    )
+    assert legacy.permission_mode == "default"
 
 
 def test_protocol_v2_chat_params_rejects_extra_field() -> None:
