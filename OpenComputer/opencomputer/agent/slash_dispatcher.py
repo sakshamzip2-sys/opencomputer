@@ -43,11 +43,21 @@ async def dispatch(
     message: str,
     slash_commands: dict[str, Any],
     runtime: RuntimeContext,
+    fallback: Any | None = None,
 ) -> SlashCommandResult | None:
     """Dispatch ``message`` to a registered slash command if it matches.
 
     Returns the command's result, or ``None`` if the message isn't a
-    slash command or no matching command is registered.
+    slash command or no matching command is registered AND no fallback
+    resolves it.
+
+    ``fallback`` (Tier 2.A `/<skill-name>` auto-dispatch): optional
+    callable invoked when the primary dict lookup misses. Signature is
+    ``fallback(name: str, args: str, runtime: RuntimeContext)`` returning
+    ``SlashCommandResult | str | None``. The agent loop wires this to a
+    skill-resolver so e.g. ``/pead-screener`` loads the SKILL.md body
+    inline. Exceptions from the fallback are caught the same way as
+    direct command failures.
     """
     parsed = parse_slash(message)
     if parsed is None:
@@ -55,6 +65,23 @@ async def dispatch(
     name, args = parsed
     cmd = slash_commands.get(name)
     if cmd is None:
+        if fallback is not None:
+            try:
+                raw = fallback(name, args, runtime)
+                if inspect.isawaitable(raw):
+                    raw = await raw
+            except Exception as exc:  # noqa: BLE001
+                return SlashCommandResult(
+                    output=f"slash fallback for '/{name}' raised {type(exc).__name__}: {exc}",
+                    handled=True,
+                )
+            if raw is None:
+                return None
+            if isinstance(raw, str):
+                return SlashCommandResult(output=raw, handled=True)
+            if isinstance(raw, SlashCommandResult):
+                return raw
+            return SlashCommandResult(output=str(raw), handled=True)
         return None
     try:
         raw = cmd.execute(args, runtime)

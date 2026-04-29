@@ -521,12 +521,17 @@ class AgentLoop:
         # dispatcher reads from below. The import is idempotent.
         from opencomputer.agent import slash_commands as _builtin_slash  # noqa: F401
         from opencomputer.agent.slash_dispatcher import dispatch as _slash_dispatch
+        from opencomputer.agent.slash_skill_fallback import make_skill_fallback
         from opencomputer.plugins.registry import registry as _plugin_registry
 
+        # Tier 2.A — /<skill-name> auto-dispatch: when /foo doesn't match
+        # a registered slash command, the dispatcher's fallback resolves
+        # 'foo' as a skill id/name and returns its body inline.
         _slash_result = await _slash_dispatch(
             user_message,
             _plugin_registry.slash_commands,
             self._runtime,
+            fallback=make_skill_fallback(self.memory),
         )
         if _slash_result is not None and _slash_result.handled:
             user_msg = Message(role="user", content=user_message)
