@@ -93,6 +93,13 @@ from plugin_sdk.provider_contract import (
     StreamEvent,
     Usage,
 )
+from plugin_sdk.realtime_voice import (
+    BaseRealtimeVoiceBridge,
+    RealtimeVoiceCloseReason,
+    RealtimeVoiceRole,
+    RealtimeVoiceTool,
+    RealtimeVoiceToolCallEvent,
+)
 from plugin_sdk.runtime_context import (
     DEFAULT_RUNTIME_CONTEXT,
     RequestContext,
@@ -178,6 +185,12 @@ __all__ = [
     # permission modes (2026-04-29)
     "PermissionMode",
     "effective_permission_mode",
+    # realtime voice (2026-04-29) — port of openclaw/src/realtime-voice/
+    "BaseRealtimeVoiceBridge",
+    "RealtimeVoiceCloseReason",
+    "RealtimeVoiceRole",
+    "RealtimeVoiceTool",
+    "RealtimeVoiceToolCallEvent",
     # slash commands (Phase 12b.6, Task D8)
     "SlashCommand",
     "SlashCommandResult",
