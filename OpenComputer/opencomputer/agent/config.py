@@ -14,7 +14,26 @@ from pathlib import Path
 
 
 def _home() -> Path:
-    """Return ~/.opencomputer/, creating it if needed."""
+    """Return the active profile's home dir, creating it if needed.
+
+    Resolution order (first match wins):
+      1. ``plugin_sdk.profile_context.current_profile_home`` ContextVar
+         — set by ``Dispatch._do_dispatch`` during a per-message
+         agent loop. Per-asyncio-Task scope, so two simultaneous
+         dispatches each see their own profile.
+      2. ``OPENCOMPUTER_HOME`` environment variable — process-global
+         override; the legacy single-profile path.
+      3. ``~/.opencomputer`` — final fallback.
+
+    The directory is ensured to exist before return.
+    """
+    from plugin_sdk.profile_context import current_profile_home
+
+    cv_value = current_profile_home.get()
+    if cv_value is not None:
+        cv_value.mkdir(parents=True, exist_ok=True)
+        return cv_value
+
     home = Path(os.environ.get("OPENCOMPUTER_HOME", Path.home() / ".opencomputer"))
     home.mkdir(parents=True, exist_ok=True)
     return home

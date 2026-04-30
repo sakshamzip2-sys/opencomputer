@@ -69,3 +69,33 @@ async def test_isolation_between_concurrent_tasks() -> None:
     await asyncio.gather(in_a(), in_b())
     assert a_seen == [a]
     assert b_seen == [b]
+
+
+def test_home_consults_contextvar(tmp_path: Path) -> None:
+    """`_home()` returns the ContextVar value when set."""
+    from opencomputer.agent.config import _home
+
+    profile = tmp_path / "myprofile"
+    with set_profile(profile):
+        assert _home() == profile
+    # mkdir side effect: the directory was created.
+    assert profile.is_dir()
+
+
+def test_home_falls_back_to_env_var(monkeypatch, tmp_path: Path) -> None:
+    """No ContextVar → falls back to OPENCOMPUTER_HOME env var."""
+    from opencomputer.agent.config import _home
+
+    target = tmp_path / "envhome"
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(target))
+    # ensure no contextvar leaked from another test
+    assert current_profile_home.get() is None
+    assert _home() == target
+
+
+def test_home_falls_back_to_default(monkeypatch) -> None:
+    """No ContextVar, no env var → ``~/.opencomputer``."""
+    from opencomputer.agent.config import _home
+
+    monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
+    assert _home() == Path.home() / ".opencomputer"
