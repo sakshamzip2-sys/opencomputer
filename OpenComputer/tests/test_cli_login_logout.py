@@ -89,9 +89,10 @@ def test_login_rejects_unknown_provider(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
     runner = CliRunner()
     result = runner.invoke(app, ["login", "bogus_provider_xyz"])
-    assert result.exit_code == 2
+    # Hermes-exact: unknown provider exits 1 (not 2).
+    assert result.exit_code == 1
     out = result.stdout + (result.stderr or "")
-    assert "Unknown provider" in out or "Unknown" in out
+    assert "Unknown provider" in out
 
 
 def test_login_writes_env_file(monkeypatch, tmp_path):
@@ -109,7 +110,10 @@ def test_login_rejects_empty_key(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
     runner = CliRunner()
     result = runner.invoke(app, ["login", "anthropic"], input="\n")
-    assert result.exit_code == 1
+    # Hermes-exact: empty key prints "Cancelled." and exits 0 (graceful).
+    assert result.exit_code == 0
+    out = result.stdout + (result.stderr or "")
+    assert "Cancelled" in out
 
 
 def test_logout_clears_env_var(monkeypatch, tmp_path):
@@ -131,7 +135,10 @@ def test_logout_rejects_unknown_provider(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
     runner = CliRunner()
     result = runner.invoke(app, ["logout", "bogus_xyz"])
-    assert result.exit_code == 2
+    # Hermes-exact: exits 1 with "Unknown provider".
+    assert result.exit_code == 1
+    out = result.stdout + (result.stderr or "")
+    assert "Unknown provider" in out
 
 
 def test_logout_handles_missing_env_file(monkeypatch, tmp_path):
@@ -140,7 +147,8 @@ def test_logout_handles_missing_env_file(monkeypatch, tmp_path):
     result = runner.invoke(app, ["logout", "openai"])
     assert result.exit_code == 0
     out = result.stdout + (result.stderr or "")
-    assert "no credentials" in out.lower() or "not stored" in out.lower()
+    # Hermes-exact: "No auth state found for OpenAI."
+    assert "No auth state" in out or "no auth" in out.lower()
 
 
 def test_login_logout_roundtrip(monkeypatch, tmp_path):

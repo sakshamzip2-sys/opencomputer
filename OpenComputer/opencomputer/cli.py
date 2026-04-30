@@ -2232,11 +2232,12 @@ def login_cmd(
 @app.command(name="logout")
 def logout_cmd(
     provider: str = typer.Argument(
-        ...,
-        help="Provider name whose stored credential to clear.",
+        None,
+        help="Provider whose stored credential to clear. "
+             "If omitted, derives from the currently-active provider.",
     ),
 ) -> None:
-    """Clear the stored API key for ``provider``."""
+    """Clear the stored API key for the given (or active) provider."""
     from opencomputer.cli_login import logout as _logout
     _logout(provider)
 
