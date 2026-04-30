@@ -34,6 +34,7 @@ Round 2B P-12 adds three slim filters to ``session list``:
 
 from __future__ import annotations
 
+import time
 import uuid
 from pathlib import Path
 
@@ -107,6 +108,34 @@ def _format_started(started_at: float | int | None) -> str:
     return _dt.datetime.fromtimestamp(float(started_at)).strftime(
         "%Y-%m-%d %H:%M"
     )
+
+
+def _parse_age(spec: str) -> int:
+    """Parse '30d' / '6w' / '3mo' / '1y' into seconds.
+
+    Suffix is required; suffix-less or non-positive values raise
+    ``ValueError``. Months are approximated as 30 days; years as 365.
+    """
+    if not spec:
+        raise ValueError("empty age spec")
+    s = spec.strip().lower()
+    if s.endswith("mo"):
+        n_str, mult = s[:-2], 30 * 86400
+    elif s.endswith("d"):
+        n_str, mult = s[:-1], 86400
+    elif s.endswith("w"):
+        n_str, mult = s[:-1], 7 * 86400
+    elif s.endswith("y"):
+        n_str, mult = s[:-1], 365 * 86400
+    else:
+        raise ValueError(f"missing suffix in {spec!r} (use 30d / 6w / 3mo / 1y)")
+    try:
+        n = int(n_str)
+    except ValueError as e:
+        raise ValueError(f"non-integer count in {spec!r}") from e
+    if n <= 0:
+        raise ValueError(f"age must be positive: {spec!r}")
+    return n * mult
 
 
 @session_app.command("list")
@@ -378,6 +407,108 @@ def session_delete(
         f"[green]deleted[/green] {session_id[:8]} "
         f"({msg_count} message(s) removed)"
     )
+
+
+@session_app.command("prune")
+def session_prune(
+    older_than: str | None = typer.Option(
+        None,
+        "--older-than",
+        help="Drop sessions older than this. Examples: 30d, 6w, 3mo, 1y.",
+    ),
+    untitled: bool = typer.Option(
+        False, "--untitled", help="Drop sessions whose title is empty."
+    ),
+    empty: bool = typer.Option(
+        False,
+        "--empty",
+        help="Drop sessions with message_count <= 1 (system-only / aborted).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        "-n",
+        help="Show what would be deleted, change nothing.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt before deleting.",
+    ),
+) -> None:
+    """Bulk-delete sessions matching the given filters (AND-composed).
+
+    Refuses to run with no filters — preventing accidental whole-DB
+    nukes. Filters compose with AND: ``--untitled --older-than 30d``
+    only deletes untitled sessions older than 30 days.
+    """
+    if not (older_than or untitled or empty):
+        console.print(
+            "[red]error:[/red] specify at least one filter "
+            "(--older-than / --untitled / --empty). "
+            "Refusing to prune everything."
+        )
+        raise typer.Exit(1)
+
+    cutoff_ts: float | None = None
+    if older_than:
+        try:
+            cutoff_ts = time.time() - _parse_age(older_than)
+        except ValueError as e:
+            console.print(f"[red]error:[/red] {e}")
+            raise typer.Exit(1) from None
+
+    db = _db()
+    rows = db.list_sessions(limit=200)
+    candidates = []
+    for r in rows:
+        if cutoff_ts is not None and (r.get("started_at") or 0) >= cutoff_ts:
+            continue
+        if untitled and (r.get("title") or "").strip():
+            continue
+        if empty and (r.get("message_count") or 0) > 1:
+            continue
+        candidates.append(r)
+
+    if not candidates:
+        console.print("[dim]nothing to prune.[/dim]")
+        return
+
+    t = Table(show_lines=False)
+    t.add_column("id", style="cyan")
+    t.add_column("started", style="dim")
+    t.add_column("msgs", justify="right")
+    t.add_column("title")
+    for r in candidates:
+        t.add_row(
+            (r.get("id", "") or "")[:8],
+            _format_started(r.get("started_at")),
+            str(r.get("message_count", 0)),
+            (r.get("title", "") or "")[:50],
+        )
+    console.print(t)
+    if dry_run:
+        console.print(
+            f"[yellow]dry-run:[/yellow] would delete {len(candidates)} session(s)"
+        )
+        return
+
+    if not yes:
+        console.print(f"delete {len(candidates)} session(s)? [y/N] ", end="")
+        try:
+            answer = input().strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in {"y", "yes"}:
+            console.print("[dim]aborted.[/dim]")
+            raise typer.Exit(1)
+
+    deleted = 0
+    for r in candidates:
+        if db.delete_session(r["id"]):
+            deleted += 1
+    console.print(f"[green]pruned[/green] {deleted} session(s)")
 
 
 __all__ = ["session_app"]
