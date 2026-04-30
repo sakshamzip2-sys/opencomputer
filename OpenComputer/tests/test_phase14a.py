@@ -296,6 +296,19 @@ class TestProfileRoutingLazyInvariant:
         for py_file in pkg_root.rglob("*.py"):
             if "__pycache__" in py_file.parts:
                 continue
+            # Skill bundles ship third-party helper scripts (Hermes-imported
+            # skills, user-authored automation) that live OUTSIDE the agent
+            # import path — they're invoked by the agent via Bash, not
+            # imported as modules. The profile-routing invariant doesn't
+            # apply to them. Skip skills/<name>/scripts/ + templates/ +
+            # references/ subtrees.
+            if "skills" in py_file.parts:
+                # Anything under opencomputer/skills/<name>/<subdir>/ where
+                # subdir is not the skill manifest itself.
+                idx = py_file.parts.index("skills")
+                # path: opencomputer / skills / <skill> / <subdir...> / <file>
+                if len(py_file.parts) > idx + 2:
+                    continue
             try:
                 tree = ast.parse(py_file.read_text())
             except SyntaxError:
