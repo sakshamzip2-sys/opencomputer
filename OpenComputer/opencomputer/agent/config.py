@@ -117,10 +117,18 @@ class LoopConfig:
 
 @dataclass(frozen=True, slots=True)
 class SessionConfig:
-    """Where sessions are stored and how."""
+    """Where sessions are stored, how, and lifecycle policy."""
 
     db_path: Path = field(default_factory=lambda: _home() / "sessions.db")
     session_id: str | None = None  # None = create new session each run
+
+    # 2026-04-30: opt-in auto-prune at AgentLoop startup. Both knobs
+    # default to 0 (disabled) so existing configs keep current
+    # behaviour. Recommended overrides for users who don't want
+    # untitled clutter: auto_prune_days=90, auto_prune_untitled_days=7.
+    auto_prune_days: int = 0
+    auto_prune_untitled_days: int = 0
+    auto_prune_min_messages: int = 3
 
 
 @dataclass(frozen=True, slots=True)

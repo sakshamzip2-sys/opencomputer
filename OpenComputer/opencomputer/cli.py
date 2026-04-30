@@ -625,7 +625,7 @@ def _resolve_resume_target(spec: str) -> str | None:
         for r in rows
         if r.get("id")
     ]
-    return run_resume_picker(picker_rows)
+    return run_resume_picker(picker_rows, db=db)
 
 
 _STREAM_HOOKS_WIRED = False
@@ -1767,7 +1767,7 @@ def resume(
         console.print("[dim]no sessions yet — start one with `oc chat`.[/dim]")
         return
 
-    selected_id = run_resume_picker(rows)
+    selected_id = run_resume_picker(rows, db=db)
     if selected_id is None:
         console.print("[dim]cancelled.[/dim]")
         return
