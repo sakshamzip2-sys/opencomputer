@@ -162,6 +162,15 @@ packages = ["opencomputer", "plugin_sdk"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Skill bundles ship third-party helper scripts (Hermes-imported skills,
+# user-authored scripts) that follow upstream code style. They're not
+# part of OC's surface area — exclude from lint.
+extend-exclude = [
+  "opencomputer/skills/*/scripts/",
+  "opencomputer/skills/*/templates/",
+  "opencomputer/skills/*/references/",
+  "extensions/*/skills/*/scripts/",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
