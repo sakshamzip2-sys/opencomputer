@@ -121,7 +121,7 @@ def test_prune_empty_filter(runner: CliRunner, home: Path) -> None:
     assert db.get_session("real") is not None
 
 
-def test_prune_filters_compose_with_AND(runner: CliRunner, home: Path) -> None:
+def test_prune_filters_compose_with_and(runner: CliRunner, home: Path) -> None:
     _seed_at_age(home, "untitled-old", age_days=60, title="", messages=1)
     _seed_at_age(home, "untitled-young", age_days=5, title="", messages=1)
     _seed_at_age(home, "named-old", age_days=60, title="keep-me", messages=1)

@@ -280,7 +280,7 @@ def _extract_scoped_path(args: dict[str, Any]) -> Any:
     return args.get("file_path") or args.get("path") or args.get("pattern")
 
 
-def _maybe_run_auto_prune(db: "SessionDB", cfg: "Config") -> None:
+def _maybe_run_auto_prune(db: SessionDB, cfg: Config) -> None:
     """At AgentLoop startup, opportunistically delete stale sessions.
 
     No-op when both ``auto_prune_days`` and ``auto_prune_untitled_days``
