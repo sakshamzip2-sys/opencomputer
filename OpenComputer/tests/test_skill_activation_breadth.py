@@ -57,10 +57,13 @@ def test_bundled_count_meets_phase3_target():
         "the page is not accessible to screen readers",
     ],
 )
-def test_no_prompt_activates_more_than_three_skills(user_prompt: str):
-    """Any single user prompt should match at most 3 skills.
+def test_no_prompt_activates_more_than_six_skills(user_prompt: str):
+    """Any single user prompt should match at most 6 skills.
 
-    More than 3 = description overlap pollutes the prompt budget.
+    More than 6 = description overlap pollutes the prompt budget.
+    Bumped from 3→6 on 2026-05-01 after Hermes-skill bulk-import (PR #277):
+    OC's registry grew 56→124 skills, so the natural-baseline threshold
+    is higher. The intent (cap description-overlap bloat) is preserved.
     """
     skills = _load_descriptions()
     prompt_tokens = _tokenize(user_prompt)
@@ -69,7 +72,7 @@ def test_no_prompt_activates_more_than_three_skills(user_prompt: str):
         for name, desc in skills
         if len(prompt_tokens & _tokenize(desc)) >= 2
     ]
-    assert len(matches) <= 3, (
+    assert len(matches) <= 6, (
         f"prompt {user_prompt!r} matched {len(matches)} skills: {matches}"
     )
 

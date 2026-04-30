@@ -373,6 +373,35 @@ def _cycle_permission_mode(runtime: object) -> str:
     return new_value
 
 
+def _cycle_persona(runtime: object) -> str | None:
+    """Advance the runtime's active persona through the registered list.
+
+    2026-05-01 — bound to Ctrl+P. Mutates ``runtime.custom["persona_id_override"]``
+    (the slash-command override key, used by ``_build_persona_overlay``)
+    so the next turn rebuilds the prompt with the new persona. Returns
+    the new persona id, or None when the registry is empty.
+    """
+    try:
+        from opencomputer.awareness.personas.registry import list_personas
+    except Exception:  # noqa: BLE001
+        return None
+    personas = list_personas()
+    if not personas:
+        return None
+    ids = [p["id"] for p in personas]
+    current = runtime.custom.get("active_persona_id", "") or runtime.custom.get(
+        "persona_id_override", "",
+    )
+    try:
+        idx = ids.index(current)
+    except ValueError:
+        idx = -1
+    new_id = ids[(idx + 1) % len(ids)]
+    runtime.custom["persona_id_override"] = new_id
+    runtime.custom["active_persona_id"] = new_id
+    return new_id
+
+
 _MODE_GLYPH = {
     "default": "[D]",
     "accept-edits": "[E]",
@@ -459,7 +488,12 @@ def _render_mode_badge(runtime: object) -> list[tuple[str, str]]:
     if personality and personality != "helpful":
         segments.append(("fg:ansimagenta", f"· personality: {personality} "))
 
-    segments.append(("", "  Shift+Tab to cycle"))
+    # Hint copy depends on which axes are visible. Always show
+    # Shift+Tab (mode cycle); add Ctrl+P when persona is shown.
+    if persona:
+        segments.append(("", "  Shift+Tab mode · Ctrl+P persona"))
+    else:
+        segments.append(("", "  Shift+Tab to cycle"))
     return segments
 
 
@@ -682,6 +716,16 @@ async def read_user_input(
         try:
             _cycle_permission_mode(runtime)
         except Exception:  # noqa: BLE001 — never crash the input loop
+            return
+        event.app.invalidate()
+
+    @kb.add(Keys.ControlP)  # Ctrl+P — cycle personas (2026-05-01)
+    def _ctrl_p(event):  # noqa: ANN001
+        if runtime is None:
+            return
+        try:
+            _cycle_persona(runtime)
+        except Exception:  # noqa: BLE001
             return
         event.app.invalidate()
 

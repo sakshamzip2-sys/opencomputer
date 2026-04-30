@@ -116,59 +116,110 @@ def _remove_env_var(env_path: Path, var_name: str) -> bool:
     return True
 
 
+_PROVIDER_PRETTY: dict[str, str] = {
+    "anthropic":  "Anthropic",
+    "openai":     "OpenAI",
+    "groq":       "Groq",
+    "openrouter": "OpenRouter",
+    "google":     "Google",
+    "gemini":     "Google",
+    "deepseek":   "DeepSeek",
+    "mistral":    "Mistral",
+}
+
+
+def _resolve_active_provider() -> str | None:
+    """Return the currently configured provider name (None if cfg unloadable)."""
+    try:
+        from opencomputer.agent.config_store import load_config
+        return load_config().model.provider
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def login(provider: str) -> None:
-    """Prompt for an API key and store it in ``~/.opencomputer/<profile>/.env``."""
+    """Prompt for an API key and store it in ``~/.opencomputer/<profile>/.env``.
+
+    Hermes-exact prompt copy: ``"<Provider> API key (or Enter to cancel): "``
+    via ``getpass.getpass`` (echo off). On empty/cancel: ``"Cancelled."``.
+    On success: ``"API key saved."``. No test API call (matches Hermes —
+    validation deferred to first real LLM call).
+    """
     name = provider.strip().lower()
     if name not in PROVIDER_ENV_MAP:
         valid = ", ".join(sorted(PROVIDER_ENV_MAP.keys()))
-        console.print(
-            f"[bold red]Unknown provider:[/bold red] {provider!r}.\n"
-            f"Valid providers: {valid}"
-        )
-        raise typer.Exit(2)
+        console.print(f"Unknown provider: {provider}")
+        console.print(f"Valid providers: {valid}")
+        raise typer.Exit(1)
 
     env_var = PROVIDER_ENV_MAP[name]
-    key = typer.prompt(
-        f"Enter {name} API key (won't echo)",
-        hide_input=True,
-        default="",
-        show_default=False,
-    )
+    pretty = _PROVIDER_PRETTY.get(name, name.capitalize())
+
+    # Hermes uses getpass directly (`hermes_cli/auth.py:2029`) for
+    # zero-echo input. typer.prompt(hide_input=True) is the same on
+    # POSIX, but getpass is the canonical Hermes call.
+    import getpass
+    try:
+        key = getpass.getpass(f"{pretty} API key (or Enter to cancel): ")
+    except (EOFError, KeyboardInterrupt):
+        console.print("\nCancelled.")
+        raise typer.Exit(0) from None
+
     if not key.strip():
-        console.print("[red]Empty key — aborting.[/red]")
-        raise typer.Exit(1)
+        console.print("Cancelled.")
+        raise typer.Exit(0)
 
     home = _profile_home()
     home.mkdir(parents=True, exist_ok=True)
     env_path = home / ".env"
     _upsert_env_var(env_path, env_var, key.strip())
 
-    console.print(f"[green]✓[/green] Stored {env_var} in {env_path}")
+    console.print("API key saved.")
+    console.print()
 
 
-def logout(provider: str) -> None:
-    """Clear the stored API key for ``provider`` from ``.env``."""
+def logout(provider: str | None = None) -> None:
+    """Clear the stored API key for ``provider`` from ``.env``.
+
+    Hermes-exact behaviour: when called with no argument, derives the
+    target from the active config's provider field (``hermes_cli/auth.py:3488``).
+    Output: ``Logged out of <ProviderName>.`` plus a follow-up hint
+    telling the user how to restore inference.
+    """
+    if provider is None or not provider.strip():
+        active = _resolve_active_provider()
+        if not active:
+            console.print("No provider is currently logged in.")
+            raise typer.Exit(0)
+        provider = active
+
     name = provider.strip().lower()
     if name not in PROVIDER_ENV_MAP:
-        valid = ", ".join(sorted(PROVIDER_ENV_MAP.keys()))
-        console.print(
-            f"[bold red]Unknown provider:[/bold red] {provider!r}.\n"
-            f"Valid providers: {valid}"
-        )
-        raise typer.Exit(2)
+        console.print(f"Unknown provider: {provider}")
+        raise typer.Exit(1)
 
     env_var = PROVIDER_ENV_MAP[name]
+    pretty = _PROVIDER_PRETTY.get(name, name.capitalize())
     home = _profile_home()
     env_path = home / ".env"
 
     if not env_path.exists():
-        console.print("[dim]No credentials stored.[/dim]")
+        console.print(f"No auth state found for {pretty}.")
         raise typer.Exit(0)
 
-    if _remove_env_var(env_path, env_var):
-        console.print(f"[green]✓[/green] Cleared {env_var} from {env_path}")
+    removed = _remove_env_var(env_path, env_var)
+    if not removed:
+        console.print(f"No auth state found for {pretty}.")
+        raise typer.Exit(0)
+
+    console.print(f"Logged out of {pretty}.")
+    # Hermes prints a follow-up hint based on whether OPENROUTER_API_KEY
+    # is still present in the environment (auth.py:3585).
+    import os as _os
+    if _os.environ.get("OPENROUTER_API_KEY"):
+        console.print("OpenComputer will use OpenRouter for inference.")
     else:
-        console.print(f"[dim]({env_var} was not stored)[/dim]")
+        console.print("Run `oc model` or configure an API key to use OpenComputer.")
 
 
 __all__ = [

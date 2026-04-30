@@ -44,6 +44,11 @@ dependencies = [
   "pyperclip>=1.8",
   "rapidocr-onnxruntime>=1.2.3",
   "filelock>=3.16",
+  # Hermes-parity arrow-key picker for `oc model` and other interactive
+  # selections (PR after #275). Falls back to curses then numbered list
+  # when this package is absent — install is required only for the
+  # nicest UX, not for correctness.
+  "simple-term-menu>=1.0,<2",
 ]
 
 [project.optional-dependencies]
@@ -157,6 +162,15 @@ packages = ["opencomputer", "plugin_sdk"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Skill bundles ship third-party helper scripts (Hermes-imported skills,
+# user-authored scripts) that follow upstream code style. They're not
+# part of OC's surface area — exclude from lint.
+extend-exclude = [
+  "opencomputer/skills/*/scripts/",
+  "opencomputer/skills/*/templates/",
+  "opencomputer/skills/*/references/",
+  "extensions/*/skills/*/scripts/",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
