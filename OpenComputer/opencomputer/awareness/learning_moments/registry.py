@@ -127,6 +127,16 @@ class Context:
     ``suggest_voice_for_voice_user`` because realtime voice requires
     an OpenAI key."""
 
+    # v3.1 fields (2026-04-30) — profile-suggest discovery moment.
+
+    persona_flips_in_session: int = 0
+    """How many times the active persona changed within this session.
+    Used by ``suggest_profile_suggest_command`` to detect multi-context
+    usage (≥3 flips ⇒ teach the user that ``/profile-suggest`` exists)."""
+
+    current_profile_name: str = "default"
+    """Name of the active profile. ``"default"`` when unset."""
+
 
 @dataclass(frozen=True, slots=True)
 class LearningMoment:
@@ -164,6 +174,7 @@ def all_moments() -> tuple[LearningMoment, ...]:
         suggest_persona_for_companion_signals,
         suggest_personality_after_friction,
         suggest_plan_for_complex_task,
+        suggest_profile_suggest_command,
         suggest_scrape_for_url,
         suggest_skill_save_after_long_session,
         suggest_undo_after_unwanted_edits,
@@ -379,5 +390,19 @@ def all_moments() -> tuple[LearningMoment, ...]:
             ),
             surface=Surface.SESSION_END,
             priority=190,
+        ),
+        # ── v3.1 (2026-04-30) — profile-suggest discovery ────────────
+        # Surfaces /profile-suggest once when a session shows multi-
+        # context usage on the default profile. The slash command is
+        # the actual feature; this moment teaches that it exists.
+        LearningMoment(
+            id="suggest_profile_suggest_command",
+            predicate=suggest_profile_suggest_command,
+            reveal=(
+                "(You've been switching contexts a lot this session — "
+                "`/profile-suggest` analyzes your usage and tells you "
+                "if a specialized profile would help.)"
+            ),
+            priority=200,
         ),
     )

@@ -357,3 +357,21 @@ def suggest_skill_save_after_long_session(ctx: Context) -> bool:
     "a workflow" rather than "a quick chat".
     """
     return ctx.turn_count >= 20
+
+
+# ─── v3.1 predicate (2026-04-30) — profile-suggest discovery ─────────
+
+
+def suggest_profile_suggest_command(ctx: Context) -> bool:
+    """User flipped persona ≥3 times this session AND is on default profile.
+
+    The threshold of 3 distinct persona flips within a single session
+    is the strongest in-loop signal that the user is doing multi-context
+    work and might benefit from a specialized profile. Restricted to
+    ``default`` because users on a named profile have already engaged
+    with the profile system — no need to re-teach.
+    """
+    return (
+        ctx.persona_flips_in_session >= 3
+        and ctx.current_profile_name == "default"
+    )

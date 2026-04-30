@@ -41,6 +41,9 @@ from opencomputer.agent.slash_commands_impl.persona_mode_cmd import (
     PersonaModeCommand,
 )
 from opencomputer.agent.slash_commands_impl.platforms_cmd import PlatformsCommand
+from opencomputer.agent.slash_commands_impl.profile_suggest_cmd import (
+    ProfileSuggestCommand,
+)
 from opencomputer.agent.slash_commands_impl.reasoning_cmd import ReasoningCommand
 from opencomputer.agent.slash_commands_impl.save_cmd import SaveCommand
 from opencomputer.agent.slash_commands_impl.scrape import ScrapeCommand
@@ -88,6 +91,9 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     StatusbarCommand,
     # Batch 4 — ephemeral side-loop:
     BtwCommand,
+    # 2026-04-30 — profile-suggest analyzes recent persona usage and
+    # recommends create/switch actions. User-pull only.
+    ProfileSuggestCommand,
 )
 
 
