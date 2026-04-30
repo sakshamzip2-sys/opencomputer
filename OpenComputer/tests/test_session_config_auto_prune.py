@@ -19,7 +19,7 @@ def test_session_config_existing_fields_preserved() -> None:
 def test_session_config_auto_prune_defaults() -> None:
     cfg = SessionConfig()
     assert cfg.auto_prune_days == 0  # disabled by default
-    assert cfg.auto_prune_untitled_days == 7
+    assert cfg.auto_prune_untitled_days == 0  # default OFF (opt-in)
     assert cfg.auto_prune_min_messages == 3
 
 

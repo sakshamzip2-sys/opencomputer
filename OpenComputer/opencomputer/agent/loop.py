@@ -280,6 +280,27 @@ def _extract_scoped_path(args: dict[str, Any]) -> Any:
     return args.get("file_path") or args.get("path") or args.get("pattern")
 
 
+def _maybe_run_auto_prune(db: "SessionDB", cfg: "Config") -> None:
+    """At AgentLoop startup, opportunistically delete stale sessions.
+
+    No-op when both ``auto_prune_days`` and ``auto_prune_untitled_days``
+    are zero (the default — auto-prune is opt-in). Logs the count to
+    stderr when something was actually pruned so the operator notices.
+    """
+    sc = cfg.session
+    if sc.auto_prune_days <= 0 and sc.auto_prune_untitled_days <= 0:
+        return
+    deleted = db.auto_prune(
+        older_than_days=sc.auto_prune_days,
+        untitled_days=sc.auto_prune_untitled_days,
+        min_messages=sc.auto_prune_min_messages,
+    )
+    if deleted:
+        import sys as _sys
+
+        print(f"[oc] auto-pruned {deleted} stale session(s)", file=_sys.stderr)
+
+
 class AgentLoop:
     """The single while-loop that runs the agent."""
 
@@ -321,6 +342,10 @@ class AgentLoop:
         self._loop_started_at: float = time.monotonic()
         self._last_activity_at: float = self._loop_started_at
         self.db = db or SessionDB(config.session.db_path)
+        # Opt-in: prune stale sessions per config.session.auto_prune_*.
+        # Default disabled (auto_prune_days=0); never deletes anything
+        # unless the operator explicitly opts in via config.yaml.
+        _maybe_run_auto_prune(self.db, config)
         self.memory = memory or MemoryManager(
             declarative_path=config.memory.declarative_path,
             skills_path=config.memory.skills_path,
