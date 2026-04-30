@@ -94,6 +94,14 @@ class SlashContext:
         False,
         "provider swap callback not wired",
     )
+    #: ``/compress`` — manually trigger CompactionEngine even when the
+    #: input-token threshold hasn't been hit. Returns
+    #: ``(ok: bool, before_count: int, after_count: int, reason: str)``.
+    #: ``ok=False`` means compaction couldn't run (e.g. bridge unavailable);
+    #: ``ok=True with before==after`` means no eligible old block to summarise.
+    on_compress: Callable[[], tuple[bool, int, int, str]] = lambda: (
+        False, 0, 0, "compress callback not wired",
+    )
 
 
 def _split_args(text: str) -> tuple[str, list[str]]:
@@ -485,6 +493,29 @@ def _handle_debug(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_compress(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/compress`` — manually compact older turns via CompactionEngine.
+
+    Hermes-parity Tier S (2026-04-30). Skips the auto-trigger threshold
+    so users can force a summary even when context isn't yet "full".
+    """
+    ok, before, after, reason = ctx.on_compress()
+    if not ok:
+        ctx.console.print(f"[yellow]{reason}[/yellow]")
+        return SlashResult(handled=True)
+    if before == after:
+        ctx.console.print(
+            "[dim]No compression — context not large enough or no eligible "
+            "messages to summarise yet.[/dim]"
+        )
+        return SlashResult(handled=True)
+    ctx.console.print(
+        f"[green]✓[/green] Compressed: {before} → {after} messages "
+        f"({before - after} folded into summary)."
+    )
+    return SlashResult(handled=True)
+
+
 _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "exit": _handle_exit,
     "clear": _handle_clear,
@@ -502,6 +533,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "reload": _handle_reload,
     "reload-mcp": _handle_reload_mcp,
     "debug": _handle_debug,
+    "compress": _handle_compress,
 }
 
 

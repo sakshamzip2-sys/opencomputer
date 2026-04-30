@@ -348,7 +348,10 @@ def test_rank_mru_top_5_cap(tmp_path: Path) -> None:
     for i in range(7):
         mru.record(f"s-{i:02d}")
     src = UnifiedSlashSource(mem, mru)
-    matches = src.rank("", top_n=20)
+    # top_n=40 to remain robust as SLASH_REGISTRY grows over time —
+    # the test's assertion is ABOUT THE TOP-5 CAP behaviour, not about
+    # whether the alphabetical tail fits within an arbitrary smaller cap.
+    matches = src.rank("", top_n=40)
     names = [_name_of(m.item) for m in matches]
     # First 5 should be MRU items (last-recorded first): s-06, s-05, s-04, s-03, s-02.
     assert names[0] == "s-06"

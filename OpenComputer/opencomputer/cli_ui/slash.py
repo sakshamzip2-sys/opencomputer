@@ -162,6 +162,12 @@ SLASH_REGISTRY: list[CommandDef] = [
         description="Sanitized diagnostic dump for bug reports (no secrets).",
         category="meta",
     ),
+    # Hermes-parity Tier S (2026-04-30): user-triggered context compression.
+    CommandDef(
+        name="compress",
+        description="Compact older turns now (skips auto-trigger threshold).",
+        category="session",
+    ),
 ]
 
 

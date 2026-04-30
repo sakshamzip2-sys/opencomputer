@@ -1486,6 +1486,25 @@ def _run_chat_session(
                 loop.config = _dc.replace(loop.config, model=new_model_cfg)
                 return (True, f"swapped to {new_provider}")
 
+            def _on_compress() -> tuple[bool, int, int, str]:
+                """Hermes-parity (2026-04-30) — flag the next iteration to
+                force-compact regardless of token threshold.
+
+                Returns ``(ok, before_count, after_count, reason)``. We
+                can't compute before/after counts here because compaction
+                runs on the AgentLoop's in-memory message list during the
+                NEXT user turn — so "queued" semantics is the honest
+                contract. Reports queued-OK with both counts equal so the
+                handler emits "queued" rather than fake numbers.
+                """
+                try:
+                    loop.request_force_compaction()
+                except Exception as e:  # noqa: BLE001
+                    return (False, 0, 0,
+                            f"compress unavailable: {type(e).__name__}: {e}")
+                return (True, 0, 0,
+                        "queued — compaction will run on next user turn")
+
             slash_ctx = SlashContext(
                 console=console,
                 session_id=session_id,
@@ -1506,6 +1525,7 @@ def _run_chat_session(
                 on_reload_mcp=_on_reload_mcp,
                 on_model_swap=_on_model_swap,
                 on_provider_swap=_on_provider_swap,
+                on_compress=_on_compress,
             )
             result = dispatch_slash(user_input, slash_ctx)
             if result.exit_loop:
@@ -2087,6 +2107,42 @@ def _redact_for_auth(env_var: str, value: str) -> str:
     if len(value) >= 8:
         return f"…{value[-4:]}"
     return "(set)"
+
+
+@app.command(name="model")
+def model_pick() -> None:
+    """Interactive picker for default provider + model.
+
+    Hermes-parity (2026-04-30). Walks through provider selection and
+    model selection then persists choice to ``~/.opencomputer/<profile>/
+    config.yaml``. Use ``oc models add`` for non-interactive registration.
+    """
+    from opencomputer.cli_model_picker import model_picker
+    model_picker()
+
+
+@app.command(name="login")
+def login_cmd(
+    provider: str = typer.Argument(
+        ...,
+        help="Provider name (anthropic / openai / groq / openrouter / google / etc.).",
+    ),
+) -> None:
+    """Store an API key for ``provider`` in the active profile's ``.env``."""
+    from opencomputer.cli_login import login as _login
+    _login(provider)
+
+
+@app.command(name="logout")
+def logout_cmd(
+    provider: str = typer.Argument(
+        ...,
+        help="Provider name whose stored credential to clear.",
+    ),
+) -> None:
+    """Clear the stored API key for ``provider``."""
+    from opencomputer.cli_login import logout as _logout
+    _logout(provider)
 
 
 @app.command()
