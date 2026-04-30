@@ -644,6 +644,56 @@ class SessionDB:
             deleted = cur.rowcount > 0
         return deleted
 
+    def auto_prune(
+        self,
+        *,
+        older_than_days: int,
+        untitled_days: int,
+        min_messages: int,
+        cap: int = 200,
+    ) -> int:
+        """Delete stale sessions matching either of two policies.
+
+        Policy A: any session whose ``started_at`` is older than
+                  ``older_than_days`` days. Disabled when set to 0.
+        Policy B: untitled sessions with fewer than ``min_messages``
+                  messages whose ``started_at`` is older than
+                  ``untitled_days`` days. Disabled when ``untitled_days``
+                  is 0.
+
+        Either or both policies may be active. The two clauses combine
+        with SQL ``OR`` so we run a single SELECT.
+
+        Caps deletion at ``cap`` rows per call to keep startup fast.
+        Returns the count of sessions actually removed.
+        """
+        if older_than_days <= 0 and untitled_days <= 0:
+            return 0
+        now = time.time()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if older_than_days > 0:
+            clauses.append("started_at < ?")
+            params.append(now - older_than_days * 86400)
+        if untitled_days > 0:
+            clauses.append(
+                "(started_at < ? AND (title IS NULL OR title = '') "
+                "AND COALESCE(message_count, 0) < ?)"
+            )
+            params.append(now - untitled_days * 86400)
+            params.append(min_messages)
+        where = " OR ".join(clauses)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT id FROM sessions WHERE {where} LIMIT ?",
+                (*params, cap),
+            ).fetchall()
+        deleted = 0
+        for (sid,) in rows:
+            if self.delete_session(sid):
+                deleted += 1
+        return deleted
+
     # ─── A.4 mood thread (2026-04-27) ─────────────────────────────
 
     def get_session_vibe(self, session_id: str) -> tuple[str | None, float | None]:

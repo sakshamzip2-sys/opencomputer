@@ -96,3 +96,77 @@ def test_delete_clears_tool_usage(db: SessionDB) -> None:
             "SELECT COUNT(*) FROM tool_usage WHERE session_id = ?", ("s1",)
         ).fetchone()[0]
     assert after == 0
+
+
+# ─── auto_prune ────────────────────────────────────────────────
+
+
+def test_auto_prune_disabled_when_both_zero(db: SessionDB) -> None:
+    _seed_session(db, "old")
+    deleted = db.auto_prune(
+        older_than_days=0, untitled_days=0, min_messages=3
+    )
+    assert deleted == 0
+    assert db.get_session("old") is not None
+
+
+def test_auto_prune_drops_old_sessions(db: SessionDB) -> None:
+    _seed_session(db, "ancient", messages=5)
+    _seed_session(db, "fresh", messages=5)
+    with db._connect() as c:
+        c.execute(
+            "UPDATE sessions SET started_at = ? WHERE id = ?",
+            (time.time() - 100 * 86400, "ancient"),
+        )
+    deleted = db.auto_prune(
+        older_than_days=90, untitled_days=0, min_messages=3
+    )
+    assert deleted == 1
+    assert db.get_session("ancient") is None
+    assert db.get_session("fresh") is not None
+
+
+def test_auto_prune_drops_untitled_empty_after_short_ttl(db: SessionDB) -> None:
+    db.create_session("u1", platform="cli", model="m", title="")
+    db.append_messages_batch("u1", [Message(role="user", content="hi")])
+    with db._connect() as c:
+        c.execute(
+            "UPDATE sessions SET started_at = ? WHERE id = ?",
+            (time.time() - 10 * 86400, "u1"),
+        )
+    deleted = db.auto_prune(
+        older_than_days=0, untitled_days=7, min_messages=3
+    )
+    assert deleted == 1
+
+
+def test_auto_prune_keeps_untitled_with_enough_messages(db: SessionDB) -> None:
+    """Untitled but message-rich sessions survive the untitled policy."""
+    db.create_session("u1", platform="cli", model="m", title="")
+    db.append_messages_batch(
+        "u1", [Message(role="user", content="hi") for _ in range(5)]
+    )
+    with db._connect() as c:
+        c.execute(
+            "UPDATE sessions SET started_at = ? WHERE id = ?",
+            (time.time() - 10 * 86400, "u1"),
+        )
+    deleted = db.auto_prune(
+        older_than_days=0, untitled_days=7, min_messages=3
+    )
+    assert deleted == 0
+    assert db.get_session("u1") is not None
+
+
+def test_auto_prune_caps_at_200(db: SessionDB) -> None:
+    for i in range(250):
+        db.create_session(f"old-{i}", platform="cli", model="m", title="")
+        with db._connect() as c:
+            c.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = ?",
+                (time.time() - 100 * 86400, f"old-{i}"),
+            )
+    deleted = db.auto_prune(
+        older_than_days=90, untitled_days=0, min_messages=3
+    )
+    assert deleted == 200
