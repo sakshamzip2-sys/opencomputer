@@ -156,6 +156,30 @@ async def _cleanup_all() -> None:
             _PROCESSES.pop(entry.pid, None)
 
 
+def count_running_processes() -> int:
+    """Return how many bg processes are currently tracked.
+
+    Public read-only API for the ``/stop`` slash command. Hermes-parity
+    Tier A (2026-04-30).
+    """
+    return sum(
+        1 for entry in _PROCESSES.values()
+        if entry.proc.returncode is None
+    )
+
+
+async def stop_all_processes() -> int:
+    """Kill every tracked bg process. Returns count of processes killed.
+
+    Public API exposed for the ``/stop`` slash command. Hermes-parity
+    Tier A (2026-04-30). Mirrors ``_cleanup_all`` semantics but returns
+    the count so the slash handler can report it to the user.
+    """
+    before = count_running_processes()
+    await _cleanup_all()
+    return before
+
+
 class StartProcessTool(BaseTool):
     parallel_safe = False
 
@@ -363,4 +387,6 @@ __all__ = [
     "KillProcessTool",
     "_PROCESSES",
     "_cleanup_all",
+    "count_running_processes",
+    "stop_all_processes",
 ]

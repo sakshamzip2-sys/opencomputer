@@ -102,6 +102,22 @@ class SlashContext:
     on_compress: Callable[[], tuple[bool, int, int, str]] = lambda: (
         False, 0, 0, "compress callback not wired",
     )
+    #: ``/retry`` — re-queue the last user message. Returns
+    #: ``(ok: bool, message_preview: str)``. ``ok=False`` means there's
+    #: no prior user message to retry. Hermes-parity Tier B (2026-04-30).
+    on_retry: Callable[[], tuple[bool, str]] = lambda: (
+        False, "retry callback not wired",
+    )
+    #: ``/stop`` — kill all background processes spawned this session.
+    #: Returns count of processes killed. Hermes-parity Tier B
+    #: (2026-04-30). Default: returns 0 (no extension installed).
+    on_stop_bg: Callable[[], int] = lambda: 0
+    #: ``/image <path>`` — queue a local image for the next user message.
+    #: Returns ``(ok: bool, message: str)``. Hermes-parity Tier A
+    #: (2026-04-30).
+    on_image_attach: Callable[[str], tuple[bool, str]] = lambda _path: (
+        False, "image attach callback not wired",
+    )
 
 
 def _split_args(text: str) -> tuple[str, list[str]]:
@@ -516,6 +532,191 @@ def _handle_compress(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+# ─── Hermes-parity Tier A (2026-04-30): in-session info wrappers ─────
+
+
+def _handle_config(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/config`` — show key fields of the active Config."""
+    cfg = ctx.config
+    lines = ["## Active config\n"]
+    try:
+        lines.append(f"  model:       {cfg.model.provider} / {cfg.model.model}")
+        lines.append(f"  cheap model: {cfg.model.cheap_model or '(disabled)'}")
+        lines.append(f"  max tokens:  {cfg.model.max_tokens}")
+        lines.append(f"  temperature: {cfg.model.temperature}")
+        lines.append(f"  db path:     {cfg.session.db_path}")
+        lines.append(f"  memory:      {cfg.memory.declarative_path}")
+    except AttributeError as e:
+        lines.append(f"  [yellow]config layout differs — {e}[/yellow]")
+    ctx.console.print("\n".join(lines))
+    return SlashResult(handled=True)
+
+
+def _handle_insights(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/insights`` — quick session-history snapshot."""
+    sessions = ctx.get_session_list()
+    cost = ctx.get_cost_summary()
+    lines = ["## Session insights\n"]
+    lines.append(f"  recent sessions: {len(sessions)}")
+    if cost:
+        for k, v in cost.items():
+            lines.append(f"  {k}: {v}")
+    if sessions:
+        lines.append("\n  most recent (5):")
+        for s in sessions[:5]:
+            title = s.get("title") or s.get("id", "")[:8]
+            lines.append(f"    • {title}")
+    ctx.console.print("\n".join(lines))
+    return SlashResult(handled=True)
+
+
+def _handle_skills_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/skills`` — list installed skills."""
+    try:
+        from opencomputer.agent.memory import MemoryManager
+        cfg = ctx.config
+        mem = MemoryManager(cfg.memory.declarative_path, cfg.memory.skills_path)
+        skills = mem.list_skills()
+    except Exception as e:  # noqa: BLE001
+        ctx.console.print(f"[yellow]Skills unavailable: {e}[/yellow]")
+        return SlashResult(handled=True)
+    if not skills:
+        ctx.console.print("[dim]No skills installed.[/dim]")
+        return SlashResult(handled=True)
+    lines = [f"## Skills ({len(skills)})\n"]
+    for s in skills:
+        name = getattr(s, "name", None) or getattr(s, "id", "?")
+        desc = getattr(s, "description", "") or ""
+        lines.append(f"  /{name}  [dim]{desc[:80]}[/dim]")
+    ctx.console.print("\n".join(lines))
+    return SlashResult(handled=True)
+
+
+def _handle_cron_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/cron`` — list active cron jobs (best-effort)."""
+    try:
+        from opencomputer.agent.config import _home
+        from opencomputer.cron.store import CronStore
+        store = CronStore(_home() / "cron" / "cron.json")
+        jobs = store.list()
+    except Exception as e:  # noqa: BLE001
+        ctx.console.print(f"[yellow]Cron unavailable: {e}[/yellow]")
+        return SlashResult(handled=True)
+    if not jobs:
+        ctx.console.print("[dim]No cron jobs configured.[/dim]")
+        return SlashResult(handled=True)
+    lines = [f"## Cron jobs ({len(jobs)})\n"]
+    for j in jobs:
+        name = getattr(j, "name", None) or getattr(j, "id", "?")
+        sched = getattr(j, "schedule", "?")
+        lines.append(f"  {name} — {sched}")
+    ctx.console.print("\n".join(lines))
+    return SlashResult(handled=True)
+
+
+def _handle_plugins_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/plugins`` — list installed plugins."""
+    try:
+        from opencomputer.plugins.registry import registry as _reg
+        plugins = list(getattr(_reg, "plugins", {}).items())
+    except Exception as e:  # noqa: BLE001
+        ctx.console.print(f"[yellow]Plugins unavailable: {e}[/yellow]")
+        return SlashResult(handled=True)
+    if not plugins:
+        ctx.console.print("[dim]No plugins installed.[/dim]")
+        return SlashResult(handled=True)
+    lines = [f"## Plugins ({len(plugins)})\n"]
+    for name, _val in plugins:
+        lines.append(f"  • {name}")
+    ctx.console.print("\n".join(lines))
+    return SlashResult(handled=True)
+
+
+def _handle_profile_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/profile`` — show active profile name + home dir."""
+    try:
+        from opencomputer.agent.config import _home
+        from opencomputer.profiles import read_active_profile
+        active = read_active_profile() or "default"
+        home = _home()
+    except Exception as e:  # noqa: BLE001
+        ctx.console.print(f"[yellow]Profile lookup failed: {e}[/yellow]")
+        return SlashResult(handled=True)
+    ctx.console.print(
+        f"## Active profile\n\n  name: [cyan]{active}[/cyan]\n  home: {home}"
+    )
+    return SlashResult(handled=True)
+
+
+def _handle_tools_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/tools`` — read-only inventory of registered tools."""
+    try:
+        from opencomputer.tools.registry import registry as _treg
+        names = sorted(_treg.list_names())
+    except Exception as e:  # noqa: BLE001
+        ctx.console.print(f"[yellow]Tool registry unavailable: {e}[/yellow]")
+        return SlashResult(handled=True)
+    if not names:
+        ctx.console.print("[dim]No tools registered.[/dim]")
+        return SlashResult(handled=True)
+    lines = [f"## Registered tools ({len(names)})\n"]
+    # Render in 3 columns so long lists stay compact.
+    col_count = 3
+    for i in range(0, len(names), col_count):
+        row = names[i:i + col_count]
+        lines.append("  " + "    ".join(f"{n:<22}" for n in row))
+    ctx.console.print("\n".join(lines))
+    return SlashResult(handled=True)
+
+
+def _handle_image(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/image <path>`` — queue an image for the next user message."""
+    if not args:
+        ctx.console.print(
+            "[yellow]Usage: /image <path>[/yellow]"
+        )
+        return SlashResult(handled=True)
+    path = " ".join(args).strip()
+    ok, msg = ctx.on_image_attach(path)
+    if ok:
+        ctx.console.print(f"[green]✓[/green] {msg}")
+    else:
+        ctx.console.print(f"[yellow]{msg}[/yellow]")
+    return SlashResult(handled=True)
+
+
+# ─── Hermes-parity Tier B (2026-04-30): /retry + /stop ───────────────
+
+
+def _handle_retry(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/retry`` — re-queue the last user message via the queue shim."""
+    ok, preview = ctx.on_retry()
+    if not ok:
+        ctx.console.print(f"[yellow]{preview}[/yellow]")
+        return SlashResult(handled=True)
+    short = preview if len(preview) <= 80 else preview[:77] + "..."
+    ctx.console.print(
+        f"[green]↻[/green] Queued for retry: [dim]{short}[/dim]"
+    )
+    return SlashResult(handled=True)
+
+
+def _handle_stop_bg(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/stop`` — kill all background processes for this session."""
+    try:
+        killed = ctx.on_stop_bg()
+    except Exception as e:  # noqa: BLE001
+        ctx.console.print(f"[yellow]Stop failed: {e}[/yellow]")
+        return SlashResult(handled=True)
+    if killed == 0:
+        ctx.console.print("[dim]No background processes running.[/dim]")
+    else:
+        ctx.console.print(
+            f"[green]✓[/green] Killed {killed} background process(es)."
+        )
+    return SlashResult(handled=True)
+
+
 _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "exit": _handle_exit,
     "clear": _handle_clear,
@@ -534,6 +735,16 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "reload-mcp": _handle_reload_mcp,
     "debug": _handle_debug,
     "compress": _handle_compress,
+    "config":   _handle_config,
+    "insights": _handle_insights,
+    "skills":   _handle_skills_inline,
+    "cron":     _handle_cron_inline,
+    "plugins":  _handle_plugins_inline,
+    "profile":  _handle_profile_inline,
+    "image":    _handle_image,
+    "tools":    _handle_tools_inline,
+    "retry":    _handle_retry,
+    "stop":     _handle_stop_bg,
 }
 
 
