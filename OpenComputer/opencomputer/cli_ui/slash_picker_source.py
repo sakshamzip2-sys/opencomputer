@@ -30,7 +30,10 @@ _log = logging.getLogger("opencomputer.cli_ui.slash_picker_source")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 #: Default cap on rendered rows. Spec §3.4. Caller can override via ``top_n``.
-_DEFAULT_TOP_N = 20
+#: Bumped from 20 → 40 on 2026-04-30 because SLASH_REGISTRY grew past 25
+#: entries (Hermes-parity Tier S+A+B), which pushed user-installed skills
+#: out of the empty-prefix dropdown when only 20 rows were allowed.
+_DEFAULT_TOP_N = 40
 
 #: Score thresholds — see spec §3.4 for tier rationale.
 _TIER1_PREFIX = 1.00

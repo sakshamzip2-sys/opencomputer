@@ -1351,6 +1351,13 @@ def _run_chat_session(
         _print_update_hint_if_any()
         return
 
+    # Hermes-parity Tier A (2026-04-30) — image queue.
+    # Lives across all turns so ``/image <path>`` queues get drained
+    # at the top of the NEXT turn. Defined OUTSIDE the while-True
+    # loop so both the drain (turn start) and the closure inside
+    # SlashContext (mid-turn) reference the same list.
+    _image_queue: list[str] = []
+
     while True:
         # Fetch the session title each turn so a fresh /rename takes effect
         # immediately (the title indicator updates on the very next prompt).
@@ -1403,6 +1410,14 @@ def _run_chat_session(
         # before we extract image attachments. The LLM sees the full
         # pasted content; the visible buffer kept the compact placeholder.
         user_input = paste_folder.expand_all(user_input)
+        # Hermes-parity Tier A (2026-04-30) — drain queued images
+        # from any prior ``/image <path>`` slash invocations and
+        # prepend them as ``[image: /path]`` tokens that
+        # ``extract_image_attachments`` already understands.
+        if _image_queue:
+            queued_tokens = "".join(f"[image: {p}]" for p in _image_queue)
+            user_input = queued_tokens + user_input
+            _image_queue.clear()
         cleaned_text, _image_paths = extract_image_attachments(user_input)
         # If the only thing in the input was an image placeholder, give the
         # model a generic prompt so it knows to describe the image.
@@ -1486,6 +1501,103 @@ def _run_chat_session(
                 loop.config = _dc.replace(loop.config, model=new_model_cfg)
                 return (True, f"swapped to {new_provider}")
 
+            def _on_compress() -> tuple[bool, int, int, str]:
+                """Hermes-parity (2026-04-30) — flag the next iteration to
+                force-compact regardless of token threshold.
+
+                Returns ``(ok, before_count, after_count, reason)``. We
+                can't compute before/after counts here because compaction
+                runs on the AgentLoop's in-memory message list during the
+                NEXT user turn — so "queued" semantics is the honest
+                contract. Reports queued-OK with both counts equal so the
+                handler emits "queued" rather than fake numbers.
+                """
+                try:
+                    loop.request_force_compaction()
+                except Exception as e:  # noqa: BLE001
+                    return (False, 0, 0,
+                            f"compress unavailable: {type(e).__name__}: {e}")
+                return (True, 0, 0,
+                        "queued — compaction will run on next user turn")
+
+            def _on_retry() -> tuple[bool, str]:
+                """Hermes-parity Tier B (2026-04-30) — re-queue last user msg.
+
+                Reads the most-recent user message from the SessionDB and
+                pushes it onto the per-session next-turn queue (same lane
+                as ``/queue <text>``). The agent loop's outer wrapper
+                drains this queue ahead of stdin, so ``/retry`` causes
+                the next iteration to re-enter with the same input.
+                """
+                try:
+                    messages = loop.db.get_messages(session_id)
+                except Exception as e:  # noqa: BLE001
+                    return (False, f"retry unavailable: {e}")
+                last_user = next(
+                    (
+                        m for m in reversed(messages)
+                        if m.role == "user" and isinstance(m.content, str)
+                        and m.content.strip()
+                    ),
+                    None,
+                )
+                if last_user is None:
+                    return (False, "no previous user message to retry")
+                content = str(last_user.content)
+                ok = _on_queue_add(content)
+                if not ok:
+                    return (False, "queue full — drain before retrying")
+                return (True, content)
+
+            def _on_stop_bg() -> int:
+                """Hermes-parity Tier B (2026-04-30) — kill all bg procs.
+
+                Calls into ``extensions/coding-harness/tools/background``
+                via lazy-import so the slash command degrades to "0 killed"
+                if the coding-harness extension isn't installed.
+                """
+                try:
+                    import asyncio as _asyncio_local
+
+                    from extensions.coding_harness.tools.background import (
+                        stop_all_processes,
+                    )
+                except Exception:  # noqa: BLE001
+                    try:
+                        # Hyphenated → underscored alternate import
+                        # (extensions/coding-harness/tools/background.py).
+                        import importlib
+                        mod = importlib.import_module(
+                            "coding_harness.tools.background",
+                        )
+                        stop_all_processes = mod.stop_all_processes
+                    except Exception:  # noqa: BLE001
+                        return 0
+                try:
+                    return _asyncio_local.run(stop_all_processes())
+                except RuntimeError:
+                    # Already inside a running loop — schedule and best-effort.
+                    loop_inner = _asyncio_local.get_event_loop()
+                    fut = _asyncio_local.run_coroutine_threadsafe(
+                        stop_all_processes(), loop_inner,
+                    )
+                    try:
+                        return fut.result(timeout=10.0)
+                    except Exception:  # noqa: BLE001
+                        return 0
+
+            # _image_queue is defined OUTSIDE the while-True loop so it
+            # persists across turns (see top of run_chat_session).
+            def _on_image_attach(path: str) -> tuple[bool, str]:
+                from pathlib import Path as _PathLocal
+                p = _PathLocal(path).expanduser()
+                if not p.exists():
+                    return (False, f"file not found: {p}")
+                if not p.is_file():
+                    return (False, f"not a file: {p}")
+                _image_queue.append(str(p.resolve()))
+                return (True, f"queued image for next turn: {p.name}")
+
             slash_ctx = SlashContext(
                 console=console,
                 session_id=session_id,
@@ -1506,6 +1618,10 @@ def _run_chat_session(
                 on_reload_mcp=_on_reload_mcp,
                 on_model_swap=_on_model_swap,
                 on_provider_swap=_on_provider_swap,
+                on_compress=_on_compress,
+                on_retry=_on_retry,
+                on_stop_bg=_on_stop_bg,
+                on_image_attach=_on_image_attach,
             )
             result = dispatch_slash(user_input, slash_ctx)
             if result.exit_loop:
@@ -2087,6 +2203,42 @@ def _redact_for_auth(env_var: str, value: str) -> str:
     if len(value) >= 8:
         return f"…{value[-4:]}"
     return "(set)"
+
+
+@app.command(name="model")
+def model_pick() -> None:
+    """Interactive picker for default provider + model.
+
+    Hermes-parity (2026-04-30). Walks through provider selection and
+    model selection then persists choice to ``~/.opencomputer/<profile>/
+    config.yaml``. Use ``oc models add`` for non-interactive registration.
+    """
+    from opencomputer.cli_model_picker import model_picker
+    model_picker()
+
+
+@app.command(name="login")
+def login_cmd(
+    provider: str = typer.Argument(
+        ...,
+        help="Provider name (anthropic / openai / groq / openrouter / google / etc.).",
+    ),
+) -> None:
+    """Store an API key for ``provider`` in the active profile's ``.env``."""
+    from opencomputer.cli_login import login as _login
+    _login(provider)
+
+
+@app.command(name="logout")
+def logout_cmd(
+    provider: str = typer.Argument(
+        ...,
+        help="Provider name whose stored credential to clear.",
+    ),
+) -> None:
+    """Clear the stored API key for ``provider``."""
+    from opencomputer.cli_login import logout as _logout
+    _logout(provider)
 
 
 @app.command()

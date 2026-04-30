@@ -138,10 +138,16 @@ class CompactionEngine(ContextEngine):
         return last_input_tokens >= threshold
 
     async def maybe_run(
-        self, messages: list[Message], last_input_tokens: int
+        self, messages: list[Message], last_input_tokens: int,
+        *, force: bool = False,
     ) -> CompactionResult:
-        """Check the threshold; compact if needed; otherwise return unchanged."""
-        if not self.should_compact(last_input_tokens):
+        """Check the threshold; compact if needed; otherwise return unchanged.
+
+        When ``force=True`` the threshold check is skipped — used by the
+        ``/compress`` slash command so users can request manual
+        compaction below the auto-trigger threshold (2026-04-30).
+        """
+        if not force and not self.should_compact(last_input_tokens):
             return CompactionResult(messages=messages, did_compact=False)
 
         # Decide which messages to compact. Preserve:

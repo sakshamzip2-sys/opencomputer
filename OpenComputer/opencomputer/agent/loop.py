@@ -369,6 +369,11 @@ class AgentLoop:
         #: persona-specific Jinja conditionals (e.g. softening "no filler"
         #: rules under the companion persona).
         self._active_persona_id: str = ""
+        #: Hermes-parity Tier S (2026-04-30): set by
+        #: :meth:`request_force_compaction` (e.g. via ``/compress`` slash);
+        #: consumed once at the start of the next iteration of
+        #: ``run_conversation``, then auto-cleared.
+        self._force_compact_next_turn: bool = False
         #: v3.1 (2026-04-30): count persona flips within the current
         #: session. Reset on each ``run_conversation`` entry. Drives the
         #: ``suggest_profile_suggest_command`` Learning Moment (≥3 flips
@@ -1143,9 +1148,20 @@ class AgentLoop:
                         exc_info=True,
                     )
 
+                # /compress slash (2026-04-30): user-requested force-compact
+                # consumed once at the start of any iteration, not just when
+                # the threshold is hit. The flag is set via
+                # ``request_force_compaction()`` and cleared after one use.
+                _force_compact = bool(
+                    getattr(self, "_force_compact_next_turn", False),
+                )
+                if _force_compact:
+                    self._force_compact_next_turn = False
+
                 # Compaction check — uses REAL measured tokens from prior turn.
-                # First iteration (no prior measurement) skips the check.
-                if self._last_input_tokens > 0:
+                # First iteration (no prior measurement) skips the check
+                # unless the user explicitly forced compaction.
+                if self._last_input_tokens > 0 or _force_compact:
                     # D7: emit PreCompact hook BEFORE actually compacting so
                     # plugins can observe / log / modify behavior pre-summary.
                     if self.compaction.should_compact(self._last_input_tokens):
@@ -1171,7 +1187,11 @@ class AgentLoop:
                                 messages=list(messages),
                             )
                         )
-                    result = await self.compaction.maybe_run(messages, self._last_input_tokens)
+                    result = await self.compaction.maybe_run(
+                        messages,
+                        self._last_input_tokens,
+                        force=_force_compact,
+                    )
                     if result.did_compact:
                         messages = result.messages
                         # Round 2A P-1: AFTER_COMPACTION fires only when
@@ -2367,6 +2387,18 @@ class AgentLoop:
                 session_id,
                 exc_info=True,
             )
+
+    # ─── Hermes-parity Tier S (2026-04-30): /compress entry point ──
+
+    def request_force_compaction(self) -> None:
+        """Request that the next iteration force-compact the conversation.
+
+        Called by the ``/compress`` slash command. The flag is consumed
+        once at the start of the next ``run_conversation`` iteration,
+        bypassing the input-token threshold so compaction runs even
+        before context is "full".
+        """
+        self._force_compact_next_turn = True
 
     # ─── PR-6 T2.3 session lifecycle ───────────────────────────────
 

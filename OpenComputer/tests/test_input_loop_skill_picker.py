@@ -48,14 +48,15 @@ def test_refilter_empty_slash_returns_commands_and_skills(tmp_path: Path) -> Non
     assert len(skills) == 2, "skills missing from empty-prefix dropdown"
 
 
-def test_refilter_capped_at_20(tmp_path: Path) -> None:
-    """The dropdown caps at 20 visible rows. Longer matches truncate."""
+def test_refilter_capped_at_default(tmp_path: Path) -> None:
+    """The dropdown caps at the picker's _DEFAULT_TOP_N. Longer matches truncate."""
+    from opencomputer.cli_ui.slash_picker_source import _DEFAULT_TOP_N
     mem = _FakeMemory(
-        [_FakeSkillMeta(id=f"skill-{i:03d}", name=f"skill-{i:03d}") for i in range(50)]
+        [_FakeSkillMeta(id=f"skill-{i:03d}", name=f"skill-{i:03d}") for i in range(_DEFAULT_TOP_N + 30)]
     )
     src = UnifiedSlashSource(mem, MruStore(tmp_path / "mru.json"))
     matches = src.rank("skill")
-    assert len(matches) == 20
+    assert len(matches) == _DEFAULT_TOP_N
 
 
 def test_refilter_re_ranks_correctly(tmp_path: Path) -> None:

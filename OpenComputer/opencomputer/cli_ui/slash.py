@@ -162,6 +162,64 @@ SLASH_REGISTRY: list[CommandDef] = [
         description="Sanitized diagnostic dump for bug reports (no secrets).",
         category="meta",
     ),
+    # Hermes-parity Tier S (2026-04-30): user-triggered context compression.
+    CommandDef(
+        name="compress",
+        description="Compact older turns now (skips auto-trigger threshold).",
+        category="session",
+    ),
+    # Hermes-parity Tier A+B (2026-04-30): in-session wrappers + queue-shim retry.
+    CommandDef(
+        name="config",
+        description="Show active config (model, provider, paths).",
+        category="meta",
+    ),
+    CommandDef(
+        name="insights",
+        description="Show usage analytics (recent sessions, tokens, vibe).",
+        category="meta",
+    ),
+    CommandDef(
+        name="skills",
+        description="List installed skills.",
+        category="meta",
+    ),
+    CommandDef(
+        name="cron",
+        description="List active cron jobs.",
+        category="meta",
+    ),
+    CommandDef(
+        name="plugins",
+        description="List installed plugins.",
+        category="meta",
+    ),
+    CommandDef(
+        name="profile",
+        description="Show active profile name + path.",
+        category="meta",
+    ),
+    CommandDef(
+        name="image",
+        description="Attach a local image for the next user message.",
+        category="session",
+        args_hint="<path>",
+    ),
+    CommandDef(
+        name="tools",
+        description="List enabled tools (read-only inventory).",
+        category="meta",
+    ),
+    CommandDef(
+        name="retry",
+        description="Resend the last user message (queues it for next turn).",
+        category="session",
+    ),
+    CommandDef(
+        name="stop",
+        description="Kill all background processes for this session.",
+        category="session",
+    ),
 ]
 
 
