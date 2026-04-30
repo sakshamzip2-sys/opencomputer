@@ -211,8 +211,8 @@ def test_cached_foreground_app_returns_cached_within_ttl(tmp_path, monkeypatch):
         side_effect=_fake_detect,
     ):
         first = loop._cached_foreground_app(now=1000.0)
-        second = loop._cached_foreground_app(now=1010.0)  # +10s, within TTL
-        third = loop._cached_foreground_app(now=1031.0)  # +31s, past TTL
+        second = loop._cached_foreground_app(now=1003.0)  # +3s, within 5s TTL
+        third = loop._cached_foreground_app(now=1006.0)  # +6s, past 5s TTL
 
     assert first == "App1"
     assert second == "App1"  # cached
@@ -258,12 +258,24 @@ def _make_loop_with_db(messages):
 
 
 def test_reclassify_does_not_flap_on_single_signal(tmp_path, monkeypatch):
-    """One emotional message in an otherwise-coding session should NOT
-    flip persona on its own. Stability gate requires 2 consecutive
-    same-classification turns OR confidence >= 0.85."""
+    """A single weak signal (just one keyword match) in an otherwise-
+    coding session should NOT flip persona on its own. Stability gate
+    requires 2 consecutive turns OR confidence >= 0.92.
+
+    2026-05-01: v2 multi-signal classifier — when emotion-anchor AND
+    message-content keyword fire together (e.g. "i am sad"), confidence
+    stacks above the short-circuit threshold and the gate is bypassed.
+    This test now uses an emotion-only message that doesn't trigger the
+    content keyword (the 'sad' keyword is in the content pattern so we
+    use 'heartbroken' which is in emotion-anchor only).
+    """
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    # Single isolated emotion message — no co-occurring content
+    # keywords. "heartbroken" hits emotion-anchor only. Confidence
+    # stays at 0.9 (below the 0.92 short-circuit threshold) — gate
+    # kicks in and persona stays at "coding" pending a second signal.
     loop = _make_loop_with_db(
-        ["fix this bug", "i am sad about this regression"]
+        ["im heartbroken"]
     )
 
     with patch(
@@ -272,7 +284,8 @@ def test_reclassify_does_not_flap_on_single_signal(tmp_path, monkeypatch):
     ):
         loop._maybe_reclassify_persona("test-session")
 
-    # First sighting of 'companion' — gate not yet passed.
+    # First sighting of 'companion' from single emotion-anchor — gate
+    # not yet passed.
     assert loop._active_persona_id == "coding"
     assert loop._pending_persona_id == "companion"
     assert loop._pending_persona_count == 1
@@ -498,8 +511,16 @@ def test_acceptance_multi_line_first_message_picks_companion(tmp_path, monkeypat
 
 
 def test_acceptance_emotion_message_eventually_flips_to_companion(tmp_path, monkeypatch):
-    """Spec acceptance criterion 2: starting in coding mode, two
-    emotion-shaped turns flips persona to companion."""
+    """Spec acceptance criterion 2 (v2-updated): starting in coding mode,
+    a strong emotion+content stacked turn flips persona to companion.
+
+    Original v1 semantics: needed 2 turns through stability gate.
+    v2 semantics: when emotion-anchor + message-content keyword stack
+    (\"i am sad\" hits both), confidence ≥0.92 short-circuits the gate.
+    Both behaviours satisfy the acceptance criterion — \"users in
+    distress get companion register\". This test now asserts the
+    stronger v2 outcome: instant flip on confirmed emotion signal.
+    """
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
     loop = _make_loop_with_db(["fix this bug", "i am sad"])
 
@@ -508,12 +529,9 @@ def test_acceptance_emotion_message_eventually_flips_to_companion(tmp_path, monk
         return_value="iTerm2",
     ):
         loop._maybe_reclassify_persona("acceptance-session")
-        assert loop._active_persona_id == "coding"  # gate not yet passed
-        loop.db._msgs.append(type(loop.db._msgs[0])(
-            "user", "feeling lonely tonight"
-        ))
-        loop._maybe_reclassify_persona("acceptance-session")
 
+    # v2 multi-signal: "i am sad" hits both emotion-anchor + content
+    # → confidence 0.95 short-circuits gate → flips immediately.
     assert loop._active_persona_id == "companion"
 
 

@@ -1801,12 +1801,29 @@ class AgentLoop:
                 list(last_user_messages) + [user_message]
             )[-3:]
 
+        # v2 fields (2026-05-01) — window title + profile_home for
+        # priors lookup. Best-effort.
+        try:
+            from opencomputer.awareness.personas._foreground import (
+                detect_window_title,
+            )
+            window_title = detect_window_title()
+        except Exception:  # noqa: BLE001
+            window_title = ""
+        try:
+            from opencomputer.agent.config import _home as _resolve_home_v2
+            profile_home_v2 = str(_resolve_home_v2())
+        except Exception:  # noqa: BLE001
+            profile_home_v2 = ""
+
         try:
             ctx = ClassificationContext(
                 foreground_app=foreground_app,
                 time_of_day_hour=hour,
                 recent_file_paths=recent_files,
                 last_messages=last_user_messages,
+                window_title=window_title,
+                profile_home=profile_home_v2,
             )
             result = classify(ctx)
             persona = get_persona(result.persona_id)
@@ -2060,9 +2077,15 @@ class AgentLoop:
 
         if now is None:
             now = _time.monotonic()
+        # 2026-05-01 — TTL dropped 30s → 5s. Old TTL meant alt-tab from
+        # VS Code → trading app and immediate next message still saw the
+        # stale "VS Code" classification for up to half a minute. 5s is
+        # the sweet spot: short enough to catch app switches, long enough
+        # to avoid spamming osascript at sub-second cadence during rapid
+        # turns.
         if (
             self._foreground_app_cache_at != 0.0
-            and now - self._foreground_app_cache_at < 30.0
+            and now - self._foreground_app_cache_at < 5.0
         ):
             return self._foreground_app_cache
         try:
@@ -2154,12 +2177,28 @@ class AgentLoop:
             self._reclassify_calls_since_flip + 1, 1_000_000
         )
 
+        # v2 fields (2026-05-01) — window title + profile_home for priors.
+        try:
+            from opencomputer.awareness.personas._foreground import (
+                detect_window_title,
+            )
+            window_title_rc = detect_window_title()
+        except Exception:  # noqa: BLE001
+            window_title_rc = ""
+        try:
+            from opencomputer.agent.config import _home as _resolve_home_rc
+            profile_home_rc = str(_resolve_home_rc())
+        except Exception:  # noqa: BLE001
+            profile_home_rc = ""
+
         try:
             ctx = ClassificationContext(
                 foreground_app=self._cached_foreground_app(),
                 time_of_day_hour=_dt.datetime.now().hour,
                 recent_file_paths=(),  # not used for re-classification
                 last_messages=self._recent_user_messages(session_id, messages),
+                window_title=window_title_rc,
+                profile_home=profile_home_rc,
             )
             result = classify(ctx)
         except Exception:  # noqa: BLE001 — defensive: never break loop
@@ -2173,8 +2212,14 @@ class AgentLoop:
             return
 
         # Stability gate: 2 consecutive matches required, OR confidence
-        # >= 0.85 short-circuits (strong-app signal).
-        flip_now = result.confidence >= 0.85
+        # >= 0.92 short-circuits (very strong signal).
+        # 2026-05-01 — bumped 0.85 → 0.92 for v2 multi-signal classifier:
+        # v2 reports higher confidence values for multi-signal hits, so
+        # 0.85 was too easy a bar. 0.92 means "trading app + content
+        # match" or "two strong signals" — those should short-circuit;
+        # single-signal emotion detection (0.9) should still go through
+        # the 2-consecutive-turns stability gate.
+        flip_now = result.confidence >= 0.92
         if not flip_now:
             if result.persona_id == self._pending_persona_id:
                 self._pending_persona_count += 1
