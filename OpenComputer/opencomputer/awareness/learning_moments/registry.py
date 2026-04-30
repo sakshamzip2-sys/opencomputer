@@ -96,6 +96,37 @@ class Context:
     moments use this to skip very short sessions where reflection
     would be premature."""
 
+    # v3 fields (2026-04-30) — slash-command-suggestion support.
+    # All optional with safe defaults so v1/v2 callers still work
+    # without modification.
+
+    permission_mode_str: str = ""
+    """Current effective permission mode as the StrEnum's ``.name``
+    identifier ("DEFAULT", "PLAN", "AUTO", "ACCEPT_EDITS"). Used by
+    ``suggest_auto_mode_for_long_task`` and ``suggest_plan_for_complex_task``
+    to silence themselves when the user is already in the suggested
+    mode."""
+
+    recent_edit_count_this_turn: int = 0
+    """How many file-mutating tool calls (Edit / MultiEdit / Write)
+    ran during the most recent agent turn. Used by /undo and /diff
+    suggestions to fire only when the assistant just touched several
+    files. Mechanism B / C call sites set this to 0."""
+
+    checkpoint_count_session: int = 0
+    """Number of checkpoints persisted for this session. Zero means
+    ``suggest_checkpoint_before_rewrite`` is eligible. Sourced from
+    the coding-harness checkpoint store (degrades to 0 if absent)."""
+
+    session_token_total: int = 0
+    """Cumulative input + output tokens for this session. Drives
+    ``suggest_usage_at_token_milestone`` (fires once at >100k)."""
+
+    has_openai_key: bool = False
+    """Whether ``OPENAI_API_KEY`` is in the environment. Gates
+    ``suggest_voice_for_voice_user`` because realtime voice requires
+    an OpenAI key."""
+
 
 @dataclass(frozen=True, slots=True)
 class LearningMoment:
@@ -119,12 +150,25 @@ class LearningMoment:
 
 
 def all_moments() -> tuple[LearningMoment, ...]:
-    """Return the v1 + v2 registry. Stable ordering for tests."""
+    """Return the v1 + v2 + v3 registry. Stable ordering for tests."""
     from opencomputer.awareness.learning_moments.predicates import (
         confused_session,
         cross_session_recall,
         memory_continuity_first_recall,
         recent_files_paste,
+        suggest_auto_mode_for_long_task,
+        suggest_btw_for_aside,
+        suggest_checkpoint_before_rewrite,
+        suggest_diff_for_silent_edits,
+        suggest_history_for_lookback,
+        suggest_persona_for_companion_signals,
+        suggest_personality_after_friction,
+        suggest_plan_for_complex_task,
+        suggest_scrape_for_url,
+        suggest_skill_save_after_long_session,
+        suggest_undo_after_unwanted_edits,
+        suggest_usage_at_token_milestone,
+        suggest_voice_for_voice_user,
         user_md_unfilled,
         vibe_first_nonneutral,
     )
@@ -194,5 +238,146 @@ def all_moments() -> tuple[LearningMoment, ...]:
             ),
             surface=Surface.SESSION_END,
             priority=60,
+        ),
+        # ── v3 (2026-04-30) — slash-command suggestions ───────────────
+        # Inline-tail (mechanism A) tips. Priorities 70-150 so they
+        # always run AFTER v1/v2 (10-60) — feature discovery should
+        # cede to memory / vibe / cross-session moments when both are
+        # eligible on the same turn.
+        LearningMoment(
+            id="suggest_plan_for_complex_task",
+            predicate=suggest_plan_for_complex_task,
+            reveal=(
+                "(Heads up — for multi-step work like this, `/plan` "
+                "lets you review the approach before I touch any code.)"
+            ),
+            priority=70,
+        ),
+        LearningMoment(
+            id="suggest_auto_mode_for_long_task",
+            predicate=suggest_auto_mode_for_long_task,
+            reveal=(
+                "(If you don't want to keep approving each step, "
+                "`/auto` (or Shift+Tab Shift+Tab) runs with fewer "
+                "interruptions.)"
+            ),
+            priority=80,
+        ),
+        LearningMoment(
+            id="suggest_checkpoint_before_rewrite",
+            predicate=suggest_checkpoint_before_rewrite,
+            reveal=(
+                "(`/checkpoint` saves state before I rewrite — "
+                "easy rollback via `/rollback` if it goes sideways.)"
+            ),
+            priority=90,
+        ),
+        LearningMoment(
+            id="suggest_undo_after_unwanted_edits",
+            predicate=suggest_undo_after_unwanted_edits,
+            reveal=(
+                "(`/undo` reverts my most recent edit; `/rollback` "
+                "resets to the last checkpoint.)"
+            ),
+            priority=100,
+        ),
+        LearningMoment(
+            id="suggest_diff_for_silent_edits",
+            predicate=suggest_diff_for_silent_edits,
+            reveal=(
+                "(`/diff` shows a clean diff of what I just edited "
+                "— useful when edits stream past quickly.)"
+            ),
+            priority=110,
+        ),
+        LearningMoment(
+            id="suggest_usage_at_token_milestone",
+            predicate=suggest_usage_at_token_milestone,
+            reveal=(
+                "(This session has used over 100k tokens — `/usage` "
+                "shows the cost so far.)"
+            ),
+            priority=120,
+        ),
+        LearningMoment(
+            id="suggest_history_for_lookback",
+            predicate=suggest_history_for_lookback,
+            reveal=(
+                "(`/history` lists every turn in this session — "
+                "easier than scrolling.)"
+            ),
+            priority=130,
+        ),
+        LearningMoment(
+            id="suggest_btw_for_aside",
+            predicate=suggest_btw_for_aside,
+            reveal=(
+                "(For asides like that, `/btw <note>` saves it to "
+                "memory without breaking the current task.)"
+            ),
+            priority=140,
+        ),
+        LearningMoment(
+            id="suggest_scrape_for_url",
+            predicate=suggest_scrape_for_url,
+            reveal=(
+                "(If you want me to read that URL, `/scrape <url>` "
+                "pulls it as text.)"
+            ),
+            priority=150,
+        ),
+        # ── v3 mechanism B (system-prompt overlays) ───────────────────
+        # The LLM gets the option to weave the suggestion in naturally
+        # — never forced. Anchors are written as second-person
+        # instructions to the model.
+        LearningMoment(
+            id="suggest_voice_for_voice_user",
+            predicate=suggest_voice_for_voice_user,
+            reveal=(
+                "Context anchor: user mentioned voice/speech and has "
+                "an OpenAI API key in their environment. If natural "
+                "and useful, you may mention `oc voice realtime` for "
+                "two-way streaming voice. Don't force the suggestion."
+            ),
+            surface=Surface.SYSTEM_PROMPT,
+            priority=160,
+        ),
+        LearningMoment(
+            id="suggest_personality_after_friction",
+            predicate=suggest_personality_after_friction,
+            reveal=(
+                "Context anchor: the user has shown frustration / "
+                "non-calm vibes multiple times this session. If "
+                "natural, you may suggest `/personality` to switch "
+                "tone or `/clear` to reset the conversation. Don't "
+                "be patronizing — only mention if it fits."
+            ),
+            surface=Surface.SYSTEM_PROMPT,
+            priority=170,
+        ),
+        LearningMoment(
+            id="suggest_persona_for_companion_signals",
+            predicate=suggest_persona_for_companion_signals,
+            reveal=(
+                "Context anchor: user is showing emotional / "
+                "companion signals (lonely / rough day / overwhelmed). "
+                "Respond with care first. If it fits naturally later, "
+                "you may mention `/persona-mode auto` (I adapt tone) "
+                "or `/personality` (manual). Never force this."
+            ),
+            surface=Surface.SYSTEM_PROMPT,
+            priority=180,
+        ),
+        # ── v3 mechanism C (session-end reflection) ──────────────────
+        LearningMoment(
+            id="suggest_skill_save_after_long_session",
+            predicate=suggest_skill_save_after_long_session,
+            reveal=(
+                "(That was a long session. If it's a workflow you'll "
+                "repeat, `oc skills new` captures the pattern as a "
+                "reusable skill — same agent, less re-explaining.)"
+            ),
+            surface=Surface.SESSION_END,
+            priority=190,
         ),
     )

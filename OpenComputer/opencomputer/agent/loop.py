@@ -1290,6 +1290,50 @@ class AgentLoop:
                         else:
                             _days_since_first = 0.0
 
+                        # v3 fields (2026-04-30) — slash-command suggestions.
+                        # All wrapped defensively; any failure leaves the
+                        # field at its zero/empty default and the moment
+                        # silently no-ops on that field.
+                        import os as _os_mod_lm
+
+                        from plugin_sdk import (
+                            effective_permission_mode as _eff_mode_lm,
+                        )
+                        try:
+                            _perm_mode_str = (
+                                _eff_mode_lm(self._runtime).name
+                                if self._runtime else "DEFAULT"
+                            )
+                        except Exception:  # noqa: BLE001
+                            _perm_mode_str = "DEFAULT"
+                        # Count edits in assistant messages added since
+                        # the most recent user message — this is "how
+                        # many edits did the assistant make in the turn
+                        # the user is now responding to?"
+                        _edit_tool_names = {"Edit", "MultiEdit", "Write"}
+                        _recent_edit_count = 0
+                        for _msg in reversed(messages):
+                            if _msg.role == "user":
+                                break
+                            if _msg.role == "assistant" and _msg.tool_calls:
+                                for _tc in _msg.tool_calls:
+                                    if _tc.name in _edit_tool_names:
+                                        _recent_edit_count += 1
+                        # Cumulative session tokens — read from the
+                        # ``sessions`` row (state.add_tokens populates it
+                        # each step). Default 0 if row missing.
+                        try:
+                            _sess_row = self.db.get_session(sid) or {}
+                            _session_token_total = (
+                                int(_sess_row.get("input_tokens", 0) or 0)
+                                + int(_sess_row.get("output_tokens", 0) or 0)
+                            )
+                        except Exception:  # noqa: BLE001
+                            _session_token_total = 0
+                        _has_openai = bool(
+                            _os_mod_lm.environ.get("OPENAI_API_KEY"),
+                        )
+
                         # Default-arg binding pins the closure values to
                         # this iteration of the outer ``while iterations``
                         # loop — without it ruff B023 (and reality) flags
@@ -1303,6 +1347,10 @@ class AgentLoop:
                             _user_msg_=user_message or "",
                             _user_md_=_user_md,
                             _days_=_days_since_first,
+                            _perm_=_perm_mode_str,
+                            _edit_count_=_recent_edit_count,
+                            _tokens_=_session_token_total,
+                            _has_openai_=_has_openai,
                         ) -> _LMCtx:
                             return _LMCtx(
                                 session_id=_sid_,
@@ -1317,6 +1365,10 @@ class AgentLoop:
                                 sessions_db_total_sessions=_total_sessions_,
                                 user_md_text=_user_md_,
                                 days_since_first_session=_days_,
+                                permission_mode_str=_perm_,
+                                recent_edit_count_this_turn=_edit_count_,
+                                session_token_total=_tokens_,
+                                has_openai_key=_has_openai_,
                             )
 
                         _reveal = _select_reveal(
@@ -1859,21 +1911,51 @@ class AgentLoop:
             _total = self.db.count_sessions()
             _hits = self._compute_cross_session_topic_hits(session_id)
 
+            # v3 (2026-04-30) — fields needed by mechanism-B v3 moments
+            # (suggest_voice_for_voice_user, suggest_persona_for_companion_signals,
+            # suggest_personality_after_friction). All best-effort.
+            import os as _os_mod_b
+
+            from plugin_sdk import (
+                effective_permission_mode as _eff_mode_b,
+            )
+            try:
+                _perm_b = (
+                    _eff_mode_b(self._runtime).name
+                    if self._runtime else "DEFAULT"
+                )
+            except Exception:  # noqa: BLE001
+                _perm_b = "DEFAULT"
+            try:
+                _vibe_rows_b = self.db.list_vibe_log_for_session(session_id)
+            except AttributeError:
+                _vibe_rows_b = []
+            _has_openai_b = bool(_os_mod_b.environ.get("OPENAI_API_KEY"))
+
             def _build_b_ctx(
                 _ph_=_ph,
                 _sid_=session_id,
                 _total_=_total,
                 _hits_=_hits,
+                _user_msg_=user_message or "",
+                _perm_=_perm_b,
+                _vibe_rows_=_vibe_rows_b,
+                _has_openai_=_has_openai_b,
             ) -> _LMCtx:
                 return _LMCtx(
                     session_id=_sid_,
                     profile_home=_ph_,
-                    user_message="",
+                    user_message=_user_msg_,
                     memory_md_text="",
-                    vibe_log_session_count_total=0,
-                    vibe_log_session_count_noncalm=0,
+                    vibe_log_session_count_total=len(_vibe_rows_),
+                    vibe_log_session_count_noncalm=sum(
+                        1 for r in _vibe_rows_
+                        if r.get("vibe") != "calm"
+                    ),
                     sessions_db_total_sessions=_total_,
                     cross_session_topic_hits=_hits_,
+                    permission_mode_str=_perm_,
+                    has_openai_key=_has_openai_,
                 )
 
             lm_overlay = _select_overlay(
@@ -2177,11 +2259,28 @@ class AgentLoop:
                 else 0.0
             )
 
+            # v3 (2026-04-30) — session-end token total + has_openai for
+            # mechanism-C moments (suggest_skill_save_after_long_session
+            # uses turn_count only, but populating these makes the
+            # Context complete for any future C-surface moments).
+            import os as _os_mod_c
+            try:
+                _sess_row_c = self.db.get_session(session_id) or {}
+                _tokens_c = (
+                    int(_sess_row_c.get("input_tokens", 0) or 0)
+                    + int(_sess_row_c.get("output_tokens", 0) or 0)
+                )
+            except Exception:  # noqa: BLE001
+                _tokens_c = 0
+            _has_openai_c = bool(_os_mod_c.environ.get("OPENAI_API_KEY"))
+
             def _build_session_end_ctx(
                 _ph_=_ph,
                 _sid_=session_id,
                 _fraction_=_fraction,
                 _turns_=turn_count,
+                _tokens_=_tokens_c,
+                _has_openai_=_has_openai_c,
             ) -> _LMCtx:
                 return _LMCtx(
                     session_id=_sid_,
@@ -2193,6 +2292,8 @@ class AgentLoop:
                     sessions_db_total_sessions=self.db.count_sessions(),
                     vibe_stuck_or_frustrated_fraction=_fraction_,
                     turn_count=_turns_,
+                    session_token_total=_tokens_,
+                    has_openai_key=_has_openai_,
                 )
 
             reflection = _select_session_end(
