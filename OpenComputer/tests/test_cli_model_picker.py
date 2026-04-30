@@ -7,19 +7,44 @@ import pytest
 
 from opencomputer.cli_model_picker import (
     _grouped_models,
+    _infer_provider,
     _prompt_pick_one,
 )
 
 
 def test_grouped_models_returns_dict_provider_to_models():
     grouped = _grouped_models()
-    # Should return at least anthropic + openai (curated G.32 defaults).
+    # Should return at least anthropic + openai (curated G.32 defaults
+    # ship with provider_id=None, but _infer_provider classifies them).
     assert isinstance(grouped, dict)
+    assert "anthropic" in grouped, "claude-* models must group under anthropic"
+    assert "openai" in grouped, "gpt-* / o-* models must group under openai"
     # Every value is a sorted list of model ids.
     for prov, models in grouped.items():
         assert isinstance(prov, str)
         assert isinstance(models, list)
         assert models == sorted(set(models))
+
+
+@pytest.mark.parametrize("model_id,expected", [
+    ("claude-opus-4-7", "anthropic"),
+    ("claude-sonnet-4-6", "anthropic"),
+    ("claude-haiku-4-5-20251001", "anthropic"),
+    ("gpt-4o", "openai"),
+    ("gpt-5.4", "openai"),
+    ("o1", "openai"),
+    ("o3", "openai"),
+    ("o4-mini", "openai"),
+    ("gemini-2.0-pro", "google"),
+    ("llama-3.1-70b", "meta"),
+    ("mixtral-8x7b", "mistral"),
+    ("deepseek-coder-v3", "deepseek"),
+    ("kimi-k2", "groq"),
+    ("some-random-model-xyz", "unknown"),
+])
+def test_infer_provider_classifies_well_known_prefixes(model_id, expected):
+    """_infer_provider must classify every curated G.32 default + common others."""
+    assert _infer_provider(model_id) == expected
 
 
 def test_grouped_models_skips_blank_provider_or_model():

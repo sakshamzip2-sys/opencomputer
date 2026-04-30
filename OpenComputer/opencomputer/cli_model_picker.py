@@ -25,13 +25,48 @@ from opencomputer.agent.model_metadata import list_models
 console = Console()
 
 
+def _infer_provider(model_id: str) -> str:
+    """Map a model id to its provider when the registry entry has none.
+
+    The curated G.32 catalog (``model_metadata._DEFAULT_CATALOG``) ships
+    every entry with ``provider_id=None`` because the same model id
+    could theoretically be served by multiple providers. The picker
+    needs a concrete provider to group under, so we infer from
+    well-known prefixes. Fallback bucket is ``"unknown"`` so models we
+    don't recognise still appear (under their own group) instead of
+    being silently dropped.
+    """
+    m = model_id.lower()
+    if m.startswith("claude"):
+        return "anthropic"
+    if m.startswith(("gpt", "o1", "o2", "o3", "o4", "o5", "o6", "chatgpt")):
+        return "openai"
+    if m.startswith(("gemini", "palm")):
+        return "google"
+    if m.startswith("llama"):
+        return "meta"
+    if m.startswith(("mixtral", "mistral", "codestral")):
+        return "mistral"
+    if m.startswith("deepseek"):
+        return "deepseek"
+    if m.startswith(("groq", "kimi")):
+        return "groq"
+    return "unknown"
+
+
 def _grouped_models() -> dict[str, list[str]]:
-    """Return ``{provider_id: [model_id, ...]}`` from the in-memory registry."""
+    """Return ``{provider_id: [model_id, ...]}`` from the in-memory registry.
+
+    When an entry's ``provider_id`` is None or empty, infer it from the
+    model id (see :func:`_infer_provider`). This is the pragmatic fix
+    for the curated catalog, which ships every entry with no provider.
+    """
     grouped: dict[str, list[str]] = defaultdict(list)
     for entry in list_models():
-        if not entry.provider_id or not entry.model_id:
+        if not entry.model_id:
             continue
-        grouped[entry.provider_id].append(entry.model_id)
+        provider = entry.provider_id or _infer_provider(entry.model_id)
+        grouped[provider].append(entry.model_id)
     # Stable ordering for picker UX.
     return {p: sorted(set(grouped[p])) for p in sorted(grouped.keys())}
 
