@@ -1295,6 +1295,7 @@ class AgentLoop:
                         # field at its zero/empty default and the moment
                         # silently no-ops on that field.
                         import os as _os_mod_lm
+
                         from plugin_sdk import (
                             effective_permission_mode as _eff_mode_lm,
                         )
@@ -1914,6 +1915,7 @@ class AgentLoop:
             # (suggest_voice_for_voice_user, suggest_persona_for_companion_signals,
             # suggest_personality_after_friction). All best-effort.
             import os as _os_mod_b
+
             from plugin_sdk import (
                 effective_permission_mode as _eff_mode_b,
             )

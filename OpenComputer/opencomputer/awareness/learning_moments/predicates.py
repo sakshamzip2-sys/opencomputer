@@ -309,9 +309,7 @@ def suggest_scrape_for_url(ctx: Context) -> bool:
         return False
     if not _URL_RE.search(ctx.user_message):
         return False
-    if _FETCH_VERBS.search(ctx.user_message):
-        return False
-    return True
+    return not _FETCH_VERBS.search(ctx.user_message)
 
 
 # ─── v3 mechanism B / C predicates ────────────────────────────────────
