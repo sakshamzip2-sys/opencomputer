@@ -23,6 +23,11 @@ class ClassificationContext:
     time_of_day_hour: int = 12
     recent_file_paths: tuple[str, ...] = ()
     last_messages: tuple[str, ...] = ()
+    # v2 fields (2026-05-01) — window title (catches Chrome-on-TradingView)
+    # and profile_home (priors lookup). Both optional with safe defaults
+    # so v1 callers continue to work without modification.
+    window_title: str = ""
+    profile_home: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,31 +110,40 @@ def is_state_query(text: str) -> bool:
 
 
 def classify(ctx: ClassificationContext) -> ClassificationResult:
-    # Path A.1 — state-query detector. Runs FIRST so a "how are you" while
-    # in VS Code still goes to companion (the user is engaging socially,
-    # not asking about code). Strong app signals (trading, relaxed) still
-    # win because those are explicit user-context choices, but the default
-    # coding signal yields to companion when the actual message is a
-    # state-query.
-    # Scan the last up-to-3 messages. State-query in any one of them
-    # signals social register. Latest-message-only was too brittle —
-    # users often open with "hi" then ask a follow-up like "ok cool".
+    """Classify the user's persona — v2 multi-signal Bayesian combiner.
+
+    Replaces the v1 first-match-wins chain (preserved below as
+    ``_classify_v1`` for tests + emergency rollback) with the v2
+    weighted-multi-signal combiner. All callers see the same
+    ``ClassificationResult`` shape; the public API is unchanged.
+    """
+    # Lazy import to avoid circular imports during module load.
+    from opencomputer.awareness.personas.classifier_v2 import classify_v2
+    return classify_v2(ctx)
+
+
+def _classify_v1(ctx: ClassificationContext) -> ClassificationResult:
+    """Frozen v1 implementation. Kept for regression tests and emergency
+    rollback. Do NOT call directly — use :func:`classify`.
+    """
     state_query = any(is_state_query(m) for m in ctx.last_messages[-3:])
     last_msg = ctx.last_messages[-1] if ctx.last_messages else ""
-
     app_lower = ctx.foreground_app.lower()
     if any(a in app_lower for a in _TRADING_APPS):
-        return ClassificationResult("trading", 0.85, f"foreground app '{ctx.foreground_app}' suggests trading")
+        return ClassificationResult(
+            "trading", 0.85,
+            f"foreground app '{ctx.foreground_app}' suggests trading",
+        )
     if any(a in app_lower for a in _RELAXED_APPS):
-        return ClassificationResult("relaxed", 0.8, f"foreground app '{ctx.foreground_app}' suggests relaxed mode")
+        return ClassificationResult(
+            "relaxed", 0.8,
+            f"foreground app '{ctx.foreground_app}' suggests relaxed mode",
+        )
     if state_query:
         return ClassificationResult(
             "companion", 0.9,
             f"state-query / greeting detected in last message: {last_msg[:40]!r}",
         )
-    # Emotion-anchor scan over the last 3 messages. Same precedence as
-    # state-query: trading/relaxed app overrides win, but coding-app
-    # and file-fallback yield to emotional content.
     emotion_msg = next(
         (m for m in reversed(ctx.last_messages[-3:]) if has_emotion_anchor(m)),
         None,
@@ -140,24 +154,20 @@ def classify(ctx: ClassificationContext) -> ClassificationResult:
             f"emotion-anchor term detected in recent messages: {emotion_msg[:40]!r}",
         )
     if any(a in app_lower for a in _CODING_APPS):
-        return ClassificationResult("coding", 0.85, f"foreground app '{ctx.foreground_app}' suggests coding")
-
-    # File-based fallback
+        return ClassificationResult(
+            "coding", 0.85,
+            f"foreground app '{ctx.foreground_app}' suggests coding",
+        )
     py_files = sum(1 for p in ctx.recent_file_paths if p.endswith(".py"))
     md_files = sum(1 for p in ctx.recent_file_paths if p.endswith(".md"))
     if py_files >= 3:
         return ClassificationResult("coding", 0.7, f"{py_files} recent .py files")
     if md_files >= 3:
         return ClassificationResult("learning", 0.6, f"{md_files} recent .md files")
-
-    # Time-of-day fallback
     if ctx.time_of_day_hour >= 21 or ctx.time_of_day_hour < 6:
-        return ClassificationResult("relaxed", 0.5, f"hour={ctx.time_of_day_hour} (evening/late)")
+        return ClassificationResult(
+            "relaxed", 0.5, f"hour={ctx.time_of_day_hour} (evening/late)",
+        )
     if 9 <= ctx.time_of_day_hour < 12:
         return ClassificationResult("coding", 0.4, "morning hours, default to coding")
-
-    # Path A.1 — companion as the new default fallback (was admin).
-    # State-query detector handles greetings; this catches everything else
-    # without strong signal. The companion overlay is warm-but-honest;
-    # admin's overlay is action-only.
     return ClassificationResult("companion", 0.3, "no strong signal — default companion")

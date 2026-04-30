@@ -85,6 +85,45 @@ class PersonaModeCommand(SlashCommand):
 
         runtime.custom["persona_id_override"] = sub
         runtime.custom["_persona_dirty"] = True
+
+        # 2026-05-01 — record the override + context for the v2
+        # learnable-priors signal. Best-effort; any IO failure here
+        # is silently swallowed so the slash command always succeeds.
+        try:
+            from datetime import datetime
+
+            from opencomputer.agent.config import _home
+            from opencomputer.awareness.personas._foreground import (
+                detect_frontmost_app,
+            )
+            from opencomputer.awareness.personas.priors import (
+                record_override,
+            )
+            last_msg = ""
+            session_db = runtime.custom.get("session_db")
+            session_id = runtime.custom.get("session_id")
+            if session_db is not None and session_id:
+                try:
+                    msgs = session_db.get_messages(session_id)
+                    user_msgs = [
+                        m for m in msgs
+                        if getattr(m, "role", "") == "user"
+                        and isinstance(getattr(m, "content", None), str)
+                    ]
+                    if user_msgs:
+                        last_msg = user_msgs[-1].content
+                except Exception:  # noqa: BLE001
+                    pass
+            record_override(
+                profile_home=str(_home()),
+                persona_id=sub,
+                foreground_app=detect_frontmost_app(),
+                hour=datetime.now().hour,
+                last_msg=last_msg,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         return SlashCommandResult(
             output=f"Persona override set to {sub}. "
                    f"Takes effect on the next turn.",
