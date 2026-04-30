@@ -112,3 +112,48 @@ def test_plugin_root_exists():
     assert root.exists(), f"plugin root not found at {root}"
     py_files = list(root.rglob("*.py"))
     assert len(py_files) >= 5, f"expected 5+ .py files in plugin, found {len(py_files)}"
+
+
+# ─── Screen-awareness no-egress guard ───────────────────────────────
+
+
+def _screen_awareness_root() -> Path:
+    return (
+        Path(__file__).resolve().parent.parent
+        / "extensions"
+        / "screen-awareness"
+    )
+
+
+def test_screen_awareness_has_no_network_imports():
+    """The screen-awareness module MUST NOT import any HTTP/network
+    library. Adding networking is a contract break — update README +
+    CHANGELOG + this denylist before bypassing.
+    """
+    root = _screen_awareness_root()
+    if not root.exists():
+        return  # plugin not yet present — no-op
+    findings: list[str] = []
+    for py_file in root.rglob("*.py"):
+        if "__pycache__" in py_file.parts or "tests" in py_file.parts:
+            continue
+        for line_no, statement in _scan_imports(py_file):
+            findings.append(f"{py_file.relative_to(root)}:{line_no}: {statement}")
+    assert findings == [], (
+        "Network imports found in screen-awareness — privacy contract "
+        "break. Findings:\n" + "\n".join(findings)
+    )
+
+
+def test_screen_awareness_root_exists():
+    """Sanity: same guard as ambient — confirms the test is real."""
+    root = _screen_awareness_root()
+    if not root.exists():
+        return  # plugin not yet present — no-op
+    py_files = [
+        p for p in root.rglob("*.py")
+        if "__pycache__" not in p.parts
+    ]
+    assert len(py_files) >= 5, (
+        f"expected 5+ .py files in screen-awareness, found {len(py_files)}"
+    )
