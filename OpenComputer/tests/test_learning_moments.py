@@ -84,6 +84,8 @@ def _ctx(
     session_token_total: int = 0,
     has_openai_key: bool = False,
     turn_count: int = 0,
+    persona_flips_in_session: int = 0,
+    current_profile_name: str = "default",
 ) -> Context:
     return Context(
         session_id="s-test",
@@ -99,6 +101,8 @@ def _ctx(
         session_token_total=session_token_total,
         has_openai_key=has_openai_key,
         turn_count=turn_count,
+        persona_flips_in_session=persona_flips_in_session,
+        current_profile_name=current_profile_name,
     )
 
 
@@ -928,3 +932,51 @@ def test_registry_has_v3_moments_registered():
         "suggest_skill_save_after_long_session",
     }
     assert v3_ids.issubset(set(ids))
+
+
+# ── v3.1 predicate (2026-04-30) — profile-suggest discovery ──────────
+
+
+def test_suggest_profile_suggest_fires_on_three_persona_flips_default_profile():
+    from opencomputer.awareness.learning_moments.predicates import (
+        suggest_profile_suggest_command,
+    )
+    ctx = _ctx(persona_flips_in_session=3, current_profile_name="default")
+    assert suggest_profile_suggest_command(ctx) is True
+
+
+def test_suggest_profile_suggest_silent_below_three_flips():
+    from opencomputer.awareness.learning_moments.predicates import (
+        suggest_profile_suggest_command,
+    )
+    ctx = _ctx(persona_flips_in_session=2, current_profile_name="default")
+    assert suggest_profile_suggest_command(ctx) is False
+
+
+def test_suggest_profile_suggest_silent_on_named_profile():
+    from opencomputer.awareness.learning_moments.predicates import (
+        suggest_profile_suggest_command,
+    )
+    # User is on a named profile already — they've engaged with the system,
+    # don't re-teach them.
+    ctx = _ctx(persona_flips_in_session=5, current_profile_name="stock")
+    assert suggest_profile_suggest_command(ctx) is False
+
+
+def test_v31_profile_suggest_fires_via_select_reveal(tmp_path):
+    """End-to-end: real registry + engine + predicate fires."""
+    ctx = _ctx(
+        profile_home=tmp_path,
+        persona_flips_in_session=3,
+        current_profile_name="default",
+    )
+    out = select_reveal(ctx_builder=lambda: ctx, profile_home=tmp_path)
+    assert out is not None
+    assert "/profile-suggest" in out
+
+
+def test_registry_includes_v31_moment():
+    moments = all_moments()
+    ids = {m.id for m in moments}
+    assert "suggest_profile_suggest_command" in ids
+    assert len(moments) >= 20

@@ -369,6 +369,11 @@ class AgentLoop:
         #: persona-specific Jinja conditionals (e.g. softening "no filler"
         #: rules under the companion persona).
         self._active_persona_id: str = ""
+        #: v3.1 (2026-04-30): count persona flips within the current
+        #: session. Reset on each ``run_conversation`` entry. Drives the
+        #: ``suggest_profile_suggest_command`` Learning Moment (≥3 flips
+        #: ⇒ surface ``/profile-suggest`` once per profile).
+        self._persona_flips_in_session: int = 0
         #: Persona-uplift (2026-04-29): cached foreground-app value with
         #: 30s TTL so per-turn re-classification doesn't spawn osascript
         #: every turn. Empty string is a valid cache state.
@@ -1362,6 +1367,22 @@ class AgentLoop:
                         # Default-arg binding pins the closure values to
                         # this iteration of the outer ``while iterations``
                         # loop — without it ruff B023 (and reality) flags
+                        # v3.1 (2026-04-30) — profile-suggest moment fields.
+                        _flips_count = self._persona_flips_in_session
+                        _profile_name = "default"
+                        try:
+                            import os as _os_lm31
+                            from pathlib import Path as _Path_lm31
+                            _env_home = _os_lm31.environ.get("OPENCOMPUTER_HOME")
+                            if _env_home:
+                                _parts = _Path_lm31(_env_home).resolve().parts
+                                if "profiles" in _parts:
+                                    _idx = _parts.index("profiles")
+                                    if _idx + 1 < len(_parts):
+                                        _profile_name = _parts[_idx + 1]
+                        except Exception:  # noqa: BLE001
+                            _profile_name = "default"
+
                         # the late-bound capture as a footgun.
                         def _build_lm_ctx(
                             _ph_=_ph,
@@ -1376,6 +1397,8 @@ class AgentLoop:
                             _edit_count_=_recent_edit_count,
                             _tokens_=_session_token_total,
                             _has_openai_=_has_openai,
+                            _flips_=_flips_count,
+                            _profile_=_profile_name,
                         ) -> _LMCtx:
                             return _LMCtx(
                                 session_id=_sid_,
@@ -1394,6 +1417,8 @@ class AgentLoop:
                                 recent_edit_count_this_turn=_edit_count_,
                                 session_token_total=_tokens_,
                                 has_openai_key=_has_openai_,
+                                persona_flips_in_session=_flips_,
+                                current_profile_name=_profile_,
                             )
 
                         _reveal = _select_reveal(
@@ -2153,6 +2178,15 @@ class AgentLoop:
         self._pending_persona_id = ""
         self._pending_persona_count = 0
         self._reclassify_calls_since_flip = 0
+        # v3.1 (2026-04-30): only count meaningful flips — first
+        # classification (prev empty → set) doesn't count, only later
+        # changes between two non-empty persona ids. Use getattr-default
+        # so existing test fixtures that build a partial AgentLoop don't
+        # trip an AttributeError on this counter.
+        if prev and prev != result.persona_id:
+            self._persona_flips_in_session = (
+                getattr(self, "_persona_flips_in_session", 0) + 1
+            )
         if rt is not None:
             rt.custom["active_persona_id"] = self._active_persona_id
 
