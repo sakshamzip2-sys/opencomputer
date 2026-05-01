@@ -17,7 +17,6 @@ Key differences vs v1 (``classifier.py::classify``):
    - Window title (Chrome on TradingView → trading)
    - Recent-message content over last 5 messages (recency-weighted)
    - User priors (persisted ``/persona-mode`` overrides via priors.py)
-   - LLM async classifier (Tier 3 — see llm_classifier.py)
 
 3. **Confidence is the normalised top score**, not the literal value
    from a single rule. A persona with two strong signals (trading +

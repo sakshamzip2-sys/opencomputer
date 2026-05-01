@@ -307,65 +307,6 @@ def test_priors_caps_at_max_records(tmp_path):
     assert len(data["overrides"]) == _MAX_RECORDS
 
 
-# ─── LLM classifier (without actual API calls) ────────────────────────
-
-
-def test_llm_parse_response_valid_json():
-    from opencomputer.awareness.personas.llm_classifier import _parse_response
-
-    raw = '{"persona": "trading", "confidence": 0.92, "why": "stocks mentioned"}'
-    result = _parse_response(raw)
-    assert result is not None
-    assert result.persona_id == "trading"
-    assert result.confidence == 0.92
-
-
-def test_llm_parse_response_rejects_unknown_persona():
-    from opencomputer.awareness.personas.llm_classifier import _parse_response
-
-    raw = '{"persona": "bogus_persona", "confidence": 0.95, "why": "x"}'
-    assert _parse_response(raw) is None
-
-
-def test_llm_parse_response_handles_markdown_wrapped():
-    from opencomputer.awareness.personas.llm_classifier import _parse_response
-
-    raw = '```json\n{"persona": "coding", "confidence": 0.8, "why": "code"}\n```'
-    result = _parse_response(raw)
-    assert result is not None
-    assert result.persona_id == "coding"
-
-
-def test_llm_parse_response_clamps_confidence():
-    from opencomputer.awareness.personas.llm_classifier import _parse_response
-
-    raw = '{"persona": "coding", "confidence": 1.5, "why": "x"}'
-    result = _parse_response(raw)
-    assert result is not None
-    assert result.confidence == 1.0
-
-
-def test_llm_classify_async_returns_none_without_api_key(monkeypatch):
-    import asyncio
-
-    from opencomputer.awareness.personas.llm_classifier import (
-        clear_cache,
-        llm_classify_async,
-    )
-
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    clear_cache()
-
-    result = asyncio.run(llm_classify_async(
-        session_id="test-session",
-        foreground_app="Code",
-        window_title="",
-        last_messages=("hello",),
-    ))
-    assert result is None
-
-
 # ─── Backwards-compatible classify() delegates to v2 ─────────────────
 
 
