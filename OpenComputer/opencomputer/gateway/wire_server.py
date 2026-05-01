@@ -21,7 +21,7 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import websockets
 
@@ -43,19 +43,58 @@ from opencomputer.gateway.protocol import (
     WireResponse,
 )
 
+if TYPE_CHECKING:
+    from opencomputer.gateway.agent_router import AgentRouter
+
 logger = logging.getLogger("opencomputer.gateway.wire_server")
 
 
 class WireServer:
-    """Minimal JSON-RPC-over-WebSocket server for local clients."""
+    """Minimal JSON-RPC-over-WebSocket server for local clients.
+
+    Accepts either a pre-built ``AgentLoop`` (legacy single-loop path) or
+    an ``AgentRouter`` (multi-profile path). The two arguments are mutually
+    exclusive — pass exactly one.
+
+    For v1, wire clients always get the default profile (per-call profile
+    binding via a ``profile_id`` field in the RPC params is deferred to
+    v1.1). The ``loop=`` legacy path wraps the supplied loop into a
+    one-entry router seeded as ``"default"`` so all dispatch goes through
+    the same router code path regardless of caller style.
+    """
 
     def __init__(
         self,
-        loop: AgentLoop,
+        loop: AgentLoop | None = None,
+        *,
+        router: AgentRouter | None = None,
         host: str = "127.0.0.1",
         port: int = 18789,
     ) -> None:
-        self.loop = loop
+        if router is not None and loop is not None:
+            raise ValueError("WireServer: pass either loop or router, not both")
+        if router is None and loop is None:
+            raise ValueError("WireServer: pass either loop or router")
+
+        if router is None:
+            # Legacy single-loop path: wrap the loop into a one-entry router
+            # seeded as "default" so all dispatch uses the same router path.
+            from opencomputer.agent.config import _home as _resolve_home
+            from opencomputer.gateway.agent_router import AgentRouter
+
+            _captured_loop = loop  # capture for the lambda closures
+            router = AgentRouter(
+                loop_factory=lambda pid, home: _captured_loop,
+                profile_home_resolver=lambda pid: _resolve_home(),
+            )
+            router._loops["default"] = loop
+
+        self._router: AgentRouter = router
+        # Legacy attribute: preserved so existing test/caller code that reads
+        # ``server.loop`` directly continues to work. For router-only
+        # construction this will be None — callers must use ``_router``
+        # directly (v1.1+).
+        self.loop: AgentLoop | None = loop
         self.host = host
         self.port = port
         self._server: websockets.WebSocketServer | None = None
@@ -145,16 +184,25 @@ class WireServer:
         elif req.method == METHOD_CHAT:
             await self._handle_chat(ws, req)
         elif req.method == METHOD_SESSION_LIST:
+            # Note: get_or_load("default") is O(1) after first load (cached
+            # dict hit). Per-call wire binding (RPC carries profile_id)
+            # deferred to v1.1.
+            # v1: always default profile; v1.1 will accept profile_id in params.
             limit = int(req.params.get("limit", 20))
-            rows = self.loop.db.list_sessions(limit=limit)
+            _loop = await self._router.get_or_load("default")
+            rows = _loop.db.list_sessions(limit=limit)
             await self._send_response(ws, req.id, True, payload={"sessions": rows})
         elif req.method == METHOD_SEARCH:
+            # v1: always default profile; v1.1 will accept profile_id in params.
             query = str(req.params.get("query", ""))
             limit = int(req.params.get("limit", 20))
-            hits = self.loop.db.search(query, limit=limit)
+            _loop = await self._router.get_or_load("default")
+            hits = _loop.db.search(query, limit=limit)
             await self._send_response(ws, req.id, True, payload={"hits": hits})
         elif req.method == METHOD_SKILLS_LIST:
-            skills = self.loop.memory.list_skills()
+            # v1: always default profile; v1.1 will accept profile_id in params.
+            _loop = await self._router.get_or_load("default")
+            skills = _loop.memory.list_skills()
             payload = {
                 "skills": [
                     {
@@ -226,12 +274,20 @@ class WireServer:
                 {"delta": text, "request_id": req.id},
             )
 
+        # v1: always default profile; v1.1 will accept profile_id in RPC params.
+        profile_id = "default"
+        loop = await self._router.get_or_load(profile_id)
+        profile_home = self._router._profile_home_resolver(profile_id)
+
+        from plugin_sdk.profile_context import set_profile
+
         try:
-            result = await self.loop.run_conversation(
-                user_message=user_message,
-                session_id=session_id,
-                stream_callback=lambda t: asyncio.create_task(_on_chunk(t)),
-            )
+            with set_profile(profile_home):
+                result = await loop.run_conversation(
+                    user_message=user_message,
+                    session_id=session_id,
+                    stream_callback=lambda t: asyncio.create_task(_on_chunk(t)),
+                )
         except Exception as e:  # noqa: BLE001
             await self._send_event(
                 ws,

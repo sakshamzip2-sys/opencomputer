@@ -32,6 +32,7 @@ from plugin_sdk.runtime_context import (
 )
 
 if TYPE_CHECKING:
+    from opencomputer.gateway.agent_router import AgentRouter
     from opencomputer.gateway.channel_directory import ChannelDirectory
     from opencomputer.plugins.loader import PluginAPI
     from plugin_sdk.consent import CapabilityClaim
@@ -127,14 +128,53 @@ class Dispatch:
 
     def __init__(
         self,
-        loop: AgentLoop,
+        loop: AgentLoop | None = None,
         plugin_api: PluginAPI | None = None,
         channel_directory: ChannelDirectory | None = None,
         config: dict[str, Any] | None = None,
+        *,
+        router: AgentRouter | None = None,
     ) -> None:
-        self.loop = loop
-        # One lock per chat_id — prevents interleaved turns from the same chat
-        self._locks: dict[str, asyncio.Lock] = {}
+        # Phase 2 multi-routing: accept either ``loop=`` (legacy single
+        # loop) or ``router=`` (per-profile cache). Exactly one of the
+        # two must be set.
+        if router is not None and loop is not None:
+            raise ValueError("Dispatch: pass either loop or router, not both")
+        if router is None and loop is None:
+            raise ValueError("Dispatch: pass either loop or router")
+
+        if router is None:
+            # Legacy single-loop path — wrap into a one-entry router
+            # seeded with the loop as ``"default"`` so the rest of the
+            # code path is uniform (no per-call branching). The lambda
+            # is a no-op fallback that should never fire because the
+            # ``"default"`` slot is pre-populated below; if a future
+            # caller asks for a non-default profile through this
+            # legacy router it'll get the same loop, which preserves
+            # current behaviour.
+            from opencomputer.agent.config import _home as _resolve_home
+            from opencomputer.gateway.agent_router import AgentRouter
+
+            assert loop is not None  # for mypy after the guard above
+            router = AgentRouter(
+                loop_factory=lambda _pid, _home: loop,
+                # Minor fix: return the real OPENCOMPUTER_HOME default
+                # rather than Path() (CWD), which was wrong for set_profile
+                # calls inside run_conversation.
+                profile_home_resolver=lambda _pid: _resolve_home(),
+            )
+            router._loops["default"] = loop  # pre-populate
+        self._router = router
+        # ``self.loop`` preserves the legacy attribute access path.
+        # When the caller passed ``router=`` directly we expose
+        # whatever the seeded "default" loop is (if any) so existing
+        # code that reads ``dispatch.loop`` still works for the common
+        # single-profile case. Multi-profile callers reading this
+        # attribute should migrate to ``router.get_or_load(profile_id)``.
+        self.loop = loop if loop is not None else router._loops.get("default")
+        # Per-(profile_id, session_id) lock map — multi-profile correct.
+        # Same chat across two profiles no longer interleaves.
+        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         # Adapter reference (set by Gateway) so we can send typing indicators
         self._adapters_by_platform: dict = {}
         # Task I.9: the shared PluginAPI whose ``in_request`` we wrap
@@ -171,6 +211,11 @@ class Dispatch:
         # message. We never grow without bound because session ids are
         # deterministic per (platform, chat_id).
         self._session_channels: dict[str, tuple[Any, str]] = {}
+        # Critical fix (Task 2.5 review): session ↔ profile_id mapping so
+        # _send_approval_prompt and _handle_approval_click can resolve the
+        # per-profile gate via the router rather than self.loop (which is
+        # None when Dispatch is constructed with router= instead of loop=).
+        self._session_profiles: dict[str, str] = {}
         # Token registry — opaque request tokens minted in the prompt
         # handler so we don't leak session_id / capability_id onto the
         # Telegram callback wire. Maps token → (session_id, cap_id).
@@ -352,7 +397,22 @@ class Dispatch:
         ``handle_message`` previously did inline before the burst-
         aware preamble was added. Same return contract — assistant
         text or None.
+
+        Phase 2 multi-routing: resolves ``profile_id`` (always
+        ``"default"`` until Phase 3 adds the ``BindingResolver``),
+        fetches the per-profile ``AgentLoop`` via
+        ``self._router.get_or_load(profile_id)``, and wraps the
+        ``run_conversation`` call in
+        ``set_profile(profile_home)`` so ``_home()`` and PluginAPI
+        lazy properties resolve to the right profile inside the
+        request scope.
         """
+        # Phase 2: per-event profile resolution. Default-only until
+        # Phase 3 wires the BindingResolver.
+        profile_id = "default"
+        loop = await self._router.get_or_load(profile_id)
+        profile_home = self._router._profile_home_resolver(profile_id)
+
         # Round 2a P-5 — record the (adapter, chat_id) binding so a
         # consent prompt later in this turn can find the right surface
         # to ask the user on. Best-effort: missing adapter = legacy
@@ -362,6 +422,11 @@ class Dispatch:
         )
         if adapter is not None:
             self._session_channels[session_id] = (adapter, event.chat_id)
+        # Critical fix: record per-session profile so the consent gate
+        # can be resolved via the router in _send_approval_prompt and
+        # _handle_approval_click even when self.loop is None (router=
+        # construction path).
+        self._session_profiles[session_id] = profile_id
         # Hermes channel-port (PR 2 Task 2.2): fire on_processing_start
         # BEFORE acquiring the per-chat lock so a fast-clicking user
         # sees the 👀 reaction even if the previous turn is still
@@ -378,7 +443,11 @@ class Dispatch:
                     adapter.on_processing_start(event.chat_id, message_id)
                 )
             )
-        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        # Per-(profile_id, session_id) lock keys make multi-profile
+        # correct: same chat_id across two profiles no longer
+        # interleaves through the same lock.
+        lock_key = (profile_id, session_id)
+        lock = self._locks.setdefault(lock_key, asyncio.Lock())
         outcome: ProcessingOutcome = ProcessingOutcome.SUCCESS
         async with lock:
             # Start a typing heartbeat (Telegram's typing state expires after
@@ -411,23 +480,29 @@ class Dispatch:
             # ``prefetched`` memory) reads these and appends them to the
             # composed system prompt — staying out of the FROZEN base
             # so prefix-cache hits on turn 2+ remain valid.
-            runtime = self._build_channel_runtime(event, adapter)
+            runtime = self._build_channel_runtime(event, adapter, loop)
+            # Phase 2 audit G1: bind the per-task ``current_profile_home``
+            # ContextVar around ``run_conversation`` so ``_home()`` and
+            # any PluginAPI lazy paths resolve to the right profile for
+            # the duration of this dispatch.
+            from plugin_sdk.profile_context import set_profile
             try:
-                if self._plugin_api is not None:
-                    with self._plugin_api.in_request(request_ctx):
-                        result = await self.loop.run_conversation(
+                with set_profile(profile_home):
+                    if self._plugin_api is not None:
+                        with self._plugin_api.in_request(request_ctx):
+                            result = await loop.run_conversation(
+                                user_message=user_message,
+                                session_id=session_id,
+                                images=images,
+                                runtime=runtime,
+                            )
+                    else:
+                        result = await loop.run_conversation(
                             user_message=user_message,
                             session_id=session_id,
                             images=images,
                             runtime=runtime,
                         )
-                else:
-                    result = await self.loop.run_conversation(
-                        user_message=user_message,
-                        session_id=session_id,
-                        images=images,
-                        runtime=runtime,
-                    )
                 return result.final_message.content or None
             except Exception as e:  # noqa: BLE001
                 # Always log full traceback for debugging; user only
@@ -456,7 +531,10 @@ class Dispatch:
                     )
 
     def _build_channel_runtime(
-        self, event: MessageEvent, adapter: Any
+        self,
+        event: MessageEvent,
+        adapter: Any,
+        loop: AgentLoop | None = None,
     ) -> RuntimeContext:
         """Resolve per-channel prompt + skill bindings into a RuntimeContext.
 
@@ -470,6 +548,11 @@ class Dispatch:
         can splice them into the per-turn system prompt without
         another disk hop. Failure to resolve is silent — default
         behaviour (no channel context) is preserved.
+
+        Phase 2 multi-routing: ``loop`` is the per-profile
+        ``AgentLoop`` resolved by ``_do_dispatch`` (so the right
+        profile's memory is used to load skill bodies). Falls back
+        to ``self.loop`` for backwards compat with older callers.
         """
         if adapter is None or not event.metadata:
             return DEFAULT_RUNTIME_CONTEXT
@@ -506,7 +589,8 @@ class Dispatch:
         # are dropped silently — operators see "channel skill X not
         # found" only at config validation time.
         skill_bodies: list[tuple[str, str]] = []
-        memory = getattr(self.loop, "memory", None)
+        memory_source = loop if loop is not None else self.loop
+        memory = getattr(memory_source, "memory", None)
         if memory is not None and skill_ids:
             for sid in skill_ids:
                 try:
@@ -585,8 +669,18 @@ class Dispatch:
         if not hasattr(adapter, "send_approval_request"):
             return False
 
-        gate = getattr(self.loop, "_consent_gate", None)
+        # Critical fix: resolve the gate via the per-profile loop rather
+        # than self.loop. self.loop is None when Dispatch was constructed
+        # with router= (no loop=), causing silent auto-deny.
+        pid = self._session_profiles.get(session_id, "default")
+        _profile_loop = self._router._loops.get(pid)
+        gate = getattr(_profile_loop, "_consent_gate", None)
         if gate is None:
+            logger.debug(
+                "approval prompt: session=%s profile=%s has no _consent_gate; "
+                "auto-deny (gate not loaded or profile not found)",
+                session_id, pid,
+            )
             return False
 
         token = uuid.uuid4().hex[:24]
@@ -632,7 +726,11 @@ class Dispatch:
             )
             return
         session_id, capability_id = binding
-        gate = getattr(self.loop, "_consent_gate", None)
+        # Resolve gate via the per-profile loop (same fix as
+        # _send_approval_prompt: self.loop is None on router= paths).
+        _pid = self._session_profiles.get(session_id, "default")
+        _click_loop = self._router._loops.get(_pid)
+        gate = getattr(_click_loop, "_consent_gate", None)
         if gate is None:
             return
         if verb == "once":

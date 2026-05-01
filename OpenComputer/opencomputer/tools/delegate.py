@@ -38,8 +38,11 @@ strips them. Mirrors Hermes `DELEGATE_BLOCKED_TOOLS`."""
 class DelegateTool(BaseTool):
     parallel_safe = True  # each delegate gets its own loop instance
 
-    # Lazy-import a factory the CLI can inject; until then raise a clear error
-    _factory = None
+    # Class-level fallbacks (legacy CLI bootstrap path). Per-instance state
+    # on each DelegateTool instance takes precedence — see __init__ and the
+    # _factory / _templates properties. Renamed from _factory / _templates to
+    # avoid colliding with the same-named instance properties (audit Pass-2 G3).
+    _factory_class_level = None
     #: Class-level "current runtime" set by the parent loop before dispatching
     #: tool calls. Ensures subagent loops inherit plan_mode / yolo_mode, etc.
     _current_runtime: RuntimeContext = DEFAULT_RUNTIME_CONTEXT
@@ -49,15 +52,48 @@ class DelegateTool(BaseTool):
     #: listing available names (of which there are none, yet). Mirrors the
     #: Claude Code concept of pre-registered named subagents from
     #: ``sources/claude-code/plugins/<plugin>/agents/*.md``.
-    _templates: dict[str, AgentTemplate] = {}
+    _templates_class_level: dict[str, AgentTemplate] = {}
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Per-instance state; populated by set_factory(instance=self) and
+        # set_templates(instance=self) at AgentLoop construction time
+        # (audit Pass-2 G3). Falls back to class-level when not explicitly
+        # set on the instance — preserves legacy CLI bootstrap path that
+        # calls DelegateTool.set_factory(...) once at startup.
+        self._instance_factory = None
+        self._instance_templates: dict | None = None
+
+    @property
+    def _factory(self):
+        """Prefer instance-level factory; fall back to class-level for legacy CLI path."""
+        if self._instance_factory is not None:
+            return self._instance_factory
+        return type(self)._factory_class_level
+
+    @property
+    def _templates(self) -> dict[str, AgentTemplate]:
+        """Prefer instance-level templates; fall back to class-level for legacy CLI path."""
+        if self._instance_templates is not None:
+            return self._instance_templates
+        return type(self)._templates_class_level
 
     @classmethod
-    def set_factory(cls, factory) -> None:
-        """Inject a callable that returns a fresh AgentLoop. Called once at CLI startup."""
-        # staticmethod wrap prevents Python from binding `self` when we later do
-        # `self._factory()` on an instance — lambdas and plain functions would
-        # otherwise get `self` auto-injected.
-        cls._factory = staticmethod(factory)
+    def set_factory(cls, factory, *, instance: DelegateTool | None = None) -> None:
+        """Inject a callable that returns a fresh AgentLoop.
+
+        With an explicit ``instance`` arg, sets only that instance's
+        factory (preferred new path — used by the per-profile AgentLoop
+        factory in Phase 2). Without an instance, sets the class-level
+        fallback (legacy CLI startup path).
+        """
+        if instance is not None:
+            instance._instance_factory = factory
+        else:
+            # staticmethod wrap prevents Python from binding `self` when we later do
+            # `self._factory()` on an instance — lambdas and plain functions would
+            # otherwise get `self` auto-injected.
+            cls._factory_class_level = staticmethod(factory)
 
     @classmethod
     def set_runtime(cls, runtime: RuntimeContext) -> None:
@@ -65,8 +101,11 @@ class DelegateTool(BaseTool):
         cls._current_runtime = runtime
 
     @classmethod
-    def set_templates(cls, templates: dict[str, AgentTemplate]) -> None:
+    def set_templates(cls, templates: dict[str, AgentTemplate], *, instance: DelegateTool | None = None) -> None:
         """Register the discovered agent templates.
+
+        With an explicit ``instance`` arg, sets only that instance's
+        templates. Without, sets the class-level fallback.
 
         III.5 — called once at CLI startup after
         :func:`opencomputer.agent.agent_templates.discover_agents` runs.
@@ -74,7 +113,10 @@ class DelegateTool(BaseTool):
         don't leak templates from a previous process state in long-lived
         test harnesses). Passing an empty dict clears the registry.
         """
-        cls._templates = dict(templates)
+        if instance is not None:
+            instance._instance_templates = dict(templates)
+        else:
+            cls._templates_class_level = dict(templates)
 
     @property
     def schema(self) -> ToolSchema:
