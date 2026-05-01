@@ -70,7 +70,6 @@ def profile_bootstrap(
     Reads system identity, asks 5 quick questions, scans the last 7 days
     of recent files + git activity. Total time: under 6 minutes.
     """
-    from pathlib import Path
 
     from opencomputer.agent.config import _home
     from opencomputer.profile_bootstrap.identity_reflex import gather_identity
@@ -96,10 +95,12 @@ def profile_bootstrap(
             if answer.strip():
                 answers[key] = answer.strip()
 
+    from opencomputer.profiles import real_user_home
+    _user_home = real_user_home()
     home_dirs = [
-        Path.home() / "Documents",
-        Path.home() / "Desktop",
-        Path.home() / "Downloads",
+        _user_home / "Documents",
+        _user_home / "Desktop",
+        _user_home / "Downloads",
     ]
     git_repos = _detect_git_repos()
 
@@ -141,12 +142,13 @@ def profile_deepen(
     Walks the current window from the cursor, extracts motifs via Ollama,
     and advances to the next window. With --force, ignores idle gating.
     """
-    from pathlib import Path
 
+    from opencomputer.profiles import real_user_home
+    _user_home = real_user_home()
     home_dirs = [
-        Path.home() / "Documents",
-        Path.home() / "Desktop",
-        Path.home() / "Downloads",
+        _user_home / "Documents",
+        _user_home / "Desktop",
+        _user_home / "Downloads",
     ]
     git_repos = _detect_git_repos()  # already exists from V1
 
@@ -171,13 +173,14 @@ def profile_deepen(
 
 def _detect_git_repos(max_repos: int = 50) -> list:
     """Find candidate git repos in common locations. Best-effort, capped."""
-    from pathlib import Path
 
+    from opencomputer.profiles import real_user_home
+    _user_home = real_user_home()
     candidates = [
-        Path.home() / "Vscode",
-        Path.home() / "Projects",
-        Path.home() / "Code",
-        Path.home() / "src",
+        _user_home / "Vscode",
+        _user_home / "Projects",
+        _user_home / "Code",
+        _user_home / "src",
     ]
     repos = []
     for root in candidates:
