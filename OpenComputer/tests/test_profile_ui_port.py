@@ -13,6 +13,7 @@ import pytest
 from opencomputer.cli_ui._profile_swap import (
     consume_pending_profile_swap,
     cycle_profile,
+    init_active_profile_id,
 )
 
 
@@ -80,3 +81,74 @@ def test_cycle_profile_re_press_advances_pending(tmp_path, monkeypatch):
 
     cycle_profile(runtime)  # → work
     assert runtime.custom["pending_profile_id"] == "work"
+
+
+def test_consume_swap_no_pending_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+    runtime = _runtime()
+    assert consume_pending_profile_swap(runtime) is None
+
+
+def test_consume_swap_same_as_current_is_noop(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+    runtime = _runtime()
+    runtime.custom["active_profile_id"] = "work"
+    runtime.custom["pending_profile_id"] = "work"
+    assert consume_pending_profile_swap(runtime) is None
+    assert "pending_profile_id" not in runtime.custom
+
+
+def test_consume_swap_writes_sticky_and_updates_runtime(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+    _seed_profiles(tmp_path, ["work"])
+    runtime = _runtime()
+    runtime.custom["active_profile_id"] = "default"
+    runtime.custom["pending_profile_id"] = "work"
+
+    result = consume_pending_profile_swap(runtime)
+
+    assert result == "work"
+    assert runtime.custom["active_profile_id"] == "work"
+    assert "pending_profile_id" not in runtime.custom
+    sticky = (tmp_path / "active_profile").read_text().strip()
+    assert sticky == "work"
+
+
+def test_consume_swap_to_default_clears_sticky(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+    _seed_profiles(tmp_path, ["work"])
+    (tmp_path / "active_profile").write_text("work\n")
+    runtime = _runtime()
+    runtime.custom["active_profile_id"] = "work"
+    runtime.custom["pending_profile_id"] = "default"
+
+    result = consume_pending_profile_swap(runtime)
+
+    assert result == "default"
+    assert not (tmp_path / "active_profile").exists()
+
+
+def test_init_active_profile_id_reads_sticky(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+    _seed_profiles(tmp_path, ["work"])
+    (tmp_path / "active_profile").write_text("work\n")
+    runtime = _runtime()
+    init_active_profile_id(runtime)
+    assert runtime.custom["active_profile_id"] == "work"
+
+
+def test_init_active_profile_id_default_when_no_sticky(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+    runtime = _runtime()
+    init_active_profile_id(runtime)
+    assert runtime.custom["active_profile_id"] == "default"
+
+
+def test_init_active_profile_id_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+    _seed_profiles(tmp_path, ["work"])
+    (tmp_path / "active_profile").write_text("work\n")
+    runtime = _runtime()
+    runtime.custom["active_profile_id"] = "side"  # already set; do not overwrite
+    init_active_profile_id(runtime)
+    assert runtime.custom["active_profile_id"] == "side"

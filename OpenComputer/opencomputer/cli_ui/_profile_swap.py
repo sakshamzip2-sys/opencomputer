@@ -60,8 +60,33 @@ def cycle_profile(runtime: Any) -> str | None:
 
 
 def consume_pending_profile_swap(runtime: Any) -> str | None:
-    """Consume a pending profile swap and return the new profile id.
+    """Apply ``pending_profile_id`` if set. Called at turn entry.
 
-    Implemented in Task 2.
+    Pure: only mutates ``runtime.custom`` and writes the sticky
+    ``active_profile`` file. Memory rebinding and prompt-cache eviction
+    are the caller's responsibility (handled in ``agent/loop.py``).
+
+    Returns the new active profile id, or ``None`` if no swap occurred.
     """
-    raise NotImplementedError("Implemented in Task 2")
+    pending = runtime.custom.pop("pending_profile_id", None)
+    if not pending:
+        return None
+    current = runtime.custom.get("active_profile_id") or "default"
+    if pending == current:
+        return None
+
+    from opencomputer.profiles import write_active_profile
+    write_active_profile(None if pending == "default" else pending)
+    runtime.custom["active_profile_id"] = pending
+    return pending
+
+
+def init_active_profile_id(runtime: Any) -> None:
+    """Mirror the sticky ``active_profile`` file into runtime.custom on
+    first turn of a session. Idempotent — runs only when the key is
+    missing.
+    """
+    if "active_profile_id" in runtime.custom:
+        return
+    from opencomputer.profiles import read_active_profile
+    runtime.custom["active_profile_id"] = read_active_profile() or "default"
