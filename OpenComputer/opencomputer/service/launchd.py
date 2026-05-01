@@ -36,8 +36,7 @@ def render_launchd_plist(*, executable: str, hour: int) -> str:
     passes to ``opencomputer``. If a future caller needs different args,
     extend the template instead of threading them through the API.
     """
-    from opencomputer.profiles import real_user_home
-    log_path = str(real_user_home() / ".opencomputer" / "profile-analyze.log")
+    log_path = str(Path.home() / ".opencomputer" / "profile-analyze.log")
     return _TEMPLATE.format(
         executable=executable,
         hour=hour,
@@ -46,13 +45,12 @@ def render_launchd_plist(*, executable: str, hour: int) -> str:
 
 
 def _launch_agents_dir() -> Path:
-    """``~/Library/LaunchAgents`` — uses real_user_home for HOME-mutation immunity.
+    """``~/Library/LaunchAgents``.
 
     Test suites monkeypatch this function directly to redirect the
     install location to a tmp_path.
     """
-    from opencomputer.profiles import real_user_home
-    return real_user_home() / "Library" / "LaunchAgents"
+    return Path.home() / "Library" / "LaunchAgents"
 
 
 def _launchctl(*args: str) -> tuple[int, str, str]:

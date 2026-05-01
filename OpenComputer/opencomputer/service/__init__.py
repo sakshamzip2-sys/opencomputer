@@ -126,8 +126,7 @@ def install_profile_analyze_timer(*, executable: str) -> tuple[Path, Path]:
         raise ServiceUnsupportedError(
             f"systemd is Linux-only; got sys.platform={sys.platform!r}"
         )
-    from opencomputer.profiles import real_user_home
-    log_path = str(real_user_home() / ".opencomputer" / "profile-analyze.log")
+    log_path = str(Path.home() / ".opencomputer" / "profile-analyze.log")
     target_dir = _pa_unit_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
     timer_path = target_dir / f"{_PA_UNIT_NAME}.timer"

@@ -118,17 +118,32 @@ class TestScopeSubprocessEnv:
 
 
 class TestApplyProfileOverrideScopesEnv:
-    """Integration: ``main()`` calls ``_apply_profile_override()`` which must,
-    after setting ``OPENCOMPUTER_HOME``, replace ``os.environ`` in-place with
-    the scoped env so every downstream subprocess inherits HOME/XDG paths
-    pointing at the profile's ``home/`` subdir.
+    """Integration: ``main()`` calls ``_apply_profile_override()`` which sets
+    ``OPENCOMPUTER_HOME`` to the active profile's directory but MUST NOT
+    mutate ``HOME`` / ``XDG_CONFIG_HOME`` / ``XDG_DATA_HOME`` in the parent
+    process.
+
+    Updated 2026-05-01 — architectural root-cause fix: parent-process HOME
+    mutation polluted ``Path.home()`` for every in-process consumer (16+
+    callsites: snapshot tarball destinations, ``~/.local/bin`` wrapper
+    paths, the workspace walk-up's home guard, identity bootstrap scan
+    roots, the Jinja system-prompt user_home, ...). Subprocess HOME-
+    scoping is now done at each spawn boundary via ``scope_subprocess_env``
+    — see ``opencomputer/tools/bash.py`` and ``opencomputer/mcp/client.py``.
     """
 
-    def test_apply_profile_override_scopes_env_for_named_profile(self, tmp_path, monkeypatch):
+    def test_apply_profile_override_sets_only_opencomputer_home(self, tmp_path, monkeypatch):
+        """For a named profile, _apply_profile_override sets OPENCOMPUTER_HOME
+        only. HOME / XDG_* are NOT mutated in the parent process.
+        """
         import sys
 
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
         monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
+        original_home = "/tmp/preserved-real-home-for-test"
+        monkeypatch.setenv("HOME", original_home)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", ["opencomputer", "-p", "coder", "chat"])
 
         # Create the profile with home/ subdir.
@@ -140,11 +155,16 @@ class TestApplyProfileOverrideScopesEnv:
 
         _apply_profile_override()
 
+        # OPENCOMPUTER_HOME points at the profile's directory.
         assert os.environ["OPENCOMPUTER_HOME"] == str(tmp_path / "profiles" / "coder")
-        expected_home = tmp_path / "profiles" / "coder" / "home"
-        assert os.environ["HOME"] == str(expected_home)
-        assert os.environ["XDG_CONFIG_HOME"] == str(expected_home / ".config")
-        assert os.environ["XDG_DATA_HOME"] == str(expected_home / ".local" / "share")
+
+        # CRITICAL: parent-process HOME / XDG_* are NOT mutated. The
+        # subprocess HOME-scoping moved to each spawn boundary
+        # (BashTool, MCP launcher) — the parent keeps its real home
+        # so Path.home() returns the user's actual home everywhere.
+        assert os.environ["HOME"] == original_home
+        assert "XDG_CONFIG_HOME" not in os.environ
+        assert "XDG_DATA_HOME" not in os.environ
 
     def test_apply_profile_override_does_not_scope_env_for_default(self, tmp_path, monkeypatch):
         import sys
@@ -162,6 +182,33 @@ class TestApplyProfileOverrideScopesEnv:
         assert "OPENCOMPUTER_HOME" not in os.environ
         # HOME was not scoped.
         assert os.environ["HOME"] == original_home
+
+    def test_scope_subprocess_env_returns_profile_scoped_dict(self, tmp_path, monkeypatch):
+        """The replacement contract: scope_subprocess_env() returns a dict
+        with HOME pointing at the profile's home/ subdir. Subprocesses
+        receive this via ``env=`` at spawn time — the parent's os.environ
+        is unchanged.
+        """
+        monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+
+        from opencomputer.profiles import create_profile, scope_subprocess_env
+
+        create_profile("coder")
+
+        # Pass an explicit profile name (no sticky state needed). The
+        # parent's os.environ is the input "base"; scope_subprocess_env
+        # returns a NEW dict with HOME / XDG_* overridden — but the
+        # parent's os.environ MUST remain untouched.
+        parent_home_before = os.environ.get("HOME")
+        scoped = scope_subprocess_env(os.environ.copy(), profile="coder")
+
+        expected_home = tmp_path / "profiles" / "coder" / "home"
+        assert scoped["HOME"] == str(expected_home)
+        assert scoped["XDG_CONFIG_HOME"] == str(expected_home / ".config")
+        assert scoped["XDG_DATA_HOME"] == str(expected_home / ".local" / "share")
+
+        # Parent's environ was NOT mutated.
+        assert os.environ.get("HOME") == parent_home_before
 
 
 # ─── C2 — ~/.local/bin/<name> wrapper scripts ───────────────────────

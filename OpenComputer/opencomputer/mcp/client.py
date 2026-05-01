@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
@@ -317,10 +318,34 @@ class MCPConnection:
                         self.last_error = blocked
                         await self.disconnect(_preserve_error_state=True)
                         return False
+                # Layer the per-MCP config env on top of the parent's
+                # environment, then scope HOME / XDG_* to the active
+                # profile. This gives MCP servers per-profile credential
+                # isolation (git/ssh/npm caches) without polluting the
+                # parent process — see _apply_profile_override in cli.py
+                # for the architectural rationale.
+                try:
+                    from opencomputer.profiles import (
+                        read_active_profile,
+                        scope_subprocess_env,
+                    )
+
+                    base_env = os.environ.copy()
+                    if self.config.env:
+                        base_env.update(self.config.env)
+                    spawn_env = scope_subprocess_env(
+                        base_env, profile=read_active_profile()
+                    )
+                except Exception:
+                    # Defensive — never block an MCP launch on profile
+                    # lookup edge cases. Fall back to the per-config env
+                    # only (or None for parent inheritance), preserving
+                    # the previous behaviour.
+                    spawn_env = self.config.env or None
                 params = StdioServerParameters(
                     command=self.config.command,
                     args=list(self.config.args),
-                    env=self.config.env or None,
+                    env=spawn_env,
                 )
                 stdio_ctx = stdio_client(params)
                 streams = await self.exit_stack.enter_async_context(stdio_ctx)

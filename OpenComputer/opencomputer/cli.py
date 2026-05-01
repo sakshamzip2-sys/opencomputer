@@ -234,22 +234,20 @@ def _apply_profile_override() -> None:
     # silently suppressed whenever a parent had OPENCOMPUTER_HOME exported.
     if profile_name and profile_name != "default":
         try:
-            from opencomputer.profiles import get_profile_dir, scope_subprocess_env
+            from opencomputer.profiles import get_profile_dir
 
             os.environ["OPENCOMPUTER_HOME"] = str(get_profile_dir(profile_name))
-            # C1 — scope HOME / XDG_* to the profile's home/ subdir so
-            # subprocesses spawned downstream (BashTool, gateway, wire)
-            # get per-profile tool-config isolation for git / ssh / npm.
-            # Pass ``profile=`` explicitly so we don't need the sticky
-            # file to be set (a one-shot ``-p`` flag should scope the
-            # env without mutating sticky state). Only overwrite the three
-            # scoped keys in-place — never ``.clear()`` os.environ: that
-            # would drop pytest/CI markers, locale, pathsep, etc. and
-            # cause spurious test isolation failures.
-            scoped = scope_subprocess_env({}, profile=profile_name)
-            for key in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME"):
-                if key in scoped:
-                    os.environ[key] = scoped[key]
+            # NOTE: do NOT mutate HOME / XDG_* in the parent process —
+            # that pollutes Path.home() for every in-process consumer
+            # (the Jinja system prompt's user_home, snapshot tarball
+            # destinations, ~/.local/bin wrapper paths, the workspace
+            # walk-up's home guard, identity bootstrap scan roots …).
+            #
+            # Subprocess HOME-scoping is now done at each spawn boundary
+            # via scope_subprocess_env() — see opencomputer/tools/bash.py
+            # and opencomputer/mcp/client.py. That gives subprocesses
+            # (git/ssh/npm/MCP servers) profile-scoped credentials
+            # without polluting the parent.
         except Exception:
             # Invalid profile name (from argv or sticky file) — silently fall
             # back to default. _apply_profile_override MUST NOT crash the CLI.
