@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
@@ -53,11 +54,32 @@ class BashTool(BaseTool):
             return ToolResult(
                 tool_call_id=call.id, content="Error: empty command", is_error=True
             )
+        # Scope HOME / XDG_* to the active profile's home/ subdir so
+        # spawned subprocesses (git, ssh, npm, etc.) get per-profile
+        # tool-config isolation for credentials and caches. The parent
+        # process keeps its real HOME — see _apply_profile_override
+        # in cli.py for the architectural rationale.
+        try:
+            from opencomputer.profiles import (
+                read_active_profile,
+                scope_subprocess_env,
+            )
+
+            env = scope_subprocess_env(
+                os.environ.copy(), profile=read_active_profile()
+            )
+        except Exception:
+            # If profile scoping fails for any reason, fall back to the
+            # parent's env so the command still runs. BashTool MUST NOT
+            # be brittle to profile lookup edge cases.
+            env = None
+
         try:
             proc = await asyncio.create_subprocess_shell(
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             exit_code = proc.returncode or 0

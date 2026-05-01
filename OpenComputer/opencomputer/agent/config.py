@@ -41,17 +41,7 @@ def _home() -> Path:
         cv_value.mkdir(parents=True, exist_ok=True)
         return cv_value
 
-    home_override = os.environ.get("OPENCOMPUTER_HOME")
-    if home_override:
-        home = Path(home_override)
-    else:
-        # Defensive: profiles.get_default_root() is immune to $HOME mutation
-        # by _apply_profile_override. In normal flow OPENCOMPUTER_HOME is set
-        # when HOME is mutated, so this fallback rarely fires — but if it
-        # does (e.g., subprocess inherits mutated HOME but loses OC_HOME),
-        # the resolved path stays correct.
-        from opencomputer.profiles import get_default_root
-        home = get_default_root()
+    home = Path(os.environ.get("OPENCOMPUTER_HOME", Path.home() / ".opencomputer"))
     home.mkdir(parents=True, exist_ok=True)
     return home
 

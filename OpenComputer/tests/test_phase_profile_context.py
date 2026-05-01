@@ -94,22 +94,17 @@ def test_home_falls_back_to_env_var(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_home_falls_back_to_default(monkeypatch, tmp_path: Path) -> None:
-    """No ContextVar, no env var → ``profiles.get_default_root()``.
+    """No ContextVar, no env var → ``Path.home() / ".opencomputer"``.
 
-    Updated 2026-05-01: ``_home()`` previously fell back to
-    ``Path.home() / ".opencomputer"``, which is broken under
-    ``_apply_profile_override`` because HOME gets mutated to point at
-    the active profile's home dir. The fix routes the fallback through
-    ``profiles.get_default_root()``, which uses ``pwd`` to resolve the
-    real user home (immune to HOME mutation). To exercise the fallback
-    here without touching the CI runner's real home, we use
-    ``OPENCOMPUTER_HOME_ROOT`` which ``get_default_root()`` honors
-    before doing the ``pwd`` lookup.
+    Redirects ``Path.home()`` via a monkeypatch on ``Path.home`` rather
+    than the ``HOME`` env var so the test is platform-neutral (Windows
+    uses ``USERPROFILE``, not ``HOME``). Avoids creating
+    ``~/.opencomputer`` on the CI runner's real home directory.
     """
     from opencomputer.agent.config import _home
 
     monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
-    monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     result = _home()
-    assert result == tmp_path
+    assert result == tmp_path / ".opencomputer"
     assert result.is_dir()  # mkdir side effect fired

@@ -62,12 +62,6 @@ def test_db_persists_across_instances(tmp_path):
 
 
 def test_default_path_under_user_home(monkeypatch, tmp_path):
-    """Default path resolves under OPENCOMPUTER_HOME_ROOT.
-
-    Renamed semantics (was 'user_home'): get_default_root() is now
-    $HOME-immune by design (commits c4932d55 + 54c83e9f); tests must
-    use OPENCOMPUTER_HOME_ROOT to redirect path resolution.
-    """
-    monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path / ".opencomputer"))
+    monkeypatch.setenv("HOME", str(tmp_path))
     rl = DraftRateLimiter()
     assert str(rl.db_path).startswith(str(tmp_path))

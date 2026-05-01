@@ -240,14 +240,9 @@ class PromptBuilder:
     ) -> str:
         memory = _truncate_from_top(declarative_memory, memory_char_limit)
         profile = _truncate_from_top(user_profile, user_char_limit)
-        # user_home in the system prompt MUST be the real home, not a
-        # HOME-mutated profile-scoped path — otherwise the model gives
-        # the user wrong path advice (e.g., suggesting they look at
-        # <profile>/home/Documents/foo.pdf instead of ~/Documents/foo.pdf).
-        from opencomputer.profiles import real_user_home
         ctx = PromptContext(
             cwd=os.getcwd(),
-            user_home=str(real_user_home()),
+            user_home=str(Path.home()),
             now=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             skills=skills or [],
             memory=memory,
