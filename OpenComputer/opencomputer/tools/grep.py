@@ -76,6 +76,8 @@ class GrepTool(BaseTool):
                 cmd += ["--glob", glob]
             cmd += ["--max-count", str(max_results)]
             cmd += [pattern, path]
+            # scope_subprocess_env not needed: rg is a file search, no HOME
+            # dependency.
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,

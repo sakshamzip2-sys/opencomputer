@@ -14,6 +14,7 @@ Design rules:
 from __future__ import annotations
 
 import errno
+import os
 import shutil
 import socket
 import subprocess
@@ -162,15 +163,24 @@ def _compose(
 
 
 def _compose_env() -> dict:
-    """Build the env dict for docker compose: read IMAGE_VERSION into HONCHO_IMAGE_TAG."""
-    import os
+    """Build the env dict for docker compose: read IMAGE_VERSION into HONCHO_IMAGE_TAG.
 
+    HOME / XDG_* are scoped to the active profile (Follow-up B to PR
+    #284) so docker compose reads ``~/.docker/config.json`` from the
+    profile's home rather than the user's real home.
+    """
     env = dict(os.environ)
     try:
         tag = IMAGE_VERSION_FILE.read_text(encoding="utf-8").strip()
     except OSError:
         tag = "latest"
     env["HONCHO_IMAGE_TAG"] = tag or "latest"
+    try:
+        from opencomputer.profiles import read_active_profile, scope_subprocess_env
+
+        env = scope_subprocess_env(env, profile=read_active_profile())
+    except Exception:  # noqa: BLE001 — fail-soft on profile lookup
+        pass
     return env
 
 

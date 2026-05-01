@@ -151,6 +151,8 @@ class AppleScriptRunTool(BaseTool):
             timeout = 15
         timeout = max(1, min(60, timeout))
 
+        # scope_subprocess_env not needed: AppleScript via osascript is
+        # macOS automation; no HOME dependency.
         proc = await asyncio.create_subprocess_exec(
             "osascript", "-e", script,
             stdout=asyncio.subprocess.PIPE,

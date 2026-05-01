@@ -114,6 +114,12 @@ def scan_git_log(
     """Run ``git log`` in each repo and return commits in the last ``days``."""
     if shutil.which("git") is None:
         return []
+    try:
+        from opencomputer.profiles import read_active_profile, scope_subprocess_env
+
+        env = scope_subprocess_env(os.environ.copy(), profile=read_active_profile())
+    except Exception:  # noqa: BLE001 — fail-soft on profile lookup
+        env = None
     since = f"{days}.days.ago"
     out: list[GitCommitSummary] = []
     for repo in repo_paths:
@@ -134,6 +140,7 @@ def scan_git_log(
                 text=True,
                 errors="replace",
                 timeout=10.0,
+                env=env,
             )
         except (subprocess.TimeoutExpired, OSError):
             continue

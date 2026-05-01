@@ -151,7 +151,12 @@ class BridgeSupervisor:
         return kwargs
 
     def spawn(self) -> subprocess.Popen:
-        """Start the Node bridge. Caller must check ``proc.poll()``."""
+        """Start the Node bridge. Caller must check ``proc.poll()``.
+
+        HOME / XDG_* are scoped to the active profile (Follow-up B to
+        PR #284) so the Node runtime reads ``~/.npm`` and ``~/.config``
+        from the profile's home rather than the user's real home.
+        """
         # Reap any stale listener BEFORE spawning so the new process can
         # actually bind. We swallow errors — a failed reap doesn't
         # necessarily mean the port is held.
@@ -165,6 +170,12 @@ class BridgeSupervisor:
                 "WHATSAPP_BRIDGE_AUTH_DIR": str(self.auth_dir),
             }
         )
+        try:
+            from opencomputer.profiles import read_active_profile, scope_subprocess_env
+
+            env = scope_subprocess_env(env, profile=read_active_profile())
+        except Exception:  # noqa: BLE001 — fail-soft on profile lookup
+            pass
         argv = [self.node_bin, "index.js"]
         logger.info(
             "whatsapp-bridge: spawning %s (cwd=%s host=%s port=%s)",

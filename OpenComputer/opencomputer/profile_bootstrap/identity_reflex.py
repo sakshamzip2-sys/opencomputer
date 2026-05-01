@@ -58,12 +58,19 @@ def _read_git_config_emails() -> tuple[str, ...]:
     if shutil.which("git") is None:
         return ()
     try:
+        from opencomputer.profiles import read_active_profile, scope_subprocess_env
+
+        env = scope_subprocess_env(os.environ.copy(), profile=read_active_profile())
+    except Exception:  # noqa: BLE001 — fail-soft on profile lookup
+        env = None
+    try:
         result = subprocess.run(
             ["git", "config", "--list", "--global"],
             capture_output=True,
             text=True,
             errors="replace",
             timeout=2.0,
+            env=env,
         )
     except (subprocess.TimeoutExpired, OSError):
         return ()
@@ -91,6 +98,7 @@ def _read_macos_contacts_me_name() -> str | None:
         return None
     script = 'tell application "Contacts" to get name of my card'
     try:
+        # scope_subprocess_env not needed: macOS Contacts query, no HOME read.
         result = subprocess.run(
             ["osascript", "-e", script],
             capture_output=True,

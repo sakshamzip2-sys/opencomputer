@@ -7,6 +7,7 @@ Detection is by file-marker; explicit `runner` argument overrides.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 from plugin_sdk.core import ToolCall, ToolResult
@@ -103,11 +104,20 @@ class RunTestsTool(BaseTool):
         )
 
         try:
+            from opencomputer.profiles import read_active_profile, scope_subprocess_env
+
+            env = scope_subprocess_env(
+                os.environ.copy(), profile=read_active_profile()
+            )
+        except Exception:  # noqa: BLE001 — fail-soft on profile lookup
+            env = None
+        try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(root),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                env=env,
             )
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)

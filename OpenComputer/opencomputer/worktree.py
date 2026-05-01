@@ -31,6 +31,21 @@ logger = logging.getLogger("opencomputer.worktree")
 WORKTREES_DIR = ".opencomputer-worktrees"
 
 
+def _profile_scoped_env() -> dict[str, str] | None:
+    """Return ``os.environ`` scoped to the active profile, or ``None`` on error.
+
+    Defensive wrapper: if profile lookup raises, fall back to the parent
+    env (None → subprocess inherits caller's). Worktree ops MUST NOT be
+    brittle to profile edge cases.
+    """
+    try:
+        from opencomputer.profiles import read_active_profile, scope_subprocess_env
+
+        return scope_subprocess_env(os.environ.copy(), profile=read_active_profile())
+    except Exception:  # noqa: BLE001 — fail-soft on profile lookup
+        return None
+
+
 def is_git_repo(path: Path) -> bool:
     """True if ``path`` is inside a git repo (has a reachable ``.git``)."""
     if not shutil.which("git"):
@@ -42,6 +57,7 @@ def is_git_repo(path: Path) -> bool:
             capture_output=True,
             text=True,
             timeout=5,
+            env=_profile_scoped_env(),
         )
         return out.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
@@ -59,6 +75,7 @@ def repo_root(path: Path) -> Path | None:
             capture_output=True,
             text=True,
             timeout=5,
+            env=_profile_scoped_env(),
         )
         if out.returncode != 0:
             return None
@@ -110,6 +127,7 @@ def create_session_worktree(
             capture_output=True,
             text=True,
             timeout=30,
+            env=_profile_scoped_env(),
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         stderr = getattr(exc, "stderr", "") or ""
@@ -145,6 +163,7 @@ def remove_session_worktree(wt_path: Path, *, force: bool = True) -> bool:
             capture_output=True,
             text=True,
             timeout=30,
+            env=_profile_scoped_env(),
         )
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:

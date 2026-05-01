@@ -127,6 +127,8 @@ class DBusCallTool(BaseTool):
                 argv.append(raw)
 
         try:
+            # scope_subprocess_env not needed: dbus-send is system IPC,
+            # no HOME dependency.
             proc = await asyncio.to_thread(
                 subprocess.run,
                 argv, capture_output=True, text=True, timeout=_TIMEOUT_SECONDS,

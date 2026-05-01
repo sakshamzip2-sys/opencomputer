@@ -413,7 +413,12 @@ async def run_ptc(
         f.write(full_script)
         script_path = Path(f.name)
 
-    env = dict(os.environ)
+    try:
+        from opencomputer.profiles import read_active_profile, scope_subprocess_env
+
+        env = scope_subprocess_env(os.environ.copy(), profile=read_active_profile())
+    except Exception:  # noqa: BLE001 — fail-soft on profile lookup
+        env = dict(os.environ)
     env["OC_PTC_SOCKET"] = server.socket_path
 
     start = time.monotonic()

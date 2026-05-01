@@ -124,7 +124,13 @@ def memory_edit(
     path.touch(exist_ok=True)
     editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
     try:
-        subprocess.run([editor, str(path)], check=False)
+        from opencomputer.profiles import read_active_profile, scope_subprocess_env
+
+        env = scope_subprocess_env(os.environ.copy(), profile=read_active_profile())
+    except Exception:  # noqa: BLE001 — fail-soft: parent env if profile lookup fails
+        env = None
+    try:
+        subprocess.run([editor, str(path)], check=False, env=env)
     except FileNotFoundError:
         console.print(f"[red]Editor {editor!r} not found. Set $EDITOR.[/red]")
         raise typer.Exit(code=1) from None
@@ -471,6 +477,7 @@ def _doctor_docker_row(bootstrap) -> tuple[str, str, tuple[bool, bool]]:
     parts: list[str] = []
     for args in (["docker", "--version"], ["docker", "compose", "version"]):
         try:
+            # scope_subprocess_env not needed: version probe, no HOME read.
             r = subprocess.run(args, capture_output=True, text=True, timeout=2)
             line = (r.stdout or r.stderr or "").splitlines()[0] if r.stdout or r.stderr else ""
             if line:

@@ -2591,7 +2591,17 @@ def config_edit() -> None:
     if not editor_argv:
         editor_argv = ["vi"]
     try:
-        result = subprocess.run([*editor_argv, str(cfg_path)], check=False)
+        from opencomputer.profiles import read_active_profile, scope_subprocess_env
+
+        editor_env = scope_subprocess_env(
+            os.environ.copy(), profile=read_active_profile()
+        )
+    except Exception:  # noqa: BLE001 — fail-soft: parent env if profile lookup fails
+        editor_env = None
+    try:
+        result = subprocess.run(
+            [*editor_argv, str(cfg_path)], check=False, env=editor_env
+        )
     except FileNotFoundError as exc:
         console.print(
             f"[bold red]error:[/bold red] editor '{editor_argv[0]}' not found "
