@@ -165,11 +165,16 @@ def test_model_accepts_all_whitelisted_fields():
 def test_home_opencomputer_is_never_treated_as_overlay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """$HOME/.opencomputer/config.yaml is the MAIN config, not an overlay.
+    """The user's home ``.opencomputer/config.yaml`` is the MAIN config, not an overlay.
 
-    Without this guard, walking up from any subdir of $HOME would hit
+    Without this guard, walking up from any subdir of home would hit
     ~/.opencomputer/config.yaml and try to parse it as an overlay,
     failing ``extra=forbid`` on all the main-config fields.
+
+    ``find_workspace_overlay`` resolves the home dir via
+    :func:`opencomputer.profiles.real_user_home` (pwd-based, immune to
+    $HOME mutation by design — see profiles.py:67). So this test must
+    monkeypatch the function itself; setting $HOME has no effect.
     """
     fake_home = tmp_path / "home"
     fake_home.mkdir()
@@ -178,7 +183,7 @@ def test_home_opencomputer_is_never_treated_as_overlay(
     (fake_home / ".opencomputer" / "config.yaml").write_text(
         "model:\n  provider: anthropic\nloop:\n  max_iterations: 50\n"
     )
-    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr("opencomputer.profiles.real_user_home", lambda: fake_home)
 
     # Walking up from a subdir of fake_home must NOT pick up the main config.
     subdir = fake_home / "projects" / "p"
@@ -190,12 +195,12 @@ def test_home_opencomputer_is_never_treated_as_overlay(
 
 
 def test_project_overlay_still_wins_inside_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """The HOME guard must not block a legitimate per-project overlay."""
+    """The home guard must not block a legitimate per-project overlay."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     (fake_home / ".opencomputer").mkdir()
     (fake_home / ".opencomputer" / "config.yaml").write_text("model:\n  provider: anthropic\n")
-    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr("opencomputer.profiles.real_user_home", lambda: fake_home)
 
     project = fake_home / "proj"
     project.mkdir()

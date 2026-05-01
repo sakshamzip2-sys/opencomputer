@@ -171,8 +171,10 @@ class TestWrapperScripts:
     def test_wrapper_path_returns_local_bin_path(self, tmp_path, monkeypatch):
         from pathlib import Path
 
-        monkeypatch.setenv("HOME", str(tmp_path))
-        # Path.home() reads HOME on POSIX; these tests only run on macOS/Linux.
+        # wrapper_path uses real_user_home() (pwd-based, $HOME-mutation-immune
+        # by design — see profiles.py:67). Monkeypatching $HOME has no effect;
+        # we have to patch the function itself.
+        monkeypatch.setattr("opencomputer.profiles.real_user_home", lambda: tmp_path)
         from opencomputer.profiles import wrapper_path
 
         assert wrapper_path("coder") == Path(tmp_path) / ".local" / "bin" / "coder"
@@ -181,7 +183,7 @@ class TestWrapperScripts:
         import sys
 
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("opencomputer.profiles.real_user_home", lambda: tmp_path)
         monkeypatch.setattr(sys, "platform", "linux")
 
         from opencomputer.profiles import create_profile
@@ -203,7 +205,7 @@ class TestWrapperScripts:
         import sys
 
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("opencomputer.profiles.real_user_home", lambda: tmp_path)
         monkeypatch.setattr(sys, "platform", "linux")
 
         from opencomputer.profiles import create_profile
@@ -220,7 +222,7 @@ class TestWrapperScripts:
         import sys
 
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("opencomputer.profiles.real_user_home", lambda: tmp_path)
         monkeypatch.setattr(sys, "platform", "linux")
 
         from opencomputer.profiles import create_profile, delete_profile
@@ -243,7 +245,7 @@ class TestWrapperScripts:
         import sys
 
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("opencomputer.profiles.real_user_home", lambda: tmp_path)
         monkeypatch.setattr(sys, "platform", "linux")
 
         from opencomputer.profiles import create_profile, delete_profile
@@ -259,7 +261,7 @@ class TestWrapperScripts:
         import sys
 
         monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
-        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr("opencomputer.profiles.real_user_home", lambda: tmp_path)
         monkeypatch.setattr(sys, "platform", "linux")
 
         from opencomputer.profiles import create_profile, delete_profile
