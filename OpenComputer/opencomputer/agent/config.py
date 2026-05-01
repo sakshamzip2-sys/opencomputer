@@ -450,6 +450,27 @@ def default_config() -> Config:
     return Config()
 
 
+def load_config_for_profile(profile_home: Path) -> Config:
+    """Build a ``Config`` whose paths are rooted in ``profile_home``.
+
+    Used by the gateway's per-profile AgentLoop factory. Wraps
+    construction in ``set_profile`` so the field-factories on
+    ``SessionConfig.db_path``, ``MemoryConfig.declarative_path``,
+    etc. capture ``profile_home`` rather than the process default.
+
+    Reads ``profile_home/config.yaml`` if present; falls back to
+    defaults from environment + bundled wizard outputs (matches
+    ``default_config()`` semantics under a different home).
+
+    The function does NOT mutate process state — ``set_profile`` is
+    a context manager that resets on exit.
+    """
+    from plugin_sdk.profile_context import set_profile
+
+    with set_profile(profile_home):
+        return default_config()
+
+
 __all__ = [
     "Config",
     "ModelConfig",
@@ -465,4 +486,5 @@ __all__ = [
     "WebSearchConfig",
     "FullSystemControlConfig",
     "default_config",
+    "load_config_for_profile",
 ]

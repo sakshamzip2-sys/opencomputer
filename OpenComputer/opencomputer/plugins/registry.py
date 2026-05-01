@@ -76,6 +76,14 @@ class PluginRegistry:
     # (``Gateway._start_outgoing_drainer``) right before plugin
     # registration; ``None`` outside the gateway.
     outgoing_queue: Any = None
+    # Pass-2 F2 (Phase 2 Pre-Task 2.4): map of plugin_id → set of tool
+    # names that plugin registered. Populated during ``load_all`` from
+    # the snapshot-diff already computed for teardown
+    # (``LoadedPlugin.registrations.tool_names``). Read via
+    # :meth:`tools_provided_by` — used by the upcoming production
+    # AgentLoop factory in Phase 2 Task 2.4 to compute per-profile
+    # tool exposures from bindings.yaml.
+    _tools_by_plugin: dict[str, set[str]] = field(default_factory=dict)
 
     def api(self) -> PluginAPI:
         # Surface the per-profile SQLite session DB path so plugins can
@@ -223,11 +231,36 @@ class PluginRegistry:
                 continue
             if loaded:
                 self.loaded.append(loaded)
+                # Pass-2 F2: track tool names per plugin id so
+                # ``tools_provided_by`` can answer in O(1).
+                # ``registrations.tool_names`` was computed by the
+                # loader's snapshot-diff (the same data teardown
+                # already relies on), so this stays consistent with
+                # what the plugin actually registered.
+                if loaded.registrations.tool_names:
+                    self._tools_by_plugin.setdefault(
+                        cand.manifest.id, set()
+                    ).update(loaded.registrations.tool_names)
         return self.loaded
 
     def list_candidates(self, search_paths: list[Path]) -> list[PluginCandidate]:
         """Cheap discovery only — doesn't activate anything."""
         return discover(search_paths)
+
+    def tools_provided_by(self, plugin_id: str) -> frozenset[str]:
+        """Return the tool names registered by a given plugin.
+
+        ``plugin_id`` is the manifest's ``id`` (kebab-case dir name).
+        Unknown plugin_id returns the empty frozenset (not an error).
+
+        Pass-2 F2 (Phase 2 Pre-Task 2.4): consumed by the production
+        AgentLoop factory in Phase 2 Task 2.4 to compute per-profile
+        tool exposures from bindings.yaml. The data is sourced from
+        the same snapshot-diff that drives plugin teardown, so
+        ``tools_provided_by`` and the actual tool-registry stay
+        consistent across load + teardown cycles.
+        """
+        return frozenset(self._tools_by_plugin.get(plugin_id, ()))
 
     def teardown_plugin(self, plugin_id: str) -> bool:
         """Tear down a single loaded plugin (Task I.4).
@@ -272,6 +305,10 @@ class PluginRegistry:
         # identity-match so a manifest-id collision doesn't drop an
         # unrelated entry.
         self.loaded = [lp for lp in self.loaded if lp is not target]
+        # Pass-2 F2: keep ``_tools_by_plugin`` consistent with the
+        # tool registry — torn-down plugins must not appear in
+        # ``tools_provided_by`` results.
+        self._tools_by_plugin.pop(plugin_id, None)
         logger.info("torn down plugin '%s'", plugin_id)
         return True
 
