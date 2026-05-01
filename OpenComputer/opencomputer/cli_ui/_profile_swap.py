@@ -16,19 +16,26 @@ _NO_OTHER_PROFILES_HINT = "no other profiles — use /profile create"
 
 
 def _all_cycle_targets() -> list[str]:
-    """Sorted list of cycle targets including the implicit ``default``.
+    """Sorted list of cycle targets.
 
-    ``list_profiles()`` only returns subdirs of ``~/.opencomputer/profiles/``;
-    "default" is the implicit fallback when no active_profile file is set.
-    The cycler treats "default" as a first-class entry so the user can
-    always cycle back to it.
+    Real profiles only when the user has any. When zero real profiles
+    exist, the synthetic ``"default"`` is the only cycle target so that
+    callers see a non-empty list and the "no other profiles" hint kicks
+    in via the ``len(targets) <= 1`` check in :func:`cycle_profile`.
+
+    Why hide ``"default"`` once real profiles exist: rendering
+    ``profile: coding → default`` to a user with [coding, stock] on
+    disk is confusing — there's no ``default`` profile dir, and a single
+    accidental Ctrl+P would queue a sticky-profile deletion on the next
+    turn. The "no profile" state is still reachable explicitly via
+    ``oc profile use default`` / ``/profile use default``.
     """
     from opencomputer.profiles import list_profiles
 
     names = list_profiles()
-    if "default" not in names:
-        names = sorted([*names, "default"])
-    return names
+    if not names:
+        return ["default"]
+    return sorted(names)
 
 
 def cycle_profile(runtime: Any) -> str | None:
