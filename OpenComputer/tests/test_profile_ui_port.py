@@ -287,8 +287,8 @@ def test_apply_pending_profile_swap_orchestrator(tmp_path, monkeypatch):
     (tmp_path / "profiles" / "work" / "home" / "USER.md").write_text("user-work")
     (tmp_path / "profiles" / "work" / "home" / "SOUL.md").write_text("soul-work")
 
-    from opencomputer.agent.memory import MemoryManager
     from opencomputer.agent.loop import _apply_pending_profile_swap
+    from opencomputer.agent.memory import MemoryManager
 
     skills = tmp_path / "skills"
     skills.mkdir()
