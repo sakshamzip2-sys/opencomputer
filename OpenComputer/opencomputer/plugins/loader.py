@@ -613,12 +613,17 @@ class PluginAPI:
         # At most one external memory provider can be active at a time
         # (Phase 10f.G). None = built-in memory only.
         self.memory_provider: Any = None
-        # Per-profile SQLite session DB path. Plugins that persist per-session
-        # state (coding-harness TodoWrite, scratchpads, etc.) get this via
-        # api.session_db_path instead of importing opencomputer.agent.config —
-        # preserves the plugin→SDK boundary for third-party plugins that don't
-        # have opencomputer in their import path.
-        self.session_db_path: Path | None = session_db_path
+        # Pass-2 F8 fix: ``session_db_path`` and ``profile_home`` are
+        # now lazy ``@property`` accessors that read the active profile
+        # via ``_home()`` each time. Eager capture at PluginRegistry.api()
+        # time was the F8 bug — the boot-time default path leaked into
+        # multi-profile dispatch, so a plugin reading it under a different
+        # profile would write to the wrong DB. The optional override
+        # argument (``session_db_path=...``) is honoured when explicitly
+        # provided (e.g. tests that want to pin a path); otherwise the
+        # property resolves lazily through ``_home()`` which is
+        # ContextVar-aware after Phase 1.
+        self._session_db_path_override: Path | None = session_db_path
         # Phase 12b.6 Task D8: plugin-authored slash commands. Shared dict
         # threaded in from PluginRegistry so all plugins register into the
         # same table. Keyed by command name (no leading slash).
@@ -697,6 +702,66 @@ class PluginAPI:
         return self._request_context
 
     @property
+    def session_db_path(self) -> Path | None:
+        """Per-profile SQLite session DB path (lazy; profile-aware).
+
+        Pass-2 F8 fix. Plugins that persist per-session state
+        (coding-harness ``TodoWrite``, affect-injection scratchpad
+        reads, etc.) read this attribute to learn where to write.
+
+        The path is resolved lazily on each access through
+        :func:`opencomputer.agent.config._home`, which is ContextVar-aware
+        after Phase 1: under ``set_profile(profile_home)``, ``_home()``
+        returns the active profile's directory; outside any scope it
+        falls back to ``OPENCOMPUTER_HOME`` and finally
+        ``~/.opencomputer``. So a plugin reading
+        ``api.session_db_path`` under multi-profile dispatch sees the
+        right DB even though the ``PluginAPI`` instance was constructed
+        once at boot under the default profile.
+
+        If a caller passed an explicit ``session_db_path`` to the
+        constructor (typically tests that pin a path) the override is
+        honoured and lazy resolution is bypassed.
+
+        Plugins that hold long-lived state bound to this path
+        (e.g. an open ``SessionDB`` connection cached on a provider
+        instance) must be aware that the path can change between
+        dispatches under multi-profile routing — they should either
+        re-resolve per call or accept that they're effectively
+        single-profile in v1. See the affect-injection + coding-harness
+        TodoWrite follow-ups documented in the F8 audit.
+        """
+        if self._session_db_path_override is not None:
+            return self._session_db_path_override
+        # Function-local import: ``opencomputer.agent.config`` is fine
+        # to import from this module (we live under ``opencomputer/``);
+        # this is just symmetry with how ``_home()`` consumers do it.
+        from opencomputer.agent.config import _home
+
+        return _home() / "sessions.db"
+
+    @property
+    def profile_home(self) -> Path:
+        """Active profile's home directory (lazy; profile-aware).
+
+        Pass-2 F8 fix. Returns the directory that holds this profile's
+        ``config.yaml`` / ``profile.yaml`` / per-feature subdirs (e.g.
+        ``ambient/``, ``screen-awareness/``). Resolved lazily through
+        :func:`opencomputer.agent.config._home` so multi-profile
+        dispatch sees the right path even though the ``PluginAPI``
+        instance was constructed once at boot.
+
+        Plugins that need per-profile feature state (e.g.
+        screen-awareness loading ``profile_home/screen-awareness/state.json``)
+        should read this on each call rather than caching the value
+        from ``register()`` — the underlying value can change between
+        dispatches under multi-profile routing.
+        """
+        from opencomputer.agent.config import _home
+
+        return _home()
+
+    @property
     def outgoing_queue(self) -> Any:
         """Outgoing-message queue facade for plugins that enqueue async sends.
 
@@ -712,6 +777,15 @@ class PluginAPI:
         ``AgentLoop`` runs). Plugin code MUST handle the ``None`` case
         — typically by logging a warning and dropping the message
         rather than raising.
+
+        Pass-2 F8 follow-up: the queue object itself is single-process
+        and bound to one ``_home()`` snapshot (the default profile at
+        gateway boot). Multi-profile routing of OUTBOUND messages is
+        out of scope for this fix — the gateway's outgoing-drainer
+        runs once per process, and re-binding the queue per-profile
+        would require a queue-per-profile registry. Documented as a
+        follow-up; v1 inbound multi-profile dispatch still works
+        because inbound paths read ``session_db_path`` lazily.
         """
         return self._outgoing_queue
 

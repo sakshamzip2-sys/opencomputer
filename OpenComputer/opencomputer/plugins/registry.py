@@ -86,11 +86,16 @@ class PluginRegistry:
     _tools_by_plugin: dict[str, set[str]] = field(default_factory=dict)
 
     def api(self) -> PluginAPI:
-        # Surface the per-profile SQLite session DB path so plugins can
-        # persist session-scoped state without importing opencomputer.*.
-        from opencomputer.agent.config import default_config
-
-        cfg = default_config()
+        # Pass-2 F8 fix: do NOT capture the default-config session DB
+        # path at api() time. ``PluginAPI.session_db_path`` is now a
+        # lazy ``@property`` that reads ``_home() / "sessions.db"`` on
+        # each access — so under multi-profile dispatch, plugins that
+        # read ``api.session_db_path`` from inside ``set_profile(b)``
+        # see profile b's path, not the boot-time default.
+        #
+        # Eager capture here was the F8 bug: ``shared_api`` lives
+        # forever and was being passed to non-default-profile loops,
+        # so ``api.session_db_path`` returned the wrong path.
         return PluginAPI(
             tool_registry=tool_registry,
             hook_engine=hook_engine,
@@ -98,7 +103,6 @@ class PluginRegistry:
             channel_registry=self.channels,
             injection_engine=injection_engine,
             doctor_contributions=self.doctor_contributions,
-            session_db_path=cfg.session.db_path,
             slash_commands=self.slash_commands,
             outgoing_queue=self.outgoing_queue,
         )
