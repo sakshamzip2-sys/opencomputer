@@ -7,7 +7,7 @@ _log = logging.getLogger("opencomputer.browser_control.plugin")
 
 
 def register(api) -> None:  # noqa: ANN001
-    """Register the 5 browser tools."""
+    """Register all browser tools (5 base + 6 Hermes-parity)."""
     try:
         from extensions.browser_control.tools import ALL_TOOLS
         for tool_cls in ALL_TOOLS:

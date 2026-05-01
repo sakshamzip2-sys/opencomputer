@@ -48,9 +48,13 @@ _FORMAT_EXTENSIONS: dict[str, str] = {
     "pcm": ".pcm",
 }
 
-_VALID_VOICES = frozenset(
+_VALID_OPENAI_VOICES = frozenset(
     {"alloy", "echo", "fable", "onyx", "nova", "shimmer"}
 )
+_VALID_PROVIDERS = frozenset({"openai", "edge"})
+
+# Backward-compat alias — kept for any external imports.
+_VALID_VOICES = _VALID_OPENAI_VOICES
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,16 +63,27 @@ class VoiceConfig:
 
     Attributes:
         model: OpenAI TTS model. ``tts-1`` (faster, cheaper) or ``tts-1-hd``
-            (higher quality, 2× cost).
-        voice: One of ``alloy / echo / fable / onyx / nova / shimmer``.
+            (higher quality, 2× cost). Ignored when ``provider="edge"``.
+        voice: For ``provider="openai"``, one of
+            ``alloy / echo / fable / onyx / nova / shimmer``. For
+            ``provider="edge"``, any Microsoft neural voice ID
+            (e.g. ``en-US-AriaNeural``, ``en-GB-RyanNeural``,
+            ``hi-IN-SwaraNeural``).
         format: ``opus`` (Telegram), ``mp3`` (Discord/SMS), ``wav`` (loss-less).
-        speed: 0.25–4.0 (default 1.0). Faster = cheaper-to-deliver but harder to follow.
+            Edge TTS produces MP3 natively — request other formats only when
+            ffmpeg is on PATH (the edge provider re-muxes).
+        speed: 0.25–4.0 (default 1.0). Faster = cheaper-to-deliver but harder
+            to follow.
+        provider: ``"openai"`` (paid, requires API key) or ``"edge"`` (free,
+            no API key, Microsoft Edge neural voices). Defaults to OpenAI for
+            BC.
     """
 
     model: str = "tts-1"
     voice: str = "alloy"
     format: str = "opus"
     speed: float = 1.0
+    provider: str = "openai"
 
 
 def synthesize_speech(
@@ -98,17 +113,29 @@ def synthesize_speech(
     cfg = cfg or VoiceConfig()
     if not text or not text.strip():
         raise ValueError("text must be non-empty")
-    if len(text) > 4096:
+    if cfg.provider not in _VALID_PROVIDERS:
         raise ValueError(
-            f"text length {len(text)} exceeds OpenAI TTS limit of 4096 characters"
-        )
-    if cfg.voice not in _VALID_VOICES:
-        raise ValueError(
-            f"voice must be one of {sorted(_VALID_VOICES)}, got {cfg.voice!r}"
+            f"provider must be one of {sorted(_VALID_PROVIDERS)}, got {cfg.provider!r}"
         )
     if cfg.format not in _FORMAT_EXTENSIONS:
         raise ValueError(
             f"format must be one of {sorted(_FORMAT_EXTENSIONS)}, got {cfg.format!r}"
+        )
+
+    # Dispatch to free Edge TTS provider — no cost guard, no API key needed.
+    if cfg.provider == "edge":
+        from opencomputer.voice.tts_edge import synthesize_edge_speech
+
+        return synthesize_edge_speech(text, cfg=cfg, dest_dir=dest_dir)
+
+    # OpenAI provider validations.
+    if len(text) > 4096:
+        raise ValueError(
+            f"text length {len(text)} exceeds OpenAI TTS limit of 4096 characters"
+        )
+    if cfg.voice not in _VALID_OPENAI_VOICES:
+        raise ValueError(
+            f"voice must be one of {sorted(_VALID_OPENAI_VOICES)}, got {cfg.voice!r}"
         )
 
     # Pre-flight budget check.
