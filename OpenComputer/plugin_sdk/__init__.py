@@ -87,6 +87,7 @@ from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
 from plugin_sdk.interaction import InteractionRequest, InteractionResponse
 from plugin_sdk.memory import MemoryProvider
 from plugin_sdk.permission_mode import PermissionMode, effective_permission_mode
+from plugin_sdk.profile_context import current_profile_home, set_profile
 from plugin_sdk.provider_contract import (
     BaseProvider,
     ProviderResponse,
@@ -185,6 +186,9 @@ __all__ = [
     # permission modes (2026-04-29)
     "PermissionMode",
     "effective_permission_mode",
+    # profile context (2026-04-30) — per-task profile ContextVar
+    "current_profile_home",
+    "set_profile",
     # realtime voice (2026-04-29) — port of openclaw/src/realtime-voice/
     "BaseRealtimeVoiceBridge",
     "RealtimeVoiceCloseReason",
