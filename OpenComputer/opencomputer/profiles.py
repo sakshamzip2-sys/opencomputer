@@ -64,59 +64,17 @@ def validate_profile_name(name: str) -> None:
         )
 
 
-def real_user_home() -> Path:
-    """Return the user's real home directory, immune to $HOME mutation.
-
-    `_apply_profile_override` sets HOME to <profile>/home/ for
-    subprocess credential isolation. After that, Path.home() returns
-    the profile-scoped path, not the user's actual home. That breaks
-    every caller that expects ~/.opencomputer/ to resolve to the real
-    ~/.opencomputer/ (active_profile lookup, profile path resolution,
-    etc.) — instead they get
-    ~/.opencomputer/profiles/<name>/home/.opencomputer/.
-
-    Public API as of 2026-05-01 — used directly by callers that need
-    the user's REAL home for non-.opencomputer paths (snapshot
-    destinations, the ``oc`` binstub on $PATH, the ``user_home``
-    Jinja variable in the system prompt, the ``~/...`` path-display
-    anchor in subdirectory hints).
-
-    `pwd.getpwuid()` reads /etc/passwd and ignores the HOME env var,
-    so it returns the canonical home regardless. On Windows (no `pwd`
-    module) we fall back to Path.home() — Windows isn't subject to
-    the same HOME-mutation pattern.
-    """
-    try:
-        import pwd  # POSIX-only
-        return Path(pwd.getpwuid(os.getuid()).pw_dir)
-    except (ImportError, KeyError):
-        return Path.home()
-
-
-# Backwards-compatible private alias — kept temporarily for any external
-# consumer that imported the underscored name. New code should use
-# :func:`real_user_home`.
-_real_user_home = real_user_home
-
-
 def get_default_root() -> Path:
     """Return the always-present profile root (~/.opencomputer/).
 
     Respects OPENCOMPUTER_HOME_ROOT for testing; this is NOT the same as
     OPENCOMPUTER_HOME (which is set dynamically by _apply_profile_override
     to point at the active profile's directory).
-
-    Uses the real user home (via pwd) rather than Path.home() so
-    the result is stable even after `_apply_profile_override` mutates
-    $HOME for subprocess scoping. Without this, calling `profile use`
-    from within an already-active profile would resolve paths relative
-    to <profile>/home/ and produce nested nonsense like
-    ~/.opencomputer/profiles/coding/home/.opencomputer/profiles/coding.
     """
     override = os.environ.get("OPENCOMPUTER_HOME_ROOT")
     if override:
         return Path(override)
-    return real_user_home() / ".opencomputer"
+    return Path.home() / ".opencomputer"
 
 
 def get_profile_dir(name: str | None) -> Path:
@@ -197,12 +155,8 @@ def wrapper_path(name: str) -> Path:
     ``.zprofile`` / systemd user units. The wrapper invokes
     ``opencomputer -p <name> "$@"`` so the user can type ``coder chat``
     instead of ``opencomputer -p coder chat``.
-
-    Uses :func:`real_user_home` (HOME-mutation-immune) — the user's
-    ``$PATH`` is global, not profile-scoped, so the wrapper must land
-    in their real ``~/.local/bin/`` regardless of the active profile.
     """
-    return real_user_home() / ".local" / "bin" / name
+    return Path.home() / ".local" / "bin" / name
 
 
 def _maybe_write_wrapper(name: str) -> None:

@@ -24,9 +24,8 @@ posture than silently warning.
 
 Public API::
 
-    from opencomputer.profiles import get_default_root
     from opencomputer.security.env_loader import load_env_file
-    env = load_env_file(get_default_root() / "default" / ".env")
+    env = load_env_file(Path.home() / ".opencomputer" / "default" / ".env")
     # env: dict[str, str]
 
 CLI override::
@@ -247,15 +246,7 @@ def load_for_profile(
     candidates: list[Path] = []
 
     home_override = os.environ.get("OPENCOMPUTER_HOME")
-    if home_override:
-        oc_home = Path(home_override)
-    else:
-        # Defensive: profiles.get_default_root() is immune to $HOME mutation
-        # so a subprocess that inherits a mutated HOME but loses
-        # OPENCOMPUTER_HOME still resolves credentials from the real
-        # ~/.opencomputer/, not <profile>/home/.opencomputer/.
-        from opencomputer.profiles import get_default_root
-        oc_home = get_default_root()
+    oc_home = Path(home_override) if home_override else Path.home() / ".opencomputer"
 
     if profile_name and profile_name != "default":
         candidates.append(oc_home / "profiles" / profile_name / ".env")

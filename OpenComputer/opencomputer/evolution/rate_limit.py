@@ -34,12 +34,7 @@ class DraftRateLimiter:
         per_day: int = 1,
         lifetime: int = 10,
     ) -> None:
-        if db_path is None:
-            # Lazy import — profiles.get_default_root() is HOME-mutation-immune
-            # so the rate-limit DB location is stable across profile contexts.
-            from opencomputer.profiles import get_default_root
-            db_path = get_default_root() / "evolution" / "rate.db"
-        self.db_path = db_path
+        self.db_path = db_path or Path.home() / ".opencomputer" / "evolution" / "rate.db"
         self.per_day = per_day
         self.lifetime = lifetime
         self._init_schema()

@@ -215,18 +215,13 @@ class SubdirectoryHintTracker:
                         content[:_MAX_HINT_CHARS]
                         + f"\n\n[...truncated {filename}: {len(content):,} chars total]"
                     )
-                # Best-effort relative path for display.
-                # Uses real_user_home as the ~-anchor (rather than
-                # Path.home(), which honors HOME mutation by
-                # _apply_profile_override) so paths render consistently
-                # to the model regardless of active profile.
+                # Best-effort relative path for display
                 rel_path = str(hint_path)
                 try:
                     rel_path = str(hint_path.relative_to(self.working_dir))
                 except ValueError:
                     try:
-                        from opencomputer.profiles import real_user_home
-                        rel_path = str(hint_path.relative_to(real_user_home()))
+                        rel_path = str(hint_path.relative_to(Path.home()))
                         rel_path = "~/" + rel_path
                     except ValueError:
                         pass  # keep absolute

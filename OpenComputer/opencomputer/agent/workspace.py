@@ -66,14 +66,8 @@ def find_workspace_overlay(*, start: Path | None = None) -> WorkspaceOverlay | N
     ``$HOME`` would misparse the main config and fail on strict
     ``extra=forbid`` validation.
     """
-    # Use real_user_home (HOME-mutation-immune) so the "skip the user's
-    # main ~/.opencomputer/config.yaml" guard still works when
-    # _apply_profile_override has set HOME to a profile-scoped path.
-    # Otherwise the walk-up would happily parse the main config as a
-    # workspace overlay and fail strict validation.
-    from opencomputer.profiles import real_user_home
     cursor = (start if start is not None else Path.cwd()).resolve()
-    home = real_user_home().resolve()
+    home = Path.home().resolve()
     while True:
         candidate = cursor / OVERLAY_DIRNAME / OVERLAY_FILENAME
         if cursor != home and candidate.exists():

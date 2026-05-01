@@ -2394,12 +2394,9 @@ def _service_install(
     from opencomputer import service as _service_mod
 
     exe = _shutil.which("opencomputer") or f"{sys.executable} -m opencomputer"
-    # Systemd user service should start in the user's REAL home, not a
-    # profile-scoped HOME — the daemon outlives any individual profile.
-    from opencomputer.profiles import real_user_home
     path = _service_mod.install_systemd_unit(
         executable=exe,
-        workdir=str(real_user_home()),
+        workdir=str(Path.home()),
         profile=profile,
         extra_args=extra_args,
     )

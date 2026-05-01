@@ -109,13 +109,9 @@ class Gateway:
                 # Default profile -> ``_home()`` (the active
                 # OPENCOMPUTER_HOME or default).
                 # Per-profile -> ``~/.opencomputer/<profile_id>``.
-                # Uses get_default_root() (HOME-mutation-immune) so this
-                # resolves correctly even when _apply_profile_override
-                # has set HOME to a profile-scoped path.
                 if profile_id == "default":
                     return _resolve_home()
-                from opencomputer.profiles import get_default_root
-                return get_default_root() / profile_id
+                return Path.home() / ".opencomputer" / profile_id
 
             router = _AgentRouter(
                 loop_factory=_wrapped_factory,
@@ -143,8 +139,8 @@ class Gateway:
             load_bindings,
         )
         from opencomputer.gateway.binding_resolver import BindingResolver
-        from opencomputer.profiles import get_default_root
-        bindings_path = get_default_root() / "bindings.yaml"
+
+        bindings_path = Path.home() / ".opencomputer" / "bindings.yaml"
         try:
             bindings_cfg = load_bindings(bindings_path)
         except ValueError:
