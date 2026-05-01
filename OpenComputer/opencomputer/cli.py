@@ -2339,7 +2339,9 @@ app.add_typer(preset_app, name="preset")
 
 # Phase 14.B — profile management CLI
 from opencomputer.cli_profile import profile_app  # noqa: E402
+from opencomputer.cli_profile_analyze import profile_analyze_app  # noqa: E402
 
+profile_app.add_typer(profile_analyze_app, name="analyze")  # Plan 3 (2026-05-01)
 app.add_typer(profile_app, name="profile")
 
 # Phase 14.E — plugin install/uninstall/where CLI

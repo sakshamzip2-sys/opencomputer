@@ -1,0 +1,10 @@
+[Unit]
+Description=OpenComputer daily profile-analyze
+Requires=opencomputer-profile-analyze.service
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

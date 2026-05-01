@@ -1,0 +1,8 @@
+[Unit]
+Description=OpenComputer profile-analyze one-shot
+
+[Service]
+Type=oneshot
+ExecStart={executable} profile analyze run
+StandardOutput=append:{log_path}
+StandardError=append:{log_path}
