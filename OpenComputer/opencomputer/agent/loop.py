@@ -660,6 +660,7 @@ class AgentLoop:
                 session_id=sid,
                 platform="cli",
                 model=self.config.model.model,
+                cwd=os.getcwd(),  # Plan 3 — profile-analysis cwd-pattern signal
             )
             messages: list[Message] = []
             # Round 2B P-9: optional pre-seed for forked-context delegations.

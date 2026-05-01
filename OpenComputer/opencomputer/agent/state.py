@@ -53,7 +53,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     output_tokens INTEGER DEFAULT 0,
     vibe          TEXT,    -- A.4 (2026-04-27): per-session emotional state
                            -- (frustrated|excited|tired|curious|calm|stuck|"")
-    vibe_updated  REAL     -- A.4: when vibe was last classified (epoch seconds)
+    vibe_updated  REAL,    -- A.4: when vibe was last classified (epoch seconds)
+    cwd           TEXT     -- Plan 3 (2026-05-01): working dir at session start,
+                           -- input signal for profile_analysis_daily cwd-clusterer
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -382,6 +384,7 @@ _EXPECTED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("messages", "attachments", "TEXT"),
     ("sessions", "vibe", "TEXT"),
     ("sessions", "vibe_updated", "REAL"),
+    ("sessions", "cwd", "TEXT"),  # Plan 3 (2026-05-01) — profile-suggester input
     ("episodic_events", "dreamed_into", "INTEGER"),
 )
 
@@ -478,7 +481,12 @@ class SessionDB:
     # ─── sessions ─────────────────────────────────────────────────
 
     def create_session(
-        self, session_id: str, platform: str = "cli", model: str = "", title: str = ""
+        self,
+        session_id: str,
+        platform: str = "cli",
+        model: str = "",
+        title: str = "",
+        cwd: str | None = None,  # Plan 3 — captured for profile-suggester
     ) -> None:
         """Create or upsert a session row.
 
@@ -486,20 +494,26 @@ class SessionDB:
         pre-existing row's ``title`` survives — important when ``/rename``
         ran before the user's first message and pre-created the row via
         :meth:`set_session_title`. Other metadata (``started_at``,
-        ``platform``, ``model``) is updated to current values, which
-        matches what callers expect when they invoke this.
+        ``platform``, ``model``, ``cwd``) is updated to current values,
+        which matches what callers expect when they invoke this.
+
+        Plan 3 (2026-05-01): ``cwd`` is the working directory the user
+        was in when ``oc`` started — used by the daily profile-analysis
+        cron to detect cwd patterns. Defaults to None for backwards
+        compatibility with callers that don't pass it.
         """
         with self._txn() as conn:
             conn.execute(
                 """
-                INSERT INTO sessions (id, started_at, platform, model, title)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO sessions (id, started_at, platform, model, title, cwd)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   started_at = excluded.started_at,
                   platform   = excluded.platform,
-                  model      = excluded.model
+                  model      = excluded.model,
+                  cwd        = excluded.cwd
                 """,
-                (session_id, time.time(), platform, model, title),
+                (session_id, time.time(), platform, model, title, cwd),
             )
         # Round 2B P-4 — bind the session id onto the
         # observability ContextVar so subsequent log records emitted
