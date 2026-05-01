@@ -127,6 +127,31 @@ class Gateway:
 
         self._router = router
 
+        # Phase 3 Task 3.3: load ~/.opencomputer/bindings.yaml and
+        # construct the BindingResolver. If the file is missing, the
+        # config defaults to ``BindingsConfig()`` (default-only routing,
+        # which matches the legacy single-profile behaviour). A
+        # malformed file is logged loudly but DOES NOT crash boot — we
+        # fall back to default-only routing so the user can still chat
+        # while they fix the YAML.
+        from opencomputer.agent.bindings_config import (
+            BindingsConfig,
+            load_bindings,
+        )
+        from opencomputer.gateway.binding_resolver import BindingResolver
+
+        bindings_path = Path.home() / ".opencomputer" / "bindings.yaml"
+        try:
+            bindings_cfg = load_bindings(bindings_path)
+        except ValueError:
+            logger.exception(
+                "malformed bindings.yaml at %s — falling back to default-only "
+                "routing (fix the file to enable multi-profile routing)",
+                bindings_path,
+            )
+            bindings_cfg = BindingsConfig()
+        self._resolver = BindingResolver(bindings_cfg)
+
         # Task I.9: wire the shared PluginAPI through to Dispatch so
         # plugins see a per-request scope via ``api.request_context``.
         # ``shared_api`` is set by ``PluginRegistry.load_all``; if the
@@ -138,6 +163,7 @@ class Gateway:
             router=router,
             plugin_api=plugin_registry.shared_api,
             config={"photo_burst_window": self._config.photo_burst_window},
+            resolver=self._resolver,
         )
         # Pass-2 F7: now that Dispatch exists, register the consent
         # prompt handler on the seeded "default" loop's gate. The

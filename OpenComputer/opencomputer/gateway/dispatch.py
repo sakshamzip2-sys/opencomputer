@@ -33,6 +33,7 @@ from plugin_sdk.runtime_context import (
 
 if TYPE_CHECKING:
     from opencomputer.gateway.agent_router import AgentRouter
+    from opencomputer.gateway.binding_resolver import BindingResolver
     from opencomputer.gateway.channel_directory import ChannelDirectory
     from opencomputer.plugins.loader import PluginAPI
     from plugin_sdk.consent import CapabilityClaim
@@ -134,6 +135,7 @@ class Dispatch:
         config: dict[str, Any] | None = None,
         *,
         router: AgentRouter | None = None,
+        resolver: BindingResolver | None = None,
     ) -> None:
         # Phase 2 multi-routing: accept either ``loop=`` (legacy single
         # loop) or ``router=`` (per-profile cache). Exactly one of the
@@ -165,6 +167,11 @@ class Dispatch:
             )
             router._loops["default"] = loop  # pre-populate
         self._router = router
+        # Phase 3 Task 3.3: per-event profile resolver. ``None`` falls
+        # back to the legacy ``"default"`` routing behaviour, preserving
+        # backwards compat for tests / callers that don't load a
+        # ``bindings.yaml`` file.
+        self._resolver: BindingResolver | None = resolver
         # ``self.loop`` preserves the legacy attribute access path.
         # When the caller passed ``router=`` directly we expose
         # whatever the seeded "default" loop is (if any) so existing
@@ -398,18 +405,45 @@ class Dispatch:
         aware preamble was added. Same return contract — assistant
         text or None.
 
-        Phase 2 multi-routing: resolves ``profile_id`` (always
-        ``"default"`` until Phase 3 adds the ``BindingResolver``),
-        fetches the per-profile ``AgentLoop`` via
+        Phase 3 multi-routing: resolves ``profile_id`` per-event via
+        ``self._resolver.resolve(event)`` (or ``"default"`` if no
+        resolver is wired), fetches the per-profile ``AgentLoop`` via
         ``self._router.get_or_load(profile_id)``, and wraps the
         ``run_conversation`` call in
         ``set_profile(profile_home)`` so ``_home()`` and PluginAPI
         lazy properties resolve to the right profile inside the
         request scope.
         """
-        # Phase 2: per-event profile resolution. Default-only until
-        # Phase 3 wires the BindingResolver.
-        profile_id = "default"
+        # Phase 3 Task 3.3: per-event profile resolution via the
+        # BindingResolver. Falls back to "default" when no resolver
+        # was wired — preserves the legacy behaviour for callers /
+        # tests that construct Dispatch without a bindings file.
+        profile_id = (
+            self._resolver.resolve(event) if self._resolver is not None else "default"
+        )
+
+        # Pass-1 G9: structured per-dispatch logging. ``binding_match``
+        # is "matched" when the resolver picked a non-default profile;
+        # "default" otherwise. Logged BEFORE lock acquisition so even a
+        # contended turn surfaces the routing decision early.
+        logger.info(
+            "dispatch routing",
+            extra={
+                "platform": event.platform.value if event.platform else None,
+                "chat_id": event.chat_id,
+                "session_id": session_id,
+                "profile_id": profile_id,
+                "binding_match": (
+                    "default"
+                    if (
+                        self._resolver is None
+                        or profile_id == self._resolver._cfg.default_profile
+                    )
+                    else "matched"
+                ),
+            },
+        )
+
         loop = await self._router.get_or_load(profile_id)
         profile_home = self._router._profile_home_resolver(profile_id)
 
@@ -508,7 +542,10 @@ class Dispatch:
                 # Always log full traceback for debugging; user only
                 # sees the one-liner from _format_user_facing_error so
                 # SDK internals / prompt fragments don't leak to chat.
-                logger.exception("dispatch error for %s: %s", event.platform, e)
+                logger.exception(
+                    "dispatch error for platform=%s profile=%s: %s",
+                    event.platform, profile_id, e,
+                )
                 outcome = ProcessingOutcome.FAILURE
                 return _format_user_facing_error(e)
             finally:
