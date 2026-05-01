@@ -88,6 +88,7 @@ from plugin_sdk.interaction import InteractionRequest, InteractionResponse
 from plugin_sdk.memory import MemoryProvider
 from plugin_sdk.permission_mode import PermissionMode, effective_permission_mode
 from plugin_sdk.profile_context import current_profile_home, set_profile
+from plugin_sdk.profile_subprocess import scope_subprocess_env
 from plugin_sdk.provider_contract import (
     BaseProvider,
     ProviderResponse,
@@ -189,6 +190,10 @@ __all__ = [
     # profile context (2026-04-30) — per-task profile ContextVar
     "current_profile_home",
     "set_profile",
+    # profile-scoped subprocess env (Follow-up A to PR #284) — public
+    # plugin SDK helper for spawning subprocesses scoped to the active
+    # profile (HOME / XDG_*). Stateless: takes profile_home directly.
+    "scope_subprocess_env",
     # realtime voice (2026-04-29) — port of openclaw/src/realtime-voice/
     "BaseRealtimeVoiceBridge",
     "RealtimeVoiceCloseReason",

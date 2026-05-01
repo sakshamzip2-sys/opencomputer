@@ -1162,6 +1162,32 @@ Will be set by `Dispatch._do_dispatch` (Phase 3) during a per-message
 agent loop. Plugin authors can also use it in tests to exercise
 profile-aware code paths in isolation.
 
+### `scope_subprocess_env(env, *, profile_home) -> dict[str, str]`
+
+```python
+import os
+from plugin_sdk import current_profile_home, scope_subprocess_env
+
+profile_home = current_profile_home.get()
+env = scope_subprocess_env(os.environ.copy(), profile_home=profile_home)
+proc = await asyncio.create_subprocess_shell(cmd, env=env, ...)
+```
+
+Stateless helper that returns a NEW env dict with `HOME` /
+`XDG_CONFIG_HOME` / `XDG_DATA_HOME` redirected to the given profile's
+home directory. The caller's env is never mutated. `profile_home=None`
+returns a shallow copy unchanged (subprocess inherits the parent's real
+HOME).
+
+Convention: the resolved `HOME` is `<profile_home>/home` unless
+`profile_home` already ends with `/home` (in which case it's used
+directly). XDG paths are derived from the resolved HOME.
+
+Use this from plugin tools (git/ssh/npm-style spawners) to ensure
+subprocesses see the active profile's tool config rather than the
+user's real home. Added in PR #284 follow-up to fix the architectural
+HOME-mutation regression.
+
 ---
 
 ## See also
