@@ -26,8 +26,17 @@ _ID_RE: Final = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 
 
 def presets_dir() -> Path:
-    """Global presets directory. NOT profile-scoped — presets are shared."""
-    return Path.home() / ".opencomputer" / "presets"
+    """Global presets directory. NOT profile-scoped — presets are shared.
+
+    Uses :func:`opencomputer.profiles.get_default_root` (lazy import) so
+    the resolved path is immune to ``$HOME`` mutation by
+    ``_apply_profile_override``. Without this, calling ``presets_dir()``
+    from inside an active profile would resolve to
+    ``<profile>/home/.opencomputer/presets`` instead of the real shared
+    location.
+    """
+    from opencomputer.profiles import get_default_root
+    return get_default_root() / "presets"
 
 
 def preset_path(name: str) -> Path:

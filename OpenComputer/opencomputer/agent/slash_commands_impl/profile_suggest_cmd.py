@@ -94,7 +94,11 @@ class ProfileSuggestCommand(SlashCommand):
             from opencomputer.agent.config import _home
             home = _home()
         except Exception:  # noqa: BLE001
-            home = Path.home() / ".opencomputer"
+            # _home() failed (e.g., ContextVar not initialized in test).
+            # Fall back to the real ~/.opencomputer/, immune to $HOME
+            # mutation by _apply_profile_override.
+            from opencomputer.profiles import get_default_root
+            home = get_default_root()
 
         current = _resolve_current_profile()
         available = _resolve_available_profiles()

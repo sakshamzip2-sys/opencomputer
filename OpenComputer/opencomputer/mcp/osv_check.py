@@ -60,8 +60,16 @@ _REQUEST_TIMEOUT_S: float = 5.0
 
 
 def _cache_path() -> Path:
-    """Resolve the cache file path lazily so test isolation works."""
-    return Path.home() / ".opencomputer" / "cache" / "osv.json"
+    """Resolve the cache file path lazily so test isolation works.
+
+    Uses :func:`opencomputer.profiles.get_default_root` so the cache
+    location is stable even when ``_apply_profile_override`` has mutated
+    ``$HOME`` for subprocess scoping. Without this, every profile would
+    have its own (empty) OSV cache nested under ``<profile>/home/`` —
+    defeating the point of the cache.
+    """
+    from opencomputer.profiles import get_default_root
+    return get_default_root() / "cache" / "osv.json"
 
 
 def _load_cache() -> dict[str, Any]:
