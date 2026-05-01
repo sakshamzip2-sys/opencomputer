@@ -710,12 +710,13 @@ async def read_user_input(
             return
         event.app.invalidate()
 
-    @kb.add(Keys.ControlP)  # Ctrl+P — cycle personas (2026-05-01)
+    @kb.add(Keys.ControlP)  # Ctrl+P — cycle profiles (Plan 1 of 3, 2026-05-01)
     def _ctrl_p(event):  # noqa: ANN001
         if runtime is None:
             return
+        from opencomputer.cli_ui._profile_swap import cycle_profile
         try:
-            _cycle_persona(runtime)
+            cycle_profile(runtime)
         except Exception:  # noqa: BLE001
             return
         event.app.invalidate()

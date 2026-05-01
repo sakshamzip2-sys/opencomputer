@@ -258,3 +258,17 @@ def test_badge_visible_when_profile_initialised_to_default():
     segments = _render_mode_badge(rt)
     text = "".join(t for _, t in segments)
     assert "profile: default" in text
+
+
+def test_ctrl_p_handler_calls_cycle_profile(tmp_path, monkeypatch):
+    """Smoke test: importing input_loop binds Ctrl+P to a function whose
+    body references cycle_profile, not _cycle_persona."""
+    import inspect
+
+    from opencomputer.cli_ui import input_loop
+
+    src = inspect.getsource(input_loop.read_user_input)
+    # The Ctrl+P handler must reference our new helper.
+    assert "cycle_profile(runtime" in src
+    # And NOT the old persona helper.
+    assert "_cycle_persona(runtime" not in src
