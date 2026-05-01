@@ -161,8 +161,11 @@ def preset_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect ``presets_dir()`` at the global filesystem level."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
-    # Pydantic/yaml side don't cache; ensure Path.home() reads env.
+    # 2026-05-01: get_default_root() now uses pwd.getpwuid() and ignores
+    # $HOME mutation (commits c4932d55 + 54c83e9f). Use
+    # OPENCOMPUTER_HOME_ROOT — the documented test override that
+    # get_default_root() honors before the pwd lookup.
+    monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(fake_home / ".opencomputer"))
     return fake_home / ".opencomputer" / "presets"
 
 

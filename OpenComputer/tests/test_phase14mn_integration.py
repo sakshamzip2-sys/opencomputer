@@ -290,7 +290,10 @@ def iso_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolate HOME + CWD so doctor reads a clean environment."""
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    # 2026-05-01: must use OPENCOMPUTER_HOME_ROOT (not HOME) since
+    # get_default_root() is now $HOME-immune by design (commits
+    # c4932d55 + 54c83e9f).
+    monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(home / ".opencomputer"))
     monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
     # CWD must be somewhere with no ancestor .opencomputer/ — tmp_path
     # is fresh so its parents won't have one.
