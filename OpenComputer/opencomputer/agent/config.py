@@ -18,18 +18,25 @@ def _home() -> Path:
 
     Resolution order (first match wins):
       1. ``plugin_sdk.profile_context.current_profile_home`` ContextVar
-         — set by ``Dispatch._do_dispatch`` during a per-message
-         agent loop. Per-asyncio-Task scope, so two simultaneous
-         dispatches each see their own profile.
+         — will be set by ``Dispatch._do_dispatch`` (Phase 3) during a
+         per-message agent loop. Per-asyncio-Task scope, so two
+         simultaneous dispatches each see their own profile.
       2. ``OPENCOMPUTER_HOME`` environment variable — process-global
          override; the legacy single-profile path.
       3. ``~/.opencomputer`` — final fallback.
 
     The directory is ensured to exist before return.
     """
+    # Function-level import: avoids a circular-import risk if
+    # ``plugin_sdk/__init__.py`` ever re-exports something from
+    # ``opencomputer.agent.config`` (the test
+    # ``test_plugin_sdk_does_not_import_opencomputer`` guards the
+    # other direction; this guards ours).
     from plugin_sdk.profile_context import current_profile_home
 
     cv_value = current_profile_home.get()
+    # TODO(phase-3): consider per-Task caching once Dispatch._do_dispatch
+    # is wired; mkdir(exist_ok=True) is cheap but not free on the hot path.
     if cv_value is not None:
         cv_value.mkdir(parents=True, exist_ok=True)
         return cv_value

@@ -93,9 +93,18 @@ def test_home_falls_back_to_env_var(monkeypatch, tmp_path: Path) -> None:
     assert _home() == target
 
 
-def test_home_falls_back_to_default(monkeypatch) -> None:
-    """No ContextVar, no env var → ``~/.opencomputer``."""
+def test_home_falls_back_to_default(monkeypatch, tmp_path: Path) -> None:
+    """No ContextVar, no env var → ``Path.home() / ".opencomputer"``.
+
+    Redirects ``Path.home()`` via a monkeypatch on ``Path.home`` rather
+    than the ``HOME`` env var so the test is platform-neutral (Windows
+    uses ``USERPROFILE``, not ``HOME``). Avoids creating
+    ``~/.opencomputer`` on the CI runner's real home directory.
+    """
     from opencomputer.agent.config import _home
 
     monkeypatch.delenv("OPENCOMPUTER_HOME", raising=False)
-    assert _home() == Path.home() / ".opencomputer"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    result = _home()
+    assert result == tmp_path / ".opencomputer"
+    assert result.is_dir()  # mkdir side effect fired
