@@ -15,7 +15,10 @@ import asyncio
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from opencomputer.agent.loop import AgentLoop  # for type annotations only
 
 logger = logging.getLogger("opencomputer.gateway.agent_router")
 
@@ -37,15 +40,15 @@ class AgentRouter:
     def __init__(
         self,
         *,
-        loop_factory: Callable[[str, Path], Any],
+        loop_factory: Callable[[str, Path], AgentLoop],
         profile_home_resolver: Callable[[str], Path],
     ) -> None:
         self._loop_factory = loop_factory
         self._profile_home_resolver = profile_home_resolver
-        self._loops: dict[str, Any] = {}
+        self._loops: dict[str, AgentLoop] = {}
         self._build_locks: dict[str, asyncio.Lock] = {}
 
-    async def get_or_load(self, profile_id: str) -> Any:
+    async def get_or_load(self, profile_id: str) -> AgentLoop:
         """Return the cached AgentLoop for ``profile_id``, building one
         on first call. Per-profile-id locking ensures two concurrent
         callers see the same instance.

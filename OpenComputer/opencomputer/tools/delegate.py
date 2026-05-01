@@ -79,7 +79,7 @@ class DelegateTool(BaseTool):
         return type(self)._templates_class_level
 
     @classmethod
-    def set_factory(cls, factory, *, instance: "DelegateTool | None" = None) -> None:
+    def set_factory(cls, factory, *, instance: DelegateTool | None = None) -> None:
         """Inject a callable that returns a fresh AgentLoop.
 
         With an explicit ``instance`` arg, sets only that instance's
@@ -101,7 +101,7 @@ class DelegateTool(BaseTool):
         cls._current_runtime = runtime
 
     @classmethod
-    def set_templates(cls, templates: dict[str, AgentTemplate], *, instance: "DelegateTool | None" = None) -> None:
+    def set_templates(cls, templates: dict[str, AgentTemplate], *, instance: DelegateTool | None = None) -> None:
         """Register the discovered agent templates.
 
         With an explicit ``instance`` arg, sets only that instance's

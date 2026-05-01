@@ -59,12 +59,12 @@ def build_agent_loop_for_profile(
     * ``allowed_tools`` allowlist matching the profile's
       ``plugins.enabled`` list (or ``None`` when the profile is in
       wildcard mode)
-    * a ``tools`` attribute holding per-instance tool objects whose
-      factories close over ``(profile_id, profile_home)`` — currently
-      one fresh ``DelegateTool`` per loop. ``run_conversation`` itself
-      still dispatches through the global tool registry; the per-loop
-      list exists so per-instance state (delegate factory closure)
-      stays attached to the loop that owns it.
+    * a ``tools`` attribute (test-only inspection surface) holding
+      per-instance tool objects whose factories close over
+      ``(profile_id, profile_home)`` — currently one fresh
+      ``DelegateTool`` per loop. ``run_conversation`` itself still
+      dispatches through the global tool registry; production dispatch
+      goes through ``loop._consent_gate``, NOT through this list.
 
     Caller responsibility (Pass-2 F7): if the loop's ``_consent_gate``
     is non-None, the caller must register the channel-side prompt
@@ -133,6 +133,12 @@ def build_agent_loop_for_profile(
         #    if someone mutates the outer ``profile_home`` reference).
         delegate = DelegateTool()
 
+        # TODO(perf): each delegate invocation rebuilds a full
+        # AgentLoop + Config + provider + plugin filter. AgentRouter
+        # already caches per-profile loops, so this delegate factory
+        # could route through `agent_router.get_or_load(profile_id)`
+        # instead of recursing into build_agent_loop_for_profile.
+        # Acceptable for v1; revisit if profiling shows hot delegate paths.
         def _delegate_factory(
             _pid: str = profile_id, _ph: Path = profile_home,
         ) -> AgentLoop:
@@ -140,13 +146,18 @@ def build_agent_loop_for_profile(
 
         DelegateTool.set_factory(_delegate_factory, instance=delegate)
 
-        # 6. Expose per-loop tools list. ``AgentLoop`` itself reaches
-        #    into the global tool registry for dispatch (see
-        #    ``opencomputer.agent.loop._dispatch_tool_calls``); this
-        #    list is for callers that need to inspect THIS loop's
-        #    per-instance tool state — primarily the gateway's
-        #    Task 2.5 consent-handler wiring + tests verifying that
-        #    each loop's delegate closes over its own profile.
+        # 6. Per-loop tools list. ``AgentLoop`` itself reaches into the
+        #    global tool registry for dispatch (see
+        #    ``opencomputer.agent.loop._dispatch_tool_calls``); the
+        #    production dispatch path goes through ``loop._consent_gate``,
+        #    NOT through this list.
+        #
+        #    NOTE (test-only inspection surface): nothing in production
+        #    code reads ``loop.tools``. This attribute exists exclusively
+        #    so tests can retrieve the per-instance ``DelegateTool`` and
+        #    verify its factory closure (audit G3). Do not gate production
+        #    behavior on it — walk ``_consent_gate`` or the tool registry
+        #    for that purpose.
         loop.tools = [delegate]  # type: ignore[attr-defined]
 
     logger.info(

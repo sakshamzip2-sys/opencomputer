@@ -184,6 +184,9 @@ class WireServer:
         elif req.method == METHOD_CHAT:
             await self._handle_chat(ws, req)
         elif req.method == METHOD_SESSION_LIST:
+            # Note: get_or_load("default") is O(1) after first load (cached
+            # dict hit). Per-call wire binding (RPC carries profile_id)
+            # deferred to v1.1.
             # v1: always default profile; v1.1 will accept profile_id in params.
             limit = int(req.params.get("limit", 20))
             _loop = await self._router.get_or_load("default")

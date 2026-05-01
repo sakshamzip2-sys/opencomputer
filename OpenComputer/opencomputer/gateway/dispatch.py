@@ -21,7 +21,6 @@ import hashlib
 import logging
 import time
 import uuid
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from opencomputer.agent.loop import AgentLoop
