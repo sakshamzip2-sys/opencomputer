@@ -26,25 +26,33 @@ logger = logging.getLogger("plugin_sdk.file_lock")
 
 @contextmanager
 def exclusive_lock(path: Path) -> Iterator[IO[str]]:
-    """Open *path* for exclusive read+write with platform-specific lock.
+    """Acquire an exclusive lock for serialising writes to *path*.
 
-    Yields a text-mode file handle positioned at the start of the file
-    (the caller is responsible for ``seek`` / ``truncate`` semantics
-    around the actual write). On exit the handle is closed and the
-    lock is released by the OS.
-
-    Use the tmp-file + ``Path.replace`` pattern for the actual write
-    so an interrupted write (SIGKILL between write and replace) leaves
-    the file intact:
+    The lock is held on a sidecar file at ``<path>.lock`` — NOT on
+    *path* itself. This matters because callers typically use the
+    tmp+``Path.replace`` idiom to rewrite *path* atomically:
 
     .. code-block:: python
-
-        from plugin_sdk.file_lock import exclusive_lock
 
         with exclusive_lock(target_path):
             tmp = target_path.with_suffix(target_path.suffix + ".tmp")
             tmp.write_text(json.dumps(data))
             tmp.replace(target_path)
+
+    ``tmp.replace(target_path)`` rotates the inode at *path*. ``flock``
+    is inode-bound, so a thread that opens *path* AFTER the replace
+    locks a different inode than the still-locked previous one — and
+    can therefore run concurrently with the in-progress writer. That
+    race silently drops entries when a third writer reads disk
+    *between* the second writer's ``read_text`` and ``tmp.replace``.
+
+    Locking a sidecar ``.lock`` file whose inode is never replaced
+    fixes this: every caller locks the same inode, so flock truly
+    serialises them.
+
+    Yields a text-mode handle to the *lock file* (rarely used by
+    callers — typical usage is ``with exclusive_lock(path):`` with no
+    ``as`` clause).
     """
     # Ensure the directory exists so ``open(..., "a+")`` can create the
     # file on first use. Best-effort: a missing parent on Windows
@@ -54,10 +62,15 @@ def exclusive_lock(path: Path) -> Iterator[IO[str]]:
     except OSError:
         pass
 
+    # Sidecar lock file path: ``foo.json`` -> ``foo.json.lock``. Using
+    # ``with_name`` (append) rather than ``with_suffix`` (replace) so
+    # the lock filename can't collide with the tmp file (``.json.tmp``).
+    lock_path = path.with_name(path.name + ".lock")
+
     # The handle MUST outlive the ``with`` block so the lock survives
     # the caller's writes; a ``with open(...)`` would close it before
     # ``yield``. The try/finally below guarantees cleanup.
-    fh: IO[str] = open(path, "a+", encoding="utf-8")  # noqa: SIM115
+    fh: IO[str] = open(lock_path, "a+", encoding="utf-8")  # noqa: SIM115
     try:
         if sys.platform != "win32":
             try:
