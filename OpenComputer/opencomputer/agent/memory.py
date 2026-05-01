@@ -290,6 +290,19 @@ class MemoryManager:
             bundled_skills_paths = [bundled] if bundled.exists() else []
         self.bundled_skills_paths = bundled_skills_paths
 
+    def rebind_to_profile(self, profile_home: Path) -> None:
+        """Re-resolve declarative_path / user_path / soul_path to point at
+        a new profile's home directory. Used by the Ctrl+P profile-swap
+        flow to make subsequent read_* calls hit the new profile's
+        SOUL.md / MEMORY.md / USER.md without recreating the manager.
+
+        ``skills_path`` and bundled-skills paths are NOT rebound — skill
+        roots are global, not per-profile, in the current model.
+        """
+        self.declarative_path = profile_home / "MEMORY.md"
+        self.user_path = profile_home / "USER.md"
+        self.soul_path = profile_home / "SOUL.md"
+
     # ─── declarative (MEMORY.md) ───────────────────────────────────
 
     def read_declarative(self) -> str:

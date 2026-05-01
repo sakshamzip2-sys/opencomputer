@@ -152,3 +152,39 @@ def test_init_active_profile_id_idempotent(tmp_path, monkeypatch):
     runtime.custom["active_profile_id"] = "side"  # already set; do not overwrite
     init_active_profile_id(runtime)
     assert runtime.custom["active_profile_id"] == "side"
+
+
+def test_memory_manager_rebind_to_profile(tmp_path):
+    """rebind_to_profile re-resolves the 3 path attributes to a new
+    profile home so subsequent read_* calls hit the new files."""
+    from opencomputer.agent.memory import MemoryManager
+
+    profile_a = tmp_path / "a"
+    profile_b = tmp_path / "b"
+    (profile_a).mkdir()
+    (profile_b).mkdir()
+    (profile_a / "MEMORY.md").write_text("memory-A")
+    (profile_a / "USER.md").write_text("user-A")
+    (profile_a / "SOUL.md").write_text("soul-A")
+    (profile_b / "MEMORY.md").write_text("memory-B")
+    (profile_b / "USER.md").write_text("user-B")
+    (profile_b / "SOUL.md").write_text("soul-B")
+
+    skills = tmp_path / "skills"
+    skills.mkdir()
+
+    mm = MemoryManager(
+        declarative_path=profile_a / "MEMORY.md",
+        skills_path=skills,
+        user_path=profile_a / "USER.md",
+        soul_path=profile_a / "SOUL.md",
+    )
+    assert mm.read_declarative() == "memory-A"
+    assert mm.read_user() == "user-A"
+    assert mm.read_soul() == "soul-A"
+
+    mm.rebind_to_profile(profile_b)
+
+    assert mm.read_declarative() == "memory-B"
+    assert mm.read_user() == "user-B"
+    assert mm.read_soul() == "soul-B"
