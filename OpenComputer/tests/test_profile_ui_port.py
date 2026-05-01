@@ -274,9 +274,6 @@ def test_ctrl_p_handler_calls_cycle_profile(tmp_path, monkeypatch):
     assert "_cycle_persona(runtime" not in src
 
 
-import asyncio  # noqa: E402
-
-
 def test_apply_pending_profile_swap_orchestrator(tmp_path, monkeypatch):
     """Orchestrator: init + consume + rebind memory + evict snapshot."""
     monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))

@@ -340,7 +340,13 @@ def _apply_pending_profile_swap(
         try:
             memory.rebind_to_profile(new_home)
         except Exception:  # noqa: BLE001 — don't roll back the user-visible swap
-            pass
+            _log.warning(
+                "profile swap to %r succeeded but memory rebind failed; "
+                "MEMORY/SOUL/USER will continue reading the previous profile "
+                "until next session restart",
+                new_id,
+                exc_info=True,
+            )
 
     # Evict the cached prompt snapshot for this session so the next turn
     # rebuilds against the new memory pointers.
