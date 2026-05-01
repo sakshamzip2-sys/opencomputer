@@ -60,9 +60,9 @@ def _set_factory(depth_cap: int = 2):
 
 def setup_function():
     """Reset DelegateTool class-level state before each test."""
-    DelegateTool._factory = None
+    DelegateTool._factory_class_level = None
     DelegateTool._current_runtime = RuntimeContext()
-    DelegateTool._templates = {}
+    DelegateTool._templates_class_level = {}
 
 
 # ─── 1. default behaviour ──────────────────────────────────────────────
