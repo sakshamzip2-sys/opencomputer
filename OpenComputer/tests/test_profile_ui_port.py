@@ -188,3 +188,54 @@ def test_memory_manager_rebind_to_profile(tmp_path):
     assert mm.read_declarative() == "memory-B"
     assert mm.read_user() == "user-B"
     assert mm.read_soul() == "soul-B"
+
+
+# ---------------------------------------------------------------------------
+# Badge rendering tests
+# ---------------------------------------------------------------------------
+
+from opencomputer.cli_ui.input_loop import (  # noqa: E402
+    _badge_has_meaningful_content,
+    _render_mode_badge,
+)
+from plugin_sdk import RuntimeContext  # noqa: E402
+
+
+def _runtime_for_badge(**custom):
+    return RuntimeContext(custom=dict(custom))
+
+
+def test_badge_shows_profile_when_set():
+    rt = _runtime_for_badge(active_profile_id="work")
+    segments = _render_mode_badge(rt)
+    text = "".join(t for _, t in segments)
+    assert "profile: work" in text
+
+
+def test_badge_shows_pending_arrow():
+    rt = _runtime_for_badge(active_profile_id="work", pending_profile_id="side")
+    segments = _render_mode_badge(rt)
+    text = "".join(t for _, t in segments)
+    assert "profile: work → side" in text
+
+
+def test_badge_pending_same_as_current_no_arrow():
+    rt = _runtime_for_badge(active_profile_id="work", pending_profile_id="work")
+    segments = _render_mode_badge(rt)
+    text = "".join(t for _, t in segments)
+    assert "→" not in text
+
+
+def test_badge_default_profile_renders_default():
+    rt = _runtime_for_badge(active_profile_id="default")
+    segments = _render_mode_badge(rt)
+    text = "".join(t for _, t in segments)
+    assert "profile: default" in text
+
+
+def test_badge_hint_says_profile_not_persona():
+    rt = _runtime_for_badge(active_profile_id="work")
+    segments = _render_mode_badge(rt)
+    text = "".join(t for _, t in segments)
+    assert "Ctrl+P profile" in text
+    assert "Ctrl+P persona" not in text
