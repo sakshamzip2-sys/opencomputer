@@ -11,10 +11,10 @@ profile during a request and must not import internals.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Iterator
 
 #: Per-asyncio-Task active profile home. ``None`` means "no profile
 #: scope active — fall back to env var / default".
