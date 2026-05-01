@@ -417,27 +417,17 @@ _MODE_STYLE = {
 }
 
 
-#: 2026-04-29 PR-6: persona ids where the mode badge is *not* useful — these
-#: are non-coding registers (chat/companion). When the auto-classifier lands
-#: on one of these AND the user hasn't explicitly switched modes, hide the
-#: badge to keep the chat surface uncluttered.
-_CHAT_PERSONAS = frozenset({"companion"})
-
-
 def _badge_has_meaningful_content(runtime: object) -> bool:
     """Decide whether the badge has anything worth showing.
 
-    Show when the user has actively set state:
+    Always show when:
     - non-default permission mode (CLI flag or ``/mode`` / ``/auto`` / ``/plan``)
-    - non-default ``/personality`` (anything other than ``helpful``)
-    - persona auto-classified into a non-chat register (e.g. ``coder``)
+    - non-default ``/personality``
+    - active profile other than ``default``
+    - a pending profile switch is queued
 
-    Hide when in a chat register (companion persona) with nothing overridden
-    — the badge would just be visual noise during casual conversation.
-
-    Fresh sessions (persona not yet classified) keep the badge visible so
-    new users discover Shift+Tab cycling — only hidden once the classifier
-    confirms a chat register.
+    Hide when on the implicit ``default`` profile with nothing else
+    overridden — the badge would just be visual noise.
     """
     if runtime is None:
         return False
@@ -450,9 +440,14 @@ def _badge_has_meaningful_content(runtime: object) -> bool:
     if personality and personality != "helpful":
         return True
 
-    # Persona unset (early session) OR non-chat → show; chat persona → hide.
-    persona = runtime.custom.get("active_persona_id", "")
-    return persona not in _CHAT_PERSONAS
+    if runtime.custom.get("pending_profile_id"):
+        return True
+
+    # If active_profile_id has been explicitly initialised (even to "default"),
+    # the profile layer is active — show the badge so the user can see the
+    # current profile and discover Ctrl+P. Only hide when the key is absent
+    # (early-session before init_active_profile_id has run).
+    return "active_profile_id" in runtime.custom
 
 
 def _render_mode_badge(runtime: object) -> list[tuple[str, str]]:
@@ -460,16 +455,14 @@ def _render_mode_badge(runtime: object) -> list[tuple[str, str]]:
 
     Surfaces three independent axes when set:
     - **mode** (always shown): default / accept-edits / auto / plan
-    - **persona** (when set): the V2.C plural-persona auto-classifier id,
-      mirrored from ``loop._active_persona_id`` into
-      ``runtime.custom["active_persona_id"]``
+    - **profile** (always shown when initialized): ``active_profile_id``,
+      with ``→ pending`` suffix when a Ctrl+P swap is queued for next turn
     - **personality** (when set to anything other than helpful/empty): the
       ``/personality`` slash-command value
 
     Includes ASCII glyphs for ``NO_COLOR`` / screen-reader accessibility.
-    Returns ``[]`` when there is no runtime, no actionable state, and the
-    persona indicates a chat register — keeps casual conversations
-    uncluttered. See :func:`_badge_has_meaningful_content` for the rule.
+    Returns ``[]`` before profile init OR when no axis is overridden — see
+    :func:`_badge_has_meaningful_content` for the rule.
     """
     if not _badge_has_meaningful_content(runtime):
         return []
@@ -480,20 +473,18 @@ def _render_mode_badge(runtime: object) -> list[tuple[str, str]]:
     style = _MODE_STYLE.get(mode, "")
     segments: list[tuple[str, str]] = [(style, f" {glyph} mode: {mode} ")]
 
-    persona = runtime.custom.get("active_persona_id", "")
-    if persona:
-        segments.append(("fg:ansicyan", f"· persona: {persona} "))
+    profile = runtime.custom.get("active_profile_id", "") or "default"
+    pending = runtime.custom.get("pending_profile_id")
+    if pending and pending != profile:
+        segments.append(("fg:ansicyan", f"· profile: {profile} → {pending} "))
+    else:
+        segments.append(("fg:ansicyan", f"· profile: {profile} "))
 
     personality = runtime.custom.get("personality", "")
     if personality and personality != "helpful":
         segments.append(("fg:ansimagenta", f"· personality: {personality} "))
 
-    # Hint copy depends on which axes are visible. Always show
-    # Shift+Tab (mode cycle); add Ctrl+P when persona is shown.
-    if persona:
-        segments.append(("", "  Shift+Tab mode · Ctrl+P persona"))
-    else:
-        segments.append(("", "  Shift+Tab to cycle"))
+    segments.append(("", "  Shift+Tab mode · Ctrl+P profile"))
     return segments
 
 
@@ -719,12 +710,13 @@ async def read_user_input(
             return
         event.app.invalidate()
 
-    @kb.add(Keys.ControlP)  # Ctrl+P — cycle personas (2026-05-01)
+    @kb.add(Keys.ControlP)  # Ctrl+P — cycle profiles (Plan 1 of 3, 2026-05-01)
     def _ctrl_p(event):  # noqa: ANN001
         if runtime is None:
             return
+        from opencomputer.cli_ui._profile_swap import cycle_profile
         try:
-            _cycle_persona(runtime)
+            cycle_profile(runtime)
         except Exception:  # noqa: BLE001
             return
         event.app.invalidate()

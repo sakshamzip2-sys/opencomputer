@@ -1120,6 +1120,50 @@ Plan beats auto on conflict (matches existing CLI precedence).
 
 ---
 
+## Profile context — per-task profile scoping
+
+*Module: `plugin_sdk.profile_context` (re-exported from `plugin_sdk`).*
+
+Phase 1 of the profile-as-agent multi-routing work. Lets the gateway set
+an asyncio-Task-local profile home so two simultaneous dispatches each
+see their own profile directory without any locking.
+
+### `current_profile_home`
+
+```python
+from plugin_sdk import current_profile_home
+
+home: Path | None = current_profile_home.get()
+```
+
+A `contextvars.ContextVar[Path | None]`. Default is `None` (no profile
+scope active — `config._home()` falls back to `OPENCOMPUTER_HOME` env
+var then `~/.opencomputer`).
+
+Each `asyncio.Task` inherits the contextvar value at task-creation time;
+mutations within a task are local to that task, so two concurrent
+dispatches each see their own profile without any locking.
+
+### `set_profile(home: Path) -> Iterator[None]`
+
+```python
+from plugin_sdk import set_profile
+
+with set_profile(Path("~/.opencomputer/work")):
+    ...  # current_profile_home.get() == Path("~/.opencomputer/work")
+# restored to prior value on exit (including on exception)
+```
+
+Context manager. Binds `current_profile_home` to `home` for the duration
+of the `with` block. Restores the prior value on exit (including on
+exception). Safe to nest.
+
+Will be set by `Dispatch._do_dispatch` (Phase 3) during a per-message
+agent loop. Plugin authors can also use it in tests to exercise
+profile-aware code paths in isolation.
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute

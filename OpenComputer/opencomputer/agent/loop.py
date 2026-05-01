@@ -301,6 +301,61 @@ def _maybe_run_auto_prune(db: SessionDB, cfg: Config) -> None:
         print(f"[oc] auto-pruned {deleted} stale session(s)", file=_sys.stderr)
 
 
+def _apply_pending_profile_swap(
+    runtime: object,
+    *,
+    memory: object,
+    prompt_snapshots: dict | None,
+    sid: str | None,
+) -> str | None:
+    """Apply a queued profile swap at turn entry.
+
+    Sequence:
+      1. Consume ``pending_profile_id`` (delegates to _profile_swap helper).
+      2. If a swap occurred, rebind ``memory`` to the new profile_home.
+      3. Evict the prompt-cache snapshot for ``sid`` so the next turn
+         rebuilds the system prompt against the new SOUL.md/MEMORY.md.
+
+    Returns the new active profile id, or None if no swap occurred.
+
+    Plan 1 of 3 — see docs/superpowers/specs/2026-05-01-profile-ui-port-design.md.
+    """
+    from opencomputer.cli_ui._profile_swap import (
+        consume_pending_profile_swap,
+        init_active_profile_id,
+    )
+    from opencomputer.profiles import get_profile_dir
+
+    init_active_profile_id(runtime)
+    new_id = consume_pending_profile_swap(runtime)
+    if new_id is None:
+        return None
+
+    # Rebind memory pointers to the new profile's home directory.
+    # get_profile_dir() returns ~/.opencomputer/profiles/<name>/ for named
+    # profiles and ~/.opencomputer/ for "default".
+    new_home_root = get_profile_dir(None if new_id == "default" else new_id)
+    new_home = new_home_root / "home"
+    if memory is not None and hasattr(memory, "rebind_to_profile"):
+        try:
+            memory.rebind_to_profile(new_home)
+        except Exception:  # noqa: BLE001 — don't roll back the user-visible swap
+            _log.warning(
+                "profile swap to %r succeeded but memory rebind failed; "
+                "MEMORY/SOUL/USER will continue reading the previous profile "
+                "until next session restart",
+                new_id,
+                exc_info=True,
+            )
+
+    # Evict the cached prompt snapshot for this session so the next turn
+    # rebuilds against the new memory pointers.
+    if prompt_snapshots is not None and sid is not None:
+        prompt_snapshots.pop(sid, None)
+
+    return new_id
+
+
 class AgentLoop:
     """The single while-loop that runs the agent."""
 
@@ -726,6 +781,20 @@ class AgentLoop:
                     input_tokens=0,
                     output_tokens=0,
                 )
+
+        # Plan 1 of 3 — UI port: apply queued profile swap (Ctrl+P or
+        # /persona slash command). Idempotent on no-pending.
+        # Placed AFTER slash-command early-return guards so the swap only
+        # runs on turns that actually proceed to a model call.
+        # ``_session_id`` is not stored on self; the local ``sid`` is used
+        # directly. ``_current_session_id`` mirrors it but is set at line
+        # 577 — using ``sid`` here is canonical and avoids any race.
+        _apply_pending_profile_swap(
+            self._runtime,
+            memory=getattr(self, "memory", None),
+            prompt_snapshots=getattr(self, "_prompt_snapshots", None),
+            sid=sid,
+        )
 
         # System prompt is frozen per session: built once on the first turn,
         # then reused verbatim so the prefix cache hits on turn 2+. Memory

@@ -14,7 +14,33 @@ from pathlib import Path
 
 
 def _home() -> Path:
-    """Return ~/.opencomputer/, creating it if needed."""
+    """Return the active profile's home dir, creating it if needed.
+
+    Resolution order (first match wins):
+      1. ``plugin_sdk.profile_context.current_profile_home`` ContextVar
+         — will be set by ``Dispatch._do_dispatch`` (Phase 3) during a
+         per-message agent loop. Per-asyncio-Task scope, so two
+         simultaneous dispatches each see their own profile.
+      2. ``OPENCOMPUTER_HOME`` environment variable — process-global
+         override; the legacy single-profile path.
+      3. ``~/.opencomputer`` — final fallback.
+
+    The directory is ensured to exist before return.
+    """
+    # Function-level import: avoids a circular-import risk if
+    # ``plugin_sdk/__init__.py`` ever re-exports something from
+    # ``opencomputer.agent.config`` (the test
+    # ``test_plugin_sdk_does_not_import_opencomputer`` guards the
+    # other direction; this guards ours).
+    from plugin_sdk.profile_context import current_profile_home
+
+    cv_value = current_profile_home.get()
+    # TODO(phase-3): consider per-Task caching once Dispatch._do_dispatch
+    # is wired; mkdir(exist_ok=True) is cheap but not free on the hot path.
+    if cv_value is not None:
+        cv_value.mkdir(parents=True, exist_ok=True)
+        return cv_value
+
     home = Path(os.environ.get("OPENCOMPUTER_HOME", Path.home() / ".opencomputer"))
     home.mkdir(parents=True, exist_ok=True)
     return home
@@ -424,6 +450,27 @@ def default_config() -> Config:
     return Config()
 
 
+def load_config_for_profile(profile_home: Path) -> Config:
+    """Build a ``Config`` whose paths are rooted in ``profile_home``.
+
+    Used by the gateway's per-profile AgentLoop factory. Wraps
+    construction in ``set_profile`` so the field-factories on
+    ``SessionConfig.db_path``, ``MemoryConfig.declarative_path``,
+    etc. capture ``profile_home`` rather than the process default.
+
+    Reads ``profile_home/config.yaml`` if present; falls back to
+    defaults from environment + bundled wizard outputs (matches
+    ``default_config()`` semantics under a different home).
+
+    The function does NOT mutate process state — ``set_profile`` is
+    a context manager that resets on exit.
+    """
+    from plugin_sdk.profile_context import set_profile
+
+    with set_profile(profile_home):
+        return default_config()
+
+
 __all__ = [
     "Config",
     "ModelConfig",
@@ -439,4 +486,5 @@ __all__ = [
     "WebSearchConfig",
     "FullSystemControlConfig",
     "default_config",
+    "load_config_for_profile",
 ]
