@@ -562,6 +562,7 @@ def use_cmd(
         raise typer.Exit(code=1) from None
 
     _console.print(f"[green]active profile set to[/green] [bold]{name}[/bold] ({target})")
+    _console.print("[dim]takes effect on next `opencomputer` session — current session is unchanged.[/dim]")
 
 
 # ─── delete ──────────────────────────────────────────────────────────────
