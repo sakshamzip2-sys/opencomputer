@@ -272,3 +272,63 @@ def test_ctrl_p_handler_calls_cycle_profile(tmp_path, monkeypatch):
     assert "cycle_profile(runtime" in src
     # And NOT the old persona helper.
     assert "_cycle_persona(runtime" not in src
+
+
+import asyncio  # noqa: E402
+
+
+def test_apply_pending_profile_swap_orchestrator(tmp_path, monkeypatch):
+    """Orchestrator: init + consume + rebind memory + evict snapshot."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
+    _seed_profiles(tmp_path, ["work"])
+    # Seed home/ subdirs that profiles.get_profile_dir(name)/"home" expects
+    (tmp_path / "profiles" / "work" / "home").mkdir()
+    (tmp_path / "profiles" / "work" / "home" / "MEMORY.md").write_text("memory-work")
+    (tmp_path / "profiles" / "work" / "home" / "USER.md").write_text("user-work")
+    (tmp_path / "profiles" / "work" / "home" / "SOUL.md").write_text("soul-work")
+
+    from opencomputer.agent.memory import MemoryManager
+    from opencomputer.agent.loop import _apply_pending_profile_swap
+
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    home_a = tmp_path / "home_a"
+    home_a.mkdir()
+    (home_a / "MEMORY.md").write_text("memory-default")
+    (home_a / "USER.md").write_text("user-default")
+    (home_a / "SOUL.md").write_text("soul-default")
+    mm = MemoryManager(
+        declarative_path=home_a / "MEMORY.md",
+        skills_path=skills,
+        user_path=home_a / "USER.md",
+        soul_path=home_a / "SOUL.md",
+    )
+
+    runtime = _runtime()
+    runtime.custom["active_profile_id"] = "default"
+    runtime.custom["pending_profile_id"] = "work"
+    snapshots = {"sid-1": "cached-prompt", "sid-2": "other-cached"}
+
+    swapped = _apply_pending_profile_swap(
+        runtime, memory=mm, prompt_snapshots=snapshots, sid="sid-1"
+    )
+
+    assert swapped == "work"
+    assert runtime.custom["active_profile_id"] == "work"
+    assert "pending_profile_id" not in runtime.custom
+    assert mm.read_declarative() == "memory-work"
+    assert mm.read_soul() == "soul-work"
+    assert "sid-1" not in snapshots  # evicted
+    assert "sid-2" in snapshots       # other sessions untouched
+
+
+def test_apply_pending_profile_swap_no_pending_is_noop(tmp_path):
+    """No pending → orchestrator is a clean no-op."""
+    from opencomputer.agent.loop import _apply_pending_profile_swap
+    runtime = _runtime()
+    snapshots = {"sid-1": "cached"}
+    result = _apply_pending_profile_swap(
+        runtime, memory=None, prompt_snapshots=snapshots, sid="sid-1"
+    )
+    assert result is None
+    assert "sid-1" in snapshots  # not evicted on no-op
