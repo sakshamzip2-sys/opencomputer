@@ -81,6 +81,17 @@ class ProfileSuggestCommand(SlashCommand):
     async def execute(
         self, args: str, runtime: RuntimeContext,
     ) -> SlashCommandResult:
+        # Plan 3 (2026-05-01) — accept/dismiss subcommands.
+        parts = args.strip().split(maxsplit=1)
+        sub = parts[0] if parts else ""
+        target = parts[1] if len(parts) > 1 else ""
+
+        if sub == "accept":
+            return await self._accept(target, runtime)
+        if sub == "dismiss":
+            return await self._dismiss(target, runtime)
+
+        # Existing analysis path (unchanged).
         db = runtime.custom.get("session_db")
         if db is None:
             return SlashCommandResult(
@@ -94,9 +105,6 @@ class ProfileSuggestCommand(SlashCommand):
             from opencomputer.agent.config import _home
             home = _home()
         except Exception:  # noqa: BLE001
-            # _home() failed (e.g., ContextVar not initialized in test).
-            # Fall back to the real ~/.opencomputer/, immune to $HOME
-            # mutation by _apply_profile_override.
             from opencomputer.profiles import get_default_root
             home = get_default_root()
 
@@ -116,6 +124,102 @@ class ProfileSuggestCommand(SlashCommand):
                 handled=True,
             )
         return SlashCommandResult(output=render_report(report), handled=True)
+
+    async def _accept(
+        self, name: str, runtime: RuntimeContext,
+    ) -> SlashCommandResult:
+        """Create the suggested profile + write seeded SOUL.md."""
+        if not name:
+            return SlashCommandResult(
+                output="Usage: /profile-suggest accept <name>",
+                handled=True,
+            )
+
+        from opencomputer.profile_analysis_daily import (
+            DailySuggestion,
+            load_cache,
+            save_cache,
+        )
+        from opencomputer.profile_seeder import render_seeded_soul
+        from opencomputer.profiles import (
+            ProfileExistsError,
+            create_profile,
+            get_profile_dir,
+        )
+
+        cache = load_cache()
+        if not cache:
+            return SlashCommandResult(
+                output=(
+                    "No suggestion cache found. Run "
+                    "`oc profile analyze run` first."
+                ),
+                handled=True,
+            )
+
+        suggestion_data = next(
+            (s for s in cache.get("suggestions", []) if s.get("name") == name),
+            None,
+        )
+        if not suggestion_data:
+            return SlashCommandResult(
+                output=(
+                    f"No pending suggestion for '{name}'. Run "
+                    "`/profile-suggest` to see current suggestions."
+                ),
+                handled=True,
+            )
+
+        suggestion = DailySuggestion(**suggestion_data)
+        user_name = runtime.custom.get("user_name", "the user")
+
+        try:
+            create_profile(name)
+        except ProfileExistsError:
+            return SlashCommandResult(
+                output=f"Profile '{name}' already exists.",
+                handled=True,
+            )
+
+        profile_dir = get_profile_dir(name)
+        soul_path = profile_dir / "SOUL.md"
+        soul_path.parent.mkdir(parents=True, exist_ok=True)
+        soul_path.write_text(
+            render_seeded_soul(suggestion, user_name=user_name)
+        )
+
+        # Remove the accepted suggestion from the cache.
+        remaining = [
+            s for s in cache.get("suggestions", []) if s.get("name") != name
+        ]
+        save_cache(
+            suggestions=[DailySuggestion(**s) for s in remaining],
+            dismissed=cache.get("dismissed", []),
+        )
+
+        return SlashCommandResult(
+            output=(
+                f"✅ Profile '{name}' created with seeded SOUL.md.\n"
+                f"   Switch to it: Ctrl+P  (or restart with `oc -p {name}`)"
+            ),
+            handled=True,
+        )
+
+    async def _dismiss(
+        self, name: str, runtime: RuntimeContext,
+    ) -> SlashCommandResult:
+        """Mark a suggestion as dismissed for 7 days."""
+        if not name:
+            return SlashCommandResult(
+                output="Usage: /profile-suggest dismiss <name>",
+                handled=True,
+            )
+        from opencomputer.profile_analysis_daily import record_dismissal
+        record_dismissal(name)
+        return SlashCommandResult(
+            output=f"Suggestion '{name}' dismissed for 7 days.",
+            handled=True,
+        )
 
 
 __all__ = ["ProfileSuggestCommand"]

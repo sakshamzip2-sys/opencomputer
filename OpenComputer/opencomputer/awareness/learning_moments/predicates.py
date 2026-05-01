@@ -363,15 +363,40 @@ def suggest_skill_save_after_long_session(ctx: Context) -> bool:
 
 
 def suggest_profile_suggest_command(ctx: Context) -> bool:
-    """User flipped persona ≥3 times this session AND is on default profile.
+    """Fire when EITHER:
 
-    The threshold of 3 distinct persona flips within a single session
-    is the strongest in-loop signal that the user is doing multi-context
-    work and might benefit from a specialized profile. Restricted to
-    ``default`` because users on a named profile have already engaged
-    with the profile system — no need to re-teach.
+    A. User flipped persona ≥3 times this session (existing trigger), OR
+    B. The daily-analysis cache has a fresh non-dismissed suggestion
+       (Plan 3, 2026-05-01 — proactive surface).
+
+    Both gates require the user to be on the default profile — users on
+    a named profile have already engaged with the profile system, no
+    need to re-teach.
+
+    Trigger A is the strongest in-loop signal: the user is doing
+    multi-context work right now and might benefit from a specialized
+    profile. Trigger B catches longer-horizon patterns the user might
+    not have noticed in-session (e.g., "you've coded 18 of 30 sessions
+    but don't have a 'work' profile yet").
     """
-    return (
-        ctx.persona_flips_in_session >= 3
-        and ctx.current_profile_name == "default"
-    )
+    if ctx.current_profile_name != "default":
+        return False
+
+    # Trigger A: in-session persona-flip thrash (existing).
+    if ctx.persona_flips_in_session >= 3:
+        return True
+
+    # Trigger B: daily cache has a fresh non-dismissed suggestion.
+    try:
+        from opencomputer.profile_analysis_daily import is_dismissed, load_cache
+    except ImportError:
+        return False
+
+    cache = load_cache()
+    if not cache:
+        return False
+    for s in cache.get("suggestions", []):
+        name = s.get("name")
+        if name and not is_dismissed(name):
+            return True
+    return False
