@@ -1,13 +1,13 @@
 {
   "id": "discord",
   "name": "Discord Channel",
-  "version": "0.1.0",
-  "description": "Discord channel — chat with your agent via a Discord bot in DMs or servers",
+  "version": "0.2.0",
+  "description": "Discord channel + server introspection. Chat via a Discord bot in DMs or servers; query / manage server state via the discord_server tool.",
   "author": "OpenComputer Contributors",
   "license": "MIT",
   "kind": "channel",
   "entry": "plugin",
-  "tool_names": [],
+  "tool_names": ["discord_server"],
   "setup": {
     "channels": [
       {

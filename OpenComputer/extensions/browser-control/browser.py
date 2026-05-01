@@ -192,3 +192,191 @@ async def scrape_url(url: str, css_selector: str | None = None, *, headless: boo
         accessibility_tree="",
         text_content=text_content[:5000],
     )
+
+
+# ─── Hermes-parity tools batch 1 (2026-05-01) ───────────────────────
+
+
+async def scroll_page(
+    url: str,
+    *,
+    direction: str = "down",
+    amount_px: int = 500,
+    headless: bool = True,
+) -> PageSnapshot:
+    """Navigate, scroll the page, return post-scroll snapshot.
+
+    direction: 'up' | 'down' | 'top' | 'bottom'. amount_px ignored for top/bottom.
+    """
+    async with _browser_session(headless=headless) as (_browser, context):
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            if direction == "top":
+                await page.evaluate("window.scrollTo(0, 0)")
+            elif direction == "bottom":
+                await page.evaluate(
+                    "window.scrollTo(0, document.body.scrollHeight)",
+                )
+            elif direction == "up":
+                await page.evaluate(f"window.scrollBy(0, -{amount_px})")
+            else:  # default: down
+                await page.evaluate(f"window.scrollBy(0, {amount_px})")
+            await page.wait_for_load_state("domcontentloaded")
+        except Exception as exc:  # noqa: BLE001
+            return PageSnapshot(
+                url=url, title="", accessibility_tree="", text_content="",
+                error=f"scroll failed: {exc}",
+            )
+        return await _snapshot_page(page)
+
+
+async def go_back(url: str, *, headless: bool = True) -> PageSnapshot:
+    """Navigate to URL, then click browser-back, return post-back snapshot.
+
+    Useful when an automated flow needs to undo a click. Note: starts
+    fresh — no shared history. Most utility comes from chaining a click,
+    then a back, in the same automated run; for that pattern we'd need
+    a stateful session API which OC's design intentionally avoids.
+    """
+    async with _browser_session(headless=headless) as (_browser, context):
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            response = await page.go_back(wait_until="domcontentloaded")
+            if response is None:
+                return PageSnapshot(
+                    url=url, title="", accessibility_tree="", text_content="",
+                    error="no back history available in this session",
+                )
+        except Exception as exc:  # noqa: BLE001
+            return PageSnapshot(
+                url=url, title="", accessibility_tree="", text_content="",
+                error=f"go_back failed: {exc}",
+            )
+        return await _snapshot_page(page)
+
+
+async def press_key(
+    url: str,
+    key: str,
+    *,
+    selector: str | None = None,
+    headless: bool = True,
+) -> PageSnapshot:
+    """Navigate, press a single key (optionally on a focused element).
+
+    key: any Playwright keyname (e.g. "Enter", "Escape", "Tab", "ArrowDown").
+    selector: optional — focus this selector before pressing.
+    """
+    async with _browser_session(headless=headless) as (_browser, context):
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            if selector:
+                await page.focus(selector, timeout=5000)
+            await page.keyboard.press(key)
+            await page.wait_for_load_state("domcontentloaded")
+        except Exception as exc:  # noqa: BLE001
+            return PageSnapshot(
+                url=url, title="", accessibility_tree="", text_content="",
+                error=f"press_key failed: {exc}",
+            )
+        return await _snapshot_page(page)
+
+
+async def get_images(
+    url: str, *, max_images: int = 20, headless: bool = True,
+) -> dict[str, Any]:
+    """Navigate; return list of (src, alt, width, height) for every img tag.
+
+    Capped at ``max_images`` to avoid massive responses.
+    """
+    async with _browser_session(headless=headless) as (_browser, context):
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            images = await page.evaluate(
+                """() => Array.from(document.images).slice(0, 1000).map(im => ({
+                    src: im.src || im.currentSrc || "",
+                    alt: im.alt || "",
+                    width: im.naturalWidth || im.width || 0,
+                    height: im.naturalHeight || im.height || 0,
+                }))""",
+            )
+            title = await page.title()
+        except Exception as exc:  # noqa: BLE001
+            return {"url": url, "error": f"get_images failed: {exc}", "images": []}
+    return {
+        "url": url,
+        "title": title,
+        "image_count": len(images),
+        "images": images[:max_images],
+    }
+
+
+async def vision_screenshot(url: str, *, headless: bool = True) -> dict[str, Any]:
+    """Navigate; return a base64 PNG screenshot suitable for vision models.
+
+    Useful when a vision model needs to see the rendered page rather than
+    text content. Caller wraps the b64 in an image content block.
+    """
+    import base64
+
+    async with _browser_session(headless=headless) as (_browser, context):
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            png = await page.screenshot(type="png", full_page=False)
+            title = await page.title()
+        except Exception as exc:  # noqa: BLE001
+            return {"url": url, "error": f"screenshot failed: {exc}"}
+    return {
+        "url": url,
+        "title": title,
+        "image_base64": base64.b64encode(png).decode("ascii"),
+        "image_format": "png",
+        "image_size_bytes": len(png),
+    }
+
+
+async def get_console_messages(
+    url: str, *, max_messages: int = 50, headless: bool = True,
+) -> dict[str, Any]:
+    """Navigate; capture console.log/warn/error messages emitted during load.
+
+    Useful for debugging pages whose JS errors aren't visible in the
+    rendered DOM.
+    """
+    messages: list[dict[str, Any]] = []
+    async with _browser_session(headless=headless) as (_browser, context):
+        page = await context.new_page()
+        page.on(
+            "console",
+            lambda msg: messages.append({
+                "type": msg.type,
+                "text": msg.text,
+                "location": msg.location.get("url", "") if msg.location else "",
+            }),
+        )
+        page.on(
+            "pageerror",
+            lambda err: messages.append({
+                "type": "pageerror",
+                "text": str(err),
+                "location": "",
+            }),
+        )
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            # Give async errors ~500ms to surface.
+            await page.wait_for_timeout(500)
+            title = await page.title()
+        except Exception as exc:  # noqa: BLE001
+            return {"url": url, "error": f"console capture failed: {exc}"}
+    return {
+        "url": url,
+        "title": title,
+        "message_count": len(messages),
+        "messages": messages[:max_messages],
+    }

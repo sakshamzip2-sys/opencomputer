@@ -42,11 +42,28 @@ def _csv(env_name: str) -> list[str]:
 
 
 def register(api) -> None:  # PluginAPI duck-typed
+    # Action tools — Hermes parity (2026-05-01). Registered unconditionally
+    # so the model always sees the schema; ``execute()`` returns a
+    # structured error when ``HOMEASSISTANT_TOKEN`` is unset.
+    try:
+        try:
+            from action_tools import ALL_TOOLS
+        except ImportError:  # pragma: no cover
+            from extensions.homeassistant.action_tools import ALL_TOOLS
+        for tool_cls in ALL_TOOLS:
+            try:
+                api.register_tool(tool_cls())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("HA action_tool registration failed (%s): %s", tool_cls.__name__, exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("HA action_tools import failed: %s", exc)
+
+    # Channel adapter — requires URL+TOKEN to actually connect.
     url = os.environ.get("HOMEASSISTANT_URL", "").strip()
     token = os.environ.get("HOMEASSISTANT_TOKEN", "").strip()
     if not url or not token:
         logger.info(
-            "homeassistant plugin: not registering "
+            "homeassistant plugin: action tools registered, channel skipped "
             "(HOMEASSISTANT_URL or HOMEASSISTANT_TOKEN unset)"
         )
         return
