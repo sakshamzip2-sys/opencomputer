@@ -129,22 +129,29 @@ def scope_subprocess_env(
 
     Safe to call at any point after :func:`_apply_profile_override` has
     set the sticky active profile (or the test equivalent).
+
+    This is a thin wrapper around
+    :func:`plugin_sdk.profile_subprocess.scope_subprocess_env` that adds
+    profile-name resolution against the on-disk active-profile marker.
+    Plugins should prefer the stateless SDK helper directly (with
+    ``current_profile_home`` from ``plugin_sdk``).
     """
-    env = os.environ.copy() if env is None else dict(env)
+    from plugin_sdk.profile_subprocess import (
+        scope_subprocess_env as _sdk_scope_subprocess_env,
+    )
+
+    env = os.environ.copy() if env is None else env
 
     target = profile if profile is not None else read_active_profile()
     if target is None or target == "default":
-        return env
+        return _sdk_scope_subprocess_env(env, profile_home=None)
 
     try:
         home = profile_home_dir(target)
     except ProfileNameError:
-        return env
+        return _sdk_scope_subprocess_env(env, profile_home=None)
 
-    env["HOME"] = str(home)
-    env["XDG_CONFIG_HOME"] = str(home / ".config")
-    env["XDG_DATA_HOME"] = str(home / ".local" / "share")
-    return env
+    return _sdk_scope_subprocess_env(env, profile_home=home)
 
 
 def wrapper_path(name: str) -> Path:

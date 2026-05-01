@@ -96,6 +96,10 @@ def _build_env(ctx: HookContext) -> dict[str, str]:
     goodwill: existing Claude Code hook scripts reference it for
     portability, so aliasing it to the profile home lets users drop those
     scripts into OpenComputer unchanged.
+
+    Hook scripts run on behalf of the user (git/ssh/etc. style commands
+    are common), so HOME / XDG_* are scoped to the active profile via
+    ``scope_subprocess_env`` (Follow-up B to PR #284).
     """
     env = dict(os.environ)
     tool_name = ctx.tool_call.name if ctx.tool_call is not None else ""
@@ -110,6 +114,12 @@ def _build_env(ctx: HookContext) -> dict[str, str]:
             "CLAUDE_PLUGIN_ROOT": profile_home,
         }
     )
+    try:
+        from opencomputer.profiles import read_active_profile, scope_subprocess_env
+
+        env = scope_subprocess_env(env, profile=read_active_profile())
+    except Exception:  # noqa: BLE001 — fail-soft: hook MUST NOT block on profile lookup
+        pass
     return env
 
 

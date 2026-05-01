@@ -89,6 +89,8 @@ class PowerShellRunTool(BaseTool):
             )
 
         try:
+            # scope_subprocess_env not needed: -NoProfile flag explicitly
+            # bypasses the user's PowerShell profile.
             proc = await asyncio.to_thread(
                 subprocess.run,
                 [exe, "-NoProfile", "-NonInteractive", "-Command", script],

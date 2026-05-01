@@ -105,7 +105,13 @@ def edit_cmd(
         _console.print(f"[red]error:[/red] preset {name!r} does not exist")
         raise typer.Exit(code=1)
     editor = os.environ.get("EDITOR", "vi")
-    subprocess.run([editor, str(path)], check=False)
+    try:
+        from opencomputer.profiles import read_active_profile, scope_subprocess_env
+
+        env = scope_subprocess_env(os.environ.copy(), profile=read_active_profile())
+    except Exception:  # noqa: BLE001 — fail-soft: parent env if profile lookup fails
+        env = None
+    subprocess.run([editor, str(path)], check=False, env=env)
 
 
 @preset_app.command("delete")

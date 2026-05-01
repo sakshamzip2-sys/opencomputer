@@ -64,6 +64,9 @@ class DockerStrategy(SandboxStrategy):
         if shutil.which("docker") is None:
             return False
         try:
+            # scope_subprocess_env not needed: sandbox owns its own env
+            # isolation via filtered_env() in run(); this is a daemon
+            # availability probe.
             result = subprocess.run(
                 ["docker", "info"],
                 capture_output=True,

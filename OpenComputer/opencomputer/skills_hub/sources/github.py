@@ -10,6 +10,7 @@ support authenticated clones; ``GITHUB_TOKEN`` integration is a follow-up.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -39,12 +40,21 @@ class GitHubSource(SkillSource):
         self._clone_dir.parent.mkdir(parents=True, exist_ok=True)
         url = f"https://github.com/{self._repo}.git"
         try:
+            from opencomputer.profiles import read_active_profile, scope_subprocess_env
+
+            env = scope_subprocess_env(
+                os.environ.copy(), profile=read_active_profile()
+            )
+        except Exception:  # noqa: BLE001 — fail-soft on profile lookup
+            env = None
+        try:
             subprocess.run(
                 ["git", "clone", "--depth=1", url, str(self._clone_dir)],
                 check=True,
                 capture_output=True,
                 text=True,
                 timeout=60,
+                env=env,
             )
         except subprocess.CalledProcessError as e:
             _log.warning("git clone failed for %s: %s", self._repo, e.stderr)

@@ -560,7 +560,18 @@ def _run_capture(
     Errors are logged at ``DEBUG`` (most are expected: missing binary,
     no git config, FDA-gated osascript). The caller should treat empty
     output as "source not available."
+
+    HOME / XDG_* are scoped to the active profile (Follow-up B to PR
+    #284) so ``git config --global``, ``gh repo list``, ``brew list``,
+    etc. read the profile's tool config rather than the user's real
+    home.
     """
+    try:
+        from opencomputer.profiles import read_active_profile, scope_subprocess_env
+
+        env = scope_subprocess_env(os.environ.copy(), profile=read_active_profile())
+    except Exception:  # noqa: BLE001 — fail-soft on profile lookup
+        env = None
     try:
         proc = subprocess.run(  # noqa: S603 — argv list, never shell
             cmd,
@@ -568,6 +579,7 @@ def _run_capture(
             text=True,
             timeout=timeout,
             check=False,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         _log.debug("_run_capture %s failed: %s", cmd[0], exc)

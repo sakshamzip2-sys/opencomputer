@@ -169,12 +169,21 @@ class OllamaArtifactExtractor:
         artifact = content[:4000]
         prompt = _EXTRACTION_PROMPT.format(artifact=artifact)
         try:
+            from opencomputer.profiles import read_active_profile, scope_subprocess_env
+
+            env = scope_subprocess_env(
+                os.environ.copy(), profile=read_active_profile()
+            )
+        except Exception:  # noqa: BLE001 — fail-soft on profile lookup
+            env = None
+        try:
             result = subprocess.run(
                 ["ollama", "run", self.model, prompt],
                 capture_output=True,
                 text=True,
                 errors="replace",
                 timeout=self.timeout_seconds,
+                env=env,
             )
         except (subprocess.TimeoutExpired, OSError):
             return ArtifactExtraction()
