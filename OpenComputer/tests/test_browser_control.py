@@ -1,12 +1,13 @@
-"""Tests for the browser-control plugin (T1+T2 of 2026-04-28 plan).
+"""Tests for the browser-control plugin (T1+T2 of 2026-04-28 plan + Hermes-parity Batch 1 2026-05-01).
 
 Mocks Playwright entirely — no browser binary is launched. Covers:
 
-* Capability namespace + tier on each of the 5 BaseTool subclasses.
+* Capability namespace + tier on each BaseTool subclass.
 * BrowserError raised when playwright is not installed.
 * Schema name + parameters shape for each tool.
 * navigate_and_snapshot happy path (mocked Playwright module).
 * Error path — page.goto throws → snap.error populated, ToolResult is_error=True.
+* Hermes-parity tools — scroll, back, press, get_images, vision, console.
 """
 from __future__ import annotations
 
@@ -17,11 +18,17 @@ import pytest
 from extensions.browser_control.browser import BrowserError, PageSnapshot
 from extensions.browser_control.tools import (
     ALL_TOOLS,
+    BrowserBackTool,
     BrowserClickTool,
+    BrowserConsoleTool,
     BrowserFillTool,
+    BrowserGetImagesTool,
     BrowserNavigateTool,
+    BrowserPressTool,
     BrowserScrapeTool,
+    BrowserScrollTool,
     BrowserSnapshotTool,
+    BrowserVisionTool,
 )
 
 from plugin_sdk.consent import ConsentTier
@@ -29,7 +36,8 @@ from plugin_sdk.core import ToolCall
 
 
 def test_all_tools_count():
-    assert len(ALL_TOOLS) == 5
+    # 5 base + 6 Hermes-parity Batch 1
+    assert len(ALL_TOOLS) == 11
 
 
 def test_capability_namespaces():
@@ -39,12 +47,18 @@ def test_capability_namespaces():
         BrowserFillTool: ("browser.fill", ConsentTier.EXPLICIT),
         BrowserSnapshotTool: ("browser.snapshot", ConsentTier.IMPLICIT),
         BrowserScrapeTool: ("browser.scrape", ConsentTier.IMPLICIT),
+        BrowserScrollTool: ("browser.scroll", ConsentTier.IMPLICIT),
+        BrowserBackTool: ("browser.navigate", ConsentTier.EXPLICIT),
+        BrowserPressTool: ("browser.fill", ConsentTier.EXPLICIT),
+        BrowserGetImagesTool: ("browser.scrape", ConsentTier.IMPLICIT),
+        BrowserVisionTool: ("browser.screenshot", ConsentTier.EXPLICIT),
+        BrowserConsoleTool: ("browser.scrape", ConsentTier.IMPLICIT),
     }
     for cls, (cap_id, tier) in expected.items():
         claims = cls.capability_claims
-        assert len(claims) == 1
-        assert claims[0].capability_id == cap_id
-        assert claims[0].tier_required == tier
+        assert len(claims) == 1, f"{cls.__name__} should have 1 capability claim"
+        assert claims[0].capability_id == cap_id, f"{cls.__name__} cap_id mismatch"
+        assert claims[0].tier_required == tier, f"{cls.__name__} tier mismatch"
 
 
 @pytest.mark.asyncio
@@ -147,7 +161,7 @@ def test_browser_error_when_playwright_missing():
 
 
 def test_schemas_have_required_fields():
-    """All 5 tools have schema with name + parameters.required."""
+    """All tools have schema with name + parameters.required."""
     for cls in ALL_TOOLS:
         tool = cls()
         schema = tool.schema
@@ -169,3 +183,185 @@ def test_click_schema_required_url_and_selector():
 def test_fill_schema_required_url_selector_value():
     tool = BrowserFillTool()
     assert tool.schema.parameters["required"] == ["url", "selector", "value"]
+
+
+# ─── Hermes-parity Batch 1 (2026-05-01) ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_scroll_happy_path_mocked():
+    snap = PageSnapshot(url="x", title="t", accessibility_tree="", text_content="bottom",
+                        error="")
+    with patch("extensions.browser_control.tools.scroll_page",
+               new_callable=AsyncMock, return_value=snap) as mock:
+        tool = BrowserScrollTool()
+        result = await tool.execute(ToolCall(id="t1", name="browser_scroll",
+                                              arguments={"url": "x", "direction": "bottom"}))
+    assert not result.is_error
+    mock.assert_called_once_with("x", direction="bottom", amount_px=500)
+
+
+@pytest.mark.asyncio
+async def test_scroll_missing_url_returns_error():
+    tool = BrowserScrollTool()
+    result = await tool.execute(ToolCall(id="t1", name="browser_scroll", arguments={}))
+    assert result.is_error
+    assert "missing url" in result.content.lower()
+
+
+@pytest.mark.asyncio
+async def test_back_happy_path_mocked():
+    snap = PageSnapshot(url="x", title="prev", accessibility_tree="", text_content="",
+                        error="")
+    with patch("extensions.browser_control.tools.go_back",
+               new_callable=AsyncMock, return_value=snap):
+        tool = BrowserBackTool()
+        result = await tool.execute(ToolCall(id="t1", name="browser_back",
+                                              arguments={"url": "x"}))
+    assert not result.is_error
+    payload = json.loads(result.content)
+    assert payload["title"] == "prev"
+
+
+@pytest.mark.asyncio
+async def test_back_no_history_error():
+    snap = PageSnapshot(url="x", title="", accessibility_tree="", text_content="",
+                        error="no back history available in this session")
+    with patch("extensions.browser_control.tools.go_back",
+               new_callable=AsyncMock, return_value=snap):
+        tool = BrowserBackTool()
+        result = await tool.execute(ToolCall(id="t1", name="browser_back",
+                                              arguments={"url": "x"}))
+    assert result.is_error
+    assert "no back history" in result.content
+
+
+@pytest.mark.asyncio
+async def test_press_with_selector():
+    snap = PageSnapshot(url="x", title="t", accessibility_tree="", text_content="",
+                        error="")
+    with patch("extensions.browser_control.tools.press_key",
+               new_callable=AsyncMock, return_value=snap) as mock:
+        tool = BrowserPressTool()
+        result = await tool.execute(ToolCall(id="t1", name="browser_press",
+                                              arguments={"url": "x", "key": "Enter",
+                                                         "selector": "input"}))
+    assert not result.is_error
+    mock.assert_called_once_with("x", "Enter", selector="input")
+
+
+@pytest.mark.asyncio
+async def test_press_missing_key_returns_error():
+    tool = BrowserPressTool()
+    result = await tool.execute(ToolCall(id="t1", name="browser_press",
+                                          arguments={"url": "x"}))
+    assert result.is_error
+    assert "key" in result.content.lower()
+
+
+@pytest.mark.asyncio
+async def test_get_images_happy_path():
+    payload = {
+        "url": "x", "title": "t", "image_count": 2,
+        "images": [
+            {"src": "a.png", "alt": "a", "width": 100, "height": 100},
+            {"src": "b.png", "alt": "b", "width": 200, "height": 200},
+        ],
+    }
+    with patch("extensions.browser_control.tools.get_images",
+               new_callable=AsyncMock, return_value=payload):
+        tool = BrowserGetImagesTool()
+        result = await tool.execute(ToolCall(id="t1", name="browser_get_images",
+                                              arguments={"url": "x"}))
+    assert not result.is_error
+    decoded = json.loads(result.content)
+    assert decoded["image_count"] == 2
+    assert decoded["images"][0]["src"] == "a.png"
+
+
+@pytest.mark.asyncio
+async def test_get_images_error_dict_returned():
+    with patch("extensions.browser_control.tools.get_images",
+               new_callable=AsyncMock, return_value={"url": "x", "error": "boom", "images": []}):
+        tool = BrowserGetImagesTool()
+        result = await tool.execute(ToolCall(id="t1", name="browser_get_images",
+                                              arguments={"url": "x"}))
+    assert result.is_error
+    assert "boom" in result.content
+
+
+@pytest.mark.asyncio
+async def test_vision_happy_path():
+    payload = {
+        "url": "x", "title": "t",
+        "image_base64": "iVBORw0KGgo=", "image_format": "png",
+        "image_size_bytes": 8,
+    }
+    with patch("extensions.browser_control.tools.vision_screenshot",
+               new_callable=AsyncMock, return_value=payload):
+        tool = BrowserVisionTool()
+        result = await tool.execute(ToolCall(id="t1", name="browser_vision",
+                                              arguments={"url": "x"}))
+    assert not result.is_error
+    decoded = json.loads(result.content)
+    assert decoded["image_format"] == "png"
+    assert decoded["image_base64"] == "iVBORw0KGgo="
+
+
+@pytest.mark.asyncio
+async def test_vision_error_dict_returned():
+    with patch("extensions.browser_control.tools.vision_screenshot",
+               new_callable=AsyncMock, return_value={"url": "x", "error": "screenshot failed"}):
+        tool = BrowserVisionTool()
+        result = await tool.execute(ToolCall(id="t1", name="browser_vision",
+                                              arguments={"url": "x"}))
+    assert result.is_error
+    assert "screenshot failed" in result.content
+
+
+@pytest.mark.asyncio
+async def test_console_happy_path():
+    payload = {
+        "url": "x", "title": "t", "message_count": 2,
+        "messages": [
+            {"type": "log", "text": "hi", "location": ""},
+            {"type": "error", "text": "boom", "location": "x.js"},
+        ],
+    }
+    with patch("extensions.browser_control.tools.get_console_messages",
+               new_callable=AsyncMock, return_value=payload):
+        tool = BrowserConsoleTool()
+        result = await tool.execute(ToolCall(id="t1", name="browser_console",
+                                              arguments={"url": "x"}))
+    assert not result.is_error
+    decoded = json.loads(result.content)
+    assert decoded["message_count"] == 2
+    assert decoded["messages"][1]["type"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_press_browser_error_returned():
+    with patch("extensions.browser_control.tools.press_key",
+               new_callable=AsyncMock, side_effect=BrowserError("playwright missing")):
+        tool = BrowserPressTool()
+        result = await tool.execute(ToolCall(id="t1", name="browser_press",
+                                              arguments={"url": "x", "key": "Enter"}))
+    assert result.is_error
+    assert "playwright" in result.content.lower()
+
+
+def test_scroll_schema_url_required():
+    tool = BrowserScrollTool()
+    assert tool.schema.parameters["required"] == ["url"]
+    direction_enum = tool.schema.parameters["properties"]["direction"]["enum"]
+    assert set(direction_enum) == {"up", "down", "top", "bottom"}
+
+
+def test_press_schema_url_and_key_required():
+    tool = BrowserPressTool()
+    assert tool.schema.parameters["required"] == ["url", "key"]
+
+
+def test_vision_schema_url_required():
+    tool = BrowserVisionTool()
+    assert tool.schema.parameters["required"] == ["url"]

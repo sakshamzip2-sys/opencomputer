@@ -10,9 +10,27 @@ Three layers of coverage:
 """
 from __future__ import annotations
 
+import datetime as _dt
 from unittest.mock import patch
 
 from opencomputer.agent.prompt_builder import PromptBuilder
+
+
+def _make_fixed_datetime(fixed_dt: _dt.datetime):
+    """Return a datetime subclass whose .now() always yields ``fixed_dt``.
+
+    Used to pin classifier time-of-day signals across runs. ``patch.object``
+    swaps ``datetime.datetime`` for this fixed class for the duration of the
+    test; production code is untouched.
+    """
+    class _FixedDateTime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ARG003
+            if tz is None:
+                return fixed_dt
+            return fixed_dt.replace(tzinfo=tz)
+
+    return _FixedDateTime
 
 
 def test_persona_overlay_rendered_in_prompt():
@@ -268,6 +286,10 @@ def test_reclassify_does_not_flap_on_single_signal(tmp_path, monkeypatch):
     This test now uses an emotion-only message that doesn't trigger the
     content keyword (the 'sad' keyword is in the content pattern so we
     use 'heartbroken' which is in emotion-anchor only).
+
+    Hour 13 is patched so the time-of-day signal is silent — between 12
+    and 20 the classifier emits no time-of-day Signal, so iTerm2 alone
+    can't stack above 0.85 / 0.9 emotion-anchor.
     """
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
     # Single isolated emotion message — no co-occurring content
@@ -278,10 +300,17 @@ def test_reclassify_does_not_flap_on_single_signal(tmp_path, monkeypatch):
         ["im heartbroken"]
     )
 
+    # Pin the classifier's time-of-day to mid-afternoon (hour 13) so the
+    # _time_of_day_signals function returns []; otherwise iTerm2 +
+    # morning-hours stack high enough to outweigh emotion-anchor and
+    # the gate never registers a "companion" pending state. This was a
+    # latent flake in PR #278.
+    fixed_now = _dt.datetime(2026, 5, 1, 13, 0, 0)
+
     with patch(
         "opencomputer.awareness.personas._foreground.detect_frontmost_app",
         return_value="iTerm2",
-    ):
+    ), patch.object(_dt, "datetime", _make_fixed_datetime(fixed_now)):
         loop._maybe_reclassify_persona("test-session")
 
     # First sighting of 'companion' from single emotion-anchor — gate
@@ -524,10 +553,15 @@ def test_acceptance_emotion_message_eventually_flips_to_companion(tmp_path, monk
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
     loop = _make_loop_with_db(["fix this bug", "i am sad"])
 
+    # Pin classifier hour to 13 (afternoon) — silences time-of-day signal
+    # so iTerm2 doesn't stack with "morning hours" boost. See note on
+    # test_reclassify_does_not_flap_on_single_signal.
+    fixed_now = _dt.datetime(2026, 5, 1, 13, 0, 0)
+
     with patch(
         "opencomputer.awareness.personas._foreground.detect_frontmost_app",
         return_value="iTerm2",
-    ):
+    ), patch.object(_dt, "datetime", _make_fixed_datetime(fixed_now)):
         loop._maybe_reclassify_persona("acceptance-session")
 
     # v2 multi-signal: "i am sad" hits both emotion-anchor + content

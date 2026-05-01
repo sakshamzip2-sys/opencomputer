@@ -1,8 +1,8 @@
 {
   "id": "homeassistant",
   "name": "Home Assistant",
-  "version": "0.1.0",
-  "description": "Home Assistant channel via the REST API. Outbound = call_service (turn lights on, send notifications, run scripts). Inbound: webhook adapter (G.3) wired to a Home Assistant automation that POSTs events.",
+  "version": "0.2.0",
+  "description": "Home Assistant channel + action tools. Outbound channel (notifications, scripts) plus 4 LLM-callable tools: ha_list_entities, ha_get_state, ha_list_services, ha_call_service. Inbound: optional webhook adapter (G.3).",
   "author": "OpenComputer Contributors",
   "license": "MIT",
   "kind": "channel",
@@ -10,6 +10,7 @@
   "single_instance": true,
   "enabled_by_default": false,
   "profiles": ["*"],
+  "tool_names": ["ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service"],
   "setup": {
     "channels": [
       {

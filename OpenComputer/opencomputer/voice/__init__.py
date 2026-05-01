@@ -32,12 +32,20 @@ from opencomputer.voice.costs import (
 )
 from opencomputer.voice.stt import transcribe_audio
 from opencomputer.voice.tts import VoiceConfig, synthesize_speech
+from opencomputer.voice.tts_edge import (
+    DEFAULT_EDGE_VOICE,
+    EdgeTTSError,
+    synthesize_edge_speech,
+)
 
 __all__ = [
+    "DEFAULT_EDGE_VOICE",
+    "EdgeTTSError",
     "OPENAI_STT_USD_PER_MINUTE",
     "OPENAI_TTS_USD_PER_1K_CHARS",
     "VoiceConfig",
     "stt_cost_usd",
+    "synthesize_edge_speech",
     "synthesize_speech",
     "transcribe_audio",
     "tts_cost_usd",

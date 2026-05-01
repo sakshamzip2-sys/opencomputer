@@ -1,8 +1,8 @@
 {
   "id": "browser-control",
   "name": "browser-control",
-  "description": "Browser automation via Playwright. Navigate, click, fill, snapshot, scrape — isolated sessions by default. Default OFF.",
-  "version": "0.1.0",
+  "description": "Browser automation via Playwright. Navigate, click, fill, scroll, press keys, snapshot, scrape, screenshot, capture console — isolated sessions by default. Default OFF.",
+  "version": "0.2.0",
   "kind": "tool",
   "enabled_by_default": false,
   "entry": "plugin",
@@ -13,6 +13,12 @@
     "browser_click",
     "browser_fill",
     "browser_snapshot",
-    "browser_scrape"
+    "browser_scrape",
+    "browser_scroll",
+    "browser_back",
+    "browser_press",
+    "browser_get_images",
+    "browser_vision",
+    "browser_console"
   ]
 }
