@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -42,6 +43,61 @@ _log = logging.getLogger(__name__)
 # their own priming pass — see ``ListAppUsageTool.execute`` which does a
 # two-pass walk to make ``cpu_percent`` values meaningful on the first call.
 psutil.cpu_percent(interval=None)
+
+
+# ─── screenshot storage ──────────────────────────────────────────────
+#
+# Screenshots are written to ``<profile_home>/tool_result_storage/screenshots/``
+# rather than returned as base64 in the tool result. A 1080p PNG is ~280 KB
+# base64-encoded — that's larger than the entire model context. Surfacing a
+# path keeps conversation history small (just the path), lets the Anthropic
+# provider re-load the image at request time and pay the per-image vision
+# token rate (~1500 tokens), and lets the same screenshot be referenced in
+# later turns without compounding cost. See plugin_sdk/core.py
+# ``ToolResult.attachments`` for the full design.
+
+_SCREENSHOT_TTL_SECONDS = 24 * 60 * 60  # 24h — older shots get cleaned up
+
+
+def _resolve_screenshots_dir() -> Path:
+    """Return ``<profile_home>/tool_result_storage/screenshots/``.
+
+    Resolved on every call so test fixtures that monkeypatch
+    ``OPENCOMPUTER_HOME`` (which ``_home()`` honours) take effect without
+    needing to reset module-level state.
+    """
+    from opencomputer.agent.config import _home  # noqa: PLC0415 — lazy
+
+    return _home() / "tool_result_storage" / "screenshots"
+
+
+def _prune_stale_screenshots(directory: Path, ttl_seconds: int = _SCREENSHOT_TTL_SECONDS) -> int:
+    """Delete screenshots older than ``ttl_seconds``. Returns count removed.
+
+    Best-effort: silently skips files we can't stat or unlink (another
+    process holding them, permission issues, race with concurrent
+    capture). The cleanup never raises — a busy agent shouldn't crash
+    because of housekeeping.
+    """
+    if not directory.exists():
+        return 0
+    cutoff = time.time() - ttl_seconds
+    removed = 0
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if not entry.is_file():
+                continue
+            if entry.stat().st_mtime < cutoff:
+                entry.unlink()
+                removed += 1
+        except OSError:
+            # File vanished mid-iteration, or denied — fine.
+            continue
+    return removed
 
 
 def _quadrant_bounds(monitor: dict, quadrant: str) -> dict:
@@ -307,7 +363,21 @@ class ReadClipboardOnceTool(BaseTool):
 
 
 class ScreenshotTool(BaseTool):
-    """Capture a screenshot, returned as base64-encoded PNG (mss-backed)."""
+    """Capture a screenshot, run vision-LLM analysis, return text + path.
+
+    The tool captures the image, calls a vision model INTERNALLY with
+    the user's question, and returns a JSON tool result containing the
+    text analysis and the on-disk path. The agent that invoked the tool
+    sees TEXT in conversation history — never the raw image — keeping
+    per-turn token cost flat regardless of how many screenshots have
+    been taken in the session.
+
+    The path is surfaced so the agent can re-share the screenshot to
+    the user via ``MEDIA:<path>`` in its next reply (see the outbound
+    extractor at ``plugin_sdk/channel_contract.py:extract_media``), and
+    so a follow-up ``VisionAnalyze(image_path=...)`` call can re-analyze
+    the same image with a different prompt without re-capturing.
+    """
 
     consent_tier: int = 1
     parallel_safe: bool = True
@@ -315,7 +385,7 @@ class ScreenshotTool(BaseTool):
         CapabilityClaim(
             capability_id="introspection.screenshot",
             tier_required=ConsentTier.IMPLICIT,
-            human_description="Capture a screenshot of the current screen.",
+            human_description="Capture a screenshot and analyze it via a vision model.",
         ),
     )
 
@@ -325,30 +395,53 @@ class ScreenshotTool(BaseTool):
         consent_gate: Any | None = None,
         sandbox: Any | None = None,
         audit: Any | None = None,
+        vision_api_key: str | None = None,
+        vision_model: str | None = None,
     ) -> None:
         self._consent_gate = consent_gate
         self._sandbox = sandbox
         self._audit = audit
+        # Vision-call config. Defaults to ANTHROPIC_API_KEY env at
+        # request time + the same default model VisionAnalyze uses.
+        # Constructor-injected values win for test fixturing.
+        self._vision_api_key = vision_api_key
+        self._vision_model = vision_model
 
     @property
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="screenshot",
             description=(
-                "Capture a screenshot of the primary monitor, returned as base64-encoded "
-                "PNG. Use when the user asks 'what's on my screen?' or when you need to "
-                "verify GUI state. Pass `quadrant` (top-left/top-right/bottom-left/bottom-"
-                "right) to capture just one corner — cheaper and less private. CAUTION: "
-                "screenshots may contain sensitive on-screen data (passwords, private "
-                "chats, financial info); do not include in error messages, third-party "
-                "calls, or persistent logs. For text content prefer extract_screen_text "
-                "(OCR) — smaller and more privacy-aware. Cross-platform via mss (macOS, "
-                "Linux, Windows). Linux requires an X or Wayland display server. Under F1 "
+                "Capture a screenshot of the primary monitor and run vision "
+                "analysis on it. The capture is saved to "
+                "<profile_home>/tool_result_storage/screenshots/ (auto-deleted "
+                "after 24h) and the path is returned alongside the text "
+                "analysis. Use when the user asks 'what's on my screen?' or "
+                "when you need to verify GUI state. Pass `prompt` to steer "
+                "the analysis (default: a generic description). Pass `quadrant` "
+                "(top-left/top-right/bottom-left/bottom-right) to capture just "
+                "one corner — cheaper and less private. To share the screenshot "
+                "with the user in your reply, include MEDIA:<screenshot_path> "
+                "in your response. CAUTION: screenshots may contain sensitive "
+                "on-screen data (passwords, private chats, financial info) AND "
+                "are sent to the configured vision API; do not include in error "
+                "messages, third-party calls, or persistent logs. For text "
+                "content prefer extract_screen_text (OCR) — smaller and more "
+                "privacy-aware. Cross-platform via mss (macOS, Linux, Windows). "
+                "Linux requires an X or Wayland display server. Under F1 "
                 "ConsentGate (IMPLICIT tier)."
             ),
             parameters={
                 "type": "object",
                 "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": (
+                            "Question or instruction to steer the vision "
+                            "analysis. Default: 'Describe what is visible on "
+                            "the screen in detail.'"
+                        ),
+                    },
                     "quadrant": {
                         "type": "string",
                         "description": (
@@ -363,7 +456,12 @@ class ScreenshotTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
+        # ── 1. Capture screenshot ────────────────────────────────────
         quadrant = call.arguments.get("quadrant")
+        prompt = (
+            call.arguments.get("prompt")
+            or "Describe what is visible on the screen in detail."
+        )
         try:
             with mss.mss() as sct:
                 monitor = sct.monitors[1]  # primary monitor
@@ -371,9 +469,102 @@ class ScreenshotTool(BaseTool):
                     monitor = _quadrant_bounds(monitor, quadrant)
                 shot = sct.grab(monitor)
                 png = mss.tools.to_png(shot.rgb, shot.size)
+                shot_w, shot_h = shot.size
         except Exception as exc:  # noqa: BLE001
-            return ToolResult(tool_call_id=call.id, content=f"Error: {exc}", is_error=True)
-        return ToolResult(tool_call_id=call.id, content=base64.b64encode(png).decode("ascii"))
+            return ToolResult(
+                tool_call_id=call.id,
+                content=json.dumps({"success": False, "error": f"capture failed: {exc}"}),
+                is_error=True,
+            )
+
+        # ── 2. Persist to disk so it can be re-shared / re-analyzed ──
+        try:
+            screenshots_dir = _resolve_screenshots_dir()
+            screenshots_dir.mkdir(parents=True, exist_ok=True)
+            _prune_stale_screenshots(screenshots_dir)
+            path = screenshots_dir / f"oc-screen-{uuid.uuid4().hex}.png"
+            path.write_bytes(png)
+        except OSError as exc:
+            _log.warning("screenshot disk write failed: %s", exc)
+            return ToolResult(
+                tool_call_id=call.id,
+                content=json.dumps({
+                    "success": False,
+                    "error": f"failed to persist screenshot: {exc}",
+                }),
+                is_error=True,
+            )
+
+        # ── 3. Vision-model analysis ────────────────────────────────
+        api_key = self._vision_api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        size_kb = len(png) // 1024
+        screenshot_path = str(path)
+
+        if not api_key:
+            # No vision API configured — return path only with a clear
+            # note so the agent knows the analysis step was skipped. The
+            # capture itself succeeded; the agent can still share the
+            # file via MEDIA:<path>.
+            return ToolResult(
+                tool_call_id=call.id,
+                content=json.dumps({
+                    "success": True,
+                    "analysis": (
+                        "(vision analysis skipped — ANTHROPIC_API_KEY not set; "
+                        "screenshot was captured and saved)"
+                    ),
+                    "screenshot_path": screenshot_path,
+                    "dimensions": [shot_w, shot_h],
+                    "size_kb": size_kb,
+                }),
+            )
+
+        # Lazy import to avoid pulling httpx into hot paths that don't
+        # need vision. Module-level import would also create a circular
+        # risk if vision_analyze ever needed to import from this module.
+        from opencomputer.tools.vision_analyze import (  # noqa: PLC0415
+            analyze_image_bytes,
+        )
+
+        image_b64 = base64.b64encode(png).decode("ascii")
+        # PNG magic header is the only option mss produces; no need to sniff.
+        result = await analyze_image_bytes(
+            image_b64=image_b64,
+            mime="image/png",
+            prompt=prompt,
+            api_key=api_key,
+            model=self._vision_model or "claude-haiku-4-5",
+        )
+
+        if isinstance(result, tuple):
+            # Vision call failed but capture succeeded. Graceful
+            # degradation: surface both — the agent sees the error AND
+            # can still share the screenshot via MEDIA:<path>.
+            error_text, _is_err = result
+            return ToolResult(
+                tool_call_id=call.id,
+                content=json.dumps({
+                    "success": False,
+                    "error": error_text,
+                    "screenshot_path": screenshot_path,
+                    "note": (
+                        "Screenshot was captured but vision analysis failed. "
+                        "You can still share it via MEDIA:<screenshot_path>."
+                    ),
+                }),
+            )
+
+        # Happy path: vision call returned analysis text.
+        return ToolResult(
+            tool_call_id=call.id,
+            content=json.dumps({
+                "success": True,
+                "analysis": result,
+                "screenshot_path": screenshot_path,
+                "dimensions": [shot_w, shot_h],
+                "size_kb": size_kb,
+            }),
+        )
 
 
 class ExtractScreenTextTool(BaseTool):

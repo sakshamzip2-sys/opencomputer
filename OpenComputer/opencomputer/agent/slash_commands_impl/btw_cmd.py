@@ -30,24 +30,14 @@ Examples:
 
 from __future__ import annotations
 
-import json
 import os
-
-import httpx
 
 from plugin_sdk.runtime_context import RuntimeContext
 from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 
-ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_API_VERSION = "2023-06-01"
 DEFAULT_MODEL = "claude-haiku-4-5"
 DEFAULT_TIMEOUT_S = 60.0
 MAX_CONTEXT_MESSAGES = 30  # bound how much parent history we send
-
-
-def _make_async_client(timeout: float = DEFAULT_TIMEOUT_S) -> httpx.AsyncClient:
-    """Test seam — replace with httpx.MockTransport in tests."""
-    return httpx.AsyncClient(timeout=timeout)
 
 
 def _flatten_content(content) -> str:
@@ -135,36 +125,38 @@ class BtwCommand(SlashCommand):
                 handled=True,
             )
 
-        body = {
-            "model": self._model,
-            "max_tokens": 1024,
-            "messages": _build_messages_payload(parent_messages, question),
-            # Note: no `tools` field — that's the whole point of /btw.
-        }
-        headers = {
-            "x-api-key": api_key,
-            "anthropic-version": ANTHROPIC_API_VERSION,
-            "content-type": "application/json",
-        }
-
+        # Use the shared Anthropic client builder so /btw inherits the same
+        # auth / base-url config as chat (claude-router bearer mode etc).
+        from opencomputer.agent.anthropic_client import (
+            build_anthropic_async_client,
+        )
+        client = build_anthropic_async_client(api_key)
         try:
-            async with _make_async_client() as client:
-                resp = await client.post(
-                    ANTHROPIC_API_URL,
-                    headers=headers,
-                    content=json.dumps(body),
-                )
-                resp.raise_for_status()
-                data = resp.json()
-        except httpx.HTTPError as e:
+            resp = await client.messages.create(
+                model=self._model,
+                max_tokens=1024,
+                messages=_build_messages_payload(parent_messages, question),
+                # Note: no `tools` — that's the whole point of /btw.
+            )
+        except Exception as e:  # noqa: BLE001 — surface SDK error as text
             return SlashCommandResult(
                 output=f"/btw API call failed: {type(e).__name__}: {e}",
                 handled=True,
             )
 
-        # Extract text from content blocks
-        blocks = data.get("content", [])
-        text_parts = [b.get("text", "") for b in blocks if b.get("type") == "text"]
+        # Extract text from content blocks (SDK returns typed objects)
+        text_parts: list[str] = []
+        for block in getattr(resp, "content", []) or []:
+            block_type = getattr(block, "type", None) or (
+                block.get("type") if isinstance(block, dict) else None
+            )
+            if block_type != "text":
+                continue
+            block_text = getattr(block, "text", None)
+            if block_text is None and isinstance(block, dict):
+                block_text = block.get("text")
+            if block_text:
+                text_parts.append(str(block_text))
         text = "".join(text_parts).strip()
         if not text:
             return SlashCommandResult(

@@ -41,6 +41,13 @@ def _mock_anthropic_response(text: str) -> dict:
 
 
 def _make_mock_transport(image_bytes: bytes | None, response_text: str = "A photograph of a cat sitting on a sofa, looking at the camera") -> httpx.MockTransport:
+    """Build an httpx MockTransport that handles BOTH the vision-API call
+    (now via AsyncAnthropic SDK) and image-URL fetches.
+
+    The handler matches by URL host: ``anthropic.com`` → fake vision
+    response; anything else → image bytes (or 404 when ``image_bytes``
+    is None, simulating a fetch failure).
+    """
     def handler(request: httpx.Request) -> httpx.Response:
         if "anthropic.com" in request.url.host:
             return httpx.Response(200, json=_mock_anthropic_response(response_text))
@@ -52,6 +59,37 @@ def _make_mock_transport(image_bytes: bytes | None, response_text: str = "A phot
     return httpx.MockTransport(handler)
 
 
+def _patch_vision_calls(monkeypatch, transport: httpx.MockTransport) -> None:
+    """Wire the MockTransport into BOTH paths the tool uses to talk to
+    the network:
+
+    1. ``_make_async_client`` — used for image-URL fetches.
+    2. ``_build_anthropic_async_client`` — used for the Anthropic vision
+       call (now SDK-based, post-collapse onto ``AsyncAnthropic``).
+
+    Without (2), the SDK's internal httpx client bypasses the mock and
+    hits the real network, returning 401 on the test key.
+    """
+    from anthropic import AsyncAnthropic
+
+    monkeypatch.setattr(
+        "opencomputer.tools.vision_analyze._make_async_client",
+        lambda timeout=60.0: httpx.AsyncClient(transport=transport, timeout=timeout),
+    )
+
+    def _stub_client(api_key: str) -> AsyncAnthropic:
+        # Mock-transported client routes /v1/messages through the handler.
+        return AsyncAnthropic(
+            api_key=api_key,
+            http_client=httpx.AsyncClient(transport=transport, timeout=60.0),
+        )
+
+    monkeypatch.setattr(
+        "opencomputer.tools.vision_analyze._build_anthropic_async_client",
+        _stub_client,
+    )
+
+
 @pytest.fixture
 def tool():
     return VisionAnalyzeTool(api_key="test-key")
@@ -60,10 +98,7 @@ def tool():
 @pytest.mark.asyncio
 async def test_analyze_with_base64_input(tool, monkeypatch):
     transport = _make_mock_transport(image_bytes=None)  # no fetch path
-    monkeypatch.setattr(
-        "opencomputer.tools.vision_analyze._make_async_client",
-        lambda timeout=60.0: httpx.AsyncClient(transport=transport, timeout=timeout),
-    )
+    _patch_vision_calls(monkeypatch, transport)
     b64 = base64.b64encode(_PNG_MAGIC).decode()
     call = ToolCall(
         id="c1",
@@ -78,10 +113,7 @@ async def test_analyze_with_base64_input(tool, monkeypatch):
 @pytest.mark.asyncio
 async def test_analyze_with_url_input(tool, monkeypatch):
     transport = _make_mock_transport(image_bytes=_PNG_MAGIC)
-    monkeypatch.setattr(
-        "opencomputer.tools.vision_analyze._make_async_client",
-        lambda timeout=60.0: httpx.AsyncClient(transport=transport, timeout=timeout),
-    )
+    _patch_vision_calls(monkeypatch, transport)
     call = ToolCall(
         id="c2",
         name="VisionAnalyze",
@@ -141,10 +173,7 @@ async def test_non_image_content_rejected(tool, monkeypatch):
 @pytest.mark.asyncio
 async def test_default_prompt_used_when_omitted(tool, monkeypatch):
     transport = _make_mock_transport(image_bytes=None)
-    monkeypatch.setattr(
-        "opencomputer.tools.vision_analyze._make_async_client",
-        lambda timeout=60.0: httpx.AsyncClient(transport=transport, timeout=timeout),
-    )
+    _patch_vision_calls(monkeypatch, transport)
     b64 = base64.b64encode(_PNG_MAGIC).decode()
     call = ToolCall(
         id="c6",
@@ -158,10 +187,7 @@ async def test_default_prompt_used_when_omitted(tool, monkeypatch):
 @pytest.mark.asyncio
 async def test_jpeg_magic_bytes_accepted(tool, monkeypatch):
     transport = _make_mock_transport(image_bytes=_JPEG_MAGIC)
-    monkeypatch.setattr(
-        "opencomputer.tools.vision_analyze._make_async_client",
-        lambda timeout=60.0: httpx.AsyncClient(transport=transport, timeout=timeout),
-    )
+    _patch_vision_calls(monkeypatch, transport)
     call = ToolCall(
         id="c7",
         name="VisionAnalyze",

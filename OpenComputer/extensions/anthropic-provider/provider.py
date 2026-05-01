@@ -234,22 +234,16 @@ class AnthropicProvider(BaseProvider):
 
         self._base = base
         self._mode = mode
-        kwargs: dict[str, Any] = {"api_key": key}
-        if base:
-            kwargs["base_url"] = base
-        if mode == "bearer":
-            # For proxies like Claude Router: add Authorization: Bearer AND
-            # strip x-api-key on the way out (the SDK adds it automatically
-            # from api_key, and some proxies forward it to upstream Anthropic
-            # which then rejects the proxy key as "invalid x-api-key").
-            kwargs["default_headers"] = {"Authorization": f"Bearer {key}"}
-            kwargs["http_client"] = httpx.AsyncClient(
-                event_hooks={"request": [_strip_x_api_key]},
-                timeout=httpx.Timeout(60.0, connect=10.0),
-            )
-        # Otherwise mode is "x-api-key" or "api_key" → default SDK behavior
-        # uses x-api-key; both spellings are equivalent here.
-        self.client = AsyncAnthropic(**kwargs)
+        # Single source of truth for client construction —
+        # ``opencomputer.agent.anthropic_client`` handles bearer mode +
+        # base_url + x-api-key strip identically for every Anthropic
+        # call site (chat, batch, vision, slash commands).
+        from opencomputer.agent.anthropic_client import (
+            build_anthropic_async_client,
+        )
+        self.client = build_anthropic_async_client(
+            key, base_url=base, auth_mode=mode,
+        )
 
     # ─── message conversion ─────────────────────────────────────────
 
@@ -400,16 +394,12 @@ class AnthropicProvider(BaseProvider):
 
     def _build_client_for_key(self, key: str) -> AsyncAnthropic:
         """Build an AsyncAnthropic client for the given key (used in pool rotation)."""
-        kwargs: dict[str, Any] = {"api_key": key}
-        if self._base:
-            kwargs["base_url"] = self._base
-        if self._mode == "bearer":
-            kwargs["default_headers"] = {"Authorization": f"Bearer {key}"}
-            kwargs["http_client"] = httpx.AsyncClient(
-                event_hooks={"request": [_strip_x_api_key]},
-                timeout=httpx.Timeout(60.0, connect=10.0),
-            )
-        return AsyncAnthropic(**kwargs)
+        from opencomputer.agent.anthropic_client import (
+            build_anthropic_async_client,
+        )
+        return build_anthropic_async_client(
+            key, base_url=self._base, auth_mode=self._mode,
+        )
 
     async def _do_complete(
         self,

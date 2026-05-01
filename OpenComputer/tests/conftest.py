@@ -33,6 +33,8 @@ _VOICE_MODE_DIR = _EXT_DIR / "voice-mode"
 _BROWSER_CONTROL_DIR = _EXT_DIR / "browser-control"
 _AFFECT_INJECTION_DIR = _EXT_DIR / "affect-injection"
 _OPENAI_PROVIDER_DIR = _EXT_DIR / "openai-provider"
+_GEMINI_PROVIDER_DIR = _EXT_DIR / "gemini-provider"
+_ANTHROPIC_PROVIDER_DIR = _EXT_DIR / "anthropic-provider"
 _SCREEN_AWARENESS_DIR = _EXT_DIR / "screen-awareness"
 
 
@@ -45,392 +47,209 @@ def _ensure_extensions_pkg() -> None:
         sys.modules["extensions"] = ext_pkg
 
 
-def _register_coding_harness_alias() -> None:
-    """Register extensions.coding_harness → extensions/coding-harness/ in sys.modules.
+def _register_extension_alias(
+    underscore_name: str,
+    ext_dir: Path,
+    submodules: tuple[str, ...] = (),
+    *,
+    exec_modules: bool = True,
+    bind_on_parent: bool = True,
+) -> None:
+    """Generic plugin-dir → underscore-package alias registration.
 
-    The parent package is registered as a synthetic namespace module with
-    ``__path__`` pointing at the hyphenated directory; Python's standard
-    import machinery then resolves sub-packages (e.g. ``introspection/``)
-    against that path automatically. No explicit per-submodule registration
-    is required for sub-packages that have their own ``__init__.py``.
+    Plugin directories are hyphenated on disk (``extensions/openai-provider/``)
+    but Python module names must use underscores. This helper synthesises
+    ``sys.modules["extensions.<underscore>"]`` pointing at the hyphenated
+    directory, then optionally registers each submodule the tests need.
+
+    Parameters
+    ----------
+    underscore_name
+        e.g. ``"openai_provider"`` — becomes ``extensions.openai_provider``.
+    ext_dir
+        Filesystem path of the hyphenated plugin directory.
+    submodules
+        Sibling ``.py`` filenames (no extension) to register. Empty tuple
+        skips the loop entirely (namespace-package mode for plugins with
+        their own ``__init__.py``).
+    exec_modules
+        ``True`` (default) — fully exec each submodule via importlib so
+        tests can import freely. ``False`` — register the spec but do
+        NOT exec; tests must pop+reload (``aws_bedrock_provider`` style).
+    bind_on_parent
+        ``True`` (default) — also do ``setattr(parent, sub, mod)`` so
+        pytest's ``monkeypatch.setattr("extensions.X.Y", ...)`` resolver
+        can find submodules via ``getattr``. ``False`` for older
+        registrations (``browser_bridge``, ``ambient_sensors``) that
+        worked without binding and we don't want to behavior-change.
+
+    Idempotent — re-calling does nothing if the alias is already in
+    ``sys.modules``. Missing ``ext_dir`` or missing per-sub ``.py``
+    files are silently skipped so this stays correct as plugins grow.
     """
     _ensure_extensions_pkg()
 
-    if "extensions.coding_harness" not in sys.modules:
-        # coding-harness is a plugin dir — no __init__.py at the root; treat as namespace.
-        ch_mod = types.ModuleType("extensions.coding_harness")
-        ch_mod.__path__ = [str(_CH_DIR)]
-        ch_mod.__package__ = "extensions.coding_harness"
-        sys.modules["extensions.coding_harness"] = ch_mod
+    if not ext_dir.exists():
+        return
+
+    full_pkg_name = f"extensions.{underscore_name}"
+    if full_pkg_name not in sys.modules:
+        mod = types.ModuleType(full_pkg_name)
+        mod.__path__ = [str(ext_dir)]
+        mod.__package__ = full_pkg_name
+        sys.modules[full_pkg_name] = mod
+        if bind_on_parent:
+            setattr(sys.modules["extensions"], underscore_name, mod)
+
+    if not submodules:
+        return  # namespace-only — nothing more to do
+
+    parent = sys.modules[full_pkg_name]
+    for sub in submodules:
+        full_name = f"{full_pkg_name}.{sub}"
+        if full_name in sys.modules:
+            if bind_on_parent:
+                setattr(parent, sub, sys.modules[full_name])
+            continue
+        init = ext_dir / f"{sub}.py"
+        if not init.exists():
+            continue
+        spec = importlib.util.spec_from_file_location(full_name, str(init))
+        if spec is None or spec.loader is None:
+            continue
+        sub_mod = importlib.util.module_from_spec(spec)
+        sub_mod.__package__ = full_pkg_name
+        sys.modules[full_name] = sub_mod
+        if exec_modules:
+            spec.loader.exec_module(sub_mod)
+        if bind_on_parent:
+            setattr(parent, sub, sub_mod)
+
+
+# ─── per-plugin alias functions ──────────────────────────────────────
+# Each thin wrapper calls _register_extension_alias with the per-plugin
+# flags. The underlying behavior is unchanged from when each function
+# had its own copy-pasted body — same submodules, same exec/bind flags.
+
+def _register_coding_harness_alias() -> None:
+    """Namespace-only — coding-harness has its own ``__init__.py`` files,
+    so Python's normal import machinery resolves sub-packages
+    (``introspection/``, etc.) against the parent ``__path__``.
+    No per-submodule registration needed; ``bind_on_parent=False`` because
+    the historical version didn't bind."""
+    _register_extension_alias(
+        "coding_harness", _CH_DIR,
+        submodules=(),
+        bind_on_parent=False,
+    )
 
 
 def _register_aws_bedrock_provider_alias() -> None:
-    """Register extensions.aws_bedrock_provider → extensions/aws-bedrock-provider/.
-
-    PR-C: allows test_bedrock_provider.py to import via the underscore form
-    (Python module name) while the directory keeps the canonical hyphenated name.
-    Mirrors the pattern used for coding_harness above.
-    """
-    _ensure_extensions_pkg()
-
-    if "extensions.aws_bedrock_provider" not in sys.modules:
-        mod = types.ModuleType("extensions.aws_bedrock_provider")
-        mod.__path__ = [str(_BEDROCK_DIR)]
-        mod.__package__ = "extensions.aws_bedrock_provider"
-        sys.modules["extensions.aws_bedrock_provider"] = mod
-
-    # Register transport.py and provider.py as importable sub-modules
-    for sub in ("transport", "provider", "plugin"):
-        full_name = f"extensions.aws_bedrock_provider.{sub}"
-        if full_name not in sys.modules:
-            init = _BEDROCK_DIR / f"{sub}.py"
-            if not init.exists():
-                continue
-            spec = importlib.util.spec_from_file_location(
-                full_name,
-                str(init),
-            )
-            if spec is None or spec.loader is None:
-                continue
-            sub_mod = importlib.util.module_from_spec(spec)
-            sub_mod.__package__ = "extensions.aws_bedrock_provider"
-            sys.modules[full_name] = sub_mod
-            # Do NOT exec yet — tests control when the module loads
+    """Lazy-spec — registers submodule specs but does NOT exec them.
+    Tests pop+reload to control when each module's body runs."""
+    _register_extension_alias(
+        "aws_bedrock_provider", _BEDROCK_DIR,
+        submodules=("transport", "provider", "plugin"),
+        exec_modules=False,
+        bind_on_parent=False,
+    )
 
 
 def _register_browser_bridge_alias() -> None:
-    """Register extensions.browser_bridge → extensions/browser-bridge/.
-
-    Mirrors the pattern used for ``extensions.aws_bedrock_provider`` —
-    plugins live in hyphenated dirs, but Python modules need underscores.
-    Layered Awareness MVP T10: lets tests import the adapter / plugin
-    Python modules from the hyphenated ``browser-bridge/`` directory.
-
-    We register the parent package (with ``__path__`` pointing at the
-    hyphenated dir) so Python's standard import machinery resolves
-    ``extensions.browser_bridge.adapter`` against ``adapter.py`` in
-    that directory. We pre-stub the sub-modules with their spec but
-    actually execute them on first import — unlike the bedrock pattern
-    (which expects test fixtures to ``sys.modules.pop()`` before import),
-    the browser-bridge tests import directly, so leaving an unexecuted
-    stub in ``sys.modules`` would mask the real module.
-    """
-    _ensure_extensions_pkg()
-    _BB_DIR = _EXT_DIR / "browser-bridge"
-
-    if "extensions.browser_bridge" not in sys.modules:
-        mod = types.ModuleType("extensions.browser_bridge")
-        mod.__path__ = [str(_BB_DIR)]
-        mod.__package__ = "extensions.browser_bridge"
-        sys.modules["extensions.browser_bridge"] = mod
-
-    for sub in ("adapter", "plugin"):
-        full_name = f"extensions.browser_bridge.{sub}"
-        if full_name not in sys.modules:
-            init = _BB_DIR / f"{sub}.py"
-            if not init.exists():
-                continue
-            spec = importlib.util.spec_from_file_location(full_name, str(init))
-            if spec is None or spec.loader is None:
-                continue
-            sub_mod = importlib.util.module_from_spec(spec)
-            sub_mod.__package__ = "extensions.browser_bridge"
-            sys.modules[full_name] = sub_mod
-            spec.loader.exec_module(sub_mod)
+    """Eager-exec, no parent-binding (historical browser-bridge pattern)."""
+    _register_extension_alias(
+        "browser_bridge", _EXT_DIR / "browser-bridge",
+        submodules=("adapter", "plugin"),
+        bind_on_parent=False,
+    )
 
 
 def _register_ambient_sensors_alias() -> None:
-    """Register extensions.ambient_sensors → extensions/ambient-sensors/.
-
-    Mirrors the browser_bridge pattern (eager exec on first import) — the
-    ambient-sensors plugin dir is hyphenated, so tests import the Python
-    modules via the underscore form. Only ``foreground.py`` exists in T2;
-    later tasks (T3-T6) add ``sensitive_apps.py``, ``pause_state.py``,
-    ``daemon.py``, and ``plugin.py``. The loop below skips files that
-    don't yet exist, so this stays correct as the plugin grows.
-    """
-    _ensure_extensions_pkg()
-
-    if not _AMBIENT_DIR.exists():
-        # Directory does not exist yet (e.g. on a stale checkout). Register
-        # nothing; later test imports will fail with a clear ModuleNotFoundError.
-        return
-
-    if "extensions.ambient_sensors" not in sys.modules:
-        mod = types.ModuleType("extensions.ambient_sensors")
-        mod.__path__ = [str(_AMBIENT_DIR)]
-        mod.__package__ = "extensions.ambient_sensors"
-        sys.modules["extensions.ambient_sensors"] = mod
-
-    for sub in ("foreground", "sensitive_apps", "pause_state", "daemon", "plugin"):
-        full_name = f"extensions.ambient_sensors.{sub}"
-        if full_name in sys.modules:
-            continue
-        init = _AMBIENT_DIR / f"{sub}.py"
-        if not init.exists():
-            continue
-        spec = importlib.util.spec_from_file_location(full_name, str(init))
-        if spec is None or spec.loader is None:
-            continue
-        sub_mod = importlib.util.module_from_spec(spec)
-        sub_mod.__package__ = "extensions.ambient_sensors"
-        sys.modules[full_name] = sub_mod
-        spec.loader.exec_module(sub_mod)
+    """Eager-exec, no parent-binding (historical ambient-sensors pattern)."""
+    _register_extension_alias(
+        "ambient_sensors", _AMBIENT_DIR,
+        submodules=("foreground", "sensitive_apps", "pause_state", "daemon", "plugin"),
+        bind_on_parent=False,
+    )
 
 
 def _register_skill_evolution_alias() -> None:
-    """Register extensions.skill_evolution → extensions/skill-evolution/.
-
-    Mirrors the ambient_sensors pattern (eager exec on first import) — the
-    skill-evolution plugin dir is hyphenated, so tests import the Python
-    modules via the underscore form. The loop below skips files that
-    don't yet exist, so this stays correct as the plugin grows from T2
-    (pattern_detector) onward.
-    """
-    _ensure_extensions_pkg()
-
-    if not _SKILL_EVO_DIR.exists():
-        return
-
-    if "extensions.skill_evolution" not in sys.modules:
-        mod = types.ModuleType("extensions.skill_evolution")
-        mod.__path__ = [str(_SKILL_EVO_DIR)]
-        mod.__package__ = "extensions.skill_evolution"
-        sys.modules["extensions.skill_evolution"] = mod
-        # Bind on parent so pytest's monkeypatch dotted-path resolver
-        # (which uses getattr) can find ``extensions.skill_evolution``.
-        sys.modules["extensions"].skill_evolution = mod
-
-    parent = sys.modules["extensions.skill_evolution"]
-    for sub in ("pattern_detector", "skill_extractor", "candidate_store", "subscriber", "session_metrics"):
-        full_name = f"extensions.skill_evolution.{sub}"
-        if full_name in sys.modules:
-            setattr(parent, sub, sys.modules[full_name])
-            continue
-        init = _SKILL_EVO_DIR / f"{sub}.py"
-        if not init.exists():
-            continue
-        spec = importlib.util.spec_from_file_location(full_name, str(init))
-        if spec is None or spec.loader is None:
-            continue
-        sub_mod = importlib.util.module_from_spec(spec)
-        sub_mod.__package__ = "extensions.skill_evolution"
-        sys.modules[full_name] = sub_mod
-        spec.loader.exec_module(sub_mod)
-        # Bind on parent so monkeypatch.setattr("extensions.skill_evolution.X", ...) works.
-        setattr(parent, sub, sub_mod)
+    """Eager-exec + parent-binding for ``monkeypatch.setattr`` resolution."""
+    _register_extension_alias(
+        "skill_evolution", _SKILL_EVO_DIR,
+        submodules=(
+            "pattern_detector", "skill_extractor", "candidate_store",
+            "subscriber", "session_metrics",
+        ),
+    )
 
 
 def _register_voice_mode_alias() -> None:
-    """Register extensions.voice_mode → extensions/voice-mode/.
-
-    Mirrors the skill_evolution / ambient_sensors pattern (eager exec on
-    first import) — the voice-mode plugin dir is hyphenated, so tests
-    import the Python modules via the underscore form. The loop below
-    skips files that don't yet exist, so this stays correct as the
-    plugin grows from T1 (audio_capture) through T5 (main loop).
-    """
-    _ensure_extensions_pkg()
-
-    if not _VOICE_MODE_DIR.exists():
-        return
-
-    if "extensions.voice_mode" not in sys.modules:
-        mod = types.ModuleType("extensions.voice_mode")
-        mod.__path__ = [str(_VOICE_MODE_DIR)]
-        mod.__package__ = "extensions.voice_mode"
-        sys.modules["extensions.voice_mode"] = mod
-        # Bind on parent so pytest's monkeypatch dotted-path resolver
-        # (which uses getattr) can find ``extensions.voice_mode``.
-        sys.modules["extensions"].voice_mode = mod
-
-    parent = sys.modules["extensions.voice_mode"]
-    for sub in ("audio_capture", "vad", "stt", "tts", "tts_playback", "playback", "orchestrator", "voice_mode", "plugin"):
-        full_name = f"extensions.voice_mode.{sub}"
-        if full_name in sys.modules:
-            setattr(parent, sub, sys.modules[full_name])
-            continue
-        init = _VOICE_MODE_DIR / f"{sub}.py"
-        if not init.exists():
-            continue
-        spec = importlib.util.spec_from_file_location(full_name, str(init))
-        if spec is None or spec.loader is None:
-            continue
-        sub_mod = importlib.util.module_from_spec(spec)
-        sub_mod.__package__ = "extensions.voice_mode"
-        sys.modules[full_name] = sub_mod
-        spec.loader.exec_module(sub_mod)
-        # Bind on parent so monkeypatch.setattr("extensions.voice_mode.X", ...) works.
-        setattr(parent, sub, sub_mod)
+    """Eager-exec + parent-binding."""
+    _register_extension_alias(
+        "voice_mode", _VOICE_MODE_DIR,
+        submodules=(
+            "audio_capture", "vad", "stt", "tts", "tts_playback",
+            "playback", "orchestrator", "voice_mode", "plugin",
+        ),
+    )
 
 
 def _register_openai_provider_alias() -> None:
-    """Register extensions.openai_provider → extensions/openai-provider/.
+    """Eager-exec + parent-binding. Realtime voice port (2026-04-29)
+    needs underscore-form imports for realtime / realtime_helpers /
+    plugin / provider submodules."""
+    _register_extension_alias(
+        "openai_provider", _OPENAI_PROVIDER_DIR,
+        submodules=("provider", "realtime", "realtime_helpers", "plugin"),
+    )
 
-    Mirrors the voice_mode pattern. Realtime voice port (2026-04-29) needs
-    underscore-form imports for the realtime / realtime_helpers / plugin /
-    provider submodules. The loop below skips files that don't yet exist,
-    so this stays correct as the plugin grows.
-    """
-    _ensure_extensions_pkg()
 
-    if not _OPENAI_PROVIDER_DIR.exists():
-        return
+def _register_gemini_provider_alias() -> None:
+    """Eager-exec + parent-binding. Currently realtime-only (chat
+    BaseProvider port pending)."""
+    _register_extension_alias(
+        "gemini_provider", _GEMINI_PROVIDER_DIR,
+        submodules=("realtime", "realtime_helpers", "plugin"),
+    )
 
-    if "extensions.openai_provider" not in sys.modules:
-        mod = types.ModuleType("extensions.openai_provider")
-        mod.__path__ = [str(_OPENAI_PROVIDER_DIR)]
-        mod.__package__ = "extensions.openai_provider"
-        sys.modules["extensions.openai_provider"] = mod
-        sys.modules["extensions"].openai_provider = mod
 
-    parent = sys.modules["extensions.openai_provider"]
-    for sub in ("provider", "realtime", "realtime_helpers", "plugin"):
-        full_name = f"extensions.openai_provider.{sub}"
-        if full_name in sys.modules:
-            setattr(parent, sub, sys.modules[full_name])
-            continue
-        init = _OPENAI_PROVIDER_DIR / f"{sub}.py"
-        if not init.exists():
-            continue
-        spec = importlib.util.spec_from_file_location(full_name, str(init))
-        if spec is None or spec.loader is None:
-            continue
-        sub_mod = importlib.util.module_from_spec(spec)
-        sub_mod.__package__ = "extensions.openai_provider"
-        sys.modules[full_name] = sub_mod
-        spec.loader.exec_module(sub_mod)
-        setattr(parent, sub, sub_mod)
+def _register_anthropic_provider_alias() -> None:
+    """Eager-exec + parent-binding for the Anthropic chat-completion provider.
+    Tests that exercise multimodal tool_result handling (screenshot + vision
+    pipeline) import via ``extensions.anthropic_provider.provider``."""
+    _register_extension_alias(
+        "anthropic_provider", _ANTHROPIC_PROVIDER_DIR,
+        submodules=("provider", "plugin"),
+    )
 
 
 def _register_browser_control_alias() -> None:
-    """Register extensions.browser_control → extensions/browser-control/.
-
-    Mirrors the voice_mode / skill_evolution pattern (eager exec on first
-    import) — the browser-control plugin dir is hyphenated, so tests
-    import the Python modules via the underscore form. The loop below
-    skips files that don't yet exist, so this stays correct as the
-    plugin grows.
-    """
-    _ensure_extensions_pkg()
-
-    if not _BROWSER_CONTROL_DIR.exists():
-        return
-
-    if "extensions.browser_control" not in sys.modules:
-        mod = types.ModuleType("extensions.browser_control")
-        mod.__path__ = [str(_BROWSER_CONTROL_DIR)]
-        mod.__package__ = "extensions.browser_control"
-        sys.modules["extensions.browser_control"] = mod
-        # Bind on parent so pytest's monkeypatch dotted-path resolver
-        # (which uses getattr) can find ``extensions.browser_control``.
-        sys.modules["extensions"].browser_control = mod
-
-    parent = sys.modules["extensions.browser_control"]
-    for sub in ("browser", "tools", "plugin"):
-        full_name = f"extensions.browser_control.{sub}"
-        if full_name in sys.modules:
-            setattr(parent, sub, sys.modules[full_name])
-            continue
-        init = _BROWSER_CONTROL_DIR / f"{sub}.py"
-        if not init.exists():
-            continue
-        spec = importlib.util.spec_from_file_location(full_name, str(init))
-        if spec is None or spec.loader is None:
-            continue
-        sub_mod = importlib.util.module_from_spec(spec)
-        sub_mod.__package__ = "extensions.browser_control"
-        sys.modules[full_name] = sub_mod
-        spec.loader.exec_module(sub_mod)
-        # Bind on parent so monkeypatch.setattr("extensions.browser_control.X", ...) works.
-        setattr(parent, sub, sub_mod)
+    """Eager-exec + parent-binding."""
+    _register_extension_alias(
+        "browser_control", _BROWSER_CONTROL_DIR,
+        submodules=("browser", "tools", "plugin"),
+    )
 
 
 def _register_affect_injection_alias() -> None:
-    """Register extensions.affect_injection → extensions/affect-injection/.
-
-    Prompt B (2026-04-28). Same eager-exec pattern as voice_mode /
-    browser_control: hyphenated dir → underscore Python module name.
-    """
-    _ensure_extensions_pkg()
-
-    if not _AFFECT_INJECTION_DIR.exists():
-        return
-
-    if "extensions.affect_injection" not in sys.modules:
-        mod = types.ModuleType("extensions.affect_injection")
-        mod.__path__ = [str(_AFFECT_INJECTION_DIR)]
-        mod.__package__ = "extensions.affect_injection"
-        sys.modules["extensions.affect_injection"] = mod
-        sys.modules["extensions"].affect_injection = mod
-
-    parent = sys.modules["extensions.affect_injection"]
-    for sub in ("provider", "plugin"):
-        full_name = f"extensions.affect_injection.{sub}"
-        if full_name in sys.modules:
-            setattr(parent, sub, sys.modules[full_name])
-            continue
-        init = _AFFECT_INJECTION_DIR / f"{sub}.py"
-        if not init.exists():
-            continue
-        spec = importlib.util.spec_from_file_location(full_name, str(init))
-        if spec is None or spec.loader is None:
-            continue
-        sub_mod = importlib.util.module_from_spec(spec)
-        sub_mod.__package__ = "extensions.affect_injection"
-        sys.modules[full_name] = sub_mod
-        spec.loader.exec_module(sub_mod)
-        setattr(parent, sub, sub_mod)
+    """Eager-exec + parent-binding."""
+    _register_extension_alias(
+        "affect_injection", _AFFECT_INJECTION_DIR,
+        submodules=("provider", "plugin"),
+    )
 
 
 def _register_screen_awareness_alias() -> None:
-    """Register extensions.screen_awareness → extensions/screen-awareness/.
-
-    Same lazy-exec pattern as voice_mode / browser_control / affect_injection
-    — hyphenated directory exposed as underscore module name. Tests import
-    via ``from extensions.screen_awareness.X import Y``; runtime lazily
-    execs each submodule on first attribute access.
-    """
-    _ensure_extensions_pkg()
-
-    if not _SCREEN_AWARENESS_DIR.exists():
-        return
-
-    if "extensions.screen_awareness" not in sys.modules:
-        mod = types.ModuleType("extensions.screen_awareness")
-        mod.__path__ = [str(_SCREEN_AWARENESS_DIR)]
-        mod.__package__ = "extensions.screen_awareness"
-        sys.modules["extensions.screen_awareness"] = mod
-        sys.modules["extensions"].screen_awareness = mod
-
-    parent = sys.modules["extensions.screen_awareness"]
-    for sub in (
-        "lock_detect",
-        "sensitive_apps",
-        "diff",
-        "ring_buffer",
-        "sensor",
-        "persist",
-        "recall_tool",
-        "injection_provider",
-        "state",
-        "plugin",
-    ):
-        full_name = f"extensions.screen_awareness.{sub}"
-        if full_name in sys.modules:
-            setattr(parent, sub, sys.modules[full_name])
-            continue
-        init = _SCREEN_AWARENESS_DIR / f"{sub}.py"
-        if not init.exists():
-            continue
-        spec = importlib.util.spec_from_file_location(full_name, str(init))
-        if spec is None or spec.loader is None:
-            continue
-        sub_mod = importlib.util.module_from_spec(spec)
-        sub_mod.__package__ = "extensions.screen_awareness"
-        sys.modules[full_name] = sub_mod
-        spec.loader.exec_module(sub_mod)
-        setattr(parent, sub, sub_mod)
+    """Eager-exec + parent-binding."""
+    _register_extension_alias(
+        "screen_awareness", _SCREEN_AWARENESS_DIR,
+        submodules=(
+            "lock_detect", "sensitive_apps", "diff", "ring_buffer",
+            "sensor", "persist", "recall_tool", "injection_provider",
+            "state", "plugin",
+        ),
+    )
 
 
 _register_coding_harness_alias()
@@ -440,6 +259,8 @@ _register_ambient_sensors_alias()
 _register_skill_evolution_alias()
 _register_voice_mode_alias()
 _register_openai_provider_alias()
+_register_gemini_provider_alias()
+_register_anthropic_provider_alias()
 _register_browser_control_alias()
 _register_affect_injection_alias()
 _register_screen_awareness_alias()

@@ -219,23 +219,21 @@ class AnthropicArtifactExtractor:
         artifact = content[:4000]
         prompt = _EXTRACTION_PROMPT.format(artifact=artifact)
         try:
-            import anthropic  # type: ignore[import-not-found]
+            from opencomputer.agent.anthropic_client import (
+                build_anthropic_sync_client,
+            )
         except ImportError:
             raise ExtractorUnavailableError(
                 "anthropic SDK not installed; run 'pip install anthropic'"
             ) from None
 
-        kwargs: dict[str, Any] = {
-            "api_key": self._api_key or os.getenv("ANTHROPIC_API_KEY"),
-            "timeout": self.timeout_seconds,
-        }
-        # Proxy / Claude Router support — Saksham's setup uses this.
-        base_url = os.getenv("ANTHROPIC_BASE_URL")
-        if base_url:
-            kwargs["base_url"] = base_url
-
+        api_key = self._api_key or os.getenv("ANTHROPIC_API_KEY") or ""
         try:
-            client = anthropic.Anthropic(**kwargs)
+            # Goes through the shared client builder so this path inherits
+            # the same proxy + bearer-mode handling as chat / batch / vision.
+            client = build_anthropic_sync_client(
+                api_key, timeout=self.timeout_seconds,
+            )
             response = client.messages.create(
                 model=self.model,
                 max_tokens=512,

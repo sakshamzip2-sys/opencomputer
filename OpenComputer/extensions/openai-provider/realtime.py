@@ -23,9 +23,16 @@ from typing import Any
 from urllib.parse import quote
 
 import websockets
-from extensions.openai_provider.realtime_helpers import (
-    read_realtime_error_detail,
-)
+from websockets.exceptions import ConnectionClosed
+
+try:
+    from realtime_helpers import (  # plugin-loader mode (sibling import)
+        read_realtime_error_detail,
+    )
+except ImportError:  # pragma: no cover — package mode (tests via conftest alias)
+    from extensions.openai_provider.realtime_helpers import (
+        read_realtime_error_detail,
+    )
 
 from plugin_sdk.realtime_voice import (
     BaseRealtimeVoiceBridge,
@@ -99,6 +106,11 @@ class OpenAIRealtimeBridge(BaseRealtimeVoiceBridge):
         self._tool_buffers: dict[str, dict[str, str]] = {}
         self._session_ready_fired = False
         self._read_task: asyncio.Task | None = None
+        # Captured at connect time so cross-thread callers (e.g. sounddevice
+        # mic callbacks) can dispatch back onto the asyncio loop via
+        # ``asyncio.run_coroutine_threadsafe``. Without this the audio
+        # thread's call to ``_send_event`` would silently drop chunks.
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # ─── public surface ──────────────────────────────────────────────
 
@@ -153,11 +165,20 @@ class OpenAIRealtimeBridge(BaseRealtimeVoiceBridge):
         self._session_configured = False
         ws = self._ws
         self._ws = None
-        if ws is not None:
+        loop = self._loop
+        if ws is None or loop is None or loop.is_closed():
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            loop.create_task(ws.close())
+        else:
             try:
-                asyncio.get_running_loop().create_task(ws.close())
+                asyncio.run_coroutine_threadsafe(ws.close(), loop)
             except RuntimeError:
-                pass  # no running loop — already torn down
+                pass  # already torn down
 
     def is_connected(self) -> bool:
         return self._connected and self._session_configured
@@ -182,6 +203,12 @@ class OpenAIRealtimeBridge(BaseRealtimeVoiceBridge):
             if self._on_error:
                 self._on_error(exc if isinstance(exc, Exception) else Exception(str(exc)))
             return
+        # Capture the running loop so cross-thread send paths (mic
+        # callback on the sounddevice audio thread) can dispatch back
+        # onto it via ``run_coroutine_threadsafe``. Stored AFTER the
+        # successful connect so a connect failure doesn't leave a stale
+        # reference for ``close()`` to chase.
+        self._loop = asyncio.get_running_loop()
         self._connected = True
         self._session_configured = False
         self._reconnect_attempts = 0
@@ -200,7 +227,7 @@ class OpenAIRealtimeBridge(BaseRealtimeVoiceBridge):
                     _log.warning("realtime event parse failed: %s", exc)
                     continue
                 self._handle_event(event)
-        except websockets.exceptions.ConnectionClosed:
+        except ConnectionClosed:
             pass
         # The original TS used a try/finally; Python ruff (B012) flags
         # ``return`` inside a finally block. Restructure: cleanup in the
@@ -267,14 +294,32 @@ class OpenAIRealtimeBridge(BaseRealtimeVoiceBridge):
         self._send_event({"type": "session.update", "session": session})
 
     def _send_event(self, event: dict[str, Any]) -> None:
+        """Schedule a JSON frame on the WebSocket from any thread.
+
+        The mic callback runs on sounddevice's audio thread, so this MUST
+        work from a non-loop thread. We dispatch via the loop captured
+        in ``_do_connect``: same-thread → ``loop.create_task``,
+        cross-thread → ``asyncio.run_coroutine_threadsafe``. The previous
+        single-path ``asyncio.get_running_loop().create_task(...)``
+        silently dropped frames whenever it was called off-loop.
+        """
         ws = self._ws
-        if ws is None:
+        loop = self._loop
+        if ws is None or loop is None or loop.is_closed():
             return
+        payload = json.dumps(event)
         try:
-            asyncio.get_running_loop().create_task(ws.send(json.dumps(event)))
+            running = asyncio.get_running_loop()
         except RuntimeError:
-            # No running loop — drop. Caller can retry via reconnect.
-            pass
+            running = None
+        if running is loop:
+            loop.create_task(ws.send(payload))
+        else:
+            try:
+                asyncio.run_coroutine_threadsafe(ws.send(payload), loop)
+            except RuntimeError:
+                # Loop closed between is_closed() and submission.
+                pass
 
     # ─── inbound ─────────────────────────────────────────────────────
 

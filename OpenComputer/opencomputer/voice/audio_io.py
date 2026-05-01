@@ -26,24 +26,54 @@ except (ImportError, OSError):  # OSError: PortAudio missing
     sd = None  # type: ignore[assignment]
 
 
-_SAMPLE_RATE = 16_000
+_INPUT_SAMPLE_RATE = 16_000  # mic — every realtime provider so far accepts 16 kHz
+_DEFAULT_OUTPUT_SAMPLE_RATE = 16_000  # speaker — Gemini ships 24 kHz, others vary
 _CHANNELS = 1
 _DTYPE = "int16"
-# 50ms chunk — trades 30ms barge-in latency for fewer WS frames; tune to
-# 20ms (320 samples) if barge-in feels sluggish.
-_BLOCK_SIZE = 800
+# Default block size: 800 frames @ 16 kHz = 50ms. Latency-tuned callers
+# (the realtime CLI's --block-size-ms) override to ~320 = 20ms which
+# trades ~2.5× more WS frames for ~30ms shaved off mic-buffer latency
+# AND finer-grained VAD silence detection on the server side.
+_DEFAULT_BLOCK_SIZE = 800
 
 
 class LocalAudioIO:
-    """Mic capture + speaker playback for realtime voice."""
+    """Mic capture + speaker playback for realtime voice.
 
-    def __init__(self, *, on_mic_chunk: Callable[[bytes], None]) -> None:
+    ``output_sample_rate`` defaults to 16 kHz (matches OpenAI Realtime).
+    Override to 24 kHz for Gemini Live, or whatever rate the provider
+    streams. Mic input is locked at 16 kHz — every realtime provider so
+    far accepts that, and resampling on the way IN belongs in the bridge
+    if a future provider demands something different.
+
+    ``block_size`` is the per-frame sample count for both streams. 800
+    (50ms) is the latency-tolerant default. Drop to 320 (20ms) for
+    snappier turn-taking — costs more WS frames but reduces both the
+    mic-buffer wait AND the granularity at which the server VAD can
+    detect silence boundaries.
+    """
+
+    def __init__(
+        self,
+        *,
+        on_mic_chunk: Callable[[bytes], None],
+        output_sample_rate: int = _DEFAULT_OUTPUT_SAMPLE_RATE,
+        block_size: int = _DEFAULT_BLOCK_SIZE,
+    ) -> None:
+        # Validate integer args first — they don't need PortAudio so
+        # bad values fail fast even on dev machines without sounddevice.
+        if output_sample_rate <= 0:
+            raise ValueError(f"output_sample_rate must be positive, got {output_sample_rate}")
+        if block_size <= 0:
+            raise ValueError(f"block_size must be positive, got {block_size}")
         if sd is None:
             raise RuntimeError(
                 "sounddevice not available. Install with "
                 "`pip install opencomputer[voice]` and ensure PortAudio is on the system."
             )
         self._on_mic_chunk = on_mic_chunk
+        self._output_sample_rate = output_sample_rate
+        self._block_size = block_size
         self._input_stream = None
         self._output_stream = None
         self._started = False
@@ -58,17 +88,17 @@ class LocalAudioIO:
         if self._started:
             return
         self._input_stream = sd.RawInputStream(
-            samplerate=_SAMPLE_RATE,
+            samplerate=_INPUT_SAMPLE_RATE,
             channels=_CHANNELS,
             dtype=_DTYPE,
-            blocksize=_BLOCK_SIZE,
+            blocksize=self._block_size,
             callback=self._mic_callback,
         )
         self._output_stream = sd.RawOutputStream(
-            samplerate=_SAMPLE_RATE,
+            samplerate=self._output_sample_rate,
             channels=_CHANNELS,
             dtype=_DTYPE,
-            blocksize=_BLOCK_SIZE,
+            blocksize=self._block_size,
         )
         self._input_stream.start()
         self._output_stream.start()
@@ -113,10 +143,10 @@ class LocalAudioIO:
         except Exception:  # noqa: BLE001 — best effort
             pass
         self._output_stream = sd.RawOutputStream(
-            samplerate=_SAMPLE_RATE,
+            samplerate=self._output_sample_rate,
             channels=_CHANNELS,
             dtype=_DTYPE,
-            blocksize=_BLOCK_SIZE,
+            blocksize=self._block_size,
         )
         self._output_stream.start()
 

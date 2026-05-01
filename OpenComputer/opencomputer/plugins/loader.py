@@ -38,8 +38,18 @@ logger = logging.getLogger("opencomputer.plugins.loader")
 
 # Common short names plugins use for their sibling files. Clearing these
 # between plugin loads prevents two plugins (both with a top-level
-# `provider.py`, say) from sharing the first-loaded module.
-_PLUGIN_LOCAL_NAMES = ("provider", "adapter", "plugin", "handlers", "hooks")
+# ``provider.py``, ``realtime.py``, etc.) from sharing the first-loaded
+# module via ``sys.modules`` cache. Adding a new sibling filename used
+# by more than one plugin? Add it here too.
+_PLUGIN_LOCAL_NAMES = (
+    "provider",
+    "adapter",
+    "plugin",
+    "handlers",
+    "hooks",
+    "realtime",          # openai-provider, gemini-provider, future Anthropic
+    "realtime_helpers",  # ditto — pure-helpers sidecar per realtime bridge
+)
 
 
 def _clear_plugin_local_cache() -> None:
@@ -586,6 +596,21 @@ def _validate_provider_config(name: str, provider: Any) -> None:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _RealtimeBridgeRegistration:
+    """Internal record stored by ``register_realtime_bridge``.
+
+    Holds the bridge factory PLUS the metadata the CLI needs to size
+    audio I/O and validate environment for that provider — without the
+    CLI having to maintain a hardcoded provider table. Frozen so plugins
+    can't mutate after registration.
+    """
+
+    factory: Any
+    env_var: str | None = None
+    audio_sink_kwargs: dict[str, Any] = field(default_factory=dict)
+
+
 class PluginAPI:
     """Passed to each plugin's register() — the narrow runtime surface."""
 
@@ -667,6 +692,15 @@ class PluginAPI:
         # no-ops. Gateway calls ``_bind_dispatch(disp)`` from
         # :meth:`Gateway.__init__` right after constructing ``Dispatch``.
         self._dispatch: Any = None
+        # Realtime voice bridge registrations (e.g. OpenAI, Gemini,
+        # future Anthropic). Keyed by short provider name ("openai",
+        # "gemini"). Each entry is a ``_RealtimeBridgeRegistration``
+        # bundling the factory with the env var the CLI must check and
+        # any audio-sink kwargs (e.g. 24 kHz output for Gemini).
+        # ``opencomputer voice realtime --provider <name>`` looks up the
+        # registration here — replaces the older hardcoded if/elif
+        # dispatch + ``_PROVIDER_DEFAULTS`` table in cli_voice.py.
+        self._realtime_bridge_registrations: dict[str, _RealtimeBridgeRegistration] = {}
 
     @property
     def activation_source(self) -> PluginActivationSource:
@@ -880,6 +914,72 @@ class PluginAPI:
 
     def register_channel(self, name: str, adapter: Any) -> None:
         self.channels[name] = adapter
+
+    def register_realtime_bridge(
+        self,
+        name: str,
+        factory: Any,
+        *,
+        env_var: str | None = None,
+        audio_sink_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        """Register a realtime-voice bridge factory under ``name``.
+
+        ``factory`` is a callable ``factory(*, callbacks, api_key, model,
+        voice, instructions, **kwargs) -> BaseRealtimeVoiceBridge``. The
+        CLI's ``voice realtime --provider <name>`` looks the factory up
+        and invokes it.
+
+        ``env_var`` is the environment variable the CLI checks for the
+        provider's API key (e.g. ``"OPENAI_API_KEY"``,
+        ``"GEMINI_API_KEY"``). ``None`` means no env validation — the
+        plugin is responsible for sourcing credentials another way.
+
+        ``audio_sink_kwargs`` is forwarded to ``LocalAudioIO`` so the
+        speaker stream matches the provider's output rate (e.g.
+        ``{"output_sample_rate": 24_000}`` for Gemini). Defaults to
+        ``{}`` (16 kHz, OpenAI's native rate).
+
+        Re-registering an existing name overwrites the prior entry —
+        matches ``register_channel`` semantics. Plugins SHOULD pick
+        unique short names ("openai", "gemini", "anthropic"); collisions
+        are silent so user-shipped plugins can override bundled defaults.
+        """
+        self._realtime_bridge_registrations[name] = _RealtimeBridgeRegistration(
+            factory=factory,
+            env_var=env_var,
+            # Defensive copy so plugin code can't mutate the stored entry.
+            audio_sink_kwargs=dict(audio_sink_kwargs or {}),
+        )
+
+    def get_realtime_bridge_registration(self, name: str) -> _RealtimeBridgeRegistration:
+        """Return the full registration for ``name`` or raise KeyError.
+
+        Use this when the caller needs the env var or audio-sink kwargs
+        in addition to the factory. The CLI's ``voice realtime`` reads
+        all three fields from one lookup.
+        """
+        try:
+            return self._realtime_bridge_registrations[name]
+        except KeyError as exc:
+            available = sorted(self._realtime_bridge_registrations)
+            raise KeyError(
+                f"no realtime-voice bridge registered for {name!r}; "
+                f"available: {available}"
+            ) from exc
+
+    def get_realtime_bridge_factory(self, name: str) -> Any:
+        """Return just the factory callable for ``name``.
+
+        Convenience for callers that don't need the env var or audio
+        kwargs. Equivalent to
+        ``get_realtime_bridge_registration(name).factory``.
+        """
+        return self.get_realtime_bridge_registration(name).factory
+
+    def realtime_bridge_names(self) -> list[str]:
+        """List registered realtime-voice bridge names."""
+        return sorted(self._realtime_bridge_registrations)
 
     def register_injection_provider(self, provider: Any) -> None:
         """Register a DynamicInjectionProvider (plan mode, yolo mode, etc.)."""

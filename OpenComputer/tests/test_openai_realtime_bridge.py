@@ -264,3 +264,63 @@ async def test_submit_tool_result_creates_function_call_output() -> None:
         if json.loads(s).get("type") == "response.create"
     ]
     assert response_creates  # bridge triggers a new response after tool result
+
+
+@pytest.mark.asyncio
+async def test_send_audio_from_non_loop_thread_dispatches_via_runcoroutinethreadsafe() -> None:
+    """Mic chunks called from sounddevice's audio thread must reach the WS.
+
+    Regression for the cross-thread asyncio bug: the previous
+    single-path ``asyncio.get_running_loop().create_task(...)`` raised
+    ``RuntimeError`` when called from a non-loop thread (e.g. the
+    sounddevice mic callback) and silently dropped the chunk. After the
+    fix, ``_send_event`` detects the cross-thread case and dispatches
+    via ``asyncio.run_coroutine_threadsafe`` onto the loop captured at
+    connect time.
+    """
+    import threading
+
+    fake_ws = _FakeWS()
+
+    async def _connect_stub(url: str, **_: Any) -> _FakeWS:
+        return fake_ws
+
+    ready_evt = asyncio.Event()
+    b = _make_bridge({"on_ready": lambda: ready_evt.set()})
+    b._connect_websocket = _connect_stub  # type: ignore[attr-defined]
+
+    task = asyncio.create_task(b.connect())
+    await asyncio.sleep(0.02)
+    fake_ws.push({"type": "session.created"})
+    fake_ws.push({"type": "session.updated"})
+    await asyncio.wait_for(ready_evt.wait(), timeout=1.0)
+
+    chunk = b"\xde\xad\xbe\xef"
+
+    def worker() -> None:
+        b.send_audio(chunk)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(timeout=1.0)
+    assert not t.is_alive(), "worker thread should have returned"
+
+    # Allow the loop to drain the threadsafe-scheduled coroutine.
+    for _ in range(20):
+        await asyncio.sleep(0.02)
+        appends = [
+            json.loads(s) for s in fake_ws.sent
+            if json.loads(s).get("type") == "input_audio_buffer.append"
+        ]
+        if appends:
+            break
+    else:
+        pytest.fail("audio frame never reached fake WS — cross-thread send dropped")
+
+    assert base64.b64decode(appends[0]["audio"]) == chunk
+
+    b.close()
+    try:
+        await asyncio.wait_for(task, timeout=1.0)
+    except asyncio.CancelledError:
+        pass

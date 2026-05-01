@@ -1,0 +1,26 @@
+{
+  "id": "gemini-provider",
+  "name": "Gemini Provider",
+  "version": "0.1.0",
+  "description": "Google Gemini Live realtime voice bridge (chat-completion provider TBD).",
+  "author": "OpenComputer",
+  "license": "MIT",
+  "kind": "provider",
+  "entry": "plugin",
+  "tool_names": [],
+  "model_support": {
+    "model_prefixes": ["gemini-", "models/gemini-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "gemini",
+        "auth_methods": ["api_key"],
+        "env_vars": ["GEMINI_API_KEY"],
+        "label": "Google Gemini",
+        "default_model": "models/gemini-2.5-flash-native-audio-preview-12-2025",
+        "signup_url": "https://aistudio.google.com/apikey"
+      }
+    ]
+  }
+}

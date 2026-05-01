@@ -39,16 +39,32 @@ class RealtimeVoiceTool:
 class RealtimeVoiceToolCallEvent:
     """Emitted by the bridge when the model invokes a tool mid-stream.
 
-    The bridge buffers ``response.function_call_arguments.delta`` chunks
-    and assembles this event when ``response.function_call_arguments.done``
-    arrives. The session orchestrator dispatches via ``ToolRegistry`` and
-    calls ``bridge.submit_tool_result(call_id, result)`` on completion.
+    The bridge buffers any provider-specific delta/buffering protocol and
+    assembles this event when the call is complete. The session
+    orchestrator dispatches via ``ToolRegistry`` and calls
+    ``bridge.submit_tool_result(call_id, result)`` on completion.
+
+    Cross-provider field set:
+
+    * ``call_id`` — universal id. Used by ``submit_tool_result`` to
+      route results back. Required.
+    * ``name``, ``args`` — what to call and with what. Required.
+    * ``item_id`` — OpenAI's separate conversation-item id. ``None`` for
+      providers that don't have a separate item concept (Gemini, hypothetical
+      Anthropic). Consumers SHOULD prefer ``call_id`` when they need an id;
+      reach for ``item_id`` only when interoperating with OpenAI's
+      conversation-item APIs.
+    * ``extra`` — opaque per-provider dict for fields that don't fit the
+      cross-provider shape (OpenAI's ``response_id``, Gemini's
+      ``scheduling`` hint). Cross-provider consumers MUST treat it as
+      optional metadata — never branch on its contents from shared code.
     """
 
-    item_id: str
     call_id: str
     name: str
     args: Any  # decoded JSON, typically dict
+    item_id: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 class BaseRealtimeVoiceBridge(ABC):

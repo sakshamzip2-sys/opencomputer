@@ -38,6 +38,28 @@ def _make_transport(response_text: str = "Quick answer.") -> httpx.MockTransport
     return transport
 
 
+def _patch_btw_anthropic_client(monkeypatch, transport: httpx.MockTransport) -> None:
+    """Stub the shared Anthropic client builder /btw uses to talk to the API.
+
+    Post-refactor /btw goes through the same ``AsyncAnthropic`` SDK as
+    chat (via ``opencomputer.agent.anthropic_client``), so tests inject
+    the ``MockTransport`` into the SDK's internal httpx client by
+    replacing the builder.
+    """
+    from anthropic import AsyncAnthropic
+
+    def _stub(api_key: str, **_kwargs) -> AsyncAnthropic:
+        return AsyncAnthropic(
+            api_key=api_key,
+            http_client=httpx.AsyncClient(transport=transport, timeout=60.0),
+        )
+
+    monkeypatch.setattr(
+        "opencomputer.agent.anthropic_client.build_anthropic_async_client",
+        _stub,
+    )
+
+
 class _FakeDB:
     def __init__(self) -> None:
         self.messages: dict[str, list] = {}
@@ -145,10 +167,7 @@ async def test_no_api_key_returns_clear_error(monkeypatch):
 @pytest.mark.asyncio
 async def test_basic_call_returns_response(monkeypatch):
     transport = _make_transport("The mTLS difference: ...")
-    monkeypatch.setattr(
-        "opencomputer.agent.slash_commands_impl.btw_cmd._make_async_client",
-        lambda timeout=60.0: httpx.AsyncClient(transport=transport, timeout=timeout),
-    )
+    _patch_btw_anthropic_client(monkeypatch, transport)
     cmd = BtwCommand(api_key="test")
     result = await cmd.execute("what's mTLS?", _runtime())
     assert "mTLS" in result.output
@@ -158,10 +177,7 @@ async def test_basic_call_returns_response(monkeypatch):
 @pytest.mark.asyncio
 async def test_includes_parent_session_context(monkeypatch):
     transport = _make_transport()
-    monkeypatch.setattr(
-        "opencomputer.agent.slash_commands_impl.btw_cmd._make_async_client",
-        lambda timeout=60.0: httpx.AsyncClient(transport=transport, timeout=timeout),
-    )
+    _patch_btw_anthropic_client(monkeypatch, transport)
     db = _FakeDB()
     db.messages["s1"] = [
         SimpleNamespace(role="user", content="we were debugging the auth flow"),
@@ -182,10 +198,7 @@ async def test_includes_parent_session_context(monkeypatch):
 async def test_request_body_does_not_include_tools(monkeypatch):
     """The whole POINT of /btw is no tools."""
     transport = _make_transport()
-    monkeypatch.setattr(
-        "opencomputer.agent.slash_commands_impl.btw_cmd._make_async_client",
-        lambda timeout=60.0: httpx.AsyncClient(transport=transport, timeout=timeout),
-    )
+    _patch_btw_anthropic_client(monkeypatch, transport)
     cmd = BtwCommand(api_key="test")
     await cmd.execute("anything", _runtime())
     sent = transport.captured["body"]
@@ -196,10 +209,7 @@ async def test_request_body_does_not_include_tools(monkeypatch):
 async def test_works_outside_agent_loop_turn(monkeypatch):
     """No session context — still works, just without history."""
     transport = _make_transport("answer without context")
-    monkeypatch.setattr(
-        "opencomputer.agent.slash_commands_impl.btw_cmd._make_async_client",
-        lambda timeout=60.0: httpx.AsyncClient(transport=transport, timeout=timeout),
-    )
+    _patch_btw_anthropic_client(monkeypatch, transport)
     cmd = BtwCommand(api_key="test")
     rt = RuntimeContext(custom={})  # no session_id/session_db
     result = await cmd.execute("hi", rt)
@@ -213,10 +223,7 @@ async def test_does_not_persist_to_session_db(monkeypatch):
     tried to write, AttributeError would surface.
     """
     transport = _make_transport()
-    monkeypatch.setattr(
-        "opencomputer.agent.slash_commands_impl.btw_cmd._make_async_client",
-        lambda timeout=60.0: httpx.AsyncClient(transport=transport, timeout=timeout),
-    )
+    _patch_btw_anthropic_client(monkeypatch, transport)
     db = _FakeDB()
     db.messages["s1"] = [SimpleNamespace(role="user", content="prior")]
     initial_msg_count = len(db.messages["s1"])
@@ -231,12 +238,8 @@ async def test_api_failure_surfaces_error(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, json={"detail": "rate limited"})
 
-    monkeypatch.setattr(
-        "opencomputer.agent.slash_commands_impl.btw_cmd._make_async_client",
-        lambda timeout=60.0: httpx.AsyncClient(
-            transport=httpx.MockTransport(handler), timeout=timeout
-        ),
-    )
+    transport = httpx.MockTransport(handler)
+    _patch_btw_anthropic_client(monkeypatch, transport)
     cmd = BtwCommand(api_key="test")
     result = await cmd.execute("anything", _runtime())
     assert "failed" in result.output.lower() or "429" in result.output
@@ -245,14 +248,17 @@ async def test_api_failure_surfaces_error(monkeypatch):
 @pytest.mark.asyncio
 async def test_empty_response_is_surfaced_as_error(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"content": []})
+        # Anthropic Message with empty content array — SDK accepts this
+        # shape; the BtwCommand surfaces it as "no text content".
+        return httpx.Response(200, json={
+            "id": "msg_x", "type": "message", "role": "assistant",
+            "model": "claude-haiku-4-5", "content": [],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 0},
+        })
 
-    monkeypatch.setattr(
-        "opencomputer.agent.slash_commands_impl.btw_cmd._make_async_client",
-        lambda timeout=60.0: httpx.AsyncClient(
-            transport=httpx.MockTransport(handler), timeout=timeout
-        ),
-    )
+    transport = httpx.MockTransport(handler)
+    _patch_btw_anthropic_client(monkeypatch, transport)
     cmd = BtwCommand(api_key="test")
     result = await cmd.execute("anything", _runtime())
     assert "no text content" in result.output.lower()

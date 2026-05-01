@@ -97,9 +97,9 @@ def _build_anthropic_request(req: BatchRequest) -> dict:
 
 async def submit_batch(requests: list[BatchRequest], *, api_key: str | None = None) -> str:
     """Submit a batch and return its id. Doesn't wait for completion."""
-    import anthropic
-
-    client = anthropic.AsyncAnthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
+    from opencomputer.agent.anthropic_client import build_anthropic_async_client
+    resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY") or ""
+    client = build_anthropic_async_client(resolved_key)
     entries = [_build_anthropic_request(r) for r in requests]
     batch = await client.messages.batches.create(requests=entries)
     return batch.id
@@ -113,9 +113,9 @@ async def poll_batch(
     on_status: callable | None = None,
 ) -> str:
     """Poll a batch until it leaves the in_progress state. Returns final status."""
-    import anthropic
-
-    client = anthropic.AsyncAnthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
+    from opencomputer.agent.anthropic_client import build_anthropic_async_client
+    resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY") or ""
+    client = build_anthropic_async_client(resolved_key)
     while True:
         batch = await client.messages.batches.retrieve(batch_id)
         if on_status:
@@ -127,9 +127,9 @@ async def poll_batch(
 
 async def fetch_results(batch_id: str, *, api_key: str | None = None) -> list[BatchResult]:
     """Fetch all results once a batch is complete."""
-    import anthropic
-
-    client = anthropic.AsyncAnthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
+    from opencomputer.agent.anthropic_client import build_anthropic_async_client
+    resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY") or ""
+    client = build_anthropic_async_client(resolved_key)
     out: list[BatchResult] = []
     async for entry in await client.messages.batches.results(batch_id):
         result_obj = entry.result
