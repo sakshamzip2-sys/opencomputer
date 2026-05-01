@@ -225,8 +225,13 @@ def export_snapshot(
             f"snapshot {snapshot_id!r} not found in {profile_home}"
         )
     if dest_path is None:
+        # Use real_user_home so the snapshot tarball lands in the user's
+        # actual ~/, not <profile>/home/ — otherwise the user can't find
+        # their snapshot after running `oc snapshot export` from inside
+        # an active profile.
+        from opencomputer.profiles import real_user_home
         ts = int(_time.time())
-        dest_path = Path.home() / f"oc-snapshot-{snapshot_id}-{ts}.tar.gz"
+        dest_path = real_user_home() / f"oc-snapshot-{snapshot_id}-{ts}.tar.gz"
     dest_path = Path(dest_path)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(dest_path, "w:gz") as tf:
