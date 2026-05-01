@@ -16,9 +16,10 @@ import json
 import logging
 import time
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Literal
 
 logger = logging.getLogger("opencomputer.profile_analysis_daily")
 

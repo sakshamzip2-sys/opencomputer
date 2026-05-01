@@ -134,7 +134,9 @@ def test_cache_round_trip(tmp_path: Path, monkeypatch) -> None:
     """save_cache writes JSON; load_cache reads it back."""
     monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
     from opencomputer.profile_analysis_daily import (
-        DailySuggestion, save_cache, load_cache,
+        DailySuggestion,
+        load_cache,
+        save_cache,
     )
     suggestions = [
         DailySuggestion(
@@ -172,7 +174,9 @@ def test_load_cache_returns_none_on_corrupt(tmp_path: Path, monkeypatch) -> None
 def test_dismissal_blocks_for_7_days(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
     from opencomputer.profile_analysis_daily import (
-        save_cache, record_dismissal, is_dismissed,
+        is_dismissed,
+        record_dismissal,
+        save_cache,
     )
     save_cache(suggestions=[], dismissed=[])
     record_dismissal("work")
@@ -199,7 +203,9 @@ def test_dismissal_replaces_existing_entry(tmp_path: Path, monkeypatch) -> None:
     """Re-dismissing 'work' shouldn't accumulate duplicate entries."""
     monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
     from opencomputer.profile_analysis_daily import (
-        save_cache, record_dismissal, load_cache,
+        load_cache,
+        record_dismissal,
+        save_cache,
     )
     save_cache(suggestions=[], dismissed=[])
     record_dismissal("work")
