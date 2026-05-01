@@ -21,6 +21,7 @@ import hashlib
 import logging
 import time
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from opencomputer.agent.loop import AgentLoop
@@ -32,6 +33,7 @@ from plugin_sdk.runtime_context import (
 )
 
 if TYPE_CHECKING:
+    from opencomputer.gateway.agent_router import AgentRouter
     from opencomputer.gateway.channel_directory import ChannelDirectory
     from opencomputer.plugins.loader import PluginAPI
     from plugin_sdk.consent import CapabilityClaim
@@ -127,14 +129,49 @@ class Dispatch:
 
     def __init__(
         self,
-        loop: AgentLoop,
+        loop: AgentLoop | None = None,
         plugin_api: PluginAPI | None = None,
         channel_directory: ChannelDirectory | None = None,
         config: dict[str, Any] | None = None,
+        *,
+        router: AgentRouter | None = None,
     ) -> None:
-        self.loop = loop
-        # One lock per chat_id — prevents interleaved turns from the same chat
-        self._locks: dict[str, asyncio.Lock] = {}
+        # Phase 2 multi-routing: accept either ``loop=`` (legacy single
+        # loop) or ``router=`` (per-profile cache). Exactly one of the
+        # two must be set.
+        if router is not None and loop is not None:
+            raise ValueError("Dispatch: pass either loop or router, not both")
+        if router is None and loop is None:
+            raise ValueError("Dispatch: pass either loop or router")
+
+        if router is None:
+            # Legacy single-loop path — wrap into a one-entry router
+            # seeded with the loop as ``"default"`` so the rest of the
+            # code path is uniform (no per-call branching). The lambda
+            # is a no-op fallback that should never fire because the
+            # ``"default"`` slot is pre-populated below; if a future
+            # caller asks for a non-default profile through this
+            # legacy router it'll get the same loop, which preserves
+            # current behaviour.
+            from opencomputer.gateway.agent_router import AgentRouter
+
+            assert loop is not None  # for mypy after the guard above
+            router = AgentRouter(
+                loop_factory=lambda _pid, _home: loop,
+                profile_home_resolver=lambda _pid: Path(),
+            )
+            router._loops["default"] = loop  # pre-populate
+        self._router = router
+        # ``self.loop`` preserves the legacy attribute access path.
+        # When the caller passed ``router=`` directly we expose
+        # whatever the seeded "default" loop is (if any) so existing
+        # code that reads ``dispatch.loop`` still works for the common
+        # single-profile case. Multi-profile callers reading this
+        # attribute should migrate to ``router.get_or_load(profile_id)``.
+        self.loop = loop if loop is not None else router._loops.get("default")
+        # Per-(profile_id, session_id) lock map — multi-profile correct.
+        # Same chat across two profiles no longer interleaves.
+        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         # Adapter reference (set by Gateway) so we can send typing indicators
         self._adapters_by_platform: dict = {}
         # Task I.9: the shared PluginAPI whose ``in_request`` we wrap
@@ -352,7 +389,22 @@ class Dispatch:
         ``handle_message`` previously did inline before the burst-
         aware preamble was added. Same return contract — assistant
         text or None.
+
+        Phase 2 multi-routing: resolves ``profile_id`` (always
+        ``"default"`` until Phase 3 adds the ``BindingResolver``),
+        fetches the per-profile ``AgentLoop`` via
+        ``self._router.get_or_load(profile_id)``, and wraps the
+        ``run_conversation`` call in
+        ``set_profile(profile_home)`` so ``_home()`` and PluginAPI
+        lazy properties resolve to the right profile inside the
+        request scope.
         """
+        # Phase 2: per-event profile resolution. Default-only until
+        # Phase 3 wires the BindingResolver.
+        profile_id = "default"
+        loop = await self._router.get_or_load(profile_id)
+        profile_home = self._router._profile_home_resolver(profile_id)
+
         # Round 2a P-5 — record the (adapter, chat_id) binding so a
         # consent prompt later in this turn can find the right surface
         # to ask the user on. Best-effort: missing adapter = legacy
@@ -378,7 +430,11 @@ class Dispatch:
                     adapter.on_processing_start(event.chat_id, message_id)
                 )
             )
-        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        # Per-(profile_id, session_id) lock keys make multi-profile
+        # correct: same chat_id across two profiles no longer
+        # interleaves through the same lock.
+        lock_key = (profile_id, session_id)
+        lock = self._locks.setdefault(lock_key, asyncio.Lock())
         outcome: ProcessingOutcome = ProcessingOutcome.SUCCESS
         async with lock:
             # Start a typing heartbeat (Telegram's typing state expires after
@@ -411,23 +467,29 @@ class Dispatch:
             # ``prefetched`` memory) reads these and appends them to the
             # composed system prompt — staying out of the FROZEN base
             # so prefix-cache hits on turn 2+ remain valid.
-            runtime = self._build_channel_runtime(event, adapter)
+            runtime = self._build_channel_runtime(event, adapter, loop)
+            # Phase 2 audit G1: bind the per-task ``current_profile_home``
+            # ContextVar around ``run_conversation`` so ``_home()`` and
+            # any PluginAPI lazy paths resolve to the right profile for
+            # the duration of this dispatch.
+            from plugin_sdk.profile_context import set_profile
             try:
-                if self._plugin_api is not None:
-                    with self._plugin_api.in_request(request_ctx):
-                        result = await self.loop.run_conversation(
+                with set_profile(profile_home):
+                    if self._plugin_api is not None:
+                        with self._plugin_api.in_request(request_ctx):
+                            result = await loop.run_conversation(
+                                user_message=user_message,
+                                session_id=session_id,
+                                images=images,
+                                runtime=runtime,
+                            )
+                    else:
+                        result = await loop.run_conversation(
                             user_message=user_message,
                             session_id=session_id,
                             images=images,
                             runtime=runtime,
                         )
-                else:
-                    result = await self.loop.run_conversation(
-                        user_message=user_message,
-                        session_id=session_id,
-                        images=images,
-                        runtime=runtime,
-                    )
                 return result.final_message.content or None
             except Exception as e:  # noqa: BLE001
                 # Always log full traceback for debugging; user only
@@ -456,7 +518,10 @@ class Dispatch:
                     )
 
     def _build_channel_runtime(
-        self, event: MessageEvent, adapter: Any
+        self,
+        event: MessageEvent,
+        adapter: Any,
+        loop: AgentLoop | None = None,
     ) -> RuntimeContext:
         """Resolve per-channel prompt + skill bindings into a RuntimeContext.
 
@@ -470,6 +535,11 @@ class Dispatch:
         can splice them into the per-turn system prompt without
         another disk hop. Failure to resolve is silent — default
         behaviour (no channel context) is preserved.
+
+        Phase 2 multi-routing: ``loop`` is the per-profile
+        ``AgentLoop`` resolved by ``_do_dispatch`` (so the right
+        profile's memory is used to load skill bodies). Falls back
+        to ``self.loop`` for backwards compat with older callers.
         """
         if adapter is None or not event.metadata:
             return DEFAULT_RUNTIME_CONTEXT
@@ -506,7 +576,8 @@ class Dispatch:
         # are dropped silently — operators see "channel skill X not
         # found" only at config validation time.
         skill_bodies: list[tuple[str, str]] = []
-        memory = getattr(self.loop, "memory", None)
+        memory_source = loop if loop is not None else self.loop
+        memory = getattr(memory_source, "memory", None)
         if memory is not None and skill_ids:
             for sid in skill_ids:
                 try:

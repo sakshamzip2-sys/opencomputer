@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from opencomputer.agent.config import GatewayConfig
 from opencomputer.agent.loop import AgentLoop
@@ -23,6 +24,9 @@ from opencomputer.gateway.dispatch import Dispatch
 from opencomputer.gateway.outgoing_drainer import OutgoingDrainer
 from opencomputer.gateway.outgoing_queue import OutgoingQueue
 from plugin_sdk.channel_contract import BaseChannelAdapter
+
+if TYPE_CHECKING:
+    from opencomputer.gateway.agent_router import AgentRouter
 
 logger = logging.getLogger("opencomputer.gateway.server")
 
@@ -32,9 +36,21 @@ class Gateway:
 
     def __init__(
         self,
-        loop: AgentLoop,
+        loop: AgentLoop | None = None,
         config: GatewayConfig | None = None,
+        *,
+        router: AgentRouter | None = None,
     ) -> None:
+        # Phase 2 multi-routing: accept either ``loop=`` (legacy single
+        # loop) or ``router=`` (per-profile cache). Exactly one of the
+        # two must be set.
+        if router is not None and loop is not None:
+            raise ValueError("Gateway: pass either loop or router, not both")
+        if router is None and loop is None:
+            raise ValueError("Gateway: pass either loop or router")
+
+        # ``self.loop`` preserves the legacy attribute access path that
+        # tests and downstream code may read.
         self.loop = loop
         # Gateway-level config (PR #221 follow-up). Defaults preserve
         # legacy behavior — ``photo_burst_window=0.8``. Users can
@@ -43,6 +59,58 @@ class Gateway:
         # ``opencomputer gateway`` entry point reads :class:`Config`
         # and threads ``cfg.gateway`` here.
         self._config: GatewayConfig = config or GatewayConfig()
+
+        # Build the wrapped factory that registers the consent prompt
+        # handler on each per-profile loop's ConsentGate (Pass-2 F7).
+        # The Dispatch instance doesn't exist yet; we close over self
+        # and read self.dispatch lazily at factory-fire time.
+        if router is None:
+            from opencomputer.agent.config import _home as _resolve_home
+            from opencomputer.gateway.agent_loop_factory import (
+                build_agent_loop_for_profile,
+            )
+            from opencomputer.gateway.agent_router import (
+                AgentRouter as _AgentRouter,
+            )
+
+            def _wrapped_factory(pid: str, home: Path) -> AgentLoop:
+                new_loop = build_agent_loop_for_profile(pid, home)
+                # Register consent prompt handler on the per-profile
+                # gate if Dispatch is already constructed (it is for
+                # any profile resolved AFTER __init__ completes).
+                gate = getattr(new_loop, "_consent_gate", None)
+                if (
+                    gate is not None
+                    and hasattr(gate, "set_prompt_handler")
+                    and getattr(self, "dispatch", None) is not None
+                ):
+                    gate.set_prompt_handler(
+                        self.dispatch._send_approval_prompt
+                    )
+                return new_loop
+
+            def _resolve_profile_home(profile_id: str) -> Path:
+                # Default profile -> ``_home()`` (the active
+                # OPENCOMPUTER_HOME or default).
+                # Per-profile -> ``~/.opencomputer/<profile_id>``.
+                if profile_id == "default":
+                    return _resolve_home()
+                return Path.home() / ".opencomputer" / profile_id
+
+            router = _AgentRouter(
+                loop_factory=_wrapped_factory,
+                profile_home_resolver=_resolve_profile_home,
+            )
+            # Seed the router with the existing single loop as
+            # ``"default"`` so the legacy CLI path doesn't pay the
+            # construction cost again. The seeded loop's gate gets the
+            # consent prompt handler registered AFTER Dispatch is
+            # constructed below.
+            assert loop is not None  # guarded above
+            router._loops["default"] = loop
+
+        self._router = router
+
         # Task I.9: wire the shared PluginAPI through to Dispatch so
         # plugins see a per-request scope via ``api.request_context``.
         # ``shared_api`` is set by ``PluginRegistry.load_all``; if the
@@ -51,10 +119,18 @@ class Gateway:
         from opencomputer.plugins.registry import registry as plugin_registry
 
         self.dispatch = Dispatch(
-            loop,
+            router=router,
             plugin_api=plugin_registry.shared_api,
             config={"photo_burst_window": self._config.photo_burst_window},
         )
+        # Pass-2 F7: now that Dispatch exists, register the consent
+        # prompt handler on the seeded "default" loop's gate. The
+        # wrapped factory will handle future per-profile loops
+        # automatically because its closure reads self.dispatch lazily.
+        if loop is not None:
+            gate = getattr(loop, "_consent_gate", None)
+            if gate is not None and hasattr(gate, "set_prompt_handler"):
+                gate.set_prompt_handler(self.dispatch._send_approval_prompt)
         # PR #221 follow-up: bind the live Dispatch onto the shared
         # PluginAPI so plugin-side helpers (e.g. Discord ``/reset``)
         # can reach the per-chat session-lock map without importing
