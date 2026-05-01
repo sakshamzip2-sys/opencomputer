@@ -1,5 +1,7 @@
 # Persona System Removal Implementation Plan
 
+> **STATUS: SUPERSEDED — DO NOT EXECUTE.** Authored 2026-05-01 based on a stale mental model of the persona system (V1 regex-only). Abandoned the same day after a deep audit revealed PR #278 (`fd073ad1`) had already replaced V1 with V2 — a multi-signal Bayesian combiner + learnable priors via `/persona-mode` overrides, doing real work. User decision 2026-05-01: **keep V2 as the live classifier; do not execute this removal plan.** The only piece this plan correctly identified as orphaned was `llm_classifier.py`, which was deleted standalone in commit `74c91e6b`. This file is preserved for the historical decision trail. See also the (also superseded) spec at `docs/superpowers/specs/2026-05-01-persona-system-removal-design.md` (lives on `feat/profile-as-agent-phase-2-clean`).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans (chosen by user) or superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Remove the persona auto-classifier and all its scaffolding (~750-900 LOC across 13+ production files and 6+ test files) while preserving the companion-register UX by making `companion.yaml`'s system_prompt_overlay an unconditional part of `base.j2`.
