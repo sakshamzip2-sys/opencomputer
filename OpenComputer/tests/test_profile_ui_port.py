@@ -239,3 +239,22 @@ def test_badge_hint_says_profile_not_persona():
     text = "".join(t for _, t in segments)
     assert "Ctrl+P profile" in text
     assert "Ctrl+P persona" not in text
+
+
+def test_badge_hidden_when_profile_uninitialised_and_default_state():
+    """Design-intent gate: before init_active_profile_id runs (so no
+    active_profile_id key) AND no other axes set, badge returns [].
+    Ensures we don't show 'profile: default' forever for new users.
+    """
+    rt = _runtime_for_badge()  # custom={} — no active_profile_id key
+    assert _render_mode_badge(rt) == []
+
+
+def test_badge_visible_when_profile_initialised_to_default():
+    """After init_active_profile_id runs even on default → badge surfaces
+    so the user discovers Ctrl+P. Distinguishes 'pre-init' from 'on default'.
+    """
+    rt = _runtime_for_badge(active_profile_id="default")
+    segments = _render_mode_badge(rt)
+    text = "".join(t for _, t in segments)
+    assert "profile: default" in text

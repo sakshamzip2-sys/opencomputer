@@ -455,16 +455,14 @@ def _render_mode_badge(runtime: object) -> list[tuple[str, str]]:
 
     Surfaces three independent axes when set:
     - **mode** (always shown): default / accept-edits / auto / plan
-    - **persona** (when set): the V2.C plural-persona auto-classifier id,
-      mirrored from ``loop._active_persona_id`` into
-      ``runtime.custom["active_persona_id"]``
+    - **profile** (always shown when initialized): ``active_profile_id``,
+      with ``→ pending`` suffix when a Ctrl+P swap is queued for next turn
     - **personality** (when set to anything other than helpful/empty): the
       ``/personality`` slash-command value
 
     Includes ASCII glyphs for ``NO_COLOR`` / screen-reader accessibility.
-    Returns ``[]`` when there is no runtime, no actionable state, and the
-    persona indicates a chat register — keeps casual conversations
-    uncluttered. See :func:`_badge_has_meaningful_content` for the rule.
+    Returns ``[]`` before profile init OR when no axis is overridden — see
+    :func:`_badge_has_meaningful_content` for the rule.
     """
     if not _badge_has_meaningful_content(runtime):
         return []
