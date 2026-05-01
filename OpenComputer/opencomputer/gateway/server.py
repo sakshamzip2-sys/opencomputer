@@ -79,11 +79,27 @@ class Gateway:
                 # gate if Dispatch is already constructed (it is for
                 # any profile resolved AFTER __init__ completes).
                 gate = getattr(new_loop, "_consent_gate", None)
-                if (
-                    gate is not None
-                    and hasattr(gate, "set_prompt_handler")
-                    and getattr(self, "dispatch", None) is not None
-                ):
+                if gate is None:
+                    logger.debug(
+                        "agent_loop_factory: profile_id=%s loop has no "
+                        "_consent_gate; consent prompts disabled for this profile",
+                        pid,
+                    )
+                elif not hasattr(gate, "set_prompt_handler"):
+                    logger.warning(
+                        "agent_loop_factory: profile_id=%s _consent_gate has no "
+                        "set_prompt_handler attribute; consent prompts will not "
+                        "be wired",
+                        pid,
+                    )
+                elif getattr(self, "dispatch", None) is None:
+                    logger.warning(
+                        "agent_loop_factory: profile_id=%s built before Dispatch "
+                        "was constructed; consent prompt handler NOT registered "
+                        "(this should not happen during normal Gateway init)",
+                        pid,
+                    )
+                else:
                     gate.set_prompt_handler(
                         self.dispatch._send_approval_prompt
                     )

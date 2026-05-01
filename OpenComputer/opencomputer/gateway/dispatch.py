@@ -153,12 +153,16 @@ class Dispatch:
             # caller asks for a non-default profile through this
             # legacy router it'll get the same loop, which preserves
             # current behaviour.
+            from opencomputer.agent.config import _home as _resolve_home
             from opencomputer.gateway.agent_router import AgentRouter
 
             assert loop is not None  # for mypy after the guard above
             router = AgentRouter(
                 loop_factory=lambda _pid, _home: loop,
-                profile_home_resolver=lambda _pid: Path(),
+                # Minor fix: return the real OPENCOMPUTER_HOME default
+                # rather than Path() (CWD), which was wrong for set_profile
+                # calls inside run_conversation.
+                profile_home_resolver=lambda _pid: _resolve_home(),
             )
             router._loops["default"] = loop  # pre-populate
         self._router = router
@@ -208,6 +212,11 @@ class Dispatch:
         # message. We never grow without bound because session ids are
         # deterministic per (platform, chat_id).
         self._session_channels: dict[str, tuple[Any, str]] = {}
+        # Critical fix (Task 2.5 review): session ↔ profile_id mapping so
+        # _send_approval_prompt and _handle_approval_click can resolve the
+        # per-profile gate via the router rather than self.loop (which is
+        # None when Dispatch is constructed with router= instead of loop=).
+        self._session_profiles: dict[str, str] = {}
         # Token registry — opaque request tokens minted in the prompt
         # handler so we don't leak session_id / capability_id onto the
         # Telegram callback wire. Maps token → (session_id, cap_id).
@@ -414,6 +423,11 @@ class Dispatch:
         )
         if adapter is not None:
             self._session_channels[session_id] = (adapter, event.chat_id)
+        # Critical fix: record per-session profile so the consent gate
+        # can be resolved via the router in _send_approval_prompt and
+        # _handle_approval_click even when self.loop is None (router=
+        # construction path).
+        self._session_profiles[session_id] = profile_id
         # Hermes channel-port (PR 2 Task 2.2): fire on_processing_start
         # BEFORE acquiring the per-chat lock so a fast-clicking user
         # sees the 👀 reaction even if the previous turn is still
@@ -656,8 +670,18 @@ class Dispatch:
         if not hasattr(adapter, "send_approval_request"):
             return False
 
-        gate = getattr(self.loop, "_consent_gate", None)
+        # Critical fix: resolve the gate via the per-profile loop rather
+        # than self.loop. self.loop is None when Dispatch was constructed
+        # with router= (no loop=), causing silent auto-deny.
+        pid = self._session_profiles.get(session_id, "default")
+        _profile_loop = self._router._loops.get(pid)
+        gate = getattr(_profile_loop, "_consent_gate", None)
         if gate is None:
+            logger.debug(
+                "approval prompt: session=%s profile=%s has no _consent_gate; "
+                "auto-deny (gate not loaded or profile not found)",
+                session_id, pid,
+            )
             return False
 
         token = uuid.uuid4().hex[:24]
@@ -703,7 +727,11 @@ class Dispatch:
             )
             return
         session_id, capability_id = binding
-        gate = getattr(self.loop, "_consent_gate", None)
+        # Resolve gate via the per-profile loop (same fix as
+        # _send_approval_prompt: self.loop is None on router= paths).
+        _pid = self._session_profiles.get(session_id, "default")
+        _click_loop = self._router._loops.get(_pid)
+        gate = getattr(_click_loop, "_consent_gate", None)
         if gate is None:
             return
         if verb == "once":
