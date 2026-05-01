@@ -48,7 +48,12 @@ class AgentRouter:
     async def get_or_load(self, profile_id: str) -> Any:
         """Return the cached AgentLoop for ``profile_id``, building one
         on first call. Per-profile-id locking ensures two concurrent
-        callers see the same instance."""
+        callers see the same instance.
+
+        Transient construction failures are NOT cached — a factory
+        raise propagates and the next call retries. Failures are
+        logged so a misconfigured profile is observable in the logs.
+        """
         existing = self._loops.get(profile_id)
         if existing is not None:
             return existing
@@ -59,7 +64,16 @@ class AgentRouter:
             if existing is not None:
                 return existing
             home = self._profile_home_resolver(profile_id)
-            loop = self._loop_factory(profile_id, home)
+            try:
+                loop = self._loop_factory(profile_id, home)
+            except Exception as exc:
+                # Don't cache failure — let next call retry. But log
+                # so a misconfigured profile is observable.
+                logger.exception(
+                    "agent_router: failed to build AgentLoop for profile_id=%s: %s",
+                    profile_id, exc,
+                )
+                raise
             self._loops[profile_id] = loop
             logger.info("agent_router: built AgentLoop for profile_id=%s", profile_id)
             return loop

@@ -61,3 +61,30 @@ async def test_concurrent_first_load_serializes(tmp_path: Path) -> None:
     a, b = await asyncio.gather(slow_get(router, "x"), slow_get(router, "x"))
     assert a is b
     assert build_count == 1
+
+
+@pytest.mark.asyncio
+async def test_broken_profile_logs_and_raises_first_time(tmp_path: Path) -> None:
+    """Factory failure should propagate the first time but be tracked
+    so the next call retries (transient failures recover)."""
+    from typing import Any
+    attempts: list[int] = []
+
+    def factory(profile_id: str, profile_home: Path) -> Any:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise RuntimeError("simulated bad config")
+        return MagicMock(name=profile_id)
+
+    router = AgentRouter(
+        loop_factory=factory,
+        profile_home_resolver=lambda pid: tmp_path / pid,
+    )
+
+    with pytest.raises(RuntimeError):
+        await router.get_or_load("broken")
+    with pytest.raises(RuntimeError):
+        await router.get_or_load("broken")
+    loop = await router.get_or_load("broken")
+    assert loop is not None
+    assert len(attempts) == 3
