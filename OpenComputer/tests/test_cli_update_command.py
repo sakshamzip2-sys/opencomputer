@@ -180,10 +180,9 @@ def _path_factory_returning(synthetic_file):
     Other Path() calls (e.g. ``cfg.session.db_path``) flow through to the
     real ``pathlib.Path`` so unrelated code keeps working.
     """
-    from pathlib import Path as _P
+    from pathlib import Path
 
-    real_path = _P
-    synthetic = real_path(str(synthetic_file))
+    synthetic = Path(str(synthetic_file))
 
     def _factory(*args, **kwargs):
         if (
@@ -193,6 +192,6 @@ def _path_factory_returning(synthetic_file):
             and not args[0].startswith(str(synthetic.parent.parent))
         ):
             return synthetic
-        return real_path(*args, **kwargs)
+        return Path(*args, **kwargs)
 
     return _factory
