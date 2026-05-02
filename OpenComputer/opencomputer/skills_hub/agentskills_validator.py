@@ -14,7 +14,9 @@ Reference: https://agentskills.io
 from __future__ import annotations
 
 import re
-from typing import Any
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
 
 import yaml
 
@@ -27,6 +29,44 @@ DESCRIPTION_MAX = 500
 
 class ValidationError(ValueError):
     """Raised when SKILL.md frontmatter does not satisfy agentskills.io."""
+
+
+@dataclass
+class ValidationIssue:
+    """A single validator finding (error or warning)."""
+    rule: str                    # e.g. "name.reserved_word"
+    severity: Literal["error", "warning"]
+    field: str | None            # e.g. "frontmatter.name"
+    message: str
+    line: int | None = None
+
+
+@dataclass
+class ValidationReport:
+    """Result of validating a SKILL.md file or directory."""
+    errors: list[ValidationIssue] = field(default_factory=list)
+    warnings: list[ValidationIssue] = field(default_factory=list)
+    skill_path: Path | None = None
+
+    @property
+    def is_clean(self) -> bool:
+        return not self.errors and not self.warnings
+
+    @property
+    def passes_strict(self) -> bool:
+        """Strict mode: warnings count as failures."""
+        return not self.errors and not self.warnings
+
+    @property
+    def passes_lenient(self) -> bool:
+        """Lenient mode: only errors block."""
+        return not self.errors
+
+    def raise_if_errors(self) -> None:
+        """Raise ValidationError if any errors are present."""
+        if self.errors:
+            messages = "; ".join(f"{i.rule}: {i.message}" for i in self.errors)
+            raise ValidationError(messages)
 
 
 def validate_frontmatter(skill_md: str) -> dict[str, Any]:

@@ -3,8 +3,35 @@ import pytest
 
 from opencomputer.skills_hub.agentskills_validator import (
     ValidationError,
+    ValidationIssue,
+    ValidationReport,
     validate_frontmatter,
 )
+
+
+def test_validation_report_has_errors_and_warnings():
+    issue_err = ValidationIssue(
+        rule="name.reserved_word",
+        severity="error",
+        field="frontmatter.name",
+        message="reserved word",
+        line=2,
+    )
+    issue_warn = ValidationIssue(
+        rule="body.size_warn",
+        severity="warning",
+        field=None,
+        message="body exceeds 500 lines",
+        line=None,
+    )
+    report = ValidationReport(
+        errors=[issue_err],
+        warnings=[issue_warn],
+        skill_path=None,
+    )
+    assert report.errors == [issue_err]
+    assert report.warnings == [issue_warn]
+    assert report.skill_path is None
 
 VALID = """---
 name: pead-screener
