@@ -16,8 +16,10 @@ NOT ZDR-eligible.
 from __future__ import annotations
 
 import logging
+import mimetypes
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 import httpx
 
@@ -90,3 +92,62 @@ class AnthropicFilesClient:
     def _make_client(self) -> httpx.AsyncClient:
         """Test seam — replace with httpx.MockTransport in tests."""
         return httpx.AsyncClient(timeout=self._timeout_s)
+
+    async def upload(self, path: Path) -> FileMetadata:
+        """Upload a file; returns metadata including the new file_id.
+
+        Raises:
+            FileNotFoundError: if path does not exist.
+            FilesAPIError: if file exceeds 500 MB or API rejects.
+        """
+        if not path.exists():
+            raise FileNotFoundError(f"file not found: {path}")
+        size = path.stat().st_size
+        if size > MAX_FILE_BYTES:
+            raise FilesAPIError(
+                f"file exceeds 500 MB limit: {path} ({size} bytes)"
+            )
+        async with self._make_client() as client:
+            with path.open("rb") as fh:
+                files = {"file": (path.name, fh, _guess_mime(path))}
+                resp = await client.post(
+                    f"{self._base_url}/v1/files",
+                    headers=self._headers(),
+                    files=files,
+                )
+        _raise_for_status(resp)
+        return FileMetadata.from_response(resp.json())
+
+    async def list(self, limit: int = 50) -> list[FileMetadata]:
+        """List uploaded files in this workspace."""
+        async with self._make_client() as client:
+            resp = await client.get(
+                f"{self._base_url}/v1/files",
+                headers=self._headers(),
+                params={"limit": limit},
+            )
+        _raise_for_status(resp)
+        return [FileMetadata.from_response(d) for d in resp.json().get("data", [])]
+
+    async def get_metadata(self, file_id: str) -> FileMetadata:
+        """Fetch metadata for a single file."""
+        async with self._make_client() as client:
+            resp = await client.get(
+                f"{self._base_url}/v1/files/{file_id}",
+                headers=self._headers(),
+            )
+        _raise_for_status(resp)
+        return FileMetadata.from_response(resp.json())
+
+
+def _guess_mime(path: Path) -> str:
+    return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+
+def _raise_for_status(resp: httpx.Response) -> None:
+    """Stub — Task 4 fleshes this out with status-specific messages."""
+    if not resp.is_success:
+        raise FilesAPIError(
+            f"Files API error (HTTP {resp.status_code}): {resp.text}",
+            status_code=resp.status_code,
+        )
