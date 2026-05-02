@@ -351,6 +351,10 @@ class BaseProvider(ABC):
         no-op — callers should add JSON instructions in the prompt as a
         backup. Default ``None`` = no schema enforcement, free-form
         text response (existing behavior).
+
+        The eval harness's ``opencomputer.inference.parse_safely``
+        wrapper provides typed-fallback parsing for callers on providers
+        without native schema enforcement.
         """
         ...
 
