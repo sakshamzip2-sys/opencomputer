@@ -185,3 +185,31 @@ def test_checklist_tty_esc_raises_wizard_cancelled(monkeypatch):
                 _input=pipe_input,
                 _output=DummyOutput(),
             )
+
+
+def test_single_select_numbered_fallback_returns_index(monkeypatch):
+    from opencomputer.cli_ui.menu import Choice, single_select
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr("sys.stdin", io.StringIO("3\n"))
+
+    items = [Choice("A", "a"), Choice("B", "b"), Choice("C", "c")]
+    idx = single_select("Pick:", items, default=0)
+    assert idx == 2
+
+
+def test_single_select_tty_arrow_then_enter(monkeypatch):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from opencomputer.cli_ui.menu import Choice, single_select
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text("\x1b[B\x1b[B\r")  # Down, Down, Enter
+        idx = single_select(
+            "Pick:",
+            [Choice("A", "a"), Choice("B", "b"), Choice("C", "c")],
+            default=0, _input=pipe_input, _output=DummyOutput(),
+        )
+    assert idx == 2

@@ -315,5 +315,96 @@ def _checklist_numbered_fallback(
         return picks
 
 
-def single_select(title, items, default=0):  # type: ignore[no-untyped-def]
-    raise NotImplementedError("single_select lands in Task 5")
+def single_select(
+    title: str,
+    items: list[Choice],
+    default: int = 0,
+    *,
+    _input: Optional[Any] = None,
+    _output: Optional[Any] = None,
+) -> int:
+    """Single-select WITHOUT radio glyphs — visual variant of radiolist
+    used when a (●)/(○) marker would imply "currently configured" rather
+    than "currently focused"."""
+    if not sys.stdin.isatty() and _input is None:
+        return _single_select_numbered_fallback(title, items, default)
+
+    flush_stdin()
+
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.formatted_text import FormattedText
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    from opencomputer.cli_ui.style import ARROW_GLYPH, MENU_STYLE
+
+    cursor = [default]
+
+    def render():
+        lines: list[tuple[str, str]] = [
+            ("class:menu.title", title + "\n"),
+            ("class:menu.hint",
+             "↑↓ navigate  ENTER select  ESC cancel\n"),
+            ("", "\n"),
+        ]
+        for i, c in enumerate(items):
+            is_cur = i == cursor[0]
+            arrow = ARROW_GLYPH if is_cur else " "
+            arrow_class = "class:menu.selected.arrow" if is_cur else "class:"
+            row_class = "class:menu.selected" if is_cur else "class:"
+            suffix = f"  ({c.description})" if c.description else ""
+            lines.append((arrow_class, f" {arrow} "))
+            lines.append((row_class, f"{c.label}{suffix}\n"))
+        return FormattedText(lines)
+
+    bindings = KeyBindings()
+
+    @bindings.add("up")
+    def _up(e): cursor[0] = (cursor[0] - 1) % len(items)
+
+    @bindings.add("down")
+    def _down(e): cursor[0] = (cursor[0] + 1) % len(items)
+
+    @bindings.add("enter")
+    def _select(e): e.app.exit(result=cursor[0])
+
+    @bindings.add("escape")
+    @bindings.add("c-c")
+    def _cancel(e): e.app.exit(exception=WizardCancelled())
+
+    layout = Layout(HSplit([Window(FormattedTextControl(render))]))
+    app = Application(
+        layout=layout, key_bindings=bindings, style=MENU_STYLE,
+        full_screen=False, input=_input, output=_output,
+    )
+    return app.run()
+
+
+def _single_select_numbered_fallback(
+    title: str, items: list[Choice], default: int,
+) -> int:
+    """Same as _radiolist_numbered_fallback minus the (○)/(●) glyphs."""
+    print(title)
+    for i, c in enumerate(items):
+        marker = "→" if i == default else " "
+        suffix = f"  ({c.description})" if c.description else ""
+        print(f"  {marker} {i + 1}. {c.label}{suffix}")
+    print()
+    while True:
+        try:
+            raw = input(f"Choice [1-{len(items)}, default {default + 1}]: ").strip()
+        except EOFError:
+            return default
+        if raw == "":
+            return default
+        try:
+            n = int(raw)
+        except ValueError:
+            print(f"Invalid input '{raw}'.", file=sys.stderr)
+            continue
+        if not 1 <= n <= len(items):
+            print("out of range.", file=sys.stderr)
+            continue
+        return n - 1
