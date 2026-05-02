@@ -287,6 +287,25 @@ Frozen dataclass — one event from `stream_complete()`. Three kinds:
 Frozen dataclass — token counts: `input_tokens`, `output_tokens`,
 `cache_read_tokens`, `cache_write_tokens`.
 
+### `VisionUnsupportedError`
+
+Raised by `BaseProvider.complete_vision()` (or by subclasses overriding
+it) when the provider/model combination does not support image inputs.
+Surfaced by upstream PR #351 to give callers a typed signal instead of
+a string-match on a generic error. Catch it to fall back to a
+text-only path or surface a clear "this model can't see images" error
+to the user.
+
+```python
+from plugin_sdk import VisionUnsupportedError
+
+try:
+    await provider.complete_vision(...)
+except VisionUnsupportedError:
+    # fall back or surface a "model can't see images" message
+    ...
+```
+
 ### `ProviderCapabilities`
 
 Frozen dataclass each provider returns from its `capabilities` property
