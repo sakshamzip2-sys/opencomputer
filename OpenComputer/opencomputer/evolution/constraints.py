@@ -22,7 +22,12 @@ from typing import Any
 
 # Module-level tunables — bumpable per design decision; mirror Hermes defaults
 MAX_SKILL_SIZE_BYTES: int = 15_000      # Hermes uses 15KB cap
-MAX_DESCRIPTION_LEN: int = 500          # Hermes uses 500 chars
+# Description length cap. Intentionally stricter than Anthropic's 1024-char
+# spec ceiling because OpenComputer routes skills by description similarity;
+# long descriptions degrade routing precision. 280 chars is enough for the
+# WHAT (action verb phrase) + WHEN ("Use when..." clause) the synthesis
+# prompt requires, and aligns with the synthesis prompt's documented cap.
+MAX_DESCRIPTION_LEN: int = 280
 MIN_BODY_LEN: int = 50                  # too short = no actionable content
 MAX_REFERENCE_FILES: int = 10
 MAX_EXAMPLE_FILES: int = 10

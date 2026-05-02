@@ -3,7 +3,6 @@ from pathlib import Path
 
 import jinja2
 
-
 PROMPT_PATH = (
     Path(__file__).parent.parent
     / "opencomputer" / "evolution" / "prompts" / "synthesis_request.j2"

@@ -9,6 +9,7 @@ Design reference: OpenComputer/docs/evolution/design.md §8.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -20,6 +21,8 @@ from jinja2 import Environment, FileSystemLoader
 
 from opencomputer.evolution.reflect import Insight
 from opencomputer.evolution.storage import evolution_home
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass  # nothing extra
@@ -172,6 +175,12 @@ class SkillSynthesizer:
             confidence=insight.confidence,
             evidence_refs=insight.evidence_refs,
         )
+        # Post-synthesis spec-compliance hook: run the unified hub validator
+        # in strict mode against the rendered SKILL.md text. Errors raise
+        # ConstraintViolation (which is a ValueError subclass — same catch
+        # contract as the pre-payload constraint gates). Warnings are
+        # logged for visibility but do not block the write.
+        self._validate_pre_write(rendered, slug)
         (target_dir / "SKILL.md").write_text(rendered, encoding="utf-8")
 
         references = payload.get("references") or []
@@ -204,3 +213,30 @@ class SkillSynthesizer:
                 f"reference/example name {name!r} is unsafe; must be a plain filename"
             )
         (parent / name).write_text(content, encoding="utf-8")
+
+    @staticmethod
+    def _validate_pre_write(content: str, slug: str) -> None:
+        """Run the unified hub validator in strict mode against the rendered SKILL.md.
+
+        Errors raise ``ConstraintViolation`` (ValueError subclass — caller's
+        existing ``except ValueError`` paths catch it). Warnings are logged
+        but do not block.
+        """
+        from opencomputer.evolution.constraints import (  # noqa: PLC0415
+            ConstraintViolation,
+        )
+        from opencomputer.skills_hub.agentskills_validator import (  # noqa: PLC0415
+            validate_skill_md,
+        )
+
+        report = validate_skill_md(content, strict=True)
+        if report.errors:
+            msgs = "; ".join(f"{i.rule}: {i.message}" for i in report.errors)
+            raise ConstraintViolation(
+                f"synthesized skill {slug!r} failed spec validation: {msgs}"
+            )
+        for warning in report.warnings:
+            logger.warning(
+                "synthesized skill %s emitted warning %s: %s",
+                slug, warning.rule, warning.message,
+            )

@@ -22,8 +22,11 @@ from opencomputer.evolution.synthesize import SkillSynthesizer
 def _create_skill_insight(**overrides):
     payload = {
         "slug": "read-then-edit",
-        "name": "Read-then-Edit",
-        "description": "Use after a file Read when you intend to edit",
+        # Lowercase kebab-case to satisfy the unified hub validator's
+        # `^[a-z][a-z0-9-]*[a-z0-9]$` name regex (run as a strict
+        # post-synthesis hook by SkillSynthesizer._validate_pre_write).
+        "name": "read-then-edit",
+        "description": "Reads a file then immediately edits it. Use when a Read is followed by an Edit on the same path.",
         "body": "# Read-then-Edit\n\nReads then immediately edits a file.",
     }
     payload.update(overrides.pop("payload_overrides", {}))
@@ -51,7 +54,7 @@ def test_synthesize_creates_dir_and_skill_md(tmp_path: Path) -> None:
     skill_md = tmp_path / "read-then-edit" / "SKILL.md"
     assert skill_md.exists(), "SKILL.md was not created"
     content = skill_md.read_text(encoding="utf-8")
-    assert "name: Read-then-Edit" in content
+    assert "name: read-then-edit" in content
     assert "Reads then immediately edits a file." in content
 
 
@@ -325,3 +328,72 @@ def test_synthesize_default_dest_dir_uses_evolution_home(
     expected = tmp_path / "evolution" / "skills" / "read-then-edit"
     assert result == expected
     assert (expected / "SKILL.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Task 11: constraint sync + post-synthesis strict validator hook
+# ---------------------------------------------------------------------------
+
+
+def test_constraint_max_description_len_synced_to_280():
+    """MAX_DESCRIPTION_LEN must equal the synthesis prompt's documented 280-char cap."""
+    from opencomputer.evolution.constraints import MAX_DESCRIPTION_LEN
+    assert MAX_DESCRIPTION_LEN == 280
+
+
+def test_synthesized_skill_must_pass_strict_validator(tmp_path: Path) -> None:
+    """A synthesized SKILL.md must pass the unified validator in strict mode.
+
+    Adapts the plan's `synthesize_skill_to_dir(slug, content, target_dir)` API
+    to the real `SkillSynthesizer.synthesize(insight)` API: build a compliant
+    Insight, write it, then validate the resulting skill directory.
+    """
+    from opencomputer.skills_hub.agentskills_validator import validate_skill_dir
+
+    synth = SkillSynthesizer(dest_dir=tmp_path)
+    insight = _create_skill_insight(
+        payload_overrides={
+            "slug": "testing-things",
+            "name": "testing-things",
+            "description": (
+                "Tests synthesized skill validation. "
+                "Use when verifying the synth pipeline."
+            ),
+            "body": (
+                "# Testing Things\n\n"
+                "## When to use\n- For tests.\n\n"
+                "## Steps\n1. Test."
+            ),
+        }
+    )
+    skill_dir = synth.synthesize(insight)
+    report = validate_skill_dir(skill_dir, strict=True)
+    assert report.passes_strict, (
+        f"unexpected issues: errors={report.errors} warnings={report.warnings}"
+    )
+
+
+def test_synthesized_skill_with_reserved_word_rejected(tmp_path: Path) -> None:
+    """Pre-write hook must reject a skill whose name contains a reserved word."""
+    from opencomputer.evolution.constraints import ConstraintViolation
+
+    synth = SkillSynthesizer(dest_dir=tmp_path)
+    insight = _create_skill_insight(
+        payload_overrides={
+            "slug": "anthropic-thing",
+            "name": "anthropic-thing",
+            "description": (
+                "Does anthropic things. "
+                "Use when needed for anthropic operations."
+            ),
+            "body": (
+                "# Anthropic Thing\n\n"
+                "## When to use\n- Always.\n\n"
+                "## Steps\n1. Do it."
+            ),
+        }
+    )
+    with pytest.raises(ConstraintViolation):
+        synth.synthesize(insight)
+    # Atomic write rolled back: no skill dir should exist.
+    assert not (tmp_path / "anthropic-thing").exists()
