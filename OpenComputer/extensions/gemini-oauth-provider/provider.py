@@ -1,89 +1,150 @@
 """Gemini OAuth provider — Google Cloud Code Assist via desktop OAuth (PKCE).
 
-Status: **OAuth foundation shipped**, transport adapter pending.
+Status: **fully wired**. Authenticates via Google's PKCE OAuth desktop client
+(``opencomputer auth login google``), reads + refreshes credentials from
+``~/.opencomputer/auth/google_oauth.json``, and routes inference through
+``cloudcode-pa.googleapis.com/v1internal:*`` (Google's Cloud Code Assist
+backend — same one ``gemini-cli`` uses).
 
-Inference for OAuth-authenticated Gemini does NOT use Google AI Studio's
-OpenAI-compatible endpoint — that endpoint accepts API keys only, not
-Bearer access tokens. OAuth tokens authorize Google's *Cloud Code Assist*
-backend at ``https://cloudcode-pa.googleapis.com/v1internal:*``, which has
-its own JSON-RPC-shaped wire protocol.
+Project resolution order:
 
-This plugin currently:
+  1. ``OPENCOMPUTER_GEMINI_PROJECT_ID`` env var
+  2. ``GOOGLE_CLOUD_PROJECT`` / ``GOOGLE_CLOUD_PROJECT_ID`` env vars
+  3. Stored ``project_id`` in google_oauth.json
+  4. ``loadCodeAssist`` preflight (Google reports user's tier + project)
+  5. ``onboardUser`` on free-tier (auto-provision if no tier yet)
 
-  - registers a provider entry so the wizard can discover ``gemini-oauth``
-  - reads/refreshes credentials from ``~/.opencomputer/auth/google_oauth.json``
-    via :mod:`opencomputer.auth.google_oauth`
-  - raises a clear ``NotImplementedError`` on any inference call, with
-    actionable guidance to either (a) use the Google AI Studio API key
-    provider for now or (b) wait for the Cloud Code Assist adapter
+Inference uses the OC ``BaseProvider`` interface directly — Cloud Code Assist
+is NOT OpenAI-compatible, so the OpenAIProvider subclass pattern doesn't
+work here. The :class:`CloudCodeTransport` handles the wire format.
 
 To set up:
 
   1. ``opencomputer auth login google``  (PKCE browser flow)
-  2. Wait for the Cloud Code Assist adapter (tracked in the onboarding
-     roadmap doc).
+  2. Done — wizard discovers ``gemini-oauth`` and your account is ready.
 
-For users who want OpenAI-compatible Gemini access today: install a
-``gemini-google`` provider plugin that uses an AI Studio API key against
-``https://generativelanguage.googleapis.com/v1beta/openai``. The OAuth
-flow shipped here is the foundation for the Cloud Code Assist path,
-which gives access to higher request quotas tied to the user's Google
-account.
+Env overrides:
+
+  OPENCOMPUTER_GEMINI_PROJECT_ID  — override discovered project_id
+  OPENCOMPUTER_GEMINI_CLIENT_ID   — override OAuth client_id (defaults to
+                                    Google's public gemini-cli client)
+  OPENCOMPUTER_GEMINI_CLIENT_SECRET — same, for client_secret
 """
 from __future__ import annotations
 
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
 
-_OPENAI_PROVIDER_DIR = Path(__file__).resolve().parent.parent / "openai-provider"
-if str(_OPENAI_PROVIDER_DIR) not in sys.path:
-    sys.path.insert(0, str(_OPENAI_PROVIDER_DIR))
+_TRANSPORT_DIR = Path(__file__).resolve().parent
+if str(_TRANSPORT_DIR) not in sys.path:
+    sys.path.insert(0, str(_TRANSPORT_DIR))
 
-from provider import OpenAIProvider  # type: ignore[import-not-found]  # noqa: E402
+from cloudcode_transport import CloudCodeTransport  # type: ignore[import-not-found]  # noqa: E402
 
+from opencomputer.auth.google_code_assist import (  # noqa: E402
+    ProjectContext,
+    resolve_project_context,
+)
 from opencomputer.auth.google_oauth import (  # noqa: E402
     DEFAULT_GEMINI_CLOUDCODE_BASE_URL,
     get_valid_access_token,
     load_credentials,
 )
+from plugin_sdk.core import Message  # noqa: E402
+from plugin_sdk.provider_contract import (  # noqa: E402
+    BaseProvider,
+    ProviderResponse,
+    StreamEvent,
+)
+from plugin_sdk.tool_contract import ToolSchema  # noqa: E402
 
 
-class GeminiOAuthProvider(OpenAIProvider):
+class GeminiOAuthProvider(BaseProvider):
+    """Google Gemini via OAuth + Cloud Code Assist."""
+
     name = "gemini-oauth"
     default_model = "gemini-2.5-pro"
 
     def __init__(
         self,
-        api_key: str | None = None,
+        api_key: str | None = None,  # ignored for OAuth flow; param for compat
         base_url: str | None = None,
+        api_mode: str | None = None,  # accepted for ModelConfig.api_mode plumbing
     ) -> None:
-        if not api_key:
-            creds = load_credentials()
-            if not creds:
-                raise RuntimeError(
-                    "Gemini OAuth: not logged in. Run "
-                    "`opencomputer auth login google` to authenticate "
-                    "(opens a browser for Google's PKCE consent flow). "
-                    "See https://aistudio.google.com for sign-up."
-                )
-            api_key = get_valid_access_token()
-        resolved_base = base_url or DEFAULT_GEMINI_CLOUDCODE_BASE_URL
-        super().__init__(api_key=api_key, base_url=resolved_base)
+        # Pre-flight: ensure the user is logged in (don't make HTTP calls yet)
+        creds = load_credentials()
+        if not creds:
+            raise RuntimeError(
+                "Gemini OAuth: not logged in. Run "
+                "`opencomputer auth login google` to authenticate "
+                "(opens a browser for Google's PKCE consent flow). "
+                "See https://aistudio.google.com for sign-up."
+            )
 
-    async def _post(self, *args, **kwargs):  # type: ignore[override]
-        raise NotImplementedError(
-            "Gemini OAuth uses Google's Cloud Code Assist backend "
-            "(cloudcode-pa.googleapis.com/v1internal), not an OpenAI-compatible "
-            "endpoint. The Cloud Code Assist transport adapter is a pending "
-            "follow-up — see docs/superpowers/specs/2026-05-02-hermes-onboarding-roadmap.md. "
-            "For OpenAI-compat Gemini access today, install a provider that uses "
-            "an AI Studio API key against generativelanguage.googleapis.com/v1beta/openai."
+        self._base = base_url or DEFAULT_GEMINI_CLOUDCODE_BASE_URL
+        self._api_key = creds.access_token  # exposed for compatibility
+        self._project_context: ProjectContext | None = None
+
+        self._transport = CloudCodeTransport(
+            access_token_provider=lambda: get_valid_access_token(),
+            project_id_provider=self._get_project_id,
         )
 
-    async def complete(self, *args, **kwargs):  # type: ignore[override]
-        return await self._post()
+    def _get_project_id(self) -> str:
+        """Lazy project resolution — runs once, caches the result.
 
-    async def stream_complete(self, *args, **kwargs):  # type: ignore[override]
-        await self._post()
-        if False:  # pragma: no cover - unreachable
-            yield None
+        Defers the loadCodeAssist / onboardUser HTTP traffic until first
+        inference call so wizard discovery doesn't trigger network I/O.
+        """
+        if self._project_context is None:
+            access_token = get_valid_access_token()
+            creds = load_credentials()
+            configured = (creds.project_id if creds else "") or ""
+            self._project_context = resolve_project_context(
+                access_token=access_token,
+                configured_project_id=configured,
+            )
+        return self._project_context.project_id
+
+    async def complete(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        system: str = "",
+        tools: list[ToolSchema] | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 1.0,
+        stream: bool = False,
+        runtime_extras: dict | None = None,
+    ) -> ProviderResponse:
+        return await self._transport.complete(
+            model=model,
+            messages=messages,
+            system=system,
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+    async def stream_complete(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        system: str = "",
+        tools: list[ToolSchema] | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 1.0,
+        runtime_extras: dict | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        async for event in self._transport.stream_complete(
+            model=model,
+            messages=messages,
+            system=system,
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        ):
+            yield event
