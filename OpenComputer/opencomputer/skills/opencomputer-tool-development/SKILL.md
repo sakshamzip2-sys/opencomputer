@@ -1,5 +1,5 @@
 ---
-name: OpenComputer Tool Development
+name: opencomputer-tool-development
 description: This skill should be used when the user asks to "create an OpenComputer tool", "subclass BaseTool", "write a ToolSchema", "add a tool to a plugin", "tool arguments", "parallel-safe tools", "how to return ToolResult", or needs guidance on OpenComputer's BaseTool contract, ToolSchema JSON schema fields, parallel_safe semantics, or ToolCall / ToolResult dataclasses.
 version: 0.1.0
 ---

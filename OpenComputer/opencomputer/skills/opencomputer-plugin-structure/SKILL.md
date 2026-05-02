@@ -1,5 +1,5 @@
 ---
-name: OpenComputer Plugin Structure
+name: opencomputer-plugin-structure
 description: This skill should be used when the user asks to "create an OpenComputer plugin", "scaffold a plugin", "understand plugin structure", "set up plugin.py", "what is register(api)", "plugin discovery", "plugin manifest", or needs guidance on OpenComputer plugin directory layout, the register(api) function, PluginManifest fields, or plugin-discovery behavior.
 version: 0.1.0
 ---

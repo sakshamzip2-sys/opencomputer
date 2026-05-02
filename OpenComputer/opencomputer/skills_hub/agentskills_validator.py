@@ -254,9 +254,15 @@ RESERVED_WORDS = frozenset({"anthropic", "claude"})
 
 
 def _check_name_reserved_word(name, report: ValidationReport) -> None:
-    """Reject skill names containing reserved words (anthropic, claude).
+    """Reject skill names that vendor-impersonate (anthropic*, claude*).
 
-    Coerces non-string YAML values (e.g. `name: 123`) to string so we
+    The intent is anti-impersonation: a third-party skill should not be
+    named ``anthropic`` / ``claude`` or start with ``anthropic-`` /
+    ``claude-`` (which would imply first-party origin). Mid-name
+    references like ``using-claude-code`` or ``with-anthropic-tools``
+    are legitimate and allowed.
+
+    Coerces non-string YAML values (e.g. ``name: 123``) to string so we
     don't crash on malformed frontmatter — that case is caught by the
     legacy validator's name-format check.
     """
@@ -264,12 +270,14 @@ def _check_name_reserved_word(name, report: ValidationReport) -> None:
         return  # missing name caught by legacy check
     name_lower = str(name).lower()
     for word in RESERVED_WORDS:
-        if word in name_lower.split("-") or name_lower == word:
+        # Block: name == "anthropic" / "claude"  OR  name.startswith("anthropic-" / "claude-")
+        # Allow: "using-claude-code" / "with-anthropic-tools" (mid-name reference)
+        if name_lower == word or name_lower.startswith(f"{word}-"):
             report.errors.append(ValidationIssue(
                 rule="name.reserved_word",
                 severity="error",
                 field="frontmatter.name",
-                message=f"name contains reserved word {word!r}",
+                message=f"name starts with or equals reserved word {word!r}",
             ))
             return
 

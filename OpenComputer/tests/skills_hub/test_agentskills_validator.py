@@ -76,7 +76,6 @@ Body content here.
     "claude",
     "anthropic-helper",
     "claude-tools",
-    "my-anthropic-skill",
 ])
 def test_name_reserved_word_blocks(name):
     text = f"""---
@@ -97,6 +96,9 @@ Body.
     "analyzing-data",
     "my-skill",
     "github-helper",
+    "using-claude-code",
+    "with-anthropic-tools",
+    "my-anthropic-skill",
 ])
 def test_name_reserved_word_allows_normal_names(name):
     text = f"""---

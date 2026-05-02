@@ -1,5 +1,5 @@
 ---
-name: OpenComputer MCP Integration
+name: opencomputer-mcp-integration
 description: This skill should be used when the user asks to "add MCP servers", "configure MCP in OpenComputer", "MCPServerConfig", "stdio MCP", "http MCP", "MCP server status", "mcp install-from-preset", or wants to integrate Model Context Protocol servers into OpenComputer.
 version: 0.1.0
 ---
