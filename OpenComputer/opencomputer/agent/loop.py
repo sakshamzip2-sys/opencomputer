@@ -2821,6 +2821,8 @@ class AgentLoop:
             tool_calls_made=len(msg.tool_calls or []),
             input_tokens=resp.usage.input_tokens,
             output_tokens=resp.usage.output_tokens,
+            cache_read_tokens=resp.usage.cache_read_tokens,
+            cache_write_tokens=resp.usage.cache_write_tokens,
         )
 
     # ─── tool dispatch ─────────────────────────────────────────────
