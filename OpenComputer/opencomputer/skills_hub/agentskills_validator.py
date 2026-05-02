@@ -225,9 +225,28 @@ def _run_legacy_checks(text: str, report: ValidationReport) -> None:
         ))
 
 
+RESERVED_WORDS = frozenset({"anthropic", "claude"})
+
+
 def _check_name_reserved_word(name, report: ValidationReport) -> None:
-    """Stub — implemented in Task 3."""
-    pass
+    """Reject skill names containing reserved words (anthropic, claude).
+
+    Coerces non-string YAML values (e.g. `name: 123`) to string so we
+    don't crash on malformed frontmatter — that case is caught by the
+    legacy validator's name-format check.
+    """
+    if not name:
+        return  # missing name caught by legacy check
+    name_lower = str(name).lower()
+    for word in RESERVED_WORDS:
+        if word in name_lower.split("-") or name_lower == word:
+            report.errors.append(ValidationIssue(
+                rule="name.reserved_word",
+                severity="error",
+                field="frontmatter.name",
+                message=f"name contains reserved word {word!r}",
+            ))
+            return
 
 
 def _check_xml_tags(parsed: dict, report: ValidationReport) -> None:

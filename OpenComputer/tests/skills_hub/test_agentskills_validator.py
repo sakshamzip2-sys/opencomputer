@@ -66,6 +66,48 @@ Body content here.
     report = validate_skill_md(good_text, strict=True)
     assert report.passes_strict, f"unexpected issues: {report.errors + report.warnings}"
 
+
+@pytest.mark.parametrize("name", [
+    "anthropic",
+    "claude",
+    "anthropic-helper",
+    "claude-tools",
+    "my-anthropic-skill",
+])
+def test_name_reserved_word_blocks(name):
+    text = f"""---
+name: {name}
+description: A reasonable description that's at least twenty chars long for the existing validator.
+version: 0.1.0
+---
+
+Body.
+"""
+    report = validate_skill_md(text, strict=True)
+    assert any(i.rule == "name.reserved_word" for i in report.errors), \
+        f"expected reserved-word error for {name!r}, got: {report.errors}"
+
+
+@pytest.mark.parametrize("name", [
+    "processing-pdfs",
+    "analyzing-data",
+    "my-skill",
+    "github-helper",
+])
+def test_name_reserved_word_allows_normal_names(name):
+    text = f"""---
+name: {name}
+description: A reasonable description that's at least twenty chars long for the existing validator.
+version: 0.1.0
+---
+
+Body.
+"""
+    report = validate_skill_md(text, strict=True)
+    assert not any(i.rule == "name.reserved_word" for i in report.errors), \
+        f"unexpected reserved-word error for {name!r}: {report.errors}"
+
+
 VALID = """---
 name: pead-screener
 description: Screen post-earnings gap-up stocks for PEAD setups
