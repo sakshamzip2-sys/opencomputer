@@ -347,6 +347,7 @@ class OpenAIProvider(BaseProvider):
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
         response_schema: dict | None = None,
+        site: str = "agent_loop",
     ) -> ProviderResponse:
         """Low-level complete using the given API key (pool-rotation target)."""
         # TS-T7 — short-circuit before the SDK so concurrent sessions
@@ -391,7 +392,7 @@ class OpenAIProvider(BaseProvider):
             raise
         t1 = time.monotonic()
         result = self._parse_response(resp)
-        self._emit_llm_event(model=model, usage=result.usage, t0=t0, t1=t1)
+        self._emit_llm_event(model=model, usage=result.usage, t0=t0, t1=t1, site=site)
         return result
 
     def _emit_llm_event(
@@ -476,6 +477,7 @@ class OpenAIProvider(BaseProvider):
         stream: bool = False,
         runtime_extras: dict | None = None,
         response_schema: dict | None = None,
+        site: str = "agent_loop",
     ) -> ProviderResponse:
         if self._credential_pool is None:
             return await self._do_complete(
@@ -488,6 +490,7 @@ class OpenAIProvider(BaseProvider):
                 temperature=temperature,
                 runtime_extras=runtime_extras,
                 response_schema=response_schema,
+                site=site,
             )
 
         def _is_auth_failure(exc: Exception) -> bool:
@@ -504,6 +507,7 @@ class OpenAIProvider(BaseProvider):
                 temperature=temperature,
                 runtime_extras=runtime_extras,
                 response_schema=response_schema,
+                site=site,
             ),
             is_auth_failure=_is_auth_failure,
         )
@@ -520,6 +524,7 @@ class OpenAIProvider(BaseProvider):
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
         response_schema: dict | None = None,
+        site: str = "agent_loop",
     ) -> ProviderResponse:
         """Low-level streaming that aggregates into a ProviderResponse (pool target)."""
         # TS-T7 — short-circuit before the SDK.
@@ -627,7 +632,7 @@ class OpenAIProvider(BaseProvider):
             "content_filter": "end_turn",
         }
         t1 = time.monotonic()
-        self._emit_llm_event(model=model, usage=usage, t0=t0, t1=t1)
+        self._emit_llm_event(model=model, usage=usage, t0=t0, t1=t1, site=site)
         return ProviderResponse(
             message=msg,
             stop_reason=stop_map.get(finish_reason, "end_turn"),
@@ -646,6 +651,7 @@ class OpenAIProvider(BaseProvider):
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
         response_schema: dict | None = None,
+        site: str = "agent_loop",
     ) -> AsyncIterator[StreamEvent]:
         """Stream via OpenAI's chat.completions.create(stream=True)."""
         if self._credential_pool is not None:
