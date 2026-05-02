@@ -72,13 +72,19 @@ def _build_registry() -> list[WizardSection]:
         is_messaging_platforms_configured,
         run_messaging_platforms_section,
     )
+    from opencomputer.cli_setup.section_handlers.prior_install import (
+        run_prior_install_section,
+    )
 
     return [
         WizardSection(
             key="opencomputer_prior_detect", icon="◆",
             title="Prior install detection",
-            description="Detect existing OpenClaw / Hermes / OpenComputer data and offer to migrate.",
-            handler=make_deferred_handler("M1"), deferred=True, target_subproject="M1",
+            description=(
+                "Detect ~/.openclaw or ~/.hermes data and offer to import "
+                "MEMORY/USER/SOUL files + skills/ (non-destructive)."
+            ),
+            handler=run_prior_install_section,
         ),
         WizardSection(
             key="inference_provider", icon="◆",

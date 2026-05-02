@@ -12,6 +12,13 @@ def test_e2e_first_run_picks_first_provider_and_skips_messaging(
     monkeypatch.setattr(wizard, "_resolve_config_path",
                          lambda: tmp_path / "config.yaml")
 
+    # M1 — prior_install_detect is now LIVE; mock detection to find
+    # nothing so the section returns SKIPPED_FRESH without prompting.
+    monkeypatch.setattr(
+        "opencomputer.cli_setup.section_handlers.prior_install._detect_prior_installs",
+        lambda: [],
+    )
+
     # Sequence of radiolist returns at the wizard level. The two LIVE
     # sections (inference_provider, messaging_platforms) each invoke
     # their own radiolist via the section-handler module-level binding.
