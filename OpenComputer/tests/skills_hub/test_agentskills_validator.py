@@ -1,4 +1,7 @@
 """Tests for agentskills.io-compatible SKILL.md frontmatter validation."""
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from opencomputer.skills_hub.agentskills_validator import (
@@ -6,6 +9,7 @@ from opencomputer.skills_hub.agentskills_validator import (
     ValidationIssue,
     ValidationReport,
     validate_frontmatter,
+    validate_skill_dir,
     validate_skill_md,
 )
 
@@ -242,6 +246,31 @@ size_review_date: 2026-05-02
 {body}"""
     report = validate_skill_md(text, strict=True)
     assert not any(i.rule == "body.size_warn" for i in report.warnings)
+
+
+def test_validate_skill_dir_reads_skill_md():
+    with tempfile.TemporaryDirectory() as tmp:
+        skill_dir = Path(tmp) / "my-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("""---
+name: processing-pdfs
+description: Processes PDF files and extracts text. Use when working with PDFs.
+version: 0.1.0
+---
+
+Body.
+""")
+        report = validate_skill_dir(skill_dir, strict=True)
+        assert report.passes_strict
+        assert report.skill_path == skill_dir / "SKILL.md"
+
+
+def test_validate_skill_dir_missing_skill_md_errors():
+    with tempfile.TemporaryDirectory() as tmp:
+        skill_dir = Path(tmp) / "empty-skill"
+        skill_dir.mkdir()
+        report = validate_skill_dir(skill_dir, strict=True)
+        assert any(i.rule == "skill_md.missing" for i in report.errors)
 
 
 VALID = """---

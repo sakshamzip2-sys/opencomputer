@@ -129,6 +129,31 @@ def validate_frontmatter(skill_md: str) -> dict[str, Any]:
     return parsed
 
 
+def validate_skill_dir(
+    skill_dir: Path,
+    *,
+    strict: bool = True,
+) -> ValidationReport:
+    """Validate a skill directory by reading and validating its SKILL.md.
+
+    Args:
+        skill_dir: Path to the skill directory (contains SKILL.md).
+        strict: If True, warnings count as failures via .passes_strict.
+    """
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.exists():
+        report = ValidationReport(skill_path=skill_md)
+        report.errors.append(ValidationIssue(
+            rule="skill_md.missing",
+            severity="error",
+            field=None,
+            message=f"SKILL.md not found in {skill_dir}",
+        ))
+        return report
+    text = skill_md.read_text()
+    return validate_skill_md(text, strict=strict, path=skill_md)
+
+
 def validate_skill_md(
     text: str,
     *,
