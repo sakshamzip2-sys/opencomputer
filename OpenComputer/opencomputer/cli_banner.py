@@ -132,5 +132,116 @@ def get_available_tools() -> dict[str, list[str]]:
     return {p: sorted(names) for p, names in sorted(grouped.items())}
 
 
-def build_welcome_banner(*args, **kwargs) -> None:
-    raise NotImplementedError("Lands in Task 12")
+_TIPS: tuple[str, ...] = (
+    "Tip: `OPENCOMPUTER_EPHEMERAL_SYSTEM_PROMPT` injects a system prompt "
+    "that's never persisted to history.",
+    "Tip: Type `/help` for the slash-command list.",
+    "Tip: Press Ctrl+C in chat to cancel the current turn cleanly.",
+    "Tip: `oc -p <profile>` runs with a different active profile.",
+    "Tip: `oc setup` re-runs the wizard — keeps your existing config "
+    "by default.",
+    "Tip: `/snapshot export` archives your session for later replay.",
+)
+
+
+def _truncate_csv(items: list[str], max_chars: int) -> str:
+    """Return comma-separated items, truncated with `…` if over limit."""
+    joined = ", ".join(items)
+    if len(joined) <= max_chars:
+        return joined
+    out: list[str] = []
+    used = 0
+    ellipsis = ", …"
+    budget = max_chars - len(ellipsis)
+    for it in items:
+        addition = (", " if out else "") + it
+        if used + len(addition) > budget:
+            break
+        out.append(it)
+        used += len(addition)
+    return ", ".join(out) + ellipsis
+
+
+def build_welcome_banner(
+    console: "Console",
+    model: str,
+    cwd: str,
+    *,
+    session_id: Optional[str] = None,
+    home: Optional[Path] = None,
+) -> None:
+    """Print the OPENCOMPUTER welcome banner with categorized
+    tools/skills listing."""
+    import random
+
+    from rich.text import Text
+
+    from opencomputer.cli_banner_art import (
+        OPENCOMPUTER_LOGO,
+        OPENCOMPUTER_LOGO_FALLBACK,
+        SIDE_GLYPH,
+    )
+
+    # 1. Logo (skip figlet if terminal too narrow)
+    width = console.size.width if console.size else 80
+    longest = max(
+        (len(line) for line in OPENCOMPUTER_LOGO.splitlines() if line),
+        default=0,
+    )
+    if width >= longest:
+        console.print(Text(OPENCOMPUTER_LOGO, style="bold yellow"))
+    else:
+        console.print(Text(OPENCOMPUTER_LOGO_FALLBACK, style="bold yellow"))
+
+    # 2. Version label
+    label = format_banner_version_label()
+    console.print(Text(label, style="dim yellow"), justify="right")
+
+    # 3. Side glyph + meta block
+    glyph_lines = SIDE_GLYPH.strip("\n").splitlines()
+    for line in glyph_lines:
+        console.print(Text(line, style="bold magenta"))
+    console.print()
+    console.print(f"[bold]{model}[/bold] · OpenComputer")
+    console.print(f"[dim]{cwd}[/dim]")
+    if session_id:
+        console.print(f"[dim]Session: {session_id}[/dim]")
+    if home:
+        console.print(f"[dim]{home}[/dim]")
+
+    # 4. Tools listing
+    line_budget = max(40, width - 12)
+    tools = get_available_tools()
+    console.print()
+    console.print("[bold]Available Tools[/bold]")
+    for plugin in sorted(tools.keys()):
+        names = tools[plugin]
+        console.print(f"  [cyan]{plugin}:[/cyan] {_truncate_csv(names, line_budget)}")
+
+    # 5. Skills listing
+    skills = get_available_skills()
+    console.print()
+    console.print("[bold]Available Skills[/bold]")
+    for group in sorted(skills.keys()):
+        names = skills[group]
+        console.print(f"  [magenta]{group}:[/magenta] {_truncate_csv(names, line_budget)}")
+
+    # 6. Footer
+    n_tools = sum(len(v) for v in tools.values())
+    n_skills = sum(len(v) for v in skills.values())
+    console.print()
+    console.print(
+        f"[dim]{n_tools} tools · {n_skills} skills · "
+        f"[bold]/help[/bold] for commands[/dim]"
+    )
+
+    # 7. Welcome line
+    console.print()
+    console.print(
+        "[bold]Welcome to OpenComputer![/bold] "
+        "Type your message or /help for commands."
+    )
+
+    # 8. Tip
+    if _TIPS:
+        console.print(f"[dim]+ {random.choice(_TIPS)}[/dim]")

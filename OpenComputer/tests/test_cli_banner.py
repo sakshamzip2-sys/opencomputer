@@ -123,3 +123,106 @@ def test_get_available_tools_returns_empty_dict_when_registry_unreachable(
     )
 
     assert get_available_tools() == {}
+
+
+def test_build_welcome_banner_renders_logo_and_version(monkeypatch):
+    import io
+
+    from rich.console import Console
+
+    from opencomputer.cli_banner import build_welcome_banner
+
+    monkeypatch.setattr(
+        "opencomputer.cli_banner.get_available_skills",
+        lambda: {"coding": ["edit", "read"]},
+    )
+    monkeypatch.setattr(
+        "opencomputer.cli_banner.get_available_tools",
+        lambda: {"core": ["Edit", "Read"]},
+    )
+
+    buf = io.StringIO()
+    console = Console(file=buf, width=120, force_terminal=False)
+    build_welcome_banner(
+        console, model="claude-opus-4-7", cwd="/tmp",
+        session_id="abc123", home=Path("/home/user/.opencomputer"),
+    )
+    out = buf.getvalue()
+    # Either the figlet OPENCOMPUTER logo or its plain-text fallback
+    assert "OPENCOMPUTER" in out or "/_____/" in out
+    assert "claude-opus-4-7" in out
+    assert "abc123" in out
+
+
+def test_build_welcome_banner_lists_tools_and_skills(monkeypatch):
+    import io
+
+    from rich.console import Console
+
+    from opencomputer.cli_banner import build_welcome_banner
+
+    monkeypatch.setattr(
+        "opencomputer.cli_banner.get_available_skills",
+        lambda: {"research": ["arxiv", "blogwatcher"]},
+    )
+    monkeypatch.setattr(
+        "opencomputer.cli_banner.get_available_tools",
+        lambda: {"coding-harness": ["Edit", "MultiEdit", "TodoWrite"]},
+    )
+
+    buf = io.StringIO()
+    console = Console(file=buf, width=120, force_terminal=False)
+    build_welcome_banner(console, "m", "/cwd")
+    out = buf.getvalue()
+    assert "research" in out
+    assert "arxiv" in out
+    assert "coding-harness" in out
+    assert "Edit" in out
+
+
+def test_build_welcome_banner_footer_counts(monkeypatch):
+    import io
+
+    from rich.console import Console
+
+    from opencomputer.cli_banner import build_welcome_banner
+
+    monkeypatch.setattr(
+        "opencomputer.cli_banner.get_available_skills",
+        lambda: {"a": ["s1", "s2"], "b": ["s3"]},  # 3 skills
+    )
+    monkeypatch.setattr(
+        "opencomputer.cli_banner.get_available_tools",
+        lambda: {"core": ["t1", "t2", "t3", "t4"]},  # 4 tools
+    )
+
+    buf = io.StringIO()
+    console = Console(file=buf, width=120, force_terminal=False)
+    build_welcome_banner(console, "m", "/cwd")
+    out = buf.getvalue()
+    assert "4 tools" in out
+    assert "3 skills" in out
+    assert "/help" in out
+
+
+def test_build_welcome_banner_truncates_long_tool_lines(monkeypatch):
+    import io
+
+    from rich.console import Console
+
+    from opencomputer.cli_banner import build_welcome_banner
+
+    long_tool_list = [f"Tool{i:02d}" for i in range(40)]
+    monkeypatch.setattr(
+        "opencomputer.cli_banner.get_available_skills", lambda: {}
+    )
+    monkeypatch.setattr(
+        "opencomputer.cli_banner.get_available_tools",
+        lambda: {"big": long_tool_list},
+    )
+
+    buf = io.StringIO()
+    console = Console(file=buf, width=80, force_terminal=False)
+    build_welcome_banner(console, "m", "/cwd")
+    out = buf.getvalue()
+    assert "…" in out, "Long lists must be truncated with ellipsis"
