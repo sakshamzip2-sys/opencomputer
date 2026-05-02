@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 
-class WizardCancelled(Exception):
+class WizardCancelled(Exception):  # noqa: N818 — public-facing name, no Error suffix per spec
     """ESC pressed in a menu primitive — propagates cleanly through
     nested section handlers without each having to check return values.
 
@@ -39,7 +39,7 @@ class Choice:
 
     label: str
     value: object  # opaque to menu code; caller-defined type
-    description: Optional[str] = None
+    description: str | None = None
 
 
 def flush_stdin() -> None:
@@ -69,10 +69,10 @@ def radiolist(
     question: str,
     choices: list[Choice],
     default: int = 0,
-    description: Optional[str] = None,
+    description: str | None = None,
     *,
-    _input: Optional[Any] = None,   # injection for tests
-    _output: Optional[Any] = None,
+    _input: Any | None = None,   # injection for tests
+    _output: Any | None = None,
 ) -> int:
     """Single-select menu. Returns selected index. Raises WizardCancelled
     on ESC.
@@ -164,7 +164,7 @@ def _radiolist_numbered_fallback(
     question: str,
     choices: list[Choice],
     default: int = 0,
-    description: Optional[str] = None,
+    description: str | None = None,
 ) -> int:
     """Non-TTY single-select. Prints a numbered list and reads stdin."""
     print(question)
@@ -196,10 +196,10 @@ def _radiolist_numbered_fallback(
 def checklist(
     title: str,
     items: list[Choice],
-    pre_selected: Optional[list[int]] = None,
+    pre_selected: list[int] | None = None,
     *,
-    _input: Optional[Any] = None,
-    _output: Optional[Any] = None,
+    _input: Any | None = None,
+    _output: Any | None = None,
 ) -> list[int]:
     """Multi-select menu. Returns sorted list of selected indices."""
     pre_selected = pre_selected or []
@@ -320,8 +320,8 @@ def single_select(
     items: list[Choice],
     default: int = 0,
     *,
-    _input: Optional[Any] = None,
-    _output: Optional[Any] = None,
+    _input: Any | None = None,
+    _output: Any | None = None,
 ) -> int:
     """Single-select WITHOUT radio glyphs — visual variant of radiolist
     used when a (●)/(○) marker would imply "currently configured" rather

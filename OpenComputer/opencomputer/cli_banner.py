@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from opencomputer import __version__
+
+if TYPE_CHECKING:
+    from rich.console import Console
 
 __all__ = [
     "build_welcome_banner",
@@ -25,7 +28,7 @@ __all__ = [
 ]
 
 
-def _git_short_sha() -> Optional[str]:
+def _git_short_sha() -> str | None:
     """Return 7-char git SHA of HEAD, or None if not in a git repo."""
     try:
         out = subprocess.check_output(
@@ -82,10 +85,7 @@ def get_available_skills() -> dict[str, list[str]]:
         for skill_md in root.rglob("SKILL.md"):
             skill_dir = skill_md.parent
             group_dir = skill_dir.parent
-            if group_dir == root:
-                group = root.name
-            else:
-                group = group_dir.name
+            group = root.name if group_dir == root else group_dir.name
             seen_per_group.setdefault(group, set()).add(skill_dir.name)
     return {g: sorted(s) for g, s in sorted(seen_per_group.items())}
 
@@ -163,12 +163,12 @@ def _truncate_csv(items: list[str], max_chars: int) -> str:
 
 
 def build_welcome_banner(
-    console: "Console",
+    console: Console,
     model: str,
     cwd: str,
     *,
-    session_id: Optional[str] = None,
-    home: Optional[Path] = None,
+    session_id: str | None = None,
+    home: Path | None = None,
 ) -> None:
     """Print the OPENCOMPUTER welcome banner with categorized
     tools/skills listing."""

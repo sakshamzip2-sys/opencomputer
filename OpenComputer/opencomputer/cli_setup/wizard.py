@@ -6,7 +6,6 @@ Independently re-implemented (no code copied) — see spec § 10 O1.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import yaml
 from rich.console import Console
@@ -77,7 +76,7 @@ def _print_section_footer(result: SectionResult) -> None:
     _console.print(f"  {msg}")
 
 
-def _gate_configured_section(ctx: WizardCtx, section_title: str) -> Optional[SectionResult]:
+def _gate_configured_section(ctx: WizardCtx, section_title: str) -> SectionResult | None:
     """When the section reports configured, ask keep / reconfigure / skip.
     Returns:
       - SectionResult.SKIPPED_KEEP / SectionResult.SKIPPED_FRESH if user chose

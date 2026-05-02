@@ -5,10 +5,10 @@ Independently re-implemented (no code copied) — see spec § 10 O1.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Optional
 
 
 class SectionResult(Enum):
@@ -45,7 +45,7 @@ class WizardSection:
     title: str
     description: str
     handler: HandlerFn
-    configured_check: Optional[ConfiguredCheckFn] = None
+    configured_check: ConfiguredCheckFn | None = None
     deferred: bool = False
     target_subproject: str = ""
 

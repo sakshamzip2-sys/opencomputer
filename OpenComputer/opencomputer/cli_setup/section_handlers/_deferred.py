@@ -2,7 +2,7 @@
 follow-up sub-project and returns SKIPPED_FRESH."""
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from opencomputer.cli_setup.sections import SectionResult, WizardCtx
 

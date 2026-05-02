@@ -35,7 +35,8 @@ def test_wizard_ctx_holds_config_path_first_run_flag():
 def test_wizard_cancelled_re_exported_from_wizard_module():
     """Public-facing import path."""
     from opencomputer.cli_setup.wizard import WizardCancelled
-    from opencomputer.cli_ui.menu import WizardCancelled as menu_wc
+    from opencomputer.cli_ui.menu import WizardCancelled as menu_wc  # noqa: N813
+
     assert WizardCancelled is menu_wc, "Same exception class, single source"
 
 
