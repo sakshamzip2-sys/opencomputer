@@ -78,6 +78,9 @@ def _build_registry() -> list[WizardSection]:
     from opencomputer.cli_setup.section_handlers.tools import (
         run_tools_section,
     )
+    from opencomputer.cli_setup.section_handlers.terminal_backend import (
+        run_terminal_backend_section,
+    )
     from opencomputer.cli_setup.section_handlers.tts_provider import (
         run_tts_provider_section,
     )
@@ -132,8 +135,11 @@ def _build_registry() -> list[WizardSection]:
         ),
         WizardSection(
             key="terminal_backend", icon="◆", title="Terminal backend",
-            description="Sandboxed shell: Apptainer / Docker / native.",
-            handler=make_deferred_handler("S3"), deferred=True, target_subproject="S3",
+            description=(
+                "Sandbox for shell tools: Apptainer / Docker / native. "
+                "Auto-detects available backends."
+            ),
+            handler=run_terminal_backend_section,
         ),
         WizardSection(
             key="tools", icon="◆", title="Tools",
