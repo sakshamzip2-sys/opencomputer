@@ -36,6 +36,8 @@ _OPENAI_PROVIDER_DIR = _EXT_DIR / "openai-provider"
 _GEMINI_PROVIDER_DIR = _EXT_DIR / "gemini-provider"
 _ANTHROPIC_PROVIDER_DIR = _EXT_DIR / "anthropic-provider"
 _SCREEN_AWARENESS_DIR = _EXT_DIR / "screen-awareness"
+_OLLAMA_PROVIDER_DIR = _EXT_DIR / "ollama-provider"
+_GROQ_PROVIDER_DIR = _EXT_DIR / "groq-provider"
 
 
 def _ensure_extensions_pkg() -> None:
@@ -252,6 +254,22 @@ def _register_screen_awareness_alias() -> None:
     )
 
 
+def _register_ollama_provider_alias() -> None:
+    """Eager-exec + parent-binding for the Ollama local LLM provider."""
+    _register_extension_alias(
+        "ollama_provider", _OLLAMA_PROVIDER_DIR,
+        submodules=("provider", "plugin"),
+    )
+
+
+def _register_groq_provider_alias() -> None:
+    """Eager-exec + parent-binding for the Groq fast-inference provider."""
+    _register_extension_alias(
+        "groq_provider", _GROQ_PROVIDER_DIR,
+        submodules=("provider", "plugin"),
+    )
+
+
 _register_coding_harness_alias()
 _register_aws_bedrock_provider_alias()
 _register_browser_bridge_alias()
@@ -264,3 +282,5 @@ _register_anthropic_provider_alias()
 _register_browser_control_alias()
 _register_affect_injection_alias()
 _register_screen_awareness_alias()
+_register_ollama_provider_alias()
+_register_groq_provider_alias()

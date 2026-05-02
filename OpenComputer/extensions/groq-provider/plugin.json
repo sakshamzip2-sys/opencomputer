@@ -1,0 +1,26 @@
+{
+  "id": "groq-provider",
+  "name": "Groq Provider",
+  "version": "0.1.0",
+  "description": "Groq fast inference — 276-1500 t/s via GroqCloud API (OpenAI-compatible).",
+  "author": "OpenComputer",
+  "license": "MIT",
+  "kind": "provider",
+  "entry": "plugin",
+  "tool_names": [],
+  "model_support": {
+    "model_prefixes": ["llama-3", "mixtral", "gemma2", "whisper"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "groq",
+        "auth_methods": ["api_key"],
+        "env_vars": ["GROQ_API_KEY"],
+        "label": "Groq (fast inference)",
+        "default_model": "llama-3.3-70b-versatile",
+        "signup_url": "https://console.groq.com/keys"
+      }
+    ]
+  }
+}

@@ -501,18 +501,25 @@ async def test_complete_returns_provider_response(provider):
         "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
     })
     with patch("httpx.AsyncClient.post", AsyncMock(return_value=mock_resp)):
-        resp = await provider.complete(messages=[Message(role="user", content="hi")], model="llama3")
-    assert resp.content == "hello"
+        resp = await provider.complete(model="llama3", messages=[Message(role="user", content="hi")])
+    assert resp.message.content == "hello"
+    assert resp.message.role == "assistant"
+    assert resp.stop_reason == "end_turn"
     assert resp.usage.input_tokens == 5
+    assert resp.usage.output_tokens == 1
 
 
 @pytest.mark.asyncio
-async def test_stream_complete_yields_chunks(provider):
-    """Critical: stream_complete MUST be implemented (not NotImplementedError)."""
+async def test_stream_complete_yields_text_delta_then_done(provider):
+    """Critical: stream_complete MUST yield StreamEvent objects (not the
+    rev-1 fictional StreamDelta), and finish with a `done` event carrying
+    the full ProviderResponse — that's what the agent loop unwraps.
+    """
     async def fake_lines():
         for line in [
             'data: {"choices":[{"delta":{"content":"hel"}}]}',
             'data: {"choices":[{"delta":{"content":"lo"}}]}',
+            'data: {"choices":[{"finish_reason":"stop"}]}',
             'data: [DONE]',
         ]:
             yield line
@@ -526,10 +533,15 @@ async def test_stream_complete_yields_chunks(provider):
         async def __aexit__(self_, *a): return None
 
     with patch("httpx.AsyncClient.stream", MagicMock(return_value=_CM())):
-        chunks = []
-        async for d in provider.stream_complete(messages=[Message(role="user", content="hi")], model="llama3"):
-            chunks.append(d)
-        assert "".join(c.content_delta for c in chunks if c.content_delta) == "hello"
+        events = []
+        async for e in provider.stream_complete(model="llama3", messages=[Message(role="user", content="hi")]):
+            events.append(e)
+    text_chunks = [e.text for e in events if e.kind == "text_delta"]
+    assert "".join(text_chunks) == "hello"
+    # Final event must be `done` with a complete ProviderResponse
+    assert events[-1].kind == "done"
+    assert events[-1].response is not None
+    assert events[-1].response.message.content == "hello"
 ```
 
 - [ ] **Step 3: Run test (expect fail — `extensions.ollama_provider` not yet aliased)**
@@ -540,26 +552,39 @@ async def test_stream_complete_yields_chunks(provider):
 # extensions/ollama-provider/provider.py
 """Ollama provider — local LLM via Ollama's OpenAI-compatible API.
 
-Default endpoint: http://localhost:11434/v1
-Reads OLLAMA_BASE_URL env var override.
+Default endpoint: http://localhost:11434/v1. Reads OLLAMA_BASE_URL override.
 
 Differs from openai-provider with OPENAI_BASE_URL=http://localhost:11434/v1 by:
-- Cleaner config UX (no env-var fiddling, defaults right out of the box)
-- Logical home for Ollama-specific extensions later
+- Cleaner config UX (defaults right out of the box, no env fiddling)
+- Logical home for Ollama-specific extensions later (modelfile mgmt, etc.)
 """
 from __future__ import annotations
 
 import json
 import os
 from collections.abc import AsyncIterator
-from typing import Any
 
 import httpx
 
-from plugin_sdk.core import Message, ProviderResponse, StreamDelta, Usage
-from plugin_sdk.provider_contract import BaseProvider
+from plugin_sdk.core import Message
+from plugin_sdk.provider_contract import (
+    BaseProvider,
+    ProviderResponse,
+    StreamEvent,
+    Usage,
+)
+from plugin_sdk.tool_contract import ToolSchema
 
 DEFAULT_BASE_URL = "http://localhost:11434/v1"
+
+# OpenAI finish_reason → OC stop_reason vocabulary
+_STOP_MAP = {
+    "stop": "end_turn",
+    "length": "max_tokens",
+    "tool_calls": "tool_use",
+    "content_filter": "end_turn",
+    None: "end_turn",
+}
 
 
 class OllamaProvider(BaseProvider):
@@ -576,18 +601,19 @@ class OllamaProvider(BaseProvider):
     async def complete(
         self,
         *,
-        messages: list[Message],
         model: str,
-        tools: list | None = None,
-        **kwargs: Any,
+        messages: list[Message],
+        system: str = "",
+        tools: list[ToolSchema] | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 1.0,
+        stream: bool = False,
+        runtime_extras: dict | None = None,
     ) -> ProviderResponse:
-        body = {
-            "model": model,
-            "messages": [self._msg(m) for m in messages],
-            "stream": False,
-        }
-        if tools:
-            body["tools"] = tools
+        body = self._build_body(
+            model=model, messages=messages, system=system, tools=tools,
+            max_tokens=max_tokens, temperature=temperature, stream=False,
+        )
         async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
             r = await client.post(
                 f"{self._base_url}/chat/completions",
@@ -596,34 +622,26 @@ class OllamaProvider(BaseProvider):
             )
             r.raise_for_status()
             data = r.json()
-        c = data["choices"][0]["message"]
-        u = data.get("usage") or {}
-        return ProviderResponse(
-            content=c.get("content") or "",
-            tool_calls=c.get("tool_calls") or [],
-            usage=Usage(
-                input_tokens=u.get("prompt_tokens", 0),
-                output_tokens=u.get("completion_tokens", 0),
-            ),
-            stop_reason=data["choices"][0].get("finish_reason"),
-            raw_response=data,
-        )
+        return self._parse_response(data)
 
     async def stream_complete(
         self,
         *,
-        messages: list[Message],
         model: str,
-        tools: list | None = None,
-        **kwargs: Any,
-    ) -> AsyncIterator[StreamDelta]:
-        body = {
-            "model": model,
-            "messages": [self._msg(m) for m in messages],
-            "stream": True,
-        }
-        if tools:
-            body["tools"] = tools
+        messages: list[Message],
+        system: str = "",
+        tools: list[ToolSchema] | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 1.0,
+        runtime_extras: dict | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        body = self._build_body(
+            model=model, messages=messages, system=system, tools=tools,
+            max_tokens=max_tokens, temperature=temperature, stream=True,
+        )
+        content_parts: list[str] = []
+        finish_reason: str | None = None
+        usage = Usage()
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             async with client.stream(
                 "POST",
@@ -642,12 +660,74 @@ class OllamaProvider(BaseProvider):
                         chunk = json.loads(payload)
                     except json.JSONDecodeError:
                         continue
-                    delta = chunk.get("choices", [{}])[0].get("delta", {})
-                    yield StreamDelta(
-                        content_delta=delta.get("content") or "",
-                        tool_call_delta=delta.get("tool_calls"),
-                        finish_reason=chunk.get("choices", [{}])[0].get("finish_reason"),
-                    )
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    if text := delta.get("content"):
+                        content_parts.append(text)
+                        yield StreamEvent(kind="text_delta", text=text)
+                    if fr := choices[0].get("finish_reason"):
+                        finish_reason = fr
+                    if u := chunk.get("usage"):
+                        usage = Usage(
+                            input_tokens=u.get("prompt_tokens", 0),
+                            output_tokens=u.get("completion_tokens", 0),
+                        )
+        # Final event — done, carrying the full ProviderResponse
+        final_msg = Message(role="assistant", content="".join(content_parts))
+        yield StreamEvent(
+            kind="done",
+            response=ProviderResponse(
+                message=final_msg,
+                stop_reason=_STOP_MAP.get(finish_reason, "end_turn"),
+                usage=usage,
+            ),
+        )
+
+    def _build_body(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        system: str,
+        tools: list[ToolSchema] | None,
+        max_tokens: int,
+        temperature: float,
+        stream: bool,
+    ) -> dict:
+        msgs = []
+        if system:
+            msgs.append({"role": "system", "content": system})
+        msgs.extend(self._msg(m) for m in messages)
+        body: dict = {
+            "model": model,
+            "messages": msgs,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": stream,
+        }
+        if tools:
+            body["tools"] = [t.to_openai_format() for t in tools]
+        return body
+
+    def _parse_response(self, data: dict) -> ProviderResponse:
+        choice = data["choices"][0]
+        msg_data = choice["message"]
+        finish = choice.get("finish_reason")
+        u = data.get("usage") or {}
+        return ProviderResponse(
+            message=Message(
+                role="assistant",
+                content=msg_data.get("content") or "",
+                tool_calls=msg_data.get("tool_calls") or None,
+            ),
+            stop_reason=_STOP_MAP.get(finish, "end_turn"),
+            usage=Usage(
+                input_tokens=u.get("prompt_tokens", 0),
+                output_tokens=u.get("completion_tokens", 0),
+            ),
+        )
 
     @staticmethod
     def _msg(m: Message) -> dict:
