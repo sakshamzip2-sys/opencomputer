@@ -98,7 +98,7 @@ async def test_setup_message_shape_on_open() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_audio_wraps_realtimeInput_pcm16k() -> None:
+async def test_send_audio_wraps_realtimeInput_pcm16k() -> None:  # noqa: N802 — name mirrors realtime API "realtimeInput" wire field
     """send_audio after ready should emit realtimeInput.audio with 16kHz mime."""
     fake_ws = _FakeWS()
 
