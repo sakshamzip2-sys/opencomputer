@@ -66,11 +66,15 @@ def test_base_url_marker_is_cloudcode():
     assert mod.DEFAULT_GEMINI_CLOUDCODE_BASE_URL == "cloudcode-pa://google"
 
 
-def test_complete_raises_not_implemented(tmp_path, monkeypatch):
-    """Cloud Code Assist adapter is the pending follow-up — surface it loudly."""
+def test_complete_routes_through_cloud_code_assist(tmp_path, monkeypatch):
+    """complete() now goes through the Cloud Code Assist transport (PR for follow-up)."""
     import asyncio
+    from unittest.mock import MagicMock
+
+    from plugin_sdk.core import Message
 
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    monkeypatch.setenv("OPENCOMPUTER_GEMINI_PROJECT_ID", "test-proj")
     auth_dir = tmp_path / "auth"
     auth_dir.mkdir(parents=True)
     (auth_dir / "google_oauth.json").write_text(json.dumps({
@@ -78,10 +82,27 @@ def test_complete_raises_not_implemented(tmp_path, monkeypatch):
         "refresh_token": "y",
         "expires_ms": int((time.time() + 3600) * 1000),
     }))
+
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.json.return_value = {
+        "response": {
+            "candidates": [{
+                "content": {"parts": [{"text": "ok"}]},
+                "finishReason": "STOP",
+            }],
+            "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1},
+        }
+    }
+
     mod = _load()
     p = mod.GeminiOAuthProvider()
-    with pytest.raises(NotImplementedError, match="Cloud Code Assist"):
-        asyncio.run(p.complete([], "gemini-2.5-pro", []))
+    with patch("httpx.post", return_value=fake_resp):
+        pr = asyncio.run(p.complete(
+            model="gemini-2.5-pro",
+            messages=[Message(role="user", content="hi")],
+        ))
+    assert pr.message.content == "ok"
 
 
 def test_plugin_manifest():
