@@ -8,26 +8,34 @@ and why. Updated as PRs merge.
 
 ---
 
-## Status snapshot
+## Status snapshot (updated 2026-05-02 after polish + M.b/c)
 
 **Wizard:** 8/8 sections LIVE, all titles + defaults aligned with Hermes,
 OAuth-token storage foundation in place, Configuration Summary block
-at end, `oc setup --new --non-interactive` flag for CI.
+at end, `oc setup --new --non-interactive` flag for CI. Polish items
+shipped: banner update-check display, provider construction test
+after key save, OpenClaw migration preview phase.
 
-**Providers:** 5 original (anthropic, openai, openrouter, gemini,
-aws-bedrock) + 14 OpenAI-compatible additions (deepseek, xai, zai, kimi,
-dashscope, tencent, nvidia, huggingface, stepfun, arcee, ollama-cloud,
-gmi, kilo, opencode-zen, opencode-go, ai-gateway, xiaomi, kimi-cn,
-alibaba-coding-plan) = **19 total** in the wizard menu.
+**Providers in wizard menu (22 total):**
+- 5 original (anthropic, openai, openrouter, gemini, aws-bedrock)
+- 17 OpenAI-compatible (deepseek, xai, zai, kimi, dashscope,
+  tencent, nvidia, huggingface, stepfun, arcee, ollama-cloud, gmi,
+  kilo, opencode-zen, opencode-go, ai-gateway, xiaomi, kimi-cn,
+  alibaba-coding-plan, azure-foundry)
+- 2 Anthropic-shaped (minimax, minimax-cn) — added in M.b
 
-**Channel adapters:** 11 working (telegram, discord, slack, matrix,
-mattermost, whatsapp, signal, email, webhook, sms, homeassistant) +
-9 missing (BlueBubbles, QQ Bot, DingTalk, Feishu, WeCom, Weixin,
-Yuanbao, IRC, Microsoft Teams).
+**Channel adapters in extensions/:** 12 working (telegram, discord,
+slack, matrix, mattermost, whatsapp, signal, email, webhook, sms,
+homeassistant, **imessage** (BlueBubbles)) + 8 missing (QQ Bot,
+DingTalk, Feishu, WeCom, Weixin, Yuanbao, IRC, Microsoft Teams).
+
+> **Correction:** an earlier version of this doc claimed BlueBubbles
+> was missing — it's actually shipped as the `imessage` extension
+> with full BlueBubbles bridge integration. 8 channels remain.
 
 ---
 
-## Shipped (PRs #288-#311)
+## Shipped (PRs #288-#315)
 
 | PR | Sub-project | Summary |
 |---|---|---|
@@ -42,16 +50,20 @@ Yuanbao, IRC, Microsoft Teams).
 | #308 | T | Per-platform credential entry flow in messaging_platforms |
 | #309 | O | OAuth token store foundation (deferred device-code flow) |
 | #310 | Q1+Q2 | Reconfigure detection + --non-interactive flag |
-| #311 | M | Regional variants (Kimi China + Alibaba Coding Plan) |
+| #311 | M.a | Regional variants (Kimi China + Alibaba Coding Plan) |
+| #312 | docs | Initial roadmap doc |
+| **#313** | **M.b** | **MiniMax + MiniMax China (Anthropic-shaped subclass)** |
+| **#314** | **M.c** | **Azure AI Foundry (OpenAI-style)** |
+| **#315** | **polish** | **Banner update-check + provider test + OpenClaw preview** |
 
-**Numbers:** ~17 PRs, ~9,500 LOC, ~210 new tests, full pytest passing,
-ruff clean.
+**Numbers:** ~21 PRs, ~10,500 LOC, ~240 new tests, full pytest passing,
+ruff clean throughout.
 
 ---
 
 ## Pending
 
-### C — Channel adapter gap-fill (9 platforms)
+### C — Channel adapter gap-fill (8 platforms remaining)
 
 The wizard's `messaging_platforms` section discovers any channel-kind
 plugin and lists it. Adding a new channel = ship a `BaseChannelAdapter`
@@ -68,7 +80,7 @@ half-built bulk attempt.
 |---|---|---|---|
 | **IRC** | RFC 1459 | ~300 LOC | Standard but stateful; nick management, channel join, MOTD |
 | **Microsoft Teams** | Webhook + Graph API | ~400 LOC | OAuth + Graph API for receive; webhook for send |
-| **BlueBubbles (iMessage)** | REST + WebSocket | ~350 LOC | Pairs with BlueBubbles server (https://bluebubbles.app); REST for send |
+| ~~BlueBubbles (iMessage)~~ | already shipped | — | See `extensions/imessage/` |
 | **DingTalk** | Webhook + receive callback | ~400 LOC | Sign-verification on inbound; outbound API uses access_token |
 | **Feishu / Lark** | REST + receive callback | ~400 LOC | App-level auth; mention-by-open-id |
 | **WeCom (Enterprise WeChat)** | REST + receive callback | ~450 LOC | Corp + agent + secret triple; encryption/decryption on receive |
@@ -76,6 +88,13 @@ half-built bulk attempt.
 | **Weixin / WeChat** | Public account REST | ~400 LOC | Token cycling; mostly outbound |
 | **Yuanbao** | Tencent direct API | ~300 LOC | OAuth + REST |
 | **QQ Bot** | Tencent QQ Bot Open API | ~400 LOC | OAuth (QQ official bot framework); reverse-WebSocket |
+
+**Status:** these 8 are *not yet shipped*. Each genuinely needs
+dedicated focus — protocol research, real-server testing, mock
+fixtures for CI. Recommended approach: one PR per adapter,
+start with IRC (simplest standard) to validate the per-channel
+shape, then Microsoft Teams (broad reach), then the Chinese
+platforms in any order based on user demand.
 
 **Recommended order to ship:** IRC first (simplest, well-known), then
 Microsoft Teams (broad reach), then BlueBubbles. Defer the Chinese
@@ -113,41 +132,33 @@ Foundation in place (`opencomputer/auth/token_store.py`). What's missing:
 together (one PR) to validate the full flow end-to-end. Then a follow-up
 adds GitHub Copilot. Then `external.py` + Google Gemini OAuth. Then Qwen.
 
-### M.b — Anthropic-shaped providers (MiniMax, MiniMax China)
+### ~~M.b~~ — Shipped in PR #313
 
-Both use `anthropic_messages` transport in Hermes (not `openai_chat`).
-Subclassing OC's existing `OpenAIProvider` would 400 at runtime.
+Anthropic-shaped MiniMax + MiniMax China subclass the bundled
+`anthropic-provider`. AnthropicProvider already supported configurable
+base_url + _api_key_env, so subclasses just override 3 class attrs and
+pre-validate env-var-not-set in __init__ for proper error messages.
 
-**Path:** extend `extensions/anthropic-provider` to accept a custom
-`base_url` + `api_key_env`, then add MiniMax + MiniMax China as thin
-subclasses. ~150 LOC for the anthropic-provider extension + 100 LOC
-per subclass.
+### M.c — Azure Foundry (partial — OpenAI-style only)
 
-### M.c — Azure Foundry
+OpenAI-style Azure Foundry deployments shipped in PR #314 (subclass
+of OpenAIProvider with required AZURE_FOUNDRY_BASE_URL).
 
-Mixed `api_mode` per-model: same provider can serve OpenAI-style or
-Anthropic-style endpoints depending on which model is requested.
-Hermes resolves this at runtime via `config.yaml::model.api_mode`.
+**Still pending:** Anthropic-style models on Azure (Claude-on-Azure,
+which uses a different endpoint shape). Needs `api_mode` field in
+`ModelConfig` so a single provider plugin can dispatch to either
+transport based on `config.yaml::model.api_mode`. ~200 LOC for the
+plugin + ~50 LOC for the config schema bump.
 
-**Path:** add `api_mode` field to `ModelConfig`; provider plugin
-dispatches to the appropriate transport. ~200 LOC for the plugin
-+ ~50 LOC for the config schema bump.
+### ~~Polish~~ — Shipped in PR #315
 
-### Polish
-
-- **Welcome banner update-check integration** — `cli_banner.py`'s
-  `prefetch_update_check` call exists but result isn't displayed.
-  Add "(update available: vX.Y.Z)" line to the banner footer when
-  update detected. ~20 LOC.
-
-- **`oc setup` connection test** — Hermes's wizard tests the provider
-  by sending a small ping after key entry. OC's wizard saves the key
-  but doesn't validate it. Add an opt-in test step. ~80 LOC.
-
-- **OpenClaw migration preview** — current M1 imports without preview.
-  Hermes shows a dry-run preview before any file copy. Add a preview
-  phase that lists what would be imported, then asks for confirmation.
-  ~100 LOC.
+All three polish items shipped:
+- ✓ Banner update-check display via `cli_update_check.get_update_hint()`
+- ✓ Provider construction test after key save (best-effort `__init__()`
+  call to catch wrong-key-shape / missing-dep issues; doesn't make
+  network calls)
+- ✓ OpenClaw migration preview phase (dry-run lists fresh files vs
+  files that would land at `<name>.imported`, plus skill counts)
 
 ---
 
