@@ -130,6 +130,41 @@ async def test_empty_end_turn_after_retry_still_empty_accepts(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_max_tokens_with_tool_use_retries_with_doubled_max_tokens(tmp_path) -> None:
+    """max_tokens stop with last block being tool_use → retry with max_tokens * 2."""
+    truncated_resp = ProviderResponse(
+        message=Message(
+            role="assistant",
+            content="Calling tool",
+            tool_calls=[ToolCall(id="t1", name="Read", arguments={"path": ""})],
+        ),
+        stop_reason="max_tokens",
+        usage=Usage(input_tokens=10, output_tokens=4096),
+    )
+    full_resp = ProviderResponse(
+        message=Message(
+            role="assistant",
+            content="Done",
+            tool_calls=None,
+        ),
+        stop_reason="end_turn",
+        usage=Usage(input_tokens=10, output_tokens=200),
+    )
+
+    provider = _ScriptedProvider([truncated_resp, full_resp])
+    loop = _make_loop(provider, tmp_path)
+    # ModelConfig default max_tokens is already 4096 — frozen dataclass
+    # so we can't mutate; use construction default.
+
+    result = await loop.run_conversation("Read file", session_id="t6")
+    # Retry happened (provider called twice).
+    assert provider._idx == 2
+    # Final outcome reflects the retry's stop reason.
+    assert result.stop_reason == StopReason.END_TURN
+    assert "Done" in result.final_message.content
+
+
+@pytest.mark.asyncio
 async def test_refusal_maps_to_stop_reason_refusal(tmp_path) -> None:
     """When stop_reason='refusal', loop emits StopReason.REFUSAL not END_TURN.
 
