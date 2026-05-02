@@ -2397,6 +2397,11 @@ from opencomputer.cli_eval import eval_app  # noqa: E402
 
 app.add_typer(eval_app, name="eval")
 
+# OpenCLI Integration 2026-05-02 — recipe-driven browser commands
+from opencomputer.cli_browser import browser_app  # noqa: E402
+
+app.add_typer(browser_app, name="browser")
+
 # Phase 10f.I — memory CLI subcommand group
 from opencomputer.cli_memory import memory_app  # noqa: E402
 
