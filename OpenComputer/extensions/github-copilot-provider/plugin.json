@@ -1,0 +1,23 @@
+{
+  "id": "github-copilot-provider",
+  "name": "GitHub Copilot",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "GitHub Copilot — uses GITHUB_TOKEN / GH_TOKEN / COPILOT_GITHUB_TOKEN env, or reads from gh CLI auth (~/.config/gh/hosts.yml). Inference at api.githubcopilot.com (OpenAI-compatible).",
+  "model_support": {
+    "model_prefixes": ["gpt-", "claude-", "o1", "o3", "o4"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "copilot",
+        "auth_methods": ["api_key", "github_oauth"],
+        "env_vars": ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"],
+        "label": "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)",
+        "default_model": "gpt-4o",
+        "signup_url": "https://docs.github.com/en/copilot"
+      }
+    ]
+  }
+}
