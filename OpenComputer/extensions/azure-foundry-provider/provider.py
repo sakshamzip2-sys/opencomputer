@@ -26,16 +26,23 @@ Env vars:
 """
 from __future__ import annotations
 
+import importlib.util as _importlib_util
 import os
 import sys
 from pathlib import Path
 
 _OPENAI_PROVIDER_DIR = Path(__file__).resolve().parent.parent / "openai-provider"
 _ANTHROPIC_PROVIDER_DIR = Path(__file__).resolve().parent.parent / "anthropic-provider"
-if str(_OPENAI_PROVIDER_DIR) not in sys.path:
-    sys.path.insert(0, str(_OPENAI_PROVIDER_DIR))
 
-from provider import OpenAIProvider  # type: ignore[import-not-found]  # noqa: E402
+# Load extensions/openai-provider/provider.py under a unique module name to
+# avoid sys.modules['provider'] collision when multiple OpenAI-compat
+# providers are loaded in the same process (PR #353 fix, extended).
+_spec = _importlib_util.spec_from_file_location(
+    "_oai_base_for_azure_foundry", str(_OPENAI_PROVIDER_DIR / "provider.py")
+)
+_mod = _importlib_util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+OpenAIProvider = _mod.OpenAIProvider
 
 VALID_API_MODES = frozenset({"auto", "openai", "anthropic"})
 
