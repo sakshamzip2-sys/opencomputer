@@ -1,0 +1,26 @@
+{
+  "id": "ollama-provider",
+  "name": "Ollama Provider",
+  "version": "0.1.0",
+  "description": "Local LLM via Ollama's OpenAI-compatible API.",
+  "author": "OpenComputer",
+  "license": "MIT",
+  "kind": "provider",
+  "entry": "plugin",
+  "tool_names": [],
+  "model_support": {
+    "model_prefixes": ["llama", "mistral", "phi", "gemma", "qwen", "codellama", "deepseek"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "ollama",
+        "auth_methods": ["none"],
+        "env_vars": ["OLLAMA_BASE_URL"],
+        "label": "Ollama (local)",
+        "default_model": "llama3",
+        "signup_url": "https://ollama.ai/download"
+      }
+    ]
+  }
+}
