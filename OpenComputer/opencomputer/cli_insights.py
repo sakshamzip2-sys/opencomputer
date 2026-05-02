@@ -17,6 +17,7 @@ stays small).
 
 from __future__ import annotations
 
+from datetime import UTC
 from typing import Annotated
 
 import typer
@@ -150,7 +151,7 @@ def insights_llm_command(
     import json
     import os
     from collections import defaultdict
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     from pathlib import Path
 
     home_str = os.environ.get("OPENCOMPUTER_PROFILE_HOME") or str(
@@ -161,7 +162,7 @@ def insights_llm_command(
         typer.echo("No LLM events recorded yet.")
         return
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
     by_provider: dict[str, list] = defaultdict(list)
     by_site: dict[str, list] = defaultdict(list)
 
