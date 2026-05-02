@@ -61,6 +61,9 @@ def _build_registry() -> list[WizardSection]:
         is_agent_settings_configured,
         run_agent_settings_section,
     )
+    from opencomputer.cli_setup.section_handlers.launchd_service import (
+        run_launchd_service_section,
+    )
     from opencomputer.cli_setup.section_handlers.inference_provider import (
         is_inference_provider_configured,
         run_inference_provider_section,
@@ -124,8 +127,11 @@ def _build_registry() -> list[WizardSection]:
         ),
         WizardSection(
             key="launchd_service", icon="◆", title="Launchd service",
-            description="Run gateway as a launchd service (starts on boot).",
-            handler=make_deferred_handler("S5"), deferred=True, target_subproject="S5",
+            description=(
+                "Run gateway as a launchd service (starts on login).\n"
+                "macOS only — no-op on Linux/Windows."
+            ),
+            handler=run_launchd_service_section,
         ),
     ]
 

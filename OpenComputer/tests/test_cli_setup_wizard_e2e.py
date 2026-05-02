@@ -40,6 +40,12 @@ def test_e2e_first_run_picks_first_provider_and_skips_messaging(
         "opencomputer.cli_setup.section_handlers.agent_settings.radiolist",
         lambda *a, **kw: 0,
     )
+    # S5 — launchd_service is now LIVE; force non-macOS path so the
+    # test doesn't actually write a real plist or shell out to launchctl.
+    monkeypatch.setattr(
+        "opencomputer.cli_setup.section_handlers.launchd_service._is_macos",
+        lambda: False,
+    )
 
     rc = wizard.run_setup()
     assert rc == 0
