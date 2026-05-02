@@ -74,3 +74,46 @@ discussions.
 - Client: `extensions/anthropic-provider/files_client.py`
 - CLI:    `opencomputer/cli_files.py`
 - Anthropic Files API docs: https://docs.claude.com/en/build-with-claude/files
+
+## PDF auto-caching (opt-in)
+
+OpenComputer's Anthropic provider can cache PDF uploads via the Files
+API to save bandwidth on multi-turn conversations about the same file.
+Default OFF.
+
+### Enable
+
+Either:
+
+```bash
+export OPENCOMPUTER_ANTHROPIC_FILES_CACHE=1
+opencomputer chat
+```
+
+Or programmatically:
+
+```python
+from opencomputer.agent.runtime import RuntimeContext
+
+runtime = RuntimeContext(custom={"anthropic_files_cache": True})
+```
+
+### How it works
+
+1. SHA-256 hash of the PDF bytes is the cache key
+2. Cache file: `<profile_home>/anthropic_files_cache.json`
+3. Hit → request uses `{type: document, source: {type: file, file_id: <cached>}}`
+4. Miss → upload via Files API, cache the file_id, then use it
+5. Failure → log warning, fall back to base64 inline (request still succeeds)
+
+### Caveats
+
+- **Workspace-scoped.** All API keys in your workspace see each other's
+  uploaded files. If another process deletes a file you have cached
+  (via `oc files delete`), the next request using that cached file_id
+  will return 404 from the API.
+- **No auto-prune.** Cache file grows over time. Inspect with
+  `cat <profile_home>/anthropic_files_cache.json`. To wipe: delete the
+  file. To prune individual entries: delete the file ID server-side
+  (`oc files delete <id>`) — the next cache miss will re-upload.
+- **Anthropic provider only.** Bedrock and OpenAI ignore the flag.
