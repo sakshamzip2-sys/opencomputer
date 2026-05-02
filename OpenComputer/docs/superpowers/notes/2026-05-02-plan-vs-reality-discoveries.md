@@ -20,11 +20,19 @@ The `json.loads(raw)` at line 169 is in `_insight_from_json`, which parses **per
 
 **Action:** dropped from v1 site list. Replacement candidates (e.g., one of the unread life-event detectors with LLM logic) deferred to a future session.
 
-## 2. `reflect.py` shim requires constructing TrajectoryRecord objects
+## 2. `reflect.py` shim requires SessionDB integration, not a string fabricator
 
-`ReflectionEngine.reflect(records: list[TrajectoryRecord]) -> list[Insight]` — not a `str -> str` function. A real `reflect_for_eval` needs to fabricate at least one `TrajectoryRecord`, which requires understanding that dataclass + the `_cache_key`/Jinja2 template wiring.
+`ReflectionEngine.reflect(records: list[TrajectoryRecord]) -> list[Insight]` — not a `str -> str` function.
 
-**Action:** deferred to scheduled agent. Adapter import-resolves (so test_callable_paths_resolve passes) but calling it raises NotImplementedError with a clear message.
+**Deeper discovery (2026-05-02 follow-up)**: `TrajectoryEvent.metadata` has a hard 200-char string limit enforced at construction — `__post_init__` raises `ValueError` on any string value longer than 200 chars to prevent raw prompt text from leaking into the evolution store. This means a "fabricator from `session_excerpt` string" violates the privacy contract by design. Records reference messages by `message_id` (FK into `agent_state.messages`), so a proper test fixture needs:
+
+1. A fake (or real) `SessionDB` with messages inserted
+2. `TrajectoryRecord`s pointing at those `message_id`s
+3. A real provider configured to call `reflect()`
+
+That's a substantial integration test, not a unit shim. Beyond v1 eval scope.
+
+**Action**: keep the `reflect_for_eval` stub with `NotImplementedError` and a clear handoff message. The cleanest future path is a separate eval site whose case format is `{"records": list[dict]}` (full pre-built records) instead of `{"session_excerpt": str}`. That moves the fabricator out of production code and into eval fixtures.
 
 ## 3. `job_change.py` is regex-only, not LLM-driven, AND takes URL+title not free text
 

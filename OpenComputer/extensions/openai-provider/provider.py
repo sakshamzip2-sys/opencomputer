@@ -15,7 +15,9 @@ import json
 import logging
 import mimetypes
 import os
+import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,8 @@ from opencomputer.agent.rate_guard import (
     rate_limit_remaining,
     record_rate_limit,
 )
+from opencomputer.inference.observability import LLMCallEvent, record_llm_call
+from opencomputer.inference.pricing import compute_cost_usd
 from plugin_sdk.core import Message, ToolCall
 from plugin_sdk.provider_contract import (
     BaseProvider,
@@ -38,6 +42,8 @@ from plugin_sdk.provider_contract import (
     Usage,
 )
 from plugin_sdk.tool_contract import ToolSchema
+
+logger = logging.getLogger(__name__)
 
 _RATE_GUARD_PROVIDER = "openai"
 
@@ -377,12 +383,54 @@ class OpenAIProvider(BaseProvider):
                     "strict": True,
                 },
             }
+        t0 = time.monotonic()
         try:
             resp = await client.chat.completions.create(**kwargs)
         except OpenAIRateLimitError as exc:
             _record_429(exc)
             raise
-        return self._parse_response(resp)
+        t1 = time.monotonic()
+        result = self._parse_response(resp)
+        self._emit_llm_event(model=model, usage=result.usage, t0=t0, t1=t1)
+        return result
+
+    def _emit_llm_event(
+        self, *, model: str, usage: Usage, t0: float, t1: float, site: str = "agent_loop"
+    ) -> None:
+        """Emit one LLMCallEvent to the central observability sink.
+
+        Best-effort: a sink failure (disk full, permission denied) must
+        not crash the agent loop. Logs at WARNING and continues.
+
+        ``site`` defaults to ``"agent_loop"`` — Phase 4 follow-up will
+        thread the actual call-site through ``BaseProvider.complete()``
+        as a kwarg once the Anthropic provider's signature is no longer
+        contended by parallel sessions.
+        """
+        try:
+            record_llm_call(
+                LLMCallEvent(
+                    ts=datetime.now(UTC),
+                    provider="openai",
+                    model=model,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cache_creation_tokens=0,  # OpenAI doesn't surface a creation count
+                    cache_read_tokens=usage.cache_read_tokens,
+                    latency_ms=int((t1 - t0) * 1000),
+                    cost_usd=compute_cost_usd(
+                        provider="openai",
+                        model=model,
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        cache_creation_tokens=0,
+                        cache_read_tokens=usage.cache_read_tokens,
+                    ),
+                    site=site,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — telemetry must not break the loop
+            logger.warning("LLMCallEvent record failed: %s", exc)
 
     async def complete_vision(
         self,
@@ -515,6 +563,7 @@ class OpenAIProvider(BaseProvider):
         finish_reason = "stop"
         usage: Usage = Usage()
 
+        t0 = time.monotonic()
         try:
             stream = await client.chat.completions.create(**kwargs)
         except OpenAIRateLimitError as exc:
@@ -577,6 +626,8 @@ class OpenAIProvider(BaseProvider):
             "function_call": "tool_use",
             "content_filter": "end_turn",
         }
+        t1 = time.monotonic()
+        self._emit_llm_event(model=model, usage=usage, t0=t0, t1=t1)
         return ProviderResponse(
             message=msg,
             stop_reason=stop_map.get(finish_reason, "end_turn"),
