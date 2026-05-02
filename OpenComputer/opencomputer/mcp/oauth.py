@@ -43,6 +43,7 @@ import os
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -281,32 +282,58 @@ class OCMCPOAuthClient:
         self.server_name = server_name
 
     def _all_tokens(self) -> dict[str, Any]:
-        """Read the entire tokens.json. Returns ``{}`` on missing / corrupt."""
+        """Read the entire tokens.json. Returns ``{}`` on missing / corrupt / non-dict."""
         path = _tokens_path()
         if not path.exists():
             return {}
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             logger.error("mcp tokens file corrupted at %s: %s", path, exc)
             return {}
+        # Guard against the file being a list/string/null — we always
+        # expect a top-level mapping. Anything else is corruption.
+        if not isinstance(data, dict):
+            logger.error(
+                "mcp tokens file at %s is not a JSON object (got %s)",
+                path, type(data).__name__,
+            )
+            return {}
+        return data
 
     def load_tokens(self) -> dict[str, Any]:
         """Return the stored payload for this server, or ``{}``."""
         return self._all_tokens().get(self.server_name, {})
 
-    def save_tokens(self, tokens: dict[str, Any]) -> None:
+    def save_tokens(
+        self,
+        tokens: dict[str, Any] | None = None,
+        *,
+        mutator: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    ) -> None:
         """Persist this server's tokens, preserving every other server's entry.
 
-        Atomic via tmp-file + ``os.replace`` so a crash mid-write cannot
-        leave a half-written ``tokens.json``. The merge step reads the
-        current file under the same lock to avoid racing two
-        ``save_tokens`` calls into a torn merge.
+        Two modes:
+          * Pass ``tokens=`` (a dict) to replace this server's slot wholesale.
+          * Pass ``mutator=`` (callable taking the current per-server dict and
+            returning the new one) to merge under the lock — required when the
+            caller needs read-modify-write atomicity (e.g. preserving
+            ``client_info`` while rotating an access token, where a concurrent
+            ``set_client_info`` could otherwise be lost).
+
+        Atomic via tmp-file + ``os.replace`` so a crash mid-write cannot leave
+        a half-written ``tokens.json``.
         """
+        if (tokens is None) == (mutator is None):
+            raise ValueError("exactly one of `tokens` or `mutator` must be provided")
         path = _tokens_path()
         with _store_lock:
             all_t = self._all_tokens()
-            all_t[self.server_name] = tokens
+            if mutator is not None:
+                new_blob = mutator(dict(all_t.get(self.server_name, {})))
+            else:
+                new_blob = tokens
+            all_t[self.server_name] = new_blob
             path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(
                 dir=str(path.parent), suffix=".tmp", prefix=".mcp_tokens_"
@@ -368,51 +395,72 @@ class _SDKStorageAdapter:
             async def get_client_info(self) -> OAuthClientInformationFull | None: ...
             async def set_client_info(self, client_info: OAuthClientInformationFull) -> None: ...
 
-    Both ``set_*`` methods receive Pydantic models — we serialise via
-    ``model_dump(mode='json')`` so any URL / datetime fields collapse to
-    JSON-safe primitives. ``get_*`` returns plain dicts; the SDK accepts
-    them and re-validates internally.
+    The SDK assigns the returned ``OAuthToken`` / ``OAuthClientInformationFull``
+    instances directly to its session context and accesses them via attributes
+    (``current_tokens.refresh_token``, ``client_info.client_id``, etc.) — so we
+    MUST re-hydrate to Pydantic models on every read, not return raw dicts.
+
+    All writes go through ``OCMCPOAuthClient.save_tokens(mutator=...)`` so the
+    read-modify-write that preserves ``client_info`` while rotating tokens (or
+    vice versa) happens under the store lock — without this, a concurrent
+    ``set_client_info`` between an adapter's pre-save read and its save call
+    could be lost.
     """
 
     def __init__(self, client: OCMCPOAuthClient) -> None:
         self._client = client
 
-    async def get_tokens(self) -> dict[str, Any] | None:
+    async def get_tokens(self):  # type: ignore[no-untyped-def]
+        from mcp.shared.auth import OAuthToken  # local import: optional dep
+
         toks = self._client.load_tokens()
-        # The SDK stores client_info alongside the OAuth token payload in
-        # our merged blob. Strip our internal key before handing back —
-        # the SDK's ``OAuthToken`` model does not declare it.
         if not toks:
             return None
+        # client_info is our internal sidecar — the SDK's OAuthToken model
+        # does not declare it and would reject it on validation.
         token_only = {k: v for k, v in toks.items() if k != "client_info"}
-        return token_only or None
+        if not token_only:
+            return None
+        return OAuthToken.model_validate(token_only)
 
     async def set_tokens(self, tokens: Any) -> None:
-        existing = self._client.load_tokens()
-        # Preserve client_info if present; only the token fields rotate.
-        client_info = existing.get("client_info")
-        payload = (
+        new_token_blob = (
             tokens.model_dump(mode="json")
             if hasattr(tokens, "model_dump")
             else dict(tokens)
         )
-        if client_info is not None:
-            payload["client_info"] = client_info
-        self._client.save_tokens(payload)
 
-    async def get_client_info(self) -> dict[str, Any] | None:
+        def _merge(existing: dict[str, Any]) -> dict[str, Any]:
+            # Preserve sidecar client_info if present; rotate token fields.
+            payload = dict(new_token_blob)
+            if "client_info" in existing:
+                payload["client_info"] = existing["client_info"]
+            return payload
+
+        self._client.save_tokens(mutator=_merge)
+
+    async def get_client_info(self):  # type: ignore[no-untyped-def]
+        from mcp.shared.auth import OAuthClientInformationFull  # local import
+
         toks = self._client.load_tokens()
         ci = toks.get("client_info") if toks else None
-        return ci if ci else None
+        if not ci:
+            return None
+        return OAuthClientInformationFull.model_validate(ci)
 
     async def set_client_info(self, client_info: Any) -> None:
-        existing = self._client.load_tokens()
-        existing["client_info"] = (
+        new_ci = (
             client_info.model_dump(mode="json")
             if hasattr(client_info, "model_dump")
             else dict(client_info)
         )
-        self._client.save_tokens(existing)
+
+        def _merge(existing: dict[str, Any]) -> dict[str, Any]:
+            payload = dict(existing)
+            payload["client_info"] = new_ci
+            return payload
+
+        self._client.save_tokens(mutator=_merge)
 
 
 __all__ = [

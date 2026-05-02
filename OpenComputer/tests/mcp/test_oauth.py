@@ -68,3 +68,99 @@ def test_provider_factory_returns_sdk_provider(tmp_path, monkeypatch):
         },
     )
     assert isinstance(p, OAuthClientProvider)
+
+
+# --- Pydantic round-trip through _SDKStorageAdapter ---------------------------
+# These tests guard against the bug where the adapter returned raw dicts but
+# the SDK consumer code treats results as Pydantic models (attribute access).
+# Real OAuth flows would crash on first refresh after restart without these.
+
+
+def test_adapter_get_tokens_returns_oauth_token_model(tmp_path, monkeypatch):
+    """get_tokens MUST return an OAuthToken Pydantic instance, not a dict."""
+    import asyncio
+
+    monkeypatch.setattr("opencomputer.agent.config._home", lambda: tmp_path)
+    pytest.importorskip("mcp")
+    from mcp.shared.auth import OAuthToken
+
+    from opencomputer.mcp.oauth import _SDKStorageAdapter
+
+    c = OCMCPOAuthClient(server_name="github")
+    c.save_tokens({"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
+    adapter = _SDKStorageAdapter(c)
+    out = asyncio.run(adapter.get_tokens())
+    assert isinstance(out, OAuthToken)
+    assert out.access_token == "tok"
+    # Attribute access (the SDK pattern) must work
+    assert out.token_type == "Bearer"
+
+
+def test_adapter_get_client_info_returns_pydantic_model(tmp_path, monkeypatch):
+    """get_client_info MUST return an OAuthClientInformationFull instance."""
+    import asyncio
+
+    monkeypatch.setattr("opencomputer.agent.config._home", lambda: tmp_path)
+    pytest.importorskip("mcp")
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    from opencomputer.mcp.oauth import _SDKStorageAdapter
+
+    c = OCMCPOAuthClient(server_name="github")
+    c.save_tokens({
+        "client_info": {
+            "client_id": "abc123",
+            "redirect_uris": ["http://localhost:5454/callback"],
+        },
+    })
+    adapter = _SDKStorageAdapter(c)
+    out = asyncio.run(adapter.get_client_info())
+    assert isinstance(out, OAuthClientInformationFull)
+    assert out.client_id == "abc123"
+
+
+def test_adapter_set_tokens_preserves_client_info_under_lock(tmp_path, monkeypatch):
+    """set_tokens MUST preserve a previously-saved client_info via under-lock merge."""
+    import asyncio
+
+    monkeypatch.setattr("opencomputer.agent.config._home", lambda: tmp_path)
+    pytest.importorskip("mcp")
+    from mcp.shared.auth import OAuthToken
+
+    from opencomputer.mcp.oauth import _SDKStorageAdapter
+
+    c = OCMCPOAuthClient(server_name="github")
+    # Pre-existing client_info from an earlier dynamic registration
+    c.save_tokens({"client_info": {"client_id": "abc123", "redirect_uris": ["http://x"]}})
+
+    adapter = _SDKStorageAdapter(c)
+    new_token = OAuthToken(access_token="rotated", token_type="Bearer", expires_in=3600)
+    asyncio.run(adapter.set_tokens(new_token))
+
+    saved = c.load_tokens()
+    assert saved["access_token"] == "rotated"
+    assert saved["client_info"]["client_id"] == "abc123"
+
+
+def test_save_tokens_xor_argument_validation(tmp_path, monkeypatch):
+    """save_tokens must require exactly one of `tokens=` or `mutator=`."""
+    monkeypatch.setattr("opencomputer.agent.config._home", lambda: tmp_path)
+    c = OCMCPOAuthClient(server_name="github")
+    with pytest.raises(ValueError, match="exactly one"):
+        c.save_tokens()  # neither
+    with pytest.raises(ValueError, match="exactly one"):
+        c.save_tokens({"a": 1}, mutator=lambda d: d)  # both
+
+
+def test_all_tokens_handles_non_dict_corruption(tmp_path, monkeypatch, caplog):
+    """A tokens.json that's a JSON list/string/null must not crash later reads."""
+    import logging
+
+    monkeypatch.setattr("opencomputer.agent.config._home", lambda: tmp_path)
+    (tmp_path / "mcp").mkdir()
+    (tmp_path / "mcp" / "tokens.json").write_text(json.dumps(["unexpected", "list"]))
+    c = OCMCPOAuthClient(server_name="github")
+    with caplog.at_level(logging.ERROR, logger="opencomputer.mcp.oauth"):
+        result = c.load_tokens()
+    assert result == {}
+    assert any("not a JSON object" in rec.message for rec in caplog.records)
