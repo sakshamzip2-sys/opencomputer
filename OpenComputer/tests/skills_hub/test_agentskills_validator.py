@@ -149,6 +149,61 @@ Body.
     assert not any(i.rule.endswith("xml_tag") for i in report.errors)
 
 
+@pytest.mark.parametrize("description", [
+    "I can help you process files. Use when working with documents.",
+    "You can use this to extract text. Use when reading PDFs.",
+    "We help analyze data. Use when reviewing spreadsheets.",
+    "Let me explain JSON parsing. Use when working with structured data.",
+    "I'll process your input. Use when handling user uploads.",
+    "This helps you query BigQuery. Use when analyzing warehouse data.",
+])
+def test_description_voice_warning_for_first_or_second_person(description):
+    text = f"""---
+name: my-skill
+description: {description}
+version: 0.1.0
+---
+
+Body.
+"""
+    report = validate_skill_md(text, strict=True)
+    assert any(i.rule == "description.voice" for i in report.warnings), \
+        f"expected voice warning for {description!r}, got warnings: {report.warnings}"
+
+
+@pytest.mark.parametrize("description", [
+    "Processes PDF files and extracts text. Use when working with PDFs.",
+    "Synthesizes git commit messages from staged diffs. Use when committing.",
+    "Generates compliance reports. Use when auditing data.",
+    "Analyzes spreadsheet data. Use when working with Excel files.",
+])
+def test_description_voice_allows_third_person(description):
+    text = f"""---
+name: my-skill
+description: {description}
+version: 0.1.0
+---
+
+Body.
+"""
+    report = validate_skill_md(text, strict=True)
+    assert not any(i.rule == "description.voice" for i in report.warnings), \
+        f"unexpected voice warning for {description!r}: {report.warnings}"
+
+
+def test_description_voice_allows_pronouns_inside_code_spans():
+    text = """---
+name: my-skill
+description: Processes documents marked with `you` or `I` annotations. Use when reviewing.
+version: 0.1.0
+---
+
+Body.
+"""
+    report = validate_skill_md(text, strict=True)
+    assert not any(i.rule == "description.voice" for i in report.warnings)
+
+
 VALID = """---
 name: pead-screener
 description: Screen post-earnings gap-up stocks for PEAD setups

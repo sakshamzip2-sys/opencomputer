@@ -275,9 +275,41 @@ def _check_xml_tags(parsed: dict, report: ValidationReport) -> None:
         ))
 
 
+VOICE_DENY_RE = re.compile(
+    # Anchored at start; pronouns require trailing whitespace so we don't
+    # match "I/O" or "Wewerk" by accident. "I'll" / "I'm" handled
+    # separately. Multi-word phrases ("Let me", "I can") require a space
+    # between tokens.
+    r"^\s*(I\s|You\s|We\s|Let\s+me\s|I['’]?ll\s|I['’]?m\s|I\s+can\s|You\s+can\s|This\s+(?:helps|lets)\s+you\s)",
+    re.IGNORECASE,
+)
+
+CODE_SPAN_RE = re.compile(r"`[^`]*`")
+
+
 def _check_description_voice(description, report: ValidationReport) -> None:
-    """Stub — implemented in Task 5."""
-    pass
+    """Warn on 1st/2nd-person voice violations in descriptions.
+
+    Anthropic spec requires 3rd-person ("Processes...", "Synthesizes...").
+    The check strips inline code spans first so pronouns inside backticks
+    don't trigger.
+
+    Coerces value to string defensively.
+    """
+    if not description:
+        return
+    desc_str = str(description)
+    stripped = CODE_SPAN_RE.sub("", desc_str)
+    if VOICE_DENY_RE.match(stripped):
+        report.warnings.append(ValidationIssue(
+            rule="description.voice",
+            severity="warning",
+            field="frontmatter.description",
+            message=(
+                "description starts with 1st/2nd-person voice "
+                "(use 3rd-person: 'Processes...', 'Synthesizes...')"
+            ),
+        ))
 
 
 def _check_body_size(body: str, parsed: dict, report: ValidationReport) -> None:
