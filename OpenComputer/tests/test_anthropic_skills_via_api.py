@@ -148,3 +148,153 @@ def test_augment_no_duplicate_tool_when_already_present():
         1 for t in out["tools"] if t.get("type") == "code_execution_20250825"
     )
     assert code_exec_count == 1
+
+
+# ─── Integration: complete() wire-up ──────────────────────────
+
+
+def _load_provider_via_conftest_alias():
+    """Use the conftest-registered ``extensions.anthropic_provider.provider``
+    alias so pydantic's forward-ref resolution sees the proper module
+    namespace (Literal, etc.). Falls back to the manual loader if the
+    alias hasn't been wired up.
+    """
+    import importlib
+    try:
+        return importlib.import_module("extensions.anthropic_provider.provider")
+    except ModuleNotFoundError:
+        return _load_provider_module()
+
+
+def test_provider_complete_calls_augment_when_skills_set(monkeypatch):
+    """Integration: provider.complete() must augment kwargs when skills set.
+
+    The runtime_extras dict is the only flag-carrier the provider sees
+    from the agent loop, so we set ``OPENCOMPUTER_ANTHROPIC_SKILLS`` env
+    var (always-on resolution path) and assert the SDK ``messages.create``
+    call received the container, beta headers, and code_execution tool.
+    """
+    import asyncio
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv("OPENCOMPUTER_ANTHROPIC_SKILLS", "pdf")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    module = _load_provider_via_conftest_alias()
+
+    captured_kwargs: dict = {}
+
+    fake_response = MagicMock()
+    fake_response.content = [MagicMock(type="text", text="ok")]
+    fake_response.stop_reason = "end_turn"
+    fake_response.usage = MagicMock(
+        input_tokens=10,
+        output_tokens=5,
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=0,
+    )
+    fake_response.model = "claude-opus-4-7"
+    fake_response.id = "msg_test"
+
+    async def fake_create(**kw):
+        captured_kwargs.update(kw)
+        return fake_response
+
+    Provider = module.AnthropicProvider
+    provider = Provider(api_key="sk-test")
+
+    fake_client = MagicMock()
+    fake_client.messages.create = fake_create
+    # Patch both the cached client and the per-key builder so any code
+    # path we land on uses our fake.
+    provider.client = fake_client
+    monkeypatch.setattr(
+        provider, "_build_client_for_key", lambda _key: fake_client, raising=False
+    )
+
+    from plugin_sdk.core import Message
+
+    messages = [Message(role="user", content="hi")]
+
+    try:
+        asyncio.run(
+            provider.complete(
+                model="claude-opus-4-7",
+                messages=messages,
+                max_tokens=10,
+            )
+        )
+    except Exception:
+        # Downstream parsing of the mocked response may fail; we only
+        # care about the kwargs that hit the SDK.
+        pass
+
+    assert "container" in captured_kwargs, (
+        f"container missing from captured kwargs: keys={list(captured_kwargs)}"
+    )
+    assert captured_kwargs["container"]["skills"][0]["skill_id"] == "pdf"
+    tool_types = [t.get("type") for t in captured_kwargs.get("tools") or []]
+    assert "code_execution_20250825" in tool_types
+    extra_headers = captured_kwargs.get("extra_headers") or {}
+    betas = extra_headers.get("anthropic-beta", "").split(",")
+    assert "skills-2025-10-02" in betas
+
+
+def test_provider_complete_no_change_when_skills_unset(monkeypatch):
+    """Without the env var or runtime flag, today's behavior is preserved.
+
+    The augmenter is a no-op for empty skill_ids, so kwargs should be
+    free of any container / code_execution_20250825 tool.
+    """
+    import asyncio
+    from unittest.mock import MagicMock
+
+    monkeypatch.delenv("OPENCOMPUTER_ANTHROPIC_SKILLS", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    module = _load_provider_via_conftest_alias()
+
+    captured_kwargs: dict = {}
+
+    fake_response = MagicMock()
+    fake_response.content = [MagicMock(type="text", text="ok")]
+    fake_response.stop_reason = "end_turn"
+    fake_response.usage = MagicMock(
+        input_tokens=10,
+        output_tokens=5,
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=0,
+    )
+    fake_response.model = "claude-opus-4-7"
+    fake_response.id = "msg_test"
+
+    async def fake_create(**kw):
+        captured_kwargs.update(kw)
+        return fake_response
+
+    Provider = module.AnthropicProvider
+    provider = Provider(api_key="sk-test")
+
+    fake_client = MagicMock()
+    fake_client.messages.create = fake_create
+    provider.client = fake_client
+    monkeypatch.setattr(
+        provider, "_build_client_for_key", lambda _key: fake_client, raising=False
+    )
+
+    from plugin_sdk.core import Message
+
+    messages = [Message(role="user", content="hi")]
+
+    try:
+        asyncio.run(
+            provider.complete(
+                model="claude-opus-4-7",
+                messages=messages,
+                max_tokens=10,
+            )
+        )
+    except Exception:
+        pass
+
+    assert "container" not in captured_kwargs
+    tool_types = [t.get("type") for t in captured_kwargs.get("tools") or []]
+    assert "code_execution_20250825" not in tool_types

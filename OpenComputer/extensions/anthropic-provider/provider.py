@@ -829,6 +829,17 @@ class AnthropicProvider(BaseProvider):
                 "schema": response_schema["schema"],
             }
             kwargs["output_config"] = existing_output_config
+        # SP4 — Anthropic Skills-via-API opt-in. The runtime knob lives
+        # on ``runtime.custom["anthropic_skills"]``; the agent loop only
+        # forwards a flat ``runtime_extras`` dict to providers, so we
+        # synthesize a minimal runtime-shaped object here. The env var
+        # path (``OPENCOMPUTER_ANTHROPIC_SKILLS``) works regardless and
+        # is the primary opt-in surface for now.
+        from types import SimpleNamespace as _SkillsRuntime
+        kwargs = _augment_kwargs_for_skills(
+            kwargs=kwargs,
+            skill_ids=_resolve_anthropic_skills(_SkillsRuntime(custom=runtime_extras or {})),
+        )
         t0 = time.monotonic()
         try:
             resp = await client.messages.create(**kwargs)
@@ -1013,6 +1024,12 @@ class AnthropicProvider(BaseProvider):
                 "schema": response_schema["schema"],
             }
             kwargs["output_config"] = existing_output_config
+        # SP4 — Anthropic Skills-via-API opt-in (see _do_complete for context).
+        from types import SimpleNamespace as _SkillsRuntime
+        kwargs = _augment_kwargs_for_skills(
+            kwargs=kwargs,
+            skill_ids=_resolve_anthropic_skills(_SkillsRuntime(custom=runtime_extras or {})),
+        )
         t0 = time.monotonic()
         try:
             async with client.messages.stream(**kwargs) as stream_ctx:
@@ -1137,6 +1154,12 @@ class AnthropicProvider(BaseProvider):
             return
 
         # No pool — native streaming path.
+        # SP4 — Anthropic Skills-via-API opt-in (see _do_complete for context).
+        from types import SimpleNamespace as _SkillsRuntime
+        kwargs = _augment_kwargs_for_skills(
+            kwargs=kwargs,
+            skill_ids=_resolve_anthropic_skills(_SkillsRuntime(custom=runtime_extras or {})),
+        )
         # TS-T7 — short-circuit if a previous 429 hasn't reset.
         _check_rate_limit()
         try:
