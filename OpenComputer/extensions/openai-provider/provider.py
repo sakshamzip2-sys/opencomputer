@@ -384,6 +384,38 @@ class OpenAIProvider(BaseProvider):
             raise
         return self._parse_response(resp)
 
+    async def complete_vision(
+        self,
+        *,
+        model: str,
+        image_base64: str,
+        mime_type: str,
+        prompt: str,
+        max_tokens: int = 1024,
+    ) -> str:
+        """Run a vision completion via OpenAI's Chat-Completions image_url shape.
+
+        OpenAI uses ``{"type": "image_url", "image_url": {"url":
+        "data:<mime>;base64,<data>"}}`` rather than Anthropic's
+        ``{"type": "image", "source": {...}}``. We build the content
+        array directly here (the existing ``_build_openai_multimodal_content``
+        helper takes filesystem paths; we have raw base64), then route
+        through ``self.complete()`` like AnthropicProvider does.
+        """
+        content = [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime_type};base64,{image_base64}"},
+            },
+        ]
+        resp = await self.complete(
+            model=model,
+            messages=[Message(role="user", content=content)],
+            max_tokens=max_tokens,
+        )
+        return resp.message.content if resp and resp.message else ""
+
     async def complete(
         self,
         *,

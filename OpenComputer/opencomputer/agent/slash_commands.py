@@ -29,6 +29,9 @@ from opencomputer.agent.slash_commands_impl.auto_cmd import AutoCommand, YoloCom
 from opencomputer.agent.slash_commands_impl.bell_cmd import BellCommand
 from opencomputer.agent.slash_commands_impl.branch_cmd import BranchCommand
 from opencomputer.agent.slash_commands_impl.btw_cmd import BtwCommand
+from opencomputer.agent.slash_commands_impl.capabilities_cmd import (
+    CapabilitiesCommand,
+)
 from opencomputer.agent.slash_commands_impl.copy_cmd import CopyCommand
 from opencomputer.agent.slash_commands_impl.display_toggles_cmd import (
     StatusbarCommand,
@@ -91,6 +94,10 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     StatusbarCommand,
     # Batch 4 — ephemeral side-loop:
     BtwCommand,
+    # Provider/feature discovery — companion to VisionUnsupportedError /
+    # BatchUnsupportedError. Lists what current provider supports +
+    # which others have features the current one doesn't.
+    CapabilitiesCommand,
     # 2026-04-30 — profile-suggest analyzes recent persona usage and
     # recommends create/switch actions. User-pull only.
     ProfileSuggestCommand,

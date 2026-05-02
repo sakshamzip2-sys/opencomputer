@@ -61,27 +61,28 @@ def _make_mock_transport(image_bytes: bytes | None, response_text: str = "A phot
 
 def _patch_vision_calls(monkeypatch, transport: httpx.MockTransport) -> None:
     """Wire the MockTransport for image-URL fetches AND stub the
-    provider-agnostic vision helper for the LLM call.
+    configured-provider's complete_vision so the tool returns canned text.
 
-    Post-aux-llm refactor: vision_analyze routes through
-    ``aux_llm.complete_vision`` which dispatches to the user's
-    configured provider. Tests stub that helper to return canned text
-    rather than mocking Anthropic specifically.
+    Post-VisionUnsupportedError refactor (PR #N): vision_analyze calls
+    ``provider.complete_vision()`` directly. Tests stub
+    ``aux_llm._resolve_provider`` to return a fake provider whose
+    ``complete_vision`` method returns canned text.
     """
-    from unittest.mock import AsyncMock
+    from unittest.mock import AsyncMock, MagicMock
 
     monkeypatch.setattr(
         "opencomputer.tools.vision_analyze._make_async_client",
         lambda timeout=60.0: httpx.AsyncClient(transport=transport, timeout=timeout),
     )
 
-    # Stub the auxiliary-LLM helper that vision_analyze.analyze_image_bytes
-    # calls. Returns canned vision text — same shape as old transport.
-    fake = AsyncMock(return_value="A photograph of a cat sitting on a sofa, looking at the camera")
+    fake_provider = MagicMock()
+    fake_provider.name = "fake-vision"
+    fake_provider.complete_vision = AsyncMock(
+        return_value="A photograph of a cat sitting on a sofa, looking at the camera"
+    )
     monkeypatch.setattr(
-        "opencomputer.agent.aux_llm.complete_vision",
-        fake,
-        raising=False,
+        "opencomputer.agent.aux_llm._resolve_provider",
+        lambda: fake_provider,
     )
 
 
@@ -201,13 +202,14 @@ async def test_works_with_non_anthropic_provider(monkeypatch):
     anthropic_client.
     """
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    from unittest.mock import AsyncMock
+    from unittest.mock import AsyncMock, MagicMock
 
-    fake = AsyncMock(return_value="vision result from openai")
+    fake_provider = MagicMock()
+    fake_provider.name = "openai"
+    fake_provider.complete_vision = AsyncMock(return_value="vision result from openai")
     monkeypatch.setattr(
-        "opencomputer.agent.aux_llm.complete_vision",
-        fake,
-        raising=False,
+        "opencomputer.agent.aux_llm._resolve_provider",
+        lambda: fake_provider,
     )
     tool = VisionAnalyzeTool(api_key=None)
     b64 = base64.b64encode(_PNG_MAGIC).decode()
@@ -224,15 +226,22 @@ async def test_works_with_non_anthropic_provider(monkeypatch):
 @pytest.mark.asyncio
 async def test_provider_without_vision_returns_clear_error(monkeypatch):
     """If the user's provider doesn't support vision (e.g. plain text
-    Ollama model), the underlying call raises and the tool surfaces
-    a user-facing error rather than crashing.
+    Ollama model), provider.complete_vision raises VisionUnsupportedError
+    and the tool surfaces a user-facing 'not supported' message rather
+    than a stack trace.
     """
-    async def boom(**kwargs):
-        raise RuntimeError("vision not supported on this provider")
+    from unittest.mock import AsyncMock, MagicMock
+
+    from plugin_sdk import VisionUnsupportedError
+
+    fake_provider = MagicMock()
+    fake_provider.name = "ollama"
+    fake_provider.complete_vision = AsyncMock(
+        side_effect=VisionUnsupportedError("ollama does not support vision"),
+    )
     monkeypatch.setattr(
-        "opencomputer.agent.aux_llm.complete_vision",
-        boom,
-        raising=False,
+        "opencomputer.agent.aux_llm._resolve_provider",
+        lambda: fake_provider,
     )
     tool = VisionAnalyzeTool(api_key=None)
     b64 = base64.b64encode(_PNG_MAGIC).decode()
@@ -244,6 +253,9 @@ async def test_provider_without_vision_returns_clear_error(monkeypatch):
     result = await tool.execute(call)
     assert result.is_error
     assert "vision" in result.content.lower()
+    assert "ollama" in result.content
+    # Tells the user how to switch
+    assert "/provider" in result.content or "oc model" in result.content
 
 
 def test_schema_shape(tool):
