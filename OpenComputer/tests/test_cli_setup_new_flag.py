@@ -57,3 +57,35 @@ def test_setup_help_lists_new_flag():
     assert result.exit_code == 0
     plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     assert "--new" in plain
+
+
+def test_setup_non_interactive_implies_new_and_passes_flag():
+    """Q2: --non-interactive routes to new wizard with non_interactive=True."""
+    from opencomputer.cli import app
+
+    captured: list[dict] = []
+
+    def fake_run_setup(**kwargs):
+        captured.append(kwargs)
+        return 0
+
+    with patch("opencomputer.cli_setup.wizard.run_setup", side_effect=fake_run_setup):
+        runner = CliRunner()
+        result = runner.invoke(app, ["setup", "--non-interactive"])
+
+    assert result.exit_code == 0
+    assert len(captured) == 1
+    assert captured[0]["non_interactive"] is True
+
+
+def test_setup_help_lists_non_interactive_flag():
+    """`oc setup --help` documents --non-interactive."""
+    import re
+
+    from opencomputer.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["setup", "--help"])
+    assert result.exit_code == 0
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "--non-interactive" in plain

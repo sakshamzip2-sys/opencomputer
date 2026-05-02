@@ -113,9 +113,47 @@ def _safe_configured_check(section: WizardSection, ctx: WizardCtx) -> bool:
         return False
 
 
-def run_setup(*, quick: bool = False) -> int:
+def _all_live_sections_configured(ctx: WizardCtx) -> bool:
+    """Q1 — True if every LIVE (non-deferred) section's configured_check
+    returns True. Used to detect 'fully set up' state on re-run."""
+    for section in _sections.SECTION_REGISTRY:
+        if section.deferred:
+            continue
+        if section.configured_check is None:
+            continue  # sections without a check can't report state
+        if not _safe_configured_check(section, ctx):
+            return False
+    return True
+
+
+def _offer_full_reconfigure(ctx: WizardCtx) -> bool:
+    """Q1 — when the wizard re-runs and everything is configured, ask
+    'reconfigure all / skip wizard'. Returns True if user chose to skip
+    (caller should short-circuit), False to fall through to per-section gating."""
+    choices = [
+        Choice("Walk through every section (re-prompt as needed)", "walk"),
+        Choice("Skip — config looks complete (use existing values)", "skip"),
+    ]
+    idx = radiolist(
+        "OpenComputer is already fully configured — what would you like to do?",
+        choices, default=1,
+    )
+    return idx == 1
+
+
+def run_setup(
+    *,
+    quick: bool = False,
+    non_interactive: bool = False,
+) -> int:
     """Top-level wizard entry. Returns exit code (0 = ok, 1 = cancelled).
-    Always returns; never raises."""
+    Always returns; never raises.
+
+    ``non_interactive=True`` (Q2) short-circuits all interactive
+    prompts: configured-checks defer to existing state, unconfigured
+    sections skip with a default-or-skip behavior. Useful for CI /
+    headless invocations where prompts would hang.
+    """
     config_path = _resolve_config_path()
     config, is_first_run = _load_config(config_path)
 
@@ -125,8 +163,26 @@ def run_setup(*, quick: bool = False) -> int:
         is_first_run=is_first_run,
         quick_mode=quick,
     )
+    ctx.extra["non_interactive"] = non_interactive
 
     _print_header()
+
+    # Q1 — detect "everything is configured" state and offer a global
+    # skip. Skipped on first run (nothing to skip) and in
+    # non_interactive mode (no prompts).
+    if not is_first_run and not non_interactive and _all_live_sections_configured(ctx):
+        try:
+            if _offer_full_reconfigure(ctx):
+                _print_setup_summary(ctx)
+                _console.print(
+                    "\n[green]✓ Skipped — config already complete.[/green]"
+                )
+                return 0
+        except WizardCancelled:
+            _console.print(
+                "\n[red]Setup cancelled.[/red] Run `oc setup` again to retry."
+            )
+            return 1
 
     try:
         for section in _sections.SECTION_REGISTRY:
@@ -142,10 +198,22 @@ def run_setup(*, quick: bool = False) -> int:
 
             try:
                 if _safe_configured_check(section, ctx):
+                    if non_interactive:
+                        # Q2 — keep existing config; no prompt
+                        _print_section_footer(SectionResult.SKIPPED_KEEP)
+                        continue
                     gated = _gate_configured_section(ctx, section.title)
                     if gated is not None:
                         _print_section_footer(gated)
                         continue
+
+                if non_interactive:
+                    # Q2 — fresh section without a default → skip
+                    _console.print(
+                        "  [dim](non-interactive — skipped)[/dim]"
+                    )
+                    _print_section_footer(SectionResult.SKIPPED_FRESH)
+                    continue
 
                 result = section.handler(ctx)
                 _print_section_footer(result)
