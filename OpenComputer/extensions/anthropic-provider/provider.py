@@ -41,6 +41,13 @@ from opencomputer.tools.schema_sanitizer import (
     normalize_tool_input_schema_for_anthropic,
 )
 from plugin_sdk.core import Message, ToolCall
+from plugin_sdk.pdf_helpers import (
+    PDF_HARD_PAGE_LIMIT,
+    PDF_MAX_BYTES,
+    PDF_SOFT_PAGE_LIMIT,
+    count_pdf_pages,
+    pdf_to_base64,
+)
 from plugin_sdk.provider_contract import (
     BaseProvider,
     ProviderResponse,
@@ -126,56 +133,125 @@ _SUPPORTED_IMAGE_MEDIA_TYPES: tuple[str, ...] = (
     "image/gif",
     "image/webp",
 )
+_IMAGE_MAX_BYTES = 5 * 1024 * 1024  # Anthropic's per-image cap
 
 
-def _build_anthropic_multimodal_content(
-    *, text: str, image_paths: list[str]
+def _build_anthropic_image_block(
+    path: Path, media_type: str
+) -> dict[str, Any] | None:
+    """Build an Anthropic ``image`` content block from a local image path.
+
+    Returns ``None`` and logs a WARNING if the file is unreadable or
+    exceeds Anthropic's 5 MB per-image cap. Never raises — a bad
+    attachment must not kill the turn.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        _log.warning("image attachment unreadable: %s (%s)", path, exc)
+        return None
+    if len(data) > _IMAGE_MAX_BYTES:
+        _log.warning(
+            "image attachment over 5 MB cap; skipping: %s (%d bytes)",
+            path,
+            len(data),
+        )
+        return None
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": base64.b64encode(data).decode("ascii"),
+        },
+    }
+
+
+def _build_anthropic_pdf_block(path: Path) -> dict[str, Any] | None:
+    """Build an Anthropic ``document`` content block from a PDF path.
+
+    Honors the SP2 guard rails (``plugin_sdk.pdf_helpers``):
+
+    - 32 MB request-size cap → reject + warn.
+    - 600-page hard cap → reject + warn.
+    - 100-page soft cap → warn but still emit (200k-context-model edge).
+
+    Returns ``None`` (and logs WARNING) on read errors or when a guard
+    fires; never raises.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        _log.warning("PDF attachment unreadable: %s (%s)", path, exc)
+        return None
+    if len(data) > PDF_MAX_BYTES:
+        _log.warning(
+            "PDF attachment over 32 MB cap; skipping: %s (%d bytes)",
+            path,
+            len(data),
+        )
+        return None
+    page_count = count_pdf_pages(data)
+    if page_count > PDF_HARD_PAGE_LIMIT:
+        _log.warning(
+            "PDF over 600-page hard limit; skipping: %s (%d pages)",
+            path,
+            page_count,
+        )
+        return None
+    if page_count > PDF_SOFT_PAGE_LIMIT:
+        _log.warning(
+            "PDF over 100 pages; may exceed 200k-context-model capacity: "
+            "%s (%d pages)",
+            path,
+            page_count,
+        )
+    return {
+        "type": "document",
+        "source": {
+            "type": "base64",
+            "media_type": "application/pdf",
+            "data": pdf_to_base64(data),
+        },
+    }
+
+
+def _content_blocks_with_attachments(
+    *, text: str, attachment_paths: list[str]
 ) -> list[dict[str, Any]]:
-    """Build Anthropic content array combining text + base64-encoded images.
+    """Build Anthropic content array combining text + media attachments.
 
-    Reads each path in ``image_paths``, base64-encodes the bytes, infers
-    the media type via ``mimetypes``, and emits Anthropic's
-    ``{"type": "image", "source": {"type": "base64", "media_type": ..., "data": ...}}``
-    blocks. Skips any path that fails to read, has an unsupported media type,
-    or exceeds Anthropic's 5 MB per-image cap — logged at WARNING; never
-    raises so a bad attachment doesn't kill the turn.
+    Dispatches per-attachment based on MIME type:
 
-    Order: images first, then text — matches what Claude Desktop sends and
-    what humans expect ("here are images, here's my question about them").
+    - ``application/pdf`` (or ``.pdf`` extension) → ``document`` block
+      with base64 source. 32 MB / 600-page guard rails apply.
+    - ``image/png|jpeg|gif|webp`` → ``image`` block (5 MB cap).
+    - other → log WARNING, skip.
+
+    Order: media blocks first, then text — matches what Claude Desktop
+    sends and what humans expect ("here are the files, here's my
+    question about them").
+
+    Never raises — bad attachments are dropped with a WARNING log so a
+    corrupt or oversized file doesn't kill the turn.
     """
     blocks: list[dict[str, Any]] = []
-    for path_str in image_paths:
+    for path_str in attachment_paths:
         path = Path(path_str)
-        try:
-            data = path.read_bytes()
-        except OSError as exc:
-            _log.warning("image attachment unreadable: %s (%s)", path, exc)
-            continue
-        if len(data) > 5 * 1024 * 1024:
-            _log.warning(
-                "image attachment over 5 MB cap; skipping: %s (%d bytes)",
-                path,
-                len(data),
-            )
-            continue
         media_type, _ = mimetypes.guess_type(str(path))
-        if media_type not in _SUPPORTED_IMAGE_MEDIA_TYPES:
+        if media_type == "application/pdf" or path.suffix.lower() == ".pdf":
+            block = _build_anthropic_pdf_block(path)
+        elif media_type in _SUPPORTED_IMAGE_MEDIA_TYPES:
+            block = _build_anthropic_image_block(path, media_type)
+        else:
             _log.warning(
-                "image attachment has unsupported media type %r; skipping: %s",
+                "attachment has unsupported media type %r; skipping: %s",
                 media_type,
                 path,
             )
-            continue
-        blocks.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": base64.b64encode(data).decode("ascii"),
-                },
-            }
-        )
+            block = None
+        if block is not None:
+            blocks.append(block)
     if text:
         blocks.append({"type": "text", "text": text})
     if not blocks:
@@ -184,6 +260,22 @@ def _build_anthropic_multimodal_content(
         # request for empty content.
         blocks.append({"type": "text", "text": text or ""})
     return blocks
+
+
+def _build_anthropic_multimodal_content(
+    *, text: str, image_paths: list[str]
+) -> list[dict[str, Any]]:
+    """Back-compat alias for :func:`_content_blocks_with_attachments`.
+
+    Pre-SP2 callers passed image paths via ``image_paths``; SP2 generalized
+    the helper to also handle PDFs. Existing callers (and the
+    ``test_cli_ui_image_paste.py`` regression suite) keep working via this
+    thin wrapper. New code should use ``_content_blocks_with_attachments``
+    directly.
+    """
+    return _content_blocks_with_attachments(
+        text=text, attachment_paths=image_paths
+    )
 
 
 class AnthropicProviderConfig(BaseModel):
@@ -403,8 +495,9 @@ class AnthropicProvider(BaseProvider):
                     out.append(
                         {
                             "role": m.role,
-                            "content": _build_anthropic_multimodal_content(
-                                text=m.content, image_paths=m.attachments
+                            "content": _content_blocks_with_attachments(
+                                text=m.content,
+                                attachment_paths=m.attachments,
                             ),
                         }
                     )

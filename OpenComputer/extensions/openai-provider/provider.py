@@ -79,61 +79,102 @@ _OPENAI_SUPPORTED_IMAGE_MEDIA_TYPES: tuple[str, ...] = (
     "image/gif",
     "image/webp",
 )
+_OPENAI_IMAGE_MAX_BYTES: int = 20 * 1024 * 1024
 
 
-def _build_openai_multimodal_content(
-    *, text: str, image_paths: list[str]
+def _build_openai_image_block(
+    path: Path, media_type: str
+) -> dict[str, Any] | None:
+    """Build an OpenAI Chat-Completions image_url block from an image path.
+
+    Returns None and logs a WARNING on read errors or size cap overflow,
+    so a bad attachment never kills the turn.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        _log.warning("image attachment unreadable: %s (%s)", path, exc)
+        return None
+    if len(data) > _OPENAI_IMAGE_MAX_BYTES:
+        _log.warning(
+            "image attachment over 20 MB cap; skipping: %s (%d bytes)",
+            path,
+            len(data),
+        )
+        return None
+    b64 = base64.b64encode(data).decode("ascii")
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{media_type};base64,{b64}"},
+    }
+
+
+def _content_blocks_with_attachments(
+    *, text: str, attachment_paths: list[str]
 ) -> list[dict[str, Any]]:
-    """Build OpenAI Chat-Completions content array combining text + images.
+    """Build OpenAI Chat-Completions content array combining text + media.
 
-    OpenAI's multimodal shape is ``[{"type": "text", "text": ...},
-    {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]``
-    — different from Anthropic's ``image / source`` shape but the same
-    inputs (path on disk, base64 the bytes, infer media type via
-    ``mimetypes``). Skips unreadable / unsupported / >20 MB attachments
-    with a WARNING log; never raises so a bad attachment doesn't kill
-    the turn.
+    Dispatches per-attachment based on MIME type:
+
+    - ``image/png|jpeg|gif|webp`` → ``image_url`` block (data URL,
+      base64-encoded). 20 MB cap.
+    - ``application/pdf`` (or ``.pdf`` extension) → log WARNING and skip
+      (OpenAI Chat Completions has no native document content type;
+      forwarding would yield cryptic 400s). Use the Anthropic provider
+      for PDF input.
+    - other → log WARNING, skip.
 
     Order: text first, then images — OpenAI's vision examples lead with
-    that shape.
+    that shape, and tool-calling-with-images requires it.
+
+    Never raises — bad attachments are dropped with a WARNING log so a
+    corrupt or oversized file doesn't kill the turn.
     """
     blocks: list[dict[str, Any]] = []
     if text:
         blocks.append({"type": "text", "text": text})
-    for path_str in image_paths:
+    for path_str in attachment_paths:
         path = Path(path_str)
-        try:
-            data = path.read_bytes()
-        except OSError as exc:
-            _log.warning("image attachment unreadable: %s (%s)", path, exc)
-            continue
-        if len(data) > 20 * 1024 * 1024:
-            _log.warning(
-                "image attachment over 20 MB cap; skipping: %s (%d bytes)",
-                path,
-                len(data),
-            )
-            continue
         media_type, _ = mimetypes.guess_type(str(path))
-        if media_type not in _OPENAI_SUPPORTED_IMAGE_MEDIA_TYPES:
+        if media_type == "application/pdf" or path.suffix.lower() == ".pdf":
             _log.warning(
-                "image attachment has unsupported media type %r; skipping: %s",
-                media_type,
+                "OpenAI provider: PDF input not supported natively; "
+                "dropping attachment: %s. (Use Anthropic provider for PDF support.)",
                 path,
             )
             continue
-        b64 = base64.b64encode(data).decode("ascii")
-        blocks.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:{media_type};base64,{b64}"},
-            }
+        if media_type in _OPENAI_SUPPORTED_IMAGE_MEDIA_TYPES:
+            block = _build_openai_image_block(path, media_type)
+            if block is not None:
+                blocks.append(block)
+            continue
+        _log.warning(
+            "image attachment has unsupported media type %r; skipping: %s",
+            media_type,
+            path,
         )
     if not blocks:
         # Edge case: every attachment was skipped AND text is empty.
         # Send an empty text block so the API doesn't reject the request.
         blocks.append({"type": "text", "text": text or ""})
     return blocks
+
+
+def _build_openai_multimodal_content(
+    *, text: str, image_paths: list[str]
+) -> list[dict[str, Any]]:
+    """Back-compat alias for :func:`_content_blocks_with_attachments`.
+
+    Pre-SP2 callers passed image paths via ``image_paths``; SP2 generalized
+    the helper to dispatch on MIME type (image vs PDF-warn-and-drop vs
+    unsupported). Existing callers (and the
+    ``test_cli_ui_image_paste.py`` regression suite) keep working via this
+    thin wrapper. New code should use ``_content_blocks_with_attachments``
+    directly.
+    """
+    return _content_blocks_with_attachments(
+        text=text, attachment_paths=image_paths
+    )
 
 
 def _extract_cached_tokens(usage: Any) -> int:
@@ -256,8 +297,8 @@ class OpenAIProvider(BaseProvider):
                     out.append(
                         {
                             "role": m.role,
-                            "content": _build_openai_multimodal_content(
-                                text=m.content, image_paths=m.attachments
+                            "content": _content_blocks_with_attachments(
+                                text=m.content, attachment_paths=m.attachments
                             ),
                         }
                     )
@@ -447,7 +488,7 @@ class OpenAIProvider(BaseProvider):
         OpenAI uses ``{"type": "image_url", "image_url": {"url":
         "data:<mime>;base64,<data>"}}`` rather than Anthropic's
         ``{"type": "image", "source": {...}}``. We build the content
-        array directly here (the existing ``_build_openai_multimodal_content``
+        array directly here (the existing ``_content_blocks_with_attachments``
         helper takes filesystem paths; we have raw base64), then route
         through ``self.complete()`` like AnthropicProvider does.
         """
