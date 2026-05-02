@@ -2581,6 +2581,11 @@ from opencomputer.cli_skills import app as skills_app  # noqa: E402
 
 app.add_typer(skills_app, name="skills")
 
+# SP3 — Anthropic Files API CLI (`oc files {list,upload,delete,download,info}`)
+from opencomputer.cli_files import files_app  # noqa: E402
+
+app.add_typer(files_app, name="files")
+
 
 @config_app.command("show")
 def config_show() -> None:
