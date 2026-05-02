@@ -120,6 +120,26 @@ def _run_async(coro: Any) -> Any:
     )
 
 
+def reflect_for_eval(session_excerpt: str) -> str:
+    """Eval-only entry point — INCOMPLETE.
+
+    A real shim must fabricate a list[TrajectoryRecord], call
+    ReflectionEngine.reflect(records), and return a text representation
+    of the resulting Insights for the LLM-rubric grader to score.
+
+    Constructing a representative TrajectoryRecord requires understanding
+    the dataclass + the Jinja2 template's expected fields. Deferred to a
+    future session.
+
+    Used by ``opencomputer.evals.adapters.adapter_reflect`` only.
+    """
+    raise NotImplementedError(
+        "reflect_for_eval is deferred. Build a TrajectoryRecord-from-text "
+        "fabricator and wire ReflectionEngine.reflect() through this entry. "
+        "See docs/superpowers/notes/2026-05-02-plan-vs-reality-discoveries.md."
+    )
+
+
 def _cache_key(records: list[TrajectoryRecord]) -> str:
     """Compute a cache key from the record ids (None ids excluded)."""
     ids = ",".join(str(r.id) for r in records if r.id is not None)

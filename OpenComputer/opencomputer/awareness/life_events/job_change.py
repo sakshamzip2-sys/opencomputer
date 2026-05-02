@@ -72,3 +72,20 @@ class JobChange(LifeEventPattern):
             "I noticed your work rhythm has shifted recently — different tabs, "
             "different patterns. If anything's on your mind work-wise, I'm here."
         )
+
+
+def detect_for_eval(url: str, title: str) -> bool:
+    """Eval-only entry point.
+
+    Returns True if the job-change regex classifier fires on the given
+    (url, title) pair. Eval harness uses this via
+    ``opencomputer.evals.adapters.adapter_job_change``.
+
+    Not part of the public API.
+    """
+    detector = JobChange()
+    evidence = detector.consider_event(
+        "browser_visit",
+        {"url": url, "title": title, "visit_time": 0.0},
+    )
+    return evidence is not None

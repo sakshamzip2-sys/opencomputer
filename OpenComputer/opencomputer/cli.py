@@ -2392,6 +2392,11 @@ from opencomputer.cli_mcp import mcp_app  # noqa: E402
 
 app.add_typer(mcp_app, name="mcp")
 
+# Quality Foundation 2026-05-02 — eval harness subcommand
+from opencomputer.cli_eval import eval_app  # noqa: E402
+
+app.add_typer(eval_app, name="eval")
+
 # Phase 10f.I — memory CLI subcommand group
 from opencomputer.cli_memory import memory_app  # noqa: E402
 
