@@ -20,7 +20,6 @@ from opencomputer.voice.realtime_context import (
     registered_tools_for_realtime,
 )
 
-
 # ─── tools ───────────────────────────────────────────────────────────
 
 

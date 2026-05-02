@@ -223,6 +223,13 @@ def test_anthropic_extract_with_mocked_sdk(monkeypatch):
     fake_module = MagicMock()
     fake_module.Anthropic.return_value = fake_client
 
+    # Patch BOTH sys.modules (in case anthropic_client is reimported anywhere)
+    # AND the bound Anthropic name on the already-loaded anthropic_client
+    # module, which is what build_anthropic_sync_client actually calls.
+    # Patching only sys.modules is not enough because anthropic_client.py
+    # captures Anthropic at top-level import time.
+    import opencomputer.agent.anthropic_client as _ac
+    monkeypatch.setattr(_ac, "Anthropic", fake_module.Anthropic)
     with patch.dict("sys.modules", {"anthropic": fake_module}):
         result = AnthropicArtifactExtractor().extract("a long artifact")
 
@@ -261,6 +268,9 @@ def test_anthropic_returns_blank_on_sdk_exception(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     fake_module = MagicMock()
     fake_module.Anthropic.side_effect = RuntimeError("network down")
+    # See test_anthropic_extract_with_mocked_sdk: patch the bound name.
+    import opencomputer.agent.anthropic_client as _ac
+    monkeypatch.setattr(_ac, "Anthropic", fake_module.Anthropic)
     with patch.dict("sys.modules", {"anthropic": fake_module}):
         result = AnthropicArtifactExtractor().extract("hello")
     assert result == ArtifactExtraction()
@@ -278,6 +288,10 @@ def test_anthropic_passes_base_url_when_proxy_env_set(monkeypatch):
     fake_module = MagicMock()
     fake_module.Anthropic.return_value = fake_client
 
+    # See test_anthropic_extract_with_mocked_sdk: patch the bound name on
+    # anthropic_client so build_anthropic_sync_client picks up our mock.
+    import opencomputer.agent.anthropic_client as _ac
+    monkeypatch.setattr(_ac, "Anthropic", fake_module.Anthropic)
     with patch.dict("sys.modules", {"anthropic": fake_module}):
         AnthropicArtifactExtractor().extract("x")
 
