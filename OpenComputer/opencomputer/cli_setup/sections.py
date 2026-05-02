@@ -61,12 +61,12 @@ def _build_registry() -> list[WizardSection]:
         is_agent_settings_configured,
         run_agent_settings_section,
     )
-    from opencomputer.cli_setup.section_handlers.launchd_service import (
-        run_launchd_service_section,
-    )
     from opencomputer.cli_setup.section_handlers.inference_provider import (
         is_inference_provider_configured,
         run_inference_provider_section,
+    )
+    from opencomputer.cli_setup.section_handlers.launchd_service import (
+        run_launchd_service_section,
     )
     from opencomputer.cli_setup.section_handlers.messaging_platforms import (
         is_messaging_platforms_configured,
