@@ -101,19 +101,14 @@ def supports_temperature(model: str) -> bool:
         return True
     # Modern claude-* (4.6, 4.7, Mythos, unknown-future) — only 4.6 keeps it.
     if _is_claude(model):
-        if model.startswith("claude-opus-4-6") or model.startswith(
+        return model.startswith("claude-opus-4-6") or model.startswith(
             "claude-sonnet-4-6"
-        ):
-            return True
-        return False
-    # OpenAI reasoning lineups reject temperature.
-    if any(model.startswith(p) for p in _OPENAI_NO_TEMPERATURE_PREFIXES):
-        return False
-    # Default for unknown providers: keep temperature. Providers that
-    # need stricter behavior can extend this function with their own
-    # prefix list (Kimi/Moonshot reasoning, Z.AI, DeepSeek-Reasoner,
-    # future Llama-thinking variants, etc.).
-    return True
+        )
+    # OpenAI reasoning lineups reject temperature. Default for unknown
+    # providers: keep temperature. Providers that need stricter behavior
+    # can extend this function with their own prefix list (Kimi/Moonshot
+    # reasoning, Z.AI, DeepSeek-Reasoner, future Llama-thinking variants).
+    return not any(model.startswith(p) for p in _OPENAI_NO_TEMPERATURE_PREFIXES)
 
 
 def thinking_display_default(model: str) -> str:
