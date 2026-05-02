@@ -256,3 +256,44 @@ async def test_delete(monkeypatch):
 
     _module, client = _client_with_mock(monkeypatch, handler)
     await client.delete("file_xyz")  # no return; should not raise
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_429_raises_with_hint(monkeypatch):
+    module = _load_module()
+
+    def handler(request):
+        return httpx.Response(429, text="too many requests")
+
+    _module, client = _client_with_mock(monkeypatch, handler)
+    with pytest.raises(module.FilesAPIError) as exc_info:
+        await client.list()
+    assert exc_info.value.status_code == 429
+    assert "100 req/min" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_storage_quota_403_raises_with_hint(monkeypatch):
+    module = _load_module()
+
+    def handler(request):
+        return httpx.Response(403, text="storage quota exceeded for organization")
+
+    _module, client = _client_with_mock(monkeypatch, handler)
+    with pytest.raises(module.FilesAPIError) as exc_info:
+        await client.list()
+    assert exc_info.value.status_code == 403
+    assert "500 GB" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_404_raises(monkeypatch):
+    module = _load_module()
+
+    def handler(request):
+        return httpx.Response(404, text="file not found")
+
+    _module, client = _client_with_mock(monkeypatch, handler)
+    with pytest.raises(module.FilesAPIError) as exc_info:
+        await client.get_metadata("nonexistent")
+    assert exc_info.value.status_code == 404

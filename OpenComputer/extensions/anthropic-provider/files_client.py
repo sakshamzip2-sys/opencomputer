@@ -175,9 +175,32 @@ def _guess_mime(path: Path) -> str:
 
 
 def _raise_for_status(resp: httpx.Response) -> None:
-    """Stub — Task 4 fleshes this out with status-specific messages."""
-    if not resp.is_success:
+    """Translate Files API HTTP errors into FilesAPIError with helpful messages."""
+    if resp.is_success:
+        return
+    status = resp.status_code
+    body = resp.text
+    if status == 429:
         raise FilesAPIError(
-            f"Files API error (HTTP {resp.status_code}): {resp.text}",
-            status_code=resp.status_code,
+            f"rate-limited (429). {RATE_LIMIT_HINT} Body: {body}",
+            status_code=status,
         )
+    if status == 403 and "storage" in body.lower():
+        raise FilesAPIError(
+            f"storage quota exceeded (403). Org limit is 500 GB. Body: {body}",
+            status_code=status,
+        )
+    if status == 403:
+        raise FilesAPIError(
+            f"forbidden (403). Body: {body}",
+            status_code=status,
+        )
+    if status == 404:
+        raise FilesAPIError(
+            f"file not found (404). Body: {body}",
+            status_code=status,
+        )
+    raise FilesAPIError(
+        f"Files API error (HTTP {status}): {body}",
+        status_code=status,
+    )
