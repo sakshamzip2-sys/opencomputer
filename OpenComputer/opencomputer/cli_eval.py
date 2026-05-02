@@ -99,17 +99,44 @@ def regress_command(
     site: str = typer.Argument("all"),
     cases_dir: Path = typer.Option(Path("evals/cases"), "--cases-dir"),
     baselines_dir: Path = typer.Option(Path("evals/baselines"), "--baselines-dir"),
+    grader_model: str | None = typer.Option(
+        None, "--grader-model", help="Explicit model for rubric grader (required to regress rubric-graded sites)."
+    ),
 ):
-    """Run sites and exit non-zero if any accuracy regressed past threshold."""
+    """Run sites and exit non-zero if any accuracy regressed past threshold.
+
+    Rubric-graded sites are skipped if no grader provider is wired (no
+    --grader-model passed AND no Anthropic provider available). The
+    regression check still works on the deterministic-graded sites in
+    that case.
+    """
     threshold = 0.05  # 5pp accuracy drop triggers regression
     target_sites = list(SITES) if site == "all" else [site]
     regressed = []
+    skipped: list[tuple[str, str]] = []
     for s in target_sites:
-        get_site(s)
-        report = run_site(site_name=s, cases_dir=cases_dir)
+        eval_site = get_site(s)
+
+        grader_provider = None
+        if eval_site.grader == "rubric":
+            try:
+                from opencomputer.evals.providers import get_grader_provider
+                grader_provider = get_grader_provider(model_override=grader_model)
+            except (ImportError, RuntimeError) as e:
+                skipped.append((s, str(e)))
+                continue
+
+        report = run_site(
+            site_name=s,
+            cases_dir=cases_dir,
+            grader_provider=grader_provider,
+        )
         diff = compare_to_baseline(report, baselines_dir=baselines_dir)
         if diff is not None and diff.accuracy_delta < -threshold:
             regressed.append((s, diff.accuracy_delta))
+
+    for s, reason in skipped:
+        typer.echo(f"Skipped rubric site {s!r}: {reason}", err=True)
 
     if regressed:
         typer.echo("REGRESSED:")
