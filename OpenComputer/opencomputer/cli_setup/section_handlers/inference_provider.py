@@ -92,9 +92,57 @@ def _collect_api_key(env_var: str, signup_url: str) -> str | None:
     return _prompt_api_key(env_var, signup_url)
 
 
+def _test_provider_connection(provider_name: str, env_var: str) -> bool:
+    """Polish: try to instantiate the provider with the new key. Just
+    constructs the class — doesn't make a network call (those need
+    real keys + network access not always available at setup time).
+
+    Returns True if construction succeeded, False otherwise. Prints
+    a hint either way. Best-effort — failure doesn't block the wizard.
+    """
+    import os
+
+    if not os.environ.get(env_var):
+        # Reload from .env in case the user just saved it. env_writer
+        # writes the file but doesn't mutate os.environ — so a fresh
+        # read is needed.
+        from opencomputer.cli_setup.env_writer import read_env_value
+        value = read_env_value(env_var)
+        if value:
+            os.environ[env_var] = value
+
+    try:
+        from opencomputer.plugins.discovery import discover, standard_search_paths
+        from opencomputer.plugins.loader import load_plugin
+        from opencomputer.plugins.registry import PluginRegistry
+        # Discover the plugin and look up its provider class
+        for cand in discover(standard_search_paths()):
+            if cand.manifest.kind not in ("provider", "mixed"):
+                continue
+            # Heuristic: look at setup.providers to find a match
+            setup = cand.manifest.setup
+            if setup is None:
+                continue
+            for prov in setup.providers:
+                if prov.id == provider_name:
+                    # Try to construct the registered class
+                    reg = PluginRegistry()
+                    load_plugin(cand, reg)
+                    cls = reg.get_provider(provider_name)
+                    if cls is None:
+                        return False
+                    cls()  # raises if env var missing or other init issue
+                    print(f"  ✓ Provider '{provider_name}' constructed successfully")
+                    return True
+    except Exception as e:  # noqa: BLE001
+        print(f"  ⚠ Could not instantiate provider: {type(e).__name__}: {e}")
+        return False
+    return False
+
+
 def _invoke_provider_setup(name: str, ctx: WizardCtx) -> bool:
     """Update config with chosen provider, prompt for API key, save to
-    ~/.opencomputer/.env. Returns True on success."""
+    ~/.opencomputer/.env, optionally test the provider. Returns True on success."""
     providers = _discover_providers()
     match = next((p for p in providers if p["name"] == name), None)
     if match is None:
@@ -116,6 +164,9 @@ def _invoke_provider_setup(name: str, ctx: WizardCtx) -> bool:
             except Exception as e:  # noqa: BLE001
                 print(f"  ⚠ Could not save key: {type(e).__name__}: {e}")
                 print(f"    Set {env_var} in your shell to use this provider.")
+        # Polish: try to construct the provider class to catch obvious
+        # issues (wrong key shape, missing dependency). Best-effort.
+        _test_provider_connection(name, env_var)
     return True
 
 

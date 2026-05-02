@@ -61,6 +61,50 @@ def _detect_prior_installs() -> list[dict]:
     return found
 
 
+def _print_import_preview(sources: list[dict], dest: Path) -> None:
+    """Polish: dry-run preview of what would be imported. No file writes.
+
+    For each source: count importable files (MEMORY/USER/SOUL.md) and
+    skills, flag any that would land at <name>.imported because the
+    destination already exists.
+    """
+    print("\n  Preview — what would be imported:")
+    for src in sources:
+        src_path: Path = src["path"]
+        files_fresh: list[str] = []
+        files_renamed: list[str] = []
+        for fname in _FILES_TO_IMPORT:
+            if not (src_path / fname).exists():
+                continue
+            if (dest / fname).exists():
+                files_renamed.append(fname)
+            else:
+                files_fresh.append(fname)
+        skills_count = 0
+        skills_skipped = 0
+        src_skills = src_path / _DIR_TO_MERGE
+        if src_skills.exists():
+            for skill_md in src_skills.rglob("SKILL.md"):
+                rel = skill_md.parent.relative_to(src_skills)
+                if (dest / _DIR_TO_MERGE / rel).exists():
+                    skills_skipped += 1
+                else:
+                    skills_count += 1
+        print(f"    {src['name']} ({src_path}):")
+        if files_fresh:
+            print(f"      → fresh: {', '.join(files_fresh)}")
+        if files_renamed:
+            print(f"      → existing kept; new lands at: "
+                  f"{', '.join(f'{f}.imported' for f in files_renamed)}")
+        if skills_count:
+            print(f"      → {skills_count} new skill(s) merged")
+        if skills_skipped:
+            print(f"      → {skills_skipped} skill(s) skipped (path already exists)")
+        if not (files_fresh or files_renamed or skills_count or skills_skipped):
+            print("      → nothing to import")
+    print()
+
+
 def _import_one(source: dict, dest: Path) -> dict:
     """Copy MEMORY/USER/SOUL files (non-destructively) and merge skills/.
     Returns a dict suitable for config.migrations.prior_install."""
@@ -114,6 +158,11 @@ def run_prior_install_section(ctx: WizardCtx) -> SectionResult:
     paths = "\n    ".join(str(f["path"]) for f in found)
     print(f"  Found prior install(s): {names}")
     print(f"    {paths}")
+
+    # Polish: dry-run preview phase. Show what WOULD be imported
+    # before any file is touched (matches Hermes's
+    # _offer_openclaw_migration preview pattern).
+    _print_import_preview(found, _oc_home())
 
     choices = [
         Choice(
