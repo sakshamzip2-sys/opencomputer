@@ -25,7 +25,7 @@ def test_skill_manage_create_list_view_patch_delete(tmp_path: Path) -> None:
     with patch("opencomputer.tools.skill_manage._skills_root", lambda: tmp_path):
         # create
         content = (
-            "---\nname: debug-nginx\ndescription: Use when nginx 502s\n---\n\n"
+            "---\nname: debug-nginx\ndescription: Diagnoses nginx 502s. Use when nginx returns bad-gateway responses to the client.\n---\n\n"
             "Check proxy_read_timeout.\n"
         )
         r = asyncio.run(
