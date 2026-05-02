@@ -1,0 +1,262 @@
+"""Tests for opencomputer/tools/schema_sanitizer.py.
+
+Mirrors Hermes's schema_sanitizer test surface and adds coverage for the
+OC-specific numeric-constraint stripping that fixes the Anthropic 400
+"minimum/maximum not supported" error.
+"""
+from __future__ import annotations
+
+from opencomputer.tools.schema_sanitizer import (
+    normalize_tool_input_schema_for_anthropic,
+    sanitize_tool_schemas,
+    strip_anthropic_unsupported_constraints,
+    strip_nullable_unions,
+)
+
+# --------------------------------------------------------------------------- #
+# strip_nullable_unions (verbatim Hermes behavior)
+# --------------------------------------------------------------------------- #
+
+def test_strip_nullable_unions_collapses_string_or_null():
+    schema = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    out = strip_nullable_unions(schema, keep_nullable_hint=False)
+    assert out == {"type": "string"}
+
+
+def test_strip_nullable_unions_keeps_nullable_hint_when_requested():
+    schema = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    out = strip_nullable_unions(schema, keep_nullable_hint=True)
+    assert out == {"type": "string", "nullable": True}
+
+
+def test_strip_nullable_unions_preserves_metadata():
+    schema = {
+        "anyOf": [{"type": "string"}, {"type": "null"}],
+        "description": "name",
+        "default": None,
+    }
+    out = strip_nullable_unions(schema, keep_nullable_hint=False)
+    assert out["type"] == "string"
+    assert out["description"] == "name"
+
+
+def test_strip_nullable_unions_leaves_meaningful_unions():
+    """Don't collapse a non-nullable anyOf — only nullable patterns."""
+    schema = {"anyOf": [{"type": "string"}, {"type": "integer"}]}
+    out = strip_nullable_unions(schema, keep_nullable_hint=False)
+    assert "anyOf" in out
+
+
+# --------------------------------------------------------------------------- #
+# strip_anthropic_unsupported_constraints (OC-specific bug fix)
+# --------------------------------------------------------------------------- #
+
+def test_strips_minimum_maximum_from_integer():
+    schema = {"type": "integer", "minimum": 1, "maximum": 600}
+    out = strip_anthropic_unsupported_constraints(schema)
+    assert out["type"] == "integer"
+    assert "minimum" not in out
+    assert "maximum" not in out
+
+
+def test_strips_minimum_maximum_from_number():
+    schema = {"type": "number", "minimum": 0.0, "maximum": 1.0}
+    out = strip_anthropic_unsupported_constraints(schema)
+    assert "minimum" not in out
+    assert "maximum" not in out
+
+
+def test_strips_exclusive_min_max_and_multiple_of():
+    schema = {
+        "type": "integer",
+        "exclusiveMinimum": 0,
+        "exclusiveMaximum": 100,
+        "multipleOf": 2,
+    }
+    out = strip_anthropic_unsupported_constraints(schema)
+    for key in ("exclusiveMinimum", "exclusiveMaximum", "multipleOf"):
+        assert key not in out
+
+
+def test_does_not_strip_string_constraints():
+    schema = {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100,
+        "pattern": "^[a-z]+$",
+    }
+    out = strip_anthropic_unsupported_constraints(schema)
+    assert out["minLength"] == 1
+    assert out["maxLength"] == 100
+    assert out["pattern"] == "^[a-z]+$"
+
+
+def test_does_not_mutate_original():
+    original = {"type": "integer", "minimum": 1, "maximum": 600}
+    strip_anthropic_unsupported_constraints(original)
+    assert original["minimum"] == 1
+    assert original["maximum"] == 600
+
+
+def test_recursive_in_array_items():
+    schema = {
+        "type": "object",
+        "properties": {
+            "ports": {
+                "type": "array",
+                "items": {"type": "integer", "minimum": 1, "maximum": 65535},
+            },
+        },
+    }
+    out = strip_anthropic_unsupported_constraints(schema)
+    items = out["properties"]["ports"]["items"]
+    assert "minimum" not in items
+    assert "maximum" not in items
+
+
+def test_recursive_in_nested_object():
+    schema = {
+        "type": "object",
+        "properties": {
+            "config": {
+                "type": "object",
+                "properties": {
+                    "retries": {"type": "integer", "minimum": 0, "maximum": 10},
+                },
+            },
+        },
+    }
+    out = strip_anthropic_unsupported_constraints(schema)
+    retries = out["properties"]["config"]["properties"]["retries"]
+    assert "minimum" not in retries
+
+
+def test_preserves_description_default_enum_on_integer():
+    schema = {
+        "type": "integer",
+        "description": "count",
+        "default": 5,
+        "enum": [1, 2, 3],
+        "minimum": 1,
+    }
+    out = strip_anthropic_unsupported_constraints(schema)
+    assert out["description"] == "count"
+    assert out["default"] == 5
+    assert out["enum"] == [1, 2, 3]
+    assert "minimum" not in out
+
+
+# --------------------------------------------------------------------------- #
+# normalize_tool_input_schema_for_anthropic (boundary)
+# --------------------------------------------------------------------------- #
+
+def test_normalize_returns_minimal_object_for_empty():
+    assert normalize_tool_input_schema_for_anthropic(None) == {
+        "type": "object",
+        "properties": {},
+    }
+    assert normalize_tool_input_schema_for_anthropic({}) == {
+        "type": "object",
+        "properties": {},
+    }
+
+
+def test_normalize_strips_min_max_and_nullable_unions():
+    schema = {
+        "type": "object",
+        "properties": {
+            "n": {"type": "integer", "minimum": 1, "maximum": 600},
+            "label": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        },
+    }
+    out = normalize_tool_input_schema_for_anthropic(schema)
+    assert "minimum" not in out["properties"]["n"]
+    assert "maximum" not in out["properties"]["n"]
+    assert out["properties"]["label"]["type"] == "string"
+    assert "nullable" not in out["properties"]["label"]  # hint=False for Anthropic
+
+
+def test_normalize_injects_properties_when_missing():
+    schema = {"type": "object"}  # no properties
+    out = normalize_tool_input_schema_for_anthropic(schema)
+    assert out["properties"] == {}
+
+
+# --------------------------------------------------------------------------- #
+# sanitize_tool_schemas (Hermes-compatible OpenAI-format entry point)
+# --------------------------------------------------------------------------- #
+
+def test_sanitize_tool_schemas_handles_missing_parameters():
+    tools = [{"type": "function", "function": {"name": "x"}}]
+    out = sanitize_tool_schemas(tools)
+    assert out[0]["function"]["parameters"]["type"] == "object"
+    assert out[0]["function"]["parameters"]["properties"] == {}
+
+
+def test_sanitize_tool_schemas_replaces_bare_string():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "x",
+                "parameters": "object",  # malformed bare string
+            },
+        }
+    ]
+    out = sanitize_tool_schemas(tools)
+    params = out[0]["function"]["parameters"]
+    assert params["type"] == "object"
+
+
+def test_sanitize_tool_schemas_returns_deep_copy():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "x",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"y": {"type": "integer"}},
+                },
+            },
+        }
+    ]
+    out = sanitize_tool_schemas(tools)
+    out[0]["function"]["parameters"]["properties"]["y"]["type"] = "string"
+    # Original unchanged
+    assert tools[0]["function"]["parameters"]["properties"]["y"]["type"] == "integer"
+
+
+# --------------------------------------------------------------------------- #
+# Integration: real OC tool schemas pass through cleanly
+# --------------------------------------------------------------------------- #
+
+def _walk_assert_no_numeric_constraints(node):
+    if isinstance(node, dict):
+        if node.get("type") in {"integer", "number"}:
+            for forbidden in (
+                "minimum", "maximum",
+                "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+            ):
+                assert forbidden not in node, (
+                    f"{forbidden!r} still present on {node.get('type')}: {node!r}"
+                )
+        for v in node.values():
+            _walk_assert_no_numeric_constraints(v)
+    elif isinstance(node, list):
+        for v in node:
+            _walk_assert_no_numeric_constraints(v)
+
+
+def test_real_bash_tool_passes_through_clean():
+    from opencomputer.tools.bash import BashTool
+    schema = BashTool().schema
+    out = normalize_tool_input_schema_for_anthropic(schema.parameters)
+    _walk_assert_no_numeric_constraints(out)
+
+
+def test_real_read_tool_passes_through_clean():
+    from opencomputer.tools.read import ReadTool
+    schema = ReadTool().schema
+    out = normalize_tool_input_schema_for_anthropic(schema.parameters)
+    _walk_assert_no_numeric_constraints(out)
