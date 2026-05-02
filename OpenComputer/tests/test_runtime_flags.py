@@ -14,6 +14,7 @@ def test_runtime_flags_empty_custom_returns_nones():
     assert runtime_flags_from_custom({}) == {
         "reasoning_effort": None,
         "service_tier": None,
+        "anthropic_skills": None,
     }
 
 
@@ -21,6 +22,7 @@ def test_runtime_flags_none_custom_returns_nones():
     assert runtime_flags_from_custom(None) == {
         "reasoning_effort": None,
         "service_tier": None,
+        "anthropic_skills": None,
     }
 
 
@@ -31,13 +33,49 @@ def test_runtime_flags_extracts_strings():
         "yolo_session": True,  # unrelated key — should not appear
     }
     out = runtime_flags_from_custom(custom)
-    assert out == {"reasoning_effort": "high", "service_tier": "priority"}
+    assert out == {
+        "reasoning_effort": "high",
+        "service_tier": "priority",
+        "anthropic_skills": None,
+    }
 
 
 def test_runtime_flags_filters_non_string_values():
     custom = {"reasoning_effort": 42, "service_tier": True}
     out = runtime_flags_from_custom(custom)
-    assert out == {"reasoning_effort": None, "service_tier": None}
+    assert out == {
+        "reasoning_effort": None,
+        "service_tier": None,
+        "anthropic_skills": None,
+    }
+
+
+def test_runtime_flags_extracts_anthropic_skills():
+    """SP4 follow-up: forward anthropic_skills list into runtime_extras."""
+    custom = {"anthropic_skills": ["pdf", "pptx"]}
+    out = runtime_flags_from_custom(custom)
+    assert out["anthropic_skills"] == ["pdf", "pptx"]
+
+
+def test_runtime_flags_anthropic_skills_strips_whitespace_and_drops_empty():
+    """Whitespace stripped per item; empty/whitespace-only items dropped."""
+    custom = {"anthropic_skills": [" pdf ", "", "  ", "pptx"]}
+    out = runtime_flags_from_custom(custom)
+    assert out["anthropic_skills"] == ["pdf", "pptx"]
+
+
+def test_runtime_flags_anthropic_skills_rejects_non_list():
+    """Plain string instead of list is rejected (returns None)."""
+    custom = {"anthropic_skills": "pdf"}
+    out = runtime_flags_from_custom(custom)
+    assert out["anthropic_skills"] is None
+
+
+def test_runtime_flags_anthropic_skills_rejects_list_with_non_strings():
+    """List with non-string items is rejected as a whole (returns None)."""
+    custom = {"anthropic_skills": ["pdf", 42, None]}
+    out = runtime_flags_from_custom(custom)
+    assert out["anthropic_skills"] is None
 
 
 # ---------- Anthropic translator ----------
