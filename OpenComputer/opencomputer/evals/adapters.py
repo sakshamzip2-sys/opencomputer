@@ -21,28 +21,21 @@ def adapter_reflect(case_input: dict[str, Any]) -> str:
 
     case_input shape: {"session_excerpt": str}
     Returns: the reflection text the model produced.
+
+    NOTE: deferred — reflect_for_eval raises NotImplementedError
+    until a TrajectoryRecord-from-text fabricator is built.
+    See docs/superpowers/notes/2026-05-02-plan-vs-reality-discoveries.md.
     """
     from opencomputer.evolution.reflect import reflect_for_eval
 
     return reflect_for_eval(case_input["session_excerpt"])
 
 
-def adapter_prompt_evolution(case_input: dict[str, Any]) -> str:
-    """Wrap opencomputer.evolution.prompt_evolution for evaluation.
-
-    case_input shape: {"prompt": str, "failure_mode": str}
-    Returns: the mutated prompt text.
-    """
-    from opencomputer.evolution.prompt_evolution import mutate_for_eval
-
-    return mutate_for_eval(case_input["prompt"], case_input["failure_mode"])
-
-
 def adapter_llm_extractor(case_input: dict[str, Any]) -> dict[str, Any]:
     """Wrap opencomputer.profile_bootstrap.llm_extractor for evaluation.
 
     case_input shape: {"text": str}
-    Returns: extracted profile dict.
+    Returns: extracted artifact fields as a dict.
     """
     from opencomputer.profile_bootstrap.llm_extractor import extract_for_eval
 
@@ -52,12 +45,12 @@ def adapter_llm_extractor(case_input: dict[str, Any]) -> dict[str, Any]:
 def adapter_job_change(case_input: dict[str, Any]) -> str:
     """Wrap opencomputer.awareness.life_events.job_change for evaluation.
 
-    case_input shape: {"context": str}
-    Returns: "yes" or "no".
+    case_input shape: {"url": str, "title": str}
+    Returns: "yes" if the job-change regex classifier fires, "no" otherwise.
     """
     from opencomputer.awareness.life_events.job_change import detect_for_eval
 
-    return "yes" if detect_for_eval(case_input["context"]) else "no"
+    return "yes" if detect_for_eval(case_input["url"], case_input["title"]) else "no"
 
 
 def adapter_instruction_detector(case_input: dict[str, Any]) -> str:

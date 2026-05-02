@@ -600,3 +600,26 @@ def _parse_extraction(raw: str) -> ArtifactExtraction:
 
 # Suppress unused-import warning on Path — used by callers via re-export.
 _ = Path
+
+
+def extract_for_eval(text: str) -> dict:
+    """Eval-only entry point.
+
+    Calls the production extractor (Ollama-backed) and returns its
+    fields as a dict. The eval harness's SchemaMatchGrader checks
+    field-level correctness against case.expected.
+
+    Used by ``opencomputer.evals.adapters.adapter_llm_extractor`` only;
+    not part of the public API.
+
+    Returns an empty-ish dict on parse failure (production behaviour
+    via :func:`_parse_extraction`'s ArtifactExtraction() default).
+    """
+    extraction = extract_artifact(text)
+    return {
+        "topic": extraction.topic,
+        "people": list(extraction.people),
+        "intent": extraction.intent,
+        "sentiment": extraction.sentiment,
+        "timestamp": extraction.timestamp,
+    }

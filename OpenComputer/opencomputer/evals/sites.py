@@ -18,12 +18,8 @@ SITES: dict[str, EvalSite] = {
         grader="rubric",
         rubric_id="reflect_v1",
     ),
-    "prompt_evolution": EvalSite(
-        name="prompt_evolution",
-        callable_path="opencomputer.evals.adapters:adapter_prompt_evolution",
-        grader="rubric",
-        rubric_id="prompt_evolution_v1",
-    ),
+    # prompt_evolution removed: not LLM-driven (PromptEvolver is "pure persistence,
+    # no LLM calls"). See docs/superpowers/notes/2026-05-02-plan-vs-reality-discoveries.md.
     "llm_extractor": EvalSite(
         name="llm_extractor",
         callable_path="opencomputer.evals.adapters:adapter_llm_extractor",
@@ -33,6 +29,7 @@ SITES: dict[str, EvalSite] = {
         name="job_change",
         callable_path="opencomputer.evals.adapters:adapter_job_change",
         grader="exact",
+        requires_provider=False,  # regex-based; no LLM call
     ),
     "instruction_detector": EvalSite(
         name="instruction_detector",

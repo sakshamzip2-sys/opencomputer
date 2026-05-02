@@ -18,12 +18,19 @@ Output the JSON array only, no preamble."""
 
 JOB_CHANGE_PROMPT = """Generate {n} diverse test cases for a job-change life-event detector.
 
-Half should be conversations where the user is signaling a job change (interview, offer, resigning, considering switching, layoff). Half should be unrelated work conversations (debugging, meeting prep, normal coding).
+The detector is a regex classifier over (url, title) pairs from browser-visit events.
+It fires on URLs/titles containing: linkedin.com/jobs, indeed.com, glassdoor.com,
+"resignation", "severance", "unemployment", or "notice period".
+
+Half should be (url, title) pairs that SHOULD fire (job-search sites, resignation
+articles, etc.). Half should be benign browsing (docs, news, social, dev tools)
+that should NOT fire — including some near-misses (e.g., "indeed I think...",
+"linkedin.com/in/saksham" non-jobs, articles about general unemployment policy).
 
 Return a JSON array. Each case has:
   id: short slug
-  input: {{"context": <multi-message conversation excerpt>}}
-  expected: "yes" or "no"
+  input: {{"url": <url string>, "title": <page title string>}}
+  expected: "yes" if the regex should fire, "no" otherwise
 
 Output the JSON array only, no preamble."""
 
@@ -49,22 +56,9 @@ Return a JSON array. Each case has:
 
 Output the JSON array only, no preamble."""
 
-PROMPT_EVOLUTION_PROMPT = """Generate {n} diverse test cases for a prompt-mutation function.
-
-Each case has an existing prompt that has a known failure mode and the failure description.
-
-Return a JSON array. Each case has:
-  id: short slug
-  input: {{"prompt": <prompt text>, "failure_mode": <description>}}
-  rubric_id: "prompt_evolution_v1"
-
-Output the JSON array only, no preamble."""
-
-
 PROMPTS = {
     "instruction_detector": INSTRUCTION_DETECTOR_PROMPT,
     "job_change": JOB_CHANGE_PROMPT,
     "llm_extractor": LLM_EXTRACTOR_PROMPT,
     "reflect": REFLECT_PROMPT,
-    "prompt_evolution": PROMPT_EVOLUTION_PROMPT,
 }

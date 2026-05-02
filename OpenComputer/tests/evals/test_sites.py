@@ -2,11 +2,13 @@ from opencomputer.evals.sites import SITES, get_site
 
 
 def test_v1_sites_registered():
+    # prompt_evolution dropped after discovery that PromptEvolver does no LLM
+    # calls (pure persistence). See docs/superpowers/notes/2026-05-02-plan-vs-reality-discoveries.md.
     assert "reflect" in SITES
-    assert "prompt_evolution" in SITES
     assert "llm_extractor" in SITES
     assert "job_change" in SITES
     assert "instruction_detector" in SITES
+    assert "prompt_evolution" not in SITES
 
 
 def test_get_site_returns_evalsite():
