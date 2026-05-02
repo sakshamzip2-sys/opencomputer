@@ -39,6 +39,22 @@ def _shared_profile_path() -> str | None:
     return os.environ.get("OPENCOMPUTER_BROWSER_PROFILE_PATH") or None
 
 
+def _cdp_attach_url() -> str | None:
+    """Return user-set CDP attach URL or None for fresh-launch mode.
+
+    When set (e.g. ``http://localhost:9222``), :func:`_browser_session`
+    uses ``chromium.connect_over_cdp`` to attach to the user's
+    already-running Chrome instead of launching a fresh ephemeral
+    browser. The user keeps full control of their tabs; the session
+    context manager NEVER closes the attached browser on exit.
+
+    The user must launch Chrome with ``--remote-debugging-port=9222``
+    (the ``oc browser chrome`` CLI helper prints the right command per
+    OS).
+    """
+    return os.environ.get("OPENCOMPUTER_BROWSER_CDP_URL") or None
+
+
 def _import_playwright():
     try:
         from playwright.async_api import async_playwright
@@ -55,19 +71,41 @@ def _import_playwright():
 async def _browser_session(headless: bool = True):
     """Context manager yielding a (browser, context) pair.
 
-    Isolated by default. If OPENCOMPUTER_BROWSER_PROFILE_PATH is set,
-    uses persistent context at that path (advanced; carries cookies + login).
+    Three modes:
+
+    * Default (isolated): launches a fresh headless chromium. Closed on exit.
+    * ``OPENCOMPUTER_BROWSER_PROFILE_PATH``: persistent profile at that path
+      (advanced; carries cookies + login state across calls).
+    * ``OPENCOMPUTER_BROWSER_CDP_URL``: attaches to the user's already-running
+      Chrome via Chrome DevTools Protocol. The browser is NOT closed on
+      exit — it's the user's, they keep using it. A fresh context is
+      created for the session and closed on exit so we don't leak tabs
+      into the user's existing windows.
     """
     async_playwright = _import_playwright()
 
     async with async_playwright() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=headless)
-        except Exception as exc:  # noqa: BLE001
-            raise BrowserError(
-                f"failed to launch chromium ({exc}). "
-                f"Run: playwright install chromium"
-            ) from exc
+        cdp_url = _cdp_attach_url()
+        attached_via_cdp = False
+        if cdp_url:
+            try:
+                browser = await pw.chromium.connect_over_cdp(cdp_url)
+            except Exception as exc:  # noqa: BLE001
+                raise BrowserError(
+                    f"failed to connect to Chrome via CDP at {cdp_url} ({exc}). "
+                    f"Did you launch Chrome with --remote-debugging-port=9222? "
+                    f"Run 'oc browser chrome' for the right command on your OS."
+                ) from exc
+            _log.info("attached to user's Chrome via CDP at %s", cdp_url)
+            attached_via_cdp = True
+        else:
+            try:
+                browser = await pw.chromium.launch(headless=headless)
+            except Exception as exc:  # noqa: BLE001
+                raise BrowserError(
+                    f"failed to launch chromium ({exc}). "
+                    f"Run: playwright install chromium"
+                ) from exc
 
         profile_path = _shared_profile_path()
         if profile_path:
@@ -84,7 +122,10 @@ async def _browser_session(headless: bool = True):
             yield browser, context
         finally:
             await context.close()
-            await browser.close()
+            # In CDP-attach mode, the user owns the browser — never close it.
+            # Closing would tear down their entire Chrome session.
+            if not attached_via_cdp:
+                await browser.close()
 
 
 async def navigate_and_snapshot(url: str, *, headless: bool = True, timeout_ms: int = 15000) -> PageSnapshot:
