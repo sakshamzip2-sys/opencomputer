@@ -43,6 +43,104 @@ def _eval_truthy(template: str, ctx: dict[str, Any]) -> bool:
     return bool(rendered)
 
 
+def _scrape_html(html: Any, spec: dict[str, Any]) -> list[dict[str, str]]:
+    """BS4-based HTML scraper.
+
+    spec shape:
+      item: "<css selector>"           # iterates these
+      fields:
+        <name>: "<css selector>"       # text of matched element
+        <name>: "<css selector>@<attr>" # value of attribute
+    """
+    if not isinstance(html, str):
+        return []
+
+    from bs4 import BeautifulSoup
+
+    item_selector = spec.get("item", "")
+    fields: dict[str, str] = spec.get("fields") or {}
+    if not item_selector or not fields:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    items = soup.select(item_selector)
+    out: list[dict[str, str]] = []
+    for item in items:
+        row: dict[str, str] = {}
+        for name, sel in fields.items():
+            sel_str = str(sel)
+            attr: str | None = None
+            if "@" in sel_str:
+                sel_str, _, attr = sel_str.partition("@")
+                sel_str = sel_str.strip()
+                attr = attr.strip() or None
+            elem = item.select_one(sel_str) if sel_str else item
+            if elem is None:
+                row[name] = ""
+                continue
+            if attr:
+                row[name] = elem.get(attr, "") or ""
+            else:
+                row[name] = elem.get_text(strip=True)
+        out.append(row)
+    return out
+
+
+def _select_path(value: Any, path: str) -> Any:
+    """Walk a dotted JSON path with optional [*] flatten markers.
+
+    Examples:
+      'data.children'         -> value['data']['children']
+      'data.children[*].data' -> [c['data'] for c in value['data']['children']]
+      'a.b.c'                 -> value['a']['b']['c']
+
+    Missing keys / wrong types yield [] rather than raising — recipes are
+    "best effort" by design; the user gets an empty result and can
+    refine the path.
+    """
+    parts: list[str] = []
+    for piece in path.split("."):
+        # Split each piece on [*] to track the flatten step.
+        if "[*]" in piece:
+            head, _, rest = piece.partition("[*]")
+            if head:
+                parts.append(head)
+            parts.append("[*]")
+            if rest:
+                # Anything after [*] in the same dotted segment is invalid;
+                # recipes should put the next key after a fresh dot.
+                # We treat it as a normal sub-key for forgiveness.
+                parts.append(rest.lstrip("."))
+        else:
+            parts.append(piece)
+
+    current = value
+    for part in parts:
+        if part == "[*]":
+            if not isinstance(current, list):
+                return []
+            # Flatten: continue with each element; if there are more parts
+            # after [*], they apply to each element below.
+            tail = parts[parts.index("[*]") + 1:]
+            if not tail:
+                return current
+            results = []
+            for item in current:
+                # Recursively select the tail on each item.
+                sub = _select_path(item, ".".join(tail))
+                if isinstance(sub, list):
+                    results.extend(sub)
+                else:
+                    results.append(sub)
+            return results
+        if not isinstance(current, dict):
+            return []
+        current = current.get(part)
+        if current is None:
+            return []
+    return current
+
+
 def run_pipeline(
     cmd: Command,
     *,
@@ -98,6 +196,11 @@ def run_pipeline(
             ]
         elif kind == "eval":
             value = _render(spec, ctx)
+        elif kind == "select":
+            path = str(_render(spec, ctx))
+            value = _select_path(value, path)
+        elif kind == "scrape":
+            value = _scrape_html(value, spec or {})
         else:
             raise ValueError(f"unknown pipeline step kind: {kind}")
     return value

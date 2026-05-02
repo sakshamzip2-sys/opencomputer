@@ -134,3 +134,145 @@ def run(
         )
         raise typer.Exit(code=1)
     typer.echo(out)
+
+
+@browser_app.command("cascade")
+def cascade_command(
+    url: str = typer.Argument(...),
+):
+    """Probe a URL with PUBLIC -> COOKIE -> HEADER strategies.
+
+    Reports which strategy succeeds. No LLM key required. Honors
+    OPENCOMPUTER_BROWSER_CDP_URL for the cookie strategy (skipped
+    silently if not set).
+    """
+    from opencomputer.recipes.discovery import run_cascade
+
+    result = run_cascade(url)
+    typer.echo(f"URL:           {url}")
+    typer.echo(f"Strategy:      {result.strategy or '(all failed)'}")
+    typer.echo(f"Status code:   {result.status_code}")
+    typer.echo(f"Attempted:     {result.attempted}")
+    if result.strategy is None:
+        raise typer.Exit(code=1)
+
+
+@browser_app.command("explore")
+def explore_command(
+    url: str = typer.Argument(...),
+    site: str = typer.Option(..., "--site", help="Slug to namespace artifacts under"),
+    output_dir: typer.FileText = typer.Option(
+        None, "--output-dir",
+        help="Where to write artifacts (default: ./.opencli/explore/<site>/)",
+    ),
+):
+    """Navigate the URL with network capture, write endpoints.json.
+
+    No LLM is involved — pure observation. Writes:
+      <output>/endpoints.json   list of {url, method, status, headers, ...}
+
+    Sensitive headers (Authorization, Cookie, X-API-Key, X-Auth-Token)
+    are REDACTED before persisting.
+
+    Run synthesize next to turn endpoints.json into a YAML recipe
+    (requires LLM API key).
+    """
+    import asyncio
+    from pathlib import Path
+
+    from opencomputer.recipes.discovery import explore_endpoints
+
+    out = Path(f".opencli/explore/{site}") if output_dir is None else Path(str(output_dir))
+
+    captured = asyncio.run(explore_endpoints(url, output_dir=out))
+    typer.echo(f"Captured {len(captured)} endpoints -> {out / 'endpoints.json'}")
+    typer.echo(
+        "Run 'oc browser synthesize {site}' to turn this into a YAML recipe "
+        "(requires ANTHROPIC_API_KEY or OPENAI_API_KEY)."
+    )
+
+
+@browser_app.command("synthesize")
+def synthesize_command(
+    site: str = typer.Argument(...),
+):
+    """Read explore artifacts; LLM writes a YAML recipe. STUB.
+
+    v2 ships this as a STUB requiring ANTHROPIC_API_KEY / OPENAI_API_KEY.
+    Phase 5 (next-session) wires the LLM-driven YAML synthesis. Today,
+    this command exits 2 with a clear message about the missing key
+    and points at the explore artifacts for manual recipe authoring.
+    """
+    import os
+    from pathlib import Path
+
+    artifacts = Path(f".opencli/explore/{site}/endpoints.json")
+    if not artifacts.exists():
+        typer.echo(
+            f"No explore artifacts at {artifacts}. "
+            f"Run 'oc browser explore <url> --site {site}' first.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENAI_API_KEY"):
+        typer.echo(
+            f"# LLM-driven synthesize is a Phase 5 stub. Needs:\n"
+            f"#   ANTHROPIC_API_KEY or OPENAI_API_KEY in env.\n"
+            f"#\n"
+            f"# Manual workaround for {site}:\n"
+            f"#   1. Read {artifacts} to find the most useful endpoint\n"
+            f"#   2. Author a recipe at ~/.opencomputer/<profile>/recipes/{site}.yaml\n"
+            f"#   3. See extensions/browser-recipes/recipes/hackernews.yaml for the shape",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    typer.echo(
+        "# Synthesize is a Phase 5 stub even with API key set. "
+        "# The LLM prompt + iteration logic is documented in "
+        "docs/superpowers/plans/2026-05-02-opencli-discovery-NEXT-SESSION.md",
+        err=True,
+    )
+    raise typer.Exit(code=2)
+
+
+@browser_app.command("generate")
+def generate_command(
+    url: str = typer.Argument(...),
+    goal: str = typer.Option(..., "--goal", help="What you want (e.g. 'hot' / 'feed')"),
+    site: str = typer.Option(..., "--site", help="Slug for the new recipe"),
+):
+    """One-shot: explore + synthesize + register. STUB inherits synthesize's key reqs.
+
+    The composed flow:
+      1. oc browser explore <url> --site <site>
+      2. oc browser synthesize <site>
+    The second step needs an LLM API key (Phase 5).
+
+    v2 today: runs explore (works), then exits with synthesize's stub message.
+    """
+    import asyncio
+    import os
+    from pathlib import Path
+
+    from opencomputer.recipes.discovery import explore_endpoints
+
+    out = Path(f".opencli/explore/{site}")
+    typer.echo(f"# Step 1: explore {url} -> {out / 'endpoints.json'}")
+    captured = asyncio.run(explore_endpoints(url, output_dir=out))
+    typer.echo(f"# Captured {len(captured)} endpoints")
+
+    typer.echo(f"# Step 2: synthesize recipe (goal={goal})")
+    if not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENAI_API_KEY"):
+        typer.echo(
+            f"#\n"
+            f"# Synthesize step needs ANTHROPIC_API_KEY or OPENAI_API_KEY (Phase 5 stub).\n"
+            f"# Explore artifacts are saved at {out}; run 'oc browser synthesize {site}'\n"
+            f"# manually after setting an API key, or hand-author a recipe.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    typer.echo("# Synthesize stub — Phase 5 not yet wired even with API key.", err=True)
+    raise typer.Exit(code=2)
