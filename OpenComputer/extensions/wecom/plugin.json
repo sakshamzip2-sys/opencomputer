@@ -1,0 +1,19 @@
+{
+  "id": "wecom",
+  "name": "WeCom (企业微信) — full corp app",
+  "kind": "channel",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Tencent WeCom (Enterprise WeChat) corporate app integration. Outbound via /cgi-bin/message/send with corp_id + agent_id + secret credential triple and 2-hour access_token rotation. Distinct from the existing 'wecom-callback' plugin (Group Chat Bot webhook). Set WECOM_CORP_ID, WECOM_AGENT_ID, WECOM_SECRET. Inbound via the corp app's encrypted callback (WXBizMsgCrypt AES-256-CBC) — encrypted callback is a follow-up; this PR ships outbound + plain-text inbound primitives.",
+  "default_enabled": false,
+  "model_support": null,
+  "setup": {
+    "channels": [
+      {
+        "id": "wecom",
+        "label": "WeCom corp app (full)",
+        "env_vars": ["WECOM_CORP_ID", "WECOM_AGENT_ID", "WECOM_SECRET"]
+      }
+    ]
+  }
+}
