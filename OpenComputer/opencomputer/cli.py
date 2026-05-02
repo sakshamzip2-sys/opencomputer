@@ -2107,10 +2107,33 @@ def plugins() -> None:
 
 
 @app.command()
-def setup() -> None:
-    """Interactive first-run wizard — pick provider, enter key, test."""
-    from opencomputer.setup_wizard import run_setup
+def setup(
+    new: bool = typer.Option(
+        False,
+        "--new",
+        help=(
+            "Use the Hermes-style section-driven wizard "
+            "(opt-in while we port legacy features). Default: legacy."
+        ),
+    ),
+) -> None:
+    """Interactive first-run wizard — pick provider, enter key, test.
 
+    Default: invokes the legacy procedural wizard at
+    :func:`opencomputer.setup_wizard.run_setup`.
+
+    With ``--new``: invokes the new section-driven wizard at
+    :func:`opencomputer.cli_setup.wizard.run_setup`. The new wizard
+    has the Hermes-style arrow-key UX but currently fewer LIVE
+    sections than the legacy one — sub-projects M1, S2-S5 etc. close
+    the gap. Once parity lands, the default flips to ``--new`` and
+    the legacy wrapper is retired.
+    """
+    if new:
+        from opencomputer.cli_setup.wizard import run_setup as run_setup_new
+        run_setup_new()
+        return
+    from opencomputer.setup_wizard import run_setup
     run_setup()
 
 
