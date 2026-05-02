@@ -317,6 +317,32 @@ Frozen dataclass — `read: int = 0`, `write: int = 0`. Returned by a
 provider's `extracts_cache_tokens(usage)` capability when surfacing
 prompt-cache token counts uniformly across providers.
 
+### `BatchRequest` / `BatchResult` / `BatchUnsupportedError`
+
+Provider-agnostic batch-processing types (Subsystem E, 2026-05-02).
+Use `BatchRequest` as the input to `BaseProvider.submit_batch()`;
+get `BatchResult` back from `BaseProvider.get_batch_results()`.
+`BatchUnsupportedError` is raised by providers that don't implement
+batch (default `BaseProvider` behavior).
+
+`BatchRequest` carries `runtime_extras` (effort tier from Subsystem B)
+and `response_schema` (structured outputs from Subsystem C) per request
+— each batched job can independently configure these. Anthropic's
+batch API gives a 50% cost discount with ~1hr turnaround. OpenAI batch
+implementation lands in a follow-up PR.
+
+### `JsonSchemaSpec`
+
+TypedDict for structured outputs (Subsystem C, 2026-05-02). Pass
+to `complete()`/`stream_complete()` via the `response_schema` kwarg
+to get schema-validated JSON responses. Providers translate to their
+native shape — Anthropic `output_config.format`, OpenAI
+`response_format` with `strict: true`. Fields: `schema` (JSON Schema
+dict, required), `name` (optional, surfaced to OpenAI's
+`json_schema.name`), `description` (optional one-liner). Use the
+`opencomputer.agent.structured.parse_structured()` helper for
+Pydantic-model integration.
+
 ---
 
 ## Channel contract

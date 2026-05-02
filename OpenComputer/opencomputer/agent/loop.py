@@ -49,7 +49,7 @@ from opencomputer.tools.registry import registry
 from opencomputer.tools.session_search_tool import SessionSearchTool
 from plugin_sdk.core import Message, StopReason, ToolCall
 from plugin_sdk.injection import InjectionContext
-from plugin_sdk.provider_contract import BaseProvider
+from plugin_sdk.provider_contract import BaseProvider, ProviderResponse
 from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
 from plugin_sdk.tool_matcher import ToolPattern as _ToolPattern
 from plugin_sdk.tool_matcher import matches as _pattern_matches
@@ -116,6 +116,11 @@ class ConversationResult:
     iterations: int
     input_tokens: int
     output_tokens: int
+    stop_reason: StopReason | None = None
+    """The terminal stop reason of the final step. ``None`` only when the
+    loop exited via the no-message early return path (no model call
+    made). Additive field (2026-05-02 Opus 4.7 migration) — existing
+    callers that ignore it continue to work unchanged."""
 
 
 #: Synthetic tool name used for Hybrid skill dispatch wrap. Must match
@@ -1310,13 +1315,8 @@ class AgentLoop:
                     session_id=sid,
                 )
 
-                # Item 2 (2026-05-02): pause_turn + refusal handling.
-                # pause_turn means a server-tool needs more time; re-send the
-                # conversation including the paused assistant message so the
-                # provider continues from where it left off. Cap at 3 to
-                # prevent pathological loops on broken server tools.
-                # refusal falls through to normal END_TURN handling — the
-                # refusal text becomes the final assistant message.
+                # Server-tool work paused: re-send so the provider continues.
+                # Cap at 3 to prevent pathological loops on broken server tools.
                 if step.stop_reason == StopReason.PAUSE_TURN:
                     self._pause_turn_count = (
                         getattr(self, "_pause_turn_count", 0) + 1
@@ -1329,16 +1329,94 @@ class AgentLoop:
                         from dataclasses import replace as _dc_replace
                         step = _dc_replace(step, stop_reason=StopReason.END_TURN)
                         self._pause_turn_count = 0
-                        # Fall through to normal end-of-turn flow below.
                     else:
-                        # Below cap: append paused content and continue the
-                        # loop so the next iteration re-sends.
                         if step.assistant_message is not None:
                             messages.append(step.assistant_message)
                         continue
                 else:
-                    # Reset counter on any non-pause outcome
                     self._pause_turn_count = 0
+
+                # Subsystem A — Context-full retry: compaction + retry once.
+                # Provider-agnostic: any provider that maps its context-
+                # exhaustion stop reason to StopReason.CONTEXT_FULL benefits.
+                if (
+                    step.stop_reason == StopReason.CONTEXT_FULL
+                    and self.compaction is not None
+                ):
+                    try:
+                        cresult = await self.compaction.maybe_run(
+                            messages, step.input_tokens, force=True,
+                        )
+                        if cresult.did_compact:
+                            messages = cresult.messages
+                            step = await self._run_one_step(
+                                messages=messages,
+                                system=system,
+                                stream_callback=stream_callback,
+                                thinking_callback=thinking_callback,
+                                model=model_for_turn,
+                                session_id=sid,
+                            )
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                # Empty end_turn retry: per Anthropic Doc 3, models can
+                # return 2-3 empty tokens with stop_reason=end_turn after
+                # tool results when text is appended in the same content
+                # block, OR when the model considers itself done. This
+                # looks like the agent hung. One-shot recovery: inject
+                # a synthetic "Please continue." into the wire-only
+                # message list and retry. Synthetic prompt is NOT
+                # persisted to SessionDB.
+                if (
+                    step.stop_reason == StopReason.END_TURN
+                    and not (step.assistant_message.content or "").strip()
+                    and not step.assistant_message.tool_calls
+                    and not step.assistant_message.reasoning
+                ):
+                    retry_messages = list(messages) + [
+                        Message(role="user", content="Please continue."),
+                    ]
+                    try:
+                        step = await self._run_one_step(
+                            messages=retry_messages,
+                            system=system,
+                            stream_callback=stream_callback,
+                            thinking_callback=thinking_callback,
+                            model=model_for_turn,
+                            session_id=sid,
+                        )
+                    except Exception:  # noqa: BLE001
+                        # Retry crashed — accept the original empty turn.
+                        pass
+
+                # max_tokens + tool_use retry: when max_tokens is hit
+                # DURING a tool_use block, the model emits a partial
+                # tool call (truncated arguments) the dispatcher can't
+                # execute. Per Anthropic Doc 3 fix-it pattern: retry
+                # with doubled max_tokens (capped at 64k) once. Provider-
+                # agnostic via canonical StopReason.MAX_TOKENS + presence
+                # of tool_calls.
+                if (
+                    step.stop_reason == StopReason.MAX_TOKENS
+                    and step.assistant_message.tool_calls
+                ):
+                    current_mt = self.config.model.max_tokens
+                    lifted_mt = min(current_mt * 2, 64_000)
+                    if lifted_mt > current_mt:
+                        try:
+                            step = await self._run_one_step(
+                                messages=messages,
+                                system=system,
+                                stream_callback=stream_callback,
+                                thinking_callback=thinking_callback,
+                                model=model_for_turn,
+                                session_id=sid,
+                                max_tokens_override=lifted_mt,
+                            )
+                        except Exception:  # noqa: BLE001
+                            # Retry crashed — accept original outcome.
+                            pass
 
                 # Round 2B P-3: a returned LLM response is activity. Bump BEFORE
                 # the early-return path below so an end-turn turn that took 290s
@@ -1643,6 +1721,7 @@ class AgentLoop:
                         iterations=iterations,
                         input_tokens=total_input,
                         output_tokens=total_output,
+                        stop_reason=step.stop_reason,
                     )
 
                 # Push the current runtime to DelegateTool so subagents inherit it.
@@ -1756,6 +1835,7 @@ class AgentLoop:
                 iterations=iterations,
                 input_tokens=total_input,
                 output_tokens=total_output,
+                stop_reason=StopReason.BUDGET_EXHAUSTED,
             )
         except (KeyboardInterrupt, asyncio.CancelledError):
             _session_end_reason = "cancelled"
@@ -1789,6 +1869,7 @@ class AgentLoop:
                 iterations=iterations,
                 input_tokens=total_input,
                 output_tokens=total_output,
+                stop_reason=StopReason.ERROR,
             )
         except Exception:
             _session_end_reason = "error"
@@ -2721,6 +2802,7 @@ class AgentLoop:
         thinking_callback=None,
         model: str | None = None,
         session_id: str = "",
+        max_tokens_override: int | None = None,
     ) -> StepOutcome:
         """One LLM call + classification of the result.
 
@@ -2730,6 +2812,11 @@ class AgentLoop:
         ``model`` overrides ``config.model.model`` for this turn only —
         used by the cheap-route gate on iteration 0. ``None`` = use the
         config default.
+
+        ``max_tokens_override`` overrides ``config.model.max_tokens`` for
+        this call only — used by the max_tokens+tool_use retry path
+        (2026-05-02) to lift the ceiling without mutating the frozen
+        ``ModelConfig`` dataclass.
 
         Resolves any user-defined alias (``config.model.model_aliases``)
         to its canonical id before the provider call so users can write
@@ -2772,6 +2859,20 @@ class AgentLoop:
         # (and 3rd-party plugins) that don't accept the kwarg still work.
         from opencomputer.agent.runtime_flags import runtime_flags_from_custom
         _runtime_extras = runtime_flags_from_custom(self._runtime.custom)
+        # Subsystem B (2026-05-02) — apply per-context effort policy
+        # when the user hasn't set ``reasoning_effort`` via ``/reasoning``.
+        # Subagents → low, voice mode → low, Sonnet 4.6 → medium,
+        # Opus 4.7 → xhigh. User-set values always win (we only fill in
+        # when None). Provider-agnostic: works for any provider whose
+        # ``*_kwargs_from_runtime`` accepts ``reasoning_effort``.
+        if _runtime_extras.get("reasoning_effort") is None:
+            from opencomputer.agent.effort_policy import recommended_effort
+            _policy_default = recommended_effort(
+                runtime=self._runtime,
+                model=model_name,
+            )
+            if _policy_default is not None:
+                _runtime_extras["reasoning_effort"] = _policy_default
         # Only pass ``runtime_extras=`` when at least one flag is non-None
         # so stub providers in tests (and 3rd-party plugins that haven't
         # adopted the kwarg) keep working.
@@ -2786,7 +2887,7 @@ class AgentLoop:
                 messages=wire_messages,
                 system=system,
                 tools=tool_schemas,
-                max_tokens=self.config.model.max_tokens,
+                max_tokens=max_tokens_override or self.config.model.max_tokens,
                 temperature=self.config.model.temperature,
                 **_extra_kwargs,
             ):
@@ -2828,12 +2929,36 @@ class AgentLoop:
             "tool_use": StopReason.TOOL_USE,
             "max_tokens": StopReason.MAX_TOKENS,
             "stop_sequence": StopReason.END_TURN,
-            # Item 2 (2026-05-02): server-tool work paused; loop re-sends.
+            # Server-tool work paused; loop re-sends.
             "pause_turn": StopReason.PAUSE_TURN,
-            # Item 2 (2026-05-02): model refused; surface as final, no retry.
+            # Model refused; surface as final, no retry.
             "refusal": StopReason.REFUSAL,
+            # Context window exceeded — Subsystem A retry-with-compaction.
+            "model_context_window_exceeded": StopReason.CONTEXT_FULL,
         }
         stop = stop_reason_map.get(resp.stop_reason, StopReason.END_TURN)
+
+        # Refusal: ensure the user sees something, even if the model
+        # emitted no text. Anthropic returns stop_reason=refusal when its
+        # safety filter declines a request — sometimes with a brief
+        # explanation, sometimes empty. Today we silently map to END_TURN,
+        # leaving the user staring at an empty assistant turn.
+        if stop == StopReason.REFUSAL:
+            existing = (resp.message.content or "").strip()
+            new_content = (
+                f"_Claude declined to respond._\n\n{existing}"
+                if existing
+                else "_Claude declined to respond._"
+            )
+            resp = ProviderResponse(
+                message=Message(
+                    role=resp.message.role,
+                    content=new_content,
+                    tool_calls=resp.message.tool_calls,
+                ),
+                stop_reason=resp.stop_reason,
+                usage=resp.usage,
+            )
 
         # If the model called tools, even if the raw stop_reason was "end_turn",
         # we need to continue so the model can process results.

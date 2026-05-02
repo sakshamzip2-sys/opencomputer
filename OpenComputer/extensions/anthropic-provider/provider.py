@@ -23,6 +23,10 @@ from anthropic.types import Message as AnthropicMessage
 from pydantic import BaseModel, Field
 
 from opencomputer.agent.credential_pool import CredentialPool
+from opencomputer.agent.model_capabilities import (
+    supports_adaptive_thinking,
+    supports_temperature,
+)
 from opencomputer.agent.prompt_caching import apply_full_cache_control
 from opencomputer.agent.rate_guard import (
     format_remaining,
@@ -509,6 +513,7 @@ class AnthropicProvider(BaseProvider):
         max_tokens: int = 4096,
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
+        response_schema: dict | None = None,
     ) -> ProviderResponse:
         """Low-level complete using the given API key (pool-rotation target)."""
         # TS-T7 — short-circuit before the SDK so concurrent sessions
@@ -540,12 +545,25 @@ class AnthropicProvider(BaseProvider):
             anthropic_messages, system, api_tools_pre,
             model=model, idle_seconds=idle_s,
         )
+        # Subsystem A — Effort-driven max_tokens floor lift: high-effort
+        # calls on adaptive models need headroom for thinking + tool calls
+        # (Doc 5: start at 64k).
+        effective_max_tokens = max_tokens
+        if (
+            runtime_extras
+            and runtime_extras.get("reasoning_effort") in ("high", "xhigh", "max")
+            and supports_adaptive_thinking(model)
+        ):
+            effective_max_tokens = max(max_tokens, 64_000)
         kwargs: dict[str, Any] = {
             "model": model,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
+            "max_tokens": effective_max_tokens,
             "messages": api_messages,
         }
+        # Opus 4.7+ and Mythos reject temperature/top_p/top_k. Conditional
+        # inclusion driven by model_capabilities.
+        if supports_temperature(model):
+            kwargs["temperature"] = temperature
         if sys_for_sdk:
             kwargs["system"] = sys_for_sdk
         if api_tools:
@@ -557,10 +575,22 @@ class AnthropicProvider(BaseProvider):
             )
             kwargs.update(
                 anthropic_kwargs_from_runtime(
+                    model=model,
                     reasoning_effort=runtime_extras.get("reasoning_effort"),
                     service_tier=runtime_extras.get("service_tier"),
                 )
             )
+        # Subsystem C — structured outputs. Merge response_schema into
+        # output_config (which may already hold `effort` from the
+        # runtime_flags step above). Anthropic's output_config accepts
+        # both `format` and `effort` simultaneously.
+        if response_schema is not None:
+            existing_output_config = kwargs.get("output_config", {})
+            existing_output_config["format"] = {
+                "type": "json_schema",
+                "schema": response_schema["schema"],
+            }
+            kwargs["output_config"] = existing_output_config
         try:
             resp = await client.messages.create(**kwargs)
         except AnthropicRateLimitError as exc:
@@ -581,6 +611,7 @@ class AnthropicProvider(BaseProvider):
         temperature: float = 1.0,
         stream: bool = False,
         runtime_extras: dict | None = None,
+        response_schema: dict | None = None,
     ) -> ProviderResponse:
         if self._credential_pool is None:
             return await self._do_complete(
@@ -592,6 +623,7 @@ class AnthropicProvider(BaseProvider):
                 max_tokens=max_tokens,
                 temperature=temperature,
                 runtime_extras=runtime_extras,
+                response_schema=response_schema,
             )
 
         def _is_auth_failure(exc: Exception) -> bool:
@@ -607,6 +639,7 @@ class AnthropicProvider(BaseProvider):
                 max_tokens=max_tokens,
                 temperature=temperature,
                 runtime_extras=runtime_extras,
+                response_schema=response_schema,
             ),
             is_auth_failure=_is_auth_failure,
         )
@@ -622,6 +655,7 @@ class AnthropicProvider(BaseProvider):
         max_tokens: int = 4096,
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
+        response_schema: dict | None = None,
     ) -> ProviderResponse:
         """Low-level stream_complete that aggregates into a ProviderResponse (pool target)."""
         # TS-T7 — same cross-session guard as the non-streaming path.
@@ -649,12 +683,25 @@ class AnthropicProvider(BaseProvider):
             anthropic_messages, system, api_tools_pre,
             model=model, idle_seconds=idle_s,
         )
+        # Subsystem A — Effort-driven max_tokens floor lift: high-effort
+        # calls on adaptive models need headroom for thinking + tool calls
+        # (Doc 5: start at 64k).
+        effective_max_tokens = max_tokens
+        if (
+            runtime_extras
+            and runtime_extras.get("reasoning_effort") in ("high", "xhigh", "max")
+            and supports_adaptive_thinking(model)
+        ):
+            effective_max_tokens = max(max_tokens, 64_000)
         kwargs: dict[str, Any] = {
             "model": model,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
+            "max_tokens": effective_max_tokens,
             "messages": api_messages,
         }
+        # Opus 4.7+ and Mythos reject temperature/top_p/top_k. Conditional
+        # inclusion driven by model_capabilities.
+        if supports_temperature(model):
+            kwargs["temperature"] = temperature
         if sys_for_sdk:
             kwargs["system"] = sys_for_sdk
         if api_tools:
@@ -666,10 +713,22 @@ class AnthropicProvider(BaseProvider):
             )
             kwargs.update(
                 anthropic_kwargs_from_runtime(
+                    model=model,
                     reasoning_effort=runtime_extras.get("reasoning_effort"),
                     service_tier=runtime_extras.get("service_tier"),
                 )
             )
+        # Subsystem C — structured outputs. Merge response_schema into
+        # output_config (which may already hold `effort` from the
+        # runtime_flags step above). Anthropic's output_config accepts
+        # both `format` and `effort` simultaneously.
+        if response_schema is not None:
+            existing_output_config = kwargs.get("output_config", {})
+            existing_output_config["format"] = {
+                "type": "json_schema",
+                "schema": response_schema["schema"],
+            }
+            kwargs["output_config"] = existing_output_config
         try:
             async with client.messages.stream(**kwargs) as stream_ctx:
                 final = await stream_ctx.get_final_message()
@@ -688,6 +747,7 @@ class AnthropicProvider(BaseProvider):
         max_tokens: int = 4096,
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
+        response_schema: dict | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream response events via Anthropic's `messages.stream()` context.
 
@@ -715,12 +775,25 @@ class AnthropicProvider(BaseProvider):
             anthropic_messages, system, api_tools_pre,
             model=model, idle_seconds=idle_s,
         )
+        # Subsystem A — Effort-driven max_tokens floor lift: high-effort
+        # calls on adaptive models need headroom for thinking + tool calls
+        # (Doc 5: start at 64k).
+        effective_max_tokens = max_tokens
+        if (
+            runtime_extras
+            and runtime_extras.get("reasoning_effort") in ("high", "xhigh", "max")
+            and supports_adaptive_thinking(model)
+        ):
+            effective_max_tokens = max(max_tokens, 64_000)
         kwargs: dict[str, Any] = {
             "model": model,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
+            "max_tokens": effective_max_tokens,
             "messages": api_messages,
         }
+        # Opus 4.7+ and Mythos reject temperature/top_p/top_k. Conditional
+        # inclusion driven by model_capabilities.
+        if supports_temperature(model):
+            kwargs["temperature"] = temperature
         if sys_for_sdk:
             kwargs["system"] = sys_for_sdk
         if api_tools:
@@ -732,10 +805,22 @@ class AnthropicProvider(BaseProvider):
             )
             kwargs.update(
                 anthropic_kwargs_from_runtime(
+                    model=model,
                     reasoning_effort=runtime_extras.get("reasoning_effort"),
                     service_tier=runtime_extras.get("service_tier"),
                 )
             )
+        # Subsystem C — structured outputs. Merge response_schema into
+        # output_config (which may already hold `effort` from the
+        # runtime_flags step above). Anthropic's output_config accepts
+        # both `format` and `effort` simultaneously.
+        if response_schema is not None:
+            existing_output_config = kwargs.get("output_config", {})
+            existing_output_config["format"] = {
+                "type": "json_schema",
+                "schema": response_schema["schema"],
+            }
+            kwargs["output_config"] = existing_output_config
 
         if self._credential_pool is not None:
             # Pool path: stream_complete falls back to aggregated response on rotation.
@@ -753,6 +838,7 @@ class AnthropicProvider(BaseProvider):
                     max_tokens=max_tokens,
                     temperature=temperature,
                     runtime_extras=runtime_extras,
+                    response_schema=response_schema,
                 ),
                 is_auth_failure=_is_auth_failure,
             )
@@ -795,6 +881,116 @@ class AnthropicProvider(BaseProvider):
             raise
 
         yield StreamEvent(kind="done", response=self._parse_response(final))
+
+    async def submit_batch(self, requests):
+        """Submit a batch via Anthropic's ``messages.batches.create``.
+
+        Subsystem E (2026-05-02). 50% cost discount, ~1hr typical
+        turnaround, 24h max. Composes with effort (Subsystem B) and
+        response_schema (Subsystem C).
+        """
+        from plugin_sdk.provider_contract import BatchRequest as _Br
+
+        entries: list[dict] = []
+        for req in requests:
+            assert isinstance(req, _Br)
+            params: dict[str, Any] = {
+                "model": req.model,
+                "max_tokens": req.max_tokens,
+                "messages": self._to_anthropic_messages(req.messages),
+            }
+            if req.system:
+                params["system"] = req.system
+            if supports_temperature(req.model):
+                params["temperature"] = 1.0
+            if req.runtime_extras:
+                from opencomputer.agent.runtime_flags import (
+                    anthropic_kwargs_from_runtime,
+                )
+                params.update(
+                    anthropic_kwargs_from_runtime(
+                        model=req.model,
+                        reasoning_effort=req.runtime_extras.get("reasoning_effort"),
+                        service_tier=req.runtime_extras.get("service_tier"),
+                    )
+                )
+            if req.response_schema is not None:
+                output_config = params.get("output_config", {})
+                output_config["format"] = {
+                    "type": "json_schema",
+                    "schema": req.response_schema["schema"],
+                }
+                params["output_config"] = output_config
+            entries.append({"custom_id": req.custom_id, "params": params})
+
+        batch = await self.client.messages.batches.create(requests=entries)
+        return batch.id
+
+    async def get_batch_results(self, batch_id: str):
+        """Fetch results for a batch.
+
+        Returns one BatchResult per entry. If the batch is still
+        processing, returns a single placeholder with
+        ``status="processing"`` — caller polls again later.
+        """
+        from plugin_sdk.provider_contract import BatchResult as _Br
+
+        batch = await self.client.messages.batches.retrieve(batch_id)
+        if batch.processing_status == "in_progress":
+            return [_Br(custom_id="__pending__", status="processing")]
+
+        out: list = []
+        async for entry in await self.client.messages.batches.results(batch_id):
+            result_obj = entry.result
+            result_type = getattr(result_obj, "type", "errored")
+            if result_type == "succeeded":
+                response = self._parse_response(result_obj.message)
+                out.append(
+                    _Br(
+                        custom_id=entry.custom_id,
+                        status="succeeded",
+                        response=response,
+                    )
+                )
+            else:
+                err_obj = getattr(result_obj, "error", None)
+                err_msg = ""
+                if err_obj is not None:
+                    err_msg = str(getattr(err_obj, "message", err_obj))
+                out.append(
+                    _Br(
+                        custom_id=entry.custom_id,
+                        status=result_type,
+                        error=err_msg,
+                    )
+                )
+        return out
+
+    async def count_tokens(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        system: str = "",
+        tools: list[ToolSchema] | None = None,
+    ) -> int:
+        """Count input tokens via Anthropic's native ``messages.count_tokens`` endpoint.
+
+        Falls back to the heuristic if the SDK call fails (e.g.,
+        network error, model not yet supported by the endpoint).
+        Subsystem D, 2026-05-02.
+        """
+        try:
+            response = await self.client.messages.count_tokens(
+                model=model,
+                messages=self._to_anthropic_messages(messages),
+                system=system if system else None,
+                tools=[t.to_anthropic_format() for t in (tools or [])] or None,
+            )
+            return int(response.input_tokens)
+        except Exception:  # noqa: BLE001 — fall back rather than fail
+            from plugin_sdk.provider_contract import _heuristic_token_count
+            return _heuristic_token_count(messages, system, tools)
 
 
 __all__ = ["AnthropicProvider", "AnthropicProviderConfig"]

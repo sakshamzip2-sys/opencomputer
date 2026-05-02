@@ -8,13 +8,42 @@ anthropic/openai SDKs directly — it only uses BaseProvider.
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from plugin_sdk.core import Message
 from plugin_sdk.tool_contract import ToolSchema
+
+
+def _heuristic_token_count(
+    messages: list[Message],
+    system: str = "",
+    tools: list[ToolSchema] | None = None,
+) -> int:
+    """Heuristic input-token count — ~4 chars per token.
+
+    Provider-agnostic lower-bound estimate. Used by
+    :meth:`BaseProvider.count_tokens` when the concrete provider
+    doesn't override (e.g. local Llama via Ollama, future providers
+    not yet shipping a tokenizer).
+
+    Real tokenizers report 10-30% higher counts in practice; this is
+    intentionally conservative so callers don't *under*-estimate
+    context pressure. For accurate counts, providers override
+    ``count_tokens`` with their native endpoint or local tokenizer.
+    """
+    total = len(system or "")
+    for m in messages:
+        total += len(m.content or "")
+        for tc in (m.tool_calls or []):
+            total += len(tc.name) + len(json.dumps(tc.arguments or {}))
+    if tools:
+        for t in tools:
+            total += len(json.dumps(t.to_openai_format()))
+    return max(1, total // 4)
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -154,6 +183,77 @@ class StreamEvent:
     response: ProviderResponse | None = None
 
 
+class BatchUnsupportedError(NotImplementedError):
+    """Raised when a provider doesn't support batch processing.
+
+    Subsystem E (2026-05-02). Most providers don't natively support
+    batch APIs — Anthropic does (50% cost discount, ~1hr turnaround),
+    OpenAI does with a different async-file-based shape, others don't
+    at all. Callers should catch this and fall back to serial calls
+    if they want graceful degradation.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class BatchRequest:
+    """One entry in a batch job — the input to ``submit_batch``.
+
+    Provider-agnostic shape — providers translate to their native batch
+    request format. Composes with Subsystems B (``runtime_extras``) and
+    C (``response_schema``): each batched request can carry its own
+    effort tier and schema independently.
+    """
+
+    custom_id: str
+    """Caller-supplied id for matching results to requests. Anthropic
+    requires alphanumeric + ``_-``, 1-64 chars."""
+    messages: list[Message]
+    model: str
+    system: str = ""
+    max_tokens: int = 1024
+    runtime_extras: dict | None = None
+    response_schema: dict | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BatchResult:
+    """One entry in batch results — output from ``get_batch_results``."""
+
+    custom_id: str
+    status: Literal["succeeded", "errored", "expired", "canceled", "processing"]
+    response: ProviderResponse | None = None
+    """Populated when ``status == "succeeded"``."""
+    error: str = ""
+    """Populated when ``status == "errored"``."""
+
+
+class JsonSchemaSpec(TypedDict, total=False):
+    """Provider-agnostic structured-outputs schema spec.
+
+    Lives in plugin_sdk because every BaseProvider sees this kwarg.
+    Providers translate the spec to their native shape:
+
+    * Anthropic: ``output_config.format = {"type": "json_schema", "schema": <schema>}``
+    * OpenAI: ``response_format = {"type": "json_schema", "json_schema":
+      {"name": <name>, "schema": <schema>, "strict": True}}``
+    * Providers without native support: pass through as no-op (the
+      caller is expected to add JSON instructions to the prompt as
+      a backup).
+
+    Fields:
+      * ``schema`` — the JSON Schema (subset Anthropic + OpenAI accept).
+        Must include ``type: "object"`` at the top level for both.
+      * ``name`` — short identifier used by OpenAI's ``json_schema.name``
+        field. Anthropic ignores this. Default ``"response"``.
+      * ``description`` — optional one-liner. Some providers surface it
+        in the schema metadata.
+    """
+
+    schema: dict
+    name: str
+    description: str
+
+
 class BaseProvider(ABC):
     """Base class for an LLM provider plugin.
 
@@ -193,6 +293,7 @@ class BaseProvider(ABC):
         temperature: float = 1.0,
         stream: bool = False,
         runtime_extras: dict | None = None,
+        response_schema: JsonSchemaSpec | None = None,
     ) -> ProviderResponse:
         """Send messages to the provider, return a single ProviderResponse.
 
@@ -204,6 +305,15 @@ class BaseProvider(ABC):
         ``opencomputer.agent.runtime_flags``. ``None`` (the default)
         means no flags active — providers must treat this identically to
         an empty dict.
+
+        ``response_schema`` enables structured outputs (Subsystem C,
+        2026-05-02). When set, providers translate to their native
+        schema-enforcement shape (Anthropic ``output_config.format``,
+        OpenAI ``response_format`` with ``strict: true``). Providers
+        without native schema enforcement should accept the kwarg as a
+        no-op — callers should add JSON instructions in the prompt as a
+        backup. Default ``None`` = no schema enforcement, free-form
+        text response (existing behavior).
         """
         ...
 
@@ -218,12 +328,18 @@ class BaseProvider(ABC):
         max_tokens: int = 4096,
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
+        response_schema: JsonSchemaSpec | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream the response.
 
         Yields StreamEvent objects in order. Final event has kind="done"
         and carries the complete ProviderResponse (including aggregated text
         and any tool calls). Text chunks arrive as kind="text_delta".
+
+        ``response_schema`` — see :meth:`complete` for semantics.
+        Streaming with structured outputs is supported by Anthropic;
+        OpenAI partial-JSON streaming has more nuance (initial
+        implementation may aggregate before yielding ``done``).
         """
         ...
 
@@ -237,10 +353,56 @@ class BaseProvider(ABC):
         """
         return ProviderCapabilities()
 
+    async def submit_batch(self, requests: list[BatchRequest]) -> str:
+        """Submit a batch job — returns a provider-specific batch_id.
+
+        Subsystem E (2026-05-02). Anthropic supports natively (50% cost
+        discount, ~1hr turnaround). Default raises BatchUnsupportedError
+        — providers opt in by overriding.
+        """
+        raise BatchUnsupportedError(
+            f"{self.name} does not support batch processing"
+        )
+
+    async def get_batch_results(self, batch_id: str) -> list[BatchResult]:
+        """Get current results for a previously-submitted batch.
+
+        Returns one BatchResult per request. Caller polls — this method
+        does not block. Default raises BatchUnsupportedError.
+        """
+        raise BatchUnsupportedError(
+            f"{self.name} does not support batch processing"
+        )
+
+    async def count_tokens(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        system: str = "",
+        tools: list[ToolSchema] | None = None,
+    ) -> int:
+        """Count input tokens for a request — provider-agnostic interface.
+
+        Concrete (non-abstract) default returns a heuristic estimate
+        (~4 chars per token). Providers should override with their
+        native endpoint (Anthropic ``messages.count_tokens``) or local
+        tokenizer (OpenAI ``tiktoken``, llama-cpp, Ollama) for accuracy.
+
+        Used by CompactionEngine, cost-guard pre-flight estimates, and
+        any classifier / extractor wanting to budget input length.
+        Returns ≥ 1 for any non-empty input.
+        """
+        return _heuristic_token_count(messages, system, tools)
+
 
 __all__ = [
     "BaseProvider",
+    "BatchRequest",
+    "BatchResult",
+    "BatchUnsupportedError",
     "CacheTokens",
+    "JsonSchemaSpec",
     "ProviderCapabilities",
     "ProviderResponse",
     "RateLimitedError",

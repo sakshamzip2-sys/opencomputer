@@ -160,7 +160,7 @@ def _build_provider_with_tool_then_end():
             self.calls: list[list[Message]] = []
             self._iter = 0
 
-        async def complete(self, *, model, messages, system, tools, max_tokens, temperature):
+        async def complete(self, *, model, messages, system, tools, max_tokens, temperature, runtime_extras=None):
             # Snapshot the message list as it appears at the wire boundary
             # — this is what the test inspects to confirm the nudge landed.
             self.calls.append(list(messages))
@@ -293,7 +293,7 @@ def test_agent_loop_no_nudge_on_first_iteration(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(loop_mod, "registry", ToolRegistry(), raising=True)
 
     class _End(BaseProvider):
-        async def complete(self, *, model, messages, system, tools, max_tokens, temperature):
+        async def complete(self, *, model, messages, system, tools, max_tokens, temperature, runtime_extras=None):
             return ProviderResponse(
                 message=Message(role="assistant", content="done"),
                 stop_reason="end_turn",
