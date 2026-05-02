@@ -21,8 +21,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-PipelineStepKind = Literal["fetch", "take", "map", "filter", "format", "eval"]
-KNOWN_KINDS: set[str] = {"fetch", "take", "map", "filter", "format", "eval"}
+PipelineStepKind = Literal[
+    "fetch", "take", "map", "filter", "format", "eval", "select"
+]
+KNOWN_KINDS: set[str] = {
+    "fetch", "take", "map", "filter", "format", "eval", "select",
+}
 
 
 class Command(BaseModel):

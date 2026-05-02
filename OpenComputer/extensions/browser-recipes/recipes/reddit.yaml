@@ -1,0 +1,27 @@
+name: reddit
+description: "Reddit public JSON endpoints (no login required for public subreddits)"
+commands:
+  hot:
+    description: "Hot posts in a subreddit"
+    pipeline:
+      - fetch: "https://www.reddit.com/r/{{ subreddit | default('programming') }}/hot.json?limit={{ limit | default(10) }}"
+      - select: "data.children[*].data"
+      - format:
+          fields: [title, url, score, num_comments, author, subreddit]
+    formats: [json, table, md]
+  new:
+    description: "Newest posts in a subreddit"
+    pipeline:
+      - fetch: "https://www.reddit.com/r/{{ subreddit | default('programming') }}/new.json?limit={{ limit | default(10) }}"
+      - select: "data.children[*].data"
+      - format:
+          fields: [title, url, score, num_comments, author]
+    formats: [json, table, md]
+  top:
+    description: "Top posts in a subreddit (today)"
+    pipeline:
+      - fetch: "https://www.reddit.com/r/{{ subreddit | default('programming') }}/top.json?t=day&limit={{ limit | default(10) }}"
+      - select: "data.children[*].data"
+      - format:
+          fields: [title, url, score, num_comments, author]
+    formats: [json, table, md]
