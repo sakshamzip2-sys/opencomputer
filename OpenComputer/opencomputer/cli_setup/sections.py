@@ -54,9 +54,6 @@ def _build_registry() -> list[WizardSection]:
     """Single source of truth for section order. Imports happen here
     (not at module top) so deferred-section subprojects can register
     without circular imports."""
-    from opencomputer.cli_setup.section_handlers._deferred import (
-        make_deferred_handler,
-    )
     from opencomputer.cli_setup.section_handlers.agent_settings import (
         is_agent_settings_configured,
         run_agent_settings_section,
@@ -74,6 +71,9 @@ def _build_registry() -> list[WizardSection]:
     )
     from opencomputer.cli_setup.section_handlers.prior_install import (
         run_prior_install_section,
+    )
+    from opencomputer.cli_setup.section_handlers.terminal_backend import (
+        run_terminal_backend_section,
     )
     from opencomputer.cli_setup.section_handlers.tools import (
         run_tools_section,
@@ -132,8 +132,11 @@ def _build_registry() -> list[WizardSection]:
         ),
         WizardSection(
             key="terminal_backend", icon="◆", title="Terminal backend",
-            description="Sandboxed shell: Apptainer / Docker / native.",
-            handler=make_deferred_handler("S3"), deferred=True, target_subproject="S3",
+            description=(
+                "Sandbox for shell tools: Apptainer / Docker / native. "
+                "Auto-detects available backends."
+            ),
+            handler=run_terminal_backend_section,
         ),
         WizardSection(
             key="tools", icon="◆", title="Tools",
