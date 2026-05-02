@@ -2807,6 +2807,20 @@ class AgentLoop:
         # (and 3rd-party plugins) that don't accept the kwarg still work.
         from opencomputer.agent.runtime_flags import runtime_flags_from_custom
         _runtime_extras = runtime_flags_from_custom(self._runtime.custom)
+        # Subsystem B (2026-05-02) — apply per-context effort policy
+        # when the user hasn't set ``reasoning_effort`` via ``/reasoning``.
+        # Subagents → low, voice mode → low, Sonnet 4.6 → medium,
+        # Opus 4.7 → xhigh. User-set values always win (we only fill in
+        # when None). Provider-agnostic: works for any provider whose
+        # ``*_kwargs_from_runtime`` accepts ``reasoning_effort``.
+        if _runtime_extras.get("reasoning_effort") is None:
+            from opencomputer.agent.effort_policy import recommended_effort
+            _policy_default = recommended_effort(
+                runtime=self._runtime,
+                model=model_name,
+            )
+            if _policy_default is not None:
+                _runtime_extras["reasoning_effort"] = _policy_default
         # Only pass ``runtime_extras=`` when at least one flag is non-None
         # so stub providers in tests (and 3rd-party plugins that haven't
         # adopted the kwarg) keep working.

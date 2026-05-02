@@ -241,7 +241,8 @@ class _EndTurnProvider(BaseProvider):
         self.captured_tools: list[ToolSchema] | None = None
 
     async def complete(
-        self, *, model, messages, system, tools, max_tokens, temperature
+        self, *, model, messages, system, tools, max_tokens, temperature,
+        runtime_extras=None,
     ) -> ProviderResponse:
         self.captured_tools = list(tools)
         return ProviderResponse(
