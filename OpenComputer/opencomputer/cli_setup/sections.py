@@ -78,6 +78,9 @@ def _build_registry() -> list[WizardSection]:
     from opencomputer.cli_setup.section_handlers.tools import (
         run_tools_section,
     )
+    from opencomputer.cli_setup.section_handlers.tts_provider import (
+        run_tts_provider_section,
+    )
 
     return [
         WizardSection(
@@ -121,8 +124,11 @@ def _build_registry() -> list[WizardSection]:
         ),
         WizardSection(
             key="tts_provider", icon="◆", title="TTS provider",
-            description="Voice output: NeutTTS / KittenTTS / eSpeak-NG / ElevenLabs / OpenAI TTS.",
-            handler=make_deferred_handler("S2"), deferred=True, target_subproject="S2",
+            description=(
+                "Voice output. Default: openai-tts. Offline engines "
+                "(NeutTTS, KittenTTS, eSpeak-NG) configurable later."
+            ),
+            handler=run_tts_provider_section,
         ),
         WizardSection(
             key="terminal_backend", icon="◆", title="Terminal backend",
