@@ -31,18 +31,128 @@ from plugin_sdk.provider_contract import BaseProvider
 logger = logging.getLogger("opencomputer.agent.compaction")
 
 
-#: Sensible per-model-family context windows. Compaction fires at 80% of these.
-#: Keep conservative — better to compact early than hit a real-limit error.
+#: Per-model context windows. Compaction fires at ``threshold_ratio`` (80%)
+#: of the listed window, so a value here is treated as the model's true
+#: maximum input capacity.
+#:
+#: Asymmetric cost note: an UNDERSTATED window costs us a wasted aux-LLM
+#: summarisation call (compact too early); an OVERSTATED window costs us
+#: a failed conversation (compact too late, API rejects). When uncertain,
+#: prefer smaller-than-reality.
+#:
+#: Sources for each value: official provider documentation as of 2026-05-02.
 DEFAULT_CONTEXT_WINDOWS: dict[str, int] = {
-    # Anthropic Claude 4.x models with extended context
+    # ─── Anthropic ─────────────────────────────────────────────────
+    # 200k window across the Claude 3 / 4 / 5 line. Mythos preview
+    # supports a 1M beta; we use the conservative 200k for it too —
+    # callers needing the extended window can override via
+    # CompactionConfig.
     "claude-opus-4-7": 200_000,
+    "claude-opus-4-6": 200_000,
+    "claude-opus-4-5": 200_000,
+    "claude-opus-4-1": 200_000,
+    "claude-opus-4": 200_000,
     "claude-sonnet-4-6": 200_000,
+    "claude-sonnet-4-5": 200_000,
+    "claude-sonnet-4": 200_000,
     "claude-haiku-4-5": 200_000,
-    # OpenAI GPT 5.x
+    "claude-3-5-sonnet-latest": 200_000,
+    "claude-3-5-sonnet-20241022": 200_000,
+    "claude-3-5-haiku-latest": 200_000,
+    "claude-3-5-haiku-20241022": 200_000,
+    "claude-3-opus-20240229": 200_000,
+    "claude-mythos-preview": 200_000,
+    # ─── OpenAI Chat Completions ───────────────────────────────────
+    # GPT-5.x series — 400k.
     "gpt-5.4": 400_000,
-    # Fallback
-    "_default": 200_000,
+    "gpt-5": 400_000,
+    # GPT-4o family — 128k.
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+    "gpt-4o-2024-08-06": 128_000,
+    "gpt-4-turbo": 128_000,
+    "gpt-4-turbo-2024-04-09": 128_000,
+    "gpt-4": 8_192,
+    # GPT-3.5 — 16k (older variants 4k, but 16k is the latest).
+    "gpt-3.5-turbo": 16_385,
+    # OpenAI o-series reasoning — 200k.
+    "o1": 200_000,
+    "o1-preview": 128_000,
+    "o1-mini": 128_000,
+    "o3": 200_000,
+    "o3-mini": 200_000,
+    # ─── Google Gemini ─────────────────────────────────────────────
+    # Gemini 2.0 Pro — 2M.
+    "gemini-2.0-pro": 2_000_000,
+    "gemini-2.0-pro-exp": 2_000_000,
+    # Gemini 2.0 Flash — 1M.
+    "gemini-2.0-flash": 1_000_000,
+    "gemini-2.0-flash-exp": 1_000_000,
+    "gemini-2.0-flash-thinking-exp": 1_000_000,
+    # Gemini 1.5 — 1M (Pro), 1M (Flash).
+    "gemini-1.5-pro": 1_000_000,
+    "gemini-1.5-pro-latest": 1_000_000,
+    "gemini-1.5-flash": 1_000_000,
+    "gemini-1.5-flash-latest": 1_000_000,
+    # ─── DeepSeek ─────────────────────────────────────────────────
+    # 64k input window across DeepSeek Chat + Reasoner (R1).
+    "deepseek-chat": 64_000,
+    "deepseek-reasoner": 64_000,
+    "deepseek-v3": 64_000,
+    "deepseek-r1": 64_000,
+    # ─── xAI Grok ─────────────────────────────────────────────────
+    "grok-2": 131_072,
+    "grok-2-mini": 131_072,
+    "grok-beta": 131_072,
+    # ─── Mistral ──────────────────────────────────────────────────
+    "mistral-large-latest": 128_000,
+    "mistral-medium": 32_000,
+    "mistral-small": 32_000,
+    # ─── Meta Llama (via Together / Groq / Ollama) ────────────────
+    # Llama 3.1+ supports 128k; older 3.0 was 8k.
+    "llama-3.1-405b": 128_000,
+    "llama-3.1-70b": 128_000,
+    "llama-3.1-8b": 128_000,
+    "llama-3.2-90b": 128_000,
+    "llama-3.2-3b": 128_000,
+    "llama-3.3-70b": 128_000,
+    # ─── Fallback ─────────────────────────────────────────────────
+    # Conservative — most modern models clear 64k. If we don't know,
+    # claim less than reality so compaction fires too early instead of
+    # too late. A wasted aux-LLM call is cheaper than a failed turn.
+    "_default": 64_000,
 }
+
+
+# Family-prefix rules: when we don't have an exact match, fall through
+# to a family rule that's specific enough to be safe. Order matters —
+# longer prefixes go first so ``claude-3-5-sonnet-`` wins over
+# ``claude-3-`` for an unlisted variant.
+_FAMILY_PREFIXES: tuple[tuple[str, int], ...] = (
+    ("claude-opus-4", 200_000),
+    ("claude-sonnet-4", 200_000),
+    ("claude-haiku-4", 200_000),
+    ("claude-3-5-sonnet", 200_000),
+    ("claude-3-5-haiku", 200_000),
+    ("claude-3-opus", 200_000),
+    ("claude-3-sonnet", 200_000),
+    ("claude-3-haiku", 200_000),
+    ("gpt-4o", 128_000),
+    ("gpt-4-turbo", 128_000),
+    ("gpt-3.5", 16_385),
+    ("gemini-2.0-pro", 2_000_000),
+    ("gemini-2.0-flash", 1_000_000),
+    ("gemini-1.5-pro", 1_000_000),
+    ("gemini-1.5-flash", 1_000_000),
+    ("deepseek-", 64_000),
+    ("o1-", 128_000),
+    ("o3-", 200_000),
+    ("llama-3.1", 128_000),
+    ("llama-3.2", 128_000),
+    ("llama-3.3", 128_000),
+    ("grok-", 131_072),
+    ("mistral-large", 128_000),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,13 +174,28 @@ class CompactionResult:
 
 
 def context_window_for(model: str) -> int:
-    """Look up the context window for a model. Falls back to default."""
+    """Look up the context window for a model.
+
+    Resolution order:
+      1. Exact match in :data:`DEFAULT_CONTEXT_WINDOWS`.
+      2. Most-specific family-prefix rule from
+         :data:`_FAMILY_PREFIXES`.
+      3. Conservative default (``_default`` entry; 64k today).
+
+    The previous implementation used ``model.startswith(key.split("-")[0])``
+    which produced silent false positives — e.g. ``gpt-4o`` matched
+    ``gpt-5.4``'s entry and inherited a 400k window despite its real
+    128k limit. Removed entirely; this function now never widens a
+    model's window beyond what we have evidence for.
+    """
     if model in DEFAULT_CONTEXT_WINDOWS:
         return DEFAULT_CONTEXT_WINDOWS[model]
-    # Fuzzy family match
-    for key, v in DEFAULT_CONTEXT_WINDOWS.items():
-        if key != "_default" and model.startswith(key.split("-")[0]):
-            return v
+    # Family prefixes — first match wins. ``_FAMILY_PREFIXES`` is
+    # ordered most-specific first so ``claude-3-5-sonnet-...`` wins
+    # over a hypothetical broader rule.
+    for prefix, window in _FAMILY_PREFIXES:
+        if model.startswith(prefix):
+            return window
     return DEFAULT_CONTEXT_WINDOWS["_default"]
 
 
