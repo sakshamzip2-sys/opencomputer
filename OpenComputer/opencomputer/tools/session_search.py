@@ -27,7 +27,10 @@ class SessionSearchTool(BaseTool):
     parallel_safe = True
 
     def __init__(self, db: Any = None) -> None:
-        self._db = db if db is not None else _resolve_default_db()
+        self._db_override = db
+
+    def _resolve_db(self) -> Any:
+        return self._db_override if self._db_override is not None else _resolve_default_db()
 
     @property
     def schema(self) -> ToolSchema:
@@ -40,8 +43,21 @@ class SessionSearchTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "FTS5 query string. Supports phrase quoting (\"exact match\") "
+                            "and AND/OR/NOT operators. Searches message body content."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": (
+                            f"Max hits to return (default {_DEFAULT_LIMIT}). Clamped to 1-50."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -65,7 +81,7 @@ class SessionSearchTool(BaseTool):
         limit = max(1, min(50, limit))
 
         try:
-            hits = self._db.search_messages(query, limit=limit)
+            hits = self._resolve_db().search_messages(query, limit=limit)
         except Exception as e:  # noqa: BLE001
             return ToolResult(
                 tool_call_id=call.id,
@@ -78,11 +94,12 @@ class SessionSearchTool(BaseTool):
 
         lines = [f"Found {len(hits)} match(es) for '{query}':", ""]
         for h in hits:
-            sid = (h.get("session_id") or "")[:8]
+            raw_sid = h.get("session_id") or ""
+            sid = raw_sid[:8] + ("…" if len(raw_sid) > 8 else "")
             role = h.get("role") or "?"
             body = h.get("content") or h.get("body") or h.get("snippet") or ""
             preview = body[:_BODY_PREVIEW] + ("…" if len(body) > _BODY_PREVIEW else "")
-            lines.append(f"[{sid}…] {role}: {preview}")
+            lines.append(f"[{sid}] {role}: {preview}")
         return ToolResult(tool_call_id=call.id, content="\n".join(lines))
 
 
