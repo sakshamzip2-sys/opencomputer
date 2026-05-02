@@ -1,0 +1,23 @@
+{
+  "id": "dashscope-provider",
+  "name": "Alibaba DashScope",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Alibaba Cloud / DashScope (Qwen + multi-provider) — OpenAI-compatible direct API.",
+  "model_support": {
+    "model_prefixes": ["qwen-", "qwen2-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "dashscope",
+        "auth_methods": ["api_key"],
+        "env_vars": ["DASHSCOPE_API_KEY"],
+        "label": "Alibaba Cloud / DashScope (Qwen + multi-provider)",
+        "default_model": "qwen-max",
+        "signup_url": "https://dashscope.aliyun.com/apiKey"
+      }
+    ]
+  }
+}
