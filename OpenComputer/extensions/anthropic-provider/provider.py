@@ -296,6 +296,26 @@ class AnthropicProvider(BaseProvider):
                 continue
             if m.role == "assistant" and m.tool_calls:
                 content: list[dict[str, Any]] = []
+                # If the message carries verbatim reasoning blocks (Anthropic
+                # extended thinking with signatures), they MUST be emitted
+                # before the tool_use block. The API verifies signatures
+                # during the tool-use cycle; missing or out-of-order
+                # thinking blocks break reasoning continuity.
+                replay = m.reasoning_replay_blocks
+                if replay:
+                    for blk in replay:
+                        # Defensive: only forward thinking blocks we know
+                        # how to send. Other shapes (future provider
+                        # extensions) are skipped here, not dropped from
+                        # the canonical Message.
+                        if isinstance(blk, dict) and blk.get("type") == "thinking":
+                            content.append(
+                                {
+                                    "type": "thinking",
+                                    "thinking": blk.get("thinking", ""),
+                                    "signature": blk.get("signature", ""),
+                                }
+                            )
                 if m.content:
                     content.append({"type": "text", "text": m.content})
                 for tc in m.tool_calls:
