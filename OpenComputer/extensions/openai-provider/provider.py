@@ -754,5 +754,197 @@ class OpenAIProvider(BaseProvider):
                 total += len(enc.encode(_json.dumps(t.to_openai_format())))
         return max(1, total)
 
+    async def submit_batch(self, requests):
+        """Submit a batch via OpenAI's async-file-based batch API.
+
+        Subsystem E follow-up (2026-05-02). Different shape from
+        Anthropic — OpenAI requires:
+        1. Upload a JSONL file (one request per line) via files.create
+        2. Create a batch referencing the file id via batches.create
+
+        Polling + result download happen in :meth:`get_batch_results`.
+
+        Composes with Subsystems B (effort via runtime_extras) and C
+        (response_schema). Each per-request entry carries its own
+        kwargs, mirroring the live-call translator.
+        """
+        import io
+        import json as _json
+
+        from plugin_sdk.provider_contract import BatchRequest as _Br
+
+        # Build the JSONL body in memory.
+        lines: list[str] = []
+        for req in requests:
+            assert isinstance(req, _Br)
+            body: dict[str, Any] = {
+                "model": req.model,
+                "messages": self._to_openai_messages(req.messages, req.system),
+                "max_tokens": req.max_tokens,
+                "temperature": 1.0,
+            }
+            if req.runtime_extras:
+                from opencomputer.agent.runtime_flags import (
+                    openai_kwargs_from_runtime,
+                )
+                body.update(
+                    openai_kwargs_from_runtime(
+                        reasoning_effort=req.runtime_extras.get("reasoning_effort"),
+                        service_tier=req.runtime_extras.get("service_tier"),
+                    )
+                )
+            if req.response_schema is not None:
+                body["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": req.response_schema.get("name", "response"),
+                        "schema": req.response_schema["schema"],
+                        "strict": True,
+                    },
+                }
+            lines.append(
+                _json.dumps(
+                    {
+                        "custom_id": req.custom_id,
+                        "method": "POST",
+                        "url": "/v1/chat/completions",
+                        "body": body,
+                    }
+                )
+            )
+        jsonl_bytes = ("\n".join(lines) + "\n").encode("utf-8")
+
+        # Upload the JSONL as a "batch" file.
+        uploaded = await self.client.files.create(
+            file=("batch.jsonl", io.BytesIO(jsonl_bytes)),
+            purpose="batch",
+        )
+        # Create the batch referencing the uploaded file.
+        batch = await self.client.batches.create(
+            input_file_id=uploaded.id,
+            endpoint="/v1/chat/completions",
+            completion_window="24h",
+        )
+        return batch.id
+
+    async def get_batch_results(self, batch_id: str):
+        """Fetch results for an OpenAI batch.
+
+        Returns one ``BatchResult`` per entry once the batch is
+        complete. While the batch is still in_progress / validating /
+        finalizing, returns a single placeholder
+        ``BatchResult(status="processing")`` — caller polls again
+        later.
+        """
+        import json as _json
+
+        from plugin_sdk.core import Message as _Msg
+        from plugin_sdk.provider_contract import (
+            BatchResult as _BResult,
+        )
+        from plugin_sdk.provider_contract import (
+            ProviderResponse as _PResp,
+        )
+        from plugin_sdk.provider_contract import (
+            Usage as _Usage,
+        )
+
+        batch = await self.client.batches.retrieve(batch_id)
+        if batch.status in (
+            "in_progress",
+            "validating",
+            "finalizing",
+            "cancelling",
+        ):
+            return [_BResult(custom_id="__pending__", status="processing")]
+
+        if batch.status == "expired":
+            return [_BResult(custom_id="__pending__", status="expired")]
+        if batch.status == "cancelled":
+            return [_BResult(custom_id="__pending__", status="canceled")]
+        if batch.status == "failed":
+            return [
+                _BResult(
+                    custom_id="__pending__",
+                    status="errored",
+                    error=str(batch.errors)
+                    if getattr(batch, "errors", None)
+                    else "batch failed",
+                )
+            ]
+
+        # status == "completed" — download output_file_id and translate.
+        output_file_id = getattr(batch, "output_file_id", None)
+        if not output_file_id:
+            return [
+                _BResult(
+                    custom_id="__pending__",
+                    status="errored",
+                    error="batch completed but output_file_id missing",
+                )
+            ]
+
+        content_response = await self.client.files.content(output_file_id)
+        # OpenAI SDK returns a streamable / readable; .text reads it all.
+        try:
+            raw = content_response.text
+        except AttributeError:
+            raw = await content_response.aread()
+            raw = raw.decode("utf-8")
+
+        out: list = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            custom_id = entry.get("custom_id", "")
+            response_payload = entry.get("response", {}) or {}
+            error_payload = entry.get("error")
+
+            if error_payload:
+                out.append(
+                    _BResult(
+                        custom_id=custom_id,
+                        status="errored",
+                        error=str(error_payload),
+                    )
+                )
+                continue
+
+            body = response_payload.get("body", {}) or {}
+            choices = body.get("choices") or []
+            if not choices:
+                out.append(
+                    _BResult(
+                        custom_id=custom_id,
+                        status="errored",
+                        error="no choices in response",
+                    )
+                )
+                continue
+
+            content = choices[0].get("message", {}).get("content", "")
+            usage_data = body.get("usage", {}) or {}
+            response = _PResp(
+                message=_Msg(role="assistant", content=content or ""),
+                stop_reason=choices[0].get("finish_reason", "end_turn"),
+                usage=_Usage(
+                    input_tokens=int(usage_data.get("prompt_tokens", 0)),
+                    output_tokens=int(usage_data.get("completion_tokens", 0)),
+                ),
+            )
+            out.append(
+                _BResult(
+                    custom_id=custom_id,
+                    status="succeeded",
+                    response=response,
+                )
+            )
+        return out
+
 
 __all__ = ["OpenAIProvider"]
