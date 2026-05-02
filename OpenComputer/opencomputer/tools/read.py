@@ -12,6 +12,8 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 class ReadTool(BaseTool):
     parallel_safe = True
+    # Item 3 (2026-05-02): Read accepts only file_path/offset/limit; closed.
+    strict_mode = True
 
     @property
     def schema(self) -> ToolSchema:
@@ -28,6 +30,7 @@ class ReadTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "file_path": {
                         "type": "string",

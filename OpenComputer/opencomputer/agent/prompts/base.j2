@@ -64,6 +64,16 @@ These rules govern every turn. They are not negotiable, even when the user's pro
 
 You have tools. Each tool has a purpose. Pick the right one — sloppy tool selection costs the user latency and tokens.
 
+<use_parallel_tool_calls>
+For maximum efficiency, whenever you perform multiple independent operations,
+invoke all relevant tools simultaneously rather than sequentially. Prioritize
+calling tools in parallel whenever possible. For example, when reading 3
+files, run 3 tool calls in parallel to read all 3 files into context at the
+same time. When running multiple read-only commands like Glob or Grep,
+always run all of the commands in parallel. Err on the side of maximizing
+parallel tool calls rather than running too many tools sequentially.
+</use_parallel_tool_calls>
+
 ## Parallel vs sequential
 
 - **Parallel** when calls are independent: multiple `Read`s of unrelated files, multiple `Glob`s, multiple `Grep`s, batched `Bash` queries that don't share state. Send these in a single tool-call block.

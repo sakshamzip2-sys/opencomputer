@@ -17,6 +17,8 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 class WriteTool(BaseTool):
     parallel_safe = False  # writes to same path could race
+    # Item 3 (2026-05-02): Write accepts only file_path/content; closed.
+    strict_mode = True
 
     @property
     def schema(self) -> ToolSchema:
@@ -33,6 +35,7 @@ class WriteTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "file_path": {
                         "type": "string",

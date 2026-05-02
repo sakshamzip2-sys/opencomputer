@@ -73,6 +73,8 @@ async def _call_one_model(
 
 class MixtureOfAgentsTool(BaseTool):
     parallel_safe = True  # API calls are independent
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
 
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key
@@ -94,6 +96,7 @@ class MixtureOfAgentsTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "prompt": {
                         "type": "string",

@@ -59,6 +59,10 @@ class RecallTool(BaseTool):
 
     parallel_safe = True
 
+    # Item 3 (2026-05-02): schema enumerated; closed.
+
+    strict_mode = True
+
     def __init__(
         self,
         db: SessionDB | None = None,
@@ -83,7 +87,21 @@ class RecallTool(BaseTool):
         return ToolSchema(
             name="Recall",
             description=(
-                "Query and write into the agent's long-term memory. Three actions:\n"
+                "Search and write into the agent's long-term memory across all past sessions.\n"
+                "\n"
+                "Use this when:\n"
+                "  - The user asks 'what did I say about X' (semantic / FTS search)\n"
+                "  - You want to find related past turns by topic, not exact text\n"
+                "  - You're recording a fact worth carrying across all future sessions\n"
+                "  - You need the FULL transcript of a known prior session by id\n"
+                "\n"
+                "Do NOT use this for:\n"
+                "  - Reading the current session's own messages — already in context\n"
+                "  - Listing sessions by recency — use SessionsList (faster, no FTS)\n"
+                "  - Reading a known recent session — use SessionsHistory (faster)\n"
+                "  - Direct CRUD on MEMORY.md — use Memory (faster, no embedding cost)\n"
+                "\n"
+                "Three actions:\n"
                 "- search: find past turns/messages by text. Returns a mix of episodic "
                 "summaries and raw message hits across all prior sessions.\n"
                 "- note: append a fact / decision / preference to MEMORY.md so it "
@@ -95,6 +113,7 @@ class RecallTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "action": {
                         "type": "string",

@@ -22,6 +22,8 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 class PushNotificationTool(BaseTool):
     parallel_safe = True
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
 
     def __init__(self, dispatch: Dispatch | None = None) -> None:
         # `dispatch` is the live gateway dispatcher — supplied by the gateway
@@ -42,6 +44,7 @@ class PushNotificationTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "text": {
                         "type": "string",

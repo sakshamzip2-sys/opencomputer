@@ -10,6 +10,8 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 class GlobTool(BaseTool):
     parallel_safe = True
+    # Item 3 (2026-05-02): Glob accepts only pattern/path/max_results; closed.
+    strict_mode = True
 
     @property
     def schema(self) -> ToolSchema:
@@ -27,6 +29,7 @@ class GlobTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "pattern": {
                         "type": "string",

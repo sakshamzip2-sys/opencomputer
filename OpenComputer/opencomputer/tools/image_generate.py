@@ -69,6 +69,8 @@ def _format_response(data: dict) -> str:
 
 class ImageGenerateTool(BaseTool):
     parallel_safe = True
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
 
     def __init__(
         self, api_key: str | None = None, default_model: str | None = None
@@ -93,6 +95,7 @@ class ImageGenerateTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "prompt": {
                         "type": "string",

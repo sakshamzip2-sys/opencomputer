@@ -136,6 +136,8 @@ def _validate_frontmatter(body: str) -> str | None:
 
 class SkillManageTool(BaseTool):
     parallel_safe = False  # writes to disk
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
 
     @property
     def schema(self) -> ToolSchema:
@@ -157,6 +159,7 @@ class SkillManageTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "action": {
                         "type": "string",

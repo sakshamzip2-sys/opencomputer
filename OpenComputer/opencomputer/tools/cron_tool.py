@@ -55,6 +55,10 @@ class CronTool(BaseTool):
     """
 
     parallel_safe = False
+
+    # Item 3 (2026-05-02): schema enumerated; closed.
+
+    strict_mode = True
     """Cron writes shared state (jobs.json); serialize tool calls."""
 
     capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
@@ -105,6 +109,7 @@ class CronTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "action": {
                         "type": "string",

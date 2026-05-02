@@ -24,6 +24,8 @@ _TIMEOUT_SECONDS = 30
 
 
 class PowerShellRunTool(BaseTool):
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
     """Run a PowerShell script via ``pwsh`` (preferred) or ``powershell.exe``."""
 
     # parallel_safe = False mirrors AppleScriptRun: PowerShell can mutate
@@ -54,6 +56,7 @@ class PowerShellRunTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "script": {
                         "type": "string",

@@ -47,6 +47,8 @@ _DENYLIST_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 class AppleScriptRunTool(BaseTool):
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
     """Run an AppleScript snippet via ``osascript``. macOS only."""
 
     parallel_safe: bool = False  # GUI scripting is not parallel-safe
@@ -78,6 +80,7 @@ class AppleScriptRunTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "script": {
                         "type": "string",
@@ -87,14 +90,12 @@ class AppleScriptRunTool(BaseTool):
                     "dry_run": {
                         "type": "boolean",
                         "description": "If true, return the script without running it.",
-                        "default": False,
                     },
                     "timeout_seconds": {
                         "type": "integer",
                         "description": "Wall-clock cap (1-60, default 15).",
                         "minimum": 1,
                         "maximum": 60,
-                        "default": 15,
                     },
                 },
                 "required": ["script"],

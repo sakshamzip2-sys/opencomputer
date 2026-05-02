@@ -11,6 +11,8 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 class BashTool(BaseTool):
     parallel_safe = False  # side effects
+    # Item 3 (2026-05-02): Bash schema enumerates command/timeout_s; closed.
+    strict_mode = True
 
     @property
     def schema(self) -> ToolSchema:
@@ -30,6 +32,7 @@ class BashTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "command": {
                         "type": "string",

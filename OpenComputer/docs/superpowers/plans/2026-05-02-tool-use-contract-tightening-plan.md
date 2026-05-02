@@ -4,9 +4,9 @@
 
 **Goal:** Adopt 5 high-ROI items from the Anthropic tool-use contract (cache_control on tools, pause_turn/refusal handling, strict tool schemas, parallel-call nudge, memory tool routing audit) without disturbing OpenComputer's consent layer or memory architecture.
 
-**Architecture:** Pure additive changes. No new modules. Touches `prompt_caching.py`, `loop.py`, `tool_contract.py`, `provider.py`, `base.j2`, and three tool description bodies. Backwards-compatible by default — existing tests pass without modification except where they assert breakpoint counts (Item 1).
+**Architecture:** Additive changes only. Touches `prompt_caching.py`, `loop.py`, `tool_contract.py`, `provider.py`, `base.j2`, and three tool description bodies. The legacy `apply_anthropic_cache_control` is preserved unchanged for backwards compatibility; a new `apply_full_cache_control` becomes the preferred entry point. `ToolSchema` gains a `strict` field (frozen-dataclass-safe via default).
 
-**Tech Stack:** Python 3.13, Anthropic Python SDK ≥ 0.40 (verified `ToolParam.strict` and `cache_control` fields exist), Jinja2 (system prompt template), pytest.
+**Tech Stack:** Python 3.13, Anthropic Python SDK (verified `ToolParam.strict` and `cache_control` fields exist), Jinja2, pytest.
 
 **Spec:** `docs/superpowers/specs/2026-05-02-tool-use-contract-tightening-design.md`
 
@@ -18,20 +18,21 @@
 
 | File | Change | Item |
 |---|---|---|
-| `opencomputer/agent/prompt_caching.py` | Add `apply_tools_cache_control()`; modify `apply_anthropic_cache_control()` to accept `tools_already_cached` flag (caps msg breakpoints at 3 when True) | 1 |
-| `extensions/anthropic-provider/provider.py` | Call `apply_tools_cache_control()` after building tools list at lines 437 and 528 | 1 |
-| `tests/test_prompt_caching.py` | Update existing test for new allocation; add 3 new tests | 1 |
-| `plugin_sdk/core.py` | Add `StopReason.PAUSE_TURN` and `StopReason.REFUSAL` to enum | 2 |
-| `opencomputer/agent/loop.py` | Extend stop_reason_map; add pause_turn re-send loop with 3-attempt cap; add refusal handling | 2 |
-| `tests/test_pause_refusal_stop_reasons.py` | NEW: 3 tests for pause-then-end, pause-cap-exceeded, refusal | 2 |
-| `plugin_sdk/tool_contract.py` | Add `BaseTool.strict_mode: ClassVar[bool] = True`; modify `ToolSchema.to_anthropic_format()` to accept and emit `strict` | 3 |
-| `opencomputer/tools/registry.py` | Pass tool's `strict_mode` into format call | 3 |
-| `opencomputer/tools/*.py` | Per-tool audit pass for strict-validation compatibility | 3 |
-| `tests/test_tool_strict_mode.py` | NEW: parametrized strict-validation test for all registered tools | 3 |
-| `opencomputer/agent/prompts/base.j2` | Append new `# Tool-call efficiency` section after `# Working rules` | 4 |
-| `opencomputer/tools/memory_tool.py` | Rewrite description with routing matrix | 5 |
-| `opencomputer/tools/recall.py` | Rewrite description with routing matrix | 5 |
-| `opencomputer/tools/sessions.py` | Update SessionsList/History/Status descriptions for routing clarity | 5 |
+| `opencomputer/agent/prompt_caching.py` | Add `apply_full_cache_control()` returning `(messages, tools)`; preserve legacy `apply_anthropic_cache_control()` | 1 |
+| `extensions/anthropic-provider/provider.py` | Switch from `apply_anthropic_cache_control` to `apply_full_cache_control` at the two tools-passing call sites | 1 |
+| `tests/test_prompt_caching.py` | Add 3 tests for the new function; existing tests untouched | 1 |
+| `plugin_sdk/core.py` | Add `StopReason.PAUSE_TURN` and `StopReason.REFUSAL` to enum at line 417 | 2 |
+| `opencomputer/agent/loop.py` | Extend `stop_reason_map` at line 2753; add pause_turn re-send (cap 3) and refusal exit | 2 |
+| `tests/test_pause_refusal_stop_reasons.py` | NEW: 3 tests using the project's standard AgentLoop fixture pattern | 2 |
+| `plugin_sdk/tool_contract.py` | Add `strict: bool = False` field to `ToolSchema` (frozen-safe via default); add `BaseTool.strict_mode` ClassVar; update `to_anthropic_format()` | 3 |
+| `opencomputer/agent/loop.py` | Update tool-schema build site at line 2671 to set `strict` from each tool | 3 |
+| `opencomputer/tools/*.py` | Per-tool audit: add `additionalProperties: False` where strict-compatible; opt-out (`strict_mode = False`) where not | 3 |
+| `tests/test_tool_strict_mode.py` | NEW: parametrized strict-validation test + on-the-wire test | 3 |
+| `opencomputer/agent/prompts/base.j2` | Insert `# Tool-call efficiency` section before `# Tone and style` | 4 |
+| `tests/test_system_prompt_parallel_nudge.py` | NEW: assert nudge is in rendered prompt | 4 |
+| `opencomputer/tools/memory_tool.py` | Rewrite Memory description with routing matrix | 5 |
+| `opencomputer/tools/recall.py` | Rewrite Recall description with routing matrix | 5 |
+| `opencomputer/tools/sessions.py` | Update SessionsList/History/Status descriptions | 5 |
 
 ---
 
@@ -39,77 +40,137 @@
 
 **Files:**
 - Modify: `opencomputer/agent/prompt_caching.py`
-- Modify: `extensions/anthropic-provider/provider.py:437,528`
+- Modify: `extensions/anthropic-provider/provider.py` (the two tools-passing call sites)
 - Test: `tests/test_prompt_caching.py`
 
-**Approach.** Add a new function `apply_tools_cache_control(tools_list)` that marks the last tool with `cache_control: ephemeral`. Modify `apply_anthropic_cache_control()` to accept an optional `tools_already_cached: bool = False` flag — when True, the function reduces its non-system message breakpoints from 3 to 2 so the total stays ≤ 4 (1 tools + 1 system + 2 messages).
+**Approach.** Add ONE new function `apply_full_cache_control(messages, tools)` returning `(messages, tools)` tuple. It encapsulates the full 4-breakpoint allocation: 1 on `tools[-1]` + 1 on system + 2 on last non-system messages (when tools is non-empty), or 1 system + 3 messages (when no tools). Single entry point eliminates the two-call coordination footgun (a misaligned flag could push total to 5 breakpoints → API rejection). Existing `apply_anthropic_cache_control` is preserved unchanged for backwards compatibility.
 
-- [ ] **Step 1.1: Write failing test for `apply_tools_cache_control`**
+- [ ] **Step 1.1: Write failing tests for `apply_full_cache_control`**
 
 Add to `tests/test_prompt_caching.py`:
 
 ```python
-def test_apply_tools_cache_control_marks_last_tool():
-    from opencomputer.agent.prompt_caching import apply_tools_cache_control
+def test_apply_full_cache_control_with_tools_marks_last_tool_and_3_message_breakpoints():
+    """With tools: 1 tools[-1] + 1 system + 2 last non-system msgs = 4 total."""
+    from opencomputer.agent.prompt_caching import apply_full_cache_control
 
     tools = [
         {"name": "Read", "description": "...", "input_schema": {}},
         {"name": "Write", "description": "...", "input_schema": {}},
         {"name": "Bash", "description": "...", "input_schema": {}},
     ]
-    out = apply_tools_cache_control(tools)
-    # Only last tool gets cache_control
-    assert "cache_control" not in out[0]
-    assert "cache_control" not in out[1]
-    assert out[2]["cache_control"] == {"type": "ephemeral"}
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "msg1"},
+        {"role": "assistant", "content": "msg2"},
+        {"role": "user", "content": "msg3"},
+    ]
+    out_msgs, out_tools = apply_full_cache_control(msgs, tools)
+
+    # Tools: only the last one marked
+    assert "cache_control" not in out_tools[0]
+    assert "cache_control" not in out_tools[1]
+    assert out_tools[2]["cache_control"] == {"type": "ephemeral"}
+
+    # Messages: system + last 2 non-system (msg2, msg3)
+    msg_breakpoints = 0
+    for m in out_msgs:
+        c = m.get("content")
+        if isinstance(c, list):
+            msg_breakpoints += sum(1 for blk in c if isinstance(blk, dict) and "cache_control" in blk)
+        if "cache_control" in m:
+            msg_breakpoints += 1
+    assert msg_breakpoints == 3
+
+    # msg1 (oldest non-system) should NOT have cache_control
+    msg1 = out_msgs[1]["content"]
+    if isinstance(msg1, list):
+        for blk in msg1:
+            if isinstance(blk, dict):
+                assert "cache_control" not in blk
+
+    # Grand total ≤ 4 (Anthropic max)
+    tools_breakpoints = sum(1 for t in out_tools if "cache_control" in t)
+    assert msg_breakpoints + tools_breakpoints == 4
 
 
-def test_apply_tools_cache_control_empty_list():
-    from opencomputer.agent.prompt_caching import apply_tools_cache_control
-    assert apply_tools_cache_control([]) == []
+def test_apply_full_cache_control_no_tools_uses_4_message_breakpoints():
+    """Empty/None tools → all 4 breakpoints on messages (system + last 3)."""
+    from opencomputer.agent.prompt_caching import apply_full_cache_control
+
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "m1"},
+        {"role": "assistant", "content": "m2"},
+        {"role": "user", "content": "m3"},
+        {"role": "assistant", "content": "m4"},
+    ]
+    out_msgs, out_tools = apply_full_cache_control(msgs, [])
+    breakpoints = 0
+    for m in out_msgs:
+        c = m.get("content")
+        if isinstance(c, list):
+            breakpoints += sum(1 for blk in c if isinstance(blk, dict) and "cache_control" in blk)
+        if "cache_control" in m:
+            breakpoints += 1
+    assert breakpoints == 4
+    assert out_tools == []
 
 
-def test_apply_tools_cache_control_does_not_mutate_input():
-    from opencomputer.agent.prompt_caching import apply_tools_cache_control
+def test_apply_full_cache_control_does_not_mutate_inputs():
+    from opencomputer.agent.prompt_caching import apply_full_cache_control
+
     tools = [{"name": "Read"}]
-    apply_tools_cache_control(tools)
+    msgs = [{"role": "system", "content": "sys"}]
+    apply_full_cache_control(msgs, tools)
     assert "cache_control" not in tools[0]
+    assert msgs[0]["content"] == "sys"
+
+
+def test_apply_full_cache_control_handles_none_tools():
+    from opencomputer.agent.prompt_caching import apply_full_cache_control
+
+    msgs = [{"role": "system", "content": "sys"}]
+    out_msgs, out_tools = apply_full_cache_control(msgs, None)
+    # Should behave identically to passing []
+    assert out_tools == []
+    sys_content = out_msgs[0]["content"]
+    if isinstance(sys_content, list):
+        assert any("cache_control" in blk for blk in sys_content if isinstance(blk, dict))
 ```
 
-- [ ] **Step 1.2: Run test to verify failure**
+- [ ] **Step 1.2: Run tests to verify failure**
 
 ```bash
 cd /Users/saksham/Vscode/claude/OpenComputer
-.venv/bin/pytest tests/test_prompt_caching.py::test_apply_tools_cache_control_marks_last_tool -v
+.venv/bin/pytest tests/test_prompt_caching.py::test_apply_full_cache_control_with_tools_marks_last_tool_and_3_message_breakpoints -v
 ```
 
-Expected: `ImportError: cannot import name 'apply_tools_cache_control'`
+Expected: `ImportError: cannot import name 'apply_full_cache_control'`
 
-- [ ] **Step 1.3: Add `apply_tools_cache_control` and modify `apply_anthropic_cache_control`**
+- [ ] **Step 1.3: Add `apply_full_cache_control` (preserve existing function)**
 
-Replace contents of `opencomputer/agent/prompt_caching.py` with:
+In `opencomputer/agent/prompt_caching.py`, KEEP the existing `apply_anthropic_cache_control` and `_apply_cache_marker`. ADD `apply_full_cache_control` and one tiny helper. Final file (replace whole file):
 
 ```python
-"""Anthropic prompt caching (system_and_3 / system_and_tools_and_2 strategy).
+"""Anthropic prompt caching.
 
 Reduces input token costs by caching the conversation prefix using up to 4
 ``cache_control`` breakpoints (Anthropic max).
 
-Two allocation strategies:
-  - Without tools cache (default, backwards-compatible):
-      1. System prompt
-      2-4. Last 3 non-system messages (rolling window)
-  - With tools cache (``tools_already_cached=True``):
-      1. Last entry of the tools array (handled by ``apply_tools_cache_control``)
-      2. System prompt
-      3-4. Last 2 non-system messages (rolling window)
+Two entry points:
 
-Why move tools above last-message: tool definitions are large (~8-30k tokens
-for ~40 registered tools) and change rarely, so they have the highest cache
-hit rate. The deepest of the 3 message breakpoints has the lowest hit rate
-(every turn changes the tail), so dropping it is the cheapest reallocation.
+- ``apply_anthropic_cache_control(messages)``: legacy. Caches system +
+  last 3 non-system messages. Used by callers that don't send tools.
 
-Pure functions -- no class state, no AIAgent dependency.
+- ``apply_full_cache_control(messages, tools)``: preferred. Returns
+  ``(messages, tools)`` with breakpoints allocated as
+  ``tools[-1] + system + last 2 non-system messages`` (4 total). Tool
+  definitions (~8-30k tokens for ~40 tools) change rarely → highest
+  cache hit rate. The deepest message breakpoint has the lowest hit
+  rate (every turn changes the tail), so dropping it costs least.
+
+Pure functions — no class state, no AIAgent dependency.
 """
 
 import copy
@@ -149,43 +210,27 @@ def _apply_cache_marker(msg: dict, cache_marker: dict, native_anthropic: bool = 
             last["cache_control"] = cache_marker
 
 
-def apply_tools_cache_control(
-    tools_list: list[dict[str, Any]],
-    cache_ttl: str = "5m",
-) -> list[dict[str, Any]]:
-    """Mark the last tool definition with ``cache_control: ephemeral``.
-
-    Anthropic's prefix-based caching extends the cached span up to and
-    including the breakpoint. Marking the last tool caches the entire
-    tools array (a large, stable prefix) for subsequent requests.
-
-    Returns a deep copy. Empty list is returned unchanged.
-    """
-    if not tools_list:
-        return tools_list
-    out = copy.deepcopy(tools_list)
-    out[-1]["cache_control"] = _build_marker(cache_ttl)
-    return out
+def _cache_tail_messages(
+    messages: list[dict[str, Any]],
+    n_tail: int,
+    marker: dict[str, Any],
+    native_anthropic: bool,
+) -> None:
+    """Mark up to n_tail non-system messages from the end."""
+    non_sys = [i for i in range(len(messages)) if messages[i].get("role") != "system"]
+    for idx in non_sys[-n_tail:]:
+        _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic)
 
 
 def apply_anthropic_cache_control(
     api_messages: list[dict[str, Any]],
     cache_ttl: str = "5m",
     native_anthropic: bool = False,
-    tools_already_cached: bool = False,
 ) -> list[dict[str, Any]]:
-    """Apply the cache_control breakpoint strategy to messages.
+    """Legacy: 4 breakpoints on messages only (system + last 3).
 
-    With ``tools_already_cached=False`` (default, backwards-compat):
-        Up to 4 breakpoints — system + last 3 non-system messages.
-
-    With ``tools_already_cached=True``:
-        Up to 3 breakpoints — system + last 2 non-system messages.
-        The 4th breakpoint is reserved for the tools array, applied
-        separately via ``apply_tools_cache_control``.
-
-    Returns:
-        Deep copy of messages with cache_control breakpoints injected.
+    Preserved for backwards compatibility. Prefer ``apply_full_cache_control``
+    when sending tools.
     """
     messages = copy.deepcopy(api_messages)
     if not messages:
@@ -193,177 +238,136 @@ def apply_anthropic_cache_control(
 
     marker = _build_marker(cache_ttl)
     breakpoints_used = 0
-    total_budget = 3 if tools_already_cached else 4
 
     if messages[0].get("role") == "system":
         _apply_cache_marker(messages[0], marker, native_anthropic=native_anthropic)
         breakpoints_used += 1
 
-    remaining = total_budget - breakpoints_used
-    non_sys = [i for i in range(len(messages)) if messages[i].get("role") != "system"]
-    for idx in non_sys[-remaining:]:
-        _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic)
-
+    _cache_tail_messages(messages, 4 - breakpoints_used, marker, native_anthropic)
     return messages
+
+
+def apply_full_cache_control(
+    api_messages: list[dict[str, Any]],
+    api_tools: list[dict[str, Any]] | None,
+    cache_ttl: str = "5m",
+    native_anthropic: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply 4-breakpoint strategy across messages AND tools array.
+
+    With tools (non-empty):  tools[-1] + system + last 2 non-system msgs (4 total)
+    Without tools:           system + last 3 non-system msgs            (4 total)
+
+    Returns ``(messages, tools)`` — both deep-copied. ``api_tools=None`` is
+    treated as ``[]``. Inputs are not mutated.
+    """
+    messages = copy.deepcopy(api_messages)
+    tools = copy.deepcopy(api_tools) if api_tools else []
+
+    if not messages and not tools:
+        return messages, tools
+
+    marker = _build_marker(cache_ttl)
+
+    # Tools breakpoint (1 of 4)
+    tools_used = 0
+    if tools:
+        tools[-1]["cache_control"] = marker
+        tools_used = 1
+
+    # System breakpoint
+    sys_used = 0
+    if messages and messages[0].get("role") == "system":
+        _apply_cache_marker(messages[0], marker, native_anthropic=native_anthropic)
+        sys_used = 1
+
+    # Tail-messages breakpoints filling remaining budget
+    remaining = 4 - tools_used - sys_used
+    if remaining > 0 and messages:
+        _cache_tail_messages(messages, remaining, marker, native_anthropic)
+
+    return messages, tools
 ```
 
 - [ ] **Step 1.4: Run new tests to verify they pass**
 
 ```bash
-.venv/bin/pytest tests/test_prompt_caching.py::test_apply_tools_cache_control_marks_last_tool tests/test_prompt_caching.py::test_apply_tools_cache_control_empty_list tests/test_prompt_caching.py::test_apply_tools_cache_control_does_not_mutate_input -v
-```
-
-Expected: 3 PASS
-
-- [ ] **Step 1.5: Update existing test for the reduced-budget allocation**
-
-Replace `test_last_3_non_system_get_cache_control` in `tests/test_prompt_caching.py` and add a new test:
-
-```python
-def test_last_3_non_system_get_cache_control_default():
-    """Default allocation (no tools cache): system + last 3 messages."""
-    msgs = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "msg1"},
-        {"role": "assistant", "content": "msg2"},
-        {"role": "user", "content": "msg3"},
-        {"role": "assistant", "content": "msg4"},
-    ]
-    out = apply_anthropic_cache_control(msgs)
-    cache_count = 0
-    for m in out:
-        c = m.get("content")
-        if isinstance(c, list):
-            cache_count += sum(1 for blk in c if isinstance(blk, dict) and "cache_control" in blk)
-        if "cache_control" in m:
-            cache_count += 1
-    assert cache_count == 4
-    # msg1 should NOT have cache_control (only last 3 non-system do)
-    msg1_content = out[1]["content"]
-    if isinstance(msg1_content, list):
-        for blk in msg1_content:
-            if isinstance(blk, dict):
-                assert "cache_control" not in blk
-
-
-def test_last_2_non_system_get_cache_control_when_tools_cached():
-    """With tools_already_cached=True: system + last 2 messages only."""
-    msgs = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "msg1"},
-        {"role": "assistant", "content": "msg2"},
-        {"role": "user", "content": "msg3"},
-        {"role": "assistant", "content": "msg4"},
-    ]
-    out = apply_anthropic_cache_control(msgs, tools_already_cached=True)
-    cache_count = 0
-    for m in out:
-        c = m.get("content")
-        if isinstance(c, list):
-            cache_count += sum(1 for blk in c if isinstance(blk, dict) and "cache_control" in blk)
-        if "cache_control" in m:
-            cache_count += 1
-    # 3 breakpoints: system + msg3 + msg4
-    assert cache_count == 3
-    # msg1 and msg2 should NOT have cache_control
-    for idx in (1, 2):
-        c = out[idx]["content"]
-        if isinstance(c, list):
-            for blk in c:
-                if isinstance(blk, dict):
-                    assert "cache_control" not in blk
-```
-
-Delete the old `test_last_3_non_system_get_cache_control` (replaced above) and update `test_max_4_breakpoints_with_many_messages` body so the assertion stays at 4 (it does — the default behavior unchanged):
-
-```python
-def test_max_4_breakpoints_with_many_messages():
-    """Default budget is 4."""
-    msgs = [{"role": "system", "content": "s"}]
-    msgs += [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"} for i in range(20)]
-    out = apply_anthropic_cache_control(msgs)
-    cache_count = 0
-    for m in out:
-        c = m.get("content")
-        if isinstance(c, list):
-            cache_count += sum(1 for blk in c if isinstance(blk, dict) and "cache_control" in blk)
-        if "cache_control" in m:
-            cache_count += 1
-    assert cache_count == 4
-
-
-def test_max_3_breakpoints_when_tools_cached():
-    """With tools_already_cached, budget caps at 3 message breakpoints."""
-    msgs = [{"role": "system", "content": "s"}]
-    msgs += [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"} for i in range(20)]
-    out = apply_anthropic_cache_control(msgs, tools_already_cached=True)
-    cache_count = 0
-    for m in out:
-        c = m.get("content")
-        if isinstance(c, list):
-            cache_count += sum(1 for blk in c if isinstance(blk, dict) and "cache_control" in blk)
-        if "cache_control" in m:
-            cache_count += 1
-    assert cache_count == 3
-```
-
-- [ ] **Step 1.6: Run all prompt_caching tests**
-
-```bash
 .venv/bin/pytest tests/test_prompt_caching.py -v
 ```
 
-Expected: all PASS (8 tests total — 6 original + 2 new for tools cache + the renamed/added budget tests).
+Expected: all 4 new tests PASS, all 6 existing tests PASS (untouched).
 
-- [ ] **Step 1.7: Wire `apply_tools_cache_control` into the Anthropic provider**
+- [ ] **Step 1.5: Switch the Anthropic provider to `apply_full_cache_control`**
 
-In `extensions/anthropic-provider/provider.py`, find the two call sites that build `kwargs["tools"]` (currently at approx lines 437 and 528 — search for `[t.to_anthropic_format() for t in tools]`).
+In `extensions/anthropic-provider/provider.py`:
 
-For each, immediately after the comprehension, add:
+1. Find every import line for `apply_anthropic_cache_control`. If imported, leave it (some non-tools paths may still use it). Add an import for `apply_full_cache_control`:
 
 ```python
-if kwargs.get("tools"):
-    from opencomputer.agent.prompt_caching import apply_tools_cache_control
-    kwargs["tools"] = apply_tools_cache_control(kwargs["tools"])
+from opencomputer.agent.prompt_caching import (
+    apply_anthropic_cache_control,
+    apply_full_cache_control,
+)
 ```
 
-Then find the call to `apply_anthropic_cache_control` in the same file (search for `apply_anthropic_cache_control(`). Pass `tools_already_cached=True` when tools were cached:
+2. Find the existing call to `apply_anthropic_cache_control` (search for it in the file — it's the only place that mutates messages with cache markers, around line 518). Replace the call with `apply_full_cache_control` and pass tools alongside:
 
+Before:
 ```python
-# Existing call signature stays the same; add the new kwarg conditionally
-tools_were_cached = bool(kwargs.get("tools"))
 api_messages = apply_anthropic_cache_control(
     anthropic_messages,
     cache_ttl=cache_ttl,
     native_anthropic=True,
-    tools_already_cached=tools_were_cached,
 )
 ```
 
-Note: confirm the exact argument name (`api_messages` vs `anthropic_messages`) by reading around line 518 — leave the rest of the call site untouched.
+After:
+```python
+api_tools = [t.to_anthropic_format() for t in (tools or [])]
+api_messages, api_tools = apply_full_cache_control(
+    anthropic_messages,
+    api_tools,
+    cache_ttl=cache_ttl,
+    native_anthropic=True,
+)
+```
 
-- [ ] **Step 1.8: Run anthropic-provider tests + full prompt_caching tests**
+3. Remove or update the older `kwargs["tools"] = [t.to_anthropic_format() for t in tools]` lines at the two old call sites (~437, ~528). They're now built and cached above; assign directly:
+
+```python
+if api_tools:
+    kwargs["tools"] = api_tools
+```
+
+**Important.** Read the full file context before editing to confirm the variable names (`anthropic_messages`, `cache_ttl`, etc.) match exactly. Don't edit blind.
+
+- [ ] **Step 1.6: Run anthropic-provider tests**
 
 ```bash
-.venv/bin/pytest tests/test_prompt_caching.py extensions/anthropic-provider/ tests/ -k "anthropic or cache" -v
+.venv/bin/pytest tests/test_prompt_caching.py extensions/anthropic-provider/ -v 2>&1 | tail -20
+.venv/bin/pytest tests/ -k "anthropic_provider or cache" -v 2>&1 | tail -20
 ```
 
 Expected: all PASS.
 
-- [ ] **Step 1.9: Commit**
+- [ ] **Step 1.7: Commit**
 
 ```bash
 git add opencomputer/agent/prompt_caching.py extensions/anthropic-provider/provider.py tests/test_prompt_caching.py
 git commit -m "$(cat <<'EOF'
 feat(cache): apply cache_control to tools array (Item 1)
 
-Reallocate the 4 ephemeral cache breakpoints from "system + last 3
-messages" to "tools[-1] + system + last 2 messages" when tools are
-sent. Tool definitions (~8-30k tokens for ~40 tools) change rarely
-and now cache, while the lowest-hit message breakpoint is dropped.
+Add apply_full_cache_control(messages, tools) -> (messages, tools)
+returning the 4-breakpoint allocation tools[-1] + system + last 2
+messages (when tools non-empty) or system + last 3 (when empty).
 
-Adds apply_tools_cache_control() and a tools_already_cached flag on
-apply_anthropic_cache_control() (default False = backwards-compat).
+Tool definitions (~8-30k tokens for ~40 tools) now cache; the lowest-
+hit message breakpoint is dropped. Single entry point prevents the
+coordination footgun where mismatched flags hit 5 breakpoints and the
+API rejects.
+
+Legacy apply_anthropic_cache_control preserved unchanged for backwards
+compat; provider switched to apply_full_cache_control.
 
 Spec: docs/superpowers/specs/2026-05-02-tool-use-contract-tightening-design.md
 
@@ -383,126 +387,149 @@ EOF
 
 **Approach.** Add two enum values. Map `pause_turn` to a new `StopReason.PAUSE_TURN`; loop re-issues the provider call with the conversation including the paused assistant response, capped at 3 consecutive pauses. Map `refusal` to `StopReason.REFUSAL`; loop exits without retry, surfacing the assistant text.
 
+The test fixture follows the pattern in `tests/test_loop_emits_bus_events.py` — build a real `AgentLoop` with `Config`, `LoopConfig`, `SessionDB`, `ToolRegistry`, and a `BaseProvider` mock. This is the project's established pattern; do not invent a new fixture.
+
 - [ ] **Step 2.1: Add enum values**
 
-In `plugin_sdk/core.py`, find the `StopReason` class at line 417 and add two members:
+In `plugin_sdk/core.py:417`, replace the `StopReason` class body:
 
 ```python
 class StopReason(str, Enum):
     """Why a conversation step ended."""
 
-    END_TURN = "end_turn"
-    TOOL_USE = "tool_use"
-    MAX_TOKENS = "max_tokens"
-    INTERRUPTED = "interrupted"
-    BUDGET_EXHAUSTED = "budget_exhausted"
-    ERROR = "error"
-    PAUSE_TURN = "pause_turn"  # server-tool work paused; re-send to continue
+    END_TURN = "end_turn"  # model produced final response, no more tool calls
+    TOOL_USE = "tool_use"  # model wants to call tools — loop continues
+    MAX_TOKENS = "max_tokens"  # hit output limit
+    INTERRUPTED = "interrupted"  # user cancelled
+    BUDGET_EXHAUSTED = "budget_exhausted"  # iteration budget spent
+    ERROR = "error"  # unrecoverable error
+    PAUSE_TURN = "pause_turn"  # server-tool work paused; re-send to continue (cap 3)
     REFUSAL = "refusal"  # model refused; surface as final, do not retry
 ```
 
-- [ ] **Step 2.2: Write failing tests**
+- [ ] **Step 2.2: Write failing tests using the project's standard fixture**
 
 Create `tests/test_pause_refusal_stop_reasons.py`:
 
 ```python
-"""Tests for pause_turn and refusal stop_reason handling in the agent loop."""
+"""Tests for pause_turn and refusal stop_reason handling in the agent loop.
+
+Fixture pattern adapted from tests/test_loop_emits_bus_events.py — build a
+real AgentLoop against a mock provider.
+"""
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock
 
-from plugin_sdk.core import Message, StopReason, ProviderResponse, Usage
+from opencomputer.agent.config import Config, LoopConfig
+from opencomputer.agent.loop import AgentLoop
+from opencomputer.agent.state import SessionDB
+from opencomputer.tools.registry import ToolRegistry
+from plugin_sdk.core import Message, StopReason
+from plugin_sdk.provider_contract import BaseProvider, ProviderResponse, Usage
 
 
-def _build_response(stop_reason: str, text: str = "", tool_calls=None):
-    """Helper to build a ProviderResponse with a given stop_reason."""
+class _ScriptedProvider(BaseProvider):
+    """Provider that returns a pre-scripted sequence of responses."""
+
+    def __init__(self, responses: list[ProviderResponse]) -> None:
+        self._responses = list(responses)
+        self.calls = 0
+
+    async def complete(self, **_kwargs: Any) -> ProviderResponse:
+        if not self._responses:
+            raise AssertionError("scripted provider exhausted")
+        self.calls += 1
+        return self._responses.pop(0)
+
+    async def stream_complete(self, **kwargs: Any):
+        # Not used by these tests
+        raise NotImplementedError
+
+
+def _resp(stop_reason: str, text: str = "") -> ProviderResponse:
     return ProviderResponse(
-        message=Message(role="assistant", content=text, tool_calls=tool_calls),
+        message=Message(role="assistant", content=text),
         stop_reason=stop_reason,
         usage=Usage(input_tokens=10, output_tokens=5),
     )
 
 
+def _build_loop(provider: BaseProvider, tmp_path) -> AgentLoop:
+    """Construct a minimal AgentLoop wired to the scripted provider."""
+    config = Config(loop=LoopConfig(max_iterations=10))
+    session_db = SessionDB(db_path=tmp_path / "test.db")
+    registry = ToolRegistry()
+    return AgentLoop(
+        provider=provider,
+        config=config,
+        session_db=session_db,
+        tool_registry=registry,
+    )
+
+
 @pytest.mark.asyncio
-async def test_pause_turn_then_end_turn_continues_loop():
-    """A pause_turn response triggers a re-send; subsequent end_turn exits cleanly."""
-    from opencomputer.agent.loop import AgentLoop
-
-    # Provider returns pause_turn first, then end_turn
-    responses = [
-        _build_response("pause_turn", "(paused mid-search)"),
-        _build_response("end_turn", "Final answer."),
-    ]
-    provider = MagicMock()
-    provider.complete = AsyncMock(side_effect=responses)
-
-    loop = _make_minimal_loop(provider=provider)
+async def test_pause_turn_then_end_turn_continues_loop(tmp_path):
+    """pause_turn → re-send → end_turn yields final answer in 2 calls."""
+    provider = _ScriptedProvider([
+        _resp("pause_turn", "(paused)"),
+        _resp("end_turn", "Final answer."),
+    ])
+    loop = _build_loop(provider, tmp_path)
     result = await loop.run_conversation("test query")
 
-    assert provider.complete.call_count == 2
-    assert "Final answer" in result.final_text
+    assert provider.calls == 2
+    assert "Final answer" in (result.final_text or "")
 
 
 @pytest.mark.asyncio
-async def test_pause_turn_cap_exceeded_exits_with_warning(caplog):
-    """4 consecutive pause_turn responses → loop exits at cap with logged warning."""
-    from opencomputer.agent.loop import AgentLoop
+async def test_pause_turn_cap_exceeded_exits_with_warning(tmp_path, caplog):
+    """4 consecutive pause_turn → loop exits at cap (≤4 calls), warning logged."""
+    provider = _ScriptedProvider([_resp("pause_turn", f"paused {i}") for i in range(5)])
+    loop = _build_loop(provider, tmp_path)
 
-    responses = [_build_response("pause_turn", f"paused {i}") for i in range(5)]
-    provider = MagicMock()
-    provider.complete = AsyncMock(side_effect=responses)
+    with caplog.at_level("WARNING"):
+        await loop.run_conversation("test query")
 
-    loop = _make_minimal_loop(provider=provider)
-    result = await loop.run_conversation("test query")
-
-    # Expected: 3 pause attempts then forced END_TURN (1 + 3 = 4 max calls)
-    assert provider.complete.call_count <= 4
-    assert any("pause_turn cap" in r.message.lower() for r in caplog.records)
+    assert provider.calls <= 4  # 1 initial + 3 re-sends max
+    assert any("pause_turn" in r.message.lower() for r in caplog.records)
 
 
 @pytest.mark.asyncio
-async def test_refusal_exits_without_retry():
-    """A refusal response surfaces the assistant text and exits immediately."""
-    from opencomputer.agent.loop import AgentLoop
-
-    responses = [_build_response("refusal", "I can't help with that.")]
-    provider = MagicMock()
-    provider.complete = AsyncMock(side_effect=responses)
-
-    loop = _make_minimal_loop(provider=provider)
+async def test_refusal_exits_without_retry(tmp_path):
+    """refusal → loop exits in 1 call, surfaces the assistant text."""
+    provider = _ScriptedProvider([_resp("refusal", "I can't help with that.")])
+    loop = _build_loop(provider, tmp_path)
     result = await loop.run_conversation("dangerous query")
 
-    assert provider.complete.call_count == 1
-    assert "can't help" in result.final_text
-
-
-def _make_minimal_loop(provider):
-    """Build an AgentLoop wired to a mock provider with minimum config.
-
-    Implementation detail: this helper is the only test scaffolding here.
-    Use the same fixtures the existing loop tests use — find one in
-    tests/test_loop_*.py or tests/conftest.py and copy its pattern.
-    """
-    # Concrete construction is project-specific; find an existing
-    # AgentLoop fixture (e.g. test_loop_*.py) and replicate it here.
-    raise NotImplementedError(
-        "Replace with the project's standard AgentLoop test fixture. "
-        "Look at any tests/test_loop_*.py for the pattern."
-    )
+    assert provider.calls == 1
+    assert "can't help" in (result.final_text or "")
 ```
 
-Note: the `_make_minimal_loop` helper is a placeholder for the project's standard test fixture. Before running the test, locate an existing AgentLoop test (e.g. `tests/test_loop_basic.py` or similar) and replicate its setup. If no such fixture exists, ask first — do not fabricate one.
+**Note.** The `Config(loop=LoopConfig(max_iterations=10))` and `AgentLoop(...)` constructor signatures may have additional required args in this codebase. Before committing, verify by reading `tests/test_loop_emits_bus_events.py` and copy whatever extra construction it does (e.g. `injection_engine`, `compaction_engine`, hook engine wiring). Do NOT proceed with placeholder construction.
 
-- [ ] **Step 2.3: Run tests to verify they fail**
+- [ ] **Step 2.3: Verify fixture by adapting from the reference test**
+
+```bash
+head -120 tests/test_loop_emits_bus_events.py
+```
+
+Read the actual `AgentLoop(...)` construction the reference test uses. Apply the same construction in `_build_loop`. If the reference test has shared helpers in `conftest.py` or `tests/_helpers.py`, import them rather than duplicating.
+
+- [ ] **Step 2.4: Run tests to verify they fail**
 
 ```bash
 .venv/bin/pytest tests/test_pause_refusal_stop_reasons.py -v
 ```
 
-Expected: FAIL — either `NotImplementedError` from the fixture, or assertion failures because the loop doesn't yet handle these stop reasons.
+Expected: 3 FAIL — assertion errors because the loop doesn't yet handle pause_turn/refusal.
 
-- [ ] **Step 2.4: Modify the stop_reason_map and add pause/refusal handling**
+- [ ] **Step 2.5: Extend the stop_reason_map**
 
-In `opencomputer/agent/loop.py`, find the block at lines 2753-2764 and replace with:
+In `opencomputer/agent/loop.py`, find lines 2753-2764 and replace:
 
 ```python
         stop_reason_map = {
@@ -515,24 +542,39 @@ In `opencomputer/agent/loop.py`, find the block at lines 2753-2764 and replace w
         }
         stop = stop_reason_map.get(resp.stop_reason, StopReason.END_TURN)
 
-        # If the model called tools, even if the raw stop_reason was "end_turn",
-        # we need to continue so the model can process results.
         if resp.message.tool_calls and stop == StopReason.END_TURN:
             stop = StopReason.TOOL_USE
 ```
 
-Then locate the loop's main iteration block (around line 1093 — search for `for _iter in range(self.config.loop.max_iterations)`). After the `step = await self._run_one_step(...)` call (around line 1299), add pause/refusal handling. The exact insertion point depends on the existing control flow — find where `step.should_continue` is checked.
+- [ ] **Step 2.6: Read the loop body to find the right insertion point for pause/refusal handling**
 
-Insert the following BEFORE the `if not step.should_continue:` check that returns:
+Read around line 1093-1700 (the main `for _iter in range(...)` loop) to understand:
+
+1. Where `step.should_continue` is checked
+2. How the loop exits via `return ConversationResult(...)`
+3. Where `messages` is mutated between turns
+4. Whether `step` is mutable, NamedTuple (has `_replace`), or frozen dataclass (use `dataclasses.replace`)
+
+```bash
+sed -n '1080,1180p' opencomputer/agent/loop.py
+sed -n '1610,1690p' opencomputer/agent/loop.py
+cat opencomputer/agent/step.py
+```
+
+- [ ] **Step 2.7: Insert pause/refusal handling**
+
+After reading the loop body, insert handling AT THE TOP of the per-iteration block, immediately after `step = await self._run_one_step(...)` returns. Use the appropriate `replace` pattern based on what `step.py` shows:
 
 ```python
-            # 2026-05-02 (Item 2): handle pause_turn and refusal stop reasons
-            # added to stop_reason_map at line 2753.
+            # 2026-05-02 (Item 2): handle pause_turn and refusal stop reasons.
             #
             # pause_turn: server-tool work paused mid-call. Per Anthropic
             # contract, re-send the conversation (including the paused
             # assistant response) to continue. Cap at 3 consecutive pauses
             # to avoid pathological loops on broken server tools.
+            #
+            # refusal: model declined. Exit immediately, do NOT retry.
+
             if step.stop_reason == StopReason.PAUSE_TURN:
                 self._pause_turn_count = getattr(self, "_pause_turn_count", 0) + 1
                 if self._pause_turn_count >= 3:
@@ -541,49 +583,35 @@ Insert the following BEFORE the `if not step.should_continue:` check that return
                         "pause_turn cap (3) exceeded — forcing END_TURN. "
                         "A server tool may be stuck in a re-send loop."
                     )
-                    # Treat as END_TURN; preserve any partial text.
-                    step = step._replace(
-                        stop_reason=StopReason.END_TURN,
-                        should_continue=False,
-                    ) if hasattr(step, "_replace") else step
-                    # NOTE: step is likely a frozen dataclass — adapt the
-                    # mutation pattern to whatever StepOutcome supports.
-                else:
-                    # Append the paused assistant message and re-send.
+                    self._pause_turn_count = 0
+                    # Treat as END_TURN. Append paused content as the final
+                    # assistant message and exit cleanly.
+                    if step.assistant_message is not None:
+                        messages.append(step.assistant_message)
+                    break
+                # Below cap: append paused content and continue the loop
+                # so the next iteration re-sends.
+                if step.assistant_message is not None:
                     messages.append(step.assistant_message)
-                    continue  # next loop iteration re-sends with the paused content
+                continue
 
-            # refusal: model declined. Exit immediately, do NOT retry.
             if step.stop_reason == StopReason.REFUSAL:
-                # Final assistant text already in step.assistant_message.content.
-                self._pause_turn_count = 0  # reset for any subsequent run
+                # Exit immediately. Final assistant text is in
+                # step.assistant_message.content.
+                self._pause_turn_count = 0
+                if step.assistant_message is not None:
+                    messages.append(step.assistant_message)
                 break
 
             # Reset pause counter on any other outcome
-            if step.stop_reason != StopReason.PAUSE_TURN:
-                self._pause_turn_count = 0
+            self._pause_turn_count = 0
 ```
 
-**Important.** The `step._replace(...)` pattern depends on whether `StepOutcome` is a NamedTuple (has `_replace`), a frozen dataclass (use `dataclasses.replace`), or a mutable class. Read `opencomputer/agent/step.py` first and use the matching pattern.
+**Where to put `_pause_turn_count`.** The use of `getattr(self, "_pause_turn_count", 0)` allows lazy initialization without modifying `AgentLoop.__init__`. If the codebase prefers explicit init, add `self._pause_turn_count = 0` to `__init__`.
 
-- [ ] **Step 2.5: Find the right StepOutcome mutation pattern**
+**Where to insert in the loop.** This block goes AFTER the `_run_one_step` call but BEFORE the `if not step.should_continue:` check that returns the final result. The intent is: pause/refusal are handled BEFORE the normal end-of-turn logic.
 
-```bash
-cat opencomputer/agent/step.py | head -40
-```
-
-If frozen dataclass, replace `step._replace(...)` with:
-
-```python
-from dataclasses import replace as _dc_replace
-step = _dc_replace(step, stop_reason=StopReason.END_TURN, should_continue=False)
-```
-
-If NamedTuple, `_replace` works as written.
-
-If mutable, simple attribute assignment.
-
-- [ ] **Step 2.6: Run tests to verify they pass**
+- [ ] **Step 2.8: Run tests**
 
 ```bash
 .venv/bin/pytest tests/test_pause_refusal_stop_reasons.py -v
@@ -591,15 +619,15 @@ If mutable, simple attribute assignment.
 
 Expected: 3 PASS.
 
-- [ ] **Step 2.7: Run full loop test suite to catch regressions**
+- [ ] **Step 2.9: Run loop test suite for regressions**
 
 ```bash
-.venv/bin/pytest tests/ -k "loop or stop_reason or agent" -v
+.venv/bin/pytest tests/ -k "loop or stop_reason or agent_loop" -v 2>&1 | tail -30
 ```
 
 Expected: all PASS.
 
-- [ ] **Step 2.8: Commit**
+- [ ] **Step 2.10: Commit**
 
 ```bash
 git add plugin_sdk/core.py opencomputer/agent/loop.py tests/test_pause_refusal_stop_reasons.py
@@ -627,242 +655,338 @@ EOF
 
 **Files:**
 - Modify: `plugin_sdk/tool_contract.py`
-- Modify: `opencomputer/tools/registry.py` (if it builds the API tool list separately)
-- Modify: `opencomputer/tools/*.py` (per-tool audit, opt-out where needed)
+- Modify: `opencomputer/agent/loop.py:2671` (where `tool_schemas` is built)
+- Modify: `opencomputer/tools/*.py` (per-tool audit)
 - Test: `tests/test_tool_strict_mode.py` (NEW)
 
-**Approach.** Add `BaseTool.strict_mode: ClassVar[bool] = True` defaulting True. `ToolSchema.to_anthropic_format()` accepts a `strict: bool = False` parameter and emits the field when True. Tool dispatch passes `tool.strict_mode` through. Audit pass: any tool whose schema fails strict-validation requirements gets `strict_mode = False` with a comment explaining why.
+**Approach.** Add `strict: bool = False` field directly to the frozen `ToolSchema` dataclass (defaulting False preserves backwards-compat with all existing constructors). Add `BaseTool.strict_mode: ClassVar[bool] = True` defaulting True. The loop's `_filtered_schemas()` is augmented to set `strict` on each `ToolSchema` based on the tool's `strict_mode`. `to_anthropic_format()` emits `"strict": True` when the field is True.
 
-**Strict-mode requirements per Anthropic SDK (`ToolParam.strict`):** "When true, guarantees schema validation on tool names and inputs." Object schemas should declare `additionalProperties: false`, all required fields listed, no implicit type unions.
+This avoids the frozen-dataclass attribute-mutation footgun: the `strict` field exists on the dataclass itself.
 
-- [ ] **Step 3.1: Add strict_mode flag to BaseTool**
+**Strict requirements per Anthropic SDK:** "When true, guarantees schema validation on tool names and inputs." Object schemas should declare `additionalProperties: false`, all required fields listed, no implicit type unions.
 
-In `plugin_sdk/tool_contract.py`, add the class attribute:
+- [ ] **Step 3.1: Add `strict` field to `ToolSchema` and `strict_mode` to `BaseTool`**
 
-```python
-class BaseTool(ABC):
-    """Base class for a tool. Subclass and implement `schema` + `execute`."""
-
-    parallel_safe: bool = False
-    max_result_size: int = 100_000
-    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = ()
-
-    #: 2026-05-02 — when True, the tool's schema is sent with strict: true
-    #: to Anthropic, guaranteeing input validation. Tools whose schemas
-    #: cannot satisfy strict requirements (no additionalProperties: false,
-    #: missing explicit types, optional union types) should override
-    #: this to False with a one-line comment explaining why.
-    strict_mode: ClassVar[bool] = True
-
-    @property
-    @abstractmethod
-    def schema(self) -> ToolSchema: ...
-
-    @abstractmethod
-    async def execute(self, call: ToolCall) -> ToolResult: ...
-```
-
-- [ ] **Step 3.2: Modify `ToolSchema.to_anthropic_format`**
+Replace the entire contents of `plugin_sdk/tool_contract.py`:
 
 ```python
-    def to_anthropic_format(self, *, strict: bool = False) -> dict[str, Any]:
+"""
+Tool contract — what plugin authors implement to add a new tool.
+
+A tool is any callable the agent can invoke: Read, Write, Bash, etc.
+Plugins can add new ones by subclassing `BaseTool` and registering
+via `register_plugin(..., tools=[MyTool])`.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any, ClassVar
+
+from plugin_sdk.consent import CapabilityClaim
+from plugin_sdk.core import ToolCall, ToolResult
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSchema:
+    """OpenAI-compatible JSON schema for a tool."""
+
+    name: str
+    description: str
+    parameters: dict[str, Any]  # JSON Schema object
+
+    #: 2026-05-02 (Item 3): when True, ``to_anthropic_format`` emits
+    #: ``"strict": True`` so Anthropic enforces schema validation on
+    #: tool names and inputs. Defaults False for backwards-compat —
+    #: every existing ToolSchema(...) constructor call still works.
+    #: The agent loop sets this from the tool's ``BaseTool.strict_mode``
+    #: when building the request.
+    strict: bool = False
+
+    def to_openai_format(self) -> dict[str, Any]:
+        """Convert to the dict format the OpenAI API expects."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            },
+        }
+
+    def to_anthropic_format(self) -> dict[str, Any]:
         """Convert to the dict format the Anthropic API expects."""
         out: dict[str, Any] = {
             "name": self.name,
             "description": self.description,
             "input_schema": self.parameters,
         }
-        if strict:
+        if self.strict:
             out["strict"] = True
         return out
+
+
+class BaseTool(ABC):
+    """Base class for a tool. Subclass and implement `schema` + `execute`."""
+
+    #: Whether this tool is safe to run in parallel with other parallel-safe tools.
+    parallel_safe: bool = False
+
+    #: Maximum size of the result string (longer is truncated with a notice).
+    max_result_size: int = 100_000
+
+    #: F1 (Sub-project F): capabilities this tool needs the user to have
+    #: granted. Empty list (default) means unprivileged — no gate check.
+    #: Subclasses SHOULD override with a tuple (not list) to avoid the
+    #: mutable-default-class-attribute footgun.
+    capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = ()
+
+    #: 2026-05-02 (Item 3): when True (default), the tool's schema is
+    #: sent with ``strict: true`` to Anthropic. Tools whose schemas
+    #: cannot satisfy strict requirements (free-form params, polymorphic
+    #: args, missing ``additionalProperties: false``) override to False
+    #: with a one-line comment explaining why.
+    strict_mode: ClassVar[bool] = True
+
+    @property
+    @abstractmethod
+    def schema(self) -> ToolSchema:
+        """Return the JSON schema describing this tool's input."""
+        ...
+
+    @abstractmethod
+    async def execute(self, call: ToolCall) -> ToolResult:
+        """Actually run the tool. Must handle its own errors — never raise."""
+        ...
+
+
+__all__ = ["ToolSchema", "BaseTool"]
 ```
 
-- [ ] **Step 3.3: Update the call site that builds the API tools list**
+- [ ] **Step 3.2: Update the loop to set `strict` on each ToolSchema before passing to provider**
 
-In `extensions/anthropic-provider/provider.py`, find:
+In `opencomputer/agent/loop.py`, find `_filtered_schemas` (line 2619) and the call to `sort_tools_for_request` (line 2671). The schemas currently come straight from `tool.schema`. Wrap the build to copy each schema with the tool's `strict_mode`.
 
+Read the existing `_filtered_schemas` first:
+
+```bash
+sed -n '2615,2680p' opencomputer/agent/loop.py
+```
+
+Then update — replace the line where `tool_schemas` is built:
+
+Before (around line 2671):
 ```python
-kwargs["tools"] = [t.to_anthropic_format() for t in tools]
+tool_schemas = sort_tools_for_request(self._filtered_schemas())
 ```
 
-Replace at BOTH call sites (lines ~437 and ~528) with code that gets `strict_mode` from the tool. The `tools` parameter in those signatures is `list[ToolSchema]` (the schema dataclass), but we need the originating tool's `strict_mode`. Search how `tools` is built upstream.
-
-If `tools` is a list of `ToolSchema` (and `strict_mode` is on the originating `BaseTool`), this requires plumbing. **Read the call chain first**: search for where `provider.complete(..., tools=...)` is invoked. The likely chain is `AgentLoop._run_one_step → provider.complete(tools=tool_schemas)` where `tool_schemas` was built from `[t.schema for t in registered_tools]`.
-
-If that's the case, change `tool_schemas` to instead build a list of tuples `[(t.schema, t.strict_mode) for t in registered_tools]`, OR pass tools as `BaseTool` instances and build the API format inside the provider.
-
-**Recommended minimal change:** in `opencomputer/agent/loop.py`, find where `tool_schemas` is built. Wrap each schema with its strict flag. In `provider.py`, the comprehension becomes:
-
+After:
 ```python
-kwargs["tools"] = [t.to_anthropic_format(strict=getattr(t, "_strict_mode", False)) for t in tools]
+import dataclasses as _dc
+
+# 2026-05-02 (Item 3): propagate each tool's strict_mode into the
+# schema sent to the provider. ToolSchema is frozen; use replace().
+def _attach_strict(schemas):
+    for s in schemas:
+        # Find the originating tool by name; if registry can't resolve
+        # (e.g. ad-hoc schema), default to non-strict for safety.
+        tool = self._tool_registry.get_tool(s.name) if hasattr(self, "_tool_registry") else None
+        strict_mode = getattr(tool, "strict_mode", False) if tool else False
+        yield _dc.replace(s, strict=strict_mode) if strict_mode and not s.strict else s
+
+tool_schemas = sort_tools_for_request(list(_attach_strict(self._filtered_schemas())))
 ```
 
-This requires attaching `_strict_mode` to each `ToolSchema` instance before passing it down — which is awkward because `ToolSchema` is `frozen=True, slots=True`.
+**Important.** The exact registry lookup (`self._tool_registry.get_tool(...)`) is a guess. Read `opencomputer/tools/registry.py` to confirm the right method:
 
-**Alternative cleaner approach:** introduce a small dataclass `ToolForApi` in `plugin_sdk/tool_contract.py`:
-
-```python
-@dataclass(frozen=True, slots=True)
-class ToolForApi:
-    """Bundles a ToolSchema with the runtime flags needed to format it for an API."""
-    schema: ToolSchema
-    strict: bool = False
+```bash
+grep -n "def get\|def lookup\|def find\|class ToolRegistry" opencomputer/tools/registry.py
 ```
 
-Then in `loop.py` build `tool_schemas: list[ToolForApi]`, and in `provider.py`:
+Use whatever method exists. If no by-name lookup exists, add one (3 LOC). If the registry stores tool instances keyed by name already, use direct dict access.
 
-```python
-kwargs["tools"] = [t.schema.to_anthropic_format(strict=t.strict) for t in tools]
-```
-
-This requires updating the type annotation on `BaseProvider.complete(tools=...)` and any test that mocks this. Confirm scope before committing.
-
-**Decision point.** Before writing code, decide:
-- (A) Quick patch: monkey-patch `_strict_mode` onto `ToolSchema` instances in loop.py before passing down. Ugly but localized.
-- (B) Clean: introduce `ToolForApi` and update the type. More files touched but type-safe.
-
-**Recommend (B)** for cleanliness. If that's too invasive given this PR's scope, fall back to (A) and ticket the cleanup.
-
-- [ ] **Step 3.4: Write failing parametrized strict-validation test**
+- [ ] **Step 3.3: Write failing parametrized strict-validation test**
 
 Create `tests/test_tool_strict_mode.py`:
 
 ```python
-"""Validate that tools declared as strict_mode=True have schemas that can
-satisfy Anthropic's strict-mode contract."""
+"""Validate that tools declared strict_mode=True have schemas that satisfy
+Anthropic's strict-mode contract (additionalProperties: false, explicit types)."""
+from __future__ import annotations
+
 import pytest
 
-from opencomputer.tools.registry import ToolRegistry
+from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 
 def _is_strict_compatible(schema_params: dict) -> tuple[bool, str]:
     """Return (passes, reason) for a JSON Schema object dict."""
     if schema_params.get("type") != "object":
         return False, "top-level type is not 'object'"
-    # Strict mode requires additionalProperties: false on object schemas.
     if schema_params.get("additionalProperties") is not False:
         return False, "additionalProperties is not False"
-    # All declared properties must have a 'type' (no implicit unions).
     props = schema_params.get("properties") or {}
     for name, spec in props.items():
+        if not isinstance(spec, dict):
+            return False, f"property '{name}' spec is not a dict"
         if "type" not in spec and "enum" not in spec and "$ref" not in spec:
             return False, f"property '{name}' has no type/enum/$ref"
     return True, ""
 
 
-def _all_registered_tools():
-    """Build a registry the same way the agent does at startup."""
-    from opencomputer.tools.registry import build_default_registry  # adapt to actual builder
-    reg = build_default_registry()
-    return list(reg.iter_tools())  # adapt method name to actual API
+def _all_registered_tools() -> list[BaseTool]:
+    """Build the same tool registry the agent uses at startup.
+
+    Adapt the import below to whatever the project actually uses to build
+    the default registry. Common candidates:
+      - opencomputer.tools.registry.build_default_registry()
+      - opencomputer.cli._build_tool_registry()
+      - manual instantiation of each tool class
+    """
+    from opencomputer.tools.registry import ToolRegistry
+
+    # If a build_default_registry helper exists, prefer it.
+    try:
+        from opencomputer.tools.registry import build_default_registry
+        reg = build_default_registry()
+    except ImportError:
+        # Fallback: build registry by importing every tool module and
+        # registering each BaseTool subclass found.
+        reg = ToolRegistry()
+        import importlib
+        import pkgutil
+        import opencomputer.tools as tools_pkg
+
+        for finder, name, ispkg in pkgutil.iter_modules(tools_pkg.__path__):
+            if name.startswith("_") or name == "registry":
+                continue
+            mod = importlib.import_module(f"opencomputer.tools.{name}")
+            for attr in dir(mod):
+                obj = getattr(mod, attr)
+                if (
+                    isinstance(obj, type)
+                    and issubclass(obj, BaseTool)
+                    and obj is not BaseTool
+                ):
+                    try:
+                        reg.register(obj())
+                    except Exception:
+                        pass  # tool may have non-trivial __init__; skip
+    return list(reg.iter_tools())
 
 
-@pytest.mark.parametrize("tool", _all_registered_tools(), ids=lambda t: t.schema.name)
-def test_strict_tools_have_compatible_schemas(tool):
-    """Every tool declared strict_mode=True must have a strict-compatible schema."""
+_TOOLS = _all_registered_tools()
+
+
+@pytest.mark.parametrize("tool", _TOOLS, ids=lambda t: t.schema.name)
+def test_strict_tools_have_compatible_schemas(tool: BaseTool):
+    """Every tool with strict_mode=True must have a strict-compatible schema."""
     if not getattr(tool, "strict_mode", False):
         pytest.skip(f"{tool.schema.name} opted out of strict mode")
     passes, reason = _is_strict_compatible(tool.schema.parameters)
     assert passes, f"{tool.schema.name} not strict-compatible: {reason}"
+
+
+def test_at_least_80_percent_of_tools_are_strict():
+    """≥80% strict adoption is the spec's acceptance bar."""
+    if not _TOOLS:
+        pytest.skip("no tools registered")
+    strict_count = sum(1 for t in _TOOLS if getattr(t, "strict_mode", False))
+    pct = strict_count / len(_TOOLS)
+    assert pct >= 0.80, (
+        f"only {strict_count}/{len(_TOOLS)} ({pct:.0%}) tools are strict; "
+        f"spec requires ≥80%"
+    )
+
+
+def test_strict_emitted_in_anthropic_format():
+    """ToolSchema with strict=True includes the strict field in API format."""
+    s_no = ToolSchema(
+        name="DummyA", description="x",
+        parameters={"type": "object", "additionalProperties": False, "properties": {}},
+    )
+    s_yes = ToolSchema(
+        name="DummyB", description="x",
+        parameters={"type": "object", "additionalProperties": False, "properties": {}},
+        strict=True,
+    )
+    assert "strict" not in s_no.to_anthropic_format()
+    assert s_yes.to_anthropic_format()["strict"] is True
 ```
 
-Adapt `build_default_registry` and `iter_tools` to the actual project APIs by reading `opencomputer/tools/registry.py`.
+**Note.** The fallback registry-build path has a try/except — if it doesn't work cleanly, find the project's actual registry-build helper (`grep -rn "build_default_registry\|build.*registry" opencomputer/` will reveal it) and adapt the import accordingly.
 
-- [ ] **Step 3.5: Run test — expect failures from non-strict tools**
+- [ ] **Step 3.4: Run test — expect mixed PASS/FAIL/SKIP**
 
 ```bash
 .venv/bin/pytest tests/test_tool_strict_mode.py -v 2>&1 | tee /tmp/strict_audit.log
 ```
 
-Expected: a mix of PASS and FAIL. Each FAIL identifies a tool whose schema needs adjustment OR an opt-out.
+Expected: a mix. Each FAIL identifies a tool whose schema needs adjustment OR a tool that should opt out.
 
-- [ ] **Step 3.6: Audit — for each failing tool, decide:**
+- [ ] **Step 3.5: Per-tool audit — for each FAIL, decide:**
 
-Open the tool's source file. Pick ONE:
+For every failing tool listed in `/tmp/strict_audit.log`:
 
-(a) **Fix the schema** (preferred): add `additionalProperties: false`, add explicit types to all properties.
+(a) **Fix the schema** (preferred): edit the tool's source file. Add `additionalProperties: false`, ensure every property has explicit `type`/`enum`/`$ref`:
 
 ```python
 parameters={
     "type": "object",
-    "additionalProperties": False,  # ADD THIS
+    "additionalProperties": False,  # ADD
     "properties": {
-        "command": {"type": "string", "description": "..."},  # ensure type is set
-        ...
+        "command": {"type": "string", "description": "..."},
     },
     "required": ["command"],
 }
 ```
 
-(b) **Opt out**: add to the class:
+(b) **Opt out** if the parameter is genuinely free-form (e.g. arbitrary shell command):
 
 ```python
 class BashTool(BaseTool):
     parallel_safe = False
-    strict_mode = False  # 2026-05-02: shell command parameter is open-ended; strict adds friction with no model-quality win
+    strict_mode = False  # 2026-05-02: free-form shell command — strict adds friction with no model-quality win
 
     @property
-    def schema(self) -> ToolSchema:
-        ...
+    def schema(self) -> ToolSchema: ...
 ```
 
-Goal: ≥80% of tools pass strict on first run. Opt-outs need a comment explaining why (e.g. "free-form command string", "complex polymorphic parameter").
+The 80% strict bar is the acceptance gate. If audit results land below 80%, prefer fixing schemas over opting out.
 
-- [ ] **Step 3.7: Run test again — expect all (passing-strict tools) PASS**
+- [ ] **Step 3.6: Re-run test — expect all PASS or SKIP**
 
 ```bash
 .venv/bin/pytest tests/test_tool_strict_mode.py -v
 ```
 
-Expected: every parametrized case either PASS or SKIP (opted out).
+Expected: every parametrized case PASS or SKIP. The 80% threshold test PASSES.
 
-- [ ] **Step 3.8: Add a test that verifies strict makes it onto the wire**
-
-Append to `tests/test_tool_strict_mode.py`:
-
-```python
-def test_strict_emitted_in_anthropic_format():
-    """A ToolSchema formatted with strict=True includes the strict field."""
-    from plugin_sdk.tool_contract import ToolSchema
-    s = ToolSchema(
-        name="DummyStrict",
-        description="x",
-        parameters={"type": "object", "additionalProperties": False, "properties": {}},
-    )
-    assert "strict" not in s.to_anthropic_format()
-    assert s.to_anthropic_format(strict=True)["strict"] is True
-```
-
-- [ ] **Step 3.9: Run test**
+- [ ] **Step 3.7: Run full pytest suite to catch any test that asserts an exact tool schema dict**
 
 ```bash
-.venv/bin/pytest tests/test_tool_strict_mode.py::test_strict_emitted_in_anthropic_format -v
+.venv/bin/pytest tests/ 2>&1 | tail -30
 ```
 
-Expected: PASS.
+Expected: all PASS. If any test asserts exact schema dict content and that dict gained `additionalProperties: False`, update the assertion.
 
-- [ ] **Step 3.10: Run full pytest suite**
-
-```bash
-.venv/bin/pytest tests/ -x 2>&1 | tail -30
-```
-
-Expected: all PASS. If any test asserts an exact tool schema dict and that dict gained `additionalProperties: false`, update the assertion.
-
-- [ ] **Step 3.11: Commit**
+- [ ] **Step 3.8: Commit**
 
 ```bash
-git add plugin_sdk/tool_contract.py opencomputer/tools/ extensions/anthropic-provider/provider.py opencomputer/agent/loop.py tests/test_tool_strict_mode.py
+git add plugin_sdk/tool_contract.py opencomputer/agent/loop.py opencomputer/tools/ tests/test_tool_strict_mode.py
 git commit -m "$(cat <<'EOF'
 feat(tools): strict:true tool schemas (Item 3)
 
-BaseTool.strict_mode (default True) flows into ToolSchema.to_anthropic_format
-and onto the wire as the strict field. Tools whose schemas cannot satisfy
-strict requirements (free-form params, polymorphic args) opt out with
-strict_mode = False + comment.
+Add strict field to ToolSchema dataclass (default False, frozen-safe)
+and BaseTool.strict_mode ClassVar (default True). The agent loop
+copies each tool's strict_mode onto the ToolSchema before the provider
+serializes the request. Anthropic then enforces input validation on
+the tool, eliminating malformed-arg retries.
 
-Goal ≥80% strict adoption hit. Eliminates malformed-arg tool retries
-on tools that pass.
+Per-tool audit: schemas that can't satisfy strict requirements
+(free-form params, polymorphic args) opt out with strict_mode = False
++ explanatory comment. ≥80% strict adoption verified by test.
 
 Spec: docs/superpowers/specs/2026-05-02-tool-use-contract-tightening-design.md
 
@@ -877,12 +1001,21 @@ EOF
 
 **Files:**
 - Modify: `opencomputer/agent/prompts/base.j2`
+- Test: `tests/test_system_prompt_parallel_nudge.py` (NEW)
 
-**Approach.** Insert the canonical block from the doc as a new top-level section between `# Working rules` and `# Tone and style`. Keep it isolated so it can be lifted out cleanly if the default behavior improves.
+**Approach.** Insert the canonical block from the doc as a new top-level section between `# Working rules` and `# Tone and style` in `base.j2`. Test uses `PromptBuilder().build()` — the project's existing API — to render the prompt and assert the block is present.
 
-- [ ] **Step 4.1: Add the section to `base.j2`**
+- [ ] **Step 4.1: Read the current `base.j2` to confirm section ordering**
 
-Open `opencomputer/agent/prompts/base.j2` and find the line containing `# Tone and style`. Insert the following block IMMEDIATELY BEFORE that line:
+```bash
+grep -n "^# " opencomputer/agent/prompts/base.j2
+```
+
+Expected sections (verified): `# System info`, `# Identity and stance`, `# Working rules`, `# Tone and style`, etc.
+
+- [ ] **Step 4.2: Insert the section**
+
+Open `opencomputer/agent/prompts/base.j2`. Find the line `# Tone and style`. Insert the following block IMMEDIATELY BEFORE that line (preserve the blank line after the new section):
 
 ```jinja2
 # Tool-call efficiency
@@ -899,62 +1032,62 @@ parallel tool calls rather than running too many tools sequentially.
 
 ```
 
-(Note the blank line after the closing tag — keep the spacing consistent with surrounding sections.)
+(The example was adapted from the doc's `ls`/`list_dir` to OpenComputer's `Glob`/`Grep`.)
 
-- [ ] **Step 4.2: Find existing snapshot tests for the system prompt**
+- [ ] **Step 4.3: Write the test**
 
-```bash
-grep -rn "base.j2\|system_prompt\|render.*prompt" tests/ | head -10
-```
-
-If there's a snapshot test for the assembled system prompt, update its expected output.
-
-If there's no snapshot, add one:
+Create `tests/test_system_prompt_parallel_nudge.py`:
 
 ```python
-# tests/test_system_prompt_parallel_nudge.py
-def test_parallel_nudge_present():
-    """The base.j2 prompt must include the parallel-tool-calls nudge."""
-    from opencomputer.agent.prompt_builder import render_system_prompt  # adapt to actual import
-    rendered = render_system_prompt(
-        cwd="/tmp", user_home="/home/test", os_name="darwin",
-        now="2026-05-02", active_persona_id="default",
-    )
+"""The base.j2 system prompt must include the <use_parallel_tool_calls> nudge."""
+from opencomputer.agent.prompt_builder import PromptBuilder
+
+
+def test_parallel_nudge_present_in_default_persona():
+    builder = PromptBuilder()
+    rendered = builder.build(active_persona_id="")  # default (not companion)
     assert "<use_parallel_tool_calls>" in rendered
     assert "invoke all relevant tools simultaneously" in rendered
     assert "</use_parallel_tool_calls>" in rendered
+
+
+def test_parallel_nudge_present_in_companion_persona():
+    builder = PromptBuilder()
+    rendered = builder.build(active_persona_id="companion")
+    # Section is unconditional — should be present in both modes
+    assert "<use_parallel_tool_calls>" in rendered
 ```
 
-Adapt `render_system_prompt` and its kwargs by reading `opencomputer/agent/prompt_builder.py`.
-
-- [ ] **Step 4.3: Run the test**
+- [ ] **Step 4.4: Run the test**
 
 ```bash
 .venv/bin/pytest tests/test_system_prompt_parallel_nudge.py -v
 ```
 
-Expected: PASS.
+Expected: 2 PASS.
 
-- [ ] **Step 4.4: Run any existing prompt-rendering snapshot tests**
+- [ ] **Step 4.5: Run any prompt-rendering snapshot tests**
 
 ```bash
-.venv/bin/pytest tests/ -k "prompt or render" -v
+.venv/bin/pytest tests/ -k "prompt or render" -v 2>&1 | tail -20
 ```
 
-Update any failing snapshots to match the new template (the new section is intentional).
+Update any failing snapshot tests to match the new template (the new section is intentional and visible in the output).
 
-- [ ] **Step 4.5: Commit**
+- [ ] **Step 4.6: Commit**
 
 ```bash
 git add opencomputer/agent/prompts/base.j2 tests/test_system_prompt_parallel_nudge.py
 git commit -m "$(cat <<'EOF'
 feat(prompt): parallel-tool-calls nudge in base system prompt (Item 4)
 
-Append <use_parallel_tool_calls> block (canonical wording from
-Anthropic tool-use docs) as a new top-level section after Working rules.
-Adapted the example from ls/list_dir to OpenComputer's Glob/Grep names.
+Insert <use_parallel_tool_calls> block (canonical wording from
+Anthropic tool-use docs) as a new top-level section before
+# Tone and style. Adapted the example from ls/list_dir to
+OpenComputer's Glob/Grep names.
 
 Bumps fan-out latency on multi-file reads and multi-grep queries.
+Block is unconditional (present in both default and companion modes).
 
 Spec: docs/superpowers/specs/2026-05-02-tool-use-contract-tightening-design.md
 
@@ -972,11 +1105,11 @@ EOF
 - Modify: `opencomputer/tools/recall.py`
 - Modify: `opencomputer/tools/sessions.py`
 
-**Approach.** Rewrite each tool's `description` field so the model knows which to call when. Each description gets a one-sentence purpose, then explicit "use when" / "do not use when" guidance referencing the alternatives by name.
+**Approach.** Rewrite each tool's `description` field so the model knows which to call when. Each description gets a one-sentence purpose, then explicit "use when" / "do not use when" guidance referencing the alternatives by name. No code logic change — only string content.
 
 - [ ] **Step 5.1: Rewrite `Memory` tool description**
 
-In `opencomputer/tools/memory_tool.py`, replace the current description with:
+In `opencomputer/tools/memory_tool.py`, find the existing `description=(...)` block for the `Memory` tool. Replace with:
 
 ```python
             description=(
@@ -1005,7 +1138,7 @@ In `opencomputer/tools/memory_tool.py`, replace the current description with:
 
 - [ ] **Step 5.2: Rewrite `Recall` tool description**
 
-In `opencomputer/tools/recall.py`, replace the current description with:
+In `opencomputer/tools/recall.py`, replace the description block:
 
 ```python
             description=(
@@ -1036,9 +1169,9 @@ In `opencomputer/tools/recall.py`, replace the current description with:
 
 - [ ] **Step 5.3: Rewrite the three `Sessions*` tool descriptions**
 
-In `opencomputer/tools/sessions.py`, find each tool's description block and update.
+In `opencomputer/tools/sessions.py`, find each block and update.
 
-For `SessionsList`:
+`SessionsList`:
 
 ```python
             description=(
@@ -1058,7 +1191,7 @@ For `SessionsList`:
             ),
 ```
 
-For `SessionsHistory`:
+`SessionsHistory`:
 
 ```python
             description=(
@@ -1078,7 +1211,7 @@ For `SessionsHistory`:
             ),
 ```
 
-For `SessionsStatus`:
+`SessionsStatus`:
 
 ```python
             description=(
@@ -1101,10 +1234,10 @@ For `SessionsStatus`:
 - [ ] **Step 5.4: Run any tests that snapshot tool descriptions**
 
 ```bash
-.venv/bin/pytest tests/ -k "tool or schema or description" -v
+.venv/bin/pytest tests/ -k "tool or schema or description" -v 2>&1 | tail -20
 ```
 
-Expected: most PASS. If any test asserts the EXACT description text, update its expected value to match the new description.
+Most should PASS. If any test asserts the EXACT description text (snapshot), update its expected value.
 
 - [ ] **Step 5.5: Run full pytest suite**
 
@@ -1148,7 +1281,7 @@ cd /Users/saksham/Vscode/claude/OpenComputer
 .venv/bin/pytest tests/ 2>&1 | tail -30
 ```
 
-Expected: 5800+ tests PASS, 0 fail. If any fail, do NOT proceed — fix before merge per the project's "no push without deep testing" rule.
+Expected: 5800+ tests PASS, 0 fail. Per the "no push without deep testing" memory rule, do NOT proceed if any fail.
 
 - [ ] **Step 6.2: Run ruff lint**
 
@@ -1156,7 +1289,7 @@ Expected: 5800+ tests PASS, 0 fail. If any fail, do NOT proceed — fix before m
 .venv/bin/ruff check opencomputer/ plugin_sdk/ extensions/ tests/
 ```
 
-Expected: no errors. Fix any reported.
+Expected: no errors.
 
 - [ ] **Step 6.3: Run ruff format check**
 
@@ -1164,44 +1297,33 @@ Expected: no errors. Fix any reported.
 .venv/bin/ruff format --check opencomputer/ plugin_sdk/ extensions/ tests/
 ```
 
-If any files need formatting, run `.venv/bin/ruff format <files>` then re-test.
+If any files need formatting, run `.venv/bin/ruff format <files>` and re-run the suite.
 
-- [ ] **Step 6.4: Verify each commit landed correctly**
-
-```bash
-git log --oneline origin/main..HEAD
-```
-
-Expected: 6 commits — spec + 5 feature commits (Items 1-5).
-
-- [ ] **Step 6.5: Three-line subagent-honesty verification (per project memory rule)**
+- [ ] **Step 6.4: Three-line subagent-honesty verification (per project memory rule)**
 
 ```bash
 # Confirm code, not just commit messages, exists for every change
+git log --oneline origin/main..HEAD
 git diff origin/main..HEAD --stat
-ls -la opencomputer/agent/prompt_caching.py tests/test_pause_refusal_stop_reasons.py tests/test_tool_strict_mode.py
-git log -p origin/main..HEAD -- opencomputer/agent/prompts/base.j2 | grep -c "use_parallel_tool_calls"
+ls -la opencomputer/agent/prompt_caching.py tests/test_pause_refusal_stop_reasons.py tests/test_tool_strict_mode.py tests/test_system_prompt_parallel_nudge.py
 ```
 
 Expected:
-- diff stat shows changes to prompt_caching.py, loop.py, core.py (StopReason), tool_contract.py, base.j2, 3 tool description files
-- new test files exist
-- `use_parallel_tool_calls` appears at least 4 times in the base.j2 diff (open + close + comment + check)
+- 6 commits (spec + 5 features) in the log
+- diff stat shows changes to: prompt_caching.py, loop.py, core.py, tool_contract.py, base.j2, memory_tool.py, recall.py, sessions.py, plus 4 test files
+- All 4 new test files exist on disk
+
+- [ ] **Step 6.5: Confirm parallel-nudge actually rendered in base.j2**
+
+```bash
+grep -c "<use_parallel_tool_calls>" opencomputer/agent/prompts/base.j2
+```
+
+Expected: `1` (opening tag — the closing tag also exists; either grep works).
 
 - [ ] **Step 6.6: Optional manual smoke test for Item 1's cost win**
 
-If you have an Anthropic API key set, run a 5-turn conversation against the live API and capture `Usage`:
-
-```bash
-ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY python -c "
-from opencomputer.cli import _run_session  # adapt to actual entry point
-# ... or just use 'opencomputer' CLI in another shell with --debug usage logging
-"
-```
-
-Expected on turn 2+: `cache_read_input_tokens > 0`. This validates the tool-array cache is hitting.
-
-This is OPTIONAL because it requires a live API key and a running session. Skip if not available; the unit tests already cover the cache placement.
+If you have an Anthropic API key set, run a multi-turn conversation against the live API and capture `Usage`. Look for `cache_read_input_tokens > 0` from turn 2 onward. This validates the tool-array cache is hitting in production. Skip if no API key — unit tests cover correctness.
 
 ---
 
@@ -1209,16 +1331,19 @@ This is OPTIONAL because it requires a live API key and a running session. Skip 
 
 After completing all 6 tasks, verify:
 
-- [ ] **Spec coverage:** Every numbered item (1-5) in the spec maps to a Task above. Items 1, 2, 3, 4, 5 → Tasks 1, 2, 3, 4, 5. Verification → Task 6.
-- [ ] **No placeholders:** No "TBD", "TODO", "implement later", "fill in details" anywhere in the plan.
-- [ ] **Type consistency:** `StopReason.PAUSE_TURN` and `StopReason.REFUSAL` are referenced consistently. `apply_tools_cache_control` and `tools_already_cached` flag are spelled the same throughout. `BaseTool.strict_mode` and `ToolSchema.to_anthropic_format(strict=...)` match.
+- [ ] **Spec coverage:** Every numbered item (1-5) maps to a Task. Items 1-5 → Tasks 1-5. Verification → Task 6.
+- [ ] **No placeholders:** No "TBD", "TODO", "implement later" anywhere. Real fixture pattern used in Task 2 (adapted from `test_loop_emits_bus_events.py`); real `PromptBuilder().build()` API used in Task 4.
+- [ ] **Type consistency:** `StopReason.PAUSE_TURN` and `StopReason.REFUSAL` consistent throughout. `apply_full_cache_control` spelled the same in tests and provider call. `BaseTool.strict_mode` and `ToolSchema.strict` field linked via `_attach_strict` in loop.
+- [ ] **Frozen-dataclass safety:** `ToolSchema` is `@dataclass(frozen=True, slots=True)`; the new `strict: bool = False` field is added directly to the dataclass (not a runtime attribute), so frozen+slots is satisfied.
 - [ ] **TDD discipline:** Each task has Write-test → Run-fail → Implement → Run-pass → Commit cadence.
-- [ ] **Backwards compatibility:** Default behavior of `apply_anthropic_cache_control()` unchanged when `tools_already_cached=False`. `to_anthropic_format()` default `strict=False` unchanged.
+- [ ] **Backwards compatibility:** `apply_anthropic_cache_control()` unchanged. `to_anthropic_format()` defaults to no `strict` field (only emits when `ToolSchema.strict=True`). All existing tool constructors continue to work because `strict` has a default of `False`.
 - [ ] **All risks from spec addressed:**
-    - Strict failures handled via opt-out
-    - Cache reallocation reversible (just flip the flag default)
-    - pause_turn cap at 3 prevents loops
-    - Parallel nudge token cost noted (~80 tokens, paid once per request)
+    - Strict failures → opt-out flag with comment + 80% threshold test
+    - Cache reallocation reversible → `apply_anthropic_cache_control` preserved as fallback
+    - pause_turn loop → cap at 3 with logged warning
+    - Parallel nudge token cost → ~80 tokens, paid once per request, dwarfed by Item 1's savings
+
+---
 
 ## Execution handoff
 
@@ -1226,8 +1351,8 @@ After saving and committing this plan:
 
 **Plan complete and saved to `docs/superpowers/plans/2026-05-02-tool-use-contract-tightening-plan.md`. Two execution options:**
 
-1. **Subagent-Driven (recommended)** — Dispatch a fresh subagent per task, verify with 3-line honesty check between tasks, fast iteration. Particularly suited to Task 3 (strict-mode audit) which touches ~40 files and benefits from fresh context per file.
+1. **Subagent-Driven (recommended for Task 3)** — Dispatch a fresh subagent per task; verify with the 3-line honesty check between tasks. Particularly suited to Task 3 (strict-mode audit), which touches ~40 tool files and benefits from fresh context per file.
 
-2. **Inline Execution** — Execute tasks in this session using executing-plans, batch execution with checkpoints between tasks.
+2. **Inline Execution (recommended for Tasks 1, 2, 4, 5)** — Execute in this session using executing-plans, batched with checkpoints. These tasks are localized to a few files each.
 
-**Recommended:** Subagent-Driven for Task 3 (strict audit) and Inline for Tasks 1, 2, 4, 5 (small surface area, single-file changes).
+**Recommended hybrid:** Inline for Tasks 1, 2, 4, 5; subagent for Task 3.
