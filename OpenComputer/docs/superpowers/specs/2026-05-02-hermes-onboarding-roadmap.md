@@ -82,18 +82,7 @@ passing, ruff clean throughout.
 
 ## Pending
 
-### C — Channel adapter gap-fill (2 platforms remaining)
-
-The wizard's `messaging_platforms` section discovers any channel-kind
-plugin and lists it. Adding a new channel = ship a `BaseChannelAdapter`
-subclass + plugin manifest. Each adapter is ~200-500 LOC depending on
-protocol complexity.
-
-**Status: deferred — each platform needs dedicated focus.** Ship one
-PR per adapter (or per cohort of similar adapters) rather than a
-half-built bulk attempt.
-
-**Per-platform port status:**
+### ~~C~~ — Channel adapter gap-fill — Shipped
 
 | Platform | Protocol | Status | PR |
 |---|---|---|---|
@@ -104,24 +93,20 @@ half-built bulk attempt.
 | ~~Feishu / Lark~~ | Custom Robot webhook + signing | ✓ Shipped | #325 |
 | ~~WeCom Callback~~ | Group Chat Bot webhook | ✓ Shipped | #325 |
 | ~~Yuanbao~~ | webhook + Bearer auth | ✓ Shipped | #326 |
-| **WeCom (full)** | corp+agent+secret + access_token rotation + encrypted callback | Pending | needs ~450 LOC focused PR |
-| **Weixin / WeChat** | Public account REST + access_token rotation (2hr cycle) | Pending | needs ~250 LOC focused PR |
-| **QQ Bot** | OAuth + reverse-WebSocket | Pending | needs ~400 LOC focused PR |
+| ~~Weixin / WeChat~~ | Public account REST + access_token rotation | ✓ Shipped | #344 |
+| ~~WeCom (full)~~ | corp+agent+secret + access_token rotation | ✓ Shipped (outbound) | #346 |
+| ~~QQ Bot~~ | bots.qq.com bot token + REST | ✓ Shipped (outbound) | #347 |
+| ~~Webhook Inbound (Teams/DingTalk/Feishu)~~ | aiohttp listener + per-platform HMAC | ✓ Shipped | #342 |
 
-Microsoft Teams + DingTalk + Feishu + WeCom-Callback + Yuanbao all
-ship as **outbound-only** today. Inbound message receive for these
-needs a public HTTP endpoint hosted by the user (callback URL); that
-machinery is the same across them, so a single shared "webhook
-inbound server" PR could close all 5 inbound paths together.
-
-For Weixin + QQ Bot full implementations: each genuinely is its own
-PR — different protocol surfaces, distinct auth flows, separate
-testing concerns.
-
-**Recommended order to ship:** IRC first (simplest, well-known), then
-Microsoft Teams (broad reach), then BlueBubbles. Defer the Chinese
-platforms (DingTalk, Feishu, WeCom, Weixin, Yuanbao, QQ Bot) until
-real user demand surfaces — each needs platform-specific research.
+**Outbound-only paths still:**
+- WeCom-Callback (Group Chat Bot) — platform has no inbound model
+- Yuanbao — platform has no inbound model
+- WeCom (full) — encrypted callback (WXBizMsgCrypt AES-256-CBC) is a
+  focused follow-up; outbound shipped
+- QQ Bot — WebSocket gateway (Identify/Heartbeat/Resume state machine)
+  is a focused follow-up; outbound shipped
+- Weixin — XML callback signature + dispatch is a focused follow-up;
+  outbound + plain-text inbound primitives shipped
 
 ### O.b — OAuth device-code flow + provider plugins
 
@@ -160,16 +145,26 @@ real user demand surfaces — each needs platform-specific research.
   guidance until the adapter ships. 25 tests (18 google_oauth + 7
   gemini-oauth).
 
+**Shipped follow-ups (latest round):**
+- ✓ **Cloud Code Assist transport adapter** (PR #340) — Gemini OAuth
+  now actually performs inference. Ports Hermes's
+  `gemini_cloudcode_adapter` + `google_code_assist`: project resolution
+  via env / loadCodeAssist / onboardUser, generateContent +
+  streamGenerateContent SSE, message translation (functionCall/Response
+  + thoughtSignature sentinel), JSON-Schema sanitization. 37 tests.
+- ✓ **GitHub Copilot ACP** (PR #348) — auth/discovery scaffold ships;
+  validates `copilot` CLI is installed, env-overrides for command path,
+  wizard discovery. JSON-RPC-over-stdio transport stub raises
+  `NotImplementedError` pointing at the REST `copilot` provider as
+  today's workaround. 10 tests.
+
 **Still pending:**
-- **GitHub Copilot ACP** — different protocol; spawns
-  `copilot --acp --stdio` subprocess. Mostly subprocess-mgmt code.
-- **Google Cloud Code Assist transport adapter** — ~400 LOC port of
-  Hermes's `gemini_cloudcode_adapter`. Wires the OAuth foundation
-  shipped here to actual Gemini inference under the user's Google
-  account quota.
+- **GitHub Copilot ACP transport** (~400 LOC) — JSON-RPC framing over
+  stdio, subprocess supervisor, stream-event mapping.
 - **Nous Portal real client_id** — currently defaults to `opencomputer-cli`
-  (placeholder). Needs OC's actual registration with Nous Portal, OR
-  users supply their own via `NOUS_PORTAL_CLIENT_ID` env var.
+  (placeholder). Parked until users complain. Reopen by registering OC
+  with Nous Portal OR documenting `NOUS_PORTAL_CLIENT_ID` for users
+  bringing their own.
 
 ### ~~M.b~~ — Shipped in PR #313
 
