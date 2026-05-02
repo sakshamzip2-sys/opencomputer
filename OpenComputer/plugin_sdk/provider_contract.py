@@ -9,8 +9,8 @@ anthropic/openai SDKs directly — it only uses BaseProvider.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from plugin_sdk.core import Message
@@ -28,6 +28,56 @@ class Usage:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class CacheTokens:
+    """Provider-agnostic cache token counts extracted from a usage payload."""
+
+    read: int = 0
+    write: int = 0
+
+
+def _default_extract_cache_tokens(usage: Any) -> CacheTokens:  # noqa: ARG001
+    """Conservative default — providers without cache visibility return zeros."""
+    return CacheTokens()
+
+
+def _default_min_cache_tokens(model: str) -> int:  # noqa: ARG001
+    """No filtering by default."""
+    return 0
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderCapabilities:
+    """What a provider supports for the agent loop's context-economy decisions.
+
+    All fields default to conservative "off" values so a provider that does
+    nothing inherits today's behaviour.
+
+    * ``requires_reasoning_resend_in_tool_cycle`` — set True if the provider
+      requires the assistant message that originally produced a tool_use to
+      include the corresponding reasoning block (with signature) when the
+      tool_result is sent back. Anthropic extended thinking requires this;
+      OpenAI Chat Completions does not.
+    * ``reasoning_block_kind`` — opaque tag the provider uses to distinguish
+      its reasoning replay shape (e.g. ``"anthropic_thinking"``).
+    * ``extracts_cache_tokens`` — callable that maps the provider's usage
+      payload to ``CacheTokens``. Default returns zeros.
+    * ``min_cache_tokens`` — minimum block size (in tokens) for which a
+      cache_control marker is worth placing. Provider-aware; receives the
+      model name. Default returns 0 (no filter).
+    * ``supports_long_ttl`` — True if the provider exposes a 1-hour cache
+      TTL knob (Anthropic only today).
+    """
+
+    requires_reasoning_resend_in_tool_cycle: bool = False
+    reasoning_block_kind: Literal["anthropic_thinking", "openai_reasoning", None] = None
+    extracts_cache_tokens: Callable[[Any], CacheTokens] = field(
+        default=_default_extract_cache_tokens
+    )
+    min_cache_tokens: Callable[[str], int] = field(default=_default_min_cache_tokens)
+    supports_long_ttl: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +223,8 @@ class BaseProvider(ABC):
 
 __all__ = [
     "BaseProvider",
+    "CacheTokens",
+    "ProviderCapabilities",
     "ProviderResponse",
     "RateLimitedError",
     "StreamEvent",
