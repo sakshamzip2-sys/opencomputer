@@ -1,0 +1,33 @@
+name: hackernews
+description: "Hacker News scrapers (public Firebase API; no auth needed)"
+commands:
+  top:
+    description: "Top stories"
+    pipeline:
+      - fetch: "https://hacker-news.firebaseio.com/v0/topstories.json"
+      - take: "{{ limit | default(10) }}"
+      - map:
+          fetch: "https://hacker-news.firebaseio.com/v0/item/{{ item }}.json"
+      - format:
+          fields: [id, title, url, score, by, descendants]
+    formats: [json, table, md]
+  new:
+    description: "Newest stories"
+    pipeline:
+      - fetch: "https://hacker-news.firebaseio.com/v0/newstories.json"
+      - take: "{{ limit | default(10) }}"
+      - map:
+          fetch: "https://hacker-news.firebaseio.com/v0/item/{{ item }}.json"
+      - format:
+          fields: [id, title, url, score, by]
+    formats: [json, table, md]
+  show:
+    description: "Show HN"
+    pipeline:
+      - fetch: "https://hacker-news.firebaseio.com/v0/showstories.json"
+      - take: "{{ limit | default(10) }}"
+      - map:
+          fetch: "https://hacker-news.firebaseio.com/v0/item/{{ item }}.json"
+      - format:
+          fields: [id, title, url, score, by]
+    formats: [json, table, md]
