@@ -23,6 +23,10 @@ from anthropic.types import Message as AnthropicMessage
 from pydantic import BaseModel, Field
 
 from opencomputer.agent.credential_pool import CredentialPool
+from opencomputer.agent.model_capabilities import (
+    supports_adaptive_thinking,
+    supports_temperature,
+)
 from opencomputer.agent.prompt_caching import apply_anthropic_cache_control
 from opencomputer.agent.rate_guard import (
     format_remaining,
@@ -425,12 +429,24 @@ class AnthropicProvider(BaseProvider):
         # messages) for ~75% input-token cost reduction on multi-turn
         # conversations.
         sys_for_sdk, api_messages = self._apply_cache_control(anthropic_messages, system)
+        # Effort-driven max_tokens floor lift: high-effort calls on adaptive
+        # models need headroom for thinking + tool calls (Doc 5: start at 64k).
+        effective_max_tokens = max_tokens
+        if (
+            runtime_extras
+            and runtime_extras.get("reasoning_effort") in ("high", "xhigh", "max")
+            and supports_adaptive_thinking(model)
+        ):
+            effective_max_tokens = max(max_tokens, 64_000)
         kwargs: dict[str, Any] = {
             "model": model,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
+            "max_tokens": effective_max_tokens,
             "messages": api_messages,
         }
+        # Opus 4.7+ and Mythos reject temperature/top_p/top_k. Conditional
+        # inclusion driven by model_capabilities.
+        if supports_temperature(model):
+            kwargs["temperature"] = temperature
         if sys_for_sdk:
             kwargs["system"] = sys_for_sdk
         if tools:
@@ -442,6 +458,7 @@ class AnthropicProvider(BaseProvider):
             )
             kwargs.update(
                 anthropic_kwargs_from_runtime(
+                    model=model,
                     reasoning_effort=runtime_extras.get("reasoning_effort"),
                     service_tier=runtime_extras.get("service_tier"),
                 )
@@ -516,12 +533,24 @@ class AnthropicProvider(BaseProvider):
         anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
         sys_for_sdk, api_messages = self._apply_cache_control(anthropic_messages, system)
+        # Effort-driven max_tokens floor lift: high-effort calls on adaptive
+        # models need headroom for thinking + tool calls (Doc 5: start at 64k).
+        effective_max_tokens = max_tokens
+        if (
+            runtime_extras
+            and runtime_extras.get("reasoning_effort") in ("high", "xhigh", "max")
+            and supports_adaptive_thinking(model)
+        ):
+            effective_max_tokens = max(max_tokens, 64_000)
         kwargs: dict[str, Any] = {
             "model": model,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
+            "max_tokens": effective_max_tokens,
             "messages": api_messages,
         }
+        # Opus 4.7+ and Mythos reject temperature/top_p/top_k. Conditional
+        # inclusion driven by model_capabilities.
+        if supports_temperature(model):
+            kwargs["temperature"] = temperature
         if sys_for_sdk:
             kwargs["system"] = sys_for_sdk
         if tools:
@@ -533,6 +562,7 @@ class AnthropicProvider(BaseProvider):
             )
             kwargs.update(
                 anthropic_kwargs_from_runtime(
+                    model=model,
                     reasoning_effort=runtime_extras.get("reasoning_effort"),
                     service_tier=runtime_extras.get("service_tier"),
                 )
@@ -564,12 +594,24 @@ class AnthropicProvider(BaseProvider):
         anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
         sys_for_sdk, api_messages = self._apply_cache_control(anthropic_messages, system)
+        # Effort-driven max_tokens floor lift: high-effort calls on adaptive
+        # models need headroom for thinking + tool calls (Doc 5: start at 64k).
+        effective_max_tokens = max_tokens
+        if (
+            runtime_extras
+            and runtime_extras.get("reasoning_effort") in ("high", "xhigh", "max")
+            and supports_adaptive_thinking(model)
+        ):
+            effective_max_tokens = max(max_tokens, 64_000)
         kwargs: dict[str, Any] = {
             "model": model,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
+            "max_tokens": effective_max_tokens,
             "messages": api_messages,
         }
+        # Opus 4.7+ and Mythos reject temperature/top_p/top_k. Conditional
+        # inclusion driven by model_capabilities.
+        if supports_temperature(model):
+            kwargs["temperature"] = temperature
         if sys_for_sdk:
             kwargs["system"] = sys_for_sdk
         if tools:
@@ -581,6 +623,7 @@ class AnthropicProvider(BaseProvider):
             )
             kwargs.update(
                 anthropic_kwargs_from_runtime(
+                    model=model,
                     reasoning_effort=runtime_extras.get("reasoning_effort"),
                     service_tier=runtime_extras.get("service_tier"),
                 )
