@@ -43,6 +43,49 @@ def _eval_truthy(template: str, ctx: dict[str, Any]) -> bool:
     return bool(rendered)
 
 
+def _scrape_html(html: Any, spec: dict[str, Any]) -> list[dict[str, str]]:
+    """BS4-based HTML scraper.
+
+    spec shape:
+      item: "<css selector>"           # iterates these
+      fields:
+        <name>: "<css selector>"       # text of matched element
+        <name>: "<css selector>@<attr>" # value of attribute
+    """
+    if not isinstance(html, str):
+        return []
+
+    from bs4 import BeautifulSoup
+
+    item_selector = spec.get("item", "")
+    fields: dict[str, str] = spec.get("fields") or {}
+    if not item_selector or not fields:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    items = soup.select(item_selector)
+    out: list[dict[str, str]] = []
+    for item in items:
+        row: dict[str, str] = {}
+        for name, sel in fields.items():
+            sel_str = str(sel)
+            attr: str | None = None
+            if "@" in sel_str:
+                sel_str, _, attr = sel_str.partition("@")
+                sel_str = sel_str.strip()
+                attr = attr.strip() or None
+            elem = item.select_one(sel_str) if sel_str else item
+            if elem is None:
+                row[name] = ""
+                continue
+            if attr:
+                row[name] = elem.get(attr, "") or ""
+            else:
+                row[name] = elem.get_text(strip=True)
+        out.append(row)
+    return out
+
+
 def _select_path(value: Any, path: str) -> Any:
     """Walk a dotted JSON path with optional [*] flatten markers.
 
@@ -156,6 +199,8 @@ def run_pipeline(
         elif kind == "select":
             path = str(_render(spec, ctx))
             value = _select_path(value, path)
+        elif kind == "scrape":
+            value = _scrape_html(value, spec or {})
         else:
             raise ValueError(f"unknown pipeline step kind: {kind}")
     return value

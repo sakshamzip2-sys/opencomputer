@@ -1,0 +1,39 @@
+name: github_trending
+description: "GitHub trending repos (HTML scrape via BS4; no auth required)"
+commands:
+  daily:
+    description: "Trending repos today"
+    pipeline:
+      - fetch: "https://github.com/trending?since=daily"
+      - scrape:
+          item: "article.Box-row"
+          fields:
+            title: "h2 a"
+            href: "h2 a@href"
+            description: "p.col-9"
+      - take: "{{ limit | default(10) }}"
+    formats: [json, table, md]
+  weekly:
+    description: "Trending repos this week"
+    pipeline:
+      - fetch: "https://github.com/trending?since=weekly"
+      - scrape:
+          item: "article.Box-row"
+          fields:
+            title: "h2 a"
+            href: "h2 a@href"
+            description: "p.col-9"
+      - take: "{{ limit | default(10) }}"
+    formats: [json, table, md]
+  monthly:
+    description: "Trending repos this month"
+    pipeline:
+      - fetch: "https://github.com/trending?since=monthly"
+      - scrape:
+          item: "article.Box-row"
+          fields:
+            title: "h2 a"
+            href: "h2 a@href"
+            description: "p.col-9"
+      - take: "{{ limit | default(10) }}"
+    formats: [json, table, md]
