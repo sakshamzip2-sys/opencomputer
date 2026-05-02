@@ -17,19 +17,23 @@ Env vars:
 """
 from __future__ import annotations
 
+import importlib.util as _importlib_util
 import os
-import sys
 from pathlib import Path
 
-# The bundled openai-provider lives at ../openai-provider; make its module
-# importable so we can subclass. The plugin loader normally manages this in
-# production via PluginAPI; here we add the path explicitly for direct import
-# (and tests).
+# Load extensions/openai-provider/provider.py under a unique module name to
+# avoid the sys.modules['provider'] collision that happens when two
+# providers both do `from provider import OpenAIProvider`. The collision
+# manifests as "cannot import name 'OpenAIProvider' from partially
+# initialized module 'provider'" when a test process loads this and another
+# provider (e.g. zai-provider) — see test_openrouter_inherits_vision_from_openai.
 _OPENAI_PROVIDER_DIR = Path(__file__).resolve().parent.parent / "openai-provider"
-if str(_OPENAI_PROVIDER_DIR) not in sys.path:
-    sys.path.insert(0, str(_OPENAI_PROVIDER_DIR))
-
-from provider import OpenAIProvider  # type: ignore[import-not-found]  # noqa: E402
+_spec = _importlib_util.spec_from_file_location(
+    "_oai_base_for_openrouter", str(_OPENAI_PROVIDER_DIR / "provider.py")
+)
+_mod = _importlib_util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+OpenAIProvider = _mod.OpenAIProvider
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
