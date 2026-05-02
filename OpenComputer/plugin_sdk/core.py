@@ -97,6 +97,9 @@ class Platform(str, Enum):
     EMAIL = "email"
     WEBHOOK = "webhook"
     HOMEASSISTANT = "homeassistant"
+    IRC = "irc"
+    TEAMS = "teams"
+    DINGTALK = "dingtalk"
 
 
 @dataclass(frozen=True, slots=True)
