@@ -235,6 +235,17 @@ def build_welcome_banner(
         f"[bold]/help[/bold] for commands[/dim]"
     )
 
+    # 6b. Update-check hint — non-blocking (200ms), silently None when
+    # the background check hasn't finished yet (caller already invoked
+    # prefetch_update_check at startup).
+    try:
+        from opencomputer.cli_update_check import get_update_hint
+        hint = get_update_hint(timeout=0.2)
+        if hint:
+            console.print(f"[yellow]+ {hint}[/yellow]")
+    except Exception:  # noqa: BLE001
+        pass  # update check is purely informational; never block startup
+
     # 7. Welcome line
     console.print()
     console.print(
