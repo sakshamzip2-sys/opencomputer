@@ -12,7 +12,9 @@ import base64
 import logging
 import mimetypes
 import os
+import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -33,6 +35,8 @@ from opencomputer.agent.rate_guard import (
     rate_limit_remaining,
     record_rate_limit,
 )
+from opencomputer.inference.observability import LLMCallEvent, record_llm_call
+from opencomputer.inference.pricing import compute_cost_usd
 from opencomputer.tools.schema_sanitizer import (
     normalize_tool_input_schema_for_anthropic,
 )
@@ -620,6 +624,7 @@ class AnthropicProvider(BaseProvider):
                 "schema": response_schema["schema"],
             }
             kwargs["output_config"] = existing_output_config
+        t0 = time.monotonic()
         try:
             resp = await client.messages.create(**kwargs)
         except AnthropicRateLimitError as exc:
@@ -627,7 +632,48 @@ class AnthropicProvider(BaseProvider):
             # re-raise so the caller's retry/fallback logic still sees it.
             _record_429(exc)
             raise
-        return self._parse_response(resp)
+        t1 = time.monotonic()
+        result = self._parse_response(resp)
+        self._emit_llm_event(model=model, usage=result.usage, t0=t0, t1=t1)
+        return result
+
+    def _emit_llm_event(
+        self, *, model: str, usage: Usage, t0: float, t1: float, site: str = "agent_loop"
+    ) -> None:
+        """Emit one LLMCallEvent to the central observability sink.
+
+        Best-effort: a sink failure (disk full, permission denied) must
+        not crash the agent loop. Logs at WARNING and continues.
+
+        ``site`` defaults to ``"agent_loop"`` — Phase 4 follow-up will
+        thread the actual call site through ``BaseProvider.complete()``
+        as a kwarg once the agent loop is no longer contended by
+        parallel sessions.
+        """
+        try:
+            record_llm_call(
+                LLMCallEvent(
+                    ts=datetime.now(UTC),
+                    provider="anthropic",
+                    model=model,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cache_creation_tokens=usage.cache_write_tokens,
+                    cache_read_tokens=usage.cache_read_tokens,
+                    latency_ms=int((t1 - t0) * 1000),
+                    cost_usd=compute_cost_usd(
+                        provider="anthropic",
+                        model=model,
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        cache_creation_tokens=usage.cache_write_tokens,
+                        cache_read_tokens=usage.cache_read_tokens,
+                    ),
+                    site=site,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — telemetry must not break the loop
+            _log.warning("LLMCallEvent record failed: %s", exc)
 
     async def complete(
         self,
@@ -758,13 +804,17 @@ class AnthropicProvider(BaseProvider):
                 "schema": response_schema["schema"],
             }
             kwargs["output_config"] = existing_output_config
+        t0 = time.monotonic()
         try:
             async with client.messages.stream(**kwargs) as stream_ctx:
                 final = await stream_ctx.get_final_message()
         except AnthropicRateLimitError as exc:
             _record_429(exc)
             raise
-        return self._parse_response(final)
+        t1 = time.monotonic()
+        result = self._parse_response(final)
+        self._emit_llm_event(model=model, usage=result.usage, t0=t0, t1=t1)
+        return result
 
     async def stream_complete(
         self,

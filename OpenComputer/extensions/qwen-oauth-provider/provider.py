@@ -27,9 +27,9 @@ Env vars:
 """
 from __future__ import annotations
 
+import importlib.util as _importlib_util
 import json
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -37,10 +37,17 @@ from typing import Any
 import httpx
 
 _OPENAI_PROVIDER_DIR = Path(__file__).resolve().parent.parent / "openai-provider"
-if str(_OPENAI_PROVIDER_DIR) not in sys.path:
-    sys.path.insert(0, str(_OPENAI_PROVIDER_DIR))
 
-from provider import OpenAIProvider  # type: ignore[import-not-found]  # noqa: E402
+# Load extensions/openai-provider/provider.py under a unique module name
+# to avoid sys.modules['provider'] collision when multiple
+# OpenAI-compat providers are loaded in the same process
+# (PR #353 fix for zai-provider/openrouter-provider, extended here).
+_spec = _importlib_util.spec_from_file_location(
+    "_oai_base_for_qwen_oauth", str(_OPENAI_PROVIDER_DIR / "provider.py")
+)
+_mod = _importlib_util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+OpenAIProvider = _mod.OpenAIProvider
 
 DEFAULT_QWEN_BASE_URL = "https://portal.qwen.ai/v1"
 DEFAULT_QWEN_CLIENT_ID = "f0304373b74a44d2b584a3fb70ca9e56"
