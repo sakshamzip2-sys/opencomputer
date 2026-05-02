@@ -1375,6 +1375,34 @@ class AgentLoop:
                         # Retry crashed — accept the original empty turn.
                         pass
 
+                # max_tokens + tool_use retry: when max_tokens is hit
+                # DURING a tool_use block, the model emits a partial
+                # tool call (truncated arguments) the dispatcher can't
+                # execute. Per Anthropic Doc 3 fix-it pattern: retry
+                # with doubled max_tokens (capped at 64k) once. Provider-
+                # agnostic via canonical StopReason.MAX_TOKENS + presence
+                # of tool_calls.
+                if (
+                    step.stop_reason == StopReason.MAX_TOKENS
+                    and step.assistant_message.tool_calls
+                ):
+                    current_mt = self.config.model.max_tokens
+                    lifted_mt = min(current_mt * 2, 64_000)
+                    if lifted_mt > current_mt:
+                        try:
+                            step = await self._run_one_step(
+                                messages=messages,
+                                system=system,
+                                stream_callback=stream_callback,
+                                thinking_callback=thinking_callback,
+                                model=model_for_turn,
+                                session_id=sid,
+                                max_tokens_override=lifted_mt,
+                            )
+                        except Exception:  # noqa: BLE001
+                            # Retry crashed — accept original outcome.
+                            pass
+
                 # Round 2B P-3: a returned LLM response is activity. Bump BEFORE
                 # the early-return path below so an end-turn turn that took 290s
                 # still resets the timer for any caller that resumes the same
@@ -2722,6 +2750,7 @@ class AgentLoop:
         thinking_callback=None,
         model: str | None = None,
         session_id: str = "",
+        max_tokens_override: int | None = None,
     ) -> StepOutcome:
         """One LLM call + classification of the result.
 
@@ -2731,6 +2760,11 @@ class AgentLoop:
         ``model`` overrides ``config.model.model`` for this turn only —
         used by the cheap-route gate on iteration 0. ``None`` = use the
         config default.
+
+        ``max_tokens_override`` overrides ``config.model.max_tokens`` for
+        this call only — used by the max_tokens+tool_use retry path
+        (2026-05-02) to lift the ceiling without mutating the frozen
+        ``ModelConfig`` dataclass.
 
         Resolves any user-defined alias (``config.model.model_aliases``)
         to its canonical id before the provider call so users can write
@@ -2787,7 +2821,7 @@ class AgentLoop:
                 messages=wire_messages,
                 system=system,
                 tools=tool_schemas,
-                max_tokens=self.config.model.max_tokens,
+                max_tokens=max_tokens_override or self.config.model.max_tokens,
                 temperature=self.config.model.temperature,
                 **_extra_kwargs,
             ):
