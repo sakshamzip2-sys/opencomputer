@@ -950,9 +950,21 @@ def _run_chat_session(
     from opencomputer.observability.logging_config import set_session_id
 
     set_session_id(session_id)
-    console.print(f"[bold cyan]OpenComputer v{__version__}[/bold cyan]")
-    console.print(f"[dim]session: {session_id}[/dim]")
-    console.print(f"[dim]model:   {cfg.model.model} ({cfg.model.provider})[/dim]")
+    # Hermes-style welcome banner (Sub-project F2). Replaces the bare
+    # 3-line preamble with categorized tools/skills listing + ASCII art.
+    from pathlib import Path as _Path
+
+    from opencomputer.cli_banner import build_welcome_banner
+
+    _banner_home_env = os.environ.get("OPENCOMPUTER_HOME")
+    _banner_home = _Path(_banner_home_env) if _banner_home_env else _Path.home() / ".opencomputer"
+    build_welcome_banner(
+        console,
+        model=f"{cfg.model.model} ({cfg.model.provider})",
+        cwd=str(_Path.cwd()),
+        session_id=session_id,
+        home=_banner_home,
+    )
     # tools / plugins / agents counts intentionally hidden from the
     # startup banner — they're noise for an interactive session. Run
     # ``opencomputer plugins``, ``opencomputer skills``, etc. to inspect
