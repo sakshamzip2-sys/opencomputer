@@ -8,6 +8,7 @@ metadata:
   hermes:
     tags: [GitHub, Repositories, Git, Releases, Secrets, Configuration]
     related_skills: [github-auth, github-pr-workflow, github-issues]
+size_review_date: 2026-05-02
 ---
 
 # GitHub Repository Management

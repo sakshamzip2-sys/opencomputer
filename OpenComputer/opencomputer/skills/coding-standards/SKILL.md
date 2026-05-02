@@ -1,6 +1,7 @@
 ---
 name: coding-standards
 description: Universal coding standards, best practices, and patterns for TypeScript, JavaScript, React, and Node.js development.
+size_review_date: 2026-05-02
 ---
 
 <!-- Source: everything-claude-code (MIT) -->

@@ -8,7 +8,7 @@ dependencies: [dspy, openai, anthropic]
 metadata:
   hermes:
     tags: [Prompt Engineering, DSPy, Declarative Programming, RAG, Agents, Prompt Optimization, LM Programming, Stanford NLP, Automatic Optimization, Modular AI]
-
+size_review_date: 2026-05-02
 ---
 
 # DSPy: Declarative Language Model Programming

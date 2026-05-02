@@ -6,6 +6,7 @@ metadata:
   hermes:
     tags: [creative-coding, generative-art, p5js, canvas, interactive, visualization, webgl, shaders, animation]
     related_skills: [ascii-video, manim-video, excalidraw]
+size_review_date: 2026-05-02
 ---
 
 # p5.js Production Pipeline

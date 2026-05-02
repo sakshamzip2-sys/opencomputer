@@ -8,7 +8,7 @@ dependencies: [audiocraft, torch>=2.0.0, transformers>=4.30.0]
 metadata:
   hermes:
     tags: [Multimodal, Audio Generation, Text-to-Music, Text-to-Audio, MusicGen]
-
+size_review_date: 2026-05-02
 ---
 
 # AudioCraft: Audio Generation
