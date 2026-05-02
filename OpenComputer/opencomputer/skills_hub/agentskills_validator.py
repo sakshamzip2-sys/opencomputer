@@ -249,9 +249,30 @@ def _check_name_reserved_word(name, report: ValidationReport) -> None:
             return
 
 
+XML_TAG_RE = re.compile(r"<[a-zA-Z!?/]")
+
+
 def _check_xml_tags(parsed: dict, report: ValidationReport) -> None:
-    """Stub — implemented in Task 4."""
-    pass
+    """Reject XML/HTML tag opens in name or description.
+
+    Coerces values to string defensively (YAML may parse them as int/list).
+    """
+    name = str(parsed.get("name", "") or "")
+    desc = str(parsed.get("description", "") or "")
+    if XML_TAG_RE.search(name):
+        report.errors.append(ValidationIssue(
+            rule="name.xml_tag",
+            severity="error",
+            field="frontmatter.name",
+            message="name contains XML/HTML tag opener",
+        ))
+    if XML_TAG_RE.search(desc):
+        report.errors.append(ValidationIssue(
+            rule="description.xml_tag",
+            severity="error",
+            field="frontmatter.description",
+            message="description contains XML/HTML tag opener",
+        ))
 
 
 def _check_description_voice(description, report: ValidationReport) -> None:

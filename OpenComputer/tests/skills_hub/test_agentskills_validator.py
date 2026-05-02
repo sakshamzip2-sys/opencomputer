@@ -108,6 +108,47 @@ Body.
         f"unexpected reserved-word error for {name!r}: {report.errors}"
 
 
+def test_xml_tag_in_name_blocks():
+    text = """---
+name: foo<script>alert
+description: A reasonable description that's at least twenty chars long for the existing validator.
+version: 0.1.0
+---
+
+Body.
+"""
+    report = validate_skill_md(text, strict=True)
+    assert any(i.rule == "name.xml_tag" for i in report.errors), \
+        f"expected xml_tag error, got: {report.errors}"
+
+
+def test_xml_tag_in_description_blocks():
+    text = """---
+name: my-skill
+description: Process files <script>alert(1)</script> and stuff that's long enough.
+version: 0.1.0
+---
+
+Body.
+"""
+    report = validate_skill_md(text, strict=True)
+    assert any(i.rule == "description.xml_tag" for i in report.errors), \
+        f"expected xml_tag error, got: {report.errors}"
+
+
+def test_xml_tag_allows_normal_punctuation():
+    text = """---
+name: my-skill
+description: Processes JSON and YAML data with key=value semantics. Use when needed.
+version: 0.1.0
+---
+
+Body.
+"""
+    report = validate_skill_md(text, strict=True)
+    assert not any(i.rule.endswith("xml_tag") for i in report.errors)
+
+
 VALID = """---
 name: pead-screener
 description: Screen post-earnings gap-up stocks for PEAD setups
