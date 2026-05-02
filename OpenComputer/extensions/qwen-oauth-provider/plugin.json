@@ -1,0 +1,23 @@
+{
+  "id": "qwen-oauth-provider",
+  "name": "Qwen OAuth",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Qwen Portal via OAuth — reuses Qwen CLI credentials at ~/.qwen/oauth_creds.json with auto-refresh. Run 'qwen auth qwen-oauth' once to authenticate. Inference at portal.qwen.ai (OpenAI-compatible).",
+  "model_support": {
+    "model_prefixes": ["qwen-", "qwen2-", "qwen3-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "qwen-oauth",
+        "auth_methods": ["oauth_external", "api_key"],
+        "env_vars": ["QWEN_API_KEY"],
+        "label": "Qwen OAuth (uses Qwen CLI auth — run 'qwen auth qwen-oauth' first)",
+        "default_model": "qwen-max",
+        "signup_url": "https://chat.qwen.ai"
+      }
+    ]
+  }
+}
