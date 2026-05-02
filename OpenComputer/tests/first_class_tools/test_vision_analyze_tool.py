@@ -60,33 +60,28 @@ def _make_mock_transport(image_bytes: bytes | None, response_text: str = "A phot
 
 
 def _patch_vision_calls(monkeypatch, transport: httpx.MockTransport) -> None:
-    """Wire the MockTransport into BOTH paths the tool uses to talk to
-    the network:
+    """Wire the MockTransport for image-URL fetches AND stub the
+    provider-agnostic vision helper for the LLM call.
 
-    1. ``_make_async_client`` — used for image-URL fetches.
-    2. ``_build_anthropic_async_client`` — used for the Anthropic vision
-       call (now SDK-based, post-collapse onto ``AsyncAnthropic``).
-
-    Without (2), the SDK's internal httpx client bypasses the mock and
-    hits the real network, returning 401 on the test key.
+    Post-aux-llm refactor: vision_analyze routes through
+    ``aux_llm.complete_vision`` which dispatches to the user's
+    configured provider. Tests stub that helper to return canned text
+    rather than mocking Anthropic specifically.
     """
-    from anthropic import AsyncAnthropic
+    from unittest.mock import AsyncMock
 
     monkeypatch.setattr(
         "opencomputer.tools.vision_analyze._make_async_client",
         lambda timeout=60.0: httpx.AsyncClient(transport=transport, timeout=timeout),
     )
 
-    def _stub_client(api_key: str) -> AsyncAnthropic:
-        # Mock-transported client routes /v1/messages through the handler.
-        return AsyncAnthropic(
-            api_key=api_key,
-            http_client=httpx.AsyncClient(transport=transport, timeout=60.0),
-        )
-
+    # Stub the auxiliary-LLM helper that vision_analyze.analyze_image_bytes
+    # calls. Returns canned vision text — same shape as old transport.
+    fake = AsyncMock(return_value="A photograph of a cat sitting on a sofa, looking at the camera")
     monkeypatch.setattr(
-        "opencomputer.tools.vision_analyze._build_anthropic_async_client",
-        _stub_client,
+        "opencomputer.agent.aux_llm.complete_vision",
+        fake,
+        raising=False,
     )
 
 
@@ -198,21 +193,57 @@ async def test_jpeg_magic_bytes_accepted(tool, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_no_api_key_returns_clear_error():
+async def test_works_with_non_anthropic_provider(monkeypatch):
+    """Regression: when the configured provider is not Anthropic, the
+    tool routes through that provider's vision capability. Test
+    simulates an OpenAI-only user (no ANTHROPIC_API_KEY) — the tool
+    must still work because vision_analyze no longer imports
+    anthropic_client.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    from unittest.mock import AsyncMock
+
+    fake = AsyncMock(return_value="vision result from openai")
+    monkeypatch.setattr(
+        "opencomputer.agent.aux_llm.complete_vision",
+        fake,
+        raising=False,
+    )
     tool = VisionAnalyzeTool(api_key=None)
-    with patch.dict("os.environ", {}, clear=False):
-        # Make sure env var also unset
-        import os
-        os.environ.pop("ANTHROPIC_API_KEY", None)
-        b64 = base64.b64encode(_PNG_MAGIC).decode()
-        call = ToolCall(
-            id="c8",
-            name="VisionAnalyze",
-            arguments={"image_base64": b64},
-        )
-        result = await tool.execute(call)
-        assert result.is_error
-        assert "api key" in result.content.lower() or "ANTHROPIC_API_KEY" in result.content
+    b64 = base64.b64encode(_PNG_MAGIC).decode()
+    call = ToolCall(
+        id="c8",
+        name="VisionAnalyze",
+        arguments={"image_base64": b64},
+    )
+    result = await tool.execute(call)
+    assert not result.is_error
+    assert "vision result from openai" in result.content
+
+
+@pytest.mark.asyncio
+async def test_provider_without_vision_returns_clear_error(monkeypatch):
+    """If the user's provider doesn't support vision (e.g. plain text
+    Ollama model), the underlying call raises and the tool surfaces
+    a user-facing error rather than crashing.
+    """
+    async def boom(**kwargs):
+        raise RuntimeError("vision not supported on this provider")
+    monkeypatch.setattr(
+        "opencomputer.agent.aux_llm.complete_vision",
+        boom,
+        raising=False,
+    )
+    tool = VisionAnalyzeTool(api_key=None)
+    b64 = base64.b64encode(_PNG_MAGIC).decode()
+    call = ToolCall(
+        id="c9",
+        name="VisionAnalyze",
+        arguments={"image_base64": b64},
+    )
+    result = await tool.execute(call)
+    assert result.is_error
+    assert "vision" in result.content.lower()
 
 
 def test_schema_shape(tool):

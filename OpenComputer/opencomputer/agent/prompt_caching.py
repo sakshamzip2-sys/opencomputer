@@ -1,11 +1,34 @@
-"""Anthropic prompt caching (system_and_3 strategy).
+"""Anthropic prompt caching.
 
-Reduces input token costs by ~75% on multi-turn conversations by caching
-the conversation prefix. Uses 4 cache_control breakpoints (Anthropic max):
-  1. System prompt (stable across all turns)
-  2-4. Last 3 non-system messages (rolling window)
+Reduces input token costs by caching the conversation prefix using up to 4
+``cache_control`` breakpoints (Anthropic max).
 
-Pure functions -- no class state, no AIAgent dependency.
+Two entry points:
+
+- ``apply_anthropic_cache_control(messages)``: legacy. Caches system +
+  last 3 non-system messages. Used by callers that don't send tools.
+
+- ``apply_full_cache_control(messages, tools)``: preferred. Returns
+  ``(messages, tools)`` with breakpoints allocated as
+  ``tools[-1] + system + last 2 non-system messages`` (4 total). Tool
+  definitions (~8-30k tokens for ~40 tools) change rarely → highest
+  cache hit rate. The deepest message breakpoint has the lowest hit
+  rate (every turn changes the tail), so dropping it costs least.
+
+``min_cache_tokens`` (default 0) filters out blocks whose estimated
+token count is below the model's prompt-cache minimum (e.g. 4096 for
+Opus). Marking a sub-threshold block is a silent server-side no-op
+that wastes a breakpoint slot. When a candidate is too small we walk
+back through earlier non-system messages (up to Anthropic's 20-block
+server-side lookback window) to find one that clears the threshold.
+
+``select_cache_ttl(supports_long_ttl, idle_seconds)`` decides between
+the default 5-minute TTL and the optional 1-hour TTL: when a session
+has been idle longer than ~4 minutes (the 5m cache would have expired)
+and the provider supports it, we switch to 1h to avoid paying a full
+re-prefill on the next turn.
+
+Pure functions — no class state, no AIAgent dependency.
 """
 
 import copy
@@ -23,6 +46,10 @@ _LOOKBACK_WINDOW = 20
 #: cheaper than a wasted breakpoint slot).
 _CHARS_PER_TOKEN = 4
 
+#: Idle-aware long-TTL switch threshold. 4 minutes leaves a 1-minute
+#: safety buffer below the default 5-minute cache TTL.
+_LONG_TTL_THRESHOLD_SECONDS = 240.0
+
 
 def _block_token_estimate(content: Any) -> int:
     """Cheap upper-bound token count for a message's content."""
@@ -35,6 +62,13 @@ def _block_token_estimate(content: Any) -> int:
                 total += len(block.get("text", ""))
         return total // _CHARS_PER_TOKEN
     return 0
+
+
+def _build_marker(cache_ttl: str) -> dict[str, Any]:
+    marker: dict[str, Any] = {"type": "ephemeral"}
+    if cache_ttl == "1h":
+        marker["ttl"] = "1h"
+    return marker
 
 
 def _apply_cache_marker(msg: dict, cache_marker: dict, native_anthropic: bool = False) -> None:
@@ -63,56 +97,31 @@ def _apply_cache_marker(msg: dict, cache_marker: dict, native_anthropic: bool = 
             last["cache_control"] = cache_marker
 
 
-def apply_anthropic_cache_control(
-    api_messages: list[dict[str, Any]],
-    cache_ttl: str = "5m",
-    native_anthropic: bool = False,
+def _cache_tail_messages(
+    messages: list[dict[str, Any]],
+    n_tail: int,
+    marker: dict[str, Any],
+    native_anthropic: bool,
     min_cache_tokens: int = 0,
-) -> list[dict[str, Any]]:
-    """Apply system_and_3 caching strategy to messages for Anthropic models.
+) -> None:
+    """Mark up to n_tail non-system messages from the end.
 
-    Places up to 4 cache_control breakpoints: system prompt + last 3 non-system
-    messages.
-
-    ``min_cache_tokens`` filters out blocks whose estimated token count is
-    below the model's prompt-cache minimum (e.g. 4096 for Opus). Marking a
-    sub-threshold block is a silent server-side no-op that wastes a
-    breakpoint slot. When a candidate is too small, we walk back through
-    earlier non-system messages (up to the Anthropic 20-block lookback
-    window) to find one that clears the threshold. If none does, the
-    breakpoint slot is simply not used; the request proceeds with fewer
-    or zero cache markers.
-
-    Returns:
-        Deep copy of messages with cache_control breakpoints injected.
+    When ``min_cache_tokens`` > 0, sub-threshold blocks are skipped:
+    we walk back through earlier non-system messages (up to Anthropic's
+    20-block server-side lookback window) to find ones that clear the
+    threshold. Marking a sub-threshold block is a silent server-side
+    no-op that wastes a breakpoint slot.
     """
-    messages = copy.deepcopy(api_messages)
-    if not messages:
-        return messages
-
-    marker = {"type": "ephemeral"}
-    if cache_ttl == "1h":
-        marker["ttl"] = "1h"
-
-    breakpoints_used = 0
-
-    if messages[0].get("role") == "system":
-        # System prompts are by convention always large enough to be worth
-        # caching; don't filter the system slot. Cheap insurance against a
-        # tiny test-only system prompt failing to threshold.
-        _apply_cache_marker(messages[0], marker, native_anthropic=native_anthropic)
-        breakpoints_used += 1
-
-    remaining = 4 - breakpoints_used
     non_sys = [i for i in range(len(messages)) if messages[i].get("role") != "system"]
+    if min_cache_tokens <= 0:
+        # Fast path — preserve existing behaviour for callers that don't filter.
+        for idx in non_sys[-n_tail:]:
+            _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic)
+        return
 
-    # Pick up to ``remaining`` indices from the tail of non_sys, skipping
-    # blocks that fall below ``min_cache_tokens``. For each slot we walk
-    # back through unused indices up to the lookback window.
     chosen: list[int] = []
     used: set[int] = set()
-    for slot_offset in range(remaining):
-        # Tail-anchored start point for this slot.
+    for slot_offset in range(n_tail):
         start = len(non_sys) - 1 - slot_offset
         if start < 0:
             break
@@ -132,10 +141,89 @@ def apply_anthropic_cache_control(
     for idx in chosen:
         _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic)
 
+
+def apply_anthropic_cache_control(
+    api_messages: list[dict[str, Any]],
+    cache_ttl: str = "5m",
+    native_anthropic: bool = False,
+    min_cache_tokens: int = 0,
+) -> list[dict[str, Any]]:
+    """Legacy: 4 breakpoints on messages only (system + last 3).
+
+    Preserved for backwards compatibility. Prefer ``apply_full_cache_control``
+    when sending tools.
+
+    ``min_cache_tokens`` (default 0) filters sub-threshold blocks; see
+    module docstring.
+
+    Returns:
+        Deep copy of messages with cache_control breakpoints injected.
+    """
+    messages = copy.deepcopy(api_messages)
+    if not messages:
+        return messages
+
+    marker = _build_marker(cache_ttl)
+    breakpoints_used = 0
+
+    if messages[0].get("role") == "system":
+        # System prompts are by convention always large enough to be worth
+        # caching; don't filter the system slot.
+        _apply_cache_marker(messages[0], marker, native_anthropic=native_anthropic)
+        breakpoints_used += 1
+
+    _cache_tail_messages(
+        messages,
+        4 - breakpoints_used,
+        marker,
+        native_anthropic,
+        min_cache_tokens=min_cache_tokens,
+    )
     return messages
 
 
-_LONG_TTL_THRESHOLD_SECONDS = 240.0  # 4 minutes — leaves 1m below the 5m cache TTL
+def apply_full_cache_control(
+    api_messages: list[dict[str, Any]],
+    api_tools: list[dict[str, Any]] | None,
+    cache_ttl: str = "5m",
+    native_anthropic: bool = False,
+    min_cache_tokens: int = 0,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply 4-breakpoint strategy across messages AND tools array.
+
+    With tools (non-empty):  tools[-1] + system + last 2 non-system msgs (4 total)
+    Without tools:           system + last 3 non-system msgs            (4 total)
+
+    Returns ``(messages, tools)`` — both deep-copied. ``api_tools=None`` is
+    treated as ``[]``. Inputs are not mutated. ``min_cache_tokens`` forwards
+    through to the message-tail filter.
+    """
+    messages = copy.deepcopy(api_messages)
+    tools = copy.deepcopy(api_tools) if api_tools else []
+
+    if not messages and not tools:
+        return messages, tools
+
+    marker = _build_marker(cache_ttl)
+
+    tools_used = 0
+    if tools:
+        tools[-1]["cache_control"] = marker
+        tools_used = 1
+
+    sys_used = 0
+    if messages and messages[0].get("role") == "system":
+        _apply_cache_marker(messages[0], marker, native_anthropic=native_anthropic)
+        sys_used = 1
+
+    remaining = 4 - tools_used - sys_used
+    if remaining > 0 and messages:
+        _cache_tail_messages(
+            messages, remaining, marker, native_anthropic,
+            min_cache_tokens=min_cache_tokens,
+        )
+
+    return messages, tools
 
 
 def select_cache_ttl(*, supports_long_ttl: bool, idle_seconds: float) -> str:
@@ -146,11 +234,9 @@ def select_cache_ttl(*, supports_long_ttl: bool, idle_seconds: float) -> str:
       * the gap since the last assistant turn exceeds 4 minutes.
 
     The 4-minute threshold leaves a one-minute safety buffer below the
-    default 5-minute cache lifetime, so a session that pauses for 5+
-    minutes would otherwise pay a full re-prefill on the next turn.
-    The 1h TTL costs 2x base on cache write but the spend is recouped
-    after one hit; for a typical coding session with multi-minute
-    "thinking" gaps between turns this is a clean win.
+    default 5-minute cache lifetime. The 1h TTL costs 2x base on cache
+    write but is recouped after one hit; for a typical coding session
+    with multi-minute "thinking" gaps between turns this is a clean win.
     """
     if not supports_long_ttl:
         return "5m"

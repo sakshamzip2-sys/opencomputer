@@ -37,6 +37,8 @@ strips them. Mirrors Hermes `DELEGATE_BLOCKED_TOOLS`."""
 
 class DelegateTool(BaseTool):
     parallel_safe = True  # each delegate gets its own loop instance
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
 
     # Class-level fallbacks (legacy CLI bootstrap path). Per-instance state
     # on each DelegateTool instance takes precedence — see __init__ and the
@@ -130,6 +132,7 @@ class DelegateTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "task": {
                         "type": "string",
@@ -182,9 +185,9 @@ class DelegateTool(BaseTool):
                         "description": (
                             "If true, child receives a snapshot of the parent's "
                             "recent messages (last 5 by default). Tool_use and "
-                            "tool_result pairs are preserved atomically."
+                            "tool_result pairs are preserved atomically. "
+                            "Defaults to false when omitted."
                         ),
-                        "default": False,
                     },
                 },
                 "required": ["task"],

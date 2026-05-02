@@ -30,8 +30,6 @@ Examples:
 
 from __future__ import annotations
 
-import os
-
 from plugin_sdk.runtime_context import RuntimeContext
 from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 
@@ -115,49 +113,26 @@ class BtwCommand(SlashCommand):
             except Exception:  # noqa: BLE001
                 parent_messages = []
 
-        api_key = self._api_key or os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            return SlashCommandResult(
-                output=(
-                    "no API key — set ANTHROPIC_API_KEY env var (or pass "
-                    "api_key= to BtwCommand)"
-                ),
-                handled=True,
-            )
+        # Route through the user's configured provider (anthropic, openai,
+        # groq, ollama, etc.) via the auxiliary-LLM shim so /btw works on
+        # any provider — not just Anthropic. The shim inherits the same
+        # auth + base URL config as chat (claude-router bearer mode etc).
+        from opencomputer.agent.aux_llm import complete_text
 
-        # Use the shared Anthropic client builder so /btw inherits the same
-        # auth / base-url config as chat (claude-router bearer mode etc).
-        from opencomputer.agent.anthropic_client import (
-            build_anthropic_async_client,
-        )
-        client = build_anthropic_async_client(api_key)
         try:
-            resp = await client.messages.create(
-                model=self._model,
-                max_tokens=1024,
+            text = await complete_text(
                 messages=_build_messages_payload(parent_messages, question),
+                max_tokens=1024,
+                model=self._model,
                 # Note: no `tools` — that's the whole point of /btw.
             )
-        except Exception as e:  # noqa: BLE001 — surface SDK error as text
+        except Exception as e:  # noqa: BLE001 — surface error as text
             return SlashCommandResult(
                 output=f"/btw API call failed: {type(e).__name__}: {e}",
                 handled=True,
             )
 
-        # Extract text from content blocks (SDK returns typed objects)
-        text_parts: list[str] = []
-        for block in getattr(resp, "content", []) or []:
-            block_type = getattr(block, "type", None) or (
-                block.get("type") if isinstance(block, dict) else None
-            )
-            if block_type != "text":
-                continue
-            block_text = getattr(block, "text", None)
-            if block_text is None and isinstance(block, dict):
-                block_text = block.get("text")
-            if block_text:
-                text_parts.append(str(block_text))
-        text = "".join(text_parts).strip()
+        text = (text or "").strip()
         if not text:
             return SlashCommandResult(
                 output="/btw returned no text content",

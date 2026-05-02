@@ -45,6 +45,8 @@ class ClarifyTool(BaseTool):
     # Not parallel-safe: blocks on user input via the underlying
     # AskUserQuestion machinery.
     parallel_safe = False
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
 
     def __init__(self, *, cli_mode: bool | None = None) -> None:
         # Compose rather than inherit — we wrap AskUserQuestionTool so any
@@ -68,6 +70,7 @@ class ClarifyTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "ambiguity": {
                         "type": "string",

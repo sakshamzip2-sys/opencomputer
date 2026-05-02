@@ -23,7 +23,7 @@ from anthropic.types import Message as AnthropicMessage
 from pydantic import BaseModel, Field
 
 from opencomputer.agent.credential_pool import CredentialPool
-from opencomputer.agent.prompt_caching import apply_anthropic_cache_control
+from opencomputer.agent.prompt_caching import apply_full_cache_control
 from opencomputer.agent.rate_guard import (
     format_remaining,
     rate_limit_remaining,
@@ -363,16 +363,21 @@ class AnthropicProvider(BaseProvider):
         self,
         anthropic_messages: list[dict[str, Any]],
         system: str,
+        api_tools: list[dict[str, Any]] | None = None,
         *,
         model: str = "",
         idle_seconds: float = 0.0,
-    ) -> tuple[Any, list[dict[str, Any]]]:
-        """Apply Anthropic prompt caching (system_and_3 strategy).
+    ) -> tuple[Any, list[dict[str, Any]], list[dict[str, Any]]]:
+        """Apply Anthropic prompt caching across system + messages + tools.
 
         Prepends ``system`` to ``anthropic_messages`` as a synthetic system
-        message, applies cache_control breakpoints (system + last 3 non-system
-        messages), then extracts system back out as a list of content blocks
-        so it can be passed to the SDK's ``system=`` parameter with cache_control
+        message and routes through ``apply_full_cache_control`` (Item 1,
+        2026-05-02), which allocates 4 ephemeral cache_control breakpoints
+        as ``tools[-1] + system + last 2 non-system messages`` when tools
+        are present, or ``system + last 3 non-system messages`` when not.
+
+        Then extracts system back out as a list of content blocks so it can
+        be passed to the SDK's ``system=`` parameter with cache_control
         preserved.
 
         ``model`` and ``idle_seconds`` drive the size-threshold filter and
@@ -381,14 +386,13 @@ class AnthropicProvider(BaseProvider):
         cache layout.
 
         Returns:
-            (system_for_sdk, messages_for_sdk) — system is a list of content
-            blocks (e.g. ``[{"type": "text", "text": "...", "cache_control": ...}]``)
-            when there is a system prompt, or an empty string otherwise.
+            (system_for_sdk, messages_for_sdk, tools_for_sdk) — system is a
+            list of content blocks when there is a system prompt, or the
+            original string otherwise; tools is the (possibly empty) list of
+            tool dicts with cache_control on the last entry when non-empty.
         """
         from opencomputer.agent.prompt_caching import select_cache_ttl
 
-        # Build a unified list with system at index 0 (if any) so the
-        # cache function can apply the system_and_3 strategy uniformly.
         unified: list[dict[str, Any]] = []
         if system:
             unified.append({"role": "system", "content": system})
@@ -401,20 +405,14 @@ class AnthropicProvider(BaseProvider):
         )
         threshold = caps.min_cache_tokens(model) if model else 0
 
-        # Apply cache_control breakpoints. native_anthropic=True puts
-        # cache_control on the message dict directly for tool messages
-        # (Anthropic SDK pattern).
-        cached = apply_anthropic_cache_control(
+        cached, cached_tools = apply_full_cache_control(
             unified,
+            api_tools,
             cache_ttl=ttl,
             native_anthropic=True,
             min_cache_tokens=threshold,
         )
 
-        # Extract system back out as a list of content blocks (preserves
-        # cache_control). The Anthropic SDK accepts ``system=`` as either
-        # a string or a list of content blocks; the list form is required
-        # to carry cache_control.
         if system and cached and cached[0].get("role") == "system":
             sys_content = cached[0].get("content")
             sys_for_sdk: Any = sys_content if isinstance(sys_content, list) else system
@@ -423,7 +421,7 @@ class AnthropicProvider(BaseProvider):
             sys_for_sdk = system
             messages_for_sdk = cached
 
-        return sys_for_sdk, messages_for_sdk
+        return sys_for_sdk, messages_for_sdk, cached_tools
 
     def _parse_response(self, resp: AnthropicMessage) -> ProviderResponse:
         """Convert an Anthropic response back to our canonical Message + metadata."""
@@ -534,8 +532,13 @@ class AnthropicProvider(BaseProvider):
         _last = getattr(self, "_last_call_ts", 0.0)
         idle_s = (_now - _last) if _last > 0 else 0.0
         self._last_call_ts = _now
-        sys_for_sdk, api_messages = self._apply_cache_control(
-            anthropic_messages, system, model=model, idle_seconds=idle_s,
+        # Item 1 (2026-05-02): build tools list FIRST so cache_control
+        # can be applied to tools[-1] together with the system+messages
+        # breakpoints in a single call (no two-call coordination footgun).
+        api_tools_pre = [t.to_anthropic_format() for t in tools] if tools else []
+        sys_for_sdk, api_messages, api_tools = self._apply_cache_control(
+            anthropic_messages, system, api_tools_pre,
+            model=model, idle_seconds=idle_s,
         )
         kwargs: dict[str, Any] = {
             "model": model,
@@ -545,8 +548,8 @@ class AnthropicProvider(BaseProvider):
         }
         if sys_for_sdk:
             kwargs["system"] = sys_for_sdk
-        if tools:
-            kwargs["tools"] = [t.to_anthropic_format() for t in tools]
+        if api_tools:
+            kwargs["tools"] = api_tools
         # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
         if runtime_extras:
             from opencomputer.agent.runtime_flags import (
@@ -638,8 +641,13 @@ class AnthropicProvider(BaseProvider):
         _last = getattr(self, "_last_call_ts", 0.0)
         idle_s = (_now - _last) if _last > 0 else 0.0
         self._last_call_ts = _now
-        sys_for_sdk, api_messages = self._apply_cache_control(
-            anthropic_messages, system, model=model, idle_seconds=idle_s,
+        # Item 1 (2026-05-02): build tools list FIRST so cache_control
+        # can be applied to tools[-1] together with the system+messages
+        # breakpoints in a single call (no two-call coordination footgun).
+        api_tools_pre = [t.to_anthropic_format() for t in tools] if tools else []
+        sys_for_sdk, api_messages, api_tools = self._apply_cache_control(
+            anthropic_messages, system, api_tools_pre,
+            model=model, idle_seconds=idle_s,
         )
         kwargs: dict[str, Any] = {
             "model": model,
@@ -649,8 +657,8 @@ class AnthropicProvider(BaseProvider):
         }
         if sys_for_sdk:
             kwargs["system"] = sys_for_sdk
-        if tools:
-            kwargs["tools"] = [t.to_anthropic_format() for t in tools]
+        if api_tools:
+            kwargs["tools"] = api_tools
         # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
         if runtime_extras:
             from opencomputer.agent.runtime_flags import (
@@ -699,8 +707,13 @@ class AnthropicProvider(BaseProvider):
         _last = getattr(self, "_last_call_ts", 0.0)
         idle_s = (_now - _last) if _last > 0 else 0.0
         self._last_call_ts = _now
-        sys_for_sdk, api_messages = self._apply_cache_control(
-            anthropic_messages, system, model=model, idle_seconds=idle_s,
+        # Item 1 (2026-05-02): build tools list FIRST so cache_control
+        # can be applied to tools[-1] together with the system+messages
+        # breakpoints in a single call (no two-call coordination footgun).
+        api_tools_pre = [t.to_anthropic_format() for t in tools] if tools else []
+        sys_for_sdk, api_messages, api_tools = self._apply_cache_control(
+            anthropic_messages, system, api_tools_pre,
+            model=model, idle_seconds=idle_s,
         )
         kwargs: dict[str, Any] = {
             "model": model,
@@ -710,8 +723,8 @@ class AnthropicProvider(BaseProvider):
         }
         if sys_for_sdk:
             kwargs["system"] = sys_for_sdk
-        if tools:
-            kwargs["tools"] = [t.to_anthropic_format() for t in tools]
+        if api_tools:
+            kwargs["tools"] = api_tools
         # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
         if runtime_extras:
             from opencomputer.agent.runtime_flags import (

@@ -26,6 +26,8 @@ _MAX_BODY = 1000
 
 
 class SystemNotifyTool(BaseTool):
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
     """Show a desktop notification. Cross-platform."""
 
     parallel_safe: bool = True  # notifications are independent
@@ -50,6 +52,7 @@ class SystemNotifyTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "title": {
                         "type": "string",
@@ -59,13 +62,11 @@ class SystemNotifyTool(BaseTool):
                     "body": {
                         "type": "string",
                         "description": f"Notification body (≤{_MAX_BODY} chars).",
-                        "default": "",
                         "maxLength": _MAX_BODY,
                     },
                     "urgency": {
                         "type": "string",
                         "enum": list(_VALID_URGENCY),
-                        "default": "normal",
                         "description": "Linux only; ignored on others.",
                     },
                 },

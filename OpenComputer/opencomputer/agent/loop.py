@@ -630,6 +630,11 @@ class AgentLoop:
         self._runtime = runtime or DEFAULT_RUNTIME_CONTEXT
         # Expose current session id to memory tools via the context provider.
         self._current_session_id = sid
+        # Item 2 fix (2026-05-02): reset pause_turn counter per conversation.
+        # Without this, a long-lived AgentLoop (gateway/daemon mode) handling
+        # multiple sequential conversations would leak the counter — session B
+        # could start with the cap already 1 or 2 and force premature END_TURN.
+        self._pause_turn_count = 0
 
         # OpenClaw 1.C — push the (session_id, delegation_depth) frame for
         # the repetition detector. Idempotent: re-entering the same session
@@ -1304,6 +1309,37 @@ class AgentLoop:
                     model=model_for_turn,
                     session_id=sid,
                 )
+
+                # Item 2 (2026-05-02): pause_turn + refusal handling.
+                # pause_turn means a server-tool needs more time; re-send the
+                # conversation including the paused assistant message so the
+                # provider continues from where it left off. Cap at 3 to
+                # prevent pathological loops on broken server tools.
+                # refusal falls through to normal END_TURN handling — the
+                # refusal text becomes the final assistant message.
+                if step.stop_reason == StopReason.PAUSE_TURN:
+                    self._pause_turn_count = (
+                        getattr(self, "_pause_turn_count", 0) + 1
+                    )
+                    if self._pause_turn_count >= 3:
+                        _log.warning(
+                            "pause_turn cap (3) exceeded — forcing END_TURN. "
+                            "A server tool may be stuck in a re-send loop.",
+                        )
+                        from dataclasses import replace as _dc_replace
+                        step = _dc_replace(step, stop_reason=StopReason.END_TURN)
+                        self._pause_turn_count = 0
+                        # Fall through to normal end-of-turn flow below.
+                    else:
+                        # Below cap: append paused content and continue the
+                        # loop so the next iteration re-sends.
+                        if step.assistant_message is not None:
+                            messages.append(step.assistant_message)
+                        continue
+                else:
+                    # Reset counter on any non-pause outcome
+                    self._pause_turn_count = 0
+
                 # Round 2B P-3: a returned LLM response is activity. Bump BEFORE
                 # the early-return path below so an end-turn turn that took 290s
                 # still resets the timer for any caller that resumes the same
@@ -2645,8 +2681,26 @@ class AgentLoop:
         III.1/III.2 applies to BOTH the schemas handed to the provider AND
         the dispatch path — otherwise the model sees tool X, calls it, and
         we'd silently run it because only schemas were filtered.
+
+        Item 3 (2026-05-02): each schema is augmented with the originating
+        tool's ``strict_mode`` so the provider-format conversion can emit
+        ``strict: true`` to Anthropic. ToolSchema is frozen+slots; we use
+        ``dataclasses.replace`` to set the field. Calls ``registry.schemas()``
+        (preserves existing tests that mock that method) and then resolves
+        each schema's tool via ``registry.get(name)`` to read strict_mode.
         """
-        all_schemas = registry.schemas()
+        from dataclasses import replace as _dc_replace
+
+        from plugin_sdk.tool_contract import ToolSchema as _ToolSchema
+
+        def _maybe_strict(schema: _ToolSchema) -> _ToolSchema:
+            tool = registry.get(schema.name)
+            strict = bool(getattr(tool, "strict_mode", False)) if tool else False
+            if strict and not schema.strict:
+                return _dc_replace(schema, strict=True)
+            return schema
+
+        all_schemas = [_maybe_strict(s) for s in registry.schemas()]
         if self.allowed_tools is None:
             return all_schemas
         names, patterns = self._split_allowlist()
@@ -2774,6 +2828,10 @@ class AgentLoop:
             "tool_use": StopReason.TOOL_USE,
             "max_tokens": StopReason.MAX_TOKENS,
             "stop_sequence": StopReason.END_TURN,
+            # Item 2 (2026-05-02): server-tool work paused; loop re-sends.
+            "pause_turn": StopReason.PAUSE_TURN,
+            # Item 2 (2026-05-02): model refused; surface as final, no retry.
+            "refusal": StopReason.REFUSAL,
         }
         stop = stop_reason_map.get(resp.stop_reason, StopReason.END_TURN)
 

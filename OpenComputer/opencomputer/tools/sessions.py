@@ -40,6 +40,10 @@ class SessionsList(BaseTool):
 
     parallel_safe = True
 
+    # Item 3 (2026-05-02): schema enumerated; closed.
+
+    strict_mode = True
+
     def __init__(self, db: SessionDB | None = None) -> None:
         self._db = db if db is not None else _resolve_default_db()
 
@@ -48,15 +52,25 @@ class SessionsList(BaseTool):
         return ToolSchema(
             name="SessionsList",
             description=(
-                "List recent sessions for the current profile, ordered by "
-                "last-activity timestamp (newest first). Returns session rows "
-                "with id, title, platform, model, message_count, input_tokens, "
-                "output_tokens, vibe, created_at, last_active_at. Use this to "
-                "enumerate sessions before calling SessionsHistory or "
-                "SessionsStatus on a specific id."
+                "List recent conversation sessions for the current profile, "
+                "ordered by last-activity timestamp (newest first).\n"
+                "\n"
+                "Use this when:\n"
+                "  - The user references 'last time we talked' / 'the conversation about X'\n"
+                "  - You need to find a session id before calling SessionsHistory\n"
+                "  - You want a quick chronological overview of recent activity\n"
+                "\n"
+                "Do NOT use this for:\n"
+                "  - Searching past notes/messages by topic — use Recall (FTS over content)\n"
+                "  - Reading stable facts from MEMORY.md — use Memory\n"
+                "  - Reading the actual messages of a session — use SessionsHistory\n"
+                "\n"
+                "Returns session rows with id, title, platform, model, message_count, "
+                "input_tokens, output_tokens, vibe, created_at, last_active_at."
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "limit": {
                         "type": "integer",
@@ -81,6 +95,10 @@ class SessionsHistory(BaseTool):
 
     parallel_safe = True
 
+    # Item 3 (2026-05-02): schema enumerated; closed.
+
+    strict_mode = True
+
     def __init__(self, db: SessionDB | None = None) -> None:
         self._db = db if db is not None else _resolve_default_db()
 
@@ -89,15 +107,24 @@ class SessionsHistory(BaseTool):
         return ToolSchema(
             name="SessionsHistory",
             description=(
-                "Read the most recent messages from a specific session by id. "
-                "Returns up to ``limit`` messages (default 30) with role, "
-                "content, and tool_call/tool_result fields. Use after "
-                "SessionsList to fetch the actual conversation content of a "
-                "prior session — useful for quoting earlier turns or recalling "
-                "context."
+                "Read the most recent messages from a specific session by id.\n"
+                "\n"
+                "Use this when:\n"
+                "  - You have a session_id (from SessionsList or Recall.search) and need\n"
+                "    the actual conversation transcript\n"
+                "  - The user wants to quote or recall context from a specific past chat\n"
+                "\n"
+                "Do NOT use this for:\n"
+                "  - Searching across all sessions by topic — use Recall.search\n"
+                "  - Listing recent sessions chronologically — use SessionsList\n"
+                "  - Quick stats without messages — use SessionsStatus\n"
+                "\n"
+                "Returns up to ``limit`` messages (default 30) with role, content, "
+                "and tool_call/tool_result fields."
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "session_id": {
                         "type": "string",
@@ -128,6 +155,10 @@ class SessionsStatus(BaseTool):
 
     parallel_safe = True
 
+    # Item 3 (2026-05-02): schema enumerated; closed.
+
+    strict_mode = True
+
     def __init__(self, db: SessionDB | None = None) -> None:
         self._db = db if db is not None else _resolve_default_db()
 
@@ -136,15 +167,24 @@ class SessionsStatus(BaseTool):
         return ToolSchema(
             name="SessionsStatus",
             description=(
-                "Get metadata for a specific session by id: title, platform, "
-                "model, message_count, input_tokens, output_tokens, vibe, "
-                "created_at, last_active_at. Returns is_error=True with a clear "
-                "message when the session id is not found in this profile's "
-                "SessionDB. Use to check session existence or quick stats "
-                "without loading the full message history."
+                "Get metadata for a specific session by id (no message bodies).\n"
+                "\n"
+                "Use this when:\n"
+                "  - You need session-level stats (token usage, message count, vibe)\n"
+                "  - Verifying a session exists before calling SessionsHistory\n"
+                "\n"
+                "Do NOT use this for:\n"
+                "  - Reading the actual messages — use SessionsHistory\n"
+                "  - Listing many sessions — use SessionsList\n"
+                "\n"
+                "Returns: title, platform, model, message_count, input_tokens, "
+                "output_tokens, vibe, created_at, last_active_at. Returns is_error=True "
+                "with a clear message when the session id is not found in this profile's "
+                "SessionDB."
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "session_id": {
                         "type": "string",

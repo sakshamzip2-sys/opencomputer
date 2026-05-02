@@ -16,7 +16,6 @@ multimodal can come in a follow-up commit if demand surfaces.
 from __future__ import annotations
 
 import base64
-import os
 from pathlib import Path
 
 import httpx
@@ -103,68 +102,51 @@ async def analyze_image_bytes(
     image_b64: str,
     mime: str,
     prompt: str,
-    api_key: str,
+    api_key: str | None = None,
     model: str = DEFAULT_MODEL,
     max_tokens: int = 1024,
 ) -> str | tuple[str, bool]:
-    """Send a base64-encoded image + prompt to Anthropic vision; return text.
+    """Send a base64-encoded image + prompt through the user's configured
+    provider's vision capability; return text.
 
-    Goes through the SAME ``AsyncAnthropic`` SDK + same auth resolution
-    as the chat layer (extensions/anthropic-provider/provider.py). One
-    code path to Anthropic, not two: any future fix to base-URL or
-    auth-mode handling that lands on the chat side carries over here
-    via :func:`_build_anthropic_async_client`.
+    Routes through ``aux_llm.complete_vision`` so vision works on any
+    provider that supports image-content (anthropic, openai-compat with
+    vision models, gemini). Providers without vision raise — caller
+    receives a clean ``(error_string, True)`` 2-tuple.
+
+    The ``api_key`` parameter is accepted for backwards compatibility
+    with callers that used to pass an Anthropic key, but is now ignored:
+    the configured provider plugin owns its own auth.
 
     Returns the text response on success, or ``(error_string, True)`` on
     failure. The 2-tuple signature matches the legacy
     ``VisionAnalyzeTool._call_anthropic`` so error-path branches stay
     identical between the helper and its wrapper.
     """
-    client = _build_anthropic_async_client(api_key)
+    del api_key  # accepted for back-compat; provider plugin owns its auth
+
+    from opencomputer.agent.aux_llm import complete_vision
+
     try:
-        resp = await client.messages.create(
-            model=model,
+        text = await complete_vision(
+            image_base64=image_b64,
+            mime_type=mime,
+            prompt=prompt,
             max_tokens=max_tokens,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": mime,
-                                "data": image_b64,
-                            },
-                        },
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
+            model=model,
         )
-    except Exception as e:  # noqa: BLE001 — surface any SDK error as text
+    except Exception as e:  # noqa: BLE001 — surface any provider error as text
         return (f"vision API call failed: {type(e).__name__}: {e}", True)
 
-    # Anthropic SDK returns objects with a ``content`` list of typed blocks.
-    text_parts: list[str] = []
-    for block in getattr(resp, "content", []) or []:
-        block_type = getattr(block, "type", None) or (
-            block.get("type") if isinstance(block, dict) else None
-        )
-        if block_type != "text":
-            continue
-        text = getattr(block, "text", None)
-        if text is None and isinstance(block, dict):
-            text = block.get("text")
-        if text:
-            text_parts.append(str(text))
-    if not text_parts:
+    if not text:
         return ("vision API returned no text content", True)
-    return "".join(text_parts)
+    return text
 
 
 class VisionAnalyzeTool(BaseTool):
     parallel_safe = True  # API call is independent
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
 
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self._api_key = api_key
@@ -191,6 +173,7 @@ class VisionAnalyzeTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "image_url": {
                         "type": "string",
@@ -293,17 +276,11 @@ class VisionAnalyzeTool(BaseTool):
                 is_error=True,
             )
 
-        # API key
-        api_key = self._api_key or os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            return ToolResult(
-                tool_call_id=call.id,
-                content=(
-                    "no API key — set ANTHROPIC_API_KEY env var or pass "
-                    "api_key= to VisionAnalyzeTool"
-                ),
-                is_error=True,
-            )
+        # No API-key check here — the configured provider plugin owns
+        # its auth (anthropic, openai, gemini, etc.). If the user's
+        # provider doesn't support vision, the call below fails with a
+        # clean ``vision API call failed: ...`` message.
+        api_key = self._api_key  # back-compat; passed through but ignored
 
         # Resolve image bytes + mime
         if image_url:

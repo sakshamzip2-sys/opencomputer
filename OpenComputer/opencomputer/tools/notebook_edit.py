@@ -42,6 +42,8 @@ def _make_cell(cell_type: str, source: str) -> dict[str, Any]:
 class NotebookEditTool(BaseTool):
     # Not parallel-safe: edits a file in place.
     parallel_safe = False
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
 
     @property
     def schema(self) -> ToolSchema:
@@ -60,6 +62,7 @@ class NotebookEditTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "path": {
                         "type": "string",

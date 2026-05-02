@@ -31,6 +31,10 @@ class SendMessageTool(BaseTool):
 
     parallel_safe = True  # SQLite enqueue is serialized internally
 
+    # Item 3 (2026-05-02): schema enumerated; closed.
+
+    strict_mode = True
+
     def __init__(self, db_path: Path | None = None) -> None:
         """`db_path` overrides the sessions.db location (test injection).
 
@@ -54,6 +58,7 @@ class SendMessageTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "platform": {
                         "type": "string",

@@ -1,0 +1,23 @@
+{
+  "id": "nous-portal-provider",
+  "name": "Nous Portal",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Nous Portal (Nous Research subscription) — OAuth device-code flow. Reuses bundled openai-provider for inference; OAuth token storage via opencomputer.auth.",
+  "model_support": {
+    "model_prefixes": ["nous-", "hermes-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "nous-portal",
+        "auth_methods": ["oauth_device_code"],
+        "env_vars": ["NOUS_PORTAL_API_KEY"],
+        "label": "Nous Portal (Nous Research subscription, pay-per-use)",
+        "default_model": "Hermes-3-Llama-3.1-405B",
+        "signup_url": "https://portal.nousresearch.com"
+      }
+    ]
+  }
+}

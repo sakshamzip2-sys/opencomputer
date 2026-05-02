@@ -106,6 +106,13 @@ class Platform(str, Enum):
     EMAIL = "email"
     WEBHOOK = "webhook"
     HOMEASSISTANT = "homeassistant"
+    IRC = "irc"
+    WEIXIN = "weixin"
+    TEAMS = "teams"
+    DINGTALK = "dingtalk"
+    FEISHU = "feishu"
+    WECOM = "wecom"
+    YUANBAO = "yuanbao"
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,6 +439,8 @@ class StopReason(str, Enum):
     INTERRUPTED = "interrupted"  # user cancelled
     BUDGET_EXHAUSTED = "budget_exhausted"  # iteration budget spent
     ERROR = "error"  # unrecoverable error
+    PAUSE_TURN = "pause_turn"  # server-tool work paused; re-send to continue (cap 3)
+    REFUSAL = "refusal"  # model refused; surface as final, do not retry
 
 
 # ─── Plugin exceptions ─────────────────────────────────────────────────

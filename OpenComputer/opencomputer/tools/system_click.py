@@ -34,6 +34,8 @@ _MAX_COORD = 8000
 
 
 class SystemClickTool(BaseTool):
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
     """Inject a mouse click at absolute screen coordinates. Cross-platform."""
 
     parallel_safe: bool = False
@@ -65,6 +67,7 @@ class SystemClickTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "x": {
                         "type": "integer",
@@ -81,9 +84,8 @@ class SystemClickTool(BaseTool):
                     "button": {
                         "type": "string",
                         "enum": ["left", "right"],
-                        "default": "left",
                     },
-                    "double": {"type": "boolean", "default": False},
+                    "double": {"type": "boolean"},
                 },
                 "required": ["x", "y"],
             },

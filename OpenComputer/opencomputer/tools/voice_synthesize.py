@@ -20,6 +20,8 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 
 class VoiceSynthesizeTool(BaseTool):
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
     """Synthesize speech audio from text. Returns the file path."""
 
     parallel_safe: bool = True
@@ -47,6 +49,7 @@ class VoiceSynthesizeTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "text": {
                         "type": "string",
@@ -56,17 +59,14 @@ class VoiceSynthesizeTool(BaseTool):
                     "voice": {
                         "type": "string",
                         "description": "OpenAI TTS voice (alloy, echo, fable, onyx, nova, shimmer).",
-                        "default": "alloy",
                     },
                     "format": {
                         "type": "string",
                         "description": "Audio format (opus|mp3|aac|flac|wav|pcm).",
-                        "default": "opus",
                     },
                     "model": {
                         "type": "string",
                         "description": "TTS model (tts-1 or tts-1-hd).",
-                        "default": "tts-1",
                     },
                 },
                 "required": ["text"],

@@ -11,9 +11,21 @@ import pytest
 
 def _import_provider():
     mod_name = "_or_provider_caps"
-    if mod_name in sys.modules:
+    if mod_name in sys.modules and hasattr(sys.modules[mod_name], "OpenRouterProvider"):
         return sys.modules[mod_name]
     repo = Path(__file__).resolve().parent.parent
+    # The openrouter provider does ``from provider import OpenAIProvider`` at
+    # module load. When other tests have stuffed something else into
+    # sys.modules['provider'], that import resolves to the wrong module and
+    # OpenRouterProvider's class body never executes. Pre-stage the openai
+    # provider under the literal name 'provider' so the openrouter module's
+    # import succeeds regardless of test ordering.
+    openai_path = repo / "extensions" / "openai-provider" / "provider.py"
+    spec_oa = importlib.util.spec_from_file_location("provider", openai_path)
+    assert spec_oa is not None and spec_oa.loader is not None
+    mod_oa = importlib.util.module_from_spec(spec_oa)
+    sys.modules["provider"] = mod_oa
+    spec_oa.loader.exec_module(mod_oa)
     plugin_path = repo / "extensions" / "openrouter-provider" / "provider.py"
     spec = importlib.util.spec_from_file_location(mod_name, plugin_path)
     assert spec is not None and spec.loader is not None
