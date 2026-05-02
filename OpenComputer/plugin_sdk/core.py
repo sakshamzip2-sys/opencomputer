@@ -104,6 +104,7 @@ class Platform(str, Enum):
     FEISHU = "feishu"
     WECOM = "wecom"
     YUANBAO = "yuanbao"
+    QQBOT = "qqbot"
 
 
 @dataclass(frozen=True, slots=True)

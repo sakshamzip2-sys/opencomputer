@@ -1,0 +1,19 @@
+{
+  "id": "qqbot",
+  "name": "QQ Bot Open Platform",
+  "kind": "channel",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Tencent QQ Bot Open Platform integration. Outbound via api.sgroup.qq.com /v2/groups/{id}/messages or /v2/users/{id}/messages with QQBot-style Authorization header (appid + bot access_token). Token rotated against bots.qq.com/app/getAppAccessToken (2-hour TTL, 60s skew). Set QQBOT_APPID + QQBOT_SECRET. Inbound WebSocket gateway is a focused follow-up — this PR ships outbound.",
+  "default_enabled": false,
+  "model_support": null,
+  "setup": {
+    "channels": [
+      {
+        "id": "qqbot",
+        "label": "QQ Bot",
+        "env_vars": ["QQBOT_APPID", "QQBOT_SECRET"]
+      }
+    ]
+  }
+}
