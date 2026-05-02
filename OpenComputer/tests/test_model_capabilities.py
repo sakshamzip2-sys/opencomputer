@@ -51,9 +51,22 @@ def test_supports_adaptive_thinking(model: str, expected: bool) -> None:
     ("claude-sonnet-3-7", True),
     # Forward-default for unknown claude-*: assume modern (no temperature)
     ("claude-future-x", False),
-    # Non-claude unaffected
+    # OpenAI reasoning models reject temperature too
+    ("o1-preview", False),
+    ("o1", False),
+    ("o3-mini", False),
+    ("o3", False),
+    ("o4-mini", False),
+    ("gpt-5-thinking", False),
+    # OpenAI chat models keep temperature
     ("gpt-4o", True),
-    ("o1-preview", True),
+    ("gpt-4", True),
+    ("gpt-3.5-turbo", True),
+    # Local + other providers default to keeping temperature
+    ("llama-3-70b", True),
+    ("kimi-k2", True),
+    ("deepseek-chat", True),
+    ("ollama/qwen2:7b", True),
 ])
 def test_supports_temperature(model: str, expected: bool) -> None:
     assert supports_temperature(model) is expected
