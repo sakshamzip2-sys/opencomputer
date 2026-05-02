@@ -1,0 +1,8 @@
+{
+  "site_name": "job_change",
+  "accuracy": 1.0,
+  "parse_failure_rate": 0.0,
+  "timestamp": "2026-05-02T14:42:00.237745+00:00",
+  "model": "claude-sonnet-4-6",
+  "provider": "anthropic"
+}

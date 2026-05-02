@@ -547,6 +547,7 @@ class AnthropicProvider(BaseProvider):
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
         response_schema: dict | None = None,
+        site: str = "agent_loop",
     ) -> ProviderResponse:
         """Low-level complete using the given API key (pool-rotation target)."""
         # TS-T7 — short-circuit before the SDK so concurrent sessions
@@ -634,7 +635,7 @@ class AnthropicProvider(BaseProvider):
             raise
         t1 = time.monotonic()
         result = self._parse_response(resp)
-        self._emit_llm_event(model=model, usage=result.usage, t0=t0, t1=t1)
+        self._emit_llm_event(model=model, usage=result.usage, t0=t0, t1=t1, site=site)
         return result
 
     def _emit_llm_event(
@@ -687,6 +688,7 @@ class AnthropicProvider(BaseProvider):
         stream: bool = False,
         runtime_extras: dict | None = None,
         response_schema: dict | None = None,
+        site: str = "agent_loop",
     ) -> ProviderResponse:
         if self._credential_pool is None:
             return await self._do_complete(
@@ -699,6 +701,7 @@ class AnthropicProvider(BaseProvider):
                 temperature=temperature,
                 runtime_extras=runtime_extras,
                 response_schema=response_schema,
+                site=site,
             )
 
         def _is_auth_failure(exc: Exception) -> bool:
@@ -715,6 +718,7 @@ class AnthropicProvider(BaseProvider):
                 temperature=temperature,
                 runtime_extras=runtime_extras,
                 response_schema=response_schema,
+                site=site,
             ),
             is_auth_failure=_is_auth_failure,
         )
@@ -731,6 +735,7 @@ class AnthropicProvider(BaseProvider):
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
         response_schema: dict | None = None,
+        site: str = "agent_loop",
     ) -> ProviderResponse:
         """Low-level stream_complete that aggregates into a ProviderResponse (pool target)."""
         # TS-T7 — same cross-session guard as the non-streaming path.
@@ -813,7 +818,7 @@ class AnthropicProvider(BaseProvider):
             raise
         t1 = time.monotonic()
         result = self._parse_response(final)
-        self._emit_llm_event(model=model, usage=result.usage, t0=t0, t1=t1)
+        self._emit_llm_event(model=model, usage=result.usage, t0=t0, t1=t1, site=site)
         return result
 
     async def stream_complete(
@@ -827,6 +832,7 @@ class AnthropicProvider(BaseProvider):
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
         response_schema: dict | None = None,
+        site: str = "agent_loop",
     ) -> AsyncIterator[StreamEvent]:
         """Stream response events via Anthropic's `messages.stream()` context.
 

@@ -31,6 +31,7 @@ class ProviderShim:
                 messages=[Message(role="user", content=prompt)],
                 max_tokens=2048,
                 temperature=0.3,
+                site="eval_grader",
             )
         )
         # ProviderResponse.message.content is the assistant text.

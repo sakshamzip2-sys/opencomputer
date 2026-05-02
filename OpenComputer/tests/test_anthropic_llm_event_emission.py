@@ -87,6 +87,34 @@ async def test_complete_emits_llm_call_event(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_complete_threads_site_kwarg(tmp_path, monkeypatch):
+    """Caller-supplied site= must land in the recorded event."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-irrelevant")
+    monkeypatch.setenv("OPENCOMPUTER_PROFILE_HOME", str(tmp_path))
+
+    mod = _load_anthropic_provider()
+    provider = mod.AnthropicProvider()
+
+    mock_client = MagicMock()
+    mock_client.messages.create = AsyncMock(return_value=_fake_anthropic_response())
+    monkeypatch.setattr(provider, "client", mock_client)
+    monkeypatch.setattr(provider, "_credential_pool", None)
+
+    from plugin_sdk.core import Message
+
+    await provider.complete(
+        model="claude-sonnet-4-6",
+        messages=[Message(role="user", content="hi")],
+        site="eval_grader",
+    )
+
+    log = tmp_path / "llm_events.jsonl"
+    lines = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert lines[0]["site"] == "eval_grader"
+
+
+@pytest.mark.asyncio
 async def test_emit_swallows_sink_failures(tmp_path, monkeypatch):
     """If record_llm_call raises, the provider must not crash."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-irrelevant")

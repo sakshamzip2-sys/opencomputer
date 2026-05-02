@@ -1,0 +1,30 @@
+{"id": "jc_pos_001_linkedin_jobs_view", "input": {"url": "https://www.linkedin.com/jobs/view/3942756711", "title": "Senior Software Engineer at Anthropic"}, "expected": "yes"}
+{"id": "jc_pos_002_linkedin_jobs_collection", "input": {"url": "https://www.linkedin.com/jobs/collections/recommended", "title": "Recommended jobs - LinkedIn"}, "expected": "yes"}
+{"id": "jc_pos_003_indeed_viewjob", "input": {"url": "https://www.indeed.com/viewjob?jk=abc123def456", "title": "Backend Developer - Indeed"}, "expected": "yes"}
+{"id": "jc_pos_004_indeed_q_search", "input": {"url": "https://www.indeed.com/jobs?q=python+developer", "title": "python developer Jobs - Indeed.com"}, "expected": "yes"}
+{"id": "jc_pos_005_glassdoor_listing", "input": {"url": "https://www.glassdoor.com/job-listing/staff-engineer-acme-corp-JV_IC1147401.htm", "title": "Acme Corp Staff Engineer Job - Glassdoor"}, "expected": "yes"}
+{"id": "jc_pos_006_glassdoor_jobs", "input": {"url": "https://www.glassdoor.com/Jobs/index.htm", "title": "Search Jobs - Glassdoor"}, "expected": "yes"}
+{"id": "jc_pos_007_resignation_template", "input": {"url": "https://www.thebalance.com/resignation-letter-template-1918778", "title": "How to write a resignation letter (template)"}, "expected": "yes"}
+{"id": "jc_pos_008_severance_negotiation", "input": {"url": "https://hbr.org/2023/04/how-to-negotiate-your-severance-package", "title": "How to Negotiate Your Severance Package - HBR"}, "expected": "yes"}
+{"id": "jc_pos_009_unemployment_benefits", "input": {"url": "https://www.dol.gov/general/topic/unemployment-insurance", "title": "Unemployment Insurance | U.S. Department of Labor"}, "expected": "yes"}
+{"id": "jc_pos_010_notice_period_advice", "input": {"url": "https://www.shrm.org/articles/notice-period-best-practices", "title": "Notice period best practices for employees"}, "expected": "yes"}
+{"id": "jc_pos_011_linkedin_jobs_search", "input": {"url": "https://linkedin.com/jobs/search?keywords=ml+engineer", "title": "ml engineer jobs - LinkedIn"}, "expected": "yes"}
+{"id": "jc_pos_012_indeed_company", "input": {"url": "https://www.indeed.com/cmp/Anthropic/jobs", "title": "Anthropic Jobs - Indeed"}, "expected": "yes"}
+{"id": "jc_pos_013_glassdoor_overview_no_jobs", "input": {"url": "https://glassdoor.com/Overview/Working-at-Acme.htm", "title": "Working at Acme | Glassdoor"}, "expected": "yes"}
+{"id": "jc_pos_014_resignation_in_title", "input": {"url": "https://example.com/articles/2024/career-pivot", "title": "Tomorrow's resignation deadline what to know"}, "expected": "yes"}
+{"id": "jc_pos_015_severance_explainer", "input": {"url": "https://example.com/explainer/severance", "title": "Severance pay - what's typical?"}, "expected": "yes"}
+{"id": "jc_neg_001_linkedin_profile", "input": {"url": "https://www.linkedin.com/in/saksham", "title": "Saksham | LinkedIn profile"}, "expected": "no"}
+{"id": "jc_neg_002_linkedin_feed", "input": {"url": "https://www.linkedin.com/feed/", "title": "LinkedIn feed"}, "expected": "no"}
+{"id": "jc_neg_003_linkedin_post", "input": {"url": "https://www.linkedin.com/posts/saksham_just-shipped-a-thing-activity-7XXXX", "title": "Saksham on LinkedIn: Just shipped a thing"}, "expected": "no"}
+{"id": "jc_overfire_001_indeed_blog", "input": {"url": "https://www.indeed.com/career-advice/news/jobs-report", "title": "Latest US jobs report - Indeed Career Advice"}, "expected": "yes"}
+{"id": "jc_overfire_002_indeed_pay_guide", "input": {"url": "https://www.indeed.com/career-advice/pay-salary/average-salary", "title": "Average salary in 2024 - Indeed"}, "expected": "yes"}
+{"id": "jc_overfire_003_glassdoor_blog", "input": {"url": "https://glassdoor.com/blog/best-cities-to-work", "title": "Best cities to work in 2024 - Glassdoor blog"}, "expected": "yes"}
+{"id": "jc_neg_007_python_docs", "input": {"url": "https://docs.python.org/3/library/asyncio.html", "title": "asyncio — Asynchronous I/O — Python 3 docs"}, "expected": "no"}
+{"id": "jc_neg_008_news_general", "input": {"url": "https://www.bbc.com/news/world", "title": "BBC News - World"}, "expected": "no"}
+{"id": "jc_overfire_004_resignation_unrelated", "input": {"url": "https://example.com/articles/2024/resignation-of-prime-minister", "title": "Resignation of the Prime Minister - political news"}, "expected": "yes"}
+{"id": "jc_neg_010_unemployment_macro_no_term", "input": {"url": "https://www.bls.gov/news.release/empsit.toc.htm", "title": "Employment Situation - Bureau of Labor Statistics"}, "expected": "no"}
+{"id": "jc_neg_011_github_pulls", "input": {"url": "https://github.com/anthropics/claude-code/pulls", "title": "Pull requests · anthropics/claude-code"}, "expected": "no"}
+{"id": "jc_neg_012_stackoverflow", "input": {"url": "https://stackoverflow.com/questions/12345/how-to-fix-cors", "title": "How to fix CORS - Stack Overflow"}, "expected": "no"}
+{"id": "jc_overfire_005_severance_movie", "input": {"url": "https://www.imdb.com/title/tt11280740/", "title": "Severance (TV Series 2022– ) - IMDb"}, "expected": "yes"}
+{"id": "jc_neg_014_personal_blog", "input": {"url": "https://saksham.dev/posts/ml-musings", "title": "ML Musings"}, "expected": "no"}
+{"id": "jc_neg_015_homepage", "input": {"url": "https://example.com/", "title": "Welcome to Example"}, "expected": "no"}

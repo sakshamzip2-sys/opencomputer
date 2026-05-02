@@ -23,6 +23,29 @@ def test_provider_shim_bridges_async_to_sync():
     provider.complete.assert_awaited_once()
 
 
+def test_provider_shim_passes_site_eval_grader():
+    """ProviderShim must pass site='eval_grader' through to the provider so
+    'oc insights llm' attributes eval traffic separately from agent_loop."""
+    received_kwargs = {}
+
+    async def fake_complete(**kwargs):
+        received_kwargs.update(kwargs)
+        msg = MagicMock()
+        msg.content = "ok"
+        resp = MagicMock()
+        resp.message = msg
+        return resp
+
+    fake_provider = MagicMock()
+    fake_provider.complete = fake_complete
+
+    shim = ProviderShim(fake_provider, model="claude-sonnet-4-6")
+    result = shim.complete("test prompt")
+
+    assert result.text == "ok"
+    assert received_kwargs.get("site") == "eval_grader"
+
+
 def test_get_grader_provider_auto_picks_opus_when_chat_is_sonnet(monkeypatch):
     """If config says Sonnet, grader auto-picks Opus."""
     fake_config = MagicMock()

@@ -331,6 +331,7 @@ class BaseProvider(ABC):
         stream: bool = False,
         runtime_extras: dict | None = None,
         response_schema: JsonSchemaSpec | None = None,
+        site: str = "agent_loop",
     ) -> ProviderResponse:
         """Send messages to the provider, return a single ProviderResponse.
 
@@ -355,6 +356,14 @@ class BaseProvider(ABC):
         The eval harness's ``opencomputer.inference.parse_safely``
         wrapper provides typed-fallback parsing for callers on providers
         without native schema enforcement.
+
+        ``site`` is a free-form attribution string emitted by
+        ``record_llm_call`` into ``LLMCallEvent.site`` (Phase 4 of the
+        quality-foundation work, 2026-05-02). Default ``"agent_loop"``
+        covers the agent loop's untreated calls. The eval harness's
+        ``ProviderShim`` passes ``"eval_grader"``. Channel adapters or
+        skill code can pass their own identifier for per-site cost /
+        latency attribution in ``oc insights llm``.
         """
         ...
 
@@ -370,6 +379,7 @@ class BaseProvider(ABC):
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
         response_schema: JsonSchemaSpec | None = None,
+        site: str = "agent_loop",
     ) -> AsyncIterator[StreamEvent]:
         """Stream the response.
 
@@ -381,6 +391,8 @@ class BaseProvider(ABC):
         Streaming with structured outputs is supported by Anthropic;
         OpenAI partial-JSON streaming has more nuance (initial
         implementation may aggregate before yielding ``done``).
+
+        ``site`` — see :meth:`complete` for semantics.
         """
         ...
 

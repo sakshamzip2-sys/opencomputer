@@ -21,3 +21,18 @@ def test_baseprovider_stream_complete_accepts_response_schema_kwarg():
     sig = inspect.signature(BaseProvider.stream_complete)
     assert "response_schema" in sig.parameters
     assert sig.parameters["response_schema"].default is None
+
+
+def test_baseprovider_complete_accepts_site_kwarg():
+    """Phase 4 follow-up: site= kwarg lets callers attribute calls."""
+    import inspect
+    sig = inspect.signature(BaseProvider.complete)
+    assert "site" in sig.parameters
+    assert sig.parameters["site"].default == "agent_loop"
+
+
+def test_baseprovider_stream_complete_accepts_site_kwarg():
+    import inspect
+    sig = inspect.signature(BaseProvider.stream_complete)
+    assert "site" in sig.parameters
+    assert sig.parameters["site"].default == "agent_loop"
