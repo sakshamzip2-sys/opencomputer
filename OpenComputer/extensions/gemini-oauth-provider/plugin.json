@@ -1,0 +1,23 @@
+{
+  "id": "gemini-oauth-provider",
+  "name": "Gemini OAuth (Cloud Code Assist)",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Google Gemini via OAuth — uses Google's gemini-cli OAuth flow to access Cloud Code Assist (cloudcode-pa.googleapis.com). Run 'opencomputer auth login google' once to authenticate. NOTE: the Cloud Code Assist transport adapter is a follow-up; this plugin currently ships the OAuth credential layer only.",
+  "model_support": {
+    "model_prefixes": ["gemini-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "gemini-oauth",
+        "auth_methods": ["oauth_external"],
+        "env_vars": [],
+        "label": "Gemini OAuth (uses Google account — opens browser for consent)",
+        "default_model": "gemini-2.5-pro",
+        "signup_url": "https://aistudio.google.com"
+      }
+    ]
+  }
+}
