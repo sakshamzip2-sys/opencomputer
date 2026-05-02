@@ -210,6 +210,16 @@ def _strip_unsupported_constraints(node: Any) -> Any:
 
     Operates on an already-deep-copied node so the caller's input is never
     mutated.
+
+    Beyond stripping unsupported constraints, also INJECTS
+    ``additionalProperties: false`` on every object node — Anthropic's
+    strict tool validator returns 400 with "For 'object' type,
+    'additionalProperties' must be explicitly set to false" when this
+    field is missing. We unconditionally set it to ``False`` (the
+    Anthropic-canonical value); tools that previously used
+    ``additionalProperties: true`` or a sub-schema get downgraded to the
+    strict shape. This is consistent with how Anthropic's MCP/tool
+    schemas treat tool inputs.
     """
     if isinstance(node, dict):
         node_type = node.get("type")
@@ -222,6 +232,9 @@ def _strip_unsupported_constraints(node: Any) -> Any:
         elif node_type == "object":
             for key in _OBJECT_CONSTRAINT_KEYS:
                 node.pop(key, None)
+            # Anthropic requires every object node to declare this
+            # explicitly; missing field → 400. Always set to False.
+            node["additionalProperties"] = False
         for key, value in list(node.items()):
             node[key] = _strip_unsupported_constraints(value)
         return node

@@ -161,6 +161,53 @@ def test_strips_min_max_contains_from_array():
     assert "maxContains" not in out
 
 
+def test_injects_additional_properties_false_on_object():
+    """Anthropic 400s without `additionalProperties: false` on objects."""
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+    }
+    out = strip_anthropic_unsupported_constraints(schema)
+    assert out["additionalProperties"] is False
+
+
+def test_overwrites_additional_properties_true_with_false():
+    """Tools that explicitly set additionalProperties: true get downgraded."""
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "additionalProperties": True,
+    }
+    out = strip_anthropic_unsupported_constraints(schema)
+    assert out["additionalProperties"] is False
+
+
+def test_overwrites_additional_properties_subschema_with_false():
+    """A sub-schema additionalProperties also gets downgraded to strict."""
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "additionalProperties": {"type": "string"},
+    }
+    out = strip_anthropic_unsupported_constraints(schema)
+    assert out["additionalProperties"] is False
+
+
+def test_injects_additional_properties_on_nested_object():
+    schema = {
+        "type": "object",
+        "properties": {
+            "config": {
+                "type": "object",
+                "properties": {"k": {"type": "string"}},
+            },
+        },
+    }
+    out = strip_anthropic_unsupported_constraints(schema)
+    assert out["additionalProperties"] is False
+    assert out["properties"]["config"]["additionalProperties"] is False
+
+
 def test_strips_min_max_properties_from_object():
     schema = {
         "type": "object",
@@ -328,6 +375,10 @@ def _walk_assert_no_numeric_constraints(node):
                 assert forbidden not in node, (
                     f"{forbidden!r} still present on {node.get('type')}: {node!r}"
                 )
+        if node.get("type") == "object":
+            assert node.get("additionalProperties") is False, (
+                f"object node missing additionalProperties: false — {node!r}"
+            )
         for v in node.values():
             _walk_assert_no_numeric_constraints(v)
     elif isinstance(node, list):
