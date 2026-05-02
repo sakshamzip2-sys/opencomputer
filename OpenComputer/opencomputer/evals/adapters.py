@@ -65,8 +65,14 @@ def adapter_instruction_detector(case_input: dict[str, Any]) -> str:
 
     case_input shape: {"text": str}
     Returns: "yes" or "no".
-    """
-    from opencomputer.security.instruction_detector import InstructionDetector
 
-    detector = InstructionDetector()
-    return "yes" if detector.is_injection(case_input["text"]) else "no"
+    Uses the existing detect() API; no production-side shim needed.
+    """
+    from opencomputer.security.instruction_detector import (
+        InstructionDetector,
+        InstructionDetectorConfig,
+    )
+
+    detector = InstructionDetector(InstructionDetectorConfig(enabled=True))
+    verdict = detector.detect(case_input["text"])
+    return "yes" if verdict.is_instruction_like else "no"
