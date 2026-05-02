@@ -37,13 +37,15 @@ Expected: empty output (no parallel-session edits to these files). If any commit
 **Files:**
 - Modify: `extensions/browser-control/browser.py` — add CDP-attach helper function
 
-- [ ] **Step 1: Read current `browser.py` shape**
+- [ ] **Step 0: Verify Playwright import path + existing function names**
 
 ```bash
-grep -n "^class \|^def \|async def \|playwright\|chromium\.launch" extensions/browser-control/browser.py | head -20
+grep -n "from playwright\|^class \|^def \|async def \|chromium\.launch\|connect_over_cdp" extensions/browser-control/browser.py | head -20
 ```
 
-Expected: identifies the `chromium.launch(...)` call and the function/class wrapping it.
+Expected: identifies (a) the exact Playwright import path used (`from playwright.async_api import async_playwright`), (b) the entry point function name (e.g. `get_browser`, `BrowserManager.get_browser`, `_browser_singleton`), and (c) any existing kwargs on the `chromium.launch()` call (like `headless=`) that the CDP path must NOT override.
+
+If the entry point is a method on a class, adapt the test + implementation accordingly. If `chromium.launch()` has kwargs like `headless=False`, preserve them in the launch fallback path.
 
 - [ ] **Step 2: Write failing test**
 
@@ -1187,7 +1189,14 @@ import httpx
 
 
 def httpx_fetcher(url: str) -> Any:
-    """GET + parse JSON; raise on non-2xx."""
+    """GET + parse JSON; raise on non-2xx.
+
+    NOTE: this is a SYNC fetcher. Calling it from inside an async context
+    (e.g. the agent loop) would block the event loop. v1 callers are CLI
+    commands which are sync. For async callers, future work adds an
+    async fetcher built on httpx.AsyncClient or routes through a
+    Playwright page.
+    """
     resp = httpx.get(url, follow_redirects=True, timeout=15.0)
     resp.raise_for_status()
     ct = resp.headers.get("content-type", "")
@@ -1625,8 +1634,10 @@ def run(
 ):
     """Run a recipe: 'oc browser run <site> <verb>'.
 
-    Top-level positional shortcut is also handled by the catch-all
-    in cli.py — this is the explicit form.
+    NOTE on '--llm-fallback': v1 ships this flag as a STUB that exits 2
+    with a "not yet implemented" message. Phase 5 (next-session) wires
+    the real LLM-fallback path. Default behaviour (no flag, missing
+    recipe) is exit 1 with helpful options.
     """
     from opencomputer.recipes import run_recipe
     from opencomputer.recipes.fetcher import httpx_fetcher
