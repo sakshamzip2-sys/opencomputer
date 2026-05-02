@@ -204,6 +204,46 @@ Body.
     assert not any(i.rule == "description.voice" for i in report.warnings)
 
 
+def test_body_size_warning_over_500_lines():
+    body = "Line.\n" * 600
+    text = f"""---
+name: big-skill
+description: A description that's long enough for the existing validator. Use when needed.
+version: 0.1.0
+---
+
+{body}"""
+    report = validate_skill_md(text, strict=True)
+    assert any(i.rule == "body.size_warn" for i in report.warnings)
+
+
+def test_body_size_no_warning_under_500_lines():
+    body = "Line.\n" * 400
+    text = f"""---
+name: small-skill
+description: A description that's long enough for the existing validator. Use when needed.
+version: 0.1.0
+---
+
+{body}"""
+    report = validate_skill_md(text, strict=True)
+    assert not any(i.rule == "body.size_warn" for i in report.warnings)
+
+
+def test_body_size_exempt_when_review_date_present():
+    body = "Line.\n" * 600
+    text = f"""---
+name: big-but-reviewed
+description: A description that's long enough for the existing validator. Use when needed.
+version: 0.1.0
+size_review_date: 2026-05-02
+---
+
+{body}"""
+    report = validate_skill_md(text, strict=True)
+    assert not any(i.rule == "body.size_warn" for i in report.warnings)
+
+
 VALID = """---
 name: pead-screener
 description: Screen post-earnings gap-up stocks for PEAD setups

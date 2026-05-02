@@ -312,6 +312,26 @@ def _check_description_voice(description, report: ValidationReport) -> None:
         ))
 
 
+BODY_SIZE_LIMIT = 500
+
+
 def _check_body_size(body: str, parsed: dict, report: ValidationReport) -> None:
-    """Stub — implemented in Task 6."""
-    pass
+    """Warn if SKILL.md body exceeds 500 lines.
+
+    Suppressed if frontmatter contains `size_review_date: <ISO date>`,
+    which indicates a documented exemption.
+    """
+    if parsed.get("size_review_date"):
+        return  # documented exemption
+    line_count = body.count("\n")
+    if line_count > BODY_SIZE_LIMIT:
+        report.warnings.append(ValidationIssue(
+            rule="body.size_warn",
+            severity="warning",
+            field=None,
+            message=(
+                f"body has {line_count} lines, exceeds {BODY_SIZE_LIMIT}-line "
+                "guideline (split into reference files OR add "
+                "`size_review_date` frontmatter to document exemption)"
+            ),
+        ))
