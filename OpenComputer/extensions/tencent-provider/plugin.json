@@ -13,7 +13,7 @@
       {
         "id": "tencent",
         "auth_methods": ["api_key"],
-        "env_vars": ["TENCENT_API_KEY"],
+        "env_vars": ["TOKENHUB_API_KEY"],
         "label": "Tencent TokenHub (Hunyuan + multi-model — direct API)",
         "default_model": "hunyuan-pro",
         "signup_url": "https://tokenhub.tencentmaas.com"

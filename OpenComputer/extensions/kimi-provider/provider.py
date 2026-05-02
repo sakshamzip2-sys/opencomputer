@@ -22,7 +22,7 @@ DEFAULT_KIMI_BASE_URL = "https://api.moonshot.ai/v1"
 class KimiProvider(OpenAIProvider):
     name = "kimi"
     default_model = "moonshot-v1-128k"
-    _api_key_env: str = "MOONSHOT_API_KEY"
+    _api_key_env: str = "KIMI_API_KEY"
 
     def __init__(
         self,
@@ -36,7 +36,7 @@ class KimiProvider(OpenAIProvider):
             )
         resolved_base = (
             base_url
-            or os.environ.get("MOONSHOT_BASE_URL")
+            or os.environ.get("KIMI_BASE_URL")
             or DEFAULT_KIMI_BASE_URL
         )
         super().__init__(api_key=api_key, base_url=resolved_base)

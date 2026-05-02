@@ -45,8 +45,11 @@ def _load_provider_class(plugin_dirname: str, class_name: str):
 COHORT = [
     ("xai-provider",       "XAIProvider",       "xai",       "XAI_API_KEY",       "api.x.ai"),
     ("zai-provider",       "ZAIProvider",       "zai",       "ZAI_API_KEY",       "open.bigmodel.cn"),
-    ("kimi-provider",      "KimiProvider",      "kimi",      "MOONSHOT_API_KEY",  "api.moonshot.ai"),
-    ("minimax-provider",   "MiniMaxProvider",   "minimax",   "MINIMAX_API_KEY",   "api.minimax.io"),
+    ("kimi-provider",      "KimiProvider",      "kimi",      "KIMI_API_KEY",      "api.moonshot.ai"),
+    # MiniMax removed in P1.fixes — Hermes uses anthropic_messages transport,
+    # not openai_chat. OpenAIProvider subclass would 400 at runtime. Re-add
+    # when OC's anthropic-provider supports configurable base_url + custom
+    # api_key_env.
     ("dashscope-provider", "DashScopeProvider", "dashscope", "DASHSCOPE_API_KEY", "dashscope.aliyuncs.com"),
 ]
 
@@ -104,7 +107,9 @@ def test_plugin_manifest_declares_correct_setup_provider(
     assert manifest["entry"] == "plugin"
     setup = manifest["setup"]["providers"][0]
     assert setup["id"] == expected_id
-    assert setup["env_vars"] == [env_var]
+    # First env var is canonical; some providers (Z.AI, Kimi) accept
+    # legacy aliases as additional entries.
+    assert setup["env_vars"][0] == env_var
 
 
 def test_all_five_providers_appear_in_wizard_discovery():
@@ -113,6 +118,6 @@ def test_all_five_providers_appear_in_wizard_discovery():
         _discover_providers,
     )
     discovered_ids = {p["name"] for p in _discover_providers()}
-    expected = {"xai", "zai", "kimi", "minimax", "dashscope"}
+    expected = {"xai", "zai", "kimi", "dashscope"}
     missing = expected - discovered_ids
     assert not missing, f"providers missing from wizard discovery: {missing}"

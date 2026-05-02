@@ -35,7 +35,7 @@ def _load_provider_class(plugin_dirname: str, class_name: str):
 COHORT = [
     ("ollama-cloud-provider",  "OllamaCloudProvider",  "ollama-cloud",  "OLLAMA_API_KEY",       "ollama.com"),
     ("gmi-provider",           "GMIProvider",          "gmi",           "GMI_API_KEY",          "gmi-serving.com"),
-    ("kilo-provider",          "KiloProvider",         "kilo",          "KILO_API_KEY",         "kilocode.ai"),
+    ("kilo-provider",          "KiloProvider",         "kilo",          "KILOCODE_API_KEY",     "kilo.ai"),
     ("opencode-zen-provider",  "OpenCodeZenProvider",  "opencode-zen",  "OPENCODE_ZEN_API_KEY", "opencode.ai"),
     ("opencode-go-provider",   "OpenCodeGoProvider",   "opencode-go",   "OPENCODE_GO_API_KEY",  "opencode.ai"),
 ]

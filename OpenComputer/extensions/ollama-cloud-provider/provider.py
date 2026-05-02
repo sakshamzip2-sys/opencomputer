@@ -16,7 +16,7 @@ if str(_OPENAI_PROVIDER_DIR) not in sys.path:
 
 from provider import OpenAIProvider  # type: ignore[import-not-found]  # noqa: E402
 
-DEFAULT_OLLAMA_BASE_URL = "https://ollama.com/api/v1"
+DEFAULT_OLLAMA_BASE_URL = "https://ollama.com/v1"
 
 
 class OllamaCloudProvider(OpenAIProvider):

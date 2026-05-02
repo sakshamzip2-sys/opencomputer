@@ -13,7 +13,7 @@
       {
         "id": "arcee",
         "auth_methods": ["api_key"],
-        "env_vars": ["ARCEE_API_KEY"],
+        "env_vars": ["ARCEEAI_API_KEY"],
         "label": "Arcee AI (Trinity / distilled models — direct API)",
         "default_model": "arcee-trinity",
         "signup_url": "https://www.arcee.ai"

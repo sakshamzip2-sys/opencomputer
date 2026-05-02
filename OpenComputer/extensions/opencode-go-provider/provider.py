@@ -16,7 +16,7 @@ if str(_OPENAI_PROVIDER_DIR) not in sys.path:
 
 from provider import OpenAIProvider  # type: ignore[import-not-found]  # noqa: E402
 
-DEFAULT_OPENCODE_GO_BASE_URL = "https://opencode.ai/go/v1"
+DEFAULT_OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
 
 
 class OpenCodeGoProvider(OpenAIProvider):

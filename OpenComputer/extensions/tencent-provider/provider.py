@@ -16,13 +16,13 @@ if str(_OPENAI_PROVIDER_DIR) not in sys.path:
 
 from provider import OpenAIProvider  # type: ignore[import-not-found]  # noqa: E402
 
-DEFAULT_TENCENT_BASE_URL = "https://api.lkeap.cloud.tencent.com/v1"
+DEFAULT_TENCENT_BASE_URL = "https://tokenhub.tencentmaas.com/v1"
 
 
 class TencentProvider(OpenAIProvider):
     name = "tencent"
     default_model = "hunyuan-pro"
-    _api_key_env: str = "TENCENT_API_KEY"
+    _api_key_env: str = "TOKENHUB_API_KEY"
 
     def __init__(
         self,
@@ -36,7 +36,7 @@ class TencentProvider(OpenAIProvider):
             )
         resolved_base = (
             base_url
-            or os.environ.get("TENCENT_BASE_URL")
+            or os.environ.get("TOKENHUB_BASE_URL")
             or DEFAULT_TENCENT_BASE_URL
         )
         super().__init__(api_key=api_key, base_url=resolved_base)

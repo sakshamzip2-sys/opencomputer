@@ -16,13 +16,13 @@ if str(_OPENAI_PROVIDER_DIR) not in sys.path:
 
 from provider import OpenAIProvider  # type: ignore[import-not-found]  # noqa: E402
 
-DEFAULT_ARCEE_BASE_URL = "https://conductor.arcee.ai/v1"
+DEFAULT_ARCEE_BASE_URL = "https://api.arcee.ai/api/v1"
 
 
 class ArceeProvider(OpenAIProvider):
     name = "arcee"
     default_model = "arcee-trinity"
-    _api_key_env: str = "ARCEE_API_KEY"
+    _api_key_env: str = "ARCEEAI_API_KEY"
 
     def __init__(
         self,
@@ -36,7 +36,8 @@ class ArceeProvider(OpenAIProvider):
             )
         resolved_base = (
             base_url
-            or os.environ.get("ARCEE_BASE_URL")
+            or os.environ.get("ARCEEAI_BASE_URL")
+            or os.environ.get("ARCEE_BASE_URL")  # legacy alias
             or DEFAULT_ARCEE_BASE_URL
         )
         super().__init__(api_key=api_key, base_url=resolved_base)

@@ -13,7 +13,7 @@
       {
         "id": "zai",
         "auth_methods": ["api_key"],
-        "env_vars": ["ZAI_API_KEY"],
+        "env_vars": ["ZAI_API_KEY", "GLM_API_KEY", "Z_AI_API_KEY"],
         "label": "Z.AI / GLM (Zhipu models — direct API)",
         "default_model": "glm-4-plus",
         "signup_url": "https://open.bigmodel.cn"

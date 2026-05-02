@@ -10,7 +10,7 @@
       {
         "id": "kilo",
         "auth_methods": ["api_key"],
-        "env_vars": ["KILO_API_KEY"],
+        "env_vars": ["KILOCODE_API_KEY"],
         "label": "Kilo Code (Kilo Gateway API)",
         "default_model": "anthropic/claude-sonnet-4-6",
         "signup_url": "https://kilocode.ai"

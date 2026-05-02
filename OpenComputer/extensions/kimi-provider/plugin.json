@@ -13,7 +13,7 @@
       {
         "id": "kimi",
         "auth_methods": ["api_key"],
-        "env_vars": ["MOONSHOT_API_KEY"],
+        "env_vars": ["KIMI_API_KEY", "KIMI_CODING_API_KEY"],
         "label": "Kimi / Moonshot (direct API)",
         "default_model": "moonshot-v1-128k",
         "signup_url": "https://platform.moonshot.ai/console/api-keys"

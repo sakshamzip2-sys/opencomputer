@@ -16,13 +16,13 @@ if str(_OPENAI_PROVIDER_DIR) not in sys.path:
 
 from provider import OpenAIProvider  # type: ignore[import-not-found]  # noqa: E402
 
-DEFAULT_KILO_BASE_URL = "https://kilocode.ai/api/openrouter/v1"
+DEFAULT_KILO_BASE_URL = "https://api.kilo.ai/api/gateway"
 
 
 class KiloProvider(OpenAIProvider):
     name = "kilo"
     default_model = "anthropic/claude-sonnet-4-6"
-    _api_key_env: str = "KILO_API_KEY"
+    _api_key_env: str = "KILOCODE_API_KEY"
 
     def __init__(
         self,
@@ -36,7 +36,7 @@ class KiloProvider(OpenAIProvider):
             )
         resolved_base = (
             base_url
-            or os.environ.get("KILO_BASE_URL")
+            or os.environ.get("KILOCODE_BASE_URL")
             or DEFAULT_KILO_BASE_URL
         )
         super().__init__(api_key=api_key, base_url=resolved_base)
