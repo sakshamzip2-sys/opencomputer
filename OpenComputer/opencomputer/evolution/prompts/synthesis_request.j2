@@ -11,12 +11,22 @@ Draft a SKILL.md that codifies a *reusable* workflow for this pattern.
 
 Your output is a JSON object with three fields:
 
-1. `name` — slug-style, lowercase, hyphenated. Distinctive — must NOT
-   duplicate any of these existing skill names: {{ existing_names | join(", ") }}.
+1. `name` — slug-style, lowercase + hyphens only, ≤50 chars. **Use gerund
+   form** — `processing-pdfs` not `pdf-helper`; `analyzing-spreadsheets`
+   not `excel-utility`. Distinctive — must NOT duplicate any of these
+   existing skill names: {{ existing_names | join(", ") }}.
+   Must NOT contain reserved words: anthropic, claude.
 
-2. `description` — ONE line, ≤ 200 characters. Must contain
-   distinctive trigger tokens so the activation matcher fires on
-   relevant prompts. Lead with "Use when...".
+2. `description` — ONE line, ≤280 characters. **Third-person voice** —
+   describe what the skill does, like a system describing itself:
+   "Processes...", "Synthesizes...", "Generates...".
+   Never start with "I", "You", "We", "Let me", "I can help".
+   Must include BOTH:
+     - WHAT the skill does (the action verb phrase)
+     - WHEN to use it (a "Use when..." clause)
+   Pattern: "<3rd-person verb phrase>. Use when <trigger condition>."
+   Example: "Synthesizes git commit messages from staged diffs.
+            Use when the user asks for help writing commit messages."
 
 3. `body` — markdown body (NO frontmatter — the caller synthesizes
    that from `name` and `description`). Must include:
@@ -34,5 +44,8 @@ Hard rules — must NOT include:
 - Shell commands that delete data (`rm -rf`, `format`, `eject`, etc.).
 - Personally identifying info from the samples (names, emails,
   IPs, secrets).
+- **Time-sensitive content** like "after August 2025" or "before next
+  quarter". If you must reference a deprecated approach, use a
+  collapsible "Old patterns" section instead.
 
 Concise + opinionated > verbose + hedged.
