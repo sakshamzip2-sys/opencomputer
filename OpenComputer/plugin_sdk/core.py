@@ -98,6 +98,7 @@ class Platform(str, Enum):
     WEBHOOK = "webhook"
     HOMEASSISTANT = "homeassistant"
     IRC = "irc"
+    WEIXIN = "weixin"
     TEAMS = "teams"
     DINGTALK = "dingtalk"
     FEISHU = "feishu"
