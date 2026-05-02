@@ -316,6 +316,9 @@ def _register_builtin_tools() -> None:
     registry.register(SessionsList())
     registry.register(SessionsHistory())
     registry.register(SessionsStatus())
+    # NOTE: SessionSearchTool already registered by AgentLoop at runtime
+    # (see opencomputer/agent/loop.py:533) with the MemoryContext it needs.
+    # Do NOT add a duplicate registration here.
     # G.1 — Cron jobs (Tier 1.1 of Sub-project G — see plan
     # ~/.claude/plans/toasty-wiggling-eclipse.md). Capability-claimed
     # through F1 ConsentGate so the agent can self-schedule with consent.
