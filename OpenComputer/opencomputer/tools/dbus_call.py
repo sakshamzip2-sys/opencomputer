@@ -77,7 +77,6 @@ class DBusCallTool(BaseTool):
                     "args": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "default": [],
                     },
                 },
                 "required": ["bus", "destination", "object_path", "interface", "method"],

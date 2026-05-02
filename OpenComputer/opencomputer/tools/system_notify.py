@@ -62,13 +62,11 @@ class SystemNotifyTool(BaseTool):
                     "body": {
                         "type": "string",
                         "description": f"Notification body (≤{_MAX_BODY} chars).",
-                        "default": "",
                         "maxLength": _MAX_BODY,
                     },
                     "urgency": {
                         "type": "string",
                         "enum": list(_VALID_URGENCY),
-                        "default": "normal",
                         "description": "Linux only; ignored on others.",
                     },
                 },

@@ -59,17 +59,14 @@ class VoiceSynthesizeTool(BaseTool):
                     "voice": {
                         "type": "string",
                         "description": "OpenAI TTS voice (alloy, echo, fable, onyx, nova, shimmer).",
-                        "default": "alloy",
                     },
                     "format": {
                         "type": "string",
                         "description": "Audio format (opus|mp3|aac|flac|wav|pcm).",
-                        "default": "opus",
                     },
                     "model": {
                         "type": "string",
                         "description": "TTS model (tts-1 or tts-1-hd).",
-                        "default": "tts-1",
                     },
                 },
                 "required": ["text"],

@@ -84,9 +84,8 @@ class SystemClickTool(BaseTool):
                     "button": {
                         "type": "string",
                         "enum": ["left", "right"],
-                        "default": "left",
                     },
-                    "double": {"type": "boolean", "default": False},
+                    "double": {"type": "boolean"},
                 },
                 "required": ["x", "y"],
             },

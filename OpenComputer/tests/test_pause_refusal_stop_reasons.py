@@ -108,11 +108,45 @@ async def test_pause_turn_cap_exceeded_exits_with_warning(tmp_path, caplog):
     with caplog.at_level("WARNING"):
         await loop.run_conversation("test query")
 
-    # 1 initial + 2 successful re-sends + 1 cap-trigger = 3 (since 3rd call is the cap)
-    # Actually: counter starts 0, goes 1, 2, 3 — at 3 we cap. So 3 provider calls total.
-    # But the test scripts 5 responses; if more than 3 are consumed it's a bug.
-    assert provider.calls <= 4
+    # Counter starts 0; each pause_turn bumps it. Cap fires when counter
+    # reaches 3 — at which point the 3rd pause is forced to END_TURN and the
+    # loop exits without re-sending. Sequence:
+    #   call 1 → counter=1 (continue), call 2 → counter=2 (continue),
+    #   call 3 → counter=3 (cap → END_TURN, no further calls).
+    # So exactly 3 provider calls; never 4 or more.
+    assert provider.calls == 3, (
+        f"expected exactly 3 provider calls (cap fires on 3rd pause), got {provider.calls}"
+    )
     assert any("pause_turn" in r.message.lower() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_pause_turn_counter_resets_between_conversations(tmp_path):
+    """B1 fix (2026-05-02): _pause_turn_count must reset per run_conversation.
+
+    Without the reset, a long-lived AgentLoop (gateway/daemon) handling
+    sequential conversations would leak the counter — session B could start
+    with cap=1 or 2 already and force premature END_TURN.
+    """
+    # First conversation: 2 pause_turn responses (below cap), then end_turn.
+    provider = _ScriptedProvider([
+        _resp("pause_turn", "p1a"),
+        _resp("pause_turn", "p1b"),
+        _resp("end_turn", "Done first."),
+        # Second conversation: 2 pause_turn (would hit cap 4 if counter leaked)
+        # then end_turn. With reset, counter starts fresh; both pauses succeed.
+        _resp("pause_turn", "p2a"),
+        _resp("pause_turn", "p2b"),
+        _resp("end_turn", "Done second."),
+    ])
+    loop = _make_loop(provider, tmp_path)
+
+    r1 = await loop.run_conversation("first")
+    r2 = await loop.run_conversation("second")
+
+    assert provider.calls == 6
+    assert "Done first" in (r1.final_message.content or "")
+    assert "Done second" in (r2.final_message.content or "")
 
 
 @pytest.mark.asyncio

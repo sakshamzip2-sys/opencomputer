@@ -90,14 +90,12 @@ class AppleScriptRunTool(BaseTool):
                     "dry_run": {
                         "type": "boolean",
                         "description": "If true, return the script without running it.",
-                        "default": False,
                     },
                     "timeout_seconds": {
                         "type": "integer",
                         "description": "Wall-clock cap (1-60, default 15).",
                         "minimum": 1,
                         "maximum": 60,
-                        "default": 15,
                     },
                 },
                 "required": ["script"],

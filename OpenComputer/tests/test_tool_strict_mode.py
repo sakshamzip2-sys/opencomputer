@@ -90,3 +90,30 @@ def test_strict_emitted_in_anthropic_format():
     )
     assert "strict" not in s_no.to_anthropic_format()
     assert s_yes.to_anthropic_format()["strict"] is True
+
+
+@pytest.mark.parametrize("tool", _TOOLS, ids=lambda t: t.schema.name)
+def test_strict_tools_have_no_default_keys(tool: BaseTool):
+    """Strict-mode tool schemas must not declare JSON-Schema 'default' keys.
+
+    Different SDKs treat 'default' differently under strict — OpenAI rejects
+    it outright; Anthropic's behaviour is unspecified. Safer to keep it out
+    of the wire payload and document defaults in the description text. Each
+    tool's ``execute()`` already supplies fallbacks via ``args.get(k, default)``.
+    """
+    if not getattr(tool, "strict_mode", False):
+        pytest.skip(f"{tool.schema.name} opted out of strict mode")
+    props = tool.schema.parameters.get("properties") or {}
+
+    def _no_default(spec: dict, path: str) -> None:
+        if not isinstance(spec, dict):
+            return
+        assert "default" not in spec, (
+            f"{tool.schema.name}: 'default' key at {path} is incompatible with strict mode"
+        )
+        for k, v in spec.items():
+            if isinstance(v, dict):
+                _no_default(v, f"{path}.{k}")
+
+    for name, spec in props.items():
+        _no_default(spec, name)

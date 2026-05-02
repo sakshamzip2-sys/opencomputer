@@ -100,7 +100,6 @@ class PythonExec(BaseTool):
                     "mode": {
                         "type": "string",
                         "enum": ["plain", "ptc"],
-                        "default": "plain",
                         "description": (
                             "'plain' = subprocess, no tool RPC; 'ptc' = "
                             "subprocess with OC tool stubs predefined."
@@ -116,7 +115,6 @@ class PythonExec(BaseTool):
                     },
                     "timeout_seconds": {
                         "type": "number",
-                        "default": 30.0,
                         "description": "Wall-clock timeout. Default 30s; PTC mode allows up to 300s.",
                     },
                 },

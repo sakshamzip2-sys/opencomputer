@@ -630,6 +630,11 @@ class AgentLoop:
         self._runtime = runtime or DEFAULT_RUNTIME_CONTEXT
         # Expose current session id to memory tools via the context provider.
         self._current_session_id = sid
+        # Item 2 fix (2026-05-02): reset pause_turn counter per conversation.
+        # Without this, a long-lived AgentLoop (gateway/daemon mode) handling
+        # multiple sequential conversations would leak the counter — session B
+        # could start with the cap already 1 or 2 and force premature END_TURN.
+        self._pause_turn_count = 0
 
         # OpenClaw 1.C — push the (session_id, delegation_depth) frame for
         # the repetition detector. Idempotent: re-entering the same session

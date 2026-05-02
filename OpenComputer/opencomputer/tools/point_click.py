@@ -90,7 +90,6 @@ class PointAndClickTool(BaseTool):
                         "type": "string",
                         "description": "Mouse button.",
                         "enum": ["left", "right"],
-                        "default": "left",
                     },
                 },
                 "required": ["x", "y"],

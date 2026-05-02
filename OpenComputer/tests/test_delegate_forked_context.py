@@ -241,15 +241,24 @@ async def test_forked_context_empty_parent_history_does_not_crash():
 # ─── 5. schema advertises forked_context ───────────────────────────────
 
 
-def test_forked_context_in_schema_with_default_false():
-    """Schema must declare ``forked_context`` as boolean defaulting to False."""
+def test_forked_context_in_schema_optional_boolean():
+    """Schema declares ``forked_context`` as an optional boolean.
+
+    2026-05-02 (Item 3 review fix): the JSON-Schema ``default`` key was
+    removed because it conflicts with Anthropic strict mode. The default
+    behavior is documented in the description text and implemented in
+    ``DelegateTool.execute`` (``args.get("forked_context", False)``).
+    """
     tool = DelegateTool()
     schema = tool.schema
     props = schema.parameters["properties"]
     assert "forked_context" in props
     assert props["forked_context"]["type"] == "boolean"
-    assert props["forked_context"]["default"] is False
-    # Not required — optional with default False.
+    # No "default" key — strict mode compatibility (Item 3, 2026-05-02)
+    assert "default" not in props["forked_context"]
+    # Description must mention the default
+    assert "false" in props["forked_context"]["description"].lower()
+    # Not required — optional.
     assert "forked_context" not in schema.parameters.get("required", [])
 
 

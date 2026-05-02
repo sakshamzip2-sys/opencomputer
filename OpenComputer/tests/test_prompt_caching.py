@@ -159,3 +159,51 @@ def test_apply_full_cache_control_handles_none_tools():
     sys_content = out_msgs[0]["content"]
     if isinstance(sys_content, list):
         assert any("cache_control" in blk for blk in sys_content if isinstance(blk, dict))
+
+
+def test_apply_full_cache_control_no_system_with_tools_stays_within_4_breakpoints():
+    """Edge case: tools present but no system message → must still cap at 4.
+
+    Allocation when no system: 1 tools[-1] + 0 system + up to 3 last messages = 4.
+    Verifies the function doesn't accidentally double-budget when system is absent.
+    """
+    from opencomputer.agent.prompt_caching import apply_full_cache_control
+
+    tools = [
+        {"name": "Read", "description": "...", "input_schema": {}},
+        {"name": "Bash", "description": "...", "input_schema": {}},
+    ]
+    # No system message — first message is user, not system
+    msgs = [
+        {"role": "user", "content": "msg1"},
+        {"role": "assistant", "content": "msg2"},
+        {"role": "user", "content": "msg3"},
+        {"role": "assistant", "content": "msg4"},
+    ]
+    out_msgs, out_tools = apply_full_cache_control(msgs, tools)
+
+    # Tools: only last
+    tools_breakpoints = sum(1 for t in out_tools if "cache_control" in t)
+    assert tools_breakpoints == 1
+    assert "cache_control" not in out_tools[0]
+    assert out_tools[1]["cache_control"] == {"type": "ephemeral"}
+
+    # Messages: budget = 4 - 1 tools - 0 system = 3 → last 3 of 4 user msgs cached.
+    msg_breakpoints = 0
+    for m in out_msgs:
+        c = m.get("content")
+        if isinstance(c, list):
+            msg_breakpoints += sum(1 for blk in c if isinstance(blk, dict) and "cache_control" in blk)
+        if "cache_control" in m:
+            msg_breakpoints += 1
+    assert msg_breakpoints == 3
+
+    # Total never exceeds Anthropic's max of 4
+    assert tools_breakpoints + msg_breakpoints == 4
+
+    # First message (msg1) should NOT be cached
+    msg1_content = out_msgs[0]["content"]
+    if isinstance(msg1_content, list):
+        for blk in msg1_content:
+            if isinstance(blk, dict):
+                assert "cache_control" not in blk
