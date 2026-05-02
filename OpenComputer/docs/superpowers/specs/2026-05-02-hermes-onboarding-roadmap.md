@@ -136,26 +136,40 @@ real user demand surfaces — each needs platform-specific research.
   `NOUS_PORTAL_API_KEY` env → auth token store. Includes
   `run_device_code_login` driving the full flow.
 
+**Shipped follow-ups (this session, PRs #331-#334):**
+- ✓ **GitHub Copilot** (PR #331) — reuses the user's `gh` CLI token via
+  `~/.config/gh/hosts.yml` parser, env-var fallbacks
+  (`COPILOT_GITHUB_TOKEN`/`GH_TOKEN`/`GITHUB_TOKEN`). 13 tests.
+- ✓ **Qwen OAuth** (PR #332) — reads/refreshes credentials at
+  `~/.qwen/oauth_creds.json`; refresh-on-expiry via
+  `chat.qwen.ai/api/v1/oauth2/token`; falls back to `QWEN_API_KEY`
+  env var. Persists rotated tokens back to disk. 15 tests.
+- ✓ **`opencomputer/auth/external.py`** (PR #333) — generic
+  browser-redirect helpers: `PKCEPair`/`generate_pkce_pair()`
+  (RFC 7636 S256), `validate_redirect_uri()` (loopback only),
+  `wait_for_redirect_callback()` (one-shot HTTPServer on a daemon
+  thread), `open_url()`. Modeled on Hermes's `_spotify_wait_for_callback`
+  but extracted as provider-agnostic primitives. 12 tests.
+- ✓ **Google OAuth flow + Gemini OAuth provider** (PR #334) —
+  `opencomputer/auth/google_oauth.py` ships the full PKCE login,
+  refresh, and credential persistence (`~/.opencomputer/auth/google_oauth.json`,
+  chmod 0600). The `gemini-oauth` provider plugin reads/refreshes
+  via the auth module. **Honest deferral:** the Cloud Code Assist
+  transport adapter (`cloudcode-pa.googleapis.com/v1internal:*`) is a
+  pending follow-up — `complete()` raises `NotImplementedError` with
+  guidance until the adapter ships. 25 tests (18 google_oauth + 7
+  gemini-oauth).
+
 **Still pending:**
-
-1. **`opencomputer/auth/external.py`** — browser-redirect OAuth (Google
-   Gemini, Qwen). Needs local HTTP server on a free port to catch the
-   redirect; same as `pip install` — well-understood pattern.
-
-2. **More provider plugins using the foundation:**
-   - **GitHub Copilot** — uses GitHub OAuth tokens; can reuse a user's
-     existing `gh` CLI token if present (Hermes pattern).
-   - **GitHub Copilot ACP** — different protocol; spawns `copilot --acp
-     --stdio` subprocess. Mostly subprocess-mgmt code.
-   - **Google Gemini OAuth** — Cloud Code Assist backend; browser-redirect.
-   - **Qwen OAuth** — browser-redirect.
-
-3. **Nous Portal real client_id** — currently defaults to `opencomputer-cli`
-   (placeholder). Needs OC's actual registration with Nous Portal, OR
-   users supply their own via `NOUS_PORTAL_CLIENT_ID` env var.
-
-**Recommended order:** GitHub Copilot next (reuses gh CLI token = no
-new infrastructure), then `external.py` + Google Gemini OAuth, then Qwen.
+- **GitHub Copilot ACP** — different protocol; spawns
+  `copilot --acp --stdio` subprocess. Mostly subprocess-mgmt code.
+- **Google Cloud Code Assist transport adapter** — ~400 LOC port of
+  Hermes's `gemini_cloudcode_adapter`. Wires the OAuth foundation
+  shipped here to actual Gemini inference under the user's Google
+  account quota.
+- **Nous Portal real client_id** — currently defaults to `opencomputer-cli`
+  (placeholder). Needs OC's actual registration with Nous Portal, OR
+  users supply their own via `NOUS_PORTAL_CLIENT_ID` env var.
 
 ### ~~M.b~~ — Shipped in PR #313
 
@@ -164,16 +178,24 @@ Anthropic-shaped MiniMax + MiniMax China subclass the bundled
 base_url + _api_key_env, so subclasses just override 3 class attrs and
 pre-validate env-var-not-set in __init__ for proper error messages.
 
-### M.c — Azure Foundry (partial — OpenAI-style only)
+### ~~M.c~~ — Shipped (full — both OpenAI-style and Anthropic-style)
 
 OpenAI-style Azure Foundry deployments shipped in PR #314 (subclass
 of OpenAIProvider with required AZURE_FOUNDRY_BASE_URL).
 
-**Still pending:** Anthropic-style models on Azure (Claude-on-Azure,
-which uses a different endpoint shape). Needs `api_mode` field in
-`ModelConfig` so a single provider plugin can dispatch to either
-transport based on `config.yaml::model.api_mode`. ~200 LOC for the
-plugin + ~50 LOC for the config schema bump.
+Anthropic-style support shipped in PR #336:
+- ✓ `ModelConfig.api_mode` field (default `"auto"`, accepts
+  `"openai"`/`"anthropic"`) — validated in `__post_init__`, hashable.
+- ✓ `_resolve_provider(name, api_mode=...)` threads api_mode into the
+  provider's `__init__` when its signature accepts the kwarg
+  (inspect-based gate; backward-compatible across all 23 providers).
+- ✓ `AzureFoundryProvider` rewritten as a `__new__` dispatcher:
+  `api_mode="anthropic"` returns a wrapper around `AnthropicProvider`
+  configured with `auth_mode="bearer"` (lazy import). The
+  Anthropic SDK only loads when actually selected.
+- ✓ `AZURE_FOUNDRY_API_MODE` env var honored when no kwarg passed.
+
+13 tests (test_api_mode.py); 7069 total tests pass after the change.
 
 ### ~~Polish~~ — Shipped in PR #315
 
