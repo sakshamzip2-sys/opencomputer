@@ -9,9 +9,11 @@ plugin system, but for Phase 1 it lives in-tree so we can ship quickly.
 from __future__ import annotations
 
 import base64
+import importlib.util
 import logging
 import mimetypes
 import os
+import sys
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -222,6 +224,46 @@ def _augment_kwargs_for_skills(
     return kwargs
 
 
+# ── SP2+SP3 integration: sibling-module lazy loaders ──
+# ``files_cache.py`` and ``files_client.py`` live next to this provider
+# in extensions/anthropic-provider/. The extension dir isn't on
+# ``sys.path`` so ``from .files_cache import …`` would only work when the
+# provider is imported as a package. Tests load this module via
+# ``spec_from_file_location`` (no parent package), so we mirror the
+# ``opencomputer/cli_files.py`` pattern: load each sibling under a stable
+# synthetic module name and lazy-cache the result.
+_EXT_DIR = Path(__file__).parent
+_FILES_CACHE_PATH = _EXT_DIR / "files_cache.py"
+_FILES_CLIENT_PATH = _EXT_DIR / "files_client.py"
+_FILES_CACHE_SYNTHETIC = "extensions_anthropic_provider_files_cache"
+_FILES_CLIENT_SYNTHETIC = "extensions_anthropic_provider_files_client"
+
+
+def _load_sibling(synthetic_name: str, path: Path):
+    """Load a sibling extension module via spec_from_file_location.
+
+    Cached in ``sys.modules`` under ``synthetic_name`` so repeated loads
+    return the same module object (matches ``opencomputer/cli_files.py``).
+    """
+    existing = sys.modules.get(synthetic_name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(synthetic_name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[synthetic_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _files_cache_module():
+    return _load_sibling(_FILES_CACHE_SYNTHETIC, _FILES_CACHE_PATH)
+
+
+def _files_client_module():
+    return _load_sibling(_FILES_CLIENT_SYNTHETIC, _FILES_CLIENT_PATH)
+
+
 _SUPPORTED_IMAGE_MEDIA_TYPES: tuple[str, ...] = (
     "image/png",
     "image/jpeg",
@@ -262,8 +304,8 @@ def _build_anthropic_image_block(
     }
 
 
-def _build_anthropic_pdf_block(path: Path) -> dict[str, Any] | None:
-    """Build an Anthropic ``document`` content block from a PDF path.
+def _build_pdf_base64_block_sync(path: Path) -> dict[str, Any] | None:
+    """SP2 base64-inline PDF block builder — synchronous.
 
     Honors the SP2 guard rails (``plugin_sdk.pdf_helpers``):
 
@@ -273,6 +315,12 @@ def _build_anthropic_pdf_block(path: Path) -> dict[str, Any] | None:
 
     Returns ``None`` (and logs WARNING) on read errors or when a guard
     fires; never raises.
+
+    This is the SP2 implementation factored out as a synchronous helper
+    so that both the sync dispatcher (``_content_blocks_with_attachments``,
+    used everywhere SP2's behavior must be preserved) and the new async
+    builder (``_build_anthropic_pdf_block``, which adds the SP3 cache
+    path) share a single source of truth for the base64 fallback.
     """
     try:
         data = path.read_bytes()
@@ -311,6 +359,117 @@ def _build_anthropic_pdf_block(path: Path) -> dict[str, Any] | None:
     }
 
 
+async def _build_anthropic_pdf_block(
+    path: Path,
+    *,
+    cache: Any | None = None,
+    client: Any | None = None,
+) -> dict[str, Any] | None:
+    """Build an Anthropic ``document`` content block from a PDF path.
+
+    Honors the SP2 guard rails (32 MB / 600-page / 100-page).
+
+    SP2+SP3 integration: when both ``cache`` and ``client`` are provided,
+    follows the Files API path:
+
+    - SHA-256 the bytes → check cache → hit returns a ``file_id`` block
+    - Cache miss → ``await client.upload(path)`` → cache + return file_id
+    - Any failure → log WARNING, fall back to the base64 path so the
+      user's request still succeeds (preserves SP2's behavior).
+
+    When ``cache`` or ``client`` is None: identical to the SP2 base64
+    path — no cache work, no upload, no extra logging.
+
+    ``cache`` and ``client`` are typed ``Any | None`` rather than the
+    concrete ``FilesCache | AnthropicFilesClient`` to keep this module's
+    import surface flat (the sibling files load lazily; see
+    ``_load_sibling``).
+    """
+    if cache is not None and client is not None:
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            # Surface the same diagnostic as the sync path; no point
+            # uploading something we couldn't even read.
+            _log.warning("PDF attachment unreadable: %s (%s)", path, exc)
+            return None
+        # Re-apply the same size + page-count guards before any upload —
+        # otherwise we'd ship a >32 MB body to Files API only to fail.
+        if len(data) > PDF_MAX_BYTES:
+            _log.warning(
+                "PDF attachment over 32 MB cap; skipping: %s (%d bytes)",
+                path,
+                len(data),
+            )
+            return None
+        page_count = count_pdf_pages(data)
+        if page_count > PDF_HARD_PAGE_LIMIT:
+            _log.warning(
+                "PDF over 600-page hard limit; skipping: %s (%d pages)",
+                path,
+                page_count,
+            )
+            return None
+        if page_count > PDF_SOFT_PAGE_LIMIT:
+            _log.warning(
+                "PDF over 100 pages; may exceed 200k-context-model capacity: "
+                "%s (%d pages)",
+                path,
+                page_count,
+            )
+        try:
+            fc_mod = _files_cache_module()
+            content_hash = fc_mod.hash_file_bytes(data)
+            entry = cache.get(content_hash)
+            if entry is not None:
+                return {
+                    "type": "document",
+                    "source": {"type": "file", "file_id": entry.file_id},
+                }
+            metadata = await client.upload(path)
+            cache.put(
+                content_hash,
+                file_id=metadata.id,
+                filename=metadata.filename,
+                size_bytes=metadata.size_bytes,
+            )
+            return {
+                "type": "document",
+                "source": {"type": "file", "file_id": metadata.id},
+            }
+        except Exception as exc:  # noqa: BLE001 — fail-open by design
+            _log.warning(
+                "Files API caching failed for %s (%s); falling back to base64",
+                path,
+                exc,
+            )
+            # Fall through to base64 path. ``data`` was already read +
+            # validated above, but rebuilding via the sync helper keeps
+            # the fallback identical to SP2 (a single source of truth).
+
+    return _build_pdf_base64_block_sync(path)
+
+
+def _resolve_anthropic_files_cache_enabled(runtime) -> bool:
+    """Return True iff Files API caching is opted in.
+
+    Resolution order:
+    1. ``runtime.custom["anthropic_files_cache"]`` (explicit programmatic — wins)
+    2. ``OPENCOMPUTER_ANTHROPIC_FILES_CACHE`` env var (truthy values: 1/true/yes/on)
+    3. False (default OFF)
+
+    Mirrors ``_resolve_anthropic_skills`` shape (SP4) for consistency.
+    """
+    if runtime is not None:
+        explicit = (getattr(runtime, "custom", {}) or {}).get(
+            "anthropic_files_cache"
+        )
+        if explicit is not None:
+            return bool(explicit)
+    env = os.environ.get("OPENCOMPUTER_ANTHROPIC_FILES_CACHE", "").strip().lower()
+    return env in ("1", "true", "yes", "on")
+
+
 def _content_blocks_with_attachments(
     *, text: str, attachment_paths: list[str]
 ) -> list[dict[str, Any]]:
@@ -329,13 +488,18 @@ def _content_blocks_with_attachments(
 
     Never raises — bad attachments are dropped with a WARNING log so a
     corrupt or oversized file doesn't kill the turn.
+
+    Synchronous: SP2's behavior preserved verbatim for callers that
+    don't opt into the SP3 Files API cache. The opt-in path uses
+    :func:`_content_blocks_with_attachments_async` instead, which
+    threads ``cache`` + ``client`` to the async PDF builder.
     """
     blocks: list[dict[str, Any]] = []
     for path_str in attachment_paths:
         path = Path(path_str)
         media_type, _ = mimetypes.guess_type(str(path))
         if media_type == "application/pdf" or path.suffix.lower() == ".pdf":
-            block = _build_anthropic_pdf_block(path)
+            block = _build_pdf_base64_block_sync(path)
         elif media_type in _SUPPORTED_IMAGE_MEDIA_TYPES:
             block = _build_anthropic_image_block(path, media_type)
         else:
@@ -353,6 +517,49 @@ def _content_blocks_with_attachments(
         # Edge case: every attachment was skipped AND text is empty. Send
         # a single empty text block so Anthropic's API doesn't reject the
         # request for empty content.
+        blocks.append({"type": "text", "text": text or ""})
+    return blocks
+
+
+async def _content_blocks_with_attachments_async(
+    *,
+    text: str,
+    attachment_paths: list[str],
+    cache: Any | None = None,
+    client: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Async variant of :func:`_content_blocks_with_attachments`.
+
+    Routes PDFs through :func:`_build_anthropic_pdf_block` (async) so
+    that an opted-in cache + Files API client can short-circuit to a
+    ``file_id`` block on hit, or upload + cache on miss. Image
+    attachments still use the sync builder (no I/O upgrade needed —
+    images are <5 MB and inlined as base64).
+
+    Same ordering and edge-case behavior as the sync dispatcher.
+    """
+    blocks: list[dict[str, Any]] = []
+    for path_str in attachment_paths:
+        path = Path(path_str)
+        media_type, _ = mimetypes.guess_type(str(path))
+        if media_type == "application/pdf" or path.suffix.lower() == ".pdf":
+            block = await _build_anthropic_pdf_block(
+                path, cache=cache, client=client
+            )
+        elif media_type in _SUPPORTED_IMAGE_MEDIA_TYPES:
+            block = _build_anthropic_image_block(path, media_type)
+        else:
+            _log.warning(
+                "attachment has unsupported media type %r; skipping: %s",
+                media_type,
+                path,
+            )
+            block = None
+        if block is not None:
+            blocks.append(block)
+    if text:
+        blocks.append({"type": "text", "text": text})
+    if not blocks:
         blocks.append({"type": "text", "text": text or ""})
     return blocks
 
@@ -600,6 +807,85 @@ class AnthropicProvider(BaseProvider):
                     out.append({"role": m.role, "content": m.content})
         return out
 
+    async def _to_anthropic_messages_async(
+        self,
+        messages: list[Message],
+        *,
+        cache: Any | None = None,
+        client: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        """Async sibling of :meth:`_to_anthropic_messages` for the cache path.
+
+        Identical shape and behavior except attachment-bearing messages
+        are routed through :func:`_content_blocks_with_attachments_async`,
+        which threads ``cache`` + ``client`` to the async PDF builder
+        (Files API hit/miss/fallback) when both are provided.
+
+        Used by ``complete()`` / ``stream_complete()`` only when
+        :func:`_resolve_anthropic_files_cache_enabled` returns True;
+        otherwise the synchronous path is preserved (so the existing
+        sync test surface — ``test_anthropic_thinking_resend.py`` etc. —
+        keeps working unchanged).
+        """
+        out: list[dict[str, Any]] = []
+        for m in messages:
+            if m.role == "system":
+                continue
+            if m.role == "assistant" and m.tool_calls:
+                content: list[dict[str, Any]] = []
+                replay = m.reasoning_replay_blocks
+                if replay:
+                    for blk in replay:
+                        if isinstance(blk, dict) and blk.get("type") == "thinking":
+                            content.append(
+                                {
+                                    "type": "thinking",
+                                    "thinking": blk.get("thinking", ""),
+                                    "signature": blk.get("signature", ""),
+                                }
+                            )
+                if m.content:
+                    content.append({"type": "text", "text": m.content})
+                for tc in m.tool_calls:
+                    content.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": tc.arguments,
+                        }
+                    )
+                out.append({"role": "assistant", "content": content})
+            elif m.role == "tool":
+                out.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": m.tool_call_id,
+                                "content": m.content,
+                            }
+                        ],
+                    }
+                )
+            else:
+                if m.attachments:
+                    out.append(
+                        {
+                            "role": m.role,
+                            "content": await _content_blocks_with_attachments_async(
+                                text=m.content,
+                                attachment_paths=m.attachments,
+                                cache=cache,
+                                client=client,
+                            ),
+                        }
+                    )
+                else:
+                    out.append({"role": m.role, "content": m.content})
+        return out
+
     def _apply_cache_control(
         self,
         anthropic_messages: list[dict[str, Any]],
@@ -739,6 +1025,44 @@ class AnthropicProvider(BaseProvider):
             key, base_url=self._base, auth_mode=self._mode,
         )
 
+    def _build_files_cache_pair(
+        self, runtime_extras: dict | None
+    ) -> tuple[Any | None, Any | None]:
+        """Construct (cache, client) iff the SP3 Files API cache is opted in.
+
+        Synthesises a one-shot runtime view from ``runtime_extras`` (a
+        flat dict on the provider call boundary) and routes it through
+        :func:`_resolve_anthropic_files_cache_enabled`, which reads
+        ``runtime.custom["anthropic_files_cache"]``. Returns
+        ``(None, None)`` when caching is off — callers then take the
+        existing sync attachment path (SP2 base64), preserving today's
+        behavior verbatim for users who don't opt in.
+
+        ``FilesCache`` and ``AnthropicFilesClient`` are loaded lazily
+        from sibling extension files; any construction error degrades
+        to ``(None, None)`` with a warning so the user's request never
+        breaks because the cache scaffolding misbehaved.
+        """
+        try:
+            from types import SimpleNamespace
+            runtime_view = SimpleNamespace(custom=runtime_extras or {})
+            if not _resolve_anthropic_files_cache_enabled(runtime_view):
+                return None, None
+            from opencomputer.agent.config import _home as _profile_home
+            fc_mod = _files_cache_module()
+            fcl_mod = _files_client_module()
+            cache_path = _profile_home() / fc_mod.CACHE_FILENAME
+            cache = fc_mod.FilesCache(cache_path)
+            client = fcl_mod.AnthropicFilesClient(api_key=self._api_key)
+            return cache, client
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            _log.warning(
+                "Failed to construct Files API cache/client (%s); "
+                "falling back to base64 PDF path",
+                exc,
+            )
+            return None, None
+
     async def _do_complete(
         self,
         key: str,
@@ -759,7 +1083,16 @@ class AnthropicProvider(BaseProvider):
         _check_rate_limit()
 
         client = self._build_client_for_key(key) if key != self._api_key else self.client
-        anthropic_messages = self._to_anthropic_messages(messages)
+        # SP2+SP3 integration: opt-in PDF Files API cache. Returns
+        # (None, None) when caching is off — preserves the SP2 sync
+        # base64 path verbatim for everyone else.
+        files_cache, files_api_client = self._build_files_cache_pair(runtime_extras)
+        if files_cache is not None:
+            anthropic_messages = await self._to_anthropic_messages_async(
+                messages, cache=files_cache, client=files_api_client,
+            )
+        else:
+            anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
         # Up to 4 cache_control breakpoints (system + last 3 non-system
         # messages) for ~75% input-token cost reduction on multi-turn
@@ -957,7 +1290,14 @@ class AnthropicProvider(BaseProvider):
         _check_rate_limit()
 
         client = self._build_client_for_key(key) if key != self._api_key else self.client
-        anthropic_messages = self._to_anthropic_messages(messages)
+        # SP2+SP3 integration: opt-in PDF Files API cache.
+        files_cache, files_api_client = self._build_files_cache_pair(runtime_extras)
+        if files_cache is not None:
+            anthropic_messages = await self._to_anthropic_messages_async(
+                messages, cache=files_cache, client=files_api_client,
+            )
+        else:
+            anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
         # Idle-aware TTL: if this provider's last call was > 4 minutes
         # ago, the 5m cache would have expired before we got back to it.
@@ -1060,7 +1400,14 @@ class AnthropicProvider(BaseProvider):
         Yields text_delta events as tokens arrive, then a single "done" event
         with the final ProviderResponse (including tool calls if any).
         """
-        anthropic_messages = self._to_anthropic_messages(messages)
+        # SP2+SP3 integration: opt-in PDF Files API cache.
+        files_cache, files_api_client = self._build_files_cache_pair(runtime_extras)
+        if files_cache is not None:
+            anthropic_messages = await self._to_anthropic_messages_async(
+                messages, cache=files_cache, client=files_api_client,
+            )
+        else:
+            anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
         # Idle-aware TTL: if this provider's last call was > 4 minutes
         # ago, the 5m cache would have expired before we got back to it.
