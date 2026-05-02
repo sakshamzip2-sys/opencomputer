@@ -224,12 +224,18 @@ def load_for_profile(
     Round 4 Item 5 — per-profile credential isolation. Resolution
     order (first hit wins per key):
 
-    1. ``$OPENCOMPUTER_HOME/<profile_name>/.env`` — profile-local
+    1. ``<root>/profiles/<profile_name>/.env`` — profile-local
        (when ``profile_name`` is set and not ``"default"``).
-    2. ``~/.opencomputer/<profile_name>/.env`` — same as above when
-       ``$OPENCOMPUTER_HOME`` is unset.
-    3. ``~/.opencomputer/.env`` — global fallback. Backwards-compat
-       for users who set up before per-profile creds existed.
+    2. ``<root>/.env`` — global fallback. Backwards-compat for users
+       who set up before per-profile creds existed.
+
+    The ``<root>`` is resolved with care: ``cli._apply_profile_override``
+    mutates ``OPENCOMPUTER_HOME`` to point at the active profile's leaf
+    directory (``<root>/profiles/<name>``) so in-process consumers of
+    ``_home()`` see the profile dir. We must not treat that leaf as the
+    root — doing so makes the canonical global ``~/.opencomputer/.env``
+    unreachable, which manifests as a spurious "first-run install"
+    prompt every shell once a non-default profile is sticky.
 
     Existing ``os.environ`` entries always win — shell-set vars take
     precedence over file-loaded ones (matches dotenv convention).
@@ -248,9 +254,32 @@ def load_for_profile(
     home_override = os.environ.get("OPENCOMPUTER_HOME")
     oc_home = Path(home_override) if home_override else Path.home() / ".opencomputer"
 
-    if profile_name and profile_name != "default":
-        candidates.append(oc_home / "profiles" / profile_name / ".env")
-    candidates.append(oc_home / ".env")
+    # Detect the leaf-pointer shape (`<root>/profiles/<name>`). When
+    # OPENCOMPUTER_HOME has that shape AND matches the active profile,
+    # treat it as the profile-local dir and walk up two levels to
+    # recover the canonical root for the global fallback. Otherwise
+    # OPENCOMPUTER_HOME IS the root (legacy callers, tests).
+    is_leaf_override = (
+        profile_name is not None
+        and profile_name != "default"
+        and oc_home.name == profile_name
+        and oc_home.parent.name == "profiles"
+    )
+    if is_leaf_override:
+        profile_env: Path | None = oc_home / ".env"
+        canonical_root = oc_home.parent.parent
+    else:
+        if profile_name and profile_name != "default":
+            profile_env = oc_home / "profiles" / profile_name / ".env"
+        else:
+            profile_env = None
+        canonical_root = oc_home
+
+    if profile_env is not None:
+        candidates.append(profile_env)
+    global_env = canonical_root / ".env"
+    if not candidates or candidates[-1] != global_env:
+        candidates.append(global_env)
 
     merged: dict[str, str] = {}
     # Walk in reverse so earlier (higher-priority) entries override
