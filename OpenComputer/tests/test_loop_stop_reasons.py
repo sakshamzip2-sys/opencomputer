@@ -101,6 +101,35 @@ async def test_context_full_triggers_compaction_and_retry(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_end_turn_triggers_continuation_retry(tmp_path) -> None:
+    """Empty end_turn (no content, no tool calls) → retry with 'Please continue'."""
+    provider = _ScriptedProvider([
+        _resp("end_turn", content=""),  # empty
+        _resp("end_turn", content="Sorry, here's the answer."),
+    ])
+    loop = _make_loop(provider, tmp_path)
+
+    result = await loop.run_conversation("Test", session_id="t4")
+    assert result.stop_reason == StopReason.END_TURN
+    assert "here's the answer" in result.final_message.content
+    assert provider._idx == 2  # continuation retry happened
+
+
+@pytest.mark.asyncio
+async def test_empty_end_turn_after_retry_still_empty_accepts(tmp_path) -> None:
+    """If continuation retry is also empty, accept rather than loop forever."""
+    provider = _ScriptedProvider([
+        _resp("end_turn", content=""),
+        _resp("end_turn", content=""),
+    ])
+    loop = _make_loop(provider, tmp_path)
+
+    result = await loop.run_conversation("Test", session_id="t5")
+    assert result.stop_reason == StopReason.END_TURN
+    assert provider._idx == 2  # exactly one retry, no more
+
+
+@pytest.mark.asyncio
 async def test_refusal_maps_to_stop_reason_refusal(tmp_path) -> None:
     """When stop_reason='refusal', loop emits StopReason.REFUSAL not END_TURN.
 
