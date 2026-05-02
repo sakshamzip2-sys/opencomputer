@@ -287,8 +287,6 @@ Frozen dataclass — one event from `stream_complete()`. Three kinds:
 Frozen dataclass — token counts: `input_tokens`, `output_tokens`,
 `cache_read_tokens`, `cache_write_tokens`.
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 ### `ProviderCapabilities`
 
 Frozen dataclass each provider returns from its `capabilities` property
@@ -318,8 +316,7 @@ economy decisions in the agent loop:
 Frozen dataclass — `read: int = 0`, `write: int = 0`. Returned by a
 provider's `extracts_cache_tokens(usage)` capability when surfacing
 prompt-cache token counts uniformly across providers.
-=======
-=======
+
 ### `BatchRequest` / `BatchResult` / `BatchUnsupportedError`
 
 Provider-agnostic batch-processing types (Subsystem E, 2026-05-02).
@@ -334,7 +331,6 @@ and `response_schema` (structured outputs from Subsystem C) per request
 batch API gives a 50% cost discount with ~1hr turnaround. OpenAI batch
 implementation lands in a follow-up PR.
 
->>>>>>> d63aa26b (feat: provider-agnostic batch processing (Subsystem E))
 ### `JsonSchemaSpec`
 
 TypedDict for structured outputs (Subsystem C, 2026-05-02). Pass
@@ -346,7 +342,6 @@ dict, required), `name` (optional, surfaced to OpenAI's
 `json_schema.name`), `description` (optional one-liner). Use the
 `opencomputer.agent.structured.parse_structured()` helper for
 Pydantic-model integration.
->>>>>>> 9d7fd568 (feat: structured outputs (Subsystem C))
 
 ---
 
