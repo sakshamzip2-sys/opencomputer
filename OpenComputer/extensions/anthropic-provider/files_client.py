@@ -139,6 +139,36 @@ class AnthropicFilesClient:
         _raise_for_status(resp)
         return FileMetadata.from_response(resp.json())
 
+    async def download(self, file_id: str, output_path: Path) -> int:
+        """Download a model-created file. Returns bytes written.
+
+        Raises FilesAPIError(403) if the file isn't downloadable —
+        Anthropic only permits download of skill/code-exec outputs,
+        not user-uploaded files.
+        """
+        async with self._make_client() as client:
+            async with client.stream(
+                "GET",
+                f"{self._base_url}/v1/files/{file_id}/content",
+                headers=self._headers(),
+            ) as resp:
+                _raise_for_status(resp)
+                total = 0
+                with output_path.open("wb") as out:
+                    async for chunk in resp.aiter_bytes():
+                        out.write(chunk)
+                        total += len(chunk)
+        return total
+
+    async def delete(self, file_id: str) -> None:
+        """Delete a file. No return; raises on error."""
+        async with self._make_client() as client:
+            resp = await client.delete(
+                f"{self._base_url}/v1/files/{file_id}",
+                headers=self._headers(),
+            )
+        _raise_for_status(resp)
+
 
 def _guess_mime(path: Path) -> str:
     return mimetypes.guess_type(path.name)[0] or "application/octet-stream"

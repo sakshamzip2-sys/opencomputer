@@ -216,3 +216,43 @@ async def test_get_metadata(monkeypatch):
     _module, client = _client_with_mock(monkeypatch, handler)
     meta = await client.get_metadata("file_xyz")
     assert meta.id == "file_xyz"
+
+
+@pytest.mark.asyncio
+async def test_download_writes_bytes(monkeypatch, tmp_path):
+    payload = b"file content here"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/v1/files/file_xyz/content"
+        return httpx.Response(200, content=payload)
+
+    _module, client = _client_with_mock(monkeypatch, handler)
+    out = tmp_path / "downloaded.bin"
+    bytes_written = await client.download("file_xyz", out)
+    assert bytes_written == len(payload)
+    assert out.read_bytes() == payload
+
+
+@pytest.mark.asyncio
+async def test_download_403_for_non_downloadable(monkeypatch, tmp_path):
+    module = _load_module()
+
+    def handler(request):
+        return httpx.Response(403, text="not downloadable")
+
+    _module, client = _client_with_mock(monkeypatch, handler)
+    with pytest.raises(module.FilesAPIError) as exc_info:
+        await client.download("file_userupload", tmp_path / "out")
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_delete(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/v1/files/file_xyz"
+        return httpx.Response(204)
+
+    _module, client = _client_with_mock(monkeypatch, handler)
+    await client.delete("file_xyz")  # no return; should not raise
