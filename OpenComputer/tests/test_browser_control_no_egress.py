@@ -1,10 +1,17 @@
 """tests/test_browser_control_no_egress.py — local-only contract guard.
 
-The browser-control plugin source MUST NOT directly import HTTP clients.
-Playwright handles networking internally (browser ↔ websites); the
-plugin layer above it has no business reaching out to other endpoints.
+The legacy browser-control plugin source (top-level browser.py / plugin.py /
+tools.py) MUST NOT directly import HTTP clients. Playwright handles networking
+internally (browser ↔ websites); the legacy plugin layer above it has no
+business reaching out to other endpoints.
 
-To DELIBERATELY add networking to this plugin (a contract break):
+The new browser-port subsystems under chrome/, session/, server/, client/,
+_utils/, profiles/, snapshot/, tools_core/ are exempt: they implement an
+explicit HTTP control plane (BLUEPRINT.md §4 mandates httpx + fastapi +
+websockets + mcp). The deny-list below stays scoped to the legacy plugin
+files that pre-date the port.
+
+To DELIBERATELY add networking to a LEGACY file (a contract break):
 
 1. Add the import.
 2. Update ``_DENIED_NETWORK_IMPORTS`` below to remove the relevant entry.
@@ -32,10 +39,32 @@ _DENIED_NETWORK_IMPORTS: frozenset[str] = frozenset(
     }
 )
 
+# Legacy plugin entry-point files. The new browser-port subpackages (under
+# directory names listed in `_BROWSER_PORT_DIRS`) implement an explicit HTTP
+# control plane and are exempt from this guard.
+_LEGACY_FILES: tuple[str, ...] = ("browser.py", "plugin.py", "tools.py")
+_BROWSER_PORT_DIRS: tuple[str, ...] = (
+    "_utils",
+    "profiles",
+    "chrome",
+    "session",
+    "tools_core",
+    "snapshot",
+    "server",
+    "server_context",
+    "client",
+    "providers",
+)
+
 
 def _plugin_root() -> Path:
     """Return the path to extensions/browser-control/ from this test file."""
     return Path(__file__).resolve().parent.parent / "extensions" / "browser-control"
+
+
+def _legacy_python_files(root: Path) -> list[Path]:
+    """Top-level legacy plugin files only — exempts the new browser-port subdirs."""
+    return [root / name for name in _LEGACY_FILES if (root / name).is_file()]
 
 
 def _scan(path: Path) -> list[tuple[int, str]]:
@@ -60,13 +89,13 @@ def _scan(path: Path) -> list[tuple[int, str]]:
 
 
 def test_no_network_imports_in_browser_control_plugin():
-    """Sweep extensions/browser-control/*.py for HTTP-client imports."""
+    """Sweep the legacy entry-point files for HTTP-client imports."""
     violations: list[str] = []
-    for path in _plugin_root().rglob("*.py"):
+    for path in _legacy_python_files(_plugin_root()):
         for line_no, stmt in _scan(path):
             violations.append(f"{path}:{line_no}: {stmt}")
     assert not violations, (
-        "browser-control must NOT import network libs:\n  "
+        "legacy browser-control plugin files must NOT import network libs:\n  "
         + "\n  ".join(violations)
         + "\n\nIf the network import is intentional: update the deny-list, "
         + "update extensions/browser-control/README.md privacy contract, "
@@ -76,9 +105,9 @@ def test_no_network_imports_in_browser_control_plugin():
 
 def test_no_urllib_request():
     """``urllib.request`` is stdlib so the import-name check above won't
-    catch it — explicit AST sweep."""
+    catch it — explicit AST sweep over legacy files."""
     violations: list[str] = []
-    for path in _plugin_root().rglob("*.py"):
+    for path in _legacy_python_files(_plugin_root()):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (SyntaxError, OSError):
@@ -94,9 +123,9 @@ def test_no_urllib_request():
 
 
 def test_no_socket_module():
-    """Direct ``socket`` usage is also forbidden (low-level network access)."""
+    """Direct ``socket`` usage is also forbidden in legacy files (low-level network)."""
     violations: list[str] = []
-    for path in _plugin_root().rglob("*.py"):
+    for path in _legacy_python_files(_plugin_root()):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (SyntaxError, OSError):
@@ -118,5 +147,5 @@ def test_plugin_root_exists():
     """
     root = _plugin_root()
     assert root.exists(), f"plugin root not found at {root}"
-    py_files = list(root.rglob("*.py"))
-    assert len(py_files) >= 3, f"expected 3+ .py files, found {len(py_files)}"
+    legacy = _legacy_python_files(root)
+    assert legacy, f"expected legacy entry-point files in {root}, found none"
