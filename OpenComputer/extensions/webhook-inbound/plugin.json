@@ -1,0 +1,20 @@
+{
+  "id": "webhook-inbound",
+  "name": "Webhook Inbound (multi-platform)",
+  "kind": "channel",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Single aiohttp listener that accepts inbound webhooks from Microsoft Teams (Outgoing Webhook), DingTalk (Outgoing), and Feishu (Custom Bot Callback). Each platform has its own signature scheme verified per-token. Reuses the same token store as the generic 'webhook' plugin so `oc webhook create` works for these too. WeCom-Callback (Group Chat Bot) and Yuanbao are intrinsically outbound-only — no inbound platform support exists.",
+  "default_enabled": false,
+  "model_support": null,
+  "setup": {
+    "channels": [
+      {
+        "id": "webhook-inbound",
+        "label": "Webhook Inbound (Teams / DingTalk / Feishu)",
+        "env_vars": [],
+        "config_keys": ["host", "port"]
+      }
+    ]
+  }
+}
