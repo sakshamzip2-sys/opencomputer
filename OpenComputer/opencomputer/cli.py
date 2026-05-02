@@ -2342,6 +2342,11 @@ from opencomputer.cli_profile_analyze import profile_analyze_app  # noqa: E402
 profile_app.add_typer(profile_analyze_app, name="analyze")  # Plan 3 (2026-05-01)
 app.add_typer(profile_app, name="profile")
 
+# Phase 4 — multi-profile gateway routing rules
+from opencomputer.cli_bindings import app as bindings_app  # noqa: E402
+
+app.add_typer(bindings_app, name="bindings")
+
 # Phase 14.E — plugin install/uninstall/where CLI
 from opencomputer.cli_plugin import plugin_app  # noqa: E402
 

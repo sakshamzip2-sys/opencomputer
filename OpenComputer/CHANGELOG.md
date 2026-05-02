@@ -4,6 +4,10 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Multi-profile gateway routing
+
+`~/.opencomputer/bindings.yaml` maps inbound messages to profiles; multiple `AgentLoop`s run in parallel under their own `ContextVar`-scoped profile home. New `oc bindings list/show/add/remove/set-default/test` CLI. Profiles act as agents in OpenClaw's sense — workspace, memory, tools, prompt all isolated per profile. (Phase 4 of profile-as-agent — built atop Phase 1 PR #279, Phase 2 PR #281, Phase 3 commits, architectural HOME-mutation fix PR #284, follow-ups PR #286.)
+
 ### Added — Permission modes (renames `yolo` → `auto`, adds `accept-edits`)
 
 `PermissionMode` enum + `effective_permission_mode()` helper exported from `plugin_sdk` — single source of truth for "what mode is this session in right now?" across CLI flags, slash commands, hooks, and the prompt template. Resolution chains canonical session-mutable keys, legacy custom-dict keys, the new frozen field, and legacy `plan_mode`/`yolo_mode` bools.

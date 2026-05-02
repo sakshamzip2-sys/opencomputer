@@ -120,6 +120,41 @@ oc skills tap remove anthropics/skills
 - `~/.opencomputer/<profile>/skills/.hub/audit.log` is an append-only JSONL of install/uninstall/scan_blocked events.
 - Skills tapped from arbitrary GitHub repos default to `community` trust level.
 
+## Multi-Profile Routing
+
+Run multiple profiles simultaneously on one gateway. Different chats route to different profiles — different system prompts, memory, tools, model configs.
+
+### Quickstart
+
+```bash
+# Create the profiles you want.
+opencomputer profile create coding
+opencomputer profile create stock
+
+# Set up routing rules.
+oc bindings add coding --platform telegram --chat-id 12345
+oc bindings add stock  --platform telegram --chat-id 67890
+oc bindings set-default personal      # everything else → personal
+
+# Inspect.
+oc bindings list
+
+# Test routing without sending a real message.
+oc bindings test --platform telegram --chat-id 12345
+# → resolved profile: coding
+
+# Run.
+opencomputer gateway
+```
+
+`~/.opencomputer/bindings.yaml` is the source of truth; the CLI is just porcelain. See the design spec at `docs/superpowers/specs/2026-04-30-profile-as-agent-multi-routing-design.md` for match-precedence rules and architecture.
+
+### Notes
+
+- First message to a new profile is slower while the gateway lazy-builds its `AgentLoop` (~200-500ms one-time).
+- v1: only `platform` and `chat_id` matchers are populated by adapters. Bindings using `peer_id` / `group_id` / `account_id` will warn at gateway startup until adapter updates land in v1.1.
+- `oc wire` clients always route to `default_profile` in v1; per-call wire binding deferred to v1.1.
+
 ## Coding mode
 
 OpenComputer ships with a `coding-harness` plugin that turns the agent into a
