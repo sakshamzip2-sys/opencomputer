@@ -1,0 +1,23 @@
+{
+  "id": "tencent-provider",
+  "name": "Tencent TokenHub",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Tencent TokenHub (Hunyuan family) — OpenAI-compatible direct API.",
+  "model_support": {
+    "model_prefixes": ["hunyuan-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "tencent",
+        "auth_methods": ["api_key"],
+        "env_vars": ["TENCENT_API_KEY"],
+        "label": "Tencent TokenHub (Hunyuan + multi-model — direct API)",
+        "default_model": "hunyuan-pro",
+        "signup_url": "https://tokenhub.tencentmaas.com"
+      }
+    ]
+  }
+}

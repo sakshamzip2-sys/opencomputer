@@ -1,0 +1,23 @@
+{
+  "id": "arcee-provider",
+  "name": "Arcee AI",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Arcee AI (Trinity family — small, distilled, on-device-friendly) — OpenAI-compatible.",
+  "model_support": {
+    "model_prefixes": ["arcee-", "trinity-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "arcee",
+        "auth_methods": ["api_key"],
+        "env_vars": ["ARCEE_API_KEY"],
+        "label": "Arcee AI (Trinity / distilled models — direct API)",
+        "default_model": "arcee-trinity",
+        "signup_url": "https://www.arcee.ai"
+      }
+    ]
+  }
+}
