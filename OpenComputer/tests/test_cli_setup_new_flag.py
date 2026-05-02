@@ -41,10 +41,19 @@ def test_setup_new_invokes_section_driven_wizard():
 
 
 def test_setup_help_lists_new_flag():
-    """`oc setup --help` documents --new."""
+    """`oc setup --help` documents --new.
+
+    Strip ANSI codes before asserting — Click/Typer's color rendering
+    in CI splits ``--new`` into ``\\x1b[36m-\\x1b[0m\\x1b[36m-new`` which
+    breaks a literal substring check. Locally tests run with
+    ``force_terminal=False``; CI runners are detected as TTYs.
+    """
+    import re
+
     from opencomputer.cli import app
 
     runner = CliRunner()
     result = runner.invoke(app, ["setup", "--help"])
     assert result.exit_code == 0
-    assert "--new" in result.output
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "--new" in plain

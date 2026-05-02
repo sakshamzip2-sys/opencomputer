@@ -32,8 +32,8 @@ def _discover_providers() -> list[dict[str, Any]]:
             continue
         for prov in setup.providers:
             out.append({
-                "name": prov.name,
-                "label": getattr(prov, "label", "") or prov.name.title(),
+                "name": prov.id,
+                "label": getattr(prov, "label", "") or prov.id.title(),
                 "description": getattr(prov, "description", "") or "",
             })
     return out
@@ -49,7 +49,7 @@ def _invoke_provider_setup(name: str, ctx: WizardCtx) -> bool:
             if setup is None:
                 continue
             for prov in setup.providers:
-                if prov.name == name:
+                if prov.id == name:
                     env_var = (prov.env_vars or [None])[0]
                     ctx.config.setdefault("model", {})
                     ctx.config["model"]["provider"] = name
