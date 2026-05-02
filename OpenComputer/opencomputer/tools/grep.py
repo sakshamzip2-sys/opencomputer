@@ -13,6 +13,8 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 class GrepTool(BaseTool):
     parallel_safe = True
+    # Item 3 (2026-05-02): Grep schema enumerates all params; closed.
+    strict_mode = True
 
     @property
     def schema(self) -> ToolSchema:
@@ -30,6 +32,7 @@ class GrepTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "pattern": {
                         "type": "string",

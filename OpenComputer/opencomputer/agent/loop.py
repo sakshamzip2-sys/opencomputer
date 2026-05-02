@@ -2657,8 +2657,24 @@ class AgentLoop:
         III.1/III.2 applies to BOTH the schemas handed to the provider AND
         the dispatch path — otherwise the model sees tool X, calls it, and
         we'd silently run it because only schemas were filtered.
+
+        Item 3 (2026-05-02): each schema is augmented with the originating
+        tool's ``strict_mode`` so the provider-format conversion can emit
+        ``strict: true`` to Anthropic. ToolSchema is frozen+slots; we use
+        ``dataclasses.replace`` to set the field. Calls ``registry.schemas()``
+        (preserves existing tests that mock that method) and then resolves
+        each schema's tool via ``registry.get(name)`` to read strict_mode.
         """
-        all_schemas = registry.schemas()
+        from dataclasses import replace as _dc_replace
+
+        def _maybe_strict(schema: ToolSchema) -> ToolSchema:
+            tool = registry.get(schema.name)
+            strict = bool(getattr(tool, "strict_mode", False)) if tool else False
+            if strict and not schema.strict:
+                return _dc_replace(schema, strict=True)
+            return schema
+
+        all_schemas = [_maybe_strict(s) for s in registry.schemas()]
         if self.allowed_tools is None:
             return all_schemas
         names, patterns = self._split_allowlist()
