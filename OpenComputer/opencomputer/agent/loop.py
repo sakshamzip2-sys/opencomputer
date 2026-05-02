@@ -2667,7 +2667,9 @@ class AgentLoop:
         """
         from dataclasses import replace as _dc_replace
 
-        def _maybe_strict(schema: ToolSchema) -> ToolSchema:
+        from plugin_sdk.tool_contract import ToolSchema as _ToolSchema
+
+        def _maybe_strict(schema: _ToolSchema) -> _ToolSchema:
             tool = registry.get(schema.name)
             strict = bool(getattr(tool, "strict_mode", False)) if tool else False
             if strict and not schema.strict:

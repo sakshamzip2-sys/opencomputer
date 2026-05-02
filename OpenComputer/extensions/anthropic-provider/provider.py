@@ -23,10 +23,7 @@ from anthropic.types import Message as AnthropicMessage
 from pydantic import BaseModel, Field
 
 from opencomputer.agent.credential_pool import CredentialPool
-from opencomputer.agent.prompt_caching import (
-    apply_anthropic_cache_control,
-    apply_full_cache_control,
-)
+from opencomputer.agent.prompt_caching import apply_full_cache_control
 from opencomputer.agent.rate_guard import (
     format_remaining,
     rate_limit_remaining,
