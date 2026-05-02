@@ -86,6 +86,13 @@ from plugin_sdk.ingestion import (
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
 from plugin_sdk.interaction import InteractionRequest, InteractionResponse
 from plugin_sdk.memory import MemoryProvider
+from plugin_sdk.pdf_helpers import (
+    PDF_HARD_PAGE_LIMIT,
+    PDF_MAX_BYTES,
+    PDF_SOFT_PAGE_LIMIT,
+    count_pdf_pages,
+    pdf_to_base64,
+)
 from plugin_sdk.permission_mode import PermissionMode, effective_permission_mode
 from plugin_sdk.profile_context import current_profile_home, set_profile
 from plugin_sdk.profile_subprocess import scope_subprocess_env
@@ -269,4 +276,11 @@ __all__ = [
     "SkillMeta",
     "SkillBundle",
     "TrustLevel",
+    # PDF helpers (SP2, 2026-05-02) — shared by Anthropic / Bedrock provider
+    # plugins for size + page-count guard rails on PDF attachments.
+    "PDF_MAX_BYTES",
+    "PDF_HARD_PAGE_LIMIT",
+    "PDF_SOFT_PAGE_LIMIT",
+    "count_pdf_pages",
+    "pdf_to_base64",
 ]
