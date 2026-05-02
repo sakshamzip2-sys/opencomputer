@@ -1025,6 +1025,44 @@ class AnthropicProvider(BaseProvider):
             key, base_url=self._base, auth_mode=self._mode,
         )
 
+    def _build_files_cache_pair(
+        self, runtime_extras: dict | None
+    ) -> tuple[Any | None, Any | None]:
+        """Construct (cache, client) iff the SP3 Files API cache is opted in.
+
+        Synthesises a one-shot runtime view from ``runtime_extras`` (a
+        flat dict on the provider call boundary) and routes it through
+        :func:`_resolve_anthropic_files_cache_enabled`, which reads
+        ``runtime.custom["anthropic_files_cache"]``. Returns
+        ``(None, None)`` when caching is off — callers then take the
+        existing sync attachment path (SP2 base64), preserving today's
+        behavior verbatim for users who don't opt in.
+
+        ``FilesCache`` and ``AnthropicFilesClient`` are loaded lazily
+        from sibling extension files; any construction error degrades
+        to ``(None, None)`` with a warning so the user's request never
+        breaks because the cache scaffolding misbehaved.
+        """
+        try:
+            from types import SimpleNamespace
+            runtime_view = SimpleNamespace(custom=runtime_extras or {})
+            if not _resolve_anthropic_files_cache_enabled(runtime_view):
+                return None, None
+            from opencomputer.agent.config import _home as _profile_home
+            fc_mod = _files_cache_module()
+            fcl_mod = _files_client_module()
+            cache_path = _profile_home() / fc_mod.CACHE_FILENAME
+            cache = fc_mod.FilesCache(cache_path)
+            client = fcl_mod.AnthropicFilesClient(api_key=self._api_key)
+            return cache, client
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            _log.warning(
+                "Failed to construct Files API cache/client (%s); "
+                "falling back to base64 PDF path",
+                exc,
+            )
+            return None, None
+
     async def _do_complete(
         self,
         key: str,
@@ -1045,7 +1083,16 @@ class AnthropicProvider(BaseProvider):
         _check_rate_limit()
 
         client = self._build_client_for_key(key) if key != self._api_key else self.client
-        anthropic_messages = self._to_anthropic_messages(messages)
+        # SP2+SP3 integration: opt-in PDF Files API cache. Returns
+        # (None, None) when caching is off — preserves the SP2 sync
+        # base64 path verbatim for everyone else.
+        files_cache, files_api_client = self._build_files_cache_pair(runtime_extras)
+        if files_cache is not None:
+            anthropic_messages = await self._to_anthropic_messages_async(
+                messages, cache=files_cache, client=files_api_client,
+            )
+        else:
+            anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
         # Up to 4 cache_control breakpoints (system + last 3 non-system
         # messages) for ~75% input-token cost reduction on multi-turn
@@ -1243,7 +1290,14 @@ class AnthropicProvider(BaseProvider):
         _check_rate_limit()
 
         client = self._build_client_for_key(key) if key != self._api_key else self.client
-        anthropic_messages = self._to_anthropic_messages(messages)
+        # SP2+SP3 integration: opt-in PDF Files API cache.
+        files_cache, files_api_client = self._build_files_cache_pair(runtime_extras)
+        if files_cache is not None:
+            anthropic_messages = await self._to_anthropic_messages_async(
+                messages, cache=files_cache, client=files_api_client,
+            )
+        else:
+            anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
         # Idle-aware TTL: if this provider's last call was > 4 minutes
         # ago, the 5m cache would have expired before we got back to it.
@@ -1346,7 +1400,14 @@ class AnthropicProvider(BaseProvider):
         Yields text_delta events as tokens arrive, then a single "done" event
         with the final ProviderResponse (including tool calls if any).
         """
-        anthropic_messages = self._to_anthropic_messages(messages)
+        # SP2+SP3 integration: opt-in PDF Files API cache.
+        files_cache, files_api_client = self._build_files_cache_pair(runtime_extras)
+        if files_cache is not None:
+            anthropic_messages = await self._to_anthropic_messages_async(
+                messages, cache=files_cache, client=files_api_client,
+            )
+        else:
+            anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
         # Idle-aware TTL: if this provider's last call was > 4 minutes
         # ago, the 5m cache would have expired before we got back to it.
