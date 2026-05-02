@@ -357,3 +357,36 @@ def test_semver_with_prerelease_passes():
     body = "---\nname: foo\ndescription: a valid description here please for tests\nversion: 1.0.0-beta.1\n---"
     parsed = validate_frontmatter(body)
     assert parsed["version"] == "1.0.0-beta.1"
+
+
+def test_skill_manage_uses_unified_validator():
+    """Regression: skill_manage._validate_frontmatter must delegate to the
+    unified hub validator so all write paths share one contract.
+
+    Verifies by feeding inputs that ONLY the unified validator would reject:
+    a non-kebab-case name and a too-short description. The legacy ad-hoc
+    checks in skill_manage previously accepted both.
+    """
+    from opencomputer.tools.skill_manage import _validate_frontmatter
+
+    # Non-kebab-case name (single char fails the unified NAME_RE pattern).
+    bad_name = "---\nname: x\ndescription: hello\n---\nbody\n"
+    err_name = _validate_frontmatter(bad_name)
+    assert err_name is not None, "expected unified validator to reject single-char name"
+    assert "kebab-case" in err_name or "name" in err_name.lower()
+
+    # Description under the 20-char minimum.
+    bad_desc = "---\nname: my-skill\ndescription: short\n---\nbody\n"
+    err_desc = _validate_frontmatter(bad_desc)
+    assert err_desc is not None, "expected unified validator to reject short description"
+    assert "description" in err_desc.lower() or "20" in err_desc
+
+    # And valid input still returns None.
+    good = (
+        "---\n"
+        "name: my-skill\n"
+        "description: A valid description that is at least twenty chars long.\n"
+        "---\n"
+        "body\n"
+    )
+    assert _validate_frontmatter(good) is None

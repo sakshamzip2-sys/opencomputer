@@ -118,19 +118,23 @@ def _validate_id(skill_id: str) -> str | None:
 
 
 def _validate_frontmatter(body: str) -> str | None:
+    """Delegates to the unified hub validator. Returns error message or None.
+
+    Single source of truth for SKILL.md frontmatter rules: see
+    ``opencomputer.skills_hub.agentskills_validator.validate_skill_md``.
+    Preserves the legacy ``return error-string-or-None`` contract used by
+    the create/edit callsites.
+    """
     if not body.strip():
         return "Error: body is empty"
-    try:
-        post = frontmatter.loads(body)
-    except Exception as e:  # noqa: BLE001
-        return f"Error parsing frontmatter: {e}"
-    meta = post.metadata
-    if "name" not in meta:
-        return "Error: frontmatter must include 'name'"
-    if "description" not in meta:
-        return "Error: frontmatter must include 'description'"
-    if not str(meta.get("description", "")).strip():
-        return "Error: description cannot be empty"
+    from opencomputer.skills_hub.agentskills_validator import validate_skill_md
+
+    report = validate_skill_md(body, strict=True)
+    if report.errors:
+        # Preserve old "first error wins" semantics so callers see one
+        # actionable message at a time.
+        first = report.errors[0]
+        return f"Error: {first.rule}: {first.message}"
     return None
 
 
