@@ -22,7 +22,10 @@ def _load_chrome_launch_module():
 def test_macos_command_has_chrome_and_debug_port():
     mod = _load_chrome_launch_module()
     cmd = mod.chrome_launch_command(platform="darwin")
-    assert "Google Chrome" in cmd
+    # macOS path has shell-escaped space ("Google\\ Chrome").
+    assert "Google" in cmd
+    assert "Chrome" in cmd
+    assert "/Applications/" in cmd
     assert "--remote-debugging-port=9222" in cmd
 
 
