@@ -1,11 +1,11 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 from opencomputer.inference.observability import LLMCallEvent, record_llm_call
 
 
 def test_llm_call_event_dataclass():
     event = LLMCallEvent(
-        ts=datetime.now(timezone.utc),
+        ts=datetime.now(UTC),
         provider="anthropic",
         model="claude-sonnet-4-6",
         input_tokens=100,
@@ -22,7 +22,7 @@ def test_llm_call_event_dataclass():
 def test_record_llm_call_appends_to_log(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCOMPUTER_PROFILE_HOME", str(tmp_path))
     event = LLMCallEvent(
-        ts=datetime.now(timezone.utc),
+        ts=datetime.now(UTC),
         provider="anthropic",
         model="claude-sonnet-4-6",
         input_tokens=100,

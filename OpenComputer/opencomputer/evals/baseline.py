@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from opencomputer.evals.runner import RunReport
@@ -42,7 +42,7 @@ def save_baseline(
         site_name=report.site_name,
         accuracy=report.accuracy,
         parse_failure_rate=report.parse_failure_rate,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         model=model,
         provider=provider,
     )

@@ -11,7 +11,6 @@ The callable_path's target function MUST accept a single dict argument
 
 from opencomputer.evals.types import EvalSite
 
-
 SITES: dict[str, EvalSite] = {
     "reflect": EvalSite(
         name="reflect",

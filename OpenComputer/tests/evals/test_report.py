@@ -1,5 +1,5 @@
-from opencomputer.evals.runner import CaseRun, RunReport
 from opencomputer.evals.report import format_report
+from opencomputer.evals.runner import CaseRun, RunReport
 
 
 def test_format_report_includes_site_name_and_accuracy():

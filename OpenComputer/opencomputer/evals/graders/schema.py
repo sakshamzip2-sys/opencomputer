@@ -4,7 +4,6 @@ from typing import Literal
 
 from opencomputer.evals.types import Case, GradeResult
 
-
 SchemaMode = Literal["strict", "subset", "partial"]
 
 

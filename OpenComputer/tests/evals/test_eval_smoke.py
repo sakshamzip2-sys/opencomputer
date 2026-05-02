@@ -12,7 +12,6 @@ import pytest
 from opencomputer.evals.runner import run_site
 from opencomputer.evals.sites import SITES
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CASES_DIR = REPO_ROOT / "evals" / "cases"
 
