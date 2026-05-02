@@ -2116,6 +2116,16 @@ def setup(
             "(opt-in while we port legacy features). Default: legacy."
         ),
     ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help=(
+            "Q2: skip all interactive prompts. Sections with existing "
+            "config keep their values; unconfigured sections skip with "
+            "a default-or-skip behavior. Useful for CI / headless. "
+            "Implies --new (legacy wizard does not support this flag)."
+        ),
+    ),
 ) -> None:
     """Interactive first-run wizard — pick provider, enter key, test.
 
@@ -2128,10 +2138,14 @@ def setup(
     sections than the legacy one — sub-projects M1, S2-S5 etc. close
     the gap. Once parity lands, the default flips to ``--new`` and
     the legacy wrapper is retired.
+
+    With ``--non-interactive`` (implies ``--new``): all prompts are
+    skipped — sections with existing config keep their values, fresh
+    sections skip without prompting. Useful for CI / scripts.
     """
-    if new:
+    if non_interactive or new:
         from opencomputer.cli_setup.wizard import run_setup as run_setup_new
-        run_setup_new()
+        run_setup_new(non_interactive=non_interactive)
         return
     from opencomputer.setup_wizard import run_setup
     run_setup()
