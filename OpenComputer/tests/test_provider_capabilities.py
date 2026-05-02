@@ -24,3 +24,23 @@ def test_cache_tokens_explicit_values():
     ct = CacheTokens(read=1234, write=200)
     assert ct.read == 1234
     assert ct.write == 200
+
+
+def test_base_provider_default_capabilities():
+    """A provider that doesn't override .capabilities returns the safe default."""
+    from plugin_sdk import BaseProvider
+
+    class _StubProvider(BaseProvider):
+        name = "_stub"
+        default_model = "stub-1"
+
+        async def complete(self, **_kw):  # type: ignore[override]
+            raise NotImplementedError
+
+        async def stream_complete(self, **_kw):  # type: ignore[override]
+            raise NotImplementedError
+
+    caps = _StubProvider().capabilities
+    assert isinstance(caps, ProviderCapabilities)
+    assert caps.requires_reasoning_resend_in_tool_cycle is False
+    assert caps.supports_long_ttl is False

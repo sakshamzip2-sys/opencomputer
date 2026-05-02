@@ -227,6 +227,16 @@ class BaseProvider(ABC):
         """
         ...
 
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        """Declares what this provider supports for the agent loop's
+        context-economy decisions. Override in concrete providers that
+        opt in to reasoning resend, cache-token extraction, etc. The
+        default returns the safe-baseline (everything off), so existing
+        providers behave exactly as today until they explicitly opt in.
+        """
+        return ProviderCapabilities()
+
 
 __all__ = [
     "BaseProvider",
