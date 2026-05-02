@@ -8,15 +8,87 @@ PR-C of ~/.claude/plans/replicated-purring-dewdrop.md.
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from plugin_sdk.core import Message
+from plugin_sdk.pdf_helpers import (
+    PDF_HARD_PAGE_LIMIT,
+    PDF_MAX_BYTES,
+    PDF_SOFT_PAGE_LIMIT,
+    count_pdf_pages,
+)
 from plugin_sdk.provider_contract import ProviderResponse, StreamEvent, Usage
 from plugin_sdk.transports import NormalizedRequest, NormalizedResponse, TransportBase
 
 logger = logging.getLogger(__name__)
+
+
+def _build_bedrock_document_block(path: Path) -> dict | None:
+    """Build a Bedrock Converse documentBlock for a PDF.
+
+    Returns None on read error, oversize, or hard page limit overflow.
+    Bedrock takes raw bytes (not base64) — boto3 serializes for the wire.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        logger.warning("PDF attachment unreadable: %s (%s)", path, exc)
+        return None
+    if len(data) > PDF_MAX_BYTES:
+        logger.warning(
+            "PDF attachment over 32 MB cap; skipping: %s (%d bytes)",
+            path, len(data),
+        )
+        return None
+    page_count = count_pdf_pages(data)
+    if page_count > PDF_HARD_PAGE_LIMIT:
+        logger.warning(
+            "PDF over 600-page hard limit; skipping: %s (%d pages)",
+            path, page_count,
+        )
+        return None
+    if page_count > PDF_SOFT_PAGE_LIMIT:
+        logger.warning(
+            "PDF over 100 pages; may exceed 200k-context-model capacity: %s (%d pages)",
+            path, page_count,
+        )
+    # Bedrock requires the document name to be filename-safe (no path separators)
+    safe_name = path.stem[:64].replace("/", "_").replace("\\", "_")
+    return {
+        "document": {
+            "format": "pdf",
+            "name": safe_name or "document",
+            "source": {"bytes": data},
+        }
+    }
+
+
+def _build_message_content_blocks(message: Message) -> list[dict]:
+    """Build the content array for a single Bedrock message.
+
+    Reads ``message.attachments`` (filesystem paths). Dispatches PDFs to
+    documentBlock. Other attachment types currently logged + dropped.
+    Always appends the text content block last.
+    """
+    blocks: list[dict] = []
+    for path_str in getattr(message, "attachments", []) or []:
+        path = Path(path_str)
+        media_type, _ = mimetypes.guess_type(str(path))
+        if media_type == "application/pdf" or path.suffix.lower() == ".pdf":
+            block = _build_bedrock_document_block(path)
+            if block:
+                blocks.append(block)
+        else:
+            logger.warning(
+                "Bedrock provider: unsupported attachment type %r, skipping: %s",
+                media_type, path,
+            )
+    blocks.append({"text": message.content})
+    return blocks
 
 
 class BedrockTransport(TransportBase):
@@ -60,7 +132,7 @@ class BedrockTransport(TransportBase):
             role = "user" if msg.role == "user" else "assistant"
             messages.append({
                 "role": role,
-                "content": [{"text": msg.content}],
+                "content": _build_message_content_blocks(msg),
             })
 
         native: dict[str, Any] = {
@@ -93,6 +165,19 @@ class BedrockTransport(TransportBase):
                 ],
             }
             native["toolConfig"] = tool_config
+
+        # THE FOOTGUN FIX: any document block in the request → enable citations.
+        # Without this, Bedrock silently drops PDF visual understanding to
+        # text-only extraction (~7000 vs ~1000 tokens for a 3-page PDF).
+        has_documents = any(
+            "document" in block
+            for msg in messages
+            for block in msg.get("content", [])
+        )
+        if has_documents:
+            native["additionalModelRequestFields"] = {
+                "citations": {"enabled": True}
+            }
 
         return native
 
