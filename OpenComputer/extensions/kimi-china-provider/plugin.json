@@ -1,0 +1,23 @@
+{
+  "id": "kimi-china-provider",
+  "name": "Kimi (China)",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Kimi / Moonshot (China region) — OpenAI-compatible direct API.",
+  "model_support": {
+    "model_prefixes": ["moonshot-", "kimi-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "kimi-cn",
+        "auth_methods": ["api_key"],
+        "env_vars": ["KIMI_CN_API_KEY"],
+        "label": "Kimi / Moonshot (China — direct API)",
+        "default_model": "moonshot-v1-128k",
+        "signup_url": "https://platform.moonshot.cn"
+      }
+    ]
+  }
+}

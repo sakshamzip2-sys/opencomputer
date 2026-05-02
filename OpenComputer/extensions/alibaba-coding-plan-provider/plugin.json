@@ -1,0 +1,23 @@
+{
+  "id": "alibaba-coding-plan-provider",
+  "name": "Alibaba Coding Plan",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Alibaba Cloud Coding Plan (Qwen multi-provider for code) — OpenAI-compatible direct API.",
+  "model_support": {
+    "model_prefixes": ["qwen-coder-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "alibaba-coding-plan",
+        "auth_methods": ["api_key"],
+        "env_vars": ["ALIBABA_CODING_PLAN_API_KEY", "DASHSCOPE_API_KEY"],
+        "label": "Alibaba Cloud Coding Plan (Qwen + multi-provider)",
+        "default_model": "qwen3-coder-plus",
+        "signup_url": "https://dashscope.aliyun.com/coding-plan"
+      }
+    ]
+  }
+}
