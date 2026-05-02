@@ -411,31 +411,60 @@ gh pr create --title "feat(tools+mcp): SessionSearch + MCP OAuth (Hermes ports)"
 
 **Branch:** `feat/ollama-groq-providers`. Subagent: sonnet (mechanical port).
 
+### Plugin convention reference (CRITICAL — read first)
+
+OC plugins follow a specific layout that the rev-1 plan got wrong. Verified from `extensions/openai-provider/` and `extensions/anthropic-provider/`:
+
+- **Directory name is HYPHENATED** on disk: `extensions/ollama-provider/` — NOT `ollama_provider/`.
+- **NO `__init__.py`** — the plugin loader puts the plugin root on `sys.path` so `plugin.py` can `from provider import X` directly.
+- **`plugin.json`** (NOT `PluginManifest` dataclass) — JSON manifest with id/name/version/description/kind/entry/setup.
+- **`plugin.py`** uses dual-import pattern: try `from provider import X` first (plugin-loader mode), fall back to `from extensions.<name>_provider.provider import X` (package mode for tests).
+- **Provider class attribute is `name = "ollama"`** — NOT `provider_id`. Optional `default_model`, `_api_key_env`.
+- **`register(api)` signature is `api.register_provider("ollama", OllamaProvider)`** — name + class, NOT just class.
+- **Tests import via underscore alias** (`extensions.ollama_provider.provider`). The hyphen→underscore aliasing is wired in `tests/conftest.py` via `_register_extension_alias()` — every new plugin needs a per-plugin registration helper there.
+
 ### Task 2.1: B1 ollama-provider
 
 **Files:**
-- Create: `extensions/ollama_provider/__init__.py` (empty)
-- Create: `extensions/ollama_provider/plugin.py`
-- Create: `extensions/ollama_provider/provider.py`
+- Create: `extensions/ollama-provider/plugin.json`
+- Create: `extensions/ollama-provider/plugin.py`
+- Create: `extensions/ollama-provider/provider.py`
 - Create: `tests/extensions/test_ollama_provider.py`
+- Modify: `tests/conftest.py` — add `_OLLAMA_PROVIDER_DIR` + `_register_ollama_provider_alias()` + invocation
 
-- [ ] **Step 1: Read existing openai-provider as template**
+- [ ] **Step 1: Read existing openai-provider + anthropic-provider as template**
 
 ```bash
 ls extensions/openai-provider/
-sed -n '1,100p' extensions/openai-provider/provider.py
-grep -rn "openai_provider\|openai-provider" plugin_sdk/ opencomputer/plugins/ 2>/dev/null | head -10
+cat extensions/openai-provider/plugin.json
+cat extensions/openai-provider/plugin.py
+sed -n '160,210p' extensions/openai-provider/provider.py   # provider class shape
+sed -n '195,260p' tests/conftest.py                         # alias registration pattern
 ```
 
-Verify: extensions are loaded via plugin manifest discovery, not bare Python imports. Underscore-named module dirs work cleanly with both Python imports and discovery.
+Confirm:
+- The dir is `extensions/openai-provider/` (hyphen)
+- `plugin.json` has `id`, `kind: "provider"`, `entry: "plugin"`, `setup.providers[]`
+- `plugin.py` uses the `try: from provider import X / except: from extensions.openai_provider.provider import X` dual-import
+- `OpenAIProvider.name = "openai"` (class attribute)
+- `register(api)` calls `api.register_provider("openai", OpenAIProvider)`
+- conftest has `_register_openai_provider_alias()` calling `_register_extension_alias("openai_provider", _OPENAI_PROVIDER_DIR, submodules=("provider", ...))`
 
 - [ ] **Step 2: Write failing test**
 
 ```python
 # tests/extensions/test_ollama_provider.py
-import asyncio
+"""Ollama provider tests.
+
+Imports via the underscore alias (extensions.ollama_provider) — the
+hyphen→underscore aliasing is wired in tests/conftest.py.
+"""
+import json
+
+import httpx
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
 from extensions.ollama_provider.provider import OllamaProvider
 from plugin_sdk.core import Message
 
@@ -445,9 +474,25 @@ def provider():
     return OllamaProvider(api_key=None, base_url="http://localhost:11434/v1")
 
 
+def test_provider_name_is_class_attribute():
+    """register() uses the class attribute as the provider name; must be 'ollama'."""
+    assert OllamaProvider.name == "ollama"
+
+
+def test_default_base_url_uses_local_ollama():
+    p = OllamaProvider()
+    assert p._base_url == "http://localhost:11434/v1"
+
+
+def test_env_var_override(monkeypatch):
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://other:9999/v1")
+    p = OllamaProvider()
+    assert p._base_url == "http://other:9999/v1"
+
+
 @pytest.mark.asyncio
 async def test_complete_returns_provider_response(provider):
-    mock_resp = MagicMock()
+    mock_resp = MagicMock(spec=httpx.Response)
     mock_resp.raise_for_status = MagicMock()
     mock_resp.json = MagicMock(return_value={
         "id": "cmpl-x",
@@ -472,7 +517,7 @@ async def test_stream_complete_yields_chunks(provider):
         ]:
             yield line
 
-    mock_resp = MagicMock()
+    mock_resp = MagicMock(spec=httpx.Response)
     mock_resp.raise_for_status = MagicMock()
     mock_resp.aiter_lines = fake_lines
 
@@ -485,24 +530,29 @@ async def test_stream_complete_yields_chunks(provider):
         async for d in provider.stream_complete(messages=[Message(role="user", content="hi")], model="llama3"):
             chunks.append(d)
         assert "".join(c.content_delta for c in chunks if c.content_delta) == "hello"
-
-
-def test_provider_id():
-    assert OllamaProvider().provider_id == "ollama"
 ```
 
-- [ ] **Step 3: Run test (expect fail)**
+- [ ] **Step 3: Run test (expect fail — `extensions.ollama_provider` not yet aliased)**
 
 - [ ] **Step 4: Implement provider — copy openai-provider's stream pattern**
 
 ```python
-# extensions/ollama_provider/provider.py
-"""Ollama provider — local LLM via OpenAI-compatible API."""
+# extensions/ollama-provider/provider.py
+"""Ollama provider — local LLM via Ollama's OpenAI-compatible API.
+
+Default endpoint: http://localhost:11434/v1
+Reads OLLAMA_BASE_URL env var override.
+
+Differs from openai-provider with OPENAI_BASE_URL=http://localhost:11434/v1 by:
+- Cleaner config UX (no env-var fiddling, defaults right out of the box)
+- Logical home for Ollama-specific extensions later
+"""
 from __future__ import annotations
 
 import json
 import os
 from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -513,14 +563,29 @@ DEFAULT_BASE_URL = "http://localhost:11434/v1"
 
 
 class OllamaProvider(BaseProvider):
-    provider_id = "ollama"
+    name = "ollama"
+    default_model = "llama3"
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
-        self._api_key = api_key or "ollama"
-        self._base_url = (base_url or os.environ.get("OLLAMA_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
+        # Ollama doesn't require auth by default but accepts arbitrary tokens.
+        self._api_key = (api_key or "ollama").strip()
+        self._base_url = (
+            (base_url or os.environ.get("OLLAMA_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
+        )
 
-    async def complete(self, *, messages: list[Message], model: str, tools: list | None = None, **kwargs) -> ProviderResponse:
-        body = {"model": model, "messages": [self._msg(m) for m in messages], "stream": False}
+    async def complete(
+        self,
+        *,
+        messages: list[Message],
+        model: str,
+        tools: list | None = None,
+        **kwargs: Any,
+    ) -> ProviderResponse:
+        body = {
+            "model": model,
+            "messages": [self._msg(m) for m in messages],
+            "stream": False,
+        }
         if tools:
             body["tools"] = tools
         async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
@@ -536,13 +601,27 @@ class OllamaProvider(BaseProvider):
         return ProviderResponse(
             content=c.get("content") or "",
             tool_calls=c.get("tool_calls") or [],
-            usage=Usage(input_tokens=u.get("prompt_tokens", 0), output_tokens=u.get("completion_tokens", 0)),
+            usage=Usage(
+                input_tokens=u.get("prompt_tokens", 0),
+                output_tokens=u.get("completion_tokens", 0),
+            ),
             stop_reason=data["choices"][0].get("finish_reason"),
             raw_response=data,
         )
 
-    async def stream_complete(self, *, messages: list[Message], model: str, tools: list | None = None, **kwargs) -> AsyncIterator[StreamDelta]:
-        body = {"model": model, "messages": [self._msg(m) for m in messages], "stream": True}
+    async def stream_complete(
+        self,
+        *,
+        messages: list[Message],
+        model: str,
+        tools: list | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamDelta]:
+        body = {
+            "model": model,
+            "messages": [self._msg(m) for m in messages],
+            "stream": True,
+        }
         if tools:
             body["tools"] = tools
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
@@ -580,48 +659,111 @@ class OllamaProvider(BaseProvider):
         return d
 ```
 
-- [ ] **Step 5: Implement plugin manifest**
+- [ ] **Step 5: Implement plugin entry (dual-import + register)**
 
 ```python
-# extensions/ollama_provider/plugin.py
-from plugin_sdk.plugin_contract import PluginManifest
-from extensions.ollama_provider.provider import OllamaProvider
+# extensions/ollama-provider/plugin.py
+"""Ollama provider plugin — entry point.
+
+Flat layout: plugin.py is the entry, sibling provider.py is importable
+via plain name because the plugin loader puts the plugin root on sys.path.
+"""
+from __future__ import annotations
+
+try:
+    from provider import OllamaProvider  # plugin-loader mode
+except ImportError:  # pragma: no cover
+    from extensions.ollama_provider.provider import OllamaProvider  # package mode
 
 
-def register(api):
-    api.register_provider(OllamaProvider)
-
-
-manifest = PluginManifest(
-    name="ollama-provider",
-    version="0.1.0",
-    description="Local LLM via Ollama's OpenAI-compatible API.",
-    author="OpenComputer",
-    enabled_by_default=False,
-)
+def register(api) -> None:  # PluginAPI duck-typed
+    api.register_provider("ollama", OllamaProvider)
 ```
 
-- [ ] **Step 6: Run tests + verify import**
+- [ ] **Step 6: Implement plugin manifest**
+
+```json
+// extensions/ollama-provider/plugin.json
+{
+  "id": "ollama-provider",
+  "name": "Ollama Provider",
+  "version": "0.1.0",
+  "description": "Local LLM via Ollama's OpenAI-compatible API.",
+  "author": "OpenComputer",
+  "license": "MIT",
+  "kind": "provider",
+  "entry": "plugin",
+  "tool_names": [],
+  "model_support": {
+    "model_prefixes": ["llama", "mistral", "phi", "gemma", "qwen", "codellama", "deepseek"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "ollama",
+        "auth_methods": ["none"],
+        "env_vars": ["OLLAMA_BASE_URL"],
+        "label": "Ollama (local)",
+        "default_model": "llama3",
+        "signup_url": "https://ollama.ai/download"
+      }
+    ]
+  }
+}
+```
+
+- [ ] **Step 7: Wire conftest alias for tests**
+
+In `tests/conftest.py`, add (mirror the openai-provider pattern):
+
+```python
+# Around the other _XXX_PROVIDER_DIR constants near top
+_OLLAMA_PROVIDER_DIR = _REPO_ROOT / "extensions" / "ollama-provider"
+
+
+# After _register_anthropic_provider_alias()
+def _register_ollama_provider_alias() -> None:
+    """Eager-exec + parent-binding for the Ollama provider."""
+    _register_extension_alias(
+        "ollama_provider", _OLLAMA_PROVIDER_DIR,
+        submodules=("provider", "plugin"),
+    )
+
+
+# In the registration block at the bottom (alphabetical position)
+_register_ollama_provider_alias()
+```
+
+The implementer reads the actual conftest.py and inserts at the matching positions.
+
+- [ ] **Step 8: Run tests + verify import**
 
 ```bash
 .venv/bin/python -m pytest tests/extensions/test_ollama_provider.py -v
-.venv/bin/python -c "from extensions.ollama_provider.provider import OllamaProvider; print(OllamaProvider.provider_id)"
+.venv/bin/python -c "
+import sys
+sys.path.insert(0, 'extensions/ollama-provider')
+from provider import OllamaProvider
+print(OllamaProvider.name, '=', 'ollama')
+"
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add extensions/ollama_provider/ tests/extensions/test_ollama_provider.py
+git add extensions/ollama-provider/ tests/extensions/test_ollama_provider.py tests/conftest.py
 git commit -m "feat(providers): ollama-provider plugin (OpenAI-compatible local LLM)"
 ```
 
 ### Task 2.2: B2 groq-provider
 
 **Files:** mirror Task 2.1 with these changes:
-- `extensions/groq_provider/` (UNDERSCORE)
-- Provider id: `groq`
+- Dir: `extensions/groq-provider/` (HYPHEN)
+- Provider class attribute: `name = "groq"`, `default_model = "llama-3.3-70b-versatile"`
 - Default base URL: `https://api.groq.com/openai/v1`
-- API key REQUIRED — raise `RuntimeError` if `GROQ_API_KEY` missing
+- API key REQUIRED — raise `RuntimeError` if `GROQ_API_KEY` missing in `__init__`
+- `_api_key_env: str = "GROQ_API_KEY"` class attribute
+- conftest: add `_GROQ_PROVIDER_DIR` + `_register_groq_provider_alias()` + invocation
 - Add test:
   ```python
   def test_missing_api_key_raises(monkeypatch):
@@ -630,9 +772,12 @@ git commit -m "feat(providers): ollama-provider plugin (OpenAI-compatible local 
           GroqProvider()
   ```
 
+`plugin.json` setup section uses `"auth_methods": ["api_key"]`, `"env_vars": ["GROQ_API_KEY"]`, `"label": "Groq (fast inference)"`, `"signup_url": "https://console.groq.com/keys"`.
+
 - [ ] **All steps + commit**
 
 ```bash
+git add extensions/groq-provider/ tests/extensions/test_groq_provider.py tests/conftest.py
 git commit -m "feat(providers): groq-provider plugin (276-1500 t/s inference)"
 ```
 
