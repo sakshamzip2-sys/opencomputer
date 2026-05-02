@@ -423,6 +423,8 @@ class StopReason(str, Enum):
     INTERRUPTED = "interrupted"  # user cancelled
     BUDGET_EXHAUSTED = "budget_exhausted"  # iteration budget spent
     ERROR = "error"  # unrecoverable error
+    PAUSE_TURN = "pause_turn"  # server-tool work paused; re-send to continue (cap 3)
+    REFUSAL = "refusal"  # model refused; surface as final, do not retry
 
 
 # ─── Plugin exceptions ─────────────────────────────────────────────────

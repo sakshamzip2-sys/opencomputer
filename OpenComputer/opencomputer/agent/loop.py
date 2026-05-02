@@ -1304,6 +1304,37 @@ class AgentLoop:
                     model=model_for_turn,
                     session_id=sid,
                 )
+
+                # Item 2 (2026-05-02): pause_turn + refusal handling.
+                # pause_turn means a server-tool needs more time; re-send the
+                # conversation including the paused assistant message so the
+                # provider continues from where it left off. Cap at 3 to
+                # prevent pathological loops on broken server tools.
+                # refusal falls through to normal END_TURN handling — the
+                # refusal text becomes the final assistant message.
+                if step.stop_reason == StopReason.PAUSE_TURN:
+                    self._pause_turn_count = (
+                        getattr(self, "_pause_turn_count", 0) + 1
+                    )
+                    if self._pause_turn_count >= 3:
+                        _log.warning(
+                            "pause_turn cap (3) exceeded — forcing END_TURN. "
+                            "A server tool may be stuck in a re-send loop.",
+                        )
+                        from dataclasses import replace as _dc_replace
+                        step = _dc_replace(step, stop_reason=StopReason.END_TURN)
+                        self._pause_turn_count = 0
+                        # Fall through to normal end-of-turn flow below.
+                    else:
+                        # Below cap: append paused content and continue the
+                        # loop so the next iteration re-sends.
+                        if step.assistant_message is not None:
+                            messages.append(step.assistant_message)
+                        continue
+                else:
+                    # Reset counter on any non-pause outcome
+                    self._pause_turn_count = 0
+
                 # Round 2B P-3: a returned LLM response is activity. Bump BEFORE
                 # the early-return path below so an end-turn turn that took 290s
                 # still resets the timer for any caller that resumes the same
@@ -2755,6 +2786,10 @@ class AgentLoop:
             "tool_use": StopReason.TOOL_USE,
             "max_tokens": StopReason.MAX_TOKENS,
             "stop_sequence": StopReason.END_TURN,
+            # Item 2 (2026-05-02): server-tool work paused; loop re-sends.
+            "pause_turn": StopReason.PAUSE_TURN,
+            # Item 2 (2026-05-02): model refused; surface as final, no retry.
+            "refusal": StopReason.REFUSAL,
         }
         stop = stop_reason_map.get(resp.stop_reason, StopReason.END_TURN)
 
