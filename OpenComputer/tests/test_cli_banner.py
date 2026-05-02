@@ -125,7 +125,13 @@ def test_get_available_tools_returns_empty_dict_when_registry_unreachable(
     assert get_available_tools() == {}
 
 
-def test_build_welcome_banner_renders_logo_and_version(monkeypatch):
+def test_build_welcome_banner_renders_minimal_meta_block(monkeypatch):
+    """Banner is intentionally minimal — model + path + session + welcome only.
+
+    OPENCOMPUTER ASCII logo, OC side glyph, version label, and tools/
+    skills inventory were all removed at user request to keep the chat
+    welcome surface clean.
+    """
     import io
 
     from rich.console import Console
@@ -148,13 +154,25 @@ def test_build_welcome_banner_renders_logo_and_version(monkeypatch):
         session_id="abc123", home=Path("/home/user/.opencomputer"),
     )
     out = buf.getvalue()
-    # Either the figlet OPENCOMPUTER logo or its plain-text fallback
-    assert "OPENCOMPUTER" in out or "/_____/" in out
+    # Must NOT have the ASCII banner art or side glyph
+    assert "OPENCOMPUTER" not in out
+    assert "/_____/" not in out
+    assert ":::: OC ::::" not in out
+    # Must have the meta block
     assert "claude-opus-4-7" in out
     assert "abc123" in out
+    assert "/tmp" in out
+    # Must have the welcome line
+    assert "Welcome to OpenComputer" in out
 
 
-def test_build_welcome_banner_lists_tools_and_skills(monkeypatch):
+def test_build_welcome_banner_does_not_list_tools_and_skills_inline(monkeypatch):
+    """Tools/skills inventory was removed from the chat banner per user request.
+
+    Both `oc tools` and `oc skills` still expose the full inventory on
+    demand. The chat surface stays clean — model line + welcome + tip
+    only.
+    """
     import io
 
     from rich.console import Console
@@ -174,38 +192,17 @@ def test_build_welcome_banner_lists_tools_and_skills(monkeypatch):
     console = Console(file=buf, width=120, force_terminal=False)
     build_welcome_banner(console, "m", "/cwd")
     out = buf.getvalue()
-    assert "research" in out
-    assert "arxiv" in out
-    assert "coding-harness" in out
-    assert "Edit" in out
+    assert "Available Tools" not in out
+    assert "Available Skills" not in out
+    # Inventory totals also gone
+    assert "tools ·" not in out
+    assert "skills ·" not in out
+    # But the user-facing welcome line is still there
+    assert "Welcome to OpenComputer" in out
 
 
-def test_build_welcome_banner_footer_counts(monkeypatch):
-    import io
-
-    from rich.console import Console
-
-    from opencomputer.cli_banner import build_welcome_banner
-
-    monkeypatch.setattr(
-        "opencomputer.cli_banner.get_available_skills",
-        lambda: {"a": ["s1", "s2"], "b": ["s3"]},  # 3 skills
-    )
-    monkeypatch.setattr(
-        "opencomputer.cli_banner.get_available_tools",
-        lambda: {"core": ["t1", "t2", "t3", "t4"]},  # 4 tools
-    )
-
-    buf = io.StringIO()
-    console = Console(file=buf, width=120, force_terminal=False)
-    build_welcome_banner(console, "m", "/cwd")
-    out = buf.getvalue()
-    assert "4 tools" in out
-    assert "3 skills" in out
-    assert "/help" in out
-
-
-def test_build_welcome_banner_truncates_long_tool_lines(monkeypatch):
+def test_build_welcome_banner_omits_tools_inventory(monkeypatch):
+    """Long tool/skill lists no longer appear in the banner — inventory removed."""
     import io
 
     from rich.console import Console
@@ -225,4 +222,8 @@ def test_build_welcome_banner_truncates_long_tool_lines(monkeypatch):
     console = Console(file=buf, width=80, force_terminal=False)
     build_welcome_banner(console, "m", "/cwd")
     out = buf.getvalue()
-    assert "…" in out, "Long lists must be truncated with ellipsis"
+    # None of the 40 tools should appear — the entire inventory is gone
+    assert "Tool00" not in out
+    assert "Tool39" not in out
+    # And no tools/skills heading either
+    assert "Available Tools" not in out
