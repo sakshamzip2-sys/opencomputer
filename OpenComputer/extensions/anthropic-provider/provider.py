@@ -33,6 +33,9 @@ from opencomputer.agent.rate_guard import (
     rate_limit_remaining,
     record_rate_limit,
 )
+from opencomputer.tools.schema_sanitizer import (
+    normalize_tool_input_schema_for_anthropic,
+)
 from plugin_sdk.core import Message, ToolCall
 from plugin_sdk.provider_contract import (
     BaseProvider,
@@ -44,6 +47,32 @@ from plugin_sdk.provider_contract import (
 from plugin_sdk.tool_contract import ToolSchema
 
 _RATE_GUARD_PROVIDER = "anthropic"
+
+
+def _format_tools_for_anthropic(
+    tools: list[ToolSchema] | None,
+) -> list[dict[str, Any]]:
+    """Convert OC ToolSchemas to Anthropic input_schema format with sanitization.
+
+    Mirrors Hermes's ``convert_tools_to_anthropic`` + ``_normalize_tool_input_schema``
+    pipeline (``agent/anthropic_adapter.py``). Strips:
+      - Nullable anyOf/oneOf unions (Anthropic rejects null branches)
+      - Numeric constraints on integer/number (Anthropic 2025 validator
+        rejects minimum/maximum/exclusiveMin/exclusiveMax/multipleOf)
+
+    Tools with no parameters get the canonical ``{"type":"object","properties":{}}``
+    shape so Anthropic's strict validator accepts them.
+    """
+    if not tools:
+        return []
+    out: list[dict[str, Any]] = []
+    for t in tools:
+        formatted = t.to_anthropic_format()
+        formatted["input_schema"] = normalize_tool_input_schema_for_anthropic(
+            formatted.get("input_schema")
+        )
+        out.append(formatted)
+    return out
 
 
 def _check_rate_limit() -> None:
@@ -540,7 +569,7 @@ class AnthropicProvider(BaseProvider):
         # Item 1 (2026-05-02): build tools list FIRST so cache_control
         # can be applied to tools[-1] together with the system+messages
         # breakpoints in a single call (no two-call coordination footgun).
-        api_tools_pre = [t.to_anthropic_format() for t in tools] if tools else []
+        api_tools_pre = _format_tools_for_anthropic(tools)
         sys_for_sdk, api_messages, api_tools = self._apply_cache_control(
             anthropic_messages, system, api_tools_pre,
             model=model, idle_seconds=idle_s,
@@ -678,7 +707,7 @@ class AnthropicProvider(BaseProvider):
         # Item 1 (2026-05-02): build tools list FIRST so cache_control
         # can be applied to tools[-1] together with the system+messages
         # breakpoints in a single call (no two-call coordination footgun).
-        api_tools_pre = [t.to_anthropic_format() for t in tools] if tools else []
+        api_tools_pre = _format_tools_for_anthropic(tools)
         sys_for_sdk, api_messages, api_tools = self._apply_cache_control(
             anthropic_messages, system, api_tools_pre,
             model=model, idle_seconds=idle_s,
@@ -770,7 +799,7 @@ class AnthropicProvider(BaseProvider):
         # Item 1 (2026-05-02): build tools list FIRST so cache_control
         # can be applied to tools[-1] together with the system+messages
         # breakpoints in a single call (no two-call coordination footgun).
-        api_tools_pre = [t.to_anthropic_format() for t in tools] if tools else []
+        api_tools_pre = _format_tools_for_anthropic(tools)
         sys_for_sdk, api_messages, api_tools = self._apply_cache_control(
             anthropic_messages, system, api_tools_pre,
             model=model, idle_seconds=idle_s,
@@ -1021,7 +1050,7 @@ class AnthropicProvider(BaseProvider):
                 model=model,
                 messages=self._to_anthropic_messages(messages),
                 system=system if system else None,
-                tools=[t.to_anthropic_format() for t in (tools or [])] or None,
+                tools=_format_tools_for_anthropic(tools) or None,
             )
             return int(response.input_tokens)
         except Exception:  # noqa: BLE001 — fall back rather than fail
