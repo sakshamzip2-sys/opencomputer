@@ -31,9 +31,9 @@ If a row is `blocked`, write **what** it's blocked on in the row so other sessio
 
 | # | Subsystem | Brief | Wave | Depends on | Owner | Branch | Status | PR | Notes |
 |---|---|---|---|---|---|---|---|---|---|
-| W0a | `_utils/` | [BRIEF-utils](BRIEF-utils.md) | 0 | — | s2 | feat/browser-port-foundation | claimed | — | atomic_write, url_pattern, safe_filename, trash, errors |
-| W0b | `profiles/` | [BRIEF-01](BRIEF-01-chrome-and-profiles.md) | 0 | — | s2 | feat/browser-port-foundation | claimed | — | half of subsystem 01 |
-| W0c | `chrome/` | [BRIEF-01](BRIEF-01-chrome-and-profiles.md) | 0 | `profiles/`, `_utils/` | s2 | feat/browser-port-foundation | claimed | — | other half of subsystem 01 |
+| W0a | `_utils/` | [BRIEF-utils](BRIEF-utils.md) | 0 | — | s2 | feat/browser-port-foundation | review | (PR pending) | 24 tests; atomic_write fsync verified |
+| W0b | `profiles/` | [BRIEF-01](BRIEF-01-chrome-and-profiles.md) | 0 | — | s2 | feat/browser-port-foundation | review | (PR pending) | 41 tests; pull-based resolver + capabilities |
+| W0c | `chrome/` | [BRIEF-01](BRIEF-01-chrome-and-profiles.md) | 0 | `profiles/`, `_utils/` | s2 | feat/browser-port-foundation | review | (PR pending) | 39 tests; mocked spawn+probe; legacy no-egress guard rescoped |
 | W1a | `session/` | [BRIEF-02](BRIEF-02-cdp-and-session.md) (TBD) | 1 | `chrome/` | — | — | not started | — | CDP attach, nav guard, page management |
 | W1b | `snapshot/` | [BRIEF-04](BRIEF-04-ai-and-snapshot.md) (TBD) | 1 | `_utils/` | — | — | not started | — | role snapshot + Chrome MCP subprocess |
 | W1c | `server_context/` | [BRIEF-05](BRIEF-05-server-and-auth.md) (TBD) | 1 | `chrome/`, `profiles/` | — | — | not started | — | per-profile state holder; can develop in parallel against mocks |
