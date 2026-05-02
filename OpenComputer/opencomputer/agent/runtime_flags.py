@@ -68,6 +68,7 @@ def anthropic_kwargs_from_runtime(
     model: str,
     reasoning_effort: str | None = None,
     service_tier: str | None = None,
+    **_unused: object,  # swallow forward-compatible keys (e.g. anthropic_skills)
 ) -> dict:
     """Build the Anthropic-specific kwargs to merge into a ``messages.create`` call.
 
@@ -105,6 +106,7 @@ def openai_kwargs_from_runtime(
     *,
     reasoning_effort: str | None = None,
     service_tier: str | None = None,
+    **_unused: object,  # swallow forward-compatible keys (e.g. anthropic_skills)
 ) -> dict:
     """Build the OpenAI Chat Completions kwargs to merge into the request body."""
     out: dict = {}
@@ -117,20 +119,41 @@ def openai_kwargs_from_runtime(
     return out
 
 
-def runtime_flags_from_custom(custom: dict | None) -> dict[str, str | None]:
+def runtime_flags_from_custom(
+    custom: dict | None,
+) -> dict[str, str | list[str] | None]:
     """Extract the relevant runtime.custom keys; safe on missing or None.
 
-    Returns ``{"reasoning_effort": ..., "service_tier": ...}`` — values may
-    be ``None`` when the flag isn't set. Pass ``**runtime_flags_from_custom(rt.custom)``
-    into the translators above.
+    Returns a dict with three keys:
+      - ``reasoning_effort`` (``str | None``)
+      - ``service_tier`` (``str | None``)
+      - ``anthropic_skills`` (``list[str] | None``) — SP4 follow-up
+
+    Values are ``None`` when the corresponding flag isn't set or has an
+    unexpected type.
+
+    The result flows into ``runtime_extras=`` on provider calls — providers
+    read what they understand and ignore the rest. Anthropic provider's
+    Skills-via-API helper reads ``anthropic_skills``; ``reasoning_effort``
+    + ``service_tier`` go through the per-provider translators above.
     """
     if not custom:
-        return {"reasoning_effort": None, "service_tier": None}
+        return {
+            "reasoning_effort": None,
+            "service_tier": None,
+            "anthropic_skills": None,
+        }
     re = custom.get("reasoning_effort")
     st = custom.get("service_tier")
+    skills = custom.get("anthropic_skills")
     return {
         "reasoning_effort": re if isinstance(re, str) else None,
         "service_tier": st if isinstance(st, str) else None,
+        "anthropic_skills": (
+            [s.strip() for s in skills if isinstance(s, str) and s.strip()]
+            if isinstance(skills, list) and all(isinstance(s, str) for s in skills)
+            else None
+        ),
     }
 
 
