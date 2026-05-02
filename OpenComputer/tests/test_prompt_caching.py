@@ -72,3 +72,90 @@ def test_max_4_breakpoints_with_many_messages():
         if "cache_control" in m:
             cache_count += 1
     assert cache_count == 4
+
+
+# ─── Item 1 (2026-05-02): apply_full_cache_control with tools array ─
+
+
+def test_apply_full_cache_control_with_tools_marks_last_tool_and_3_message_breakpoints():
+    """With tools: 1 tools[-1] + 1 system + 2 last non-system msgs = 4 total."""
+    from opencomputer.agent.prompt_caching import apply_full_cache_control
+
+    tools = [
+        {"name": "Read", "description": "...", "input_schema": {}},
+        {"name": "Write", "description": "...", "input_schema": {}},
+        {"name": "Bash", "description": "...", "input_schema": {}},
+    ]
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "msg1"},
+        {"role": "assistant", "content": "msg2"},
+        {"role": "user", "content": "msg3"},
+    ]
+    out_msgs, out_tools = apply_full_cache_control(msgs, tools)
+
+    assert "cache_control" not in out_tools[0]
+    assert "cache_control" not in out_tools[1]
+    assert out_tools[2]["cache_control"] == {"type": "ephemeral"}
+
+    msg_breakpoints = 0
+    for m in out_msgs:
+        c = m.get("content")
+        if isinstance(c, list):
+            msg_breakpoints += sum(1 for blk in c if isinstance(blk, dict) and "cache_control" in blk)
+        if "cache_control" in m:
+            msg_breakpoints += 1
+    assert msg_breakpoints == 3
+
+    msg1 = out_msgs[1]["content"]
+    if isinstance(msg1, list):
+        for blk in msg1:
+            if isinstance(blk, dict):
+                assert "cache_control" not in blk
+
+    tools_breakpoints = sum(1 for t in out_tools if "cache_control" in t)
+    assert msg_breakpoints + tools_breakpoints == 4
+
+
+def test_apply_full_cache_control_no_tools_uses_4_message_breakpoints():
+    """Empty/None tools → 4 breakpoints on messages (system + last 3)."""
+    from opencomputer.agent.prompt_caching import apply_full_cache_control
+
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "m1"},
+        {"role": "assistant", "content": "m2"},
+        {"role": "user", "content": "m3"},
+        {"role": "assistant", "content": "m4"},
+    ]
+    out_msgs, out_tools = apply_full_cache_control(msgs, [])
+    breakpoints = 0
+    for m in out_msgs:
+        c = m.get("content")
+        if isinstance(c, list):
+            breakpoints += sum(1 for blk in c if isinstance(blk, dict) and "cache_control" in blk)
+        if "cache_control" in m:
+            breakpoints += 1
+    assert breakpoints == 4
+    assert out_tools == []
+
+
+def test_apply_full_cache_control_does_not_mutate_inputs():
+    from opencomputer.agent.prompt_caching import apply_full_cache_control
+
+    tools = [{"name": "Read"}]
+    msgs = [{"role": "system", "content": "sys"}]
+    apply_full_cache_control(msgs, tools)
+    assert "cache_control" not in tools[0]
+    assert msgs[0]["content"] == "sys"
+
+
+def test_apply_full_cache_control_handles_none_tools():
+    from opencomputer.agent.prompt_caching import apply_full_cache_control
+
+    msgs = [{"role": "system", "content": "sys"}]
+    out_msgs, out_tools = apply_full_cache_control(msgs, None)
+    assert out_tools == []
+    sys_content = out_msgs[0]["content"]
+    if isinstance(sys_content, list):
+        assert any("cache_control" in blk for blk in sys_content if isinstance(blk, dict))
