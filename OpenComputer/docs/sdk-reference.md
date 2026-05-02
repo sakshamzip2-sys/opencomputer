@@ -287,6 +287,18 @@ Frozen dataclass — one event from `stream_complete()`. Three kinds:
 Frozen dataclass — token counts: `input_tokens`, `output_tokens`,
 `cache_read_tokens`, `cache_write_tokens`.
 
+### `JsonSchemaSpec`
+
+TypedDict for structured outputs (Subsystem C, 2026-05-02). Pass
+to `complete()`/`stream_complete()` via the `response_schema` kwarg
+to get schema-validated JSON responses. Providers translate to their
+native shape — Anthropic `output_config.format`, OpenAI
+`response_format` with `strict: true`. Fields: `schema` (JSON Schema
+dict, required), `name` (optional, surfaced to OpenAI's
+`json_schema.name`), `description` (optional one-liner). Use the
+`opencomputer.agent.structured.parse_structured()` helper for
+Pydantic-model integration.
+
 ---
 
 ## Channel contract

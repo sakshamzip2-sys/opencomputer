@@ -11,7 +11,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from plugin_sdk.core import Message
 from plugin_sdk.tool_contract import ToolSchema
@@ -97,6 +97,33 @@ class StreamEvent:
     response: ProviderResponse | None = None
 
 
+class JsonSchemaSpec(TypedDict, total=False):
+    """Provider-agnostic structured-outputs schema spec.
+
+    Lives in plugin_sdk because every BaseProvider sees this kwarg.
+    Providers translate the spec to their native shape:
+
+    * Anthropic: ``output_config.format = {"type": "json_schema", "schema": <schema>}``
+    * OpenAI: ``response_format = {"type": "json_schema", "json_schema":
+      {"name": <name>, "schema": <schema>, "strict": True}}``
+    * Providers without native support: pass through as no-op (the
+      caller is expected to add JSON instructions to the prompt as
+      a backup).
+
+    Fields:
+      * ``schema`` — the JSON Schema (subset Anthropic + OpenAI accept).
+        Must include ``type: "object"`` at the top level for both.
+      * ``name`` — short identifier used by OpenAI's ``json_schema.name``
+        field. Anthropic ignores this. Default ``"response"``.
+      * ``description`` — optional one-liner. Some providers surface it
+        in the schema metadata.
+    """
+
+    schema: dict
+    name: str
+    description: str
+
+
 class BaseProvider(ABC):
     """Base class for an LLM provider plugin.
 
@@ -136,6 +163,7 @@ class BaseProvider(ABC):
         temperature: float = 1.0,
         stream: bool = False,
         runtime_extras: dict | None = None,
+        response_schema: JsonSchemaSpec | None = None,
     ) -> ProviderResponse:
         """Send messages to the provider, return a single ProviderResponse.
 
@@ -147,6 +175,15 @@ class BaseProvider(ABC):
         ``opencomputer.agent.runtime_flags``. ``None`` (the default)
         means no flags active — providers must treat this identically to
         an empty dict.
+
+        ``response_schema`` enables structured outputs (Subsystem C,
+        2026-05-02). When set, providers translate to their native
+        schema-enforcement shape (Anthropic ``output_config.format``,
+        OpenAI ``response_format`` with ``strict: true``). Providers
+        without native schema enforcement should accept the kwarg as a
+        no-op — callers should add JSON instructions in the prompt as a
+        backup. Default ``None`` = no schema enforcement, free-form
+        text response (existing behavior).
         """
         ...
 
@@ -161,18 +198,25 @@ class BaseProvider(ABC):
         max_tokens: int = 4096,
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
+        response_schema: JsonSchemaSpec | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream the response.
 
         Yields StreamEvent objects in order. Final event has kind="done"
         and carries the complete ProviderResponse (including aggregated text
         and any tool calls). Text chunks arrive as kind="text_delta".
+
+        ``response_schema`` — see :meth:`complete` for semantics.
+        Streaming with structured outputs is supported by Anthropic;
+        OpenAI partial-JSON streaming has more nuance (initial
+        implementation may aggregate before yielding ``done``).
         """
         ...
 
 
 __all__ = [
     "BaseProvider",
+    "JsonSchemaSpec",
     "ProviderResponse",
     "RateLimitedError",
     "StreamEvent",

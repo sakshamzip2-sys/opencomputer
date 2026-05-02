@@ -108,6 +108,58 @@ async def test_high_effort_lifts_max_tokens_floor_on_adaptive(provider) -> None:
 
 
 @pytest.mark.asyncio
+async def test_response_schema_lands_in_output_config_format(provider) -> None:
+    """Subsystem C — response_schema must be translated to output_config.format."""
+    captured: dict = {}
+
+    async def _capture(**kw):
+        captured.update(kw)
+        return _stub_response()
+
+    schema = {
+        "type": "object",
+        "properties": {"x": {"type": "string"}},
+        "required": ["x"],
+    }
+    with patch.object(provider.client.messages, "create", side_effect=_capture):
+        await provider.complete(
+            model="claude-opus-4-7",
+            messages=[],
+            max_tokens=100,
+            response_schema={"name": "test_reply", "schema": schema},
+        )
+
+    assert captured["output_config"]["format"] == {
+        "type": "json_schema",
+        "schema": schema,
+    }
+
+
+@pytest.mark.asyncio
+async def test_response_schema_coexists_with_effort(provider) -> None:
+    """response_schema and effort both live in output_config — must not stomp each other."""
+    captured: dict = {}
+
+    async def _capture(**kw):
+        captured.update(kw)
+        return _stub_response()
+
+    schema = {"type": "object", "properties": {}, "required": []}
+    with patch.object(provider.client.messages, "create", side_effect=_capture):
+        await provider.complete(
+            model="claude-opus-4-7",
+            messages=[],
+            max_tokens=100,
+            runtime_extras={"reasoning_effort": "high"},
+            response_schema={"name": "x", "schema": schema},
+        )
+
+    output_config = captured["output_config"]
+    assert output_config["effort"] == "high"
+    assert output_config["format"]["schema"] == schema
+
+
+@pytest.mark.asyncio
 async def test_low_effort_does_not_lift_max_tokens(provider) -> None:
     """Low effort doesn't trigger the floor lift."""
     captured: dict = {}
