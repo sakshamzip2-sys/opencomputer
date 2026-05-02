@@ -125,12 +125,12 @@ def test_get_available_tools_returns_empty_dict_when_registry_unreachable(
     assert get_available_tools() == {}
 
 
-def test_build_welcome_banner_renders_minimal_meta_block(monkeypatch):
-    """Banner is intentionally minimal — model + path + session + welcome only.
+def test_build_welcome_banner_renders_header_and_meta_block(monkeypatch):
+    """Banner header: ✦ OpenComputer + version pill, then meta block.
 
-    OPENCOMPUTER ASCII logo, OC side glyph, version label, and tools/
-    skills inventory were all removed at user request to keep the chat
-    welcome surface clean.
+    OPENCOMPUTER ASCII logo, OC side glyph, and tools/skills inventory
+    were removed at user request. The "OpenComputer" name lives on its
+    own bold line above the model so it reads as the agent title.
     """
     import io
 
@@ -154,16 +154,24 @@ def test_build_welcome_banner_renders_minimal_meta_block(monkeypatch):
         session_id="abc123", home=Path("/home/user/.opencomputer"),
     )
     out = buf.getvalue()
+    # Header line must include OpenComputer + version
+    assert "OpenComputer" in out
+    assert "v" in out  # version pill (e.g. v2026.4.27)
     # Must NOT have the ASCII banner art or side glyph
-    assert "OPENCOMPUTER" not in out
     assert "/_____/" not in out
     assert ":::: OC ::::" not in out
-    # Must have the meta block
+    # Must have the meta block (model on its own line — no " · OpenComputer" suffix)
     assert "claude-opus-4-7" in out
+    # The model line should NOT contain the trailing " · OpenComputer" anymore
+    # (the agent name is its own header line above)
+    assert "claude-opus-4-7 · OpenComputer" not in out
     assert "abc123" in out
     assert "/tmp" in out
-    # Must have the welcome line
+    # Must have the welcome line WITHOUT the "/help for commands" mention
+    # (deduped against the Tip line which mentions /help)
     assert "Welcome to OpenComputer" in out
+    assert "Type your message to start" in out
+    assert "/help for commands" not in out
 
 
 def test_build_welcome_banner_does_not_list_tools_and_skills_inline(monkeypatch):

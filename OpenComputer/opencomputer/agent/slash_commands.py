@@ -55,6 +55,7 @@ from opencomputer.agent.slash_commands_impl.skin_personality_cmd import (
     SkinCommand,
 )
 from opencomputer.agent.slash_commands_impl.title_cmd import TitleCommand
+from opencomputer.agent.slash_commands_impl.update_cmd import UpdateCommand
 from opencomputer.agent.slash_commands_impl.usage_cmd import UsageCommand
 from opencomputer.plugins.registry import registry as _plugin_registry
 
@@ -77,6 +78,7 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     ReasoningCommand,
     FastCommand,
     UsageCommand,
+    UpdateCommand,
     PlatformsCommand,
     # Batch 2 — session-aware (read session_id + session_db from
     # runtime.custom; loop plumbs them in before dispatch):

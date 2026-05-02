@@ -174,22 +174,33 @@ def build_welcome_banner(
     tools/skills listing."""
     import random
 
-    # Banner art (OPENCOMPUTER logo + OC side glyph) and the
-    # tools/skills inventory were removed at user request to keep the
-    # chat welcome surface minimal — same content as Hermes-style
-    # onboarding but without the visual fanfare. ``oc tools`` and
-    # ``oc skills`` still expose the full inventory on demand.
+    # Header — agent name + version, styled to read as the title of the
+    # session. The OPENCOMPUTER ASCII logo and OC side glyph were dropped
+    # at user request; instead we use a single bold-yellow line with a
+    # sparkle accent, version label dimmed alongside.
+    version_label = format_banner_version_label()
+    # ``format_banner_version_label`` returns "OpenComputer vX · sha".
+    # Split off the leading agent-name so we can style it differently
+    # from the version pill that follows.
+    if version_label.startswith("OpenComputer "):
+        version_pill = version_label[len("OpenComputer "):]
+    else:  # defensive — never happens in production
+        version_pill = ""
+    console.print(
+        f"[bold yellow]✦ OpenComputer[/bold yellow]  [dim yellow]{version_pill}[/dim yellow]"
+    )
+    console.print()
 
     # Meta block — model + working dir + session + profile home
-    console.print(f"[bold]{model}[/bold] · OpenComputer")
+    console.print(f"[bold]{model}[/bold]")
     console.print(f"[dim]{cwd}[/dim]")
     if session_id:
         console.print(f"[dim]Session: {session_id}[/dim]")
     if home:
         console.print(f"[dim]{home}[/dim]")
 
-    # 6b. Update-check hint — non-blocking (200ms), silently None when
-    # the background check hasn't finished yet (caller already invoked
+    # Update-check hint — non-blocking (200ms), silently None when the
+    # background check hasn't finished yet (caller already invoked
     # prefetch_update_check at startup).
     try:
         from opencomputer.cli_update_check import get_update_hint
@@ -199,13 +210,11 @@ def build_welcome_banner(
     except Exception:  # noqa: BLE001
         pass  # update check is purely informational; never block startup
 
-    # 7. Welcome line
+    # Welcome line — `/help` mention dropped here because the Tip below
+    # already covers it (avoids the repeated mention the user flagged).
     console.print()
-    console.print(
-        "[bold]Welcome to OpenComputer![/bold] "
-        "Type your message or /help for commands."
-    )
+    console.print("[bold]Welcome to OpenComputer![/bold] Type your message to start.")
 
-    # 8. Tip
+    # Tip
     if _TIPS:
         console.print(f"[dim]+ {random.choice(_TIPS)}[/dim]")
