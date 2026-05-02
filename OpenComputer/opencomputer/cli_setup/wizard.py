@@ -162,5 +162,94 @@ def run_setup(*, quick: bool = False) -> int:
         return 1
 
     _save_config(config_path, ctx.config)
+    _print_setup_summary(ctx)
     _console.print("\n[green]✓ Setup complete.[/green] Run `oc chat` to start.")
     return 0
+
+
+def _print_setup_summary(ctx: WizardCtx) -> None:
+    """Print a Hermes-style configuration summary block after the section
+    loop. Walks ctx.config and reports configured / missing pieces with
+    brief next-step hints.
+
+    Modeled after hermes_cli/setup.py::_print_setup_summary (line 348).
+    Independently re-implemented (no code copied) — checks OC's config
+    shape rather than Hermes's.
+    """
+    cfg = ctx.config
+    _console.print("\n[bold cyan]◆ Configuration Summary[/bold cyan]")
+
+    rows: list[tuple[str, bool, str]] = []  # (label, ok, hint)
+
+    # Inference provider
+    model = cfg.get("model") or {}
+    provider = model.get("provider") or ""
+    if provider and provider != "none":
+        rows.append((f"Inference provider: {provider}", True, ""))
+    else:
+        rows.append(("Inference provider", False, "run `oc setup --new` to select"))
+
+    # Messaging platforms
+    platforms = (cfg.get("gateway") or {}).get("platforms") or []
+    if platforms:
+        rows.append((f"Messaging platforms: {', '.join(platforms)}", True, ""))
+    else:
+        rows.append(("Messaging platforms", False, "skipped — set up later via the wizard"))
+
+    # Agent settings
+    loop = cfg.get("loop") or {}
+    if loop.get("max_iterations"):
+        rows.append(
+            (f"Agent settings: max_iterations={loop['max_iterations']}", True, ""),
+        )
+    else:
+        rows.append(("Agent settings", False, "using built-in defaults"))
+
+    # TTS
+    tts = cfg.get("tts") or {}
+    if tts.get("provider"):
+        rows.append((f"TTS: {tts['provider']}", True, ""))
+    else:
+        rows.append(("TTS", False, "skipped — voice output not configured"))
+
+    # Terminal backend
+    terminal = cfg.get("terminal") or {}
+    if terminal.get("backend"):
+        rows.append((f"Terminal backend: {terminal['backend']}", True, ""))
+    else:
+        rows.append(("Terminal backend", False, "using default (local)"))
+
+    # Tools / plugins
+    enabled_plugins = (cfg.get("plugins") or {}).get("enabled") or []
+    if enabled_plugins:
+        plug_label = ", ".join(enabled_plugins[:3])
+        if len(enabled_plugins) > 3:
+            plug_label += f" + {len(enabled_plugins) - 3} more"
+        rows.append((f"Plugins: {plug_label}", True, ""))
+    else:
+        rows.append(("Plugins", False, "no plugin preset applied"))
+
+    # Launchd service
+    launchd_installed = (cfg.get("gateway") or {}).get("launchd_installed")
+    if launchd_installed:
+        rows.append(("Launchd service: installed", True, ""))
+    # else: omit — not relevant on non-macOS, and "skipped" is the default
+
+    # Migrations
+    migrations = (cfg.get("migrations") or {}).get("prior_install") or []
+    if migrations:
+        sources = ", ".join(m.get("source", "?") for m in migrations)
+        rows.append((f"Imported from: {sources}", True, ""))
+
+    # Render
+    for label, ok, hint in rows:
+        glyph = "[green]✓[/green]" if ok else "[yellow]·[/yellow]"
+        line = f"  {glyph} {label}"
+        if not ok and hint:
+            line += f"  [dim]({hint})[/dim]"
+        _console.print(line)
+
+    # Config location pointer
+    _console.print(
+        f"\n  [dim]Config: {ctx.config_path}[/dim]"
+    )
