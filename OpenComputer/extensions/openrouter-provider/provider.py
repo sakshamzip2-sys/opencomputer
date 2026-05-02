@@ -67,3 +67,41 @@ class OpenRouterProvider(OpenAIProvider):
             or DEFAULT_OPENROUTER_BASE_URL
         )
         super().__init__(api_key=api_key, base_url=resolved_base)
+
+    @property
+    def capabilities(self):  # type: ignore[override]
+        """OpenRouter passes the upstream's usage payload through verbatim,
+        so the cache-token extractor must handle either the Anthropic
+        shape (``cache_creation_input_tokens`` / ``cache_read_input_tokens``)
+        or the OpenAI shape (``prompt_tokens_details.cached_tokens``).
+        Reasoning resend is False — even when OpenRouter routes to
+        Anthropic, the upstream's signed thinking blocks aren't surfaced
+        through OpenRouter's OpenAI-compatible response shape today.
+        """
+        from typing import Any as _Any
+
+        from plugin_sdk import CacheTokens, ProviderCapabilities
+
+        def _extract(usage: _Any) -> CacheTokens:
+            # Prefer Anthropic-shape fields (more specific); fall back to
+            # OpenAI-shape.
+            anth_read = getattr(usage, "cache_read_input_tokens", None)
+            anth_write = getattr(usage, "cache_creation_input_tokens", None)
+            if anth_read is not None or anth_write is not None:
+                return CacheTokens(
+                    read=int(anth_read or 0),
+                    write=int(anth_write or 0),
+                )
+            details = getattr(usage, "prompt_tokens_details", None)
+            cached = 0
+            if details is not None:
+                cached = int(getattr(details, "cached_tokens", 0) or 0)
+            return CacheTokens(read=cached, write=0)
+
+        return ProviderCapabilities(
+            requires_reasoning_resend_in_tool_cycle=False,
+            reasoning_block_kind=None,
+            extracts_cache_tokens=_extract,
+            min_cache_tokens=lambda _model: 1024,
+            supports_long_ttl=False,
+        )

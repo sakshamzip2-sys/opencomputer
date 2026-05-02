@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     message_count INTEGER DEFAULT 0,
     input_tokens  INTEGER DEFAULT 0,
     output_tokens INTEGER DEFAULT 0,
+    cache_read_tokens  INTEGER DEFAULT 0,
+    cache_write_tokens INTEGER DEFAULT 0,
     vibe          TEXT,    -- A.4 (2026-04-27): per-session emotional state
                            -- (frustrated|excited|tired|curious|calm|stuck|"")
     vibe_updated  REAL,    -- A.4: when vibe was last classified (epoch seconds)
@@ -69,6 +71,7 @@ CREATE TABLE IF NOT EXISTS messages (
     reasoning              TEXT,   -- extended thinking (free-form text)
     reasoning_details      TEXT,   -- II.6: JSON, OpenRouter/Nous structured array
     codex_reasoning_items  TEXT,   -- II.6: JSON, OpenAI o1/o3 reasoning items
+    reasoning_replay_blocks TEXT,  -- 2026-05-02: JSON, verbatim provider replay blocks (Anthropic thinking with signatures)
     attachments            TEXT,   -- 2026-04-27: JSON list[str], image attachments
     timestamp              REAL NOT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -252,7 +255,12 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
     large legacy DBs. Wrapped in try/except so fresh DBs that already
     have the columns from DDL get a silent no-op.
     """
-    for col_name in ("reasoning_details", "codex_reasoning_items", "attachments"):
+    for col_name in (
+        "reasoning_details",
+        "codex_reasoning_items",
+        "reasoning_replay_blocks",  # 2026-05-02 — verbatim provider replay blocks
+        "attachments",
+    ):
         try:
             conn.execute(
                 f'ALTER TABLE messages ADD COLUMN "{col_name}" TEXT'
@@ -381,7 +389,10 @@ def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
 _EXPECTED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("messages", "reasoning_details", "TEXT"),
     ("messages", "codex_reasoning_items", "TEXT"),
+    ("messages", "reasoning_replay_blocks", "TEXT"),  # 2026-05-02
     ("messages", "attachments", "TEXT"),
+    ("sessions", "cache_read_tokens", "INTEGER DEFAULT 0"),  # 2026-05-02
+    ("sessions", "cache_write_tokens", "INTEGER DEFAULT 0"),  # 2026-05-02
     ("sessions", "vibe", "TEXT"),
     ("sessions", "vibe_updated", "REAL"),
     ("sessions", "cwd", "TEXT"),  # Plan 3 (2026-05-01) — profile-suggester input
@@ -834,6 +845,15 @@ class SessionDB:
             if msg.codex_reasoning_items is not None
             else None
         )
+        # 2026-05-02: verbatim provider replay blocks (Anthropic thinking
+        # with signatures). Persisted as JSON so a mid-cycle session
+        # resume retains the cryptographic signatures the API requires
+        # alongside tool_result.
+        reasoning_replay_json = (
+            json.dumps(msg.reasoning_replay_blocks)
+            if msg.reasoning_replay_blocks is not None
+            else None
+        )
         # 2026-04-27: image attachments serialise as JSON list[str].
         # Empty list → NULL so non-image messages don't bloat the column.
         attachments_json = (
@@ -849,6 +869,7 @@ class SessionDB:
             msg.reasoning,
             reasoning_details_json,
             codex_items_json,
+            reasoning_replay_json,
             attachments_json,
             time.time(),
         )
@@ -859,9 +880,10 @@ class SessionDB:
     _INSERT_MESSAGE_SQL = (
         "INSERT INTO messages "
         "(session_id, role, content, tool_call_id, tool_calls, name, "
-        "reasoning, reasoning_details, codex_reasoning_items, attachments, "
+        "reasoning, reasoning_details, codex_reasoning_items, "
+        "reasoning_replay_blocks, attachments, "
         "timestamp) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
 
     def append_message(self, session_id: str, msg: Message) -> int:
@@ -901,7 +923,12 @@ class SessionDB:
             return ids
 
     def add_tokens(
-        self, session_id: str, input_tokens: int, output_tokens: int
+        self,
+        session_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
     ) -> None:
         """Bump the per-session token counters by the given deltas.
 
@@ -913,7 +940,11 @@ class SessionDB:
         clamped to ``0`` defensively — a buggy provider mustn't be able
         to drag the running total backwards.
 
-        No-op when both deltas are zero (and when ``session_id`` is
+        2026-05-02 — cache_read_tokens / cache_write_tokens accumulate
+        prompt-cache hits + writes for ``/usage`` to surface. Default
+        zero keeps every existing call site working unchanged.
+
+        No-op when all deltas are zero (and when ``session_id`` is
         empty), so callers don't need to branch on the common case
         where a provider declined to surface usage.
         """
@@ -921,15 +952,19 @@ class SessionDB:
             return
         in_delta = max(0, int(input_tokens or 0))
         out_delta = max(0, int(output_tokens or 0))
-        if in_delta == 0 and out_delta == 0:
+        cr_delta = max(0, int(cache_read_tokens or 0))
+        cw_delta = max(0, int(cache_write_tokens or 0))
+        if in_delta == 0 and out_delta == 0 and cr_delta == 0 and cw_delta == 0:
             return
         with self._txn() as conn:
             conn.execute(
                 "UPDATE sessions SET "
                 "input_tokens = input_tokens + ?, "
-                "output_tokens = output_tokens + ? "
+                "output_tokens = output_tokens + ?, "
+                "cache_read_tokens = cache_read_tokens + ?, "
+                "cache_write_tokens = cache_write_tokens + ? "
                 "WHERE id = ?",
-                (in_delta, out_delta, session_id),
+                (in_delta, out_delta, cr_delta, cw_delta, session_id),
             )
 
     def get_messages(self, session_id: str) -> list[Message]:
@@ -937,7 +972,7 @@ class SessionDB:
             rows = conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, name, "
                 "reasoning, reasoning_details, codex_reasoning_items, "
-                "attachments "
+                "reasoning_replay_blocks, attachments "
                 "FROM messages WHERE session_id = ? ORDER BY id",
                 (session_id,),
             ).fetchall()
@@ -964,6 +999,20 @@ class SessionDB:
                     codex_items = json.loads(r["codex_reasoning_items"])
                 except (json.JSONDecodeError, TypeError):
                     codex_items = None
+            # 2026-05-02: deserialise reasoning_replay_blocks (Anthropic
+            # thinking blocks with cryptographic signatures). Tolerate
+            # missing column / bad JSON — pre-migration rows return None
+            # which is the same as "no replay needed".
+            reasoning_replay: Any = None
+            try:
+                raw_replay = r["reasoning_replay_blocks"]
+            except (IndexError, KeyError):
+                raw_replay = None
+            if raw_replay:
+                try:
+                    reasoning_replay = json.loads(raw_replay)
+                except (json.JSONDecodeError, TypeError):
+                    reasoning_replay = None
             # 2026-04-27: deserialise attachments (image paths). Same
             # forgiving JSON shape as the reasoning fields. Pre-migration
             # rows return NULL via dict.get(); legacy DBs upgraded by
@@ -990,6 +1039,7 @@ class SessionDB:
                     reasoning=r["reasoning"],
                     reasoning_details=reasoning_details,
                     codex_reasoning_items=codex_items,
+                    reasoning_replay_blocks=reasoning_replay,
                     attachments=attachments_list,
                 )
             )

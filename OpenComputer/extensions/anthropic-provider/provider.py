@@ -244,6 +244,45 @@ class AnthropicProvider(BaseProvider):
         self.client = build_anthropic_async_client(
             key, base_url=base, auth_mode=mode,
         )
+        # Idle-aware TTL switch — track wall-clock between calls so we can
+        # bump cache TTL to 1h when a session has been idle long enough
+        # that the 5m cache would otherwise have expired.
+        self._last_call_ts: float = 0.0
+
+    # ─── capabilities ───────────────────────────────────────────────
+
+    @property
+    def capabilities(self):  # type: ignore[override]
+        from plugin_sdk import CacheTokens, ProviderCapabilities
+
+        def _extract(usage: Any) -> CacheTokens:
+            return CacheTokens(
+                read=int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+                write=int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
+            )
+
+        def _min_tokens(model: str) -> int:
+            m = model.lower()
+            # Opus + Mythos + Haiku 4.5 share the 4096 minimum per the
+            # Anthropic prompt-caching spec.
+            if (
+                "opus" in m
+                or "mythos" in m
+                or "haiku-4-5" in m
+                or "haiku-4.5" in m
+            ):
+                return 4096
+            if "sonnet-4-6" in m or "sonnet-4.6" in m:
+                return 2048
+            return 1024
+
+        return ProviderCapabilities(
+            requires_reasoning_resend_in_tool_cycle=True,
+            reasoning_block_kind="anthropic_thinking",
+            extracts_cache_tokens=_extract,
+            min_cache_tokens=_min_tokens,
+            supports_long_ttl=True,
+        )
 
     # ─── message conversion ─────────────────────────────────────────
 
@@ -257,6 +296,26 @@ class AnthropicProvider(BaseProvider):
                 continue
             if m.role == "assistant" and m.tool_calls:
                 content: list[dict[str, Any]] = []
+                # If the message carries verbatim reasoning blocks (Anthropic
+                # extended thinking with signatures), they MUST be emitted
+                # before the tool_use block. The API verifies signatures
+                # during the tool-use cycle; missing or out-of-order
+                # thinking blocks break reasoning continuity.
+                replay = m.reasoning_replay_blocks
+                if replay:
+                    for blk in replay:
+                        # Defensive: only forward thinking blocks we know
+                        # how to send. Other shapes (future provider
+                        # extensions) are skipped here, not dropped from
+                        # the canonical Message.
+                        if isinstance(blk, dict) and blk.get("type") == "thinking":
+                            content.append(
+                                {
+                                    "type": "thinking",
+                                    "thinking": blk.get("thinking", ""),
+                                    "signature": blk.get("signature", ""),
+                                }
+                            )
                 if m.content:
                     content.append({"type": "text", "text": m.content})
                 for tc in m.tool_calls:
@@ -305,6 +364,9 @@ class AnthropicProvider(BaseProvider):
         anthropic_messages: list[dict[str, Any]],
         system: str,
         api_tools: list[dict[str, Any]] | None = None,
+        *,
+        model: str = "",
+        idle_seconds: float = 0.0,
     ) -> tuple[Any, list[dict[str, Any]], list[dict[str, Any]]]:
         """Apply Anthropic prompt caching across system + messages + tools.
 
@@ -318,21 +380,37 @@ class AnthropicProvider(BaseProvider):
         be passed to the SDK's ``system=`` parameter with cache_control
         preserved.
 
+        ``model`` and ``idle_seconds`` drive the size-threshold filter and
+        the long-TTL switch via the provider's capabilities. Both default
+        safely so callers that haven't been updated still produce today's
+        cache layout.
+
         Returns:
             (system_for_sdk, messages_for_sdk, tools_for_sdk) — system is a
             list of content blocks when there is a system prompt, or the
             original string otherwise; tools is the (possibly empty) list of
             tool dicts with cache_control on the last entry when non-empty.
         """
+        from opencomputer.agent.prompt_caching import select_cache_ttl
+
         unified: list[dict[str, Any]] = []
         if system:
             unified.append({"role": "system", "content": system})
         unified.extend(anthropic_messages)
 
+        caps = self.capabilities
+        ttl = select_cache_ttl(
+            supports_long_ttl=caps.supports_long_ttl,
+            idle_seconds=idle_seconds,
+        )
+        threshold = caps.min_cache_tokens(model) if model else 0
+
         cached, cached_tools = apply_full_cache_control(
             unified,
             api_tools,
+            cache_ttl=ttl,
             native_anthropic=True,
+            min_cache_tokens=threshold,
         )
 
         if system and cached and cached[0].get("role") == "system":
@@ -350,6 +428,7 @@ class AnthropicProvider(BaseProvider):
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         thinking_parts: list[str] = []
+        replay_blocks: list[dict[str, Any]] = []
         for block in resp.content:
             if block.type == "text":
                 text_parts.append(block.text)
@@ -359,8 +438,22 @@ class AnthropicProvider(BaseProvider):
                 # blocks and surface on ProviderResponse.reasoning so the
                 # SDK has a provider-agnostic reasoning field populated.
                 thinking_text = getattr(block, "thinking", None)
+                signature = getattr(block, "signature", None)
                 if thinking_text:
                     thinking_parts.append(str(thinking_text))
+                # Preserve the verbatim block (with signature) so we can
+                # replay it on the next turn during the tool-use cycle.
+                # The Anthropic API rejects modified or missing signatures.
+                # Skip blocks without a signature — they can't be replayed
+                # safely.
+                if thinking_text is not None and signature is not None:
+                    replay_blocks.append(
+                        {
+                            "type": "thinking",
+                            "thinking": str(thinking_text),
+                            "signature": str(signature),
+                        }
+                    )
             elif block.type == "tool_use":
                 tool_calls.append(
                     ToolCall(
@@ -369,10 +462,12 @@ class AnthropicProvider(BaseProvider):
                         arguments=dict(block.input) if block.input else {},
                     )
                 )
+        replay = replay_blocks or None
         msg = Message(
             role="assistant",
             content="\n".join(text_parts),
             tool_calls=tool_calls if tool_calls else None,
+            reasoning_replay_blocks=replay,
         )
         # Anthropic exposes prompt-cache token counts on usage when the
         # request hit its caching path. Surface them on canonical Usage so
@@ -389,6 +484,7 @@ class AnthropicProvider(BaseProvider):
             stop_reason=resp.stop_reason or "end_turn",
             usage=usage,
             reasoning=reasoning,
+            reasoning_replay_blocks=replay,
         )
 
     # ─── completion ────────────────────────────────────────────────
@@ -425,12 +521,24 @@ class AnthropicProvider(BaseProvider):
         # Up to 4 cache_control breakpoints (system + last 3 non-system
         # messages) for ~75% input-token cost reduction on multi-turn
         # conversations.
+        # Idle-aware TTL: if this provider's last call was > 4 minutes
+        # ago, the 5m cache would have expired before we got back to it.
+        # Bump to 1h on Anthropic; safe no-op for providers that don't
+        # support it. Time tracked per-provider-instance in monotonic
+        # seconds (see __init__). Read defensively because some test
+        # paths instantiate via ``__new__`` and skip __init__.
+        import time as _time
+        _now = _time.monotonic()
+        _last = getattr(self, "_last_call_ts", 0.0)
+        idle_s = (_now - _last) if _last > 0 else 0.0
+        self._last_call_ts = _now
         # Item 1 (2026-05-02): build tools list FIRST so cache_control
         # can be applied to tools[-1] together with the system+messages
         # breakpoints in a single call (no two-call coordination footgun).
         api_tools_pre = [t.to_anthropic_format() for t in tools] if tools else []
         sys_for_sdk, api_messages, api_tools = self._apply_cache_control(
-            anthropic_messages, system, api_tools_pre
+            anthropic_messages, system, api_tools_pre,
+            model=model, idle_seconds=idle_s,
         )
         kwargs: dict[str, Any] = {
             "model": model,
@@ -522,12 +630,24 @@ class AnthropicProvider(BaseProvider):
         client = self._build_client_for_key(key) if key != self._api_key else self.client
         anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
+        # Idle-aware TTL: if this provider's last call was > 4 minutes
+        # ago, the 5m cache would have expired before we got back to it.
+        # Bump to 1h on Anthropic; safe no-op for providers that don't
+        # support it. Time tracked per-provider-instance in monotonic
+        # seconds (see __init__). Read defensively because some test
+        # paths instantiate via ``__new__`` and skip __init__.
+        import time as _time
+        _now = _time.monotonic()
+        _last = getattr(self, "_last_call_ts", 0.0)
+        idle_s = (_now - _last) if _last > 0 else 0.0
+        self._last_call_ts = _now
         # Item 1 (2026-05-02): build tools list FIRST so cache_control
         # can be applied to tools[-1] together with the system+messages
         # breakpoints in a single call (no two-call coordination footgun).
         api_tools_pre = [t.to_anthropic_format() for t in tools] if tools else []
         sys_for_sdk, api_messages, api_tools = self._apply_cache_control(
-            anthropic_messages, system, api_tools_pre
+            anthropic_messages, system, api_tools_pre,
+            model=model, idle_seconds=idle_s,
         )
         kwargs: dict[str, Any] = {
             "model": model,
@@ -576,12 +696,24 @@ class AnthropicProvider(BaseProvider):
         """
         anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
+        # Idle-aware TTL: if this provider's last call was > 4 minutes
+        # ago, the 5m cache would have expired before we got back to it.
+        # Bump to 1h on Anthropic; safe no-op for providers that don't
+        # support it. Time tracked per-provider-instance in monotonic
+        # seconds (see __init__). Read defensively because some test
+        # paths instantiate via ``__new__`` and skip __init__.
+        import time as _time
+        _now = _time.monotonic()
+        _last = getattr(self, "_last_call_ts", 0.0)
+        idle_s = (_now - _last) if _last > 0 else 0.0
+        self._last_call_ts = _now
         # Item 1 (2026-05-02): build tools list FIRST so cache_control
         # can be applied to tools[-1] together with the system+messages
         # breakpoints in a single call (no two-call coordination footgun).
         api_tools_pre = [t.to_anthropic_format() for t in tools] if tools else []
         sys_for_sdk, api_messages, api_tools = self._apply_cache_control(
-            anthropic_messages, system, api_tools_pre
+            anthropic_messages, system, api_tools_pre,
+            model=model, idle_seconds=idle_s,
         )
         kwargs: dict[str, Any] = {
             "model": model,

@@ -46,6 +46,15 @@ class Message:
     reasoning: str | None = None  # extended thinking, if supported
     reasoning_details: Any = None  # list[dict[str, Any]] | None
     codex_reasoning_items: Any = None  # list[dict[str, Any]] | None
+    reasoning_replay_blocks: Any = None  # list[dict[str, Any]] | None
+    """Verbatim provider-side reasoning blocks that must be replayed on
+    the next turn for the provider's reasoning continuity contract.
+    Anthropic populates this with thinking blocks (each with a
+    ``signature``) when extended thinking is on; the provider's
+    message-conversion layer reconstructs them on resend so the API's
+    cryptographic-signature check passes during tool-use cycles.
+    Other providers leave this ``None``. SessionDB serialises this as
+    JSON so mid-cycle session resume retains the signatures."""
     attachments: list[str] = field(default_factory=list)
     """Absolute filesystem paths to image attachments associated with this
     message. Forward-compatible field added 2026-04-27 for TUI image-paste

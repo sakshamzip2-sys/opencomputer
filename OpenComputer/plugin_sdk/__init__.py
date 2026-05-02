@@ -91,6 +91,8 @@ from plugin_sdk.profile_context import current_profile_home, set_profile
 from plugin_sdk.profile_subprocess import scope_subprocess_env
 from plugin_sdk.provider_contract import (
     BaseProvider,
+    CacheTokens,
+    ProviderCapabilities,
     ProviderResponse,
     StreamEvent,
     Usage,
@@ -150,6 +152,8 @@ __all__ = [
     "BaseTool",
     "ToolSchema",
     "BaseProvider",
+    "CacheTokens",
+    "ProviderCapabilities",
     "ProviderResponse",
     "StreamEvent",
     "Usage",

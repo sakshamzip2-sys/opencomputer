@@ -287,6 +287,36 @@ Frozen dataclass — one event from `stream_complete()`. Three kinds:
 Frozen dataclass — token counts: `input_tokens`, `output_tokens`,
 `cache_read_tokens`, `cache_write_tokens`.
 
+### `ProviderCapabilities`
+
+Frozen dataclass each provider returns from its `capabilities` property
+(default: everything off / safe). Drives provider-agnostic context
+economy decisions in the agent loop:
+
+* `requires_reasoning_resend_in_tool_cycle: bool` — set True when the
+  provider requires the assistant message that originally produced a
+  `tool_use` to include the corresponding reasoning block (with
+  signature) when the `tool_result` is sent back. Anthropic extended
+  thinking requires this; OpenAI Chat Completions does not.
+* `reasoning_block_kind: Literal["anthropic_thinking", "openai_reasoning", None]` —
+  opaque tag the provider uses to distinguish its reasoning replay
+  shape.
+* `extracts_cache_tokens: Callable[[Any], CacheTokens]` — maps the
+  provider's usage payload to canonical `CacheTokens(read, write)`.
+  Default returns zeros.
+* `min_cache_tokens: Callable[[str], int]` — minimum block size (in
+  tokens) for which a `cache_control` marker is worth placing.
+  Provider-aware (receives the model name). Default returns 0
+  (no filter).
+* `supports_long_ttl: bool` — True if the provider exposes a 1-hour
+  cache TTL knob (Anthropic only today).
+
+### `CacheTokens`
+
+Frozen dataclass — `read: int = 0`, `write: int = 0`. Returned by a
+provider's `extracts_cache_tokens(usage)` capability when surfacing
+prompt-cache token counts uniformly across providers.
+
 ---
 
 ## Channel contract

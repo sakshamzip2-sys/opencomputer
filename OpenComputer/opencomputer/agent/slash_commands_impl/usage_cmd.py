@@ -7,6 +7,8 @@ update each turn:
 
 - ``session_tokens_in``  — input tokens used this session
 - ``session_tokens_out`` — output tokens used this session
+- ``session_cache_read``  — prompt-cache reads this session (2026-05-02)
+- ``session_cache_write`` — prompt-cache writes this session (2026-05-02)
 - ``session_cost_usd``   — accumulated cost this session
 - ``rate_limit_reset_at`` — UNIX timestamp when current rate limit resets
 - ``rate_limit_remaining`` — requests remaining in window
@@ -39,6 +41,16 @@ def _fmt_cost(c) -> str:
     return f"${c:.2f}"
 
 
+def _fmt_cache_count(n) -> str:
+    if not isinstance(n, int) or n < 0:
+        return "0"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
 class UsageCommand(SlashCommand):
     name = "usage"
     description = "Show session token usage + rate-limit state"
@@ -46,6 +58,8 @@ class UsageCommand(SlashCommand):
     async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
         in_t = runtime.custom.get("session_tokens_in")
         out_t = runtime.custom.get("session_tokens_out")
+        cache_r = runtime.custom.get("session_cache_read")
+        cache_w = runtime.custom.get("session_cache_write")
         cost = runtime.custom.get("session_cost_usd")
         rl_remaining = runtime.custom.get("rate_limit_remaining")
         rl_reset = runtime.custom.get("rate_limit_reset_at")
@@ -54,6 +68,17 @@ class UsageCommand(SlashCommand):
         lines.append(f"  input tokens:  {_fmt_tokens(in_t)}")
         lines.append(f"  output tokens: {_fmt_tokens(out_t)}")
         lines.append(f"  cost (est):    {_fmt_cost(cost)}")
+
+        # 2026-05-02: cache hit/miss line. Surface only when at least one
+        # side is non-zero — non-caching providers and old sessions
+        # display unchanged.
+        cr = int(cache_r) if isinstance(cache_r, int) else 0
+        cw = int(cache_w) if isinstance(cache_w, int) else 0
+        if cr > 0 or cw > 0:
+            lines.append(
+                f"  cache:         {_fmt_cache_count(cr)} read / "
+                f"{_fmt_cache_count(cw)} written"
+            )
 
         if rl_remaining is not None or rl_reset is not None:
             lines.append("\n## Rate limit")
