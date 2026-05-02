@@ -5,7 +5,6 @@ import pytest
 
 from opencomputer.recipes import load_recipe, run_recipe
 
-
 SAMPLE_TRENDING_HTML = """
 <html><body>
   <article class="Box-row">
