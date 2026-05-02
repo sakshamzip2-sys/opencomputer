@@ -288,6 +288,7 @@ Frozen dataclass — token counts: `input_tokens`, `output_tokens`,
 `cache_read_tokens`, `cache_write_tokens`.
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 ### `ProviderCapabilities`
 
 Frozen dataclass each provider returns from its `capabilities` property
@@ -318,6 +319,22 @@ Frozen dataclass — `read: int = 0`, `write: int = 0`. Returned by a
 provider's `extracts_cache_tokens(usage)` capability when surfacing
 prompt-cache token counts uniformly across providers.
 =======
+=======
+### `BatchRequest` / `BatchResult` / `BatchUnsupportedError`
+
+Provider-agnostic batch-processing types (Subsystem E, 2026-05-02).
+Use `BatchRequest` as the input to `BaseProvider.submit_batch()`;
+get `BatchResult` back from `BaseProvider.get_batch_results()`.
+`BatchUnsupportedError` is raised by providers that don't implement
+batch (default `BaseProvider` behavior).
+
+`BatchRequest` carries `runtime_extras` (effort tier from Subsystem B)
+and `response_schema` (structured outputs from Subsystem C) per request
+— each batched job can independently configure these. Anthropic's
+batch API gives a 50% cost discount with ~1hr turnaround. OpenAI batch
+implementation lands in a follow-up PR.
+
+>>>>>>> d63aa26b (feat: provider-agnostic batch processing (Subsystem E))
 ### `JsonSchemaSpec`
 
 TypedDict for structured outputs (Subsystem C, 2026-05-02). Pass
