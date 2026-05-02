@@ -423,6 +423,8 @@ class StopReason(str, Enum):
     INTERRUPTED = "interrupted"  # user cancelled
     BUDGET_EXHAUSTED = "budget_exhausted"  # iteration budget spent
     ERROR = "error"  # unrecoverable error
+    REFUSAL = "refusal"  # model declined the request (Anthropic safety filter)
+    CONTEXT_FULL = "context_full"  # response stopped because context window was exceeded
 
 
 # ─── Plugin exceptions ─────────────────────────────────────────────────
