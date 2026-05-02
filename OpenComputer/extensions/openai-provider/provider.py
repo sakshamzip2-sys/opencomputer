@@ -708,5 +708,51 @@ class OpenAIProvider(BaseProvider):
         )
         yield StreamEvent(kind="done", response=final)
 
+    async def count_tokens(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        system: str = "",
+        tools: list[ToolSchema] | None = None,
+    ) -> int:
+        """Count input tokens locally via ``tiktoken``.
+
+        Falls back to the heuristic if ``tiktoken`` is not installed
+        or doesn't recognise the model. Subsystem D, 2026-05-02.
+        """
+        try:
+            import tiktoken
+        except ImportError:
+            from plugin_sdk.provider_contract import _heuristic_token_count
+            return _heuristic_token_count(messages, system, tools)
+
+        try:
+            enc = tiktoken.encoding_for_model(model)
+        except KeyError:
+            # Unknown model — fall back to the cl100k_base encoder used
+            # by gpt-4 / gpt-3.5-turbo / gpt-4o variants.
+            try:
+                enc = tiktoken.get_encoding("cl100k_base")
+            except Exception:  # noqa: BLE001
+                from plugin_sdk.provider_contract import (
+                    _heuristic_token_count,
+                )
+                return _heuristic_token_count(messages, system, tools)
+
+        import json as _json
+        total = len(enc.encode(system)) if system else 0
+        for m in messages:
+            if m.content:
+                total += len(enc.encode(m.content))
+            for tc in (m.tool_calls or []):
+                total += len(
+                    enc.encode(tc.name + _json.dumps(tc.arguments or {}))
+                )
+        if tools:
+            for t in tools:
+                total += len(enc.encode(_json.dumps(t.to_openai_format())))
+        return max(1, total)
+
 
 __all__ = ["OpenAIProvider"]

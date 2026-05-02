@@ -882,5 +882,31 @@ class AnthropicProvider(BaseProvider):
 
         yield StreamEvent(kind="done", response=self._parse_response(final))
 
+    async def count_tokens(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        system: str = "",
+        tools: list[ToolSchema] | None = None,
+    ) -> int:
+        """Count input tokens via Anthropic's native ``messages.count_tokens`` endpoint.
+
+        Falls back to the heuristic if the SDK call fails (e.g.,
+        network error, model not yet supported by the endpoint).
+        Subsystem D, 2026-05-02.
+        """
+        try:
+            response = await self.client.messages.count_tokens(
+                model=model,
+                messages=self._to_anthropic_messages(messages),
+                system=system if system else None,
+                tools=[t.to_anthropic_format() for t in (tools or [])] or None,
+            )
+            return int(response.input_tokens)
+        except Exception:  # noqa: BLE001 — fall back rather than fail
+            from plugin_sdk.provider_contract import _heuristic_token_count
+            return _heuristic_token_count(messages, system, tools)
+
 
 __all__ = ["AnthropicProvider", "AnthropicProviderConfig"]

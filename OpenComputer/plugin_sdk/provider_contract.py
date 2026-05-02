@@ -8,6 +8,7 @@ anthropic/openai SDKs directly — it only uses BaseProvider.
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -15,6 +16,34 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from plugin_sdk.core import Message
 from plugin_sdk.tool_contract import ToolSchema
+
+
+def _heuristic_token_count(
+    messages: list[Message],
+    system: str = "",
+    tools: list[ToolSchema] | None = None,
+) -> int:
+    """Heuristic input-token count — ~4 chars per token.
+
+    Provider-agnostic lower-bound estimate. Used by
+    :meth:`BaseProvider.count_tokens` when the concrete provider
+    doesn't override (e.g. local Llama via Ollama, future providers
+    not yet shipping a tokenizer).
+
+    Real tokenizers report 10-30% higher counts in practice; this is
+    intentionally conservative so callers don't *under*-estimate
+    context pressure. For accurate counts, providers override
+    ``count_tokens`` with their native endpoint or local tokenizer.
+    """
+    total = len(system or "")
+    for m in messages:
+        total += len(m.content or "")
+        for tc in (m.tool_calls or []):
+            total += len(tc.name) + len(json.dumps(tc.arguments or {}))
+    if tools:
+        for t in tools:
+            total += len(json.dumps(t.to_openai_format()))
+    return max(1, total // 4)
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -279,6 +308,27 @@ class BaseProvider(ABC):
         providers behave exactly as today until they explicitly opt in.
         """
         return ProviderCapabilities()
+
+    async def count_tokens(
+        self,
+        *,
+        model: str,
+        messages: list[Message],
+        system: str = "",
+        tools: list[ToolSchema] | None = None,
+    ) -> int:
+        """Count input tokens for a request — provider-agnostic interface.
+
+        Concrete (non-abstract) default returns a heuristic estimate
+        (~4 chars per token). Providers should override with their
+        native endpoint (Anthropic ``messages.count_tokens``) or local
+        tokenizer (OpenAI ``tiktoken``, llama-cpp, Ollama) for accuracy.
+
+        Used by CompactionEngine, cost-guard pre-flight estimates, and
+        any classifier / extractor wanting to budget input length.
+        Returns ≥ 1 for any non-empty input.
+        """
+        return _heuristic_token_count(messages, system, tools)
 
 
 __all__ = [
