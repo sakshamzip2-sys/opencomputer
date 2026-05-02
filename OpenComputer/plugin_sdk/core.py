@@ -102,6 +102,7 @@ class Platform(str, Enum):
     DINGTALK = "dingtalk"
     FEISHU = "feishu"
     WECOM = "wecom"
+    YUANBAO = "yuanbao"
 
 
 @dataclass(frozen=True, slots=True)
