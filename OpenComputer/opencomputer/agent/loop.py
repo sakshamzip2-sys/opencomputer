@@ -1382,6 +1382,36 @@ class AgentLoop:
                         pass
 >>>>>>> a3a2eb94 (feat(loop): handle StopReason.CONTEXT_FULL with compaction retry)
 
+                # Empty end_turn retry: per Anthropic Doc 3, models can
+                # return 2-3 empty tokens with stop_reason=end_turn after
+                # tool results when text is appended in the same content
+                # block, OR when the model considers itself done. This
+                # looks like the agent hung. One-shot recovery: inject
+                # a synthetic "Please continue." into the wire-only
+                # message list and retry. Synthetic prompt is NOT
+                # persisted to SessionDB.
+                if (
+                    step.stop_reason == StopReason.END_TURN
+                    and not (step.assistant_message.content or "").strip()
+                    and not step.assistant_message.tool_calls
+                    and not step.assistant_message.reasoning
+                ):
+                    retry_messages = list(messages) + [
+                        Message(role="user", content="Please continue."),
+                    ]
+                    try:
+                        step = await self._run_one_step(
+                            messages=retry_messages,
+                            system=system,
+                            stream_callback=stream_callback,
+                            thinking_callback=thinking_callback,
+                            model=model_for_turn,
+                            session_id=sid,
+                        )
+                    except Exception:  # noqa: BLE001
+                        # Retry crashed — accept the original empty turn.
+                        pass
+
                 # Round 2B P-3: a returned LLM response is activity. Bump BEFORE
                 # the early-return path below so an end-turn turn that took 290s
                 # still resets the timer for any caller that resumes the same
