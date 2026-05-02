@@ -1,0 +1,23 @@
+{
+  "id": "xiaomi-provider",
+  "name": "Xiaomi MiMo",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Xiaomi MiMo (MiMo-V2.5 / V2 — pro, omni, flash) — OpenAI-compatible direct API.",
+  "model_support": {
+    "model_prefixes": ["mimo-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "xiaomi",
+        "auth_methods": ["api_key"],
+        "env_vars": ["XIAOMI_API_KEY"],
+        "label": "Xiaomi MiMo (MiMo-V2.5 / V2 models — direct API)",
+        "default_model": "mimo-v2.5-pro",
+        "signup_url": "https://api.xiaomimimo.com"
+      }
+    ]
+  }
+}

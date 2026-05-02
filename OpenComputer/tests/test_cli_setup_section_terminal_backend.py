@@ -13,13 +13,12 @@ def _make_ctx(tmp_path: Path, config: dict | None = None):
     )
 
 
-def test_native_only_environment_offers_native_and_skip(monkeypatch, tmp_path):
+def test_local_only_environment_offers_local_and_skip(monkeypatch, tmp_path):
     """When neither docker nor apptainer is installed, the menu offers
-    only [native, skip]."""
+    only [local, skip]."""
     from opencomputer.cli_setup.section_handlers import terminal_backend as tb
 
-    monkeypatch.setattr(tb, "_detect_backends",
-                         lambda: ["native"])
+    monkeypatch.setattr(tb, "_detect_backends", lambda: ["local"])
 
     captured = []
 
@@ -32,7 +31,7 @@ def test_native_only_environment_offers_native_and_skip(monkeypatch, tmp_path):
     ctx = _make_ctx(tmp_path)
     tb.run_terminal_backend_section(ctx)
 
-    assert "native" in captured
+    assert "local" in captured
     assert "__skip__" in captured
     assert "docker" not in captured
     assert "apptainer" not in captured
@@ -42,7 +41,7 @@ def test_docker_present_offers_docker_choice(monkeypatch, tmp_path):
     from opencomputer.cli_setup.section_handlers import terminal_backend as tb
 
     monkeypatch.setattr(tb, "_detect_backends",
-                         lambda: ["docker", "native"])
+                         lambda: ["docker", "local"])
 
     captured = []
 
@@ -56,21 +55,22 @@ def test_docker_present_offers_docker_choice(monkeypatch, tmp_path):
     tb.run_terminal_backend_section(ctx)
 
     assert "docker" in captured
-    assert "native" in captured
+    assert "local" in captured
 
 
-def test_pick_native_writes_config(monkeypatch, tmp_path):
+def test_pick_local_writes_config(monkeypatch, tmp_path):
     from opencomputer.cli_setup.section_handlers import terminal_backend as tb
     from opencomputer.cli_setup.sections import SectionResult
 
-    monkeypatch.setattr(tb, "_detect_backends", lambda: ["native"])
-    monkeypatch.setattr(tb, "radiolist", lambda *a, **kw: 0)  # native
+    monkeypatch.setattr(tb, "_detect_backends", lambda: ["local"])
+    monkeypatch.setattr(tb, "radiolist", lambda *a, **kw: 0)  # local
 
     ctx = _make_ctx(tmp_path)
     result = tb.run_terminal_backend_section(ctx)
 
     assert result == SectionResult.CONFIGURED
-    assert ctx.config["terminal"]["backend"] == "native"
+    # Aligned with Hermes naming — "local" not "native".
+    assert ctx.config["terminal"]["backend"] == "local"
 
 
 def test_skip_keeps_existing_config(monkeypatch, tmp_path):
@@ -78,8 +78,8 @@ def test_skip_keeps_existing_config(monkeypatch, tmp_path):
     from opencomputer.cli_setup.sections import SectionResult
 
     monkeypatch.setattr(tb, "_detect_backends",
-                         lambda: ["docker", "native"])
-    # idx 2 = skip (after docker, native)
+                         lambda: ["docker", "local"])
+    # idx 2 = skip (after docker, local)
     monkeypatch.setattr(tb, "radiolist", lambda *a, **kw: 2)
 
     existing = {"terminal": {"backend": "apptainer"}}

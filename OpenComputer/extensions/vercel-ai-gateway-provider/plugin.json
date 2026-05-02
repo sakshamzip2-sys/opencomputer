@@ -1,0 +1,20 @@
+{
+  "id": "vercel-ai-gateway-provider",
+  "name": "Vercel AI Gateway",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Vercel AI Gateway (multi-provider router) — OpenAI-compatible.",
+  "setup": {
+    "providers": [
+      {
+        "id": "ai-gateway",
+        "auth_methods": ["api_key"],
+        "env_vars": ["AI_GATEWAY_API_KEY"],
+        "label": "Vercel AI Gateway (multi-provider router)",
+        "default_model": "anthropic/claude-sonnet-4",
+        "signup_url": "https://vercel.com/dashboard/ai/gateway/api-keys"
+      }
+    ]
+  }
+}

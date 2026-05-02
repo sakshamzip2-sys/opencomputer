@@ -23,8 +23,9 @@ def test_apply_default_writes_tts_provider(monkeypatch, tmp_path):
     result = tts.run_tts_provider_section(ctx)
 
     assert result == SectionResult.CONFIGURED
-    assert ctx.config["tts"]["provider"] == "openai-tts"
-    assert ctx.config["tts"]["voice"] == "alloy"
+    # Aligned with Hermes default (edge-tts is free + no signup).
+    assert ctx.config["tts"]["provider"] == "edge-tts"
+    assert ctx.config["tts"]["voice"] == "en-US-AriaNeural"
 
 
 def test_skip_keeps_tts_config_untouched(monkeypatch, tmp_path):
@@ -51,7 +52,7 @@ def test_apply_does_not_clobber_unrelated_tts_keys(monkeypatch, tmp_path):
     tts.run_tts_provider_section(ctx)
 
     assert ctx.config["tts"]["speed"] == 1.25, "user-set keys preserved"
-    assert ctx.config["tts"]["provider"] == "openai-tts"
+    assert ctx.config["tts"]["provider"] == "edge-tts"
 
 
 def test_section_registry_uses_live_tts_handler():
