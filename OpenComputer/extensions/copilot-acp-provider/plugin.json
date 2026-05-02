@@ -1,0 +1,23 @@
+{
+  "id": "copilot-acp-provider",
+  "name": "GitHub Copilot ACP",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "GitHub Copilot via Agent Communication Protocol — spawns 'copilot --acp --stdio' subprocess and exchanges JSON-RPC over stdin/stdout. Distinct from the REST 'copilot' plugin. Override binary path via OPENCOMPUTER_COPILOT_ACP_COMMAND or COPILOT_CLI_PATH. ACP JSON-RPC transport is a focused follow-up; v1 ships discovery scaffold.",
+  "model_support": {
+    "model_prefixes": ["copilot-", "claude-", "gpt-", "o1-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "copilot-acp",
+        "auth_methods": ["external_process"],
+        "env_vars": [],
+        "label": "GitHub Copilot ACP (subprocess: copilot --acp --stdio)",
+        "default_model": "claude-3-5-sonnet",
+        "signup_url": "https://github.com/features/copilot"
+      }
+    ]
+  }
+}

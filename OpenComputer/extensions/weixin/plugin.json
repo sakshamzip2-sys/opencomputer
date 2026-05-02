@@ -4,9 +4,7 @@
   "kind": "channel",
   "version": "0.1.0",
   "entry": "plugin",
-  "description": "WeChat 公众号 / Service Account integration. Outbound via Customer Service Message API (api.weixin.qq.com/cgi-bin/message/custom/send) with auto-rotated access_token (2-hour TTL, 60s skew). Inbound via Server Configuration callback URL with SHA1 signature verification + XML payload parsing. Set WEIXIN_APPID + WEIXIN_SECRET (Service Account credentials) and WEIXIN_TOKEN (callback verification token, optional for outbound-only).",
-  "default_enabled": false,
-  "model_support": null,
+  "description": "WeChat 公众号 / Service Account integration. Outbound via Customer Service Message API (api.weixin.qq.com) with auto-rotated access_token (2-hour TTL, 60s skew). Inbound primitives: SHA1 signature verification + XML parsing. Set WEIXIN_APPID + WEIXIN_SECRET; WEIXIN_TOKEN optional for outbound.",
   "setup": {
     "channels": [
       {
