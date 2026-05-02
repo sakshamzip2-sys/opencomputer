@@ -32,6 +32,8 @@ _MAX_TEXT_LEN = 4000
 
 
 class SystemKeystrokeTool(BaseTool):
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
     """Type text or send a hotkey combination. Cross-platform."""
 
     parallel_safe: bool = False
@@ -59,6 +61,7 @@ class SystemKeystrokeTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "text": {
                         "type": "string",

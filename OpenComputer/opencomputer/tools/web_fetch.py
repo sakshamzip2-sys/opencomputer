@@ -42,6 +42,8 @@ def _html_to_text(html: str) -> str:
 
 class WebFetchTool(BaseTool):
     parallel_safe = True
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
 
     @property
     def schema(self) -> ToolSchema:
@@ -59,6 +61,7 @@ class WebFetchTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "url": {
                         "type": "string",

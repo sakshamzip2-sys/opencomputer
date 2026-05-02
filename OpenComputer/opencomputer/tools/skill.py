@@ -20,6 +20,8 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 class SkillTool(BaseTool):
     parallel_safe = True
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
 
     def __init__(self, memory_manager: MemoryManager | None = None) -> None:
         # Default to the user's configured paths when no override supplied so
@@ -47,6 +49,7 @@ class SkillTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "name": {
                         "type": "string",

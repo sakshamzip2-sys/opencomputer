@@ -40,6 +40,8 @@ _MAX_COORD = 8000
 
 
 class PointAndClickTool(BaseTool):
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
     """Click at absolute screen coordinates. macOS only."""
 
     parallel_safe: bool = False  # mouse is a singleton
@@ -70,6 +72,7 @@ class PointAndClickTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "x": {
                         "type": "integer",

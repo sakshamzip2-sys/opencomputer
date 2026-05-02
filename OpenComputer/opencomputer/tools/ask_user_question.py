@@ -34,6 +34,8 @@ def _prompt_stdin(req: InteractionRequest) -> str:
 class AskUserQuestionTool(BaseTool):
     # Not parallel-safe: blocks on user input.
     parallel_safe = False
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
 
     def __init__(self, *, cli_mode: bool | None = None) -> None:
         # cli_mode auto-detects: if stdin is a TTY AND we're not in
@@ -61,6 +63,7 @@ class AskUserQuestionTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "question": {
                         "type": "string",

@@ -39,6 +39,8 @@ _log = logging.getLogger("opencomputer.tools.python_exec")
 
 
 class PythonExec(BaseTool):
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
     """Run a Python script in a subprocess; capture stdout + stderr.
 
     With ``mode="ptc"`` the subprocess can call OC's registered tools
@@ -89,6 +91,7 @@ class PythonExec(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "code": {
                         "type": "string",

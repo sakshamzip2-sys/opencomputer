@@ -165,6 +165,8 @@ async def analyze_image_bytes(
 
 class VisionAnalyzeTool(BaseTool):
     parallel_safe = True  # API call is independent
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
 
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self._api_key = api_key
@@ -191,6 +193,7 @@ class VisionAnalyzeTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "image_url": {
                         "type": "string",

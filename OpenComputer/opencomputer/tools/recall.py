@@ -59,6 +59,10 @@ class RecallTool(BaseTool):
 
     parallel_safe = True
 
+    # Item 3 (2026-05-02): schema enumerated; closed.
+
+    strict_mode = True
+
     def __init__(
         self,
         db: SessionDB | None = None,
@@ -109,6 +113,7 @@ class RecallTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "action": {
                         "type": "string",

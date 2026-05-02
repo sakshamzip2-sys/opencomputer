@@ -40,6 +40,10 @@ class SessionsList(BaseTool):
 
     parallel_safe = True
 
+    # Item 3 (2026-05-02): schema enumerated; closed.
+
+    strict_mode = True
+
     def __init__(self, db: SessionDB | None = None) -> None:
         self._db = db if db is not None else _resolve_default_db()
 
@@ -66,6 +70,7 @@ class SessionsList(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "limit": {
                         "type": "integer",
@@ -89,6 +94,10 @@ class SessionsHistory(BaseTool):
     """Read recent messages from a session, sliced to ``limit`` from the end."""
 
     parallel_safe = True
+
+    # Item 3 (2026-05-02): schema enumerated; closed.
+
+    strict_mode = True
 
     def __init__(self, db: SessionDB | None = None) -> None:
         self._db = db if db is not None else _resolve_default_db()
@@ -115,6 +124,7 @@ class SessionsHistory(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "session_id": {
                         "type": "string",
@@ -145,6 +155,10 @@ class SessionsStatus(BaseTool):
 
     parallel_safe = True
 
+    # Item 3 (2026-05-02): schema enumerated; closed.
+
+    strict_mode = True
+
     def __init__(self, db: SessionDB | None = None) -> None:
         self._db = db if db is not None else _resolve_default_db()
 
@@ -170,6 +184,7 @@ class SessionsStatus(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "session_id": {
                         "type": "string",

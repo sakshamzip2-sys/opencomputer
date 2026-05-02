@@ -17,6 +17,8 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 
 class VoiceTranscribeTool(BaseTool):
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
     """Transcribe an audio file to text. Caller supplies an absolute path."""
 
     parallel_safe: bool = True
@@ -44,6 +46,7 @@ class VoiceTranscribeTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "audio_path": {
                         "type": "string",

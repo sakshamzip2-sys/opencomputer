@@ -48,6 +48,8 @@ def _format_hits_as_markdown(query: str, hits: list[SearchHit], provider: str) -
 
 class WebSearchTool(BaseTool):
     parallel_safe = True
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
 
     def __init__(self, default_provider: str | None = None) -> None:
         # Default provider is read from config, but tests + downstream
@@ -74,6 +76,7 @@ class WebSearchTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "query": {
                         "type": "string",

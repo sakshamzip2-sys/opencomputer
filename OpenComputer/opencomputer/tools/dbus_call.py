@@ -31,6 +31,8 @@ _VALID_BUSES = {"session", "system"}
 
 
 class DBusCallTool(BaseTool):
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
     """Invoke a D-Bus method via ``dbus-send``. Linux only."""
 
     # parallel_safe = False — D-Bus methods can mutate desktop state
@@ -65,6 +67,7 @@ class DBusCallTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "bus": {"type": "string", "enum": ["session", "system"]},
                     "destination": {"type": "string"},

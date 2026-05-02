@@ -20,6 +20,8 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 
 class VoiceSynthesizeTool(BaseTool):
+    # Item 3 (2026-05-02): schema enumerated; closed.
+    strict_mode = True
     """Synthesize speech audio from text. Returns the file path."""
 
     parallel_safe: bool = True
@@ -47,6 +49,7 @@ class VoiceSynthesizeTool(BaseTool):
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "text": {
                         "type": "string",
