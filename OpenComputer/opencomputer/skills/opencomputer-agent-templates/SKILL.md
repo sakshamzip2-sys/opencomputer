@@ -1,5 +1,5 @@
 ---
-name: OpenComputer Agent Templates
+name: opencomputer-agent-templates
 description: This skill should be used when the user asks to "create a subagent template", "add an .md agent", "register a named agent", "code-reviewer subagent", "DelegateTool agent parameter", or wants to ship a reusable subagent shape.
 version: 0.1.0
 ---

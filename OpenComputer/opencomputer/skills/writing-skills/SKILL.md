@@ -1,6 +1,7 @@
 ---
 name: writing-skills
 description: Use when creating new skills, editing existing skills, or verifying skills work before deployment
+size_review_date: 2026-05-02
 ---
 
 # Writing Skills

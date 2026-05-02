@@ -1,5 +1,5 @@
 ---
-name: OpenComputer Hook Authoring
+name: opencomputer-hook-authoring
 description: This skill should be used when the user asks to "add a hook to an OpenComputer plugin", "write a PreToolUse hook", "block dangerous commands", "log tool calls", "SessionStart hook", "HookSpec", "register_hook", or wants to add automation at OpenComputer's lifecycle events.
 version: 0.1.0
 ---

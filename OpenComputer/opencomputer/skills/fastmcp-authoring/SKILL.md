@@ -1,5 +1,5 @@
 ---
-name: FastMCP Authoring
+name: fastmcp-authoring
 description: Use this skill when the user asks to "write an MCP server", "build an MCP", "author a custom tool for OpenComputer", "FastMCP tutorial", "MCP server in Python", or wants to extend OpenComputer with their own tools without writing a full plugin. Covers the FastMCP decorator API, transports (stdio / sse / http), tool/resource/prompt primitives, and the `opencomputer mcp scaffold` workflow that materialises a working skeleton.
 version: 0.1.0
 ---

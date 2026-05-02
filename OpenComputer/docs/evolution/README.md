@@ -118,6 +118,28 @@ for ins in insights:
 
 ---
 
+## Description style guide
+
+Synthesized skill descriptions must be:
+
+- **Third-person.** "Processes...", "Synthesizes...", "Generates...".  Never "I can help" or "You can use".
+- **WHAT + WHEN.** The action verb phrase, then a "Use when..." clause.
+
+### Examples
+
+✅ Good:
+- `Synthesizes git commit messages from staged diffs. Use when the user asks for help writing commit messages.`
+- `Detects repeated grep-then-edit patterns in a session. Use when investigating workflow patterns.`
+
+❌ Bad:
+- `I can help you write commit messages.`
+- `Use when you want to write commits.` (no WHAT)
+- `Helps with git stuff.` (no WHEN, vague WHAT)
+
+The synthesis prompt enforces this voice. The post-synthesis validator catches non-compliant descriptions before they're written. See [docs/skills/AUTHORING.md](../skills/AUTHORING.md) for the full spec.
+
+---
+
 ## What's coming in B3 + B4 (gated on dogfood feedback)
 
 **B3** — auto-collection of trajectories from real agent runs. Subscribes (read-only) to Session A's TypedEvent bus when it lands; `opencomputer/ingestion/bus.py` is the dependency. CLI additions: `opencomputer evolution enable / disable`, `opencomputer evolution trajectories show --limit 50`.

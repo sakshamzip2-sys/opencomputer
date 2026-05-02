@@ -14,7 +14,9 @@ Reference: https://agentskills.io
 from __future__ import annotations
 
 import re
-from typing import Any
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
 
 import yaml
 
@@ -27,6 +29,44 @@ DESCRIPTION_MAX = 500
 
 class ValidationError(ValueError):
     """Raised when SKILL.md frontmatter does not satisfy agentskills.io."""
+
+
+@dataclass
+class ValidationIssue:
+    """A single validator finding (error or warning)."""
+    rule: str                    # e.g. "name.reserved_word"
+    severity: Literal["error", "warning"]
+    field: str | None            # e.g. "frontmatter.name"
+    message: str
+    line: int | None = None
+
+
+@dataclass
+class ValidationReport:
+    """Result of validating a SKILL.md file or directory."""
+    errors: list[ValidationIssue] = field(default_factory=list)
+    warnings: list[ValidationIssue] = field(default_factory=list)
+    skill_path: Path | None = None
+
+    @property
+    def is_clean(self) -> bool:
+        return not self.errors and not self.warnings
+
+    @property
+    def passes_strict(self) -> bool:
+        """Strict mode: warnings count as failures."""
+        return not self.errors and not self.warnings
+
+    @property
+    def passes_lenient(self) -> bool:
+        """Lenient mode: only errors block."""
+        return not self.errors
+
+    def raise_if_errors(self) -> None:
+        """Raise ValidationError if any errors are present."""
+        if self.errors:
+            messages = "; ".join(f"{i.rule}: {i.message}" for i in self.errors)
+            raise ValidationError(messages)
 
 
 def validate_frontmatter(skill_md: str) -> dict[str, Any]:
@@ -87,3 +127,244 @@ def validate_frontmatter(skill_md: str) -> dict[str, Any]:
             raise ValidationError("tags must be a list of strings")
 
     return parsed
+
+
+def validate_skill_dir(
+    skill_dir: Path,
+    *,
+    strict: bool = True,
+) -> ValidationReport:
+    """Validate a skill directory by reading and validating its SKILL.md.
+
+    Args:
+        skill_dir: Path to the skill directory (contains SKILL.md).
+        strict: If True, warnings count as failures via .passes_strict.
+    """
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.exists():
+        report = ValidationReport(skill_path=skill_md)
+        report.errors.append(ValidationIssue(
+            rule="skill_md.missing",
+            severity="error",
+            field=None,
+            message=f"SKILL.md not found in {skill_dir}",
+        ))
+        return report
+    text = skill_md.read_text()
+    return validate_skill_md(text, strict=strict, path=skill_md)
+
+
+def validate_skill_md(
+    text: str,
+    *,
+    strict: bool = True,
+    path: Path | None = None,
+) -> ValidationReport:
+    """Validate a SKILL.md file's text against the Anthropic spec.
+
+    Args:
+        text: The full SKILL.md content (frontmatter + body).
+        strict: If True, warnings count as failures via .passes_strict.
+        path: Optional path for error reporting.
+
+    Returns:
+        ValidationReport with errors and warnings populated.
+    """
+    report = ValidationReport(skill_path=path)
+    frontmatter, body = _split_frontmatter(text)
+    if frontmatter is None:
+        report.errors.append(ValidationIssue(
+            rule="frontmatter.missing",
+            severity="error",
+            field=None,
+            message="no YAML frontmatter found",
+        ))
+        return report
+
+    # Delegate existing checks: parse frontmatter and run legacy validator.
+    # The legacy validator raises on first error; we wrap to collect all.
+    try:
+        parsed = _parse_yaml(frontmatter)
+    except Exception as exc:
+        report.errors.append(ValidationIssue(
+            rule="frontmatter.parse_error",
+            severity="error",
+            field=None,
+            message=str(exc),
+        ))
+        return report
+
+    if not isinstance(parsed, dict):
+        report.errors.append(ValidationIssue(
+            rule="frontmatter.parse_error",
+            severity="error",
+            field=None,
+            message="frontmatter must be a YAML mapping (key: value pairs)",
+        ))
+        return report
+
+    # Existing checks (name regex, description length, version semver, tags type).
+    # Convert raises to issues.
+    _run_legacy_checks(text, report)
+
+    # New checks (added in subsequent tasks).
+    _check_name_reserved_word(parsed.get("name", ""), report)
+    _check_xml_tags(parsed, report)
+    _check_description_voice(parsed.get("description", ""), report)
+    _check_body_size(body, parsed, report)
+
+    return report
+
+
+def _split_frontmatter(text: str) -> tuple[str | None, str]:
+    """Split text into (frontmatter_yaml, body). Returns (None, text) if no frontmatter."""
+    if not text.startswith("---"):
+        return None, text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return None, text
+    fm = text[3:end].strip()
+    body = text[end + 4:].lstrip("\n")
+    return fm, body
+
+
+def _parse_yaml(text: str) -> dict:
+    """Parse YAML frontmatter using PyYAML."""
+    return yaml.safe_load(text) or {}
+
+
+def _run_legacy_checks(text: str, report: ValidationReport) -> None:
+    """Run the existing validate_frontmatter checks, converting raises to issues.
+
+    The legacy validator takes raw SKILL.md text and raises on the first
+    error. We wrap it so failures land in the structured report.
+    """
+    try:
+        validate_frontmatter(text)
+    except ValidationError as exc:
+        report.errors.append(ValidationIssue(
+            rule="legacy",
+            severity="error",
+            field=None,
+            message=str(exc),
+        ))
+
+
+RESERVED_WORDS = frozenset({"anthropic", "claude"})
+
+
+def _check_name_reserved_word(name, report: ValidationReport) -> None:
+    """Reject skill names that vendor-impersonate (anthropic*, claude*).
+
+    The intent is anti-impersonation: a third-party skill should not be
+    named ``anthropic`` / ``claude`` or start with ``anthropic-`` /
+    ``claude-`` (which would imply first-party origin). Mid-name
+    references like ``using-claude-code`` or ``with-anthropic-tools``
+    are legitimate and allowed.
+
+    Coerces non-string YAML values (e.g. ``name: 123``) to string so we
+    don't crash on malformed frontmatter — that case is caught by the
+    legacy validator's name-format check.
+    """
+    if not name:
+        return  # missing name caught by legacy check
+    name_lower = str(name).lower()
+    for word in RESERVED_WORDS:
+        # Block: name == "anthropic" / "claude"  OR  name.startswith("anthropic-" / "claude-")
+        # Allow: "using-claude-code" / "with-anthropic-tools" (mid-name reference)
+        if name_lower == word or name_lower.startswith(f"{word}-"):
+            report.errors.append(ValidationIssue(
+                rule="name.reserved_word",
+                severity="error",
+                field="frontmatter.name",
+                message=f"name starts with or equals reserved word {word!r}",
+            ))
+            return
+
+
+XML_TAG_RE = re.compile(r"<[a-zA-Z!?/]")
+
+
+def _check_xml_tags(parsed: dict, report: ValidationReport) -> None:
+    """Reject XML/HTML tag opens in name or description.
+
+    Coerces values to string defensively (YAML may parse them as int/list).
+    """
+    name = str(parsed.get("name", "") or "")
+    desc = str(parsed.get("description", "") or "")
+    if XML_TAG_RE.search(name):
+        report.errors.append(ValidationIssue(
+            rule="name.xml_tag",
+            severity="error",
+            field="frontmatter.name",
+            message="name contains XML/HTML tag opener",
+        ))
+    if XML_TAG_RE.search(desc):
+        report.errors.append(ValidationIssue(
+            rule="description.xml_tag",
+            severity="error",
+            field="frontmatter.description",
+            message="description contains XML/HTML tag opener",
+        ))
+
+
+VOICE_DENY_RE = re.compile(
+    # Anchored at start; pronouns require trailing whitespace so we don't
+    # match "I/O" or "Wewerk" by accident. "I'll" / "I'm" handled
+    # separately. Multi-word phrases ("Let me", "I can") require a space
+    # between tokens.
+    r"^\s*(I\s|You\s|We\s|Let\s+me\s|I['’]?ll\s|I['’]?m\s|I\s+can\s|You\s+can\s|This\s+(?:helps|lets)\s+you\s)",
+    re.IGNORECASE,
+)
+
+CODE_SPAN_RE = re.compile(r"`[^`]*`")
+
+
+def _check_description_voice(description, report: ValidationReport) -> None:
+    """Warn on 1st/2nd-person voice violations in descriptions.
+
+    Anthropic spec requires 3rd-person ("Processes...", "Synthesizes...").
+    The check strips inline code spans first so pronouns inside backticks
+    don't trigger.
+
+    Coerces value to string defensively.
+    """
+    if not description:
+        return
+    desc_str = str(description)
+    stripped = CODE_SPAN_RE.sub("", desc_str)
+    if VOICE_DENY_RE.match(stripped):
+        report.warnings.append(ValidationIssue(
+            rule="description.voice",
+            severity="warning",
+            field="frontmatter.description",
+            message=(
+                "description starts with 1st/2nd-person voice "
+                "(use 3rd-person: 'Processes...', 'Synthesizes...')"
+            ),
+        ))
+
+
+BODY_SIZE_LIMIT = 500
+
+
+def _check_body_size(body: str, parsed: dict, report: ValidationReport) -> None:
+    """Warn if SKILL.md body exceeds 500 lines.
+
+    Suppressed if frontmatter contains `size_review_date: <ISO date>`,
+    which indicates a documented exemption.
+    """
+    if parsed.get("size_review_date"):
+        return  # documented exemption
+    line_count = body.count("\n")
+    if line_count > BODY_SIZE_LIMIT:
+        report.warnings.append(ValidationIssue(
+            rule="body.size_warn",
+            severity="warning",
+            field=None,
+            message=(
+                f"body has {line_count} lines, exceeds {BODY_SIZE_LIMIT}-line "
+                "guideline (split into reference files OR add "
+                "`size_review_date` frontmatter to document exemption)"
+            ),
+        ))

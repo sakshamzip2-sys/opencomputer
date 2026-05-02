@@ -1,5 +1,5 @@
 ---
-name: Debug Python import error
+name: debug-python-import-error
 description: Use when the user hits a ModuleNotFoundError, ImportError, ImportError when running a Python script, circular import, "no module named X", or asks about fixing a broken Python import.
 version: 0.1.0
 ---

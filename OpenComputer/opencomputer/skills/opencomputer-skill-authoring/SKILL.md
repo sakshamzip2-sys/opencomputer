@@ -1,5 +1,5 @@
 ---
-name: OpenComputer Skill Authoring
+name: opencomputer-skill-authoring
 description: This skill should be used when the user asks to "write an OpenComputer skill", "add a skill to a plugin", "SKILL.md frontmatter", "skill description that triggers well", "reference files for a skill", "skill examples dir", or needs guidance on authoring filesystem-based skills for OpenComputer agents.
 version: 0.1.0
 ---
