@@ -533,12 +533,17 @@ def _register_settings_hooks(cfg: Config) -> int:
     return registered
 
 
-def _resolve_provider(provider_name: str):
+def _resolve_provider(provider_name: str, *, api_mode: str | None = None):
     """Resolve a provider by name from the plugin registry.
 
     Providers are plugins — discovered via plugin.json + activated on demand.
     There is no in-tree fallback: if a provider isn't registered, the user
     needs to install (or enable) the corresponding plugin.
+
+    ``api_mode`` (from ``ModelConfig.api_mode``) is threaded into the
+    provider's constructor when it accepts an ``api_mode`` keyword. Providers
+    that don't (the common case — single-shape providers) are constructed
+    with no kwargs as before.
     """
     registered = plugin_registry.providers.get(provider_name)
     if registered is None:
@@ -556,8 +561,23 @@ def _resolve_provider(provider_name: str):
             f"    › Run `oc auth` to see which credentials each "
             f"provider expects (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY)\n"
         )
-    # Plugins register the CLASS — instantiate with defaults (reads env vars)
-    return registered() if isinstance(registered, type) else registered
+    # Already an instance — nothing to construct
+    if not isinstance(registered, type):
+        return registered
+
+    # Provider class — opportunistically pass api_mode if the constructor
+    # accepts it. Use inspect rather than try/except so we don't shadow
+    # genuine TypeError raised inside a provider's __init__.
+    if api_mode is not None:
+        import inspect
+
+        try:
+            sig = inspect.signature(registered)
+            if "api_mode" in sig.parameters:
+                return registered(api_mode=api_mode)
+        except (TypeError, ValueError):
+            pass  # builtins / C-classes lacking signatures — fall through
+    return registered()
 
 
 @app.callback(invoke_without_command=True)
