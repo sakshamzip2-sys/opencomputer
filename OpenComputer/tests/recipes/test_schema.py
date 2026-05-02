@@ -4,7 +4,6 @@ import yaml
 
 from opencomputer.recipes.schema import validate_recipe
 
-
 VALID_HN_YAML = """
 name: hackernews
 description: Hacker News scrapers

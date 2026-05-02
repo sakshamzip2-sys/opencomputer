@@ -11,7 +11,8 @@ Templates (jinja2-shaped, simple syntax):
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from jinja2 import Environment, StrictUndefined
 

@@ -6,7 +6,8 @@ Public API:
     list_recipes()          -> list[str]
 """
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from opencomputer.recipes.formats import Fmt, format_output
 from opencomputer.recipes.loader import list_recipes, load_recipe

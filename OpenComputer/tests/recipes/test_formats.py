@@ -5,7 +5,6 @@ import pytest
 
 from opencomputer.recipes.formats import format_output
 
-
 SAMPLE = [
     {"title": "First", "score": 100},
     {"title": "Second", "score": 50},
