@@ -49,6 +49,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 _log = logging.getLogger("opencomputer.skill_evolution.skill_extractor")
 
 # ─── tunables ─────────────────────────────────────────────────────────
@@ -246,6 +248,17 @@ _PROCEDURE_SYSTEM = (
     "list."
 )
 
+# Subsystem C follow-up (2026-05-02) — schema-validated path for the
+# procedure call. When supported by the provider, the LLM emits a JSON
+# object matching :class:`_ExtractedProcedure` and we render the
+# numbered list deterministically from the validated steps. Falls back
+# to legacy text-output parsing for providers without schema support.
+_PROCEDURE_SYSTEM_STRUCTURED = (
+    "You summarise a coding agent's successful procedure. Each step is "
+    "a short imperative sentence. 3–8 steps total. Redact concrete file "
+    "paths and obvious secrets — replace them with `<path>` or `<secret>`."
+)
+
 _TRIGGER_SYSTEM = (
     "You write the `description:` line for a Claude SKILL.md frontmatter. "
     "Phrase as 'Use when [user request shape]'. One line, no period at the "
@@ -374,6 +387,142 @@ def _render_skill_md(
 # ─── public entry point ───────────────────────────────────────────────
 
 
+# ─── Subsystem C follow-up: schema-validated procedure extraction ────
+
+
+class _ExtractedProcedure(BaseModel):
+    """Schema for the procedure-extraction LLM call."""
+
+    steps: list[str] = Field(
+        min_length=3,
+        max_length=8,
+        description=(
+            "Numbered procedure steps as a list of short imperative "
+            "sentences. 3-8 entries, each a single sentence."
+        ),
+    )
+
+
+async def _extract_procedure_steps(
+    *,
+    provider: Any,
+    model: str,
+    intent: str,
+    session_summary: str,
+    cost_guard: Any,
+    sensitive_filter: Callable[[str], bool] | None,
+) -> list[str] | None:
+    """Get procedure steps as a validated list when possible.
+
+    Tries :func:`opencomputer.agent.structured.parse_structured` first.
+    Schema validation guarantees 3-8 steps, all strings. Falls back to
+    the legacy text-output path for providers that don't support
+    ``response_schema`` (older models, OpenAI-compat plugins without
+    schema wiring).
+
+    Returns ``None`` on cost-guard denial, provider failure, redaction
+    that strips the body, or schema mismatch in the legacy parse path —
+    all converge on the same caller-handling.
+    """
+    decision = cost_guard.check_budget(
+        "anthropic", projected_cost_usd=_PROJECTED_COST_USD
+    )
+    if not _budget_allows(decision):
+        _log.info("skill-evolution: extractor skipped — cost_guard denied")
+        return None
+
+    user_prompt = _build_procedure_user(intent, session_summary)
+
+    # Schema-validated path.
+    try:
+        from opencomputer.agent.structured import (
+            StructuredOutputError,
+            parse_structured,
+        )
+        from plugin_sdk.core import Message
+
+        result = await parse_structured(
+            response_model=_ExtractedProcedure,
+            messages=[Message(role="user", content=user_prompt)],
+            provider=provider,
+            model=model,
+            system=_PROCEDURE_SYSTEM_STRUCTURED,
+            max_tokens=600,
+            name="extracted_procedure",
+        )
+        _record_usage(cost_guard)
+        # Apply redaction per-step (preserves per-step granularity for
+        # PII filtering); apply the body-usefulness check to the JOINED
+        # output, matching the legacy path's whole-body semantics.
+        clean_steps: list[str] = [
+            _redact_pii(
+                _apply_sensitive_filter(step, sensitive_filter)
+            ).strip()
+            for step in result.steps
+        ]
+        clean_steps = [s for s in clean_steps if s]
+        joined = "\n".join(clean_steps)
+        if not (3 <= len(clean_steps) <= 8) or not _is_useful_body(joined):
+            # Filter degraded the body below useful threshold — fall
+            # through to legacy path rather than emit a degraded skill.
+            _log.info(
+                "skill-evolution: schema procedure had %d useful steps; "
+                "falling back to text path",
+                len(clean_steps),
+            )
+        else:
+            return clean_steps
+    except StructuredOutputError as exc:
+        _log.info(
+            "skill-evolution: schema procedure call failed (%s); "
+            "falling back to text path",
+            exc,
+        )
+    except Exception:  # noqa: BLE001 — provider/import failures fall back
+        _log.info(
+            "skill-evolution: schema procedure path raised; falling back",
+            exc_info=True,
+        )
+
+    # Legacy text-output fallback — preserved for providers without
+    # response_schema support.
+    procedure_raw = await _llm_call(
+        provider=provider,
+        model=model,
+        system=_PROCEDURE_SYSTEM,
+        user=user_prompt,
+        cost_guard=cost_guard,
+        max_tokens=600,
+    )
+    if not procedure_raw:
+        return None
+    procedure_red = _redact_pii(
+        _apply_sensitive_filter(procedure_raw, sensitive_filter)
+    )
+    if not _is_useful_body(procedure_red):
+        return None
+    # Parse the numbered list back into individual steps so the caller
+    # gets a uniform list[str] regardless of which path produced it.
+    raw = procedure_red.strip()
+    steps: list[str] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Strip "1. " / "2." / "(1)" prefixes so the renderer adds them
+        # consistently.
+        match = re.match(r"^(?:[(]?\d+[)]?[.)]?\s*)(.*)$", line)
+        if match and match.group(1):
+            steps.append(match.group(1))
+        else:
+            steps.append(line)
+    if not (3 <= len(steps) <= 8):
+        # Legacy output didn't match the count constraint — return None
+        # rather than emit a malformed skill.
+        return None
+    return steps
+
+
 async def extract_skill_from_session(
     session_id: str,
     *,
@@ -440,22 +589,24 @@ async def extract_skill_from_session(
     intent = _truncate_one_line(intent_red, 200)
 
     # ── Call 2: Procedure ─────────────────────────────────────────────
-    procedure_raw = await _llm_call(
+    # Subsystem C follow-up — try the schema-validated path first; fall
+    # back to legacy text-output if the provider doesn't support
+    # response_schema (e.g. older models, providers without native
+    # structured-outputs wiring). Failure modes converge on returning
+    # None so the rest of the flow handles them identically.
+    procedure_steps = await _extract_procedure_steps(
         provider=provider,
         model=model,
-        system=_PROCEDURE_SYSTEM,
-        user=_build_procedure_user(intent, session_summary),
+        intent=intent,
+        session_summary=session_summary,
         cost_guard=cost_guard,
-        max_tokens=600,
+        sensitive_filter=sensitive_filter,
     )
-    if not procedure_raw:
+    if procedure_steps is None:
         return None
-    procedure_red = _redact_pii(
-        _apply_sensitive_filter(procedure_raw, sensitive_filter)
+    procedure = "\n".join(
+        f"{i + 1}. {step}" for i, step in enumerate(procedure_steps)
     )
-    if not _is_useful_body(procedure_red):
-        return None
-    procedure = procedure_red.strip()
 
     # ── Call 3: Trigger description ───────────────────────────────────
     trigger_raw = await _llm_call(
