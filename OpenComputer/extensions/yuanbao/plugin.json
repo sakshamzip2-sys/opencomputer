@@ -1,0 +1,20 @@
+{
+  "id": "yuanbao",
+  "name": "Tencent Yuanbao Channel",
+  "kind": "channel",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Tencent Yuanbao (元宝) outbound via webhook. Inbound deferred (needs OAuth + callback URL).",
+  "single_instance": true,
+  "enabled_by_default": false,
+  "setup": {
+    "channels": [
+      {
+        "id": "yuanbao",
+        "env_vars": ["YUANBAO_WEBHOOK_URL", "YUANBAO_API_KEY"],
+        "label": "Tencent Yuanbao (元宝)",
+        "signup_url": "https://yuanbao.tencent.com"
+      }
+    ]
+  }
+}
