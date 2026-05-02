@@ -1,0 +1,23 @@
+{
+  "id": "minimax-anthropic-provider",
+  "name": "MiniMax (Anthropic-shaped)",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "MiniMax (M-series, ABAB) — Anthropic Messages API compatible. Subclasses the bundled anthropic-provider.",
+  "model_support": {
+    "model_prefixes": ["abab-", "minimax-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "minimax",
+        "auth_methods": ["api_key"],
+        "env_vars": ["MINIMAX_API_KEY"],
+        "label": "MiniMax (global — Anthropic Messages API)",
+        "default_model": "MiniMax-M1",
+        "signup_url": "https://www.minimax.io"
+      }
+    ]
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "id": "minimax-china-anthropic-provider",
+  "name": "MiniMax (China)",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "MiniMax (China region) — Anthropic Messages API compatible.",
+  "model_support": {
+    "model_prefixes": ["abab-", "minimax-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "minimax-cn",
+        "auth_methods": ["api_key"],
+        "env_vars": ["MINIMAX_CN_API_KEY"],
+        "label": "MiniMax (China — Anthropic Messages API)",
+        "default_model": "MiniMax-M1",
+        "signup_url": "https://api.minimaxi.com"
+      }
+    ]
+  }
+}
