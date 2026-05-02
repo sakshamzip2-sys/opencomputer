@@ -92,6 +92,24 @@ class ModelConfig:
     # relies on ModelConfig hashability for memoisation
     # (see test_dataclass_remains_hashable in test_model_fallback.py).
 
+    # Per-model wire-shape selector. ``"auto"`` (default) defers to the
+    # provider's native transport; ``"openai"`` forces OpenAI
+    # chat/completions; ``"anthropic"`` forces Anthropic /v1/messages.
+    # Use case: Azure AI Foundry deployments hosting both GPT-4o
+    # (OpenAI shape) and Claude (Anthropic shape) under one provider —
+    # the same provider plugin dispatches differently per model.
+    api_mode: str = "auto"
+
+    def __post_init__(self) -> None:
+        if self.api_mode not in _VALID_API_MODES:
+            raise ValueError(
+                f"api_mode must be one of {sorted(_VALID_API_MODES)!r}, "
+                f"got {self.api_mode!r}"
+            )
+
+
+_VALID_API_MODES: frozenset[str] = frozenset({"auto", "openai", "anthropic"})
+
 
 @dataclass(frozen=True, slots=True)
 class LoopConfig:

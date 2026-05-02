@@ -1,0 +1,20 @@
+{
+  "id": "azure-foundry-provider",
+  "name": "Azure AI Foundry",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Azure AI Foundry (OpenAI-style endpoint) — your Azure AI deployment. Anthropic-style endpoint is deferred to a follow-up.",
+  "setup": {
+    "providers": [
+      {
+        "id": "azure-foundry",
+        "auth_methods": ["api_key"],
+        "env_vars": ["AZURE_FOUNDRY_API_KEY"],
+        "label": "Azure AI Foundry (OpenAI-style — your Azure deployment)",
+        "default_model": "gpt-5",
+        "signup_url": "https://ai.azure.com"
+      }
+    ]
+  }
+}

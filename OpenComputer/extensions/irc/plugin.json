@@ -1,0 +1,20 @@
+{
+  "id": "irc",
+  "name": "IRC Channel",
+  "kind": "channel",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "IRC (RFC 1459) channel adapter — minimal asyncio-based client. Joins listed channels on connect; receives + sends PRIVMSG. Handles PING/PONG, basic reconnect.",
+  "single_instance": true,
+  "enabled_by_default": false,
+  "setup": {
+    "channels": [
+      {
+        "id": "irc",
+        "env_vars": ["IRC_SERVER", "IRC_NICK", "IRC_CHANNELS"],
+        "label": "IRC (RFC 1459)",
+        "signup_url": ""
+      }
+    ]
+  }
+}
