@@ -127,3 +127,119 @@ def validate_frontmatter(skill_md: str) -> dict[str, Any]:
             raise ValidationError("tags must be a list of strings")
 
     return parsed
+
+
+def validate_skill_md(
+    text: str,
+    *,
+    strict: bool = True,
+    path: Path | None = None,
+) -> ValidationReport:
+    """Validate a SKILL.md file's text against the Anthropic spec.
+
+    Args:
+        text: The full SKILL.md content (frontmatter + body).
+        strict: If True, warnings count as failures via .passes_strict.
+        path: Optional path for error reporting.
+
+    Returns:
+        ValidationReport with errors and warnings populated.
+    """
+    report = ValidationReport(skill_path=path)
+    frontmatter, body = _split_frontmatter(text)
+    if frontmatter is None:
+        report.errors.append(ValidationIssue(
+            rule="frontmatter.missing",
+            severity="error",
+            field=None,
+            message="no YAML frontmatter found",
+        ))
+        return report
+
+    # Delegate existing checks: parse frontmatter and run legacy validator.
+    # The legacy validator raises on first error; we wrap to collect all.
+    try:
+        parsed = _parse_yaml(frontmatter)
+    except Exception as exc:
+        report.errors.append(ValidationIssue(
+            rule="frontmatter.parse_error",
+            severity="error",
+            field=None,
+            message=str(exc),
+        ))
+        return report
+
+    if not isinstance(parsed, dict):
+        report.errors.append(ValidationIssue(
+            rule="frontmatter.parse_error",
+            severity="error",
+            field=None,
+            message="frontmatter must be a YAML mapping (key: value pairs)",
+        ))
+        return report
+
+    # Existing checks (name regex, description length, version semver, tags type).
+    # Convert raises to issues.
+    _run_legacy_checks(text, report)
+
+    # New checks (added in subsequent tasks).
+    _check_name_reserved_word(parsed.get("name", ""), report)
+    _check_xml_tags(parsed, report)
+    _check_description_voice(parsed.get("description", ""), report)
+    _check_body_size(body, parsed, report)
+
+    return report
+
+
+def _split_frontmatter(text: str) -> tuple[str | None, str]:
+    """Split text into (frontmatter_yaml, body). Returns (None, text) if no frontmatter."""
+    if not text.startswith("---"):
+        return None, text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return None, text
+    fm = text[3:end].strip()
+    body = text[end + 4:].lstrip("\n")
+    return fm, body
+
+
+def _parse_yaml(text: str) -> dict:
+    """Parse YAML frontmatter using PyYAML."""
+    return yaml.safe_load(text) or {}
+
+
+def _run_legacy_checks(text: str, report: ValidationReport) -> None:
+    """Run the existing validate_frontmatter checks, converting raises to issues.
+
+    The legacy validator takes raw SKILL.md text and raises on the first
+    error. We wrap it so failures land in the structured report.
+    """
+    try:
+        validate_frontmatter(text)
+    except ValidationError as exc:
+        report.errors.append(ValidationIssue(
+            rule="legacy",
+            severity="error",
+            field=None,
+            message=str(exc),
+        ))
+
+
+def _check_name_reserved_word(name, report: ValidationReport) -> None:
+    """Stub — implemented in Task 3."""
+    pass
+
+
+def _check_xml_tags(parsed: dict, report: ValidationReport) -> None:
+    """Stub — implemented in Task 4."""
+    pass
+
+
+def _check_description_voice(description, report: ValidationReport) -> None:
+    """Stub — implemented in Task 5."""
+    pass
+
+
+def _check_body_size(body: str, parsed: dict, report: ValidationReport) -> None:
+    """Stub — implemented in Task 6."""
+    pass

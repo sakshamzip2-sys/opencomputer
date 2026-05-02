@@ -6,6 +6,7 @@ from opencomputer.skills_hub.agentskills_validator import (
     ValidationIssue,
     ValidationReport,
     validate_frontmatter,
+    validate_skill_md,
 )
 
 
@@ -32,6 +33,38 @@ def test_validation_report_has_errors_and_warnings():
     assert report.errors == [issue_err]
     assert report.warnings == [issue_warn]
     assert report.skill_path is None
+
+
+def test_validate_skill_md_returns_report_with_existing_validations():
+    bad_text = """---
+name: BadName
+description: short
+---
+
+Body content.
+"""
+    report = validate_skill_md(bad_text, strict=True)
+    assert isinstance(report, ValidationReport)
+    # Existing validator caught: name not lowercase, description too short (<20 chars)
+    assert any(i.field and "name" in i.field for i in report.errors) or any(
+        "name" in i.message.lower() or "description" in i.message.lower()
+        for i in report.errors
+    )
+
+
+def test_validate_skill_md_clean_report_for_valid_input():
+    good_text = """---
+name: processing-pdfs
+description: Processes PDF files and extracts text. Use when working with PDF documents or extraction tasks.
+version: 0.1.0
+---
+
+# Processing PDFs
+
+Body content here.
+"""
+    report = validate_skill_md(good_text, strict=True)
+    assert report.passes_strict, f"unexpected issues: {report.errors + report.warnings}"
 
 VALID = """---
 name: pead-screener
