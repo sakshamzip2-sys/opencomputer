@@ -1343,6 +1343,8 @@ class AgentLoop:
                         sid,
                         step.input_tokens,
                         step.output_tokens,
+                        cache_read_tokens=step.cache_read_tokens,
+                        cache_write_tokens=step.cache_write_tokens,
                     )
                 except Exception:  # noqa: BLE001
                     _log.debug(
@@ -1350,6 +1352,23 @@ class AgentLoop:
                         sid,
                         exc_info=True,
                     )
+
+                # 2026-05-02: surface cumulative cache reads / writes on
+                # runtime.custom so the ``/usage`` slash command can render
+                # them. Defensive int-coerce — runtime.custom is shared
+                # state and another component might have stomped a non-int
+                # value; in that case start fresh.
+                try:
+                    _cur_cr = self._runtime.custom.get("session_cache_read")
+                    _cur_cw = self._runtime.custom.get("session_cache_write")
+                    self._runtime.custom["session_cache_read"] = (
+                        int(_cur_cr) if isinstance(_cur_cr, int) else 0
+                    ) + step.cache_read_tokens
+                    self._runtime.custom["session_cache_write"] = (
+                        int(_cur_cw) if isinstance(_cur_cw, int) else 0
+                    ) + step.cache_write_tokens
+                except Exception:  # noqa: BLE001
+                    pass
 
                 if not step.should_continue:
                     # No tool calls — safe to persist the assistant message alone. (PR #1)

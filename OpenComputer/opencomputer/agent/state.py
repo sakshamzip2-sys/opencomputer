@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     message_count INTEGER DEFAULT 0,
     input_tokens  INTEGER DEFAULT 0,
     output_tokens INTEGER DEFAULT 0,
+    cache_read_tokens  INTEGER DEFAULT 0,
+    cache_write_tokens INTEGER DEFAULT 0,
     vibe          TEXT,    -- A.4 (2026-04-27): per-session emotional state
                            -- (frustrated|excited|tired|curious|calm|stuck|"")
     vibe_updated  REAL,    -- A.4: when vibe was last classified (epoch seconds)
@@ -389,6 +391,8 @@ _EXPECTED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("messages", "codex_reasoning_items", "TEXT"),
     ("messages", "reasoning_replay_blocks", "TEXT"),  # 2026-05-02
     ("messages", "attachments", "TEXT"),
+    ("sessions", "cache_read_tokens", "INTEGER DEFAULT 0"),  # 2026-05-02
+    ("sessions", "cache_write_tokens", "INTEGER DEFAULT 0"),  # 2026-05-02
     ("sessions", "vibe", "TEXT"),
     ("sessions", "vibe_updated", "REAL"),
     ("sessions", "cwd", "TEXT"),  # Plan 3 (2026-05-01) — profile-suggester input
@@ -919,7 +923,12 @@ class SessionDB:
             return ids
 
     def add_tokens(
-        self, session_id: str, input_tokens: int, output_tokens: int
+        self,
+        session_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
     ) -> None:
         """Bump the per-session token counters by the given deltas.
 
@@ -931,7 +940,11 @@ class SessionDB:
         clamped to ``0`` defensively — a buggy provider mustn't be able
         to drag the running total backwards.
 
-        No-op when both deltas are zero (and when ``session_id`` is
+        2026-05-02 — cache_read_tokens / cache_write_tokens accumulate
+        prompt-cache hits + writes for ``/usage`` to surface. Default
+        zero keeps every existing call site working unchanged.
+
+        No-op when all deltas are zero (and when ``session_id`` is
         empty), so callers don't need to branch on the common case
         where a provider declined to surface usage.
         """
@@ -939,15 +952,19 @@ class SessionDB:
             return
         in_delta = max(0, int(input_tokens or 0))
         out_delta = max(0, int(output_tokens or 0))
-        if in_delta == 0 and out_delta == 0:
+        cr_delta = max(0, int(cache_read_tokens or 0))
+        cw_delta = max(0, int(cache_write_tokens or 0))
+        if in_delta == 0 and out_delta == 0 and cr_delta == 0 and cw_delta == 0:
             return
         with self._txn() as conn:
             conn.execute(
                 "UPDATE sessions SET "
                 "input_tokens = input_tokens + ?, "
-                "output_tokens = output_tokens + ? "
+                "output_tokens = output_tokens + ?, "
+                "cache_read_tokens = cache_read_tokens + ?, "
+                "cache_write_tokens = cache_write_tokens + ? "
                 "WHERE id = ?",
-                (in_delta, out_delta, session_id),
+                (in_delta, out_delta, cr_delta, cw_delta, session_id),
             )
 
     def get_messages(self, session_id: str) -> list[Message]:
