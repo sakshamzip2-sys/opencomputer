@@ -3,7 +3,6 @@
 Imports via the underscore alias (extensions.groq_provider) — the
 hyphen→underscore aliasing is wired in tests/conftest.py.
 """
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -32,6 +31,23 @@ def test_missing_api_key_raises(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
         GroqProvider()
+
+
+def test_missing_api_key_error_includes_signup_url(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match=r"console\.groq\.com"):
+        GroqProvider()
+
+
+def test_empty_string_api_key_raises(monkeypatch):
+    """An empty string for either env or explicit arg must NOT silently pass."""
+    monkeypatch.setenv("GROQ_API_KEY", "")
+    with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
+        GroqProvider()
+    with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
+        GroqProvider(api_key="")
+    with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
+        GroqProvider(api_key="   ")
 
 
 def test_api_key_env_attribute():
@@ -106,3 +122,71 @@ async def test_stream_complete_yields_text_delta_then_done(provider):
     assert events[-1].kind == "done"
     assert events[-1].response is not None
     assert events[-1].response.message.content == "quick"
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_done_event_even_on_http_error(provider):
+    """Critical regression: try/finally guarantees the `done` sentinel fires
+    even when the HTTP layer raises — agent loop hangs without this.
+    """
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 401
+    mock_resp.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError("401 Unauthorized", request=MagicMock(), response=mock_resp)
+    )
+
+    class _CM:
+        async def __aenter__(self): return mock_resp  # noqa: N805
+        async def __aexit__(self, *a): return None  # noqa: N805
+
+    events = []
+    raised = False
+    with patch("httpx.AsyncClient.stream", MagicMock(return_value=_CM())):
+        try:
+            async for e in provider.stream_complete(
+                model="llama-3.3-70b-versatile",
+                messages=[Message(role="user", content="hi")],
+            ):
+                events.append(e)
+        except httpx.HTTPStatusError:
+            raised = True
+    assert raised
+    assert any(e.kind == "done" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_stream_accumulates_tool_call_deltas(provider):
+    """Critical regression: tool_calls stream as partial deltas; the final
+    `done` event MUST carry assembled ToolCall objects.
+    """
+    async def fake_lines():
+        for line in [
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","function":{"name":"sum","arguments":"{\\"x\\":"}}]}}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"5}"}}]}}]}',
+            'data: {"choices":[{"finish_reason":"tool_calls"}]}',
+            'data: [DONE]',
+        ]:
+            yield line
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.aiter_lines = fake_lines
+
+    class _CM:
+        async def __aenter__(self): return mock_resp  # noqa: N805
+        async def __aexit__(self, *a): return None  # noqa: N805
+
+    with patch("httpx.AsyncClient.stream", MagicMock(return_value=_CM())):
+        events = []
+        async for e in provider.stream_complete(
+            model="llama-3.3-70b-versatile",
+            messages=[Message(role="user", content="hi")],
+        ):
+            events.append(e)
+    done = next(e for e in events if e.kind == "done")
+    assert done.response.stop_reason == "tool_use"
+    tool_calls = done.response.message.tool_calls
+    assert tool_calls is not None and len(tool_calls) == 1
+    assert tool_calls[0].id == "call_x"
+    assert tool_calls[0].name == "sum"
+    assert tool_calls[0].arguments == {"x": 5}

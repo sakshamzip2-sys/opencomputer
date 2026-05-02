@@ -3,7 +3,6 @@
 Imports via the underscore alias (extensions.ollama_provider) — the
 hyphen→underscore aliasing is wired in tests/conftest.py.
 """
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -86,3 +85,75 @@ async def test_stream_complete_yields_text_delta_then_done(provider):
     assert events[-1].kind == "done"
     assert events[-1].response is not None
     assert events[-1].response.message.content == "hello"
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_done_event_even_on_http_error(provider):
+    """Critical regression: try/finally guarantees the agent loop's
+    `done` sentinel fires even when the HTTP layer raises. Without this,
+    consumers awaiting the sentinel hang forever on transient errors.
+    """
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 503
+    mock_resp.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError("503 Service Unavailable", request=MagicMock(), response=mock_resp)
+    )
+
+    class _CM:
+        async def __aenter__(self): return mock_resp  # noqa: N805
+        async def __aexit__(self, *a): return None  # noqa: N805
+
+    events = []
+    raised = False
+    with patch("httpx.AsyncClient.stream", MagicMock(return_value=_CM())):
+        try:
+            async for e in provider.stream_complete(
+                model="llama3", messages=[Message(role="user", content="hi")]
+            ):
+                events.append(e)
+        except httpx.HTTPStatusError:
+            raised = True
+    # The exception MUST propagate to the caller (so they know it failed)
+    assert raised
+    # AND a done event must have fired (try/finally) — even with empty content
+    assert any(e.kind == "done" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_stream_accumulates_tool_call_deltas(provider):
+    """Critical regression: tool_calls stream as partial deltas across
+    multiple chunks; the final `done` event MUST carry the assembled
+    ToolCall objects. Without accumulation, tool-use turns silently break.
+    """
+    async def fake_lines():
+        for line in [
+            # Two chunks with partial tool_call deltas at index 0
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"add","arguments":"{\\"a\\":"}}]}}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1, \\"b\\":2}"}}]}}]}',
+            'data: {"choices":[{"finish_reason":"tool_calls"}]}',
+            'data: [DONE]',
+        ]:
+            yield line
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.aiter_lines = fake_lines
+
+    class _CM:
+        async def __aenter__(self): return mock_resp  # noqa: N805
+        async def __aexit__(self, *a): return None  # noqa: N805
+
+    with patch("httpx.AsyncClient.stream", MagicMock(return_value=_CM())):
+        events = []
+        async for e in provider.stream_complete(
+            model="llama3", messages=[Message(role="user", content="hi")]
+        ):
+            events.append(e)
+    done = next(e for e in events if e.kind == "done")
+    assert done.response.stop_reason == "tool_use"
+    tool_calls = done.response.message.tool_calls
+    assert tool_calls is not None and len(tool_calls) == 1
+    tc = tool_calls[0]
+    assert tc.id == "call_1"
+    assert tc.name == "add"
+    assert tc.arguments == {"a": 1, "b": 2}
