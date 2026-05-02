@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 from typer.testing import CliRunner
 
@@ -8,7 +8,7 @@ from opencomputer.cli_insights import insights_app
 
 def _write_event(log_path, **overrides):
     event = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "provider": "anthropic",
         "model": "claude-sonnet-4-6",
         "input_tokens": 100,
@@ -50,8 +50,8 @@ def test_insights_llm_filters_by_hours(tmp_path, monkeypatch):
     """Events older than --hours window are excluded."""
     monkeypatch.setenv("OPENCOMPUTER_PROFILE_HOME", str(tmp_path))
     log = tmp_path / "llm_events.jsonl"
-    old_ts = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
-    new_ts = datetime.now(timezone.utc).isoformat()
+    old_ts = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+    new_ts = datetime.now(UTC).isoformat()
     _write_event(log, ts=old_ts, provider="old-provider")
     _write_event(log, ts=new_ts, provider="anthropic")
 

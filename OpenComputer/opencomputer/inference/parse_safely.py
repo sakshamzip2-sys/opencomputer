@@ -7,13 +7,12 @@ this wrapper turns crashes into a typed 'no decision' fallback.
 
 import json
 import logging
-from typing import Any, TypeVar
+from typing import Any
 
-T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
 
-def parse_safely(raw: str, *, default: T) -> Any | T:
+def parse_safely[T](raw: str, *, default: T) -> Any | T:
     """Return json.loads(raw) on success; return default on JSONDecodeError.
 
     Logs the parse error at WARNING level - never silent.
