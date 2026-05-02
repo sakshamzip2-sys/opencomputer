@@ -57,6 +57,10 @@ def _build_registry() -> list[WizardSection]:
     from opencomputer.cli_setup.section_handlers._deferred import (
         make_deferred_handler,
     )
+    from opencomputer.cli_setup.section_handlers.agent_settings import (
+        is_agent_settings_configured,
+        run_agent_settings_section,
+    )
     from opencomputer.cli_setup.section_handlers.inference_provider import (
         is_inference_provider_configured,
         run_inference_provider_section,
@@ -95,8 +99,13 @@ def _build_registry() -> list[WizardSection]:
         ),
         WizardSection(
             key="agent_settings", icon="◆", title="Agent settings",
-            description="Max iterations, compression threshold, session reset.",
-            handler=make_deferred_handler("S1"), deferred=True, target_subproject="S1",
+            description=(
+                "Max iterations, parallel tools, inactivity + iteration "
+                "timeouts.\n"
+                "Recommended defaults work for most use cases."
+            ),
+            handler=run_agent_settings_section,
+            configured_check=is_agent_settings_configured,
         ),
         WizardSection(
             key="tts_provider", icon="◆", title="TTS provider",

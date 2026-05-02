@@ -55,15 +55,20 @@ def test_section_registry_has_eight_entries_with_correct_order():
     ]
 
 
-def test_six_sections_are_deferred_two_are_live():
+def test_deferred_vs_live_section_split():
+    """As sub-projects ship, sections move from deferred → live.
+    F0+F1+F2 made inference_provider + messaging_platforms live;
+    S1 made agent_settings live. Remaining 5 deferred."""
     from opencomputer.cli_setup.sections import SECTION_REGISTRY
     deferred = {s.key for s in SECTION_REGISTRY if s.deferred}
     live = {s.key for s in SECTION_REGISTRY if not s.deferred}
     assert deferred == {
-        "opencomputer_prior_detect", "agent_settings", "tts_provider",
+        "opencomputer_prior_detect", "tts_provider",
         "terminal_backend", "tools", "launchd_service",
     }
-    assert live == {"inference_provider", "messaging_platforms"}
+    assert live == {
+        "inference_provider", "messaging_platforms", "agent_settings",
+    }
 
 
 def test_run_setup_iterates_all_sections_in_order(monkeypatch, tmp_path):
