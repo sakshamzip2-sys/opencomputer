@@ -34,6 +34,12 @@ def test_e2e_first_run_picks_first_provider_and_skips_messaging(
             or True
         ),
     )
+    # S1 — agent_settings is now LIVE; mock its radiolist to "Apply
+    # recommended defaults" (idx 0).
+    monkeypatch.setattr(
+        "opencomputer.cli_setup.section_handlers.agent_settings.radiolist",
+        lambda *a, **kw: 0,
+    )
 
     rc = wizard.run_setup()
     assert rc == 0
@@ -42,3 +48,5 @@ def test_e2e_first_run_picks_first_provider_and_skips_messaging(
     written = yaml.safe_load((tmp_path / "config.yaml").read_text())
     assert written["model"]["provider"] == "anthropic"
     assert "platforms" not in (written.get("gateway") or {})
+    # S1 wrote recommended loop defaults.
+    assert written["loop"]["max_iterations"] == 90
