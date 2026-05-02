@@ -75,6 +75,9 @@ def _build_registry() -> list[WizardSection]:
     from opencomputer.cli_setup.section_handlers.prior_install import (
         run_prior_install_section,
     )
+    from opencomputer.cli_setup.section_handlers.tools import (
+        run_tools_section,
+    )
 
     return [
         WizardSection(
@@ -128,8 +131,11 @@ def _build_registry() -> list[WizardSection]:
         ),
         WizardSection(
             key="tools", icon="◆", title="Tools",
-            description="Optional tool plugins.",
-            handler=make_deferred_handler("S4"), deferred=True, target_subproject="S4",
+            description=(
+                "Enable the recommended plugin preset "
+                "(coding-harness + memory-honcho + dev-tools)."
+            ),
+            handler=run_tools_section,
         ),
         WizardSection(
             key="launchd_service", icon="◆", title="Launchd service",

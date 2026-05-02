@@ -53,6 +53,11 @@ def test_e2e_first_run_picks_first_provider_and_skips_messaging(
         "opencomputer.cli_setup.section_handlers.launchd_service._is_macos",
         lambda: False,
     )
+    # S4 — tools section is now LIVE; mock to apply preset (idx 0).
+    monkeypatch.setattr(
+        "opencomputer.cli_setup.section_handlers.tools.radiolist",
+        lambda *a, **kw: 0,
+    )
 
     rc = wizard.run_setup()
     assert rc == 0
