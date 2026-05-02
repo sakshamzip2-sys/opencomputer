@@ -259,6 +259,25 @@ class OpenAIProvider(BaseProvider):
                     out.append({"role": m.role, "content": m.content})
         return out
 
+    @property
+    def capabilities(self):  # type: ignore[override]
+        from plugin_sdk import CacheTokens, ProviderCapabilities
+
+        def _extract(usage: Any) -> CacheTokens:
+            details = getattr(usage, "prompt_tokens_details", None)
+            cached = 0
+            if details is not None:
+                cached = int(getattr(details, "cached_tokens", 0) or 0)
+            return CacheTokens(read=cached, write=0)
+
+        return ProviderCapabilities(
+            requires_reasoning_resend_in_tool_cycle=False,
+            reasoning_block_kind=None,
+            extracts_cache_tokens=_extract,
+            min_cache_tokens=lambda _model: 1024,
+            supports_long_ttl=False,
+        )
+
     def _parse_response(self, resp: ChatCompletion) -> ProviderResponse:
         """Convert an OpenAI response to our canonical Message + metadata."""
         choice = resp.choices[0]
