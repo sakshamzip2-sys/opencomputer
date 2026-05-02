@@ -338,7 +338,10 @@ async def _run_realtime_loop(
     from opencomputer.voice.tool_router import dispatch_realtime_tool_call
     from plugin_sdk.runtime_context import RuntimeContext
 
-    runtime = RuntimeContext()
+    # Subsystem B follow-up (2026-05-02) — flag voice context so the
+    # effort policy picks ``low`` automatically. Realtime voice can't
+    # afford reasoning budget on the round-trip critical path.
+    runtime = RuntimeContext(custom={"voice_mode": True})
     # The CLI command above already resolved the registration to read
     # env_var + audio_sink_kwargs; here we only need the factory.
     factory = _resolve_realtime_bridge_registration(provider).factory

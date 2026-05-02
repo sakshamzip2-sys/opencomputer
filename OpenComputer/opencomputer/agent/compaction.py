@@ -262,6 +262,39 @@ class CompactionEngine(ContextEngine):
         threshold = int(window * self.config.threshold_ratio)
         return last_input_tokens >= threshold
 
+    async def should_compact_now(
+        self,
+        messages: list[Message],
+        *,
+        system: str = "",
+    ) -> bool:
+        """Subsystem D follow-up (2026-05-02) — pre-flight compaction check
+        using the provider's ``count_tokens``.
+
+        Useful when the caller doesn't have a recent ``last_input_tokens``
+        figure (e.g., out-of-band ``/compress`` invocation, fresh session
+        resume, cost-guard pre-flight). Asks the provider to count the
+        current messages and applies the same threshold check as
+        :meth:`should_compact`.
+
+        Provider-agnostic — every BaseProvider's ``count_tokens`` falls
+        back to a heuristic if no native tokenizer is available, so this
+        method always returns a usable answer.
+        """
+        if self.disabled:
+            return False
+        try:
+            tokens = await self.provider.count_tokens(
+                model=self.model,
+                messages=messages,
+                system=system,
+            )
+        except Exception:  # noqa: BLE001 — pre-flight is best-effort
+            # Fall back to "don't compact" rather than blocking the caller.
+            # CompactionEngine.maybe_run still has its own count-aware path.
+            return False
+        return self.should_compact(tokens)
+
     async def maybe_run(
         self, messages: list[Message], last_input_tokens: int,
         *, force: bool = False,

@@ -23,18 +23,41 @@ def _heuristic_token_count(
     system: str = "",
     tools: list[ToolSchema] | None = None,
 ) -> int:
-    """Heuristic input-token count — ~4 chars per token.
+    """Provider-agnostic input-token count.
 
-    Provider-agnostic lower-bound estimate. Used by
-    :meth:`BaseProvider.count_tokens` when the concrete provider
-    doesn't override (e.g. local Llama via Ollama, future providers
-    not yet shipping a tokenizer).
+    Tries ``tiktoken`` (cl100k_base — what GPT-4/Claude/Llama tokenizers
+    closely approximate) when available. Falls back to a ~4-chars-per-
+    token heuristic when tiktoken isn't installed.
 
-    Real tokenizers report 10-30% higher counts in practice; this is
-    intentionally conservative so callers don't *under*-estimate
-    context pressure. For accurate counts, providers override
-    ``count_tokens`` with their native endpoint or local tokenizer.
+    Used by :meth:`BaseProvider.count_tokens` when the concrete provider
+    doesn't override. Providers with native endpoints (Anthropic
+    ``messages.count_tokens``) or local tokenizers (Llama-cpp, Ollama
+    ``/api/tokenize``) should still override for highest accuracy —
+    this fallback is just a smarter default than character counting.
     """
+    # Try tiktoken's cl100k_base first — close approximation for most
+    # modern tokenizers (GPT-4, Claude, Llama, Mistral all within ~10%).
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+        total = len(enc.encode(system or ""))
+        for m in messages:
+            if m.content:
+                total += len(enc.encode(m.content))
+            for tc in (m.tool_calls or []):
+                total += len(
+                    enc.encode(tc.name + json.dumps(tc.arguments or {}))
+                )
+        if tools:
+            for t in tools:
+                total += len(enc.encode(json.dumps(t.to_openai_format())))
+        return max(1, total)
+    except (ImportError, KeyError, Exception):  # noqa: BLE001
+        # Fall through to char-based heuristic when tiktoken unavailable
+        # or its encoder fails (rare — defensive).
+        pass
+
+    # Char-based fallback — ~4 chars per token. Conservative.
     total = len(system or "")
     for m in messages:
         total += len(m.content or "")
