@@ -21,17 +21,22 @@ OPENCOMPUTER_LOGO = r"""
 \____/_/   /_____/_/ |_|//_(_)____/\____/_/  /_/_/    \____/ /_/ /_____/_/ |_|
 """
 
-# Side glyph: 12-line geometric mark with "OC" in the center
+# Side glyph: braille-pattern geometric mark inspired by Hermes's caduceus
+# (``hermes_cli/banner.py:HERMES_CADUCEUS``). Independently re-drawn so it
+# represents OpenComputer's identity (the "OC" double-circle) rather than
+# Hermes's specific symbol. Uses braille block characters so it renders
+# crisply at small sizes — the previous ASCII-dot version had visible
+# alignment seams on most terminals.
 SIDE_GLYPH = r"""
-        .::::::.
-      .::::::::::.
-     :::: OC ::::
-    :::::::::::::::
-   :::      :::::
-   :::      :::::
-   :::      :::::
-    :::::::::::::::
-     :::::::::::
-      .::::::::::.
-        .::::::.
+            ⢀⣤⣶⣶⣦⣄⡀
+        ⢀⣴⣿⠟⠉  ⠉⠻⣿⣦⡀
+      ⣰⣿⠟⠁  ⢀⣀⣀  ⠈⠻⣿⣆
+    ⣴⡿⠋  ⢀⣴⣿⠟⠛⢿⣷⣦⡀  ⠙⢿⣦
+   ⣿⠏    ⣾⡟⠁    ⠈⢻⣷    ⠹⣿
+  ⣸⡿     ⣿⡇  OC   ⢸⣿     ⢿⣇
+   ⣿⡆    ⢿⣧⡀    ⢀⣼⡿    ⢰⣿
+    ⠹⣿⣄  ⠈⠻⢿⣷⣶⣶⡿⠟⠁  ⣠⣿⠏
+      ⠙⣿⣆⡀  ⠉⠉⠉⠉  ⢀⣰⣿⠋
+        ⠙⢿⣷⣄⡀    ⢀⣠⣾⡿⠋
+            ⠉⠛⠿⠿⠟⠋
 """
