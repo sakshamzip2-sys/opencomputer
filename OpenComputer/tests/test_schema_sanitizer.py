@@ -131,6 +131,93 @@ def test_recursive_in_nested_object():
     assert "minimum" not in retries
 
 
+def test_strips_min_items_max_items_from_array():
+    """Anthropic rejects minItems > 1 and maxItems anywhere on arrays."""
+    schema = {
+        "type": "array",
+        "items": {"type": "string"},
+        "minItems": 2,
+        "maxItems": 4,
+        "uniqueItems": True,
+    }
+    out = strip_anthropic_unsupported_constraints(schema)
+    assert out["type"] == "array"
+    assert "minItems" not in out
+    assert "maxItems" not in out
+    assert "uniqueItems" not in out
+    # Non-array fields preserved
+    assert out["items"] == {"type": "string"}
+
+
+def test_strips_min_max_contains_from_array():
+    schema = {
+        "type": "array",
+        "items": {"type": "integer"},
+        "minContains": 1,
+        "maxContains": 3,
+    }
+    out = strip_anthropic_unsupported_constraints(schema)
+    assert "minContains" not in out
+    assert "maxContains" not in out
+
+
+def test_strips_min_max_properties_from_object():
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "minProperties": 1,
+        "maxProperties": 5,
+    }
+    out = strip_anthropic_unsupported_constraints(schema)
+    assert out["type"] == "object"
+    assert "minProperties" not in out
+    assert "maxProperties" not in out
+    # Required + properties preserved
+    assert out["properties"] == {"a": {"type": "string"}}
+
+
+def test_recursive_array_constraints_in_nested_object():
+    """Tools wrap arrays inside their object parameters — recursion must reach them."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "options": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 2,
+                "maxItems": 4,
+            },
+        },
+    }
+    out = strip_anthropic_unsupported_constraints(schema)
+    options = out["properties"]["options"]
+    assert "minItems" not in options
+    assert "maxItems" not in options
+
+
+def test_real_clarify_tool_passes_through_clean():
+    """ClarifyTool has minItems=2 maxItems=4 on its options array — must be stripped."""
+    from opencomputer.tools.clarify import ClarifyTool
+
+    schema = ClarifyTool().schema
+    out = normalize_tool_input_schema_for_anthropic(schema.parameters)
+
+    def walk(node):
+        if isinstance(node, dict):
+            t = node.get("type")
+            if t == "array":
+                for forbidden in ("minItems", "maxItems", "uniqueItems"):
+                    assert forbidden not in node, (
+                        f"{forbidden} still on array node: {node!r}"
+                    )
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+    walk(out)
+
+
 def test_preserves_description_default_enum_on_integer():
     schema = {
         "type": "integer",

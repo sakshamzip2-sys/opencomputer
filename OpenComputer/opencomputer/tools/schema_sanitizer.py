@@ -50,6 +50,27 @@ _NUMERIC_CONSTRAINT_KEYS: frozenset[str] = frozenset({
     "multipleOf",
 })
 
+# Anthropic's array-type validator only accepts ``minItems`` values 0 or 1
+# (the wire error: "minItems values other than 0 or 1 are not supported").
+# It also rejects ``maxItems`` and ``uniqueItems``. Same OpenAI-accepts /
+# Anthropic-rejects pattern. Tools that need bounded arrays still validate
+# at the tool layer in their ``execute()`` method (see
+# ``opencomputer/tools/clarify.py`` for the canonical example).
+_ARRAY_CONSTRAINT_KEYS: frozenset[str] = frozenset({
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "minContains",
+    "maxContains",
+})
+
+# Anthropic also rejects object-level cardinality bounds. Strip
+# defensively in case a generated schema has them.
+_OBJECT_CONSTRAINT_KEYS: frozenset[str] = frozenset({
+    "minProperties",
+    "maxProperties",
+})
+
 
 def sanitize_tool_schemas(tools: list[dict]) -> list[dict]:
     """Return a copy of ``tools`` with each tool's parameter schema sanitized.
@@ -150,41 +171,62 @@ def strip_nullable_unions(
 
 
 def strip_anthropic_unsupported_constraints(schema: Any) -> Any:
-    """Recursively strip numeric constraints Anthropic rejects on int/number.
+    """Recursively strip schema constraints Anthropic's validator rejects.
 
     OC-specific extension over Hermes's sanitizer (Hermes will hit the same
-    bug once their tools exercise enough numeric bounds — this is the fix
-    for both projects). Anthropic's 2025 validator returns 400 with
-    "tools.0.custom: For 'integer' type, properties maximum, minimum are
-    not supported" if any of:
+    bugs as their tool surface grows — these are fixes for both projects).
+    Anthropic's 2025 strict validator returns 400 for several JSON-Schema
+    constraints that OpenAI accepts:
 
-      - ``minimum`` / ``maximum``
-      - ``exclusiveMinimum`` / ``exclusiveMaximum``
-      - ``multipleOf``
+      Numeric (on ``integer`` / ``number`` nodes):
+        - ``minimum`` / ``maximum``
+        - ``exclusiveMinimum`` / ``exclusiveMaximum``
+        - ``multipleOf``
 
-    appear on a node typed ``integer`` or ``number``. This walker drops
-    them anywhere they appear under those types, leaving everything else
-    (description, default, enum, string-type minLength/maxLength/pattern,
-    etc.) untouched. Returns a deep copy — original schema is unchanged.
+      Array (on ``array`` nodes):
+        - ``minItems`` (only 0 or 1 accepted; we strip rather than guess)
+        - ``maxItems``
+        - ``uniqueItems``
+        - ``minContains`` / ``maxContains``
+
+      Object (on ``object`` nodes):
+        - ``minProperties``
+        - ``maxProperties``
+
+    Walker drops them anywhere they appear under their respective types,
+    leaving everything else (description, default, enum, string-type
+    minLength/maxLength/pattern, items shape, properties, required, etc.)
+    untouched. Returns a deep copy — original schema is unchanged.
+
+    Tools that need to enforce these bounds (e.g. ``ClarifyTool`` requires
+    2-4 options) MUST validate at the tool layer in their ``execute()``
+    method since the schema-level enforcement is gone for Anthropic.
     """
-    return _strip_numeric_constraints(copy.deepcopy(schema))
+    return _strip_unsupported_constraints(copy.deepcopy(schema))
 
 
-def _strip_numeric_constraints(node: Any) -> Any:
+def _strip_unsupported_constraints(node: Any) -> Any:
     """In-place strip helper used by ``strip_anthropic_unsupported_constraints``.
 
     Operates on an already-deep-copied node so the caller's input is never
     mutated.
     """
     if isinstance(node, dict):
-        if node.get("type") in {"integer", "number"}:
+        node_type = node.get("type")
+        if node_type in {"integer", "number"}:
             for key in _NUMERIC_CONSTRAINT_KEYS:
                 node.pop(key, None)
+        elif node_type == "array":
+            for key in _ARRAY_CONSTRAINT_KEYS:
+                node.pop(key, None)
+        elif node_type == "object":
+            for key in _OBJECT_CONSTRAINT_KEYS:
+                node.pop(key, None)
         for key, value in list(node.items()):
-            node[key] = _strip_numeric_constraints(value)
+            node[key] = _strip_unsupported_constraints(value)
         return node
     if isinstance(node, list):
-        return [_strip_numeric_constraints(v) for v in node]
+        return [_strip_unsupported_constraints(v) for v in node]
     return node
 
 
