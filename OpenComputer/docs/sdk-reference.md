@@ -1257,6 +1257,81 @@ HOME-mutation regression.
 
 ---
 
+## PDF helpers (SP2)
+
+*Module: `plugin_sdk.pdf_helpers` (re-exported from `plugin_sdk`).*
+
+Stateless utilities for PDF attachment handling shared by provider
+plugins (Anthropic, AWS Bedrock, OpenAI). Limits match Anthropic's
+published PDF support spec
+(https://docs.claude.com/en/build-with-claude/pdf-support). See the SP2
+design doc at
+`docs/superpowers/specs/2026-05-02-sp2-pdf-provider-hardening-design.md`
+and the per-provider matrix at `docs/providers/pdf-support.md`.
+
+### `PDF_MAX_BYTES`
+
+```python
+from plugin_sdk import PDF_MAX_BYTES
+
+PDF_MAX_BYTES == 32 * 1024 * 1024  # 32 MB
+```
+
+Maximum total request payload size in bytes (Anthropic limit). Providers
+should drop attachments that push the request over this limit and emit a
+warning.
+
+### `PDF_HARD_PAGE_LIMIT`
+
+```python
+from plugin_sdk import PDF_HARD_PAGE_LIMIT
+
+PDF_HARD_PAGE_LIMIT == 600
+```
+
+Hard cap on PDF page count (Anthropic limit). PDFs over this should be
+dropped with a warning.
+
+### `PDF_SOFT_PAGE_LIMIT`
+
+```python
+from plugin_sdk import PDF_SOFT_PAGE_LIMIT
+
+PDF_SOFT_PAGE_LIMIT == 100
+```
+
+Effective page count above which 200k-context models start to degrade.
+PDFs between `PDF_SOFT_PAGE_LIMIT` and `PDF_HARD_PAGE_LIMIT` should
+emit a soft warning but still be sent.
+
+### `count_pdf_pages(data: bytes) -> int`
+
+```python
+from plugin_sdk import count_pdf_pages
+
+pages = count_pdf_pages(pdf_bytes)
+```
+
+Cheap byte-marker page-count heuristic. Counts `/Type /Page` minus
+`/Type /Pages` markers in the raw bytes. Approximate — a content stream
+containing the literal marker bytes could over-count — but good enough
+for guard rails. Returns `0` for non-PDF or malformed input. No
+`pypdf`-style dependency added.
+
+### `pdf_to_base64(data: bytes) -> str`
+
+```python
+from plugin_sdk import pdf_to_base64
+
+source_b64 = pdf_to_base64(pdf_bytes)
+```
+
+Standard-base64 encode PDF bytes for the Anthropic `document` content
+block's `source.data` field. Bedrock takes raw bytes (not base64) — use
+this only when building Anthropic-style requests.
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute
