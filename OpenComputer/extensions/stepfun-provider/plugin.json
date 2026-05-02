@@ -1,0 +1,23 @@
+{
+  "id": "stepfun-provider",
+  "name": "StepFun",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "StepFun Step Plan (agent / coding models) — OpenAI-compatible direct API.",
+  "model_support": {
+    "model_prefixes": ["step-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "stepfun",
+        "auth_methods": ["api_key"],
+        "env_vars": ["STEPFUN_API_KEY"],
+        "label": "StepFun Step Plan (agent + coding models — direct API)",
+        "default_model": "step-2-16k",
+        "signup_url": "https://platform.stepfun.com"
+      }
+    ]
+  }
+}

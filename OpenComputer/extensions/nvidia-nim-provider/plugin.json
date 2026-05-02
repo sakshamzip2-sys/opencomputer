@@ -1,0 +1,23 @@
+{
+  "id": "nvidia-nim-provider",
+  "name": "NVIDIA NIM",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "NVIDIA NIM (Nemotron + 100+ open models) — OpenAI-compatible.",
+  "model_support": {
+    "model_prefixes": ["nvidia/", "meta/", "mistralai/"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "nvidia",
+        "auth_methods": ["api_key"],
+        "env_vars": ["NVIDIA_API_KEY"],
+        "label": "NVIDIA NIM (Nemotron + open models — build.nvidia.com)",
+        "default_model": "nvidia/nemotron-4-340b-instruct",
+        "signup_url": "https://build.nvidia.com"
+      }
+    ]
+  }
+}
