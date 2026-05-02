@@ -71,6 +71,36 @@ def _make_loop(provider: BaseProvider, tmp_path) -> AgentLoop:
 
 
 @pytest.mark.asyncio
+async def test_context_full_triggers_compaction_and_retry(tmp_path) -> None:
+    """First call returns model_context_window_exceeded; loop compacts and retries."""
+    from opencomputer.agent.compaction import CompactionResult
+
+    provider = _ScriptedProvider([
+        _resp("model_context_window_exceeded", input_tokens=199_000),
+        _resp("end_turn", content="Now I can answer."),
+    ])
+    loop = _make_loop(provider, tmp_path)
+
+    # Force compaction.maybe_run to report did_compact=True so the
+    # retry path engages without depending on real summarization.
+    compaction_calls: list[bool] = []
+
+    async def _fake_compact(messages, last_input_tokens, *, force=False):
+        compaction_calls.append(force)
+        return CompactionResult(messages=messages, did_compact=True)
+
+    loop.compaction.maybe_run = _fake_compact  # type: ignore[method-assign]
+
+    result = await loop.run_conversation("Long prompt", session_id="t2")
+    assert result.stop_reason == StopReason.END_TURN
+    assert "Now I can answer" in result.final_message.content
+    # Compaction was called with force=True on the retry path.
+    assert compaction_calls == [True]
+    # Both provider calls were consumed (original + retry).
+    assert provider._idx == 2
+
+
+@pytest.mark.asyncio
 async def test_refusal_maps_to_stop_reason_refusal(tmp_path) -> None:
     """When stop_reason='refusal', loop emits StopReason.REFUSAL not END_TURN.
 

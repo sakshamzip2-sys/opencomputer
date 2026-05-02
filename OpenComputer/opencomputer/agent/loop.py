@@ -1309,6 +1309,42 @@ class AgentLoop:
                     model=model_for_turn,
                     session_id=sid,
                 )
+
+                # 2026-05-02 — one-shot stop-reason recovery. Each path
+                # reissues _run_one_step at most once with adjusted
+                # state. Provider-agnostic: every provider that maps its
+                # native stop_reason to the canonical StopReason enum
+                # benefits from these retries automatically.
+                #
+                # Context full: ask the compaction engine to make room
+                # and retry the same call. Mirrors Anthropic's Doc 3
+                # guidance for model_context_window_exceeded but works
+                # for any provider whose stop_reason maps to
+                # StopReason.CONTEXT_FULL.
+                if (
+                    step.stop_reason == StopReason.CONTEXT_FULL
+                    and self.compaction is not None
+                ):
+                    try:
+                        cresult = await self.compaction.maybe_run(
+                            messages, step.input_tokens, force=True,
+                        )
+                        if cresult.did_compact:
+                            messages = cresult.messages
+                            step = await self._run_one_step(
+                                messages=messages,
+                                system=system,
+                                stream_callback=stream_callback,
+                                thinking_callback=thinking_callback,
+                                model=model_for_turn,
+                                session_id=sid,
+                            )
+                    except Exception:  # noqa: BLE001
+                        # Compaction failure → fall through to whatever
+                        # the loop does with CONTEXT_FULL (visible to
+                        # caller via ConversationResult.stop_reason).
+                        pass
+
                 # Round 2B P-3: a returned LLM response is activity. Bump BEFORE
                 # the early-return path below so an end-turn turn that took 290s
                 # still resets the timer for any caller that resumes the same
