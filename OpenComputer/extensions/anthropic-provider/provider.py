@@ -127,6 +127,101 @@ def _record_429(exc: AnthropicRateLimitError) -> None:
 _log = logging.getLogger("opencomputer.providers.anthropic")
 
 
+# ─── SP4 — Anthropic Skills-via-API (opt-in) ──────────────────
+# See docs/superpowers/specs/2026-05-02-sp4-skills-via-api-design.md
+ANTHROPIC_SKILLS_BETA_HEADERS = (
+    "code-execution-2025-08-25",
+    "skills-2025-10-02",
+    "files-api-2025-04-14",
+)
+
+CODE_EXECUTION_TOOL = {
+    "type": "code_execution_20250825",
+    "name": "code_execution",
+}
+
+
+def _resolve_anthropic_skills(runtime) -> list[str]:
+    """Get the list of Anthropic skill IDs to enable for this call.
+
+    Resolution order:
+    1. ``runtime.custom["anthropic_skills"]`` (explicit programmatic)
+    2. ``OPENCOMPUTER_ANTHROPIC_SKILLS`` env var (comma-separated)
+    3. ``[]`` (no skills)
+
+    Bad input (non-list, non-strings) is logged and ignored. ``runtime``
+    may be ``None`` — in that case we still consult the env var.
+    """
+    if runtime is not None:
+        explicit = (getattr(runtime, "custom", {}) or {}).get("anthropic_skills")
+        if explicit is not None:
+            if isinstance(explicit, list) and all(isinstance(s, str) for s in explicit):
+                return [s for s in explicit if s.strip()]
+            _log.warning(
+                "anthropic_skills runtime flag has bad type %r; expected list[str]",
+                type(explicit).__name__,
+            )
+            return []
+    env = os.environ.get("OPENCOMPUTER_ANTHROPIC_SKILLS", "").strip()
+    if env:
+        return [s.strip() for s in env.split(",") if s.strip()]
+    return []
+
+
+def _build_skills_container(skill_ids: list[str]) -> dict:
+    """Build the ``container.skills`` array per Anthropic Skills-via-API spec."""
+    return {
+        "skills": [
+            {"type": "anthropic", "skill_id": sid, "version": "latest"}
+            for sid in skill_ids
+        ]
+    }
+
+
+def _augment_kwargs_for_skills(
+    *,
+    kwargs: dict,
+    skill_ids: list[str],
+) -> dict:
+    """Mutate kwargs to enable Anthropic Skills-via-API.
+
+    - Adds the three required beta headers (preserving any existing
+      comma-separated ``anthropic-beta`` values).
+    - Adds ``container.skills``.
+    - Appends the ``code_execution_20250825`` tool (skips if already
+      present, so it is safe to call twice).
+
+    Returns the same dict (mutated in place) for convenience. No-op when
+    ``skill_ids`` is empty — the kwargs are returned unchanged so this is
+    safe to call unconditionally on every request.
+    """
+    if not skill_ids:
+        return kwargs
+
+    # Beta headers — preserve any existing comma-separated betas
+    extra = dict(kwargs.get("extra_headers") or {})
+    existing_betas = [
+        b.strip() for b in extra.get("anthropic-beta", "").split(",") if b.strip()
+    ]
+    for beta in ANTHROPIC_SKILLS_BETA_HEADERS:
+        if beta not in existing_betas:
+            existing_betas.append(beta)
+    if existing_betas:
+        extra["anthropic-beta"] = ",".join(existing_betas)
+    kwargs["extra_headers"] = extra
+
+    # container.skills
+    kwargs["container"] = _build_skills_container(skill_ids)
+
+    # code_execution tool (required for skills to actually run)
+    tools = list(kwargs.get("tools") or [])
+    if not any(t.get("type") == "code_execution_20250825" for t in tools):
+        tools.append(CODE_EXECUTION_TOOL)
+    kwargs["tools"] = tools
+
+    return kwargs
+
+
 _SUPPORTED_IMAGE_MEDIA_TYPES: tuple[str, ...] = (
     "image/png",
     "image/jpeg",
@@ -734,6 +829,17 @@ class AnthropicProvider(BaseProvider):
                 "schema": response_schema["schema"],
             }
             kwargs["output_config"] = existing_output_config
+        # SP4 — Anthropic Skills-via-API opt-in. The runtime knob lives
+        # on ``runtime.custom["anthropic_skills"]``; the agent loop only
+        # forwards a flat ``runtime_extras`` dict to providers, so we
+        # synthesize a minimal runtime-shaped object here. The env var
+        # path (``OPENCOMPUTER_ANTHROPIC_SKILLS``) works regardless and
+        # is the primary opt-in surface for now.
+        from types import SimpleNamespace as _SkillsRuntime
+        kwargs = _augment_kwargs_for_skills(
+            kwargs=kwargs,
+            skill_ids=_resolve_anthropic_skills(_SkillsRuntime(custom=runtime_extras or {})),
+        )
         t0 = time.monotonic()
         try:
             resp = await client.messages.create(**kwargs)
@@ -918,6 +1024,12 @@ class AnthropicProvider(BaseProvider):
                 "schema": response_schema["schema"],
             }
             kwargs["output_config"] = existing_output_config
+        # SP4 — Anthropic Skills-via-API opt-in (see _do_complete for context).
+        from types import SimpleNamespace as _SkillsRuntime
+        kwargs = _augment_kwargs_for_skills(
+            kwargs=kwargs,
+            skill_ids=_resolve_anthropic_skills(_SkillsRuntime(custom=runtime_extras or {})),
+        )
         t0 = time.monotonic()
         try:
             async with client.messages.stream(**kwargs) as stream_ctx:
@@ -1042,6 +1154,12 @@ class AnthropicProvider(BaseProvider):
             return
 
         # No pool — native streaming path.
+        # SP4 — Anthropic Skills-via-API opt-in (see _do_complete for context).
+        from types import SimpleNamespace as _SkillsRuntime
+        kwargs = _augment_kwargs_for_skills(
+            kwargs=kwargs,
+            skill_ids=_resolve_anthropic_skills(_SkillsRuntime(custom=runtime_extras or {})),
+        )
         # TS-T7 — short-circuit if a previous 429 hasn't reset.
         _check_rate_limit()
         try:
