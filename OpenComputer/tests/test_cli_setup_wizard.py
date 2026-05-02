@@ -240,3 +240,102 @@ def test_run_setup_esc_during_section_returns_one(monkeypatch, tmp_path):
 
     rc = run_setup()
     assert rc == 1
+
+
+def test_run_setup_prints_configuration_summary_at_end(
+    monkeypatch, tmp_path, capsys,
+):
+    """Q3 — after sections run, a 'Configuration Summary' block is
+    rendered showing configured pieces + missing-piece hints."""
+    from opencomputer.cli_setup import sections as sec_mod
+    from opencomputer.cli_setup.sections import SectionResult, WizardSection
+    from opencomputer.cli_setup.wizard import run_setup
+
+    def configured(ctx):
+        ctx.config["model"] = {"provider": "anthropic"}
+        ctx.config["loop"] = {"max_iterations": 90}
+        ctx.config["gateway"] = {"platforms": ["telegram", "discord"]}
+        ctx.config["tts"] = {"provider": "edge-tts"}
+        ctx.config["terminal"] = {"backend": "local"}
+        ctx.config["plugins"] = {"enabled": ["coding-harness", "memory-honcho"]}
+        return SectionResult.CONFIGURED
+
+    fake_registry = [
+        WizardSection(
+            key="m", icon="◆", title="Model setup",
+            description="d", handler=configured,
+        ),
+    ]
+    monkeypatch.setattr(sec_mod, "SECTION_REGISTRY", fake_registry)
+    monkeypatch.setattr(
+        "opencomputer.cli_setup.wizard._resolve_config_path",
+        lambda: tmp_path / "config.yaml",
+    )
+
+    rc = run_setup()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Configuration Summary" in out
+    assert "anthropic" in out
+    assert "max_iterations=90" in out
+    assert "telegram" in out
+    assert "edge-tts" in out
+    assert "local" in out
+    assert "coding-harness" in out
+
+
+def test_run_setup_summary_flags_missing_pieces(
+    monkeypatch, tmp_path, capsys,
+):
+    """When the wizard runs but sections skip, the summary highlights
+    missing pieces."""
+    from opencomputer.cli_setup import sections as sec_mod
+    from opencomputer.cli_setup.sections import SectionResult, WizardSection
+    from opencomputer.cli_setup.wizard import run_setup
+
+    def empty_handler(ctx):
+        return SectionResult.SKIPPED_FRESH
+
+    fake_registry = [
+        WizardSection(key="x", icon="◆", title="X", description="d",
+                      handler=empty_handler),
+    ]
+    monkeypatch.setattr(sec_mod, "SECTION_REGISTRY", fake_registry)
+    monkeypatch.setattr(
+        "opencomputer.cli_setup.wizard._resolve_config_path",
+        lambda: tmp_path / "config.yaml",
+    )
+
+    rc = run_setup()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Configuration Summary" in out
+    # Missing-piece marker — Inference provider listed as not configured
+    assert "Inference provider" in out
+
+
+def test_run_setup_summary_includes_config_path(
+    monkeypatch, tmp_path, capsys,
+):
+    from opencomputer.cli_setup import sections as sec_mod
+    from opencomputer.cli_setup.sections import SectionResult, WizardSection
+    from opencomputer.cli_setup.wizard import run_setup
+
+    def noop(ctx):
+        return SectionResult.SKIPPED_FRESH
+
+    fake_registry = [
+        WizardSection(key="x", icon="◆", title="X", description="d",
+                      handler=noop),
+    ]
+    monkeypatch.setattr(sec_mod, "SECTION_REGISTRY", fake_registry)
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(
+        "opencomputer.cli_setup.wizard._resolve_config_path",
+        lambda: config_path,
+    )
+
+    rc = run_setup()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "config.yaml" in out
