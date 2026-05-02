@@ -1,383 +1,138 @@
-# Best-of-OpenClaw/Hermes/Claude-Code Import — Implementation Plan
+# Best-of-import Implementation Plan (rev 2)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Spec:** `docs/superpowers/specs/2026-05-02-best-of-import-design.md`
+**Goal:** Port 7 carefully-curated capabilities from OpenClaw + Hermes into OpenComputer (audit-rejected 5 duplicates from rev 1; added `oc update` per user request).
 
-**Goal:** Port 12 curated items from OpenClaw, Hermes-agent, and Claude Code into OpenComputer — bringing in only what's empirically popular AND fills a real gap, after both audit-doc curation and 2026-05-02 web-search popularity research.
+**Architecture:** 4 PRs, each independently shippable. PR 1 (Hermes tools) → PR 2 (Providers) → PR 3 (Architectural) → PR 4 (oc update).
 
-**Architecture:** 4 phases / 6 PRs / each independently shippable. Order: D (Hermes tool ports) → B (providers) → C (search tools) → A (architectural ports). Smallest/most-isolated wins ship first; deepest changes last.
+**Tech Stack:** Python 3.12+, plugin_sdk, MCP Python SDK, httpx, pytest, ruff.
 
-**Tech Stack:** Python 3.12+, asyncio, httpx, pytest, ruff, plugin_sdk boundary contract, existing extensions/* layout, existing tools/registry pattern.
-
-**Backwards-compatibility contract:** all 6 PRs must keep the full pytest suite (voice-excluded) green vs origin/main baseline at every merge. Each PR is opt-in (new files; existing behavior unchanged for users who don't enable the new plugin/feature).
+**Worktree:** `/Users/saksham/.config/superpowers/worktrees/claude/phase-3/OpenComputer`. NEVER touch the main repo.
 
 ---
 
-## File Structure
+## Pre-Task — Discovery sweep (every PR starts here)
 
-### New top-level dirs
+- [ ] **Step 0.1: Verify no collision before writing any new file**
 
-| Path | Responsibility |
-|---|---|
-| `extensions/ollama-provider/` | OpenAI-compatible HTTP client for local Ollama (B1) |
-| `extensions/groq-provider/` | OpenAI-compatible HTTP client for Groq cloud (B2) |
-| `extensions/firecrawl/` | Tool plugin for Firecrawl search + scrape (C1) |
-| `extensions/tavily/` | Tool plugin for Tavily agent-search API (C2) |
-| `extensions/exa/` | Tool plugin for Exa semantic search (C3) |
+For each new file path the PR introduces, run:
 
-### New files in core
+```bash
+find opencomputer extensions plugin_sdk -name "<filename>*" 2>/dev/null
+```
 
-| Path | Responsibility |
-|---|---|
-| `opencomputer/tools/memory.py` | LLM-callable verbs over MEMORY.md (D1) |
-| `opencomputer/tools/session_search.py` | LLM-callable wrapper for SessionDB.search (D2) |
-| `opencomputer/tools/send_message.py` | LLM-callable wrapper for OutgoingQueue (D3) |
-| `opencomputer/mcp/oauth.py` | OAuth 2.1 + PKCE for MCP servers (D4) |
-| `opencomputer/gateway/streaming_chunker.py` | Block streaming chunker (A1) |
-| `opencomputer/agent/active_memory.py` | Pre-reply blocking recall (A2) |
-| `opencomputer/agent/standing_orders.py` | AGENTS.md `## Program:` parser (A3) |
+If a match exists, STOP and re-evaluate. Rev 1's blockers were 100% caused by skipping this step.
 
-### Modified core files
+- [ ] **Step 0.2: Verify clean baseline test suite on main before branching**
 
-| Path | Change |
-|---|---|
-| `opencomputer/agent/loop.py` | Hook in Active Memory pre-reply (A2); apply Standing Orders as system context (A3) |
-| `opencomputer/mcp/client.py` | Use OAuth client when MCP server requires it (D4) |
-| `opencomputer/tools/registry.py` | Register the 3 new core tools (D1, D2, D3) |
-| `extensions/telegram/adapter.py` and similar channel adapters | Opt-in chunker integration (A1) |
+```bash
+cd /Users/saksham/.config/superpowers/worktrees/claude/phase-3/OpenComputer
+git checkout main && git pull --ff-only origin main
+.venv/bin/python -m pytest -x --tb=short -q 2>&1 | tail -20
+```
+
+Expected: all green except `voice/` markers (excluded).
+
+- [ ] **Step 0.3: Branch off main, fresh per PR**
+
+```bash
+git checkout -b feat/<pr-name>
+```
 
 ---
 
-# PR 1 — Phase D: Hermes Tool Ports (4 items)
+## PR 1 — Hermes tool ports (D2 + D4)
 
-**PR title:** `feat(tools): port memory_tool + session_search_tool + send_message_tool + mcp_oauth from Hermes`
-**Branch:** `feat/phase-d-hermes-tool-ports`
-**Estimated scope:** ~600 LOC + ~400 LOC tests, ~6 hours.
-**Behavior change:** opt-in only — new tools are registered but the LLM uses them only when it chooses to call them.
+**Branch:** `feat/hermes-tool-ports`. Subagent: opus (D4 is judgment-heavy; D2 is mechanical, but bundle for one PR).
 
-### Task D1.1 — `MemoryTool` core implementation (TDD)
-
-**Files:**
-- Create: `opencomputer/tools/memory.py`
-- Test: `tests/test_memory_tool.py`
-
-- [ ] **Step 1: Write failing test**
-
-```python
-# tests/test_memory_tool.py
-"""MemoryTool — LLM-callable verbs for MEMORY.md edits.
-
-Hermes port (per docs/refs/hermes-agent/inventory.md: high value, port to core).
-Today MEMORY.md is a plain file the agent reads as system prompt context;
-this tool lets the LLM write/append/search/list/delete entries as a
-ToolCall instead of just reading the static prompt.
-"""
-from __future__ import annotations
-
-from pathlib import Path
-
-import pytest
-
-from opencomputer.tools.memory import MemoryTool
-from plugin_sdk.core import ToolCall
-
-
-def _call(action: str, **kwargs) -> ToolCall:
-    return ToolCall(id="t1", name="memory", arguments={"action": action, **kwargs})
-
-
-@pytest.mark.asyncio
-async def test_memory_write_creates_file(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
-    tool = MemoryTool()
-    res = await tool.execute(_call("write", content="Saksham prefers concise replies."))
-    assert "ok" in res.content.lower() or "wrote" in res.content.lower()
-    assert (tmp_path / "MEMORY.md").exists()
-    assert "concise replies" in (tmp_path / "MEMORY.md").read_text()
-
-
-@pytest.mark.asyncio
-async def test_memory_append_preserves_existing(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
-    (tmp_path / "MEMORY.md").write_text("# Memory\n- existing line\n")
-    tool = MemoryTool()
-    await tool.execute(_call("append", content="- new line"))
-    body = (tmp_path / "MEMORY.md").read_text()
-    assert "existing line" in body and "new line" in body
-
-
-@pytest.mark.asyncio
-async def test_memory_search_returns_matches(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
-    (tmp_path / "MEMORY.md").write_text(
-        "# Memory\n- alpha is fast\n- beta is slow\n- gamma is medium\n"
-    )
-    tool = MemoryTool()
-    res = await tool.execute(_call("search", query="slow"))
-    assert "beta" in res.content
-
-
-@pytest.mark.asyncio
-async def test_memory_list_returns_all_lines(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
-    (tmp_path / "MEMORY.md").write_text("# Memory\n- one\n- two\n")
-    tool = MemoryTool()
-    res = await tool.execute(_call("list"))
-    assert "one" in res.content and "two" in res.content
-
-
-@pytest.mark.asyncio
-async def test_memory_delete_removes_matching_line(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
-    (tmp_path / "MEMORY.md").write_text("# Memory\n- keep me\n- delete me\n")
-    tool = MemoryTool()
-    await tool.execute(_call("delete", match="delete me"))
-    body = (tmp_path / "MEMORY.md").read_text()
-    assert "keep me" in body
-    assert "delete me" not in body
-
-
-@pytest.mark.asyncio
-async def test_memory_unknown_action_errors(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
-    tool = MemoryTool()
-    res = await tool.execute(_call("explode"))
-    assert res.is_error
-    assert "explode" in res.content or "action" in res.content.lower()
-```
-
-- [ ] **Step 2: Run; expect 6 errors (ModuleNotFoundError on `opencomputer.tools.memory`)**
-
-```bash
-cd /Users/saksham/.config/superpowers/worktrees/claude/phase-3/OpenComputer && .venv/bin/python -m pytest tests/test_memory_tool.py -v
-```
-
-- [ ] **Step 3: Read the Hermes source for shape reference (do not blind-copy)**
-
-Read `/Users/saksham/Vscode/claude/sources/hermes-agent-2026.4.23/tools/memory_tool.py` to understand verb semantics and error patterns. Note OC's path conventions are different (OC uses `_home() / "MEMORY.md"`, Hermes uses `~/.hermes/...`).
-
-- [ ] **Step 4: Implementation**
-
-Create `opencomputer/tools/memory.py`:
-
-```python
-"""LLM-callable tool over MEMORY.md.
-
-Hermes port (per docs/refs/hermes-agent/inventory.md tagged "high value,
-port to core"). Today MEMORY.md is read as static system-prompt context;
-this tool lets the LLM mutate it via ``write`` / ``append`` / ``search`` /
-``list`` / ``delete`` actions.
-
-The tool resolves the active profile's MEMORY.md path via ``_home()`` —
-ContextVar-aware after Phase 1 of profile-as-agent multi-routing
-(PR #279). Per-profile memory naturally falls out.
-"""
-from __future__ import annotations
-
-from typing import Any
-
-from plugin_sdk.core import ToolCall, ToolResult
-from plugin_sdk.tool_contract import BaseTool, ToolSchema
-
-
-class MemoryTool(BaseTool):
-    parallel_safe = False  # MEMORY.md writes serialize naturally
-
-    @property
-    def schema(self) -> ToolSchema:
-        return ToolSchema(
-            name="memory",
-            description=(
-                "Read or write the agent's long-term declarative memory "
-                "(MEMORY.md). Use to record durable facts about the user, "
-                "their projects, preferences, and decisions. Verbs: "
-                "write (overwrite), append (add line), search (substring "
-                "match across lines), list (return entire file), delete "
-                "(remove first matching line)."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["write", "append", "search", "list", "delete"],
-                    },
-                    "content": {"type": "string", "description": "For write/append."},
-                    "query": {"type": "string", "description": "For search."},
-                    "match": {"type": "string", "description": "For delete (substring)."},
-                },
-                "required": ["action"],
-            },
-        )
-
-    async def execute(self, call: ToolCall) -> ToolResult:
-        from opencomputer.agent.config import _home
-
-        action = call.arguments.get("action", "").strip().lower()
-        path = _home() / "MEMORY.md"
-
-        try:
-            if action == "write":
-                content = (call.arguments.get("content") or "").strip()
-                if not content:
-                    return ToolResult(call.id, "Error: content required for write", is_error=True)
-                path.write_text(content + "\n", encoding="utf-8")
-                return ToolResult(call.id, f"wrote {len(content)} chars to {path.name}")
-
-            if action == "append":
-                content = (call.arguments.get("content") or "").rstrip()
-                if not content:
-                    return ToolResult(call.id, "Error: content required for append", is_error=True)
-                existing = path.read_text(encoding="utf-8") if path.exists() else ""
-                if existing and not existing.endswith("\n"):
-                    existing += "\n"
-                path.write_text(existing + content + "\n", encoding="utf-8")
-                return ToolResult(call.id, f"appended {len(content)} chars to {path.name}")
-
-            if action == "search":
-                q = (call.arguments.get("query") or "").strip()
-                if not q:
-                    return ToolResult(call.id, "Error: query required for search", is_error=True)
-                if not path.exists():
-                    return ToolResult(call.id, "memory empty")
-                lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if q.lower() in ln.lower()]
-                return ToolResult(call.id, "\n".join(lines) if lines else f"no matches for {q!r}")
-
-            if action == "list":
-                if not path.exists():
-                    return ToolResult(call.id, "memory empty")
-                return ToolResult(call.id, path.read_text(encoding="utf-8"))
-
-            if action == "delete":
-                m = (call.arguments.get("match") or "").strip()
-                if not m:
-                    return ToolResult(call.id, "Error: match required for delete", is_error=True)
-                if not path.exists():
-                    return ToolResult(call.id, "memory empty; nothing to delete")
-                lines = path.read_text(encoding="utf-8").splitlines()
-                kept: list[str] = []
-                deleted = False
-                for ln in lines:
-                    if not deleted and m.lower() in ln.lower():
-                        deleted = True
-                        continue
-                    kept.append(ln)
-                path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-                return ToolResult(call.id, f"deleted {1 if deleted else 0} line(s)")
-
-            return ToolResult(call.id, f"Error: unknown action {action!r}", is_error=True)
-        except Exception as exc:  # noqa: BLE001
-            return ToolResult(call.id, f"Error: {type(exc).__name__}: {exc}", is_error=True)
-
-
-__all__ = ["MemoryTool"]
-```
-
-- [ ] **Step 5: Register in tool registry**
-
-In `opencomputer/tools/registry.py`, find the existing `register_default_tools()` function and add MemoryTool to the list. Pattern:
-
-```python
-from opencomputer.tools.memory import MemoryTool
-# inside register_default_tools or wherever core tools are registered:
-registry.register(MemoryTool())
-```
-
-- [ ] **Step 6: Run tests**
-
-```bash
-cd /Users/saksham/.config/superpowers/worktrees/claude/phase-3/OpenComputer && .venv/bin/python -m pytest tests/test_memory_tool.py -v
-```
-
-Expected: 6 passed.
-
-- [ ] **Step 7: Run broader regression**
-
-```bash
-.venv/bin/python -m pytest tests/ -q --ignore-glob="tests/test_voice_*" 2>&1 | tail -7
-```
-
-Expected: 0 new failures vs main.
-
-### Task D2 — `SessionSearchTool`
+### Task 1.1: D2 SessionSearchTool
 
 **Files:**
 - Create: `opencomputer/tools/session_search.py`
-- Test: `tests/test_session_search_tool.py`
+- Create: `tests/tools/test_session_search.py`
+- Modify: `opencomputer/cli.py` — register tool in default tool registration block (search around line 280-350)
 
-- [ ] **Step 1: Write failing tests**
+- [ ] **Step 1: Read `SessionDB.search_messages()` signature**
+
+```bash
+grep -n "def search_messages\|def search\b" opencomputer/agent/state.py
+```
+
+Confirm: `search_messages(self, query: str, limit: int = 10) -> list[dict[str, Any]]`. Returns dicts with keys including `session_id`, `role`, `timestamp`, `body` or `content`.
+
+Read the actual function body around line 1175 to confirm the dict keys.
+
+- [ ] **Step 2: Write failing test**
 
 ```python
-# tests/test_session_search_tool.py
-"""SessionSearchTool — LLM-callable wrapper for SessionDB FTS5 search.
-
-Hermes port. Today FTS5 works but only the CLI calls it
-(`opencomputer search QUERY`); the LLM cannot search session history mid-
-conversation. This tool fills it.
-"""
-from __future__ import annotations
-
-from pathlib import Path
-from unittest.mock import MagicMock
-
+# tests/tools/test_session_search.py
+import asyncio
 import pytest
-
+from unittest.mock import MagicMock
 from opencomputer.tools.session_search import SessionSearchTool
 from plugin_sdk.core import ToolCall
 
 
-@pytest.mark.asyncio
-async def test_session_search_returns_hits(tmp_path: Path, monkeypatch) -> None:
-    """Searches via SessionDB.search(query, limit) and formats results."""
-    fake_db = MagicMock()
-    fake_db.search = MagicMock(return_value=[
-        MagicMock(session_id="s1", role="user", content="learning about ollama", timestamp=1.0),
-        MagicMock(session_id="s2", role="assistant", content="ollama runs locally", timestamp=2.0),
-    ])
-    monkeypatch.setattr(
-        "opencomputer.tools.session_search._get_db",
-        lambda: fake_db,
-    )
-    tool = SessionSearchTool()
-    res = await tool.execute(ToolCall(id="t1", name="session_search", arguments={"query": "ollama"}))
-    assert "ollama" in res.content.lower()
-    assert "s1" in res.content or "user" in res.content
+def _hits():
+    return [
+        {"session_id": "abc-1234567890", "role": "user", "timestamp": 100, "content": "first hit body"},
+        {"session_id": "def-2222222222", "role": "assistant", "timestamp": 200, "content": "second hit body"},
+    ]
 
 
-@pytest.mark.asyncio
-async def test_session_search_empty_query_errors(tmp_path: Path, monkeypatch) -> None:
-    tool = SessionSearchTool()
-    res = await tool.execute(ToolCall(id="t1", name="session_search", arguments={"query": ""}))
-    assert res.is_error
+@pytest.fixture
+def tool():
+    db = MagicMock()
+    db.search_messages.return_value = _hits()
+    return SessionSearchTool(db)
 
 
-@pytest.mark.asyncio
-async def test_session_search_no_hits_message(tmp_path: Path, monkeypatch) -> None:
-    fake_db = MagicMock()
-    fake_db.search = MagicMock(return_value=[])
-    monkeypatch.setattr("opencomputer.tools.session_search._get_db", lambda: fake_db)
-    tool = SessionSearchTool()
-    res = await tool.execute(ToolCall(id="t1", name="session_search", arguments={"query": "needle"}))
-    assert "no" in res.content.lower() or "0" in res.content
+def test_returns_dict_keys_not_attrs(tool):
+    """Critical regression test for rev 1's `h.session_id` bug."""
+    call = ToolCall(id="x", name="SessionSearch", arguments={"query": "first"})
+    result = asyncio.run(tool.execute(call))
+    assert not result.is_error
+    assert "abc-1234" in result.content  # truncated session_id
+    assert "first hit body" in result.content
+
+
+def test_empty_query_errors(tool):
+    call = ToolCall(id="y", name="SessionSearch", arguments={"query": ""})
+    result = asyncio.run(tool.execute(call))
+    assert result.is_error
+    assert "query" in result.content.lower()
+
+
+def test_db_failure_returns_tool_error(tool):
+    tool._db.search_messages.side_effect = RuntimeError("db locked")
+    call = ToolCall(id="z", name="SessionSearch", arguments={"query": "x"})
+    result = asyncio.run(tool.execute(call))
+    assert result.is_error
+
+
+def test_limit_passed_through(tool):
+    call = ToolCall(id="w", name="SessionSearch", arguments={"query": "x", "limit": 25})
+    asyncio.run(tool.execute(call))
+    tool._db.search_messages.assert_called_once_with("x", limit=25)
 ```
 
-- [ ] **Step 2: Run; expect failures**
+- [ ] **Step 3: Run test (expect fail — module not yet created)**
 
 ```bash
-.venv/bin/python -m pytest tests/test_session_search_tool.py -v
+.venv/bin/python -m pytest tests/tools/test_session_search.py -v
 ```
 
-- [ ] **Step 3: Implementation**
+Expected: ImportError or ModuleNotFoundError.
 
-Create `opencomputer/tools/session_search.py`:
+- [ ] **Step 4: Implement**
 
 ```python
-"""LLM-callable wrapper for SessionDB FTS5 search.
+# opencomputer/tools/session_search.py
+"""SessionSearchTool — LLM-callable wrapper over SessionDB.search_messages.
 
-Hermes port. The SessionDB FTS5 engine has been usable from CLI
-(``opencomputer search QUERY``) but not from inside the agent loop.
-This tool exposes it.
+Returns up to `limit` FTS5 hits as a compact text block. Use when the agent
+needs to recall facts from prior conversations within the user's session history.
 """
 from __future__ import annotations
 
@@ -386,1408 +141,1246 @@ from typing import Any
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
-
-def _get_db() -> Any:
-    """Resolve the active profile's SessionDB."""
-    from opencomputer.agent.config import default_config
-    from opencomputer.agent.state import SessionDB
-    cfg = default_config()
-    return SessionDB(cfg.session.db_path)
+_DEFAULT_LIMIT = 10
+_BODY_PREVIEW = 200
 
 
 class SessionSearchTool(BaseTool):
     parallel_safe = True
 
+    def __init__(self, db: Any) -> None:
+        self._db = db
+
     @property
     def schema(self) -> ToolSchema:
         return ToolSchema(
-            name="session_search",
+            name="SessionSearch",
             description=(
-                "Search past conversation history (FTS5 full-text). Use to "
-                "recall prior chats, decisions, code snippets, etc. Returns "
-                "matching session/role/content lines."
+                "Full-text search across the user's prior conversations. Returns "
+                "matching message snippets from any session."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
-                    "limit": {"type": "integer", "default": 10, "minimum": 1, "maximum": 50},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                 },
                 "required": ["query"],
             },
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        q = (call.arguments.get("query") or "").strip()
-        if not q:
-            return ToolResult(call.id, "Error: query required", is_error=True)
-        limit = int(call.arguments.get("limit", 10))
+        args = call.arguments or {}
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return ToolResult(tool_call_id=call.id, content="missing required argument: query", is_error=True)
+
+        limit = args.get("limit", _DEFAULT_LIMIT)
         try:
-            db = _get_db()
-            hits = db.search(q, limit=limit)
-            if not hits:
-                return ToolResult(call.id, f"0 hits for {q!r}")
-            lines = [
-                f"[{h.session_id[:8]}] {h.role}: {h.content[:200]}"
-                for h in hits
-            ]
-            return ToolResult(call.id, f"{len(hits)} hit(s) for {q!r}:\n" + "\n".join(lines))
-        except Exception as exc:  # noqa: BLE001
-            return ToolResult(call.id, f"Error: {type(exc).__name__}: {exc}", is_error=True)
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = _DEFAULT_LIMIT
+        limit = max(1, min(50, limit))
+
+        try:
+            hits = self._db.search_messages(query, limit=limit)
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"search failed: {type(e).__name__}: {e}",
+                is_error=True,
+            )
+
+        if not hits:
+            return ToolResult(tool_call_id=call.id, content=f"No matches for '{query}'.")
+
+        lines = [f"Found {len(hits)} match(es) for '{query}':", ""]
+        for h in hits:
+            sid = (h.get("session_id") or "")[:8]
+            role = h.get("role") or "?"
+            body = h.get("content") or h.get("body") or h.get("snippet") or ""
+            preview = body[:_BODY_PREVIEW] + ("…" if len(body) > _BODY_PREVIEW else "")
+            lines.append(f"[{sid}…] {role}: {preview}")
+        return ToolResult(tool_call_id=call.id, content="\n".join(lines))
 
 
 __all__ = ["SessionSearchTool"]
 ```
 
-- [ ] **Step 4: Register + tests pass + regression green**
+- [ ] **Step 5: Run test — expect pass**
 
-Same pattern as D1.
+- [ ] **Step 6: Wire into CLI tool registration**
 
-### Task D3 — `SendMessageTool`
-
-**Files:**
-- Create: `opencomputer/tools/send_message.py`
-- Test: `tests/test_send_message_tool.py`
-
-- [ ] **Step 1: Write failing tests**
+In `opencomputer/cli.py`, find the tool registration block (search for existing `MemoryTool` or `RecallTool` registration). Add:
 
 ```python
-# tests/test_send_message_tool.py
-from __future__ import annotations
-
-from unittest.mock import MagicMock
-
-import pytest
-
-from opencomputer.tools.send_message import SendMessageTool
-from plugin_sdk.core import ToolCall
-
-
-@pytest.mark.asyncio
-async def test_send_message_enqueues_via_outgoing_queue(monkeypatch) -> None:
-    fake_q = MagicMock()
-    fake_q.enqueue = MagicMock(return_value=True)
-    monkeypatch.setattr("opencomputer.tools.send_message._get_queue", lambda: fake_q)
-    tool = SendMessageTool()
-    res = await tool.execute(ToolCall(
-        id="t1", name="send_message",
-        arguments={"platform": "telegram", "chat_id": "12345", "text": "hi"}
-    ))
-    fake_q.enqueue.assert_called_once()
-    assert "queued" in res.content.lower() or "ok" in res.content.lower()
-
-
-@pytest.mark.asyncio
-async def test_send_message_no_queue_fails_gracefully(monkeypatch) -> None:
-    monkeypatch.setattr("opencomputer.tools.send_message._get_queue", lambda: None)
-    tool = SendMessageTool()
-    res = await tool.execute(ToolCall(
-        id="t1", name="send_message",
-        arguments={"platform": "telegram", "chat_id": "x", "text": "hi"}
-    ))
-    assert res.is_error
-    assert "queue" in res.content.lower() or "gateway" in res.content.lower()
-
-
-@pytest.mark.asyncio
-async def test_send_message_missing_args_errors() -> None:
-    tool = SendMessageTool()
-    res = await tool.execute(ToolCall(id="t1", name="send_message", arguments={}))
-    assert res.is_error
+from opencomputer.tools.session_search import SessionSearchTool
+tools.append(SessionSearchTool(session_db))
 ```
 
-- [ ] **Step 2-4: Implementation + register + verify**
+Implementer must locate the actual line range.
 
-```python
-# opencomputer/tools/send_message.py
-"""LLM-callable tool to send messages on a platform without an inbound trigger.
+- [ ] **Step 7: Commit**
 
-Hermes port. Useful for cron jobs, standing orders, and proactive flows
-that need to post to a chat without a live MessageEvent to reply to.
-Routes through the gateway's OutgoingQueue (already in OC).
-"""
-from __future__ import annotations
-
-from typing import Any
-
-from plugin_sdk.core import ToolCall, ToolResult
-from plugin_sdk.tool_contract import BaseTool, ToolSchema
-
-
-def _get_queue() -> Any:
-    """Best-effort accessor for the live OutgoingQueue."""
-    from opencomputer.plugins.registry import registry as plugin_registry
-    return getattr(plugin_registry, "outgoing_queue", None)
-
-
-class SendMessageTool(BaseTool):
-    parallel_safe = True
-
-    @property
-    def schema(self) -> ToolSchema:
-        return ToolSchema(
-            name="send_message",
-            description=(
-                "Send a message on a specific channel/platform without "
-                "needing an inbound MessageEvent. Use for cron output, "
-                "scheduled summaries, autonomous-program reports, etc."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "platform": {"type": "string", "description": "telegram, discord, slack, ..."},
-                    "chat_id": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-                "required": ["platform", "chat_id", "text"],
-            },
-        )
-
-    async def execute(self, call: ToolCall) -> ToolResult:
-        platform = (call.arguments.get("platform") or "").strip()
-        chat_id = (call.arguments.get("chat_id") or "").strip()
-        text = call.arguments.get("text") or ""
-        if not (platform and chat_id and text):
-            return ToolResult(call.id, "Error: platform, chat_id, text all required", is_error=True)
-        q = _get_queue()
-        if q is None:
-            return ToolResult(
-                call.id,
-                "Error: OutgoingQueue not bound — this tool requires the gateway to be running",
-                is_error=True,
-            )
-        try:
-            q.enqueue(platform=platform, chat_id=chat_id, body=text, attachments=[], metadata={})
-            return ToolResult(call.id, f"queued message on {platform}:{chat_id}")
-        except Exception as exc:  # noqa: BLE001
-            return ToolResult(call.id, f"Error: {type(exc).__name__}: {exc}", is_error=True)
-
-
-__all__ = ["SendMessageTool"]
+```bash
+git add opencomputer/tools/session_search.py tests/tools/test_session_search.py opencomputer/cli.py
+git commit -m "feat(tools): add SessionSearchTool wrapping SessionDB.search_messages"
 ```
 
-### Task D4 — `mcp_oauth` (OAuth 2.1 + PKCE for MCP)
+### Task 1.2: D4 MCPOAuthClient (use MCP SDK's OAuthClientProvider)
 
 **Files:**
 - Create: `opencomputer/mcp/oauth.py`
-- Modify: `opencomputer/mcp/client.py` (apply OAuth when MCP server requires it)
-- Test: `tests/test_mcp_oauth.py`
+- Create: `tests/mcp/test_oauth.py`
+- Modify: `opencomputer/mcp/client.py` — accept optional auth provider
 
-- [ ] **Step 1: Read Hermes source for OAuth pattern**
+- [ ] **Step 1: Read MCP SDK's OAuthClientProvider + Hermes' wrapper**
 
 ```bash
-cat /Users/saksham/Vscode/claude/sources/hermes-agent-2026.4.23/mcp/oauth.py 2>/dev/null | head -100
-# Note: structure of authorization-code flow + PKCE challenge generation + token refresh
+.venv/bin/pip show mcp 2>&1 | head -3 || .venv/bin/pip install "mcp>=1.6"
+.venv/bin/python -c "from mcp.client.auth import OAuthClientProvider; help(OAuthClientProvider.__init__)"
+sed -n '1,100p' /Users/saksham/Vscode/claude/sources/hermes-agent-2026.4.23/mcp/oauth.py
 ```
 
-- [ ] **Step 2: Write failing tests**
+- [ ] **Step 2: Write failing test**
 
 ```python
-# tests/test_mcp_oauth.py
-"""OAuth 2.1 + PKCE client for MCP servers (port from Hermes).
-
-OAuth 2.1 (RFC 9700) requires PKCE for all authorization code flows.
-Test the PKCE challenge generation, state/nonce handling, and the
-token-exchange request shape.
-"""
-from __future__ import annotations
-
+# tests/mcp/test_oauth.py
+import json
 import pytest
-from unittest.mock import AsyncMock, patch
-
-from opencomputer.mcp.oauth import MCPOAuthClient, generate_pkce_pair
+from opencomputer.mcp.oauth import OCMCPOAuthClient, _tokens_path
 
 
-def test_pkce_pair_format() -> None:
-    """code_verifier is 43-128 char URL-safe base64; challenge is SHA256(verifier) base64url."""
-    verifier, challenge = generate_pkce_pair()
-    assert 43 <= len(verifier) <= 128
-    assert all(c.isalnum() or c in "-._~" for c in verifier)
-    # challenge must be different from verifier (it's the SHA256 hash, base64url-encoded)
-    assert challenge != verifier
-    assert 43 <= len(challenge) <= 64
+def test_tokens_path_is_profile_aware(tmp_path, monkeypatch):
+    monkeypatch.setattr("opencomputer.agent.config._home", lambda: tmp_path)
+    p = _tokens_path()
+    assert p == tmp_path / "mcp" / "tokens.json"
 
 
-def test_pkce_pair_unique() -> None:
-    """Each call must produce a fresh verifier (no static)."""
-    v1, _ = generate_pkce_pair()
-    v2, _ = generate_pkce_pair()
-    assert v1 != v2
+def test_load_returns_empty_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr("opencomputer.agent.config._home", lambda: tmp_path)
+    assert OCMCPOAuthClient(server_name="github").load_tokens() == {}
 
 
-def test_state_nonce_unique() -> None:
-    client = MCPOAuthClient(
-        authorization_url="https://auth.example.com/authorize",
-        token_url="https://auth.example.com/token",
-        client_id="test",
-        redirect_uri="http://localhost:5757/cb",
+def test_save_then_load_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr("opencomputer.agent.config._home", lambda: tmp_path)
+    c = OCMCPOAuthClient(server_name="github")
+    c.save_tokens({"access_token": "tok", "refresh_token": "ref"})
+    assert c.load_tokens() == {"access_token": "tok", "refresh_token": "ref"}
+
+
+def test_save_preserves_other_servers(tmp_path, monkeypatch):
+    monkeypatch.setattr("opencomputer.agent.config._home", lambda: tmp_path)
+    OCMCPOAuthClient(server_name="github").save_tokens({"access_token": "g"})
+    OCMCPOAuthClient(server_name="notion").save_tokens({"access_token": "n"})
+    saved = json.loads((tmp_path / "mcp" / "tokens.json").read_text())
+    assert saved["github"]["access_token"] == "g"
+    assert saved["notion"]["access_token"] == "n"
+
+
+def test_provider_factory_returns_sdk_provider(tmp_path, monkeypatch):
+    monkeypatch.setattr("opencomputer.agent.config._home", lambda: tmp_path)
+    pytest.importorskip("mcp")
+    from mcp.client.auth import OAuthClientProvider
+    c = OCMCPOAuthClient(server_name="github")
+    p = c.as_sdk_provider(
+        server_url="https://example.invalid",
+        client_metadata={
+            "client_name": "OpenComputer",
+            "redirect_uris": ["http://localhost:5454/callback"],
+        },
     )
-    s1 = client._mint_state()
-    s2 = client._mint_state()
-    assert s1 != s2
-    assert len(s1) >= 32
-
-
-@pytest.mark.asyncio
-async def test_exchange_code_for_token_calls_token_endpoint() -> None:
-    client = MCPOAuthClient(
-        authorization_url="https://auth.example.com/authorize",
-        token_url="https://auth.example.com/token",
-        client_id="test",
-        redirect_uri="http://localhost:5757/cb",
-    )
-    fake_response = AsyncMock()
-    fake_response.json = AsyncMock(return_value={
-        "access_token": "test-token",
-        "expires_in": 3600,
-        "token_type": "Bearer",
-    })
-    fake_response.raise_for_status = lambda: None
-
-    fake_client = AsyncMock()
-    fake_client.__aenter__.return_value = fake_client
-    fake_client.__aexit__.return_value = None
-    fake_client.post = AsyncMock(return_value=fake_response)
-
-    with patch("httpx.AsyncClient", return_value=fake_client):
-        token = await client.exchange_code_for_token(
-            code="abc", code_verifier="verifier-xyz",
-        )
-        assert token.access_token == "test-token"
-        assert token.expires_in == 3600
-        # POST to token_url with grant_type=authorization_code + code + verifier
-        args, kwargs = fake_client.post.call_args
-        assert client.token_url in args
-        body = kwargs.get("data") or kwargs.get("json") or {}
-        assert body.get("grant_type") == "authorization_code"
-        assert body.get("code") == "abc"
-        assert body.get("code_verifier") == "verifier-xyz"
-
-
-def test_authorization_url_includes_pkce_challenge() -> None:
-    """The /authorize redirect URL must include code_challenge + S256."""
-    client = MCPOAuthClient(
-        authorization_url="https://auth.example.com/authorize",
-        token_url="https://auth.example.com/token",
-        client_id="test-client",
-        redirect_uri="http://localhost:5757/cb",
-    )
-    url, state, verifier = client.build_authorization_url(scopes=["read"])
-    assert "code_challenge=" in url
-    assert "code_challenge_method=S256" in url
-    assert f"state={state}" in url
-    assert f"client_id=test-client" in url
-    assert "scope=read" in url or "scope=read+" in url
+    assert isinstance(p, OAuthClientProvider)
 ```
 
-- [ ] **Step 3: Implementation**
+- [ ] **Step 3: Run test (expect fail)**
 
-Create `opencomputer/mcp/oauth.py`:
+- [ ] **Step 4: Implement**
 
 ```python
-"""OAuth 2.1 + PKCE client for MCP servers that require authentication.
+# opencomputer/mcp/oauth.py
+"""MCP OAuth 2.1 client — adapter around the MCP SDK's OAuthClientProvider.
 
-Hermes port. Implements RFC 9700 (OAuth 2.1 BCP) authorization code
-flow with mandatory PKCE. Used by ``opencomputer.mcp.client`` when a
-configured MCP server's manifest declares OAuth-required.
-
-Usage:
-
-    client = MCPOAuthClient(
-        authorization_url="https://oauth.example.com/authorize",
-        token_url="https://oauth.example.com/token",
-        client_id="<registered client id>",
-        redirect_uri="http://localhost:5757/cb",
-    )
-    url, state, verifier = client.build_authorization_url(scopes=["mcp:read"])
-    # User opens url; redirects back to redirect_uri with ?code=...&state=...
-    token = await client.exchange_code_for_token(code, verifier)
+Stores tokens per-profile. The MCP Python SDK handles dynamic client
+registration, RFC 8414 discovery, PKCE, refresh, step-up — we provide
+persistence + profile-aware paths.
 """
 from __future__ import annotations
 
-import base64
-import hashlib
-import secrets
-from dataclasses import dataclass
-from urllib.parse import urlencode
-
-import httpx
+import json
+from pathlib import Path
+from typing import Any
 
 
-def generate_pkce_pair() -> tuple[str, str]:
-    """Return (code_verifier, code_challenge).
-
-    Per RFC 7636: code_verifier is a 43-128 char string of unreserved
-    characters [A-Z][a-z][0-9]-._~. We use 43-char URL-safe base64 of 32
-    random bytes (matches Hermes implementation). code_challenge is
-    SHA256(verifier) base64url-encoded without padding.
-    """
-    raw = secrets.token_bytes(32)
-    verifier = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-    digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    return verifier, challenge
+def _tokens_path() -> Path:
+    from opencomputer.agent.config import _home
+    return _home() / "mcp" / "tokens.json"
 
 
-@dataclass(frozen=True)
-class OAuthToken:
-    access_token: str
-    token_type: str
-    expires_in: int
-    refresh_token: str | None = None
+class OCMCPOAuthClient:
+    def __init__(self, server_name: str) -> None:
+        self.server_name = server_name
 
+    def _all_tokens(self) -> dict[str, Any]:
+        path = _tokens_path()
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
 
-class MCPOAuthClient:
-    """OAuth 2.1 + PKCE authorization code client."""
+    def load_tokens(self) -> dict[str, Any]:
+        return self._all_tokens().get(self.server_name, {})
 
-    def __init__(
+    def save_tokens(self, tokens: dict[str, Any]) -> None:
+        all_t = self._all_tokens()
+        all_t[self.server_name] = tokens
+        path = _tokens_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(all_t, indent=2))
+        tmp.replace(path)
+
+    def as_sdk_provider(
         self,
-        *,
-        authorization_url: str,
-        token_url: str,
-        client_id: str,
-        redirect_uri: str,
-        client_secret: str | None = None,
-    ) -> None:
-        self.authorization_url = authorization_url
-        self.token_url = token_url
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.redirect_uri = redirect_uri
-
-    def _mint_state(self) -> str:
-        return secrets.token_urlsafe(32)
-
-    def build_authorization_url(
-        self, *, scopes: list[str] | None = None,
-    ) -> tuple[str, str, str]:
-        """Return (url, state, code_verifier).
-
-        Caller redirects user to ``url``, awaits redirect to ``redirect_uri``
-        with ``?code=...&state=...``, validates ``state`` matches, then calls
-        :meth:`exchange_code_for_token` with the code + verifier.
-        """
-        verifier, challenge = generate_pkce_pair()
-        state = self._mint_state()
-        params = {
-            "response_type": "code",
-            "client_id": self.client_id,
-            "redirect_uri": self.redirect_uri,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-            "state": state,
-        }
-        if scopes:
-            params["scope"] = " ".join(scopes)
-        sep = "&" if "?" in self.authorization_url else "?"
-        return f"{self.authorization_url}{sep}{urlencode(params)}", state, verifier
-
-    async def exchange_code_for_token(
-        self, code: str, code_verifier: str,
-    ) -> OAuthToken:
-        body = {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": self.redirect_uri,
-            "client_id": self.client_id,
-            "code_verifier": code_verifier,
-        }
-        if self.client_secret:
-            body["client_secret"] = self.client_secret
-        async with httpx.AsyncClient() as http:
-            r = await http.post(self.token_url, data=body)
-            r.raise_for_status()
-            j = await r.json() if hasattr(r.json, "__await__") else r.json()
-        return OAuthToken(
-            access_token=j["access_token"],
-            token_type=j.get("token_type", "Bearer"),
-            expires_in=int(j.get("expires_in", 3600)),
-            refresh_token=j.get("refresh_token"),
-        )
-
-    async def refresh_token(self, refresh_token: str) -> OAuthToken:
-        body = {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": self.client_id,
-        }
-        if self.client_secret:
-            body["client_secret"] = self.client_secret
-        async with httpx.AsyncClient() as http:
-            r = await http.post(self.token_url, data=body)
-            r.raise_for_status()
-            j = await r.json() if hasattr(r.json, "__await__") else r.json()
-        return OAuthToken(
-            access_token=j["access_token"],
-            token_type=j.get("token_type", "Bearer"),
-            expires_in=int(j.get("expires_in", 3600)),
-            refresh_token=j.get("refresh_token", refresh_token),
+        server_url: str,
+        client_metadata: dict[str, Any],
+        callback_handler: Any | None = None,
+    ) -> Any:
+        from mcp.client.auth import OAuthClientProvider, OAuthClientMetadata
+        return OAuthClientProvider(
+            server_url=server_url,
+            client_metadata=OAuthClientMetadata(**client_metadata),
+            storage=_SDKStorageAdapter(self),
+            redirect_handler=callback_handler,
         )
 
 
-__all__ = ["MCPOAuthClient", "OAuthToken", "generate_pkce_pair"]
+class _SDKStorageAdapter:
+    def __init__(self, client: OCMCPOAuthClient) -> None:
+        self._client = client
+
+    async def get_tokens(self) -> dict[str, Any] | None:
+        toks = self._client.load_tokens()
+        return toks if toks else None
+
+    async def set_tokens(self, tokens: Any) -> None:
+        if hasattr(tokens, "model_dump"):
+            self._client.save_tokens(tokens.model_dump())
+        else:
+            self._client.save_tokens(dict(tokens))
+
+    async def get_client_info(self) -> dict[str, Any] | None:
+        toks = self._client.load_tokens()
+        ci = toks.get("client_info") if toks else None
+        return ci if ci else None
+
+    async def set_client_info(self, info: Any) -> None:
+        existing = self._client.load_tokens()
+        existing["client_info"] = info.model_dump() if hasattr(info, "model_dump") else dict(info)
+        self._client.save_tokens(existing)
+
+
+__all__ = ["OCMCPOAuthClient", "_tokens_path"]
 ```
 
-- [ ] **Step 4: Wire into `opencomputer/mcp/client.py`**
+- [ ] **Step 5: Run test — expect pass**
 
-Read the existing MCPManager. Find where it builds the HTTP client / connection. Add a path: when an MCP server's config has `oauth: { authorization_url, token_url, client_id, redirect_uri }`, run `MCPOAuthClient.build_authorization_url(...)`, surface the URL to the user (CLI prompt), accept the code via local callback or paste, then `exchange_code_for_token(...)`. Cache the token in `~/.opencomputer/<profile>/mcp/tokens.json`.
-
-This wiring is non-trivial; document the hook point but allow the OAuth client to be used standalone before full integration. Tests for the wiring belong in a follow-up; this PR ships the OAuth client + standalone tests.
-
-- [ ] **Step 5: All tests pass + ruff clean**
-
-### Task D-Final — Commit + push + PR
+- [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/saksham/.config/superpowers/worktrees/claude/phase-3
-git add OpenComputer/opencomputer/tools/memory.py OpenComputer/opencomputer/tools/session_search.py OpenComputer/opencomputer/tools/send_message.py OpenComputer/opencomputer/mcp/oauth.py OpenComputer/opencomputer/tools/registry.py OpenComputer/tests/test_memory_tool.py OpenComputer/tests/test_session_search_tool.py OpenComputer/tests/test_send_message_tool.py OpenComputer/tests/test_mcp_oauth.py
-# (Also add OpenComputer/opencomputer/mcp/client.py if you wired OAuth into it.)
-git commit -m "$(cat <<'EOF'
-feat(tools,mcp): port memory_tool + session_search + send_message + mcp_oauth from Hermes
+git add opencomputer/mcp/oauth.py tests/mcp/test_oauth.py
+git commit -m "feat(mcp): OAuth 2.1 token store + SDK provider adapter"
+```
 
-Phase D of best-of-import. 4 Hermes-tagged "high value, port to core"
-items in one PR:
+### Task 1.3: Push PR 1
 
-- MemoryTool: LLM-callable verbs (write/append/search/list/delete) over
-  MEMORY.md. ContextVar-aware via _home() — per-profile by default.
-- SessionSearchTool: LLM-callable wrapper for SessionDB FTS5 search.
-  Today FTS5 is CLI-only.
-- SendMessageTool: LLM-callable cross-platform send via OutgoingQueue.
-  For cron / standing orders / proactive flows.
-- MCPOAuthClient: OAuth 2.1 + PKCE per RFC 9700. Standalone client +
-  hook documented in mcp/client.py for full integration follow-up.
+- [ ] Run full suite + ruff. Push. Open PR. Watch CI green. Merge.
 
-All four tools register in the global tool_registry. Refs: spec at
-docs/superpowers/specs/2026-05-02-best-of-import-design.md (Phase D).
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
-EOF
-)"
-git push -u origin feat/phase-d-hermes-tool-ports
-gh pr create --title "feat(tools,mcp): port 4 Hermes tools (Phase D)" --body "(see commit)"
+```bash
+.venv/bin/python -m pytest -x --tb=short -q --ignore=tests/voice 2>&1 | tail -10
+.venv/bin/ruff check opencomputer extensions plugin_sdk tests 2>&1 | tail -5
+git push -u origin feat/hermes-tool-ports
+gh pr create --title "feat(tools+mcp): SessionSearch + MCP OAuth (Hermes ports)" --body "..."
 ```
 
 ---
 
-# PR 2 — Phase B: Provider Plugins (2 items)
+## PR 2 — Provider plugins (B1 + B2)
 
-**PR title:** `feat(providers): ollama + groq chat (Phase B)`
-**Branch:** `feat/phase-b-providers`
-**Estimated scope:** ~250 LOC + ~150 LOC tests, ~3 hours.
+**Branch:** `feat/ollama-groq-providers`. Subagent: sonnet (mechanical port).
 
-### Task B1 — `extensions/ollama-provider/`
+### Task 2.1: B1 ollama-provider
 
 **Files:**
-- Create: `extensions/ollama-provider/plugin.py`
-- Create: `extensions/ollama-provider/provider.py`
-- Create: `extensions/ollama-provider/plugin.json`
-- Test: `tests/test_ollama_provider.py`
+- Create: `extensions/ollama_provider/__init__.py` (empty)
+- Create: `extensions/ollama_provider/plugin.py`
+- Create: `extensions/ollama_provider/provider.py`
+- Create: `tests/extensions/test_ollama_provider.py`
 
-- [ ] **Step 1: Read source pattern**
+- [ ] **Step 1: Read existing openai-provider as template**
 
-Read `/Users/saksham/Vscode/claude/sources/openclaw-2026.4.23/extensions/ollama/` for the OpenClaw shape, then read `extensions/openai-provider/` in OC for the OC plugin shape (since Ollama exposes an OpenAI-compatible API, much can be shared with the openai-provider pattern).
+```bash
+ls extensions/openai-provider/
+sed -n '1,100p' extensions/openai-provider/provider.py
+grep -rn "openai_provider\|openai-provider" plugin_sdk/ opencomputer/plugins/ 2>/dev/null | head -10
+```
 
-- [ ] **Step 2: Write failing tests**
+Verify: extensions are loaded via plugin manifest discovery, not bare Python imports. Underscore-named module dirs work cleanly with both Python imports and discovery.
+
+- [ ] **Step 2: Write failing test**
 
 ```python
-# tests/test_ollama_provider.py
-from __future__ import annotations
-
-from unittest.mock import AsyncMock, patch
-
+# tests/extensions/test_ollama_provider.py
+import asyncio
 import pytest
-
-# The plugin's provider class
+from unittest.mock import AsyncMock, MagicMock, patch
 from extensions.ollama_provider.provider import OllamaProvider
+from plugin_sdk.core import Message
 
 
-def test_provider_metadata() -> None:
-    """Provider declares its name + supported models."""
-    p = OllamaProvider(api_key=None, base_url="http://localhost:11434/v1")
-    # Provider class must inherit BaseProvider and declare name
-    assert hasattr(p, "complete") or hasattr(p, "stream_complete")
+@pytest.fixture
+def provider():
+    return OllamaProvider(api_key=None, base_url="http://localhost:11434/v1")
 
 
 @pytest.mark.asyncio
-async def test_ollama_complete_calls_http_endpoint() -> None:
-    """Provider.complete posts to the configured Ollama base_url."""
-    fake_response_data = {
-        "id": "x",
-        "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-    }
-    fake_resp = AsyncMock()
-    fake_resp.json = AsyncMock(return_value=fake_response_data)
-    fake_resp.raise_for_status = lambda: None
+async def test_complete_returns_provider_response(provider):
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json = MagicMock(return_value={
+        "id": "cmpl-x",
+        "model": "llama3",
+        "choices": [{"message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+    })
+    with patch("httpx.AsyncClient.post", AsyncMock(return_value=mock_resp)):
+        resp = await provider.complete(messages=[Message(role="user", content="hi")], model="llama3")
+    assert resp.content == "hello"
+    assert resp.usage.input_tokens == 5
 
-    fake_client = AsyncMock()
-    fake_client.__aenter__.return_value = fake_client
-    fake_client.__aexit__.return_value = None
-    fake_client.post = AsyncMock(return_value=fake_resp)
 
-    with patch("httpx.AsyncClient", return_value=fake_client):
-        p = OllamaProvider(api_key=None, base_url="http://localhost:11434/v1")
-        # Adjust signature to match OC's BaseProvider.complete
-        from plugin_sdk.core import Message
-        result = await p.complete(
-            messages=[Message(role="user", content="hi")],
-            model="ollama/llama3.2",
-            max_tokens=100,
-        )
-        assert "ok" in result.message.content
+@pytest.mark.asyncio
+async def test_stream_complete_yields_chunks(provider):
+    """Critical: stream_complete MUST be implemented (not NotImplementedError)."""
+    async def fake_lines():
+        for line in [
+            'data: {"choices":[{"delta":{"content":"hel"}}]}',
+            'data: {"choices":[{"delta":{"content":"lo"}}]}',
+            'data: [DONE]',
+        ]:
+            yield line
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.aiter_lines = fake_lines
+
+    class _CM:
+        async def __aenter__(self_): return mock_resp
+        async def __aexit__(self_, *a): return None
+
+    with patch("httpx.AsyncClient.stream", MagicMock(return_value=_CM())):
+        chunks = []
+        async for d in provider.stream_complete(messages=[Message(role="user", content="hi")], model="llama3"):
+            chunks.append(d)
+        assert "".join(c.content_delta for c in chunks if c.content_delta) == "hello"
+
+
+def test_provider_id():
+    assert OllamaProvider().provider_id == "ollama"
 ```
 
-- [ ] **Step 3: Implementation**
+- [ ] **Step 3: Run test (expect fail)**
 
-Create `extensions/ollama-provider/provider.py` (uses OpenAI-compatible endpoint for both streaming + non-streaming):
+- [ ] **Step 4: Implement provider — copy openai-provider's stream pattern**
 
 ```python
-"""Ollama provider — OpenAI-compatible HTTP client to localhost:11434.
-
-Per 2026 popularity research, Ollama is the #1 local-LLM tool for
-individual developers. This provider exposes Ollama as a first-class
-OC provider. Default base URL ``http://localhost:11434/v1``;
-overridable via plugin config.
-
-Plugin-SDK boundary: this file does NOT import from opencomputer.*.
-"""
+# extensions/ollama_provider/provider.py
+"""Ollama provider — local LLM via OpenAI-compatible API."""
 from __future__ import annotations
 
-from typing import Any
+import json
+import os
+from collections.abc import AsyncIterator
 
 import httpx
 
-from plugin_sdk.core import Message, ProviderResponse, Usage
+from plugin_sdk.core import Message, ProviderResponse, StreamDelta, Usage
 from plugin_sdk.provider_contract import BaseProvider
+
+DEFAULT_BASE_URL = "http://localhost:11434/v1"
 
 
 class OllamaProvider(BaseProvider):
-    name = "ollama"
+    provider_id = "ollama"
 
-    def __init__(
-        self,
-        *,
-        api_key: str | None = None,
-        base_url: str = "http://localhost:11434/v1",
-    ) -> None:
-        self.api_key = api_key  # ollama is typically open; api_key is a placeholder for parity
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
+        self._api_key = api_key or "ollama"
+        self._base_url = (base_url or os.environ.get("OLLAMA_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
 
-    async def complete(
-        self,
-        *,
-        messages: list[Message],
-        model: str,
-        max_tokens: int = 1024,
-        tools: Any = None,
-        **kwargs: Any,
-    ) -> ProviderResponse:
-        # Strip the "ollama/" prefix to get the actual ollama model tag
-        ollama_model = model.split("/", 1)[1] if "/" in model else model
-        payload = {
-            "model": ollama_model,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
-            "max_tokens": max_tokens,
-        }
+    async def complete(self, *, messages: list[Message], model: str, tools: list | None = None, **kwargs) -> ProviderResponse:
+        body = {"model": model, "messages": [self._msg(m) for m in messages], "stream": False}
         if tools:
-            payload["tools"] = tools
-        headers = {}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        async with httpx.AsyncClient(timeout=120) as http:
-            r = await http.post(
-                f"{self.base_url}/chat/completions",
-                json=payload, headers=headers,
+            body["tools"] = tools
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+            r = await client.post(
+                f"{self._base_url}/chat/completions",
+                json=body,
+                headers={"Authorization": f"Bearer {self._api_key}"},
             )
             r.raise_for_status()
-            j = r.json()
-        choice = j["choices"][0]
-        text = choice["message"]["content"]
-        u = j.get("usage") or {}
+            data = r.json()
+        c = data["choices"][0]["message"]
+        u = data.get("usage") or {}
         return ProviderResponse(
-            message=Message(role="assistant", content=text),
-            stop_reason=choice.get("finish_reason", "stop"),
-            usage=Usage(
-                input_tokens=int(u.get("prompt_tokens", 0)),
-                output_tokens=int(u.get("completion_tokens", 0)),
-            ),
+            content=c.get("content") or "",
+            tool_calls=c.get("tool_calls") or [],
+            usage=Usage(input_tokens=u.get("prompt_tokens", 0), output_tokens=u.get("completion_tokens", 0)),
+            stop_reason=data["choices"][0].get("finish_reason"),
+            raw_response=data,
         )
 
-    async def stream_complete(self, *args: Any, **kwargs: Any) -> Any:
-        # Implement streaming; pattern mirrors openai-provider's StreamEvent generator
-        raise NotImplementedError("streaming TBD — non-streaming covers most uses")
+    async def stream_complete(self, *, messages: list[Message], model: str, tools: list | None = None, **kwargs) -> AsyncIterator[StreamDelta]:
+        body = {"model": model, "messages": [self._msg(m) for m in messages], "stream": True}
+        if tools:
+            body["tools"] = tools
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+            async with client.stream(
+                "POST",
+                f"{self._base_url}/chat/completions",
+                json=body,
+                headers={"Authorization": f"Bearer {self._api_key}"},
+            ) as r:
+                r.raise_for_status()
+                async for line in r.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    payload = line[6:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    yield StreamDelta(
+                        content_delta=delta.get("content") or "",
+                        tool_call_delta=delta.get("tool_calls"),
+                        finish_reason=chunk.get("choices", [{}])[0].get("finish_reason"),
+                    )
+
+    @staticmethod
+    def _msg(m: Message) -> dict:
+        d = {"role": m.role, "content": m.content or ""}
+        if getattr(m, "tool_calls", None):
+            d["tool_calls"] = m.tool_calls
+        if getattr(m, "tool_call_id", None):
+            d["tool_call_id"] = m.tool_call_id
+        return d
 ```
 
-> Adjust kwargs/methods to match OC's `BaseProvider` exactly. Read `plugin_sdk/provider_contract.py` and `extensions/openai-provider/provider.py` first.
-
-Create `extensions/ollama-provider/plugin.py`:
+- [ ] **Step 5: Implement plugin manifest**
 
 ```python
-"""Ollama provider plugin entry point."""
-from plugin_sdk.core import PluginManifest
-
+# extensions/ollama_provider/plugin.py
+from plugin_sdk.plugin_contract import PluginManifest
 from extensions.ollama_provider.provider import OllamaProvider
 
 
 def register(api):
-    api.providers["ollama"] = OllamaProvider
+    api.register_provider(OllamaProvider)
 
 
-MANIFEST = PluginManifest(
-    id="ollama-provider",
-    name="Ollama Provider",
+manifest = PluginManifest(
+    name="ollama-provider",
     version="0.1.0",
-    kind="provider",
-    entry="plugin.py",
+    description="Local LLM via Ollama's OpenAI-compatible API.",
+    author="OpenComputer",
+    enabled_by_default=False,
 )
 ```
 
-- [ ] **Step 4: Tests pass + ruff clean**
+- [ ] **Step 6: Run tests + verify import**
 
-### Task B2 — `extensions/groq-provider/`
+```bash
+.venv/bin/python -m pytest tests/extensions/test_ollama_provider.py -v
+.venv/bin/python -c "from extensions.ollama_provider.provider import OllamaProvider; print(OllamaProvider.provider_id)"
+```
 
-Same shape as B1, but base_url is `https://api.groq.com/openai/v1` and reads `GROQ_API_KEY`. Default models: `groq/llama-4-70b`, `groq/mixtral-8x7b`. Reuse the openai-provider pattern.
+- [ ] **Step 7: Commit**
 
-**Tests:** mock-based; live opt-in benchmark. 3 tests minimum (init, complete-non-streaming, missing-API-key error).
+```bash
+git add extensions/ollama_provider/ tests/extensions/test_ollama_provider.py
+git commit -m "feat(providers): ollama-provider plugin (OpenAI-compatible local LLM)"
+```
 
-### Task B-Final — Commit + push + PR
+### Task 2.2: B2 groq-provider
 
-Standard pattern.
+**Files:** mirror Task 2.1 with these changes:
+- `extensions/groq_provider/` (UNDERSCORE)
+- Provider id: `groq`
+- Default base URL: `https://api.groq.com/openai/v1`
+- API key REQUIRED — raise `RuntimeError` if `GROQ_API_KEY` missing
+- Add test:
+  ```python
+  def test_missing_api_key_raises(monkeypatch):
+      monkeypatch.delenv("GROQ_API_KEY", raising=False)
+      with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
+          GroqProvider()
+  ```
+
+- [ ] **All steps + commit**
+
+```bash
+git commit -m "feat(providers): groq-provider plugin (276-1500 t/s inference)"
+```
+
+### Task 2.3: Push PR 2
+
+- [ ] Same shape as Task 1.3.
 
 ---
 
-# PR 3 — Phase C: Search Tool Plugins (3 items)
+## PR 3 — Architectural ports (A1 + A3)
 
-**PR title:** `feat(tools): firecrawl + tavily + exa search plugins (Phase C)`
-**Branch:** `feat/phase-c-search-tools`
-**Estimated scope:** ~400 LOC + ~250 LOC tests, ~3 hours.
+**Branch:** `feat/chunker-and-standing-orders`. Subagent: opus (judgment-heavy).
 
-### Task C1 — `extensions/firecrawl/`
+### Task 3.1: A1 BlockStreamingChunker
 
 **Files:**
-- Create: `extensions/firecrawl/plugin.py`
-- Create: `extensions/firecrawl/tool.py`
-- Create: `extensions/firecrawl/plugin.json`
-- Test: `tests/test_firecrawl_tool.py`
+- Create: `opencomputer/gateway/streaming_chunker.py`
+- Create: `tests/gateway/test_streaming_chunker.py`
+- Modify: telegram channel adapter (one channel as proof; document pattern)
 
-- [ ] **Step 1: Read source**
+- [ ] **Step 1: Read OpenClaw's discord chunker as canonical reference**
 
 ```bash
-ls /Users/saksham/Vscode/claude/sources/openclaw-2026.4.23/extensions/firecrawl/
-cat /Users/saksham/Vscode/claude/sources/openclaw-2026.4.23/extensions/firecrawl/*.ts | head -200
+sed -n '1,200p' /Users/saksham/Vscode/claude/sources/openclaw-2026.4.23/extensions/discord/src/chunk.ts
 ```
+
+Note key behaviors: paragraph→newline→sentence→whitespace boundary preference, code-fence-safe, idle-coalesce, humanDelay 800-2500ms.
 
 - [ ] **Step 2: Write failing tests**
 
 ```python
-# tests/test_firecrawl_tool.py
-"""Firecrawl tool — LLM-callable web search + scrape via api.firecrawl.dev."""
-from __future__ import annotations
-
-from unittest.mock import AsyncMock, patch
-
-import pytest
-
-from extensions.firecrawl.tool import FirecrawlTool
-from plugin_sdk.core import ToolCall
-
-
-@pytest.mark.asyncio
-async def test_firecrawl_search_calls_search_endpoint(monkeypatch) -> None:
-    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
-    fake_resp = AsyncMock()
-    fake_resp.json = AsyncMock(return_value={"data": [
-        {"title": "Ollama", "url": "https://ollama.com", "markdown": "# Ollama\n..."},
-    ]})
-    fake_resp.raise_for_status = lambda: None
-    fake_client = AsyncMock()
-    fake_client.__aenter__.return_value = fake_client
-    fake_client.__aexit__.return_value = None
-    fake_client.post = AsyncMock(return_value=fake_resp)
-    with patch("httpx.AsyncClient", return_value=fake_client):
-        tool = FirecrawlTool()
-        res = await tool.execute(ToolCall(
-            id="t1", name="firecrawl_search", arguments={"query": "ollama"}
-        ))
-        assert "Ollama" in res.content
-
-
-@pytest.mark.asyncio
-async def test_firecrawl_no_api_key_errors(monkeypatch) -> None:
-    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
-    tool = FirecrawlTool()
-    res = await tool.execute(ToolCall(
-        id="t1", name="firecrawl_search", arguments={"query": "x"}
-    ))
-    assert res.is_error
-    assert "FIRECRAWL_API_KEY" in res.content
-```
-
-- [ ] **Step 3: Implementation**
-
-```python
-# extensions/firecrawl/tool.py
-"""Firecrawl LLM-callable tool — search + scrape.
-
-Per 2026 popularity benchmarks, Firecrawl is the "starting recommendation"
-for agent web research. Free tier 500 credits at api.firecrawl.dev.
-Reads FIRECRAWL_API_KEY env var.
-
-Plugin-SDK boundary: no opencomputer.* imports.
-"""
-from __future__ import annotations
-
-import os
-
-import httpx
-
-from plugin_sdk.core import ToolCall, ToolResult
-from plugin_sdk.tool_contract import BaseTool, ToolSchema
-
-
-class FirecrawlTool(BaseTool):
-    parallel_safe = True
-
-    @property
-    def schema(self) -> ToolSchema:
-        return ToolSchema(
-            name="firecrawl_search",
-            description=(
-                "Search the web via Firecrawl. Returns clean markdown for "
-                "top results. Use for research, current events, finding "
-                "specific info on the open web. Free tier requires "
-                "FIRECRAWL_API_KEY env var."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer", "default": 5, "minimum": 1, "maximum": 20},
-                },
-                "required": ["query"],
-            },
-        )
-
-    async def execute(self, call: ToolCall) -> ToolResult:
-        api_key = os.environ.get("FIRECRAWL_API_KEY")
-        if not api_key:
-            return ToolResult(
-                call.id,
-                "Error: FIRECRAWL_API_KEY env var not set. Get a free key at firecrawl.dev",
-                is_error=True,
-            )
-        q = (call.arguments.get("query") or "").strip()
-        if not q:
-            return ToolResult(call.id, "Error: query required", is_error=True)
-        limit = int(call.arguments.get("limit", 5))
-        try:
-            async with httpx.AsyncClient(timeout=60) as http:
-                r = await http.post(
-                    "https://api.firecrawl.dev/v1/search",
-                    json={"query": q, "limit": limit},
-                    headers={"Authorization": f"Bearer {api_key}"},
-                )
-                r.raise_for_status()
-                j = r.json()
-            data = j.get("data") or []
-            if not data:
-                return ToolResult(call.id, f"0 results for {q!r}")
-            lines = []
-            for d in data:
-                lines.append(f"- {d.get('title','(no title)')} <{d.get('url','')}>")
-                if d.get("markdown"):
-                    lines.append("  " + d["markdown"][:400].replace("\n", " ").strip())
-            return ToolResult(call.id, "\n".join(lines))
-        except Exception as exc:  # noqa: BLE001
-            return ToolResult(call.id, f"Error: {type(exc).__name__}: {exc}", is_error=True)
-```
-
-### Task C2 — `extensions/tavily/`
-
-Same shape. POST to `https://api.tavily.com/search` with `{"api_key": ..., "query": ...}`. Reads `TAVILY_API_KEY`.
-
-### Task C3 — `extensions/exa/`
-
-Same shape. POST to `https://api.exa.ai/search`. Reads `EXA_API_KEY`.
-
-### Task C-Final — Commit + push + PR
-
-Standard pattern.
-
----
-
-# PR 4 — Phase A1: Block Streaming Chunker
-
-**PR title:** `feat(gateway): block streaming chunker + humanDelay (Phase A1)`
-**Branch:** `feat/phase-a1-streaming-chunker`
-**Estimated scope:** ~400 LOC + ~300 LOC tests, ~5 hours.
-
-### Task A1.1 — Chunker core
-
-**Files:**
-- Create: `opencomputer/gateway/streaming_chunker.py`
-- Test: `tests/test_streaming_chunker.py`
-
-- [ ] **Step 1: Read source**
-
-OpenClaw's chunker source: `sources/openclaw-2026.4.23/src/streaming/`. Read both the chunker and the test fixtures to understand boundary preferences + code-fence handling.
-
-- [ ] **Step 2: Write 8 failing tests**
-
-```python
-# tests/test_streaming_chunker.py
-"""BlockStreamingChunker — buffers token deltas, splits at human-readable
-boundaries, idle-coalesces, applies humanDelay between blocks.
-
-Source: sources/openclaw-2026.4.23/src/streaming/. Adapted to Python +
-asyncio. Per-channel opt-in via plugin config.
-"""
-from __future__ import annotations
-
+# tests/gateway/test_streaming_chunker.py
 import asyncio
 import pytest
-
-from opencomputer.gateway.streaming_chunker import (
-    BlockStreamingChunker,
-    ChunkerConfig,
-)
-
-
-def _cfg(**overrides) -> ChunkerConfig:
-    base = dict(
-        min_chars=20,
-        max_chars=400,
-        idle_ms=200,
-        human_delay_min_ms=0,    # disable delay for fast tests
-        human_delay_max_ms=0,
-    )
-    base.update(overrides)
-    return ChunkerConfig(**base)
+from opencomputer.gateway.streaming_chunker import BlockStreamingChunker, ChunkerConfig
 
 
 @pytest.mark.asyncio
-async def test_chunker_emits_at_paragraph_boundary() -> None:
-    """Prefer paragraph (\\n\\n) over other boundaries when both available."""
-    chunker = BlockStreamingChunker(_cfg())
-    out: list[str] = []
-    async def feed():
-        chunker.feed("First paragraph that is long enough to exceed min_chars threshold.\n\n")
-        chunker.feed("Second paragraph follows. ")
-        chunker.close()
-    async def collect():
-        async for chunk in chunker.chunks():
-            out.append(chunk)
-    await asyncio.gather(feed(), collect())
-    # First chunk should end at \n\n boundary
-    assert out[0].endswith("\n\n") or out[0].rstrip().endswith(".")
+async def test_paragraph_boundary_preferred():
+    chunks = []
+    async def collect(c): chunks.append(c)
+    chunker = BlockStreamingChunker(emit=collect, config=ChunkerConfig(human_delay_ms=0))
+    await chunker.feed("First paragraph.\n\nSecond paragraph.\n\nThird.")
+    await chunker.close()
+    assert any("First paragraph" in c for c in chunks)
+    assert any("Second paragraph" in c for c in chunks)
 
 
 @pytest.mark.asyncio
-async def test_chunker_never_splits_inside_code_fence() -> None:
-    chunker = BlockStreamingChunker(_cfg(max_chars=50))
-    out: list[str] = []
-    async def feed():
-        chunker.feed("Here is code:\n```python\ndef foo():\n    return 1\n```\n")
-        chunker.close()
-    async def collect():
-        async for chunk in chunker.chunks():
-            out.append(chunk)
-    await asyncio.gather(feed(), collect())
-    # Code fence must be intact in some chunk (joined output preserves fence)
-    joined = "".join(out)
-    assert "```python" in joined and "```\n" in joined
-    # No chunk should END inside an open code fence
-    for chunk in out:
-        opens = chunk.count("```")
-        assert opens % 2 == 0, f"chunk has unmatched ```: {chunk!r}"
+async def test_no_split_inside_code_fence():
+    chunks = []
+    async def collect(c): chunks.append(c)
+    chunker = BlockStreamingChunker(emit=collect, config=ChunkerConfig(human_delay_ms=0))
+    text = "Look:\n\n```python\ndef foo():\n    return 1\n```\n\nDone."
+    await chunker.feed(text)
+    await chunker.close()
+    assembled = "".join(chunks)
+    assert "```python" in assembled and "Done." in assembled
 
 
 @pytest.mark.asyncio
-async def test_chunker_idle_coalesce() -> None:
-    chunker = BlockStreamingChunker(_cfg(min_chars=10, idle_ms=100))
-    out: list[str] = []
-    async def feed():
-        chunker.feed("Short. ")
-        await asyncio.sleep(0.01)  # < idle_ms
-        chunker.feed("Another short. ")
-        await asyncio.sleep(0.20)  # > idle_ms — should now flush
-        chunker.feed("Final part long enough to exceed.")
-        chunker.close()
-    async def collect():
-        async for chunk in chunker.chunks():
-            out.append(chunk)
-    await asyncio.gather(feed(), collect())
-    # First emit should contain both short pieces (coalesced after idle)
-    assert any("Short" in c and "Another" in c for c in out)
+async def test_close_flushes_remaining():
+    chunks = []
+    async def collect(c): chunks.append(c)
+    chunker = BlockStreamingChunker(emit=collect, config=ChunkerConfig(human_delay_ms=0))
+    await chunker.feed("no boundary")
+    await chunker.close()
+    assert "no boundary" in "".join(chunks)
 
 
 @pytest.mark.asyncio
-async def test_chunker_min_chars_holds_until_threshold() -> None:
-    chunker = BlockStreamingChunker(_cfg(min_chars=50, idle_ms=10000))  # huge idle
-    out: list[str] = []
-    async def feed():
-        chunker.feed("Tiny.")  # under min_chars
-        chunker.close()  # close should force-flush
-    async def collect():
-        async for chunk in chunker.chunks():
-            out.append(chunk)
-    await asyncio.gather(feed(), collect())
-    # Force-flush on close emits the buffer
-    assert any("Tiny" in c for c in out)
-
-
-@pytest.mark.asyncio
-async def test_chunker_max_chars_forces_split() -> None:
-    chunker = BlockStreamingChunker(_cfg(min_chars=10, max_chars=60))
-    out: list[str] = []
-    async def feed():
-        chunker.feed("a" * 200)  # one long blob, no boundaries
-        chunker.close()
-    async def collect():
-        async for chunk in chunker.chunks():
-            out.append(chunk)
-    await asyncio.gather(feed(), collect())
-    # No single chunk should exceed max_chars (except slack for safety)
-    for chunk in out:
-        assert len(chunk) <= 100, f"chunk too long: {len(chunk)}"
-
-
-@pytest.mark.asyncio
-async def test_chunker_sentence_boundary_preference() -> None:
-    chunker = BlockStreamingChunker(_cfg(min_chars=15, max_chars=200))
-    out: list[str] = []
-    async def feed():
-        chunker.feed("Sentence one. Sentence two. Sentence three. Sentence four.")
-        chunker.close()
-    async def collect():
-        async for chunk in chunker.chunks():
-            out.append(chunk)
-    await asyncio.gather(feed(), collect())
-    # At least one chunk should end at a sentence boundary
-    assert any(c.rstrip().endswith(".") for c in out)
-
-
-@pytest.mark.asyncio
-async def test_chunker_empty_input_emits_nothing() -> None:
-    chunker = BlockStreamingChunker(_cfg())
-    out: list[str] = []
-    async def feed():
-        chunker.close()  # no feed at all
-    async def collect():
-        async for chunk in chunker.chunks():
-            out.append(chunk)
-    await asyncio.gather(feed(), collect())
-    assert out == []
-
-
-@pytest.mark.asyncio
-async def test_chunker_human_delay_applied() -> None:
-    """Verify human_delay sleeps between emits (use small delay for tests)."""
-    chunker = BlockStreamingChunker(_cfg(
-        min_chars=10, human_delay_min_ms=50, human_delay_max_ms=100
-    ))
-    timestamps: list[float] = []
-    import time
-    async def feed():
-        for _ in range(3):
-            chunker.feed("Some content. " * 5)
-        chunker.close()
-    async def collect():
-        async for _ in chunker.chunks():
-            timestamps.append(time.monotonic())
-    await asyncio.gather(feed(), collect())
-    # Between consecutive emits there should be at least the min delay
-    if len(timestamps) >= 2:
-        gaps = [timestamps[i+1] - timestamps[i] for i in range(len(timestamps)-1)]
-        # Allow some slack but verify some delay was applied
-        assert max(gaps) >= 0.04, f"no delay observed: {gaps}"
+async def test_idle_coalesce_flushes():
+    chunks = []
+    async def collect(c): chunks.append(c)
+    chunker = BlockStreamingChunker(emit=collect, config=ChunkerConfig(idle_ms=50, human_delay_ms=0))
+    await chunker.feed("partial")
+    await asyncio.sleep(0.15)
+    await chunker.close()
+    assert "".join(chunks).startswith("partial")
 ```
 
-- [ ] **Step 3: Implementation**
+- [ ] **Step 3: Implement**
 
 ```python
 # opencomputer/gateway/streaming_chunker.py
-"""Block streaming chunker with humanDelay — channel UX improvement.
+"""Block streaming chunker — humanlike pacing for chat-channel adapters.
 
-Source: OpenClaw streaming subsystem (sources/openclaw-2026.4.23/src/
-streaming/). Adapted to Python + asyncio.
-
-Token-stream → coarse blocks at human-readable boundaries:
-  paragraph (\\n\\n) → newline (\\n) → sentence (. ! ?) → whitespace.
-
-Never splits inside ``` code fences. Idle-coalesces (waits idle_ms
-before flushing partial buffer). Applies randomized human_delay between
-emits so channel output reads naturally.
+Async-only API: feed() and close() MUST be called from coroutine context.
+Reference: openclaw-2026.4.23/extensions/discord/src/chunk.ts.
 """
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
-from collections.abc import AsyncIterator
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+EmitFn = Callable[[str], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
 class ChunkerConfig:
-    min_chars: int = 80
-    max_chars: int = 600
-    idle_ms: int = 350
+    idle_ms: int = 250
     human_delay_min_ms: int = 800
     human_delay_max_ms: int = 2500
+    human_delay_ms: int | None = None  # test override
+    min_emit_chars: int = 1
 
 
 class BlockStreamingChunker:
-    """Buffer tokens; emit blocks at boundary preference; apply human delay.
-
-    Usage:
-
-        chunker = BlockStreamingChunker(ChunkerConfig())
-        async def producer():
-            async for delta in provider.stream_complete(...):
-                chunker.feed(delta)
-            chunker.close()
-        async def consumer():
-            async for block in chunker.chunks():
-                await adapter.send(chat_id, block)
-        await asyncio.gather(producer(), consumer())
-    """
-
-    def __init__(self, config: ChunkerConfig) -> None:
-        self._cfg = config
-        self._buf = ""
+    def __init__(self, emit: EmitFn, *, config: ChunkerConfig | None = None) -> None:
+        self._emit = emit
+        self._cfg = config or ChunkerConfig()
+        self._buf: list[str] = []
+        self._fence_open = False
+        self._idle_task: asyncio.Task | None = None
         self._closed = False
-        self._cv = asyncio.Condition()
 
-    def feed(self, text: str) -> None:
-        if not text:
+    async def feed(self, text: str) -> None:
+        if self._closed:
             return
-        # Schedule notify; can't await from sync method
-        self._buf += text
-        loop = asyncio.get_event_loop()
-        loop.create_task(self._notify())
+        self._buf.append(text)
+        for _ in self._scan_fence(text):
+            self._fence_open = not self._fence_open
+        await self._maybe_emit()
+        self._reset_idle()
 
-    async def _notify(self) -> None:
-        async with self._cv:
-            self._cv.notify_all()
-
-    def close(self) -> None:
+    async def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
-        loop = asyncio.get_event_loop()
-        loop.create_task(self._notify())
+        if self._idle_task and not self._idle_task.done():
+            self._idle_task.cancel()
+        if self._buf:
+            await self._do_emit("".join(self._buf))
+            self._buf.clear()
 
-    async def chunks(self) -> AsyncIterator[str]:
-        first = True
+    def _scan_fence(self, text: str) -> list[int]:
+        out, i = [], 0
         while True:
-            chunk = await self._next_chunk()
-            if chunk is None:
-                return
-            if not first:
-                # human delay between emits (skip before first)
-                if self._cfg.human_delay_min_ms or self._cfg.human_delay_max_ms:
-                    delay = random.uniform(
-                        self._cfg.human_delay_min_ms / 1000.0,
-                        self._cfg.human_delay_max_ms / 1000.0,
-                    )
-                    await asyncio.sleep(delay)
-            first = False
-            yield chunk
+            j = text.find("```", i)
+            if j < 0:
+                return out
+            out.append(j)
+            i = j + 3
 
-    async def _next_chunk(self) -> str | None:
-        async with self._cv:
-            while True:
-                # If closed and buffer empty, EOF
-                if self._closed and not self._buf:
-                    return None
-                # If we have enough or are forced to flush, decide split
-                buf = self._buf
-                in_code_fence = (buf.count("```") % 2) != 0
-                if not in_code_fence and (len(buf) >= self._cfg.min_chars or self._closed):
-                    split = self._find_split(buf)
-                    if split is not None:
-                        self._buf = buf[split:]
-                        return buf[:split]
-                if in_code_fence and self._closed:
-                    # Closed mid-fence: emit everything as one block (preserve fence)
-                    self._buf = ""
-                    return buf
-                # Not enough content, or we're inside a code fence — wait
-                try:
-                    await asyncio.wait_for(self._cv.wait(), timeout=self._cfg.idle_ms / 1000.0)
-                except TimeoutError:
-                    # Idle gap → flush whatever we have if past min_chars or closed
-                    if not in_code_fence and (len(self._buf) >= 1 or self._closed):
-                        buf = self._buf
-                        if buf:
-                            self._buf = ""
-                            return buf
+    async def _maybe_emit(self) -> None:
+        if self._fence_open:
+            return
+        s = "".join(self._buf)
+        b = self._find_boundary(s)
+        if b < 0:
+            return
+        chunk = s[:b]
+        rest = s[b:]
+        if len(chunk.strip()) < self._cfg.min_emit_chars:
+            return
+        self._buf = [rest] if rest else []
+        await self._do_emit(chunk)
 
-    def _find_split(self, buf: str) -> int | None:
-        """Return index AFTER which to split, preferring paragraph > newline > sentence > whitespace."""
-        # Within the prefix [min_chars : max_chars], find best boundary
-        lo = self._cfg.min_chars
-        hi = min(len(buf), self._cfg.max_chars)
-        if lo >= len(buf):
-            # buffer not yet at min_chars
-            return None
+    def _find_boundary(self, s: str) -> int:
+        idx = s.rfind("\n\n")
+        if idx >= 0:
+            return idx + 2
+        idx = s.rfind("\n")
+        if idx >= 0:
+            return idx + 1
+        for end in (". ", "? ", "! "):
+            idx = s.rfind(end)
+            if idx >= 0:
+                return idx + len(end)
+        return -1
 
-        # 1. Paragraph (\n\n) within range
-        for i in range(min(hi, len(buf) - 1), lo, -1):
-            if buf[i - 1:i + 1] == "\n\n" and not self._inside_code_fence(buf, i):
-                return i + 1
+    async def _do_emit(self, chunk: str) -> None:
+        delay = self._cfg.human_delay_ms
+        if delay is None:
+            delay = random.randint(self._cfg.human_delay_min_ms, self._cfg.human_delay_max_ms)
+        if delay > 0:
+            await asyncio.sleep(delay / 1000.0)
+        try:
+            await self._emit(chunk)
+        except Exception:
+            logger.exception("chunker emit failed; reinserting buffer")
+            self._buf.insert(0, chunk)
 
-        # 2. Newline (\n)
-        for i in range(min(hi, len(buf)), lo, -1):
-            if buf[i - 1] == "\n" and not self._inside_code_fence(buf, i):
-                return i
+    def _reset_idle(self) -> None:
+        if self._idle_task and not self._idle_task.done():
+            self._idle_task.cancel()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._idle_task = loop.create_task(self._idle_flush())
 
-        # 3. Sentence end (. ! ?) followed by space
-        for i in range(min(hi, len(buf) - 1), lo, -1):
-            if buf[i - 1] in ".!?" and (i >= len(buf) or buf[i].isspace()):
-                if not self._inside_code_fence(buf, i):
-                    return i
-
-        # 4. Whitespace
-        for i in range(min(hi, len(buf)), lo, -1):
-            if buf[i - 1].isspace() and not self._inside_code_fence(buf, i):
-                return i
-
-        # 5. Hard split at max_chars (only if we MUST)
-        if len(buf) >= self._cfg.max_chars:
-            return self._cfg.max_chars
-        return None
-
-    def _inside_code_fence(self, buf: str, pos: int) -> bool:
-        """Are we inside an open code fence at position pos?"""
-        return (buf[:pos].count("```") % 2) != 0
+    async def _idle_flush(self) -> None:
+        try:
+            await asyncio.sleep(self._cfg.idle_ms / 1000.0)
+        except asyncio.CancelledError:
+            return
+        if self._buf and not self._fence_open:
+            await self._do_emit("".join(self._buf))
+            self._buf.clear()
 
 
 __all__ = ["BlockStreamingChunker", "ChunkerConfig"]
 ```
 
-- [ ] **Step 4: Channel-adapter opt-in integration**
+- [ ] **Step 4: Run tests (expect green)**
 
-In `extensions/telegram/adapter.py` (and similar for discord, slack), add a config flag `streaming.use_chunker: true` that wraps the outgoing stream in `BlockStreamingChunker`. Default: false (no behavior change).
+- [ ] **Step 5: Wire into telegram adapter (proof of integration)**
 
-- [ ] **Step 5: Tests pass + ruff clean + commit + PR**
+Find the telegram outbound emit point. Add opt-in flag in plugin config. Document the integration in adapter README so other channels can follow.
 
----
-
-# PR 5 — Phase A2: Active Memory
-
-**PR title:** `feat(agent): active memory pre-reply blocking recall (Phase A2)`
-**Branch:** `feat/phase-a2-active-memory`
-**Estimated scope:** ~250 LOC + ~200 LOC tests, ~4 hours.
-
-### Task A2.1 — Core implementation
-
-**Files:**
-- Create: `opencomputer/agent/active_memory.py`
-- Modify: `opencomputer/agent/loop.py` (one hook before reply emission)
-- Test: `tests/test_active_memory.py`
-
-- [ ] **Step 1: Read source**
+- [ ] **Step 6: Commit**
 
 ```bash
-ls /Users/saksham/Vscode/claude/sources/openclaw-2026.4.23/extensions/active-memory/
+git add opencomputer/gateway/streaming_chunker.py tests/gateway/test_streaming_chunker.py extensions/telegram-channel/...
+git commit -m "feat(gateway): block streaming chunker for human-paced channel emits"
 ```
 
-- [ ] **Step 2: Tests + impl**
-
-The active-memory module is essentially:
-
-```python
-async def maybe_recall_for(
-    user_message: str,
-    *,
-    memory_search_fn,
-    token_budget: int = 1500,
-    eligibility: callable = None,
-) -> str | None:
-    """Run a bounded recall sub-agent. Return prefix to inject, or None."""
-    if eligibility is not None and not eligibility(user_message):
-        return None
-    if not user_message.strip():
-        return None
-    try:
-        hits = await asyncio.wait_for(
-            memory_search_fn(user_message, limit=5),
-            timeout=2.0,
-        )
-        if not hits:
-            return None
-        prefix = "\n".join(h.content for h in hits)[:token_budget * 4]  # rough char budget
-        return f"<recalled-memory>\n{prefix}\n</recalled-memory>"
-    except (asyncio.TimeoutError, Exception):
-        return None
-```
-
-Wire into `agent/loop.py` at the pre-reply emission point. Config: opt-in flag in `cfg.memory.active_memory_enabled`.
-
-Tests cover: eligibility filter, timeout fallback, empty user message, hits returned, no hits returned, opt-in flag respected.
-
-### Task A2-Final — Commit + push + PR
-
----
-
-# PR 6 — Phase A3: Standing Orders
-
-**PR title:** `feat(agent): standing orders — autonomous program authority (Phase A3)`
-**Branch:** `feat/phase-a3-standing-orders`
-**Estimated scope:** ~400 LOC + ~300 LOC tests, ~5 hours.
-
-### Task A3.1 — AGENTS.md `## Program:` parser
+### Task 3.2: A3 Standing Orders
 
 **Files:**
 - Create: `opencomputer/agent/standing_orders.py`
-- Modify: `opencomputer/agent/loop.py` (apply standing orders as system context)
-- Test: `tests/test_standing_orders.py`
+- Create: `tests/agent/test_standing_orders.py`
+- Modify: `opencomputer/agent/loop.py` — apply parsed orders as system context per turn
 
-- [ ] **Step 1: Read source + AGENTS.md examples**
+- [ ] **Step 1: Write failing tests (line-state-machine + adjacent-H2 regression)**
 
-```bash
-ls /Users/saksham/Vscode/claude/sources/openclaw-2026.4.23/src/agents/
-grep -rn "## Program:" /Users/saksham/Vscode/claude/sources/openclaw-2026.4.23/extensions/ | head -10
+```python
+# tests/agent/test_standing_orders.py
+import pytest
+from opencomputer.agent.standing_orders import parse_agents_md, StandingOrder
+
+
+def test_single_well_formed_program():
+    text = """# Project notes
+
+## Program: weekly-summary
+Scope: opencomputer/
+Triggers: cron weekly
+Approval Gates: human-confirm before send
+Escalation: notify Saksham
+
+## Other section
+unrelated
+"""
+    orders = parse_agents_md(text)
+    assert len(orders) == 1
+    assert orders[0].name == "weekly-summary"
+    assert orders[0].scope == "opencomputer/"
+    assert "human-confirm" in orders[0].approval_gates
+
+
+def test_two_adjacent_program_blocks_dont_merge():
+    """Critical regression test for rev 1's regex bug."""
+    text = """## Program: alpha
+Scope: a-only
+Triggers: x
+
+## Program: beta
+Scope: b-only
+Triggers: y
+"""
+    orders = parse_agents_md(text)
+    assert len(orders) == 2
+    assert orders[0].name == "alpha" and orders[0].scope == "a-only"
+    assert orders[1].name == "beta" and orders[1].scope == "b-only"
+
+
+def test_malformed_block_skipped_not_crashed():
+    text = """## Program: bad
+Scope:
+(no other fields)
+
+## Program: good
+Scope: ok
+Triggers: cron daily
+"""
+    orders = parse_agents_md(text)
+    assert any(o.name == "good" for o in orders)
+
+
+def test_empty_file_returns_empty_list():
+    assert parse_agents_md("") == []
+    assert parse_agents_md("# Just a heading") == []
 ```
 
-- [ ] **Step 2: Test + impl**
+- [ ] **Step 2: Implement parser as line-state-machine**
 
 ```python
 # opencomputer/agent/standing_orders.py
-"""Standing Orders — text-contract for autonomous program authority.
+"""Standing Orders — parsed `## Program:` blocks from AGENTS.md.
 
-Source: OpenClaw standing-orders pattern. Declarative `## Program:` blocks
-in AGENTS.md grant the agent permanent operating authority for autonomous
-programs. Each block defines:
-
-    ## Program: morning-briefing
-    Scope: read-only access to ~/.opencomputer/briefings/
-    Triggers: cron("0 7 * * *")
-    Approval: auto for read; ask for any send_message > 100 chars
-    Escalation: stop and ping me if 3 consecutive failures
-
-The parser reads AGENTS.md, extracts `## Program:` blocks, validates
-each, and surfaces them to the agent loop as system-prompt context +
-runtime authority hints.
+Parser is a line-state-machine to avoid regex pitfalls.
 """
 from __future__ import annotations
 
+import logging
 import re
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class StandingOrder:
     name: str
-    scope: str
-    triggers: tuple[str, ...]
-    approval: str
-    escalation: str
-    raw: str
+    scope: str = ""
+    triggers: str = ""
+    approval_gates: str = ""
+    escalation: str = ""
+    raw_fields: dict[str, str] = field(default_factory=dict)
 
 
-_PROGRAM_RE = re.compile(
-    r"^## Program: (?P<name>[\w\-]+)\s*$\n(?P<body>(?:(?!^## ).+\n?)*)",
-    re.MULTILINE,
-)
+_HEADER_RE = re.compile(r"^##\s+Program:\s+(?P<name>[\w\-]+)\s*$")
+_FIELD_RE = re.compile(r"^(?P<key>[A-Z][\w\s]*?):\s*(?P<val>.*)$")
+_OTHER_H2_RE = re.compile(r"^##\s+(?!Program:)")
 
 
-def parse_standing_orders(agents_md: str) -> list[StandingOrder]:
+def parse_agents_md(text: str) -> list[StandingOrder]:
+    if not text:
+        return []
     out: list[StandingOrder] = []
-    for m in _PROGRAM_RE.finditer(agents_md):
-        name = m.group("name").strip()
-        body = m.group("body")
-        scope = _extract_field(body, "Scope")
-        triggers = tuple(t.strip() for t in _extract_field(body, "Triggers").split(",") if t.strip())
-        approval = _extract_field(body, "Approval")
-        escalation = _extract_field(body, "Escalation")
-        if not scope:
-            continue  # malformed — skip
-        out.append(StandingOrder(
-            name=name, scope=scope, triggers=triggers,
-            approval=approval, escalation=escalation, raw=m.group(0),
-        ))
+    state = "OUTSIDE"
+    current: StandingOrder | None = None
+    cur_key: str | None = None
+    cur_lines: list[str] = []
+
+    def commit_field() -> None:
+        nonlocal cur_key, cur_lines
+        if current is None or cur_key is None:
+            return
+        val = "\n".join(cur_lines).strip()
+        norm = cur_key.strip().lower().replace(" ", "_")
+        current.raw_fields[norm] = val
+        if norm == "scope":
+            current.scope = val
+        elif norm == "triggers":
+            current.triggers = val
+        elif norm == "approval_gates":
+            current.approval_gates = val
+        elif norm == "escalation":
+            current.escalation = val
+        cur_key = None
+        cur_lines = []
+
+    def commit_block() -> None:
+        nonlocal current
+        if current is None:
+            return
+        commit_field()
+        if current.triggers:
+            out.append(current)
+        else:
+            logger.warning("standing-order %r missing 'Triggers' — skipped", current.name)
+        current = None
+
+    for line in text.splitlines():
+        m = _HEADER_RE.match(line)
+        if m:
+            commit_block()
+            current = StandingOrder(name=m.group("name"))
+            state = "IN_BLOCK"
+            continue
+        if _OTHER_H2_RE.match(line):
+            commit_block()
+            state = "OUTSIDE"
+            continue
+        if state != "IN_BLOCK":
+            continue
+        fm = _FIELD_RE.match(line)
+        if fm and not line.startswith((" ", "\t")):
+            commit_field()
+            cur_key = fm.group("key")
+            cur_lines = [fm.group("val")]
+            continue
+        if cur_key is not None:
+            cur_lines.append(line)
+
+    commit_block()
     return out
 
 
-def _extract_field(body: str, key: str) -> str:
-    m = re.search(rf"^{re.escape(key)}:\s*(.+)$", body, re.MULTILINE)
-    return m.group(1).strip() if m else ""
-
-
-def load_standing_orders(profile_home: Path) -> list[StandingOrder]:
-    agents_md = profile_home / "AGENTS.md"
-    if not agents_md.exists():
-        return []
-    return parse_standing_orders(agents_md.read_text(encoding="utf-8"))
-
-
-__all__ = ["StandingOrder", "parse_standing_orders", "load_standing_orders"]
+__all__ = ["parse_agents_md", "StandingOrder"]
 ```
 
-Wire into `agent/loop.py` to inject Standing Orders into system prompt at session start. Cron triggers integrate with OC's existing cron via runtime registration.
+- [ ] **Step 3: Run tests (expect green)**
 
-Tests cover: parser well-formed/malformed, multiple programs, missing Scope (skip), trigger field comma-split, integration test (orders surface in system prompt).
+- [ ] **Step 4: Wire into agent loop**
 
-### Task A3-Final — Commit + push + PR
+In `opencomputer/agent/loop.py`, find per-turn system-context construction. Add: read `<workspace>/AGENTS.md`, parse, prepend orders as system context.
 
----
+- [ ] **Step 5: Commit**
 
-## Self-review (run after writing)
+```bash
+git add opencomputer/agent/standing_orders.py tests/agent/test_standing_orders.py opencomputer/agent/loop.py
+git commit -m "feat(agent): standing orders parser + loop integration"
+```
 
-### 1. Spec coverage check
+### Task 3.3: Push PR 3
 
-| Spec section | Plan coverage |
-|---|---|
-| §2 Phase A — A1 streaming chunker | ✅ PR 4 with 8 tests |
-| §2 Phase A — A2 Active Memory | ✅ PR 5 |
-| §2 Phase A — A3 Standing Orders | ✅ PR 6 |
-| §2 Phase B — B1 ollama | ✅ PR 2 task B1 |
-| §2 Phase B — B2 groq | ✅ PR 2 task B2 |
-| §2 Phase C — C1 firecrawl | ✅ PR 3 task C1 |
-| §2 Phase C — C2 tavily | ✅ PR 3 task C2 |
-| §2 Phase C — C3 exa | ✅ PR 3 task C3 |
-| §2 Phase D — D1 memory_tool | ✅ PR 1 task D1 |
-| §2 Phase D — D2 session_search | ✅ PR 1 task D2 |
-| §2 Phase D — D3 send_message | ✅ PR 1 task D3 |
-| §2 Phase D — D4 mcp_oauth | ✅ PR 1 task D4 |
-| §3 Phase ordering D→B→C→A | ✅ PR 1=D, PR 2=B, PR 3=C, PRs 4-6 = A |
-| §4 Cross-cutting (worktree, plugin SDK boundary, subagent split) | ✅ Per-PR-Final task includes |
-| §5 Error handling | ✅ Each tool has try/except + is_error returns |
-| §6 Testing | ✅ TDD red-green for every task |
-
-No gaps.
-
-### 2. Placeholder scan
-
-Search the plan for: TBD, TODO, "implement later," "fill in details," "Add appropriate error handling," "similar to Task N." Result: 1 instance of "TBD" in B1 stream_complete (intentional — non-streaming covers most uses; streaming is a follow-up). Acceptable; documented as "non-streaming covers most uses."
-
-### 3. Type consistency
-
-- `BaseTool` / `ToolSchema` / `ToolCall` / `ToolResult` — used consistently.
-- `BaseProvider` / `Message` / `ProviderResponse` / `Usage` — used consistently in B1.
-- `_home()` reference (D1) — matches OC's existing helper.
-- `MCPOAuthClient` / `OAuthToken` / `generate_pkce_pair` — consistent throughout D4.
-
-No drift.
+- [ ] Same shape as Task 1.3.
 
 ---
 
-## Adversarial-audit hooks (per user's standing audit instructions)
+## PR 4 — `oc update` + banner integration (E1)
 
-Per the user's flow: brainstorm → writing-plans → **rigorous self-audit** → executing-plans. The audit appends below in the next turn before execution starts. Hooks the audit MUST cover:
+**Branch:** `feat/oc-update-command`. Subagent: opus (subprocess + git edge cases).
 
-1. **Plugin SDK boundary** — does each new extension's plugin.py / provider.py / tool.py avoid `from opencomputer` imports? (Test enforces this; implementer must not bypass.)
-2. **OutgoingQueue lifecycle** — does send_message_tool (D3) handle `queue=None` (CLI/test path)?
-3. **Chunker re-entrancy** — does the chunker handle being closed mid-feed (race condition)?
-4. **OAuth token caching** — where do tokens get stored? File permissions? Per-profile?
-5. **Active Memory failure isolation** — if memory_search hangs, does it block the reply forever?
-6. **Standing Orders scope enforcement** — does the parser do anything to ENFORCE scope, or just declare it? (Likely just declare; enforcement TBD as follow-up.)
-7. **B1 model name format** — is `ollama/llama3.2` the right convention given OC's existing model-prefix logic?
-8. **D4 OAuth `httpx.AsyncClient` mock** — does the test correctly mock both context-manager + post call?
+### Task 4.1: `check_for_updates()` + cmd_update
+
+**Files:**
+- Create: `opencomputer/cli/update.py`
+- Create: `tests/cli/test_update.py`
+- Modify: `opencomputer/cli.py` — add `oc update` subcommand, call prefetch on startup
+- Modify: `opencomputer/cli/banner.py` — render commits-behind line if positive
+
+- [ ] **Step 1: Read Hermes' implementation**
+
+```bash
+sed -n '120,250p' /Users/saksham/Vscode/claude/sources/hermes-agent-2026.4.23/hermes_cli/banner.py
+sed -n '5425,5650p' /Users/saksham/Vscode/claude/sources/hermes-agent-2026.4.23/hermes_cli/main.py
+```
+
+- [ ] **Step 2: Write failing tests**
+
+```python
+# tests/cli/test_update.py
+import json
+import time
+import pytest
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+from opencomputer.cli.update import check_for_updates, cmd_update, _UPDATE_CHECK_CACHE_SECONDS
+
+
+def _mk_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    return repo
+
+
+def test_returns_none_when_not_a_git_repo(tmp_path, monkeypatch):
+    monkeypatch.setattr("opencomputer.cli.update._resolve_repo_dir", lambda: None)
+    monkeypatch.setattr("opencomputer.cli.update._cache_path", lambda: tmp_path / ".update_check")
+    assert check_for_updates() is None
+
+
+def test_uses_cache_when_fresh(tmp_path, monkeypatch):
+    repo = _mk_repo(tmp_path)
+    cache = tmp_path / ".update_check"
+    cache.write_text(json.dumps({"ts": time.time(), "behind": 7}))
+    monkeypatch.setattr("opencomputer.cli.update._resolve_repo_dir", lambda: repo)
+    monkeypatch.setattr("opencomputer.cli.update._cache_path", lambda: cache)
+    fake_run = MagicMock()
+    with patch("subprocess.run", fake_run):
+        result = check_for_updates()
+    assert result == 7
+    fake_run.assert_not_called()
+
+
+def test_runs_git_commands_when_cache_stale(tmp_path, monkeypatch):
+    repo = _mk_repo(tmp_path)
+    cache = tmp_path / ".update_check"
+    cache.write_text(json.dumps({"ts": time.time() - _UPDATE_CHECK_CACHE_SECONDS - 1, "behind": 0}))
+    monkeypatch.setattr("opencomputer.cli.update._resolve_repo_dir", lambda: repo)
+    monkeypatch.setattr("opencomputer.cli.update._cache_path", lambda: cache)
+
+    def fake_run(cmd, **kwargs):
+        if "fetch" in cmd:
+            return MagicMock(returncode=0)
+        if "rev-list" in cmd:
+            return MagicMock(returncode=0, stdout="3\n")
+        return MagicMock(returncode=1)
+
+    with patch("subprocess.run", side_effect=fake_run):
+        result = check_for_updates()
+    assert result == 3
+    assert json.loads(cache.read_text())["behind"] == 3
+
+
+def test_check_handles_failure_gracefully(tmp_path, monkeypatch):
+    repo = _mk_repo(tmp_path)
+    monkeypatch.setattr("opencomputer.cli.update._resolve_repo_dir", lambda: repo)
+    monkeypatch.setattr("opencomputer.cli.update._cache_path", lambda: tmp_path / "cache")
+    with patch("subprocess.run", side_effect=Exception("network error")):
+        assert check_for_updates() is None
+
+
+def test_cmd_update_pip_install_fallback(monkeypatch, capsys):
+    monkeypatch.setattr("opencomputer.cli.update._resolve_repo_dir", lambda: None)
+    rc = cmd_update()
+    assert rc == 1
+    assert "pip install --upgrade" in capsys.readouterr().out
+
+
+def test_cmd_update_already_up_to_date(tmp_path, monkeypatch, capsys):
+    repo = _mk_repo(tmp_path)
+    monkeypatch.setattr("opencomputer.cli.update._resolve_repo_dir", lambda: repo)
+    monkeypatch.setattr("opencomputer.cli.update._cache_path", lambda: tmp_path / "cache")
+
+    def fake_run(cmd, **kw):
+        if "fetch" in cmd:
+            return MagicMock(returncode=0, stderr="")
+        if "rev-parse" in cmd:
+            return MagicMock(returncode=0, stdout="main\n")
+        if "rev-list" in cmd:
+            return MagicMock(returncode=0, stdout="0\n")
+        return MagicMock(returncode=0)
+
+    with patch("subprocess.run", side_effect=fake_run):
+        rc = cmd_update()
+    assert rc == 0
+    assert "Already up to date" in capsys.readouterr().out
+```
+
+- [ ] **Step 3: Implement**
+
+```python
+# opencomputer/cli/update.py
+"""`oc update` command + banner update-check.
+
+Mirrors Hermes' design: prefetch → 6h cache → banner display → cmd_update.
+Reference: sources/hermes-agent-2026.4.23/hermes_cli/{banner.py,main.py}.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import subprocess
+import threading
+import time
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_UPDATE_CHECK_CACHE_SECONDS = 6 * 3600
+_PREFETCH_THREAD: threading.Thread | None = None
+
+
+def _cache_path() -> Path:
+    from opencomputer.agent.config import _home
+    return _home() / ".update_check"
+
+
+def _resolve_repo_dir() -> Path | None:
+    project_root = Path(__file__).resolve().parents[2]
+    if (project_root / ".git").exists():
+        return project_root
+    from opencomputer.agent.config import _home
+    candidate = _home() / "opencomputer"
+    if (candidate / ".git").exists():
+        return candidate
+    return None
+
+
+def check_for_updates() -> int | None:
+    repo = _resolve_repo_dir()
+    if repo is None:
+        return None
+    cache = _cache_path()
+    now = time.time()
+    try:
+        if cache.exists():
+            data = json.loads(cache.read_text())
+            if now - data.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS:
+                return data.get("behind")
+    except (OSError, json.JSONDecodeError):
+        pass
+    behind: int | None = None
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin", "--quiet"],
+            capture_output=True, timeout=10, cwd=str(repo),
+        )
+        result = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD..origin/main"],
+            capture_output=True, text=True, timeout=5, cwd=str(repo),
+        )
+        if result.returncode == 0:
+            behind = int(result.stdout.strip())
+    except Exception as e:  # noqa: BLE001 — soft-fail offline / errored repo
+        logger.debug("update check failed: %s", e)
+        return None
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({"ts": now, "behind": behind}))
+    except OSError:
+        pass
+    return behind
+
+
+def prefetch_update_check() -> None:
+    global _PREFETCH_THREAD
+    if _PREFETCH_THREAD and _PREFETCH_THREAD.is_alive():
+        return
+    _PREFETCH_THREAD = threading.Thread(target=check_for_updates, daemon=True)
+    _PREFETCH_THREAD.start()
+
+
+def get_update_result(timeout: float = 0.5) -> int | None:
+    if _PREFETCH_THREAD and _PREFETCH_THREAD.is_alive():
+        _PREFETCH_THREAD.join(timeout=timeout)
+    cache = _cache_path()
+    if not cache.exists():
+        return None
+    try:
+        return json.loads(cache.read_text()).get("behind")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def cmd_update() -> int:
+    repo = _resolve_repo_dir()
+    if repo is None:
+        print("✗ Not a git checkout. To upgrade a pip install, run:")
+        print("   pip install --upgrade opencomputer")
+        return 1
+
+    print("⚕ Updating OpenComputer...")
+    try:
+        print("→ Fetching updates...")
+        r = subprocess.run(["git", "fetch", "origin"], cwd=str(repo), capture_output=True, text=True)
+        if r.returncode != 0:
+            err = (r.stderr or "").splitlines()
+            print(f"✗ Fetch failed: {err[0] if err else 'unknown error'}")
+            return 1
+
+        cur = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(repo), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        stashed = False
+        if cur != "main":
+            print(f"  ⚠ On branch '{cur}' — stashing and switching to main...")
+            stash = subprocess.run(
+                ["git", "stash", "push", "-u", "-m", "oc update auto-stash"],
+                cwd=str(repo), capture_output=True, text=True,
+            )
+            stashed = stash.returncode == 0 and "No local changes" not in (stash.stdout + stash.stderr)
+            subprocess.run(["git", "checkout", "main"], cwd=str(repo), check=True, capture_output=True)
+
+        n = int(subprocess.run(
+            ["git", "rev-list", "--count", "HEAD..origin/main"],
+            cwd=str(repo), capture_output=True, text=True, check=True,
+        ).stdout.strip())
+
+        if n == 0:
+            print("✓ Already up to date!")
+            _invalidate_cache()
+            if cur != "main":
+                subprocess.run(["git", "checkout", cur], cwd=str(repo), check=False, capture_output=True)
+                if stashed:
+                    subprocess.run(["git", "stash", "pop"], cwd=str(repo), check=False, capture_output=True)
+            return 0
+
+        print(f"→ Found {n} new commit(s)")
+        print("→ Pulling updates...")
+        pull = subprocess.run(
+            ["git", "pull", "--ff-only", "origin", "main"],
+            cwd=str(repo), capture_output=True, text=True,
+        )
+        if pull.returncode != 0:
+            err = (pull.stderr or "").splitlines()
+            print("✗ Pull failed (local diverged from origin):")
+            print(f"  {err[0] if err else 'unknown error'}")
+            return 1
+
+        print(f"✓ Updated to latest main (+{n} commits)")
+        _invalidate_cache()
+        if cur != "main":
+            subprocess.run(["git", "checkout", cur], cwd=str(repo), check=False, capture_output=True)
+            if stashed:
+                pop = subprocess.run(["git", "stash", "pop"], cwd=str(repo), capture_output=True, text=True)
+                if pop.returncode != 0:
+                    print("  ⚠ Stash pop failed; your changes remain in stash list.")
+        return 0
+    except subprocess.CalledProcessError as e:
+        print(f"✗ git command failed: {e}")
+        return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"✗ Update failed: {type(e).__name__}: {e}")
+        return 1
+
+
+def _invalidate_cache() -> None:
+    try:
+        _cache_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+__all__ = [
+    "check_for_updates",
+    "prefetch_update_check",
+    "get_update_result",
+    "cmd_update",
+]
+```
+
+- [ ] **Step 4: Run tests (expect green)**
+
+- [ ] **Step 5: Wire into CLI entry**
+
+- Add `oc update` subcommand calling `cmd_update()` and exiting with its code.
+- At CLI startup (banner-mode): `from opencomputer.cli.update import prefetch_update_check; prefetch_update_check()`.
+- In banner: `behind = get_update_result(timeout=0.5); if behind: print(f"⚠ {behind} commits behind — run 'oc update' to update")`.
+
+Implementer locates the actual entry points before editing.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add opencomputer/cli/update.py tests/cli/test_update.py opencomputer/cli.py opencomputer/cli/banner.py
+git commit -m "feat(cli): oc update command + banner behind-count display"
+```
+
+### Task 4.2: Push PR 4
+
+- [ ] Same shape as Task 1.3.
 
 ---
 
-## Execution choice
+## Final verification (before declaring done)
 
-Plan complete and saved to `docs/superpowers/plans/2026-05-02-best-of-import.md`. Next per user's flow: rigorous self-audit (their explicit instruction) → invoke `superpowers:executing-plans` (or subagent-driven-development).
+- [ ] All 4 PRs merged to main with green CI
+- [ ] Full pytest suite green (voice-excluded)
+- [ ] `oc --help` shows `update` subcommand
+- [ ] `oc update` runs cleanly on the worktree
+- [ ] Banner shows commits-behind count when behind > 0
+- [ ] No regressions in existing memory_tool, send_message, active_memory, search backends
+
+---
+
+## Self-review (post-write inline check)
+
+- ✅ Spec rev 2 coverage: every of 7 items has a task; 5 cut items not duplicated.
+- ✅ Pre-Task 0.1 enforces discovery sweep — would have prevented all 3 rev-1 collisions.
+- ✅ D2 uses `dict["key"]` access + `search_messages()` (rev 1 used `h.session_id` which would AttributeError).
+- ✅ D4 uses MCP SDK's `OAuthClientProvider` (Hermes' actual approach, not from-scratch).
+- ✅ B1 implements `stream_complete` (not abstract NotImplementedError).
+- ✅ B1/B2 use underscore dir names so Python imports work.
+- ✅ A1 chunker: async-only API; uses `get_running_loop()`; tests cover code-fence safety + idle-coalesce + close-flush.
+- ✅ A3 standing orders: line-state-machine parser, NOT regex; adjacent-H2 regression test included.
+- ✅ E1 update: 4 layers (prefetch → cache → banner → cmd) with pip-install fallback.
+
+**Lessons encoded:** discovery-sweep is mandatory; verify return-type contracts before writing consumers; SDK wrappers beat re-implementations.
