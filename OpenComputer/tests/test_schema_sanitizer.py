@@ -242,6 +242,52 @@ def test_recursive_array_constraints_in_nested_object():
     assert "maxItems" not in options
 
 
+def test_anthropic_format_drops_strict_flag_to_avoid_20_cap():
+    """Anthropic caps strict tools at 20; OC ships >20 strict-mode tools.
+
+    The provider boundary drops ``strict: true`` so we never trip the
+    "Too many strict tools (33). The maximum number of strict tools
+    supported is 20" 400.
+    """
+    import importlib.util
+    import sys
+    from dataclasses import replace
+    from pathlib import Path
+
+    from plugin_sdk.tool_contract import ToolSchema
+
+    repo = Path(__file__).parent.parent
+    openai_provider_py = repo / "extensions" / "openai-provider" / "provider.py"
+    anthropic_provider_py = repo / "extensions" / "anthropic-provider" / "provider.py"
+
+    def _load(name: str, path: Path):
+        sys.modules.pop(name, None)
+        spec = importlib.util.spec_from_file_location(name, path)
+        m = importlib.util.module_from_spec(spec)
+        sys.modules[name] = m
+        spec.loader.exec_module(m)
+        return m
+
+    _load("provider", openai_provider_py)
+    _load("provider_a", anthropic_provider_py)
+    sys.modules.pop("provider", None)
+    _load("provider", anthropic_provider_py)
+    anth = sys.modules["provider"]
+
+    schema = ToolSchema(
+        name="bash_strict",
+        description="x",
+        parameters={"type": "object", "properties": {"cmd": {"type": "string"}}},
+        strict=True,
+    )
+    out = anth._format_tools_for_anthropic([schema])
+    assert "strict" not in out[0], (
+        "strict flag must be dropped to avoid Anthropic's 20-tool cap"
+    )
+    # Schema-level enforcement still in place
+    assert out[0]["input_schema"]["additionalProperties"] is False
+
+
 def test_real_clarify_tool_passes_through_clean():
     """ClarifyTool has minItems=2 maxItems=4 on its options array — must be stripped."""
     from opencomputer.tools.clarify import ClarifyTool
