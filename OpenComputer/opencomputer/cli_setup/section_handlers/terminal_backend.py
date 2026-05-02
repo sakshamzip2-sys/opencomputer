@@ -6,7 +6,7 @@ Independently re-implemented (no code copied).
 Detects available backends via shutil.which:
   - apptainer / singularity → "apptainer"
   - docker → "docker"
-  - always: "native" (fallback / no sandbox)
+  - always: "local" (fallback / no sandbox; matches Hermes naming)
 
 Builds a radiolist with detected backends + a Skip choice. User picks
 which to use; selection writes config.terminal.backend.
@@ -29,14 +29,14 @@ def _detect_backends() -> list[str]:
         out.append("apptainer")
     if shutil.which("docker"):
         out.append("docker")
-    out.append("native")
+    out.append("local")
     return out
 
 
 _LABELS = {
-    "apptainer": "Apptainer / Singularity (rootless container sandbox)",
+    "apptainer": "Apptainer / Singularity (rootless container sandbox; HPC-friendly)",
     "docker": "Docker (container sandbox; runs as user)",
-    "native": "Native shell (no sandbox — fastest, least isolated)",
+    "local": "Local shell (run directly on this machine — default)",
 }
 
 
@@ -48,10 +48,11 @@ def run_terminal_backend_section(ctx: WizardCtx) -> SectionResult:
     choices.append(Choice("Skip — keep current", "__skip__"))
 
     idx = radiolist(
-        "Choose terminal backend (sandbox for shell tools):",
+        "Select terminal backend:",
         choices, default=0,
-        description="Apptainer/Docker isolate file + network access; "
-                     "native is unsandboxed.",
+        description="Where OpenComputer runs shell commands and code. "
+                     "Apptainer/Docker isolate file + network access; "
+                     "local is unsandboxed.",
     )
     chosen = choices[idx].value
     if chosen == "__skip__":

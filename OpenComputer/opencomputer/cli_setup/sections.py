@@ -85,7 +85,7 @@ def _build_registry() -> list[WizardSection]:
     return [
         WizardSection(
             key="opencomputer_prior_detect", icon="◆",
-            title="Prior install detection",
+            title="OpenClaw / Hermes Installation Detected",
             description=(
                 "Detect ~/.openclaw or ~/.hermes data and offer to import "
                 "MEMORY/USER/SOUL files + skills/ (non-destructive)."
@@ -113,7 +113,7 @@ def _build_registry() -> list[WizardSection]:
             configured_check=is_messaging_platforms_configured,
         ),
         WizardSection(
-            key="agent_settings", icon="◆", title="Agent settings",
+            key="agent_settings", icon="◆", title="Agent Settings",
             description=(
                 "Max iterations, parallel tools, inactivity + iteration "
                 "timeouts.\n"
@@ -123,18 +123,20 @@ def _build_registry() -> list[WizardSection]:
             configured_check=is_agent_settings_configured,
         ),
         WizardSection(
-            key="tts_provider", icon="◆", title="TTS provider",
+            key="tts_provider", icon="◆",
+            title="Text-to-Speech Provider (optional)",
             description=(
-                "Voice output. Default: openai-tts. Offline engines "
-                "(NeutTTS, KittenTTS, eSpeak-NG) configurable later."
+                "Voice output. Default: Edge TTS (free, no API key). "
+                "Premium engines (ElevenLabs, OpenAI, xAI, NeuTTS, KittenTTS) "
+                "configurable later via config.yaml."
             ),
             handler=run_tts_provider_section,
         ),
         WizardSection(
-            key="terminal_backend", icon="◆", title="Terminal backend",
+            key="terminal_backend", icon="◆", title="Terminal Backend",
             description=(
-                "Sandbox for shell tools: Apptainer / Docker / native. "
-                "Auto-detects available backends."
+                "Where Hermes runs shell commands and code. "
+                "Choose: local (default) / docker / apptainer."
             ),
             handler=run_terminal_backend_section,
         ),
@@ -147,7 +149,7 @@ def _build_registry() -> list[WizardSection]:
             handler=run_tools_section,
         ),
         WizardSection(
-            key="launchd_service", icon="◆", title="Launchd service",
+            key="launchd_service", icon="◆", title="Launchd Service",
             description=(
                 "Run gateway as a launchd service (starts on login).\n"
                 "macOS only — no-op on Linux/Windows."

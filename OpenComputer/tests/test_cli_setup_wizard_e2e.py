@@ -63,11 +63,11 @@ def test_e2e_first_run_picks_first_provider_and_skips_messaging(
         "opencomputer.cli_setup.section_handlers.tts_provider.radiolist",
         lambda *a, **kw: 1,
     )
-    # S3 — terminal_backend is now LIVE; force native-only detection +
-    # pick native (idx 0).
+    # S3 — terminal_backend is now LIVE; force local-only detection +
+    # pick local (idx 0). Naming aligned with Hermes ("local" not "native").
     monkeypatch.setattr(
         "opencomputer.cli_setup.section_handlers.terminal_backend._detect_backends",
-        lambda: ["native"],
+        lambda: ["local"],
     )
     monkeypatch.setattr(
         "opencomputer.cli_setup.section_handlers.terminal_backend.radiolist",
