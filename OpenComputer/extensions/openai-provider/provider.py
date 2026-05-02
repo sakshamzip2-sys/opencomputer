@@ -340,6 +340,7 @@ class OpenAIProvider(BaseProvider):
         max_tokens: int = 4096,
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
+        response_schema: dict | None = None,
     ) -> ProviderResponse:
         """Low-level complete using the given API key (pool-rotation target)."""
         # TS-T7 — short-circuit before the SDK so concurrent sessions
@@ -366,6 +367,16 @@ class OpenAIProvider(BaseProvider):
                     service_tier=runtime_extras.get("service_tier"),
                 )
             )
+        # Subsystem C — structured outputs.
+        if response_schema is not None:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": response_schema.get("name", "response"),
+                    "schema": response_schema["schema"],
+                    "strict": True,
+                },
+            }
         try:
             resp = await client.chat.completions.create(**kwargs)
         except OpenAIRateLimitError as exc:
@@ -384,6 +395,7 @@ class OpenAIProvider(BaseProvider):
         temperature: float = 1.0,
         stream: bool = False,
         runtime_extras: dict | None = None,
+        response_schema: dict | None = None,
     ) -> ProviderResponse:
         if self._credential_pool is None:
             return await self._do_complete(
@@ -395,6 +407,7 @@ class OpenAIProvider(BaseProvider):
                 max_tokens=max_tokens,
                 temperature=temperature,
                 runtime_extras=runtime_extras,
+                response_schema=response_schema,
             )
 
         def _is_auth_failure(exc: Exception) -> bool:
@@ -410,6 +423,7 @@ class OpenAIProvider(BaseProvider):
                 max_tokens=max_tokens,
                 temperature=temperature,
                 runtime_extras=runtime_extras,
+                response_schema=response_schema,
             ),
             is_auth_failure=_is_auth_failure,
         )
@@ -425,6 +439,7 @@ class OpenAIProvider(BaseProvider):
         max_tokens: int = 4096,
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
+        response_schema: dict | None = None,
     ) -> ProviderResponse:
         """Low-level streaming that aggregates into a ProviderResponse (pool target)."""
         # TS-T7 — short-circuit before the SDK.
@@ -451,6 +466,16 @@ class OpenAIProvider(BaseProvider):
                     service_tier=runtime_extras.get("service_tier"),
                 )
             )
+        # Subsystem C — structured outputs.
+        if response_schema is not None:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": response_schema.get("name", "response"),
+                    "schema": response_schema["schema"],
+                    "strict": True,
+                },
+            }
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -537,6 +562,7 @@ class OpenAIProvider(BaseProvider):
         max_tokens: int = 4096,
         temperature: float = 1.0,
         runtime_extras: dict | None = None,
+        response_schema: dict | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream via OpenAI's chat.completions.create(stream=True)."""
         if self._credential_pool is not None:
@@ -554,6 +580,7 @@ class OpenAIProvider(BaseProvider):
                     max_tokens=max_tokens,
                     temperature=temperature,
                     runtime_extras=runtime_extras,
+                    response_schema=response_schema,
                 ),
                 is_auth_failure=_is_auth_failure,
             )
@@ -583,6 +610,16 @@ class OpenAIProvider(BaseProvider):
                     service_tier=runtime_extras.get("service_tier"),
                 )
             )
+        # Subsystem C — structured outputs.
+        if response_schema is not None:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": response_schema.get("name", "response"),
+                    "schema": response_schema["schema"],
+                    "strict": True,
+                },
+            }
 
         # Aggregate state while streaming — used to build the final ProviderResponse
         content_parts: list[str] = []

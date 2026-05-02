@@ -1315,14 +1315,8 @@ class AgentLoop:
                     session_id=sid,
                 )
 
-<<<<<<< HEAD
-                # Item 2 (2026-05-02): pause_turn + refusal handling.
-                # pause_turn means a server-tool needs more time; re-send the
-                # conversation including the paused assistant message so the
-                # provider continues from where it left off. Cap at 3 to
-                # prevent pathological loops on broken server tools.
-                # refusal falls through to normal END_TURN handling — the
-                # refusal text becomes the final assistant message.
+                # Server-tool work paused: re-send so the provider continues.
+                # Cap at 3 to prevent pathological loops on broken server tools.
                 if step.stop_reason == StopReason.PAUSE_TURN:
                     self._pause_turn_count = (
                         getattr(self, "_pause_turn_count", 0) + 1
@@ -1335,28 +1329,16 @@ class AgentLoop:
                         from dataclasses import replace as _dc_replace
                         step = _dc_replace(step, stop_reason=StopReason.END_TURN)
                         self._pause_turn_count = 0
-                        # Fall through to normal end-of-turn flow below.
                     else:
-                        # Below cap: append paused content and continue the
-                        # loop so the next iteration re-sends.
                         if step.assistant_message is not None:
                             messages.append(step.assistant_message)
                         continue
                 else:
-                    # Reset counter on any non-pause outcome
                     self._pause_turn_count = 0
-=======
-                # 2026-05-02 — one-shot stop-reason recovery. Each path
-                # reissues _run_one_step at most once with adjusted
-                # state. Provider-agnostic: every provider that maps its
-                # native stop_reason to the canonical StopReason enum
-                # benefits from these retries automatically.
-                #
-                # Context full: ask the compaction engine to make room
-                # and retry the same call. Mirrors Anthropic's Doc 3
-                # guidance for model_context_window_exceeded but works
-                # for any provider whose stop_reason maps to
-                # StopReason.CONTEXT_FULL.
+
+                # Subsystem A — Context-full retry: compaction + retry once.
+                # Provider-agnostic: any provider that maps its context-
+                # exhaustion stop reason to StopReason.CONTEXT_FULL benefits.
                 if (
                     step.stop_reason == StopReason.CONTEXT_FULL
                     and self.compaction is not None
@@ -1376,11 +1358,7 @@ class AgentLoop:
                                 session_id=sid,
                             )
                     except Exception:  # noqa: BLE001
-                        # Compaction failure → fall through to whatever
-                        # the loop does with CONTEXT_FULL (visible to
-                        # caller via ConversationResult.stop_reason).
                         pass
->>>>>>> a3a2eb94 (feat(loop): handle StopReason.CONTEXT_FULL with compaction retry)
 
                 # Empty end_turn retry: per Anthropic Doc 3, models can
                 # return 2-3 empty tokens with stop_reason=end_turn after

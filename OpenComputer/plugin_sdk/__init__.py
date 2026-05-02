@@ -92,6 +92,7 @@ from plugin_sdk.profile_subprocess import scope_subprocess_env
 from plugin_sdk.provider_contract import (
     BaseProvider,
     CacheTokens,
+    JsonSchemaSpec,
     ProviderCapabilities,
     ProviderResponse,
     StreamEvent,
@@ -153,6 +154,7 @@ __all__ = [
     "ToolSchema",
     "BaseProvider",
     "CacheTokens",
+    "JsonSchemaSpec",
     "ProviderCapabilities",
     "ProviderResponse",
     "StreamEvent",
