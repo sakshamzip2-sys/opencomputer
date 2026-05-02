@@ -16,7 +16,7 @@ if str(_OPENAI_PROVIDER_DIR) not in sys.path:
 
 from provider import OpenAIProvider  # type: ignore[import-not-found]  # noqa: E402
 
-DEFAULT_STEPFUN_BASE_URL = "https://api.stepfun.com/v1"
+DEFAULT_STEPFUN_BASE_URL = "https://api.stepfun.ai/step_plan/v1"
 
 
 class StepFunProvider(OpenAIProvider):

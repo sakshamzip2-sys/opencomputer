@@ -26,7 +26,7 @@ DEFAULT_HF_BASE_URL = "https://router.huggingface.co/v1"
 class HuggingFaceProvider(OpenAIProvider):
     name = "huggingface"
     default_model = "meta-llama/Llama-3.3-70B-Instruct"
-    _api_key_env: str = "HF_API_KEY"
+    _api_key_env: str = "HF_TOKEN"
 
     def __init__(
         self,

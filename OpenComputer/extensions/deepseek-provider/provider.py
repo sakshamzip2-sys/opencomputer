@@ -24,7 +24,7 @@ if str(_OPENAI_PROVIDER_DIR) not in sys.path:
 
 from provider import OpenAIProvider  # type: ignore[import-not-found]  # noqa: E402
 
-DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 
 
 class DeepSeekProvider(OpenAIProvider):

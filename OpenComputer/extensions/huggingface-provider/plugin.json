@@ -10,7 +10,7 @@
       {
         "id": "huggingface",
         "auth_methods": ["api_key"],
-        "env_vars": ["HF_API_KEY"],
+        "env_vars": ["HF_TOKEN"],
         "label": "HuggingFace Inference Providers (20+ open models)",
         "default_model": "meta-llama/Llama-3.3-70B-Instruct",
         "signup_url": "https://huggingface.co/settings/tokens"

@@ -38,11 +38,11 @@ def _load_provider_class(plugin_dirname: str, class_name: str):
 
 # (plugin_dir, class_name, provider_id, env_var, base_host_substring)
 COHORT = [
-    ("tencent-provider",     "TencentProvider",     "tencent",     "TENCENT_API_KEY",  "tencent.com"),
+    ("tencent-provider",     "TencentProvider",     "tencent",     "TOKENHUB_API_KEY", "tokenhub.tencentmaas.com"),
     ("nvidia-nim-provider",  "NvidiaNIMProvider",   "nvidia",      "NVIDIA_API_KEY",   "nvidia.com"),
-    ("huggingface-provider", "HuggingFaceProvider", "huggingface", "HF_API_KEY",       "huggingface.co"),
-    ("stepfun-provider",     "StepFunProvider",     "stepfun",     "STEPFUN_API_KEY",  "stepfun.com"),
-    ("arcee-provider",       "ArceeProvider",       "arcee",       "ARCEE_API_KEY",    "arcee.ai"),
+    ("huggingface-provider", "HuggingFaceProvider", "huggingface", "HF_TOKEN",         "huggingface.co"),
+    ("stepfun-provider",     "StepFunProvider",     "stepfun",     "STEPFUN_API_KEY",  "stepfun.ai"),
+    ("arcee-provider",       "ArceeProvider",       "arcee",       "ARCEEAI_API_KEY",  "arcee.ai"),
 ]
 
 
