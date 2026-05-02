@@ -53,6 +53,17 @@ from plugin_sdk.tool_contract import ToolSchema
 _RATE_GUARD_PROVIDER = "anthropic"
 
 
+#: Anthropic's tool-validator caps the number of tools that may carry
+#: ``strict: true`` at 20. OC ships well over 20 tools that opt in via
+#: ``strict_mode = True`` (Sessions/Read/Write/Bash/etc.), so we drop
+#: the strict flag at the wire boundary — the schema sanitizer's
+#: ``additionalProperties: false`` + pruned-required logic enforces the
+#: same shape constraints at JSON-Schema level. Sending strict-true on
+#: >20 tools yields ``BadRequestError: Too many strict tools (33).
+#: The maximum number of strict tools supported is 20``.
+_DROP_STRICT_FLAG_FROM_ANTHROPIC_TOOLS: bool = True
+
+
 def _format_tools_for_anthropic(
     tools: list[ToolSchema] | None,
 ) -> list[dict[str, Any]]:
@@ -63,6 +74,9 @@ def _format_tools_for_anthropic(
       - Nullable anyOf/oneOf unions (Anthropic rejects null branches)
       - Numeric constraints on integer/number (Anthropic 2025 validator
         rejects minimum/maximum/exclusiveMin/exclusiveMax/multipleOf)
+      - Array/object cardinality constraints
+      - The ``strict: true`` flag — Anthropic caps strict tools at 20
+        and OC ships >20 strict-marked tools (see comment above).
 
     Tools with no parameters get the canonical ``{"type":"object","properties":{}}``
     shape so Anthropic's strict validator accepts them.
@@ -75,6 +89,8 @@ def _format_tools_for_anthropic(
         formatted["input_schema"] = normalize_tool_input_schema_for_anthropic(
             formatted.get("input_schema")
         )
+        if _DROP_STRICT_FLAG_FROM_ANTHROPIC_TOOLS:
+            formatted.pop("strict", None)
         out.append(formatted)
     return out
 
