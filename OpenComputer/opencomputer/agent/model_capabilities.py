@@ -1,24 +1,39 @@
-"""Pure-function capability table for model-conditional API kwargs.
+"""Generic per-model capability table — provider-agnostic interface.
 
-Anthropic's model lineup has diverged enough that one provider can't
-send identical kwargs to every model:
+Modern AI providers ship multiple models with diverging API surfaces.
+The same provider often has models that take different kwargs:
 
-* Opus 4.7+ and Mythos reject ``temperature``/``top_p``/``top_k`` and
-  reject manual extended thinking (``thinking: {type: enabled,
-  budget_tokens: N}``); they require ``thinking: {type: adaptive}``
-  with ``output_config.effort``.
-* Opus 4.6 / Sonnet 4.6 accept both shapes but adaptive is recommended
-  and ``temperature`` is still allowed.
-* Opus 4.5 and older only support the legacy thinking shape.
+* Anthropic Opus 4.7+ rejects ``temperature``/``top_p``/``top_k`` and
+  requires ``thinking: {type: adaptive}`` instead of the legacy
+  ``enabled+budget_tokens`` shape.
+* OpenAI's reasoning models (o1, o3, gpt-5-thinking) reject
+  ``temperature`` and use ``reasoning_effort`` instead of vendor-specific
+  thinking blocks.
+* Local providers (Ollama, llama.cpp) accept whatever the upstream
+  generic shape allows but may have their own ``num_predict``-style
+  output-token quirks.
 
-This module answers three yes/no questions per model so the provider
-and runtime_flags can pick the right shape without each rolling its
-own table.
+This module is a **registry** — providers contribute their model→
+capability data here, and the agent loop / runtime_flags consult the
+unified API. The framework is generic; the *data* below is currently
+Anthropic + OpenAI-reasoning because those are the providers where
+model-conditional kwargs matter today. New providers (Kimi/Moonshot,
+Z.AI, DeepSeek thinking models, future Llama variants) extend the
+appropriate function as they ship support for capability-gated kwargs.
+
+The three questions every provider needs answered:
+  * ``supports_adaptive_thinking(model)`` — does this model accept
+    Anthropic's ``thinking: {type: adaptive}`` shape? (Today: only
+    modern Claude. Future: maybe other providers if they adopt it.)
+  * ``supports_temperature(model)`` — does this model accept
+    ``temperature``/``top_p``/``top_k``? Reasoning models often don't.
+  * ``thinking_display_default(model)`` — recommended ``display`` field
+    for the thinking block (only meaningful where adaptive is true).
 
 Detection is allowlist-based with a forward-compatible default: an
-unknown ``claude-*`` model name is assumed "modern" (adaptive,
-no temperature). Anthropic's trajectory is everything moves to that
-shape; a wrong guess on a future model is one-line to fix.
+unknown ``claude-*`` name is assumed "modern" (adaptive, no
+temperature) — Anthropic's trajectory. Other providers default to
+"keeps temperature" until they explicitly opt out.
 """
 
 from __future__ import annotations
@@ -56,13 +71,30 @@ def supports_adaptive_thinking(model: str) -> bool:
     return not _is_legacy_claude(model)
 
 
+# OpenAI reasoning models reject ``temperature``/``top_p``/``top_k``.
+# Pattern follows Anthropic's lead: any model whose name signals
+# "reasoning-tier" drops temperature. Update as OpenAI ships new
+# reasoning lineups.
+_OPENAI_NO_TEMPERATURE_PREFIXES: tuple[str, ...] = (
+    "o1",
+    "o3",
+    "o4",
+    "gpt-5-thinking",
+    "gpt-6-thinking",
+)
+
+
 def supports_temperature(model: str) -> bool:
     """True if the model accepts ``temperature``/``top_p``/``top_k`` kwargs.
 
-    Opus 4.7+, Mythos, and future modern claude-* reject these (return
-    False). Legacy claude-* and all non-claude models accept them
-    (return True). 4.6 specifically still accepts temperature even
-    though adaptive thinking is recommended there.
+    Returns False for:
+      * Modern Anthropic (Opus 4.7+, Mythos, future claude-* — except 4.6
+        which Anthropic explicitly kept temperature on).
+      * OpenAI reasoning models (o1, o3, o4, gpt-5-thinking, etc.).
+
+    Returns True for legacy Anthropic, OpenAI chat (gpt-4o, gpt-4),
+    and all other models (Kimi, Llama, Mistral, etc.) until those
+    providers explicitly opt out.
     """
     # Legacy claude-* keeps temperature.
     if _is_legacy_claude(model):
@@ -74,8 +106,13 @@ def supports_temperature(model: str) -> bool:
         ):
             return True
         return False
-    # Non-claude models: providers handle their own param names; we
-    # never strip temperature from them here.
+    # OpenAI reasoning lineups reject temperature.
+    if any(model.startswith(p) for p in _OPENAI_NO_TEMPERATURE_PREFIXES):
+        return False
+    # Default for unknown providers: keep temperature. Providers that
+    # need stricter behavior can extend this function with their own
+    # prefix list (Kimi/Moonshot reasoning, Z.AI, DeepSeek-Reasoner,
+    # future Llama-thinking variants, etc.).
     return True
 
 
