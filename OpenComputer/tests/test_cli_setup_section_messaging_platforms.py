@@ -83,3 +83,123 @@ def test_is_messaging_platforms_configured(tmp_path):
         config={"gateway": {"platforms": ["telegram"]}},
     )
     assert is_messaging_platforms_configured(with_platform) is True
+
+
+# ─────────────────────────────────────────────────────────────────
+# T — per-platform credential entry flow
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_invoke_platform_setup_prompts_for_each_env_var(
+    monkeypatch, tmp_path,
+):
+    """Telegram has 2 env_vars (BOT_TOKEN, USER_ID) — both prompted +
+    saved when no existing values."""
+    from opencomputer.cli_setup.section_handlers import messaging_platforms as mp
+
+    monkeypatch.setattr(mp, "_discover_platforms", lambda: [
+        {
+            "name": "telegram", "label": "Telegram",
+            "env_vars": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_ID"],
+            "signup_url": "https://t.me/BotFather",
+        },
+    ])
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_USER_ID", raising=False)
+
+    env_file = tmp_path / ".env"
+    monkeypatch.setattr(mp, "default_env_file", lambda: env_file)
+    monkeypatch.setattr(
+        "opencomputer.cli_setup.env_writer.default_env_file",
+        lambda: env_file,
+    )
+
+    prompts_seen: list[str] = []
+
+    def fake_prompt(env_var):
+        prompts_seen.append(env_var)
+        return f"value-for-{env_var}"
+
+    monkeypatch.setattr(mp, "_prompt_secret", fake_prompt)
+
+    ctx = _make_ctx(tmp_path)
+    mp._invoke_platform_setup("telegram", ctx)
+
+    assert prompts_seen == ["TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_ID"]
+    text = env_file.read_text()
+    assert "TELEGRAM_BOT_TOKEN=value-for-TELEGRAM_BOT_TOKEN" in text
+    assert "TELEGRAM_USER_ID=value-for-TELEGRAM_USER_ID" in text
+    assert "telegram" in ctx.config["gateway"]["platforms"]
+
+
+def test_invoke_platform_setup_use_existing_secret(monkeypatch, tmp_path):
+    """When env var already set, user can pick 'use existing' (idx 0) — no prompt."""
+    from opencomputer.cli_setup.section_handlers import messaging_platforms as mp
+
+    monkeypatch.setattr(mp, "_discover_platforms", lambda: [
+        {
+            "name": "discord", "label": "Discord",
+            "env_vars": ["DISCORD_BOT_TOKEN"],
+            "signup_url": "",
+        },
+    ])
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "existing-token")
+
+    env_file = tmp_path / ".env"
+    monkeypatch.setattr(mp, "default_env_file", lambda: env_file)
+    monkeypatch.setattr(mp, "radiolist", lambda *a, **kw: 0)  # use existing
+
+    prompt_called: list[bool] = []
+    monkeypatch.setattr(
+        mp, "_prompt_secret",
+        lambda env_var: prompt_called.append(True) or "should-not-be-used",
+    )
+
+    ctx = _make_ctx(tmp_path)
+    mp._invoke_platform_setup("discord", ctx)
+
+    assert prompt_called == []
+    assert not env_file.exists()
+    assert "discord" in ctx.config["gateway"]["platforms"]
+
+
+def test_invoke_platform_setup_unknown_platform_records_only_name(
+    monkeypatch, tmp_path,
+):
+    """Falls back to name-only record when discovery doesn't include
+    the requested platform."""
+    from opencomputer.cli_setup.section_handlers import messaging_platforms as mp
+
+    monkeypatch.setattr(mp, "_discover_platforms", lambda: [])
+
+    ctx = _make_ctx(tmp_path)
+    mp._invoke_platform_setup("custom-channel", ctx)
+
+    assert ctx.config["gateway"]["platforms"] == ["custom-channel"]
+
+
+def test_invoke_platform_setup_user_skips_prompt(monkeypatch, tmp_path):
+    """User submits empty input → no .env write but platform still recorded."""
+    from opencomputer.cli_setup.section_handlers import messaging_platforms as mp
+
+    monkeypatch.setattr(mp, "_discover_platforms", lambda: [
+        {
+            "name": "telegram", "label": "Telegram",
+            "env_vars": ["TELEGRAM_BOT_TOKEN"],
+            "signup_url": "",
+        },
+    ])
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    env_file = tmp_path / ".env"
+    monkeypatch.setattr(mp, "default_env_file", lambda: env_file)
+    monkeypatch.setattr(
+        "opencomputer.cli_setup.env_writer.default_env_file",
+        lambda: env_file,
+    )
+    monkeypatch.setattr(mp, "_prompt_secret", lambda env_var: None)
+
+    ctx = _make_ctx(tmp_path)
+    mp._invoke_platform_setup("telegram", ctx)
+
+    assert not env_file.exists()
+    assert "telegram" in ctx.config["gateway"]["platforms"]
