@@ -28,12 +28,12 @@ def _seed_profiles(root: Path, names: list[str]) -> None:
         (root / "profiles" / n).mkdir()
 
 
-def test_cycle_profile_wraps_through_real_profiles_only(tmp_path, monkeypatch):
-    """With real profiles on disk, cycle stays inside them and skips the
-    synthetic ``"default"``. UX rule: rendering ``coding → default`` to a
-    user who only created real profiles was confusing — see the docstring
-    on ``_all_cycle_targets``. The "no profile" state remains reachable
-    via ``oc profile use default`` / ``/profile use default``.
+def test_cycle_profile_wraps_through_default_and_real_profiles(
+    tmp_path, monkeypatch,
+):
+    """Cycle now includes ``default`` so users can rotate back to the
+    no-sticky state via Ctrl+P (per user request). Order:
+    ``default → first-real → … → last-real → default``.
     """
     monkeypatch.setenv("OPENCOMPUTER_HOME_ROOT", str(tmp_path))
     _seed_profiles(tmp_path, ["work", "side"])
@@ -48,9 +48,13 @@ def test_cycle_profile_wraps_through_real_profiles_only(tmp_path, monkeypatch):
     runtime.custom.pop("pending_profile_id", None)
     assert cycle_profile(runtime) == "work"
 
-    # Wrap-around: from the last real profile back to the first real,
-    # NOT to the synthetic "default".
+    # Wrap-around: from the last real profile back to ``default``,
+    # then default → first real again on the next press.
     runtime.custom["active_profile_id"] = "work"
+    runtime.custom.pop("pending_profile_id", None)
+    assert cycle_profile(runtime) == "default"
+
+    runtime.custom["active_profile_id"] = "default"
     runtime.custom.pop("pending_profile_id", None)
     assert cycle_profile(runtime) == "side"
 

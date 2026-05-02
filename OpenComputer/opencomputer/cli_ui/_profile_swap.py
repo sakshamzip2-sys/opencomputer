@@ -16,26 +16,27 @@ _NO_OTHER_PROFILES_HINT = "no other profiles — use /profile create"
 
 
 def _all_cycle_targets() -> list[str]:
-    """Sorted list of cycle targets.
+    """Sorted list of cycle targets, ALWAYS including ``"default"``.
 
-    Real profiles only when the user has any. When zero real profiles
-    exist, the synthetic ``"default"`` is the only cycle target so that
-    callers see a non-empty list and the "no other profiles" hint kicks
-    in via the ``len(targets) <= 1`` check in :func:`cycle_profile`.
+    Per user request, the cycle now rotates through ``default`` plus
+    every real profile on disk (e.g. ``default → coding → stock →
+    default``). Previously ``default`` was hidden once real profiles
+    existed, leaving Ctrl+P "stuck" rotating between non-default
+    profiles only — the user could never get back to the no-sticky
+    state without dropping to the CLI.
 
-    Why hide ``"default"`` once real profiles exist: rendering
-    ``profile: coding → default`` to a user with [coding, stock] on
-    disk is confusing — there's no ``default`` profile dir, and a single
-    accidental Ctrl+P would queue a sticky-profile deletion on the next
-    turn. The "no profile" state is still reachable explicitly via
-    ``oc profile use default`` / ``/profile use default``.
+    Empty list edge case: zero real profiles → just ``["default"]``,
+    which trips the ``len(targets) <= 1`` guard in
+    :func:`cycle_profile` and surfaces the "no other profiles" hint.
     """
     from opencomputer.profiles import list_profiles
 
-    names = list_profiles()
-    if not names:
-        return ["default"]
-    return sorted(names)
+    names = sorted(list_profiles())
+    # Guarantee "default" is in the cycle and lives at the front so
+    # the rotation reads naturally: default → first-real-profile → … → default.
+    if "default" not in names:
+        names = ["default", *names]
+    return names
 
 
 def cycle_profile(runtime: Any) -> str | None:
