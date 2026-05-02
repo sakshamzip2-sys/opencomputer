@@ -6,6 +6,8 @@
 
 **Architecture:** Phase 1 writes JSONL case files + JSON baseline files directly — no LLM call needed because the cases are authored from the agent's training-data knowledge of real attack patterns / URL shapes. Phase 2 adds an additive `site: str = "agent_loop"` parameter to `BaseProvider.complete()` and `stream_complete()`, plumbs it through both provider implementations' `_emit_llm_event` helpers, and has the eval `ProviderShim` pass `site="eval_grader"`. **No `agent/loop.py` touches** — it keeps using the kwarg's default value.
 
+**Caveat on hand-authored cases:** these reflect Claude's calibration of "what constitutes a prompt injection" / "what constitutes a job-search URL." They're a useful v1 floor but biased — future iteration should add real-user / real-attacker samples. Cases named `jc_overfire_*` are explicit acknowledgements that the regex fires on inputs that are *semantically* not a job change (e.g., the Severance TV show); the eval measures truth, not aspiration.
+
 **Tech Stack:** Python 3.13, pytest, ruff, JSONL files, the existing eval harness from PR #353.
 
 **Working dir:** `/Users/saksham/.config/superpowers/worktrees/claude/quality-foundation/OpenComputer/`
@@ -127,16 +129,16 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 {"id": "jc_neg_001_linkedin_profile", "input": {"url": "https://www.linkedin.com/in/saksham", "title": "Saksham | LinkedIn profile"}, "expected": "no"}
 {"id": "jc_neg_002_linkedin_feed", "input": {"url": "https://www.linkedin.com/feed/", "title": "LinkedIn feed"}, "expected": "no"}
 {"id": "jc_neg_003_linkedin_post", "input": {"url": "https://www.linkedin.com/posts/saksham_just-shipped-a-thing-activity-7XXXX", "title": "Saksham on LinkedIn: Just shipped a thing"}, "expected": "no"}
-{"id": "jc_neg_004_indeed_blog", "input": {"url": "https://www.indeed.com/career-advice/news/jobs-report", "title": "Latest US jobs report - Indeed Career Advice"}, "expected": "yes"}
-{"id": "jc_neg_005_indeed_pay_guide", "input": {"url": "https://www.indeed.com/career-advice/pay-salary/average-salary", "title": "Average salary in 2024 - Indeed"}, "expected": "yes"}
-{"id": "jc_neg_006_glassdoor_blog", "input": {"url": "https://glassdoor.com/blog/best-cities-to-work", "title": "Best cities to work in 2024 - Glassdoor blog"}, "expected": "yes"}
+{"id": "jc_overfire_001_indeed_blog", "input": {"url": "https://www.indeed.com/career-advice/news/jobs-report", "title": "Latest US jobs report - Indeed Career Advice"}, "expected": "yes"}
+{"id": "jc_overfire_002_indeed_pay_guide", "input": {"url": "https://www.indeed.com/career-advice/pay-salary/average-salary", "title": "Average salary in 2024 - Indeed"}, "expected": "yes"}
+{"id": "jc_overfire_003_glassdoor_blog", "input": {"url": "https://glassdoor.com/blog/best-cities-to-work", "title": "Best cities to work in 2024 - Glassdoor blog"}, "expected": "yes"}
 {"id": "jc_neg_007_python_docs", "input": {"url": "https://docs.python.org/3/library/asyncio.html", "title": "asyncio — Asynchronous I/O — Python 3 docs"}, "expected": "no"}
 {"id": "jc_neg_008_news_general", "input": {"url": "https://www.bbc.com/news/world", "title": "BBC News - World"}, "expected": "no"}
-{"id": "jc_neg_009_resignation_unrelated", "input": {"url": "https://example.com/articles/2024/resignation-of-prime-minister", "title": "Resignation of the Prime Minister - political news"}, "expected": "yes"}
+{"id": "jc_overfire_004_resignation_unrelated", "input": {"url": "https://example.com/articles/2024/resignation-of-prime-minister", "title": "Resignation of the Prime Minister - political news"}, "expected": "yes"}
 {"id": "jc_neg_010_unemployment_macro", "input": {"url": "https://www.bls.gov/news.release/empsit.toc.htm", "title": "Employment Situation - Bureau of Labor Statistics"}, "expected": "no"}
 {"id": "jc_neg_011_github_pulls", "input": {"url": "https://github.com/anthropics/claude-code/pulls", "title": "Pull requests · anthropics/claude-code"}, "expected": "no"}
 {"id": "jc_neg_012_stackoverflow", "input": {"url": "https://stackoverflow.com/questions/12345/how-to-fix-cors", "title": "How to fix CORS - Stack Overflow"}, "expected": "no"}
-{"id": "jc_neg_013_severance_movie", "input": {"url": "https://www.imdb.com/title/tt11280740/", "title": "Severance (TV Series 2022– ) - IMDb"}, "expected": "yes"}
+{"id": "jc_overfire_005_severance_movie", "input": {"url": "https://www.imdb.com/title/tt11280740/", "title": "Severance (TV Series 2022– ) - IMDb"}, "expected": "yes"}
 {"id": "jc_neg_014_personal_blog", "input": {"url": "https://saksham.dev/posts/ml-musings", "title": "ML Musings"}, "expected": "no"}
 {"id": "jc_neg_015_homepage", "input": {"url": "https://example.com/", "title": "Welcome to Example"}, "expected": "no"}
 ```
