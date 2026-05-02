@@ -11,6 +11,31 @@ Pure functions -- no class state, no AIAgent dependency.
 import copy
 from typing import Any
 
+#: Anthropic's server-side cache lookback window. We mirror this client-side
+#: when walking back to find the most recent block eligible for a cache_control
+#: marker — going further than this can't pay off because the server stops
+#: looking too.
+_LOOKBACK_WINDOW = 20
+
+#: Cheap chars→tokens approximation. We are filtering for cache eligibility,
+#: not billing — over-counting (lower token estimate) errs on the side of
+#: "skip the marker", which is the safe direction (a missed cache write is
+#: cheaper than a wasted breakpoint slot).
+_CHARS_PER_TOKEN = 4
+
+
+def _block_token_estimate(content: Any) -> int:
+    """Cheap upper-bound token count for a message's content."""
+    if isinstance(content, str):
+        return len(content) // _CHARS_PER_TOKEN
+    if isinstance(content, list):
+        total = 0
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                total += len(block.get("text", ""))
+        return total // _CHARS_PER_TOKEN
+    return 0
+
 
 def _apply_cache_marker(msg: dict, cache_marker: dict, native_anthropic: bool = False) -> None:
     """Add cache_control to a single message, handling all format variations."""
@@ -42,10 +67,21 @@ def apply_anthropic_cache_control(
     api_messages: list[dict[str, Any]],
     cache_ttl: str = "5m",
     native_anthropic: bool = False,
+    min_cache_tokens: int = 0,
 ) -> list[dict[str, Any]]:
     """Apply system_and_3 caching strategy to messages for Anthropic models.
 
-    Places up to 4 cache_control breakpoints: system prompt + last 3 non-system messages.
+    Places up to 4 cache_control breakpoints: system prompt + last 3 non-system
+    messages.
+
+    ``min_cache_tokens`` filters out blocks whose estimated token count is
+    below the model's prompt-cache minimum (e.g. 4096 for Opus). Marking a
+    sub-threshold block is a silent server-side no-op that wastes a
+    breakpoint slot. When a candidate is too small, we walk back through
+    earlier non-system messages (up to the Anthropic 20-block lookback
+    window) to find one that clears the threshold. If none does, the
+    breakpoint slot is simply not used; the request proceeds with fewer
+    or zero cache markers.
 
     Returns:
         Deep copy of messages with cache_control breakpoints injected.
@@ -61,12 +97,39 @@ def apply_anthropic_cache_control(
     breakpoints_used = 0
 
     if messages[0].get("role") == "system":
+        # System prompts are by convention always large enough to be worth
+        # caching; don't filter the system slot. Cheap insurance against a
+        # tiny test-only system prompt failing to threshold.
         _apply_cache_marker(messages[0], marker, native_anthropic=native_anthropic)
         breakpoints_used += 1
 
     remaining = 4 - breakpoints_used
     non_sys = [i for i in range(len(messages)) if messages[i].get("role") != "system"]
-    for idx in non_sys[-remaining:]:
+
+    # Pick up to ``remaining`` indices from the tail of non_sys, skipping
+    # blocks that fall below ``min_cache_tokens``. For each slot we walk
+    # back through unused indices up to the lookback window.
+    chosen: list[int] = []
+    used: set[int] = set()
+    for slot_offset in range(remaining):
+        # Tail-anchored start point for this slot.
+        start = len(non_sys) - 1 - slot_offset
+        if start < 0:
+            break
+        for walk in range(_LOOKBACK_WINDOW):
+            cand = start - walk
+            if cand < 0:
+                break
+            idx = non_sys[cand]
+            if idx in used:
+                continue
+            est = _block_token_estimate(messages[idx].get("content"))
+            if est >= min_cache_tokens:
+                chosen.append(idx)
+                used.add(idx)
+                break
+
+    for idx in chosen:
         _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic)
 
     return messages
