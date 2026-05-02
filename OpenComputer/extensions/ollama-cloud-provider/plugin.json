@@ -1,0 +1,20 @@
+{
+  "id": "ollama-cloud-provider",
+  "name": "Ollama Cloud",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Ollama Cloud (cloud-hosted open models) — OpenAI-compatible.",
+  "setup": {
+    "providers": [
+      {
+        "id": "ollama-cloud",
+        "auth_methods": ["api_key"],
+        "env_vars": ["OLLAMA_API_KEY"],
+        "label": "Ollama Cloud (cloud-hosted open models — ollama.com)",
+        "default_model": "gpt-oss:120b",
+        "signup_url": "https://ollama.com/settings/keys"
+      }
+    ]
+  }
+}

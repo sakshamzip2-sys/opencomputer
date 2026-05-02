@@ -1,0 +1,20 @@
+{
+  "id": "kilo-provider",
+  "name": "Kilo Code",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Kilo Code (Kilo Gateway API) — OpenAI-compatible.",
+  "setup": {
+    "providers": [
+      {
+        "id": "kilo",
+        "auth_methods": ["api_key"],
+        "env_vars": ["KILO_API_KEY"],
+        "label": "Kilo Code (Kilo Gateway API)",
+        "default_model": "anthropic/claude-sonnet-4-6",
+        "signup_url": "https://kilocode.ai"
+      }
+    ]
+  }
+}

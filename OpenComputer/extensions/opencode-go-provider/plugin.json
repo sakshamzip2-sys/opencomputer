@@ -1,0 +1,20 @@
+{
+  "id": "opencode-go-provider",
+  "name": "OpenCode Go",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "OpenCode Go (open models, $10/month subscription) — OpenAI-compatible.",
+  "setup": {
+    "providers": [
+      {
+        "id": "opencode-go",
+        "auth_methods": ["api_key"],
+        "env_vars": ["OPENCODE_GO_API_KEY"],
+        "label": "OpenCode Go (open models — $10/month subscription)",
+        "default_model": "qwen/qwen2.5-coder-32b-instruct",
+        "signup_url": "https://opencode.ai/go"
+      }
+    ]
+  }
+}
