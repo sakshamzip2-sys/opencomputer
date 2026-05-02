@@ -194,6 +194,20 @@ class BatchUnsupportedError(NotImplementedError):
     """
 
 
+class VisionUnsupportedError(NotImplementedError):
+    """Raised when a provider doesn't support vision (multimodal image input).
+
+    Mirrors :class:`BatchUnsupportedError` for the vision capability.
+    Most providers don't accept image content blocks (Ollama default
+    text models, Groq's text-only Llama variants, the OpenAI-compat
+    shims that pass-through plain chat). Anthropic, OpenAI (via
+    gpt-4o / gpt-5.4), and OpenRouter (when routed to a vision model)
+    do. Callers should catch this and surface a clean "vision not
+    supported on <provider>" message rather than crashing with a
+    cryptic HTTP 400 from the LLM API.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class BatchRequest:
     """One entry in a batch job — the input to ``submit_batch``.
@@ -353,6 +367,33 @@ class BaseProvider(ABC):
         """
         return ProviderCapabilities()
 
+    async def complete_vision(
+        self,
+        *,
+        model: str,
+        image_base64: str,
+        mime_type: str,
+        prompt: str,
+        max_tokens: int = 1024,
+    ) -> str:
+        """Run a vision completion (text + image), return assistant text.
+
+        Default raises :class:`VisionUnsupportedError` — providers opt in
+        by overriding. The expected implementation is to call ``complete()``
+        with the multimodal-content array shape:
+        ``[{"type": "image", "source": {"type": "base64", "media_type": ...,
+        "data": ...}}, {"type": "text", "text": prompt}]`` wrapped in a
+        single user :class:`Message`, then return ``response.message.content``.
+
+        Mirrors :meth:`submit_batch` — capability is a method override
+        rather than a separate registry lookup. Callers (e.g. the
+        ``VisionAnalyzeTool``) catch :class:`VisionUnsupportedError` and
+        surface a user-facing "vision not supported on <name>" message.
+        """
+        raise VisionUnsupportedError(
+            f"{self.name} does not support vision (multimodal image input)"
+        )
+
     async def submit_batch(self, requests: list[BatchRequest]) -> str:
         """Submit a batch job — returns a provider-specific batch_id.
 
@@ -408,4 +449,5 @@ __all__ = [
     "RateLimitedError",
     "StreamEvent",
     "Usage",
+    "VisionUnsupportedError",
 ]

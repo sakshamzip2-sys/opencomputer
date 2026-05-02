@@ -882,6 +882,42 @@ class AnthropicProvider(BaseProvider):
 
         yield StreamEvent(kind="done", response=self._parse_response(final))
 
+    async def complete_vision(
+        self,
+        *,
+        model: str,
+        image_base64: str,
+        mime_type: str,
+        prompt: str,
+        max_tokens: int = 1024,
+    ) -> str:
+        """Run a vision completion via the existing chat-completions path.
+
+        Anthropic's Messages API accepts the multimodal content-array
+        shape natively — we wrap the image + prompt as a single user
+        :class:`Message` and route through ``self.complete()``. The
+        response's text content is returned verbatim.
+        """
+        from plugin_sdk.core import Message
+
+        content = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime_type,
+                    "data": image_base64,
+                },
+            },
+            {"type": "text", "text": prompt},
+        ]
+        resp = await self.complete(
+            model=model,
+            messages=[Message(role="user", content=content)],
+            max_tokens=max_tokens,
+        )
+        return resp.message.content if resp and resp.message else ""
+
     async def submit_batch(self, requests):
         """Submit a batch via Anthropic's ``messages.batches.create``.
 

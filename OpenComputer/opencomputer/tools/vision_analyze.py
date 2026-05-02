@@ -109,10 +109,11 @@ async def analyze_image_bytes(
     """Send a base64-encoded image + prompt through the user's configured
     provider's vision capability; return text.
 
-    Routes through ``aux_llm.complete_vision`` so vision works on any
-    provider that supports image-content (anthropic, openai-compat with
-    vision models, gemini). Providers without vision raise — caller
-    receives a clean ``(error_string, True)`` 2-tuple.
+    Calls ``provider.complete_vision()`` directly — providers that
+    support vision (anthropic, openai, openrouter via inheritance)
+    override the default; everyone else raises
+    :class:`plugin_sdk.VisionUnsupportedError` which we catch and
+    surface as a clean "vision not supported on <name>" tuple.
 
     The ``api_key`` parameter is accepted for backwards compatibility
     with callers that used to pass an Anthropic key, but is now ignored:
@@ -125,15 +126,27 @@ async def analyze_image_bytes(
     """
     del api_key  # accepted for back-compat; provider plugin owns its auth
 
-    from opencomputer.agent.aux_llm import complete_vision
+    from opencomputer.agent.aux_llm import _resolve_provider
+    from plugin_sdk import VisionUnsupportedError
 
     try:
-        text = await complete_vision(
+        provider = _resolve_provider()
+    except Exception as e:  # noqa: BLE001 — provider not configured / unavailable
+        return (f"vision API call failed: {type(e).__name__}: {e}", True)
+
+    try:
+        text = await provider.complete_vision(
+            model=model,
             image_base64=image_b64,
             mime_type=mime,
             prompt=prompt,
             max_tokens=max_tokens,
-            model=model,
+        )
+    except VisionUnsupportedError as e:
+        return (
+            f"vision not supported on '{provider.name}': {e}. "
+            f"Switch to a vision-capable provider via /provider <name> or oc model.",
+            True,
         )
     except Exception as e:  # noqa: BLE001 — surface any provider error as text
         return (f"vision API call failed: {type(e).__name__}: {e}", True)

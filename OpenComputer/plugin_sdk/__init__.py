@@ -100,6 +100,7 @@ from plugin_sdk.provider_contract import (
     ProviderResponse,
     StreamEvent,
     Usage,
+    VisionUnsupportedError,
 )
 from plugin_sdk.realtime_voice import (
     BaseRealtimeVoiceBridge,
@@ -165,6 +166,7 @@ __all__ = [
     "ProviderResponse",
     "StreamEvent",
     "Usage",
+    "VisionUnsupportedError",
     "BaseChannelAdapter",
     "ChannelCapabilities",
     # classifier abstraction (2026-04-28)
