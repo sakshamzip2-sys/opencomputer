@@ -193,10 +193,126 @@ def _radiolist_numbered_fallback(
         return n - 1
 
 
-# Stubs for checklist / single_select — implemented in subsequent tasks.
-# Defined here so imports of cli_ui.menu don't error in the meantime.
-def checklist(title, items, pre_selected=None):  # type: ignore[no-untyped-def]
-    raise NotImplementedError("checklist lands in Task 4")
+def checklist(
+    title: str,
+    items: list[Choice],
+    pre_selected: Optional[list[int]] = None,
+    *,
+    _input: Optional[Any] = None,
+    _output: Optional[Any] = None,
+) -> list[int]:
+    """Multi-select menu. Returns sorted list of selected indices."""
+    pre_selected = pre_selected or []
+    if not sys.stdin.isatty() and _input is None:
+        return _checklist_numbered_fallback(title, items, pre_selected)
+
+    flush_stdin()
+
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.formatted_text import FormattedText
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    from opencomputer.cli_ui.style import (
+        ARROW_GLYPH,
+        CHECK_OFF,
+        CHECK_ON,
+        MENU_STYLE,
+    )
+
+    cursor = [0]
+    selected: set[int] = set(pre_selected)
+
+    def render():
+        lines: list[tuple[str, str]] = [
+            ("class:menu.title", title + "\n"),
+            ("class:menu.hint",
+             "↑↓ navigate  SPACE toggle  ENTER confirm  ESC cancel\n"),
+            ("", "\n"),
+        ]
+        for i, c in enumerate(items):
+            is_cur = i == cursor[0]
+            is_sel = i in selected
+            arrow = ARROW_GLYPH if is_cur else " "
+            arrow_class = "class:menu.selected.arrow" if is_cur else "class:"
+            row_class = "class:menu.selected" if is_cur else "class:"
+            glyph = CHECK_ON if is_sel else CHECK_OFF
+            glyph_class = (
+                "class:menu.selected.glyph" if is_sel
+                else "class:menu.unselected.glyph"
+            )
+            suffix = f"  ({c.description})" if c.description else ""
+            lines.append((arrow_class, f" {arrow} "))
+            lines.append((glyph_class, f"[{glyph}] "))
+            lines.append((row_class, f"{c.label}{suffix}\n"))
+        return FormattedText(lines)
+
+    bindings = KeyBindings()
+
+    @bindings.add("up")
+    def _up(event): cursor[0] = (cursor[0] - 1) % len(items)
+
+    @bindings.add("down")
+    def _down(event): cursor[0] = (cursor[0] + 1) % len(items)
+
+    @bindings.add(" ")
+    def _toggle(event):
+        i = cursor[0]
+        if i in selected:
+            selected.remove(i)
+        else:
+            selected.add(i)
+
+    @bindings.add("enter")
+    def _confirm(event):
+        event.app.exit(result=sorted(selected))
+
+    @bindings.add("escape")
+    @bindings.add("c-c")
+    def _cancel(event):
+        event.app.exit(exception=WizardCancelled())
+
+    layout = Layout(HSplit([Window(FormattedTextControl(render))]))
+    app = Application(
+        layout=layout, key_bindings=bindings, style=MENU_STYLE,
+        full_screen=False, input=_input, output=_output,
+    )
+    return app.run()
+
+
+def _checklist_numbered_fallback(
+    title: str, items: list[Choice], pre_selected: list[int],
+) -> list[int]:
+    """Non-TTY multi-select. Reads comma-separated numbers from stdin."""
+    print(title)
+    for i, c in enumerate(items):
+        marker = "[✓]" if i in pre_selected else "[ ]"
+        suffix = f"  ({c.description})" if c.description else ""
+        print(f"  {marker} {i + 1}. {c.label}{suffix}")
+    print()
+    pre_str = ",".join(str(i + 1) for i in pre_selected) or "none"
+    while True:
+        try:
+            raw = input(
+                f"Numbers comma-separated [default {pre_str}]: "
+            ).strip()
+        except EOFError:
+            return sorted(pre_selected)
+        if raw == "":
+            return sorted(pre_selected)
+        try:
+            picks = sorted({int(x.strip()) - 1 for x in raw.split(",") if x.strip()})
+        except ValueError:
+            print(f"Invalid input '{raw}' — comma-separated numbers only.",
+                  file=sys.stderr)
+            continue
+        if not all(0 <= p < len(items) for p in picks):
+            print(f"out of range — only 1-{len(items)} are valid.",
+                  file=sys.stderr)
+            continue
+        return picks
 
 
 def single_select(title, items, default=0):  # type: ignore[no-untyped-def]

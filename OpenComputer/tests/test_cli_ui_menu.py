@@ -124,3 +124,64 @@ def test_radiolist_tty_esc_raises_wizard_cancelled(monkeypatch):
                 _input=pipe_input,
                 _output=DummyOutput(),
             )
+
+
+def test_checklist_numbered_fallback_returns_selected_indices(monkeypatch):
+    from opencomputer.cli_ui.menu import Choice, checklist
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr("sys.stdin", io.StringIO("1,3\n"))
+
+    items = [Choice("Telegram", "telegram"), Choice("Discord", "discord"),
+             Choice("Slack", "slack"), Choice("Matrix", "matrix")]
+    selected = checklist("Select platforms:", items)
+    assert selected == [0, 2]
+
+
+def test_checklist_numbered_fallback_pre_selected_default(monkeypatch):
+    from opencomputer.cli_ui.menu import Choice, checklist
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n"))
+
+    items = [Choice("A", "a"), Choice("B", "b")]
+    selected = checklist("Pick:", items, pre_selected=[1])
+    assert selected == [1]
+
+
+def test_checklist_tty_space_toggles_then_enter_confirms(monkeypatch):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from opencomputer.cli_ui.menu import Choice, checklist
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    with create_pipe_input() as pipe_input:
+        # Default cursor at 0; SPACE toggles 0; Down; SPACE toggles 1; Enter.
+        pipe_input.send_text(" \x1b[B \r")
+        selected = checklist(
+            "Pick:",
+            [Choice("A", "a"), Choice("B", "b"), Choice("C", "c")],
+            _input=pipe_input,
+            _output=DummyOutput(),
+        )
+    assert selected == [0, 1]
+
+
+def test_checklist_tty_esc_raises_wizard_cancelled(monkeypatch):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from opencomputer.cli_ui.menu import Choice, WizardCancelled, checklist
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text("\x1b")
+        with pytest.raises(WizardCancelled):
+            checklist(
+                "Pick:",
+                [Choice("A", "a")],
+                _input=pipe_input,
+                _output=DummyOutput(),
+            )
