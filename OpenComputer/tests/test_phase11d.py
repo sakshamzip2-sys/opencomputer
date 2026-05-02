@@ -366,10 +366,22 @@ async def test_submit_poll_fetch_end_to_end_with_mocks(
 
     monkeypatch.setattr(batch_mod, "__import__", lambda *a, **kw: MagicMock(), raising=False)
 
-    # Patch anthropic.AsyncAnthropic to return our fake client
+    # Force-import opencomputer.agent.anthropic_client BEFORE patching
+    # sys.modules. The module does ``from anthropic import Anthropic,
+    # AsyncAnthropic`` at top-level, so its bound names need to capture the
+    # *real* classes — otherwise our MagicMock leaks into later tests in
+    # the same process (e.g. test_profile_bootstrap_extractor_pluggable.py)
+    # that hit the same code path through build_anthropic_sync_client.
+    import opencomputer.agent.anthropic_client as _ac
+
+    # Patch anthropic.AsyncAnthropic to return our fake client. We patch
+    # both sys.modules (for any code that does ``import anthropic``) and
+    # the bound name on _ac (used by build_anthropic_async_client). Both
+    # reverts cleanly because _ac was already imported with the real class.
     fake_anthropic = MagicMock()
     fake_anthropic.AsyncAnthropic = MagicMock(return_value=fake_client)
     monkeypatch.setitem(__import__("sys").modules, "anthropic", fake_anthropic)
+    monkeypatch.setattr(_ac, "AsyncAnthropic", fake_anthropic.AsyncAnthropic)
 
     in_path = tmp_path / "in.jsonl"
     in_path.write_text(
