@@ -1,0 +1,23 @@
+{
+  "id": "deepseek-provider",
+  "name": "DeepSeek",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "DeepSeek (V3 / R1 / Coder) — OpenAI-compatible direct API. Subclasses the bundled openai-provider.",
+  "model_support": {
+    "model_prefixes": ["deepseek-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "deepseek",
+        "auth_methods": ["api_key"],
+        "env_vars": ["DEEPSEEK_API_KEY"],
+        "label": "DeepSeek (V3 / R1 / Coder — direct API)",
+        "default_model": "deepseek-chat",
+        "signup_url": "https://platform.deepseek.com/api_keys"
+      }
+    ]
+  }
+}
