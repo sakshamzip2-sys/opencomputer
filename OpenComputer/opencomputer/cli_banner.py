@@ -174,30 +174,24 @@ def build_welcome_banner(
     tools/skills listing."""
     import random
 
-    # Header — agent name + version, styled to read as the title of the
-    # session. The OPENCOMPUTER ASCII logo and OC side glyph were dropped
-    # at user request; instead we use a single bold-yellow line with a
-    # sparkle accent, version label dimmed alongside.
-    version_label = format_banner_version_label()
-    # ``format_banner_version_label`` returns "OpenComputer vX · sha".
-    # Split off the leading agent-name so we can style it differently
-    # from the version pill that follows.
-    if version_label.startswith("OpenComputer "):
-        version_pill = version_label[len("OpenComputer "):]
-    else:  # defensive — never happens in production
-        version_pill = ""
+    # Header — agent name + version, styled to read as the title of
+    # the session. SHA dropped per user request; just show ``vX.Y.Z``.
     console.print(
-        f"[bold yellow]✦ OpenComputer[/bold yellow]  [dim yellow]{version_pill}[/dim yellow]"
+        f"[bold yellow]✦ OpenComputer[/bold yellow]  "
+        f"[dim yellow]v{__version__}[/dim yellow]"
     )
     console.print()
 
-    # Meta block — model + working dir + session + profile home
+    # Meta block — model + working dir + session.
+    # The profile-home line was dropped per user request: it duplicated
+    # what the cwd line already conveys for most users (the cwd is what
+    # the agent operates on; the OC home dir is purely internal state).
     console.print(f"[bold]{model}[/bold]")
     console.print(f"[dim]{cwd}[/dim]")
     if session_id:
         console.print(f"[dim]Session: {session_id}[/dim]")
-    if home:
-        console.print(f"[dim]{home}[/dim]")
+    # ``home`` arg accepted for backwards-compat but no longer rendered.
+    _ = home
 
     # Update-check hint — non-blocking (200ms), silently None when the
     # background check hasn't finished yet (caller already invoked
