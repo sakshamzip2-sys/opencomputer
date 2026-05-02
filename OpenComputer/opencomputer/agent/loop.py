@@ -49,7 +49,7 @@ from opencomputer.tools.registry import registry
 from opencomputer.tools.session_search_tool import SessionSearchTool
 from plugin_sdk.core import Message, StopReason, ToolCall
 from plugin_sdk.injection import InjectionContext
-from plugin_sdk.provider_contract import BaseProvider
+from plugin_sdk.provider_contract import BaseProvider, ProviderResponse
 from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
 from plugin_sdk.tool_matcher import ToolPattern as _ToolPattern
 from plugin_sdk.tool_matcher import matches as _pattern_matches
@@ -116,6 +116,11 @@ class ConversationResult:
     iterations: int
     input_tokens: int
     output_tokens: int
+    stop_reason: StopReason | None = None
+    """The terminal stop reason of the final step. ``None`` only when the
+    loop exited via the no-message early return path (no model call
+    made). Additive field (2026-05-02 Opus 4.7 migration) — existing
+    callers that ignore it continue to work unchanged."""
 
 
 #: Synthetic tool name used for Hybrid skill dispatch wrap. Must match
@@ -1643,6 +1648,7 @@ class AgentLoop:
                         iterations=iterations,
                         input_tokens=total_input,
                         output_tokens=total_output,
+                        stop_reason=step.stop_reason,
                     )
 
                 # Push the current runtime to DelegateTool so subagents inherit it.
@@ -1756,6 +1762,7 @@ class AgentLoop:
                 iterations=iterations,
                 input_tokens=total_input,
                 output_tokens=total_output,
+                stop_reason=StopReason.BUDGET_EXHAUSTED,
             )
         except (KeyboardInterrupt, asyncio.CancelledError):
             _session_end_reason = "cancelled"
@@ -1789,6 +1796,7 @@ class AgentLoop:
                 iterations=iterations,
                 input_tokens=total_input,
                 output_tokens=total_output,
+                stop_reason=StopReason.ERROR,
             )
         except Exception:
             _session_end_reason = "error"
@@ -2828,12 +2836,36 @@ class AgentLoop:
             "tool_use": StopReason.TOOL_USE,
             "max_tokens": StopReason.MAX_TOKENS,
             "stop_sequence": StopReason.END_TURN,
-            # Item 2 (2026-05-02): server-tool work paused; loop re-sends.
+            # Server-tool work paused; loop re-sends.
             "pause_turn": StopReason.PAUSE_TURN,
-            # Item 2 (2026-05-02): model refused; surface as final, no retry.
+            # Model refused; surface as final, no retry.
             "refusal": StopReason.REFUSAL,
+            # Context window exceeded — Subsystem A retry-with-compaction.
+            "model_context_window_exceeded": StopReason.CONTEXT_FULL,
         }
         stop = stop_reason_map.get(resp.stop_reason, StopReason.END_TURN)
+
+        # Refusal: ensure the user sees something, even if the model
+        # emitted no text. Anthropic returns stop_reason=refusal when its
+        # safety filter declines a request — sometimes with a brief
+        # explanation, sometimes empty. Today we silently map to END_TURN,
+        # leaving the user staring at an empty assistant turn.
+        if stop == StopReason.REFUSAL:
+            existing = (resp.message.content or "").strip()
+            new_content = (
+                f"_Claude declined to respond._\n\n{existing}"
+                if existing
+                else "_Claude declined to respond._"
+            )
+            resp = ProviderResponse(
+                message=Message(
+                    role=resp.message.role,
+                    content=new_content,
+                    tool_calls=resp.message.tool_calls,
+                ),
+                stop_reason=resp.stop_reason,
+                usage=resp.usage,
+            )
 
         # If the model called tools, even if the raw stop_reason was "end_turn",
         # we need to continue so the model can process results.
