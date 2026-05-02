@@ -1,0 +1,20 @@
+{
+  "id": "gmi-provider",
+  "name": "GMI Cloud",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "GMI Cloud (multi-model direct API) — OpenAI-compatible.",
+  "setup": {
+    "providers": [
+      {
+        "id": "gmi",
+        "auth_methods": ["api_key"],
+        "env_vars": ["GMI_API_KEY"],
+        "label": "GMI Cloud (multi-model direct API)",
+        "default_model": "deepseek-ai/DeepSeek-V3",
+        "signup_url": "https://www.gmicloud.ai"
+      }
+    ]
+  }
+}

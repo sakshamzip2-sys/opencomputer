@@ -1,0 +1,20 @@
+{
+  "id": "opencode-zen-provider",
+  "name": "OpenCode Zen",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "OpenCode Zen (35+ curated models, pay-as-you-go) — OpenAI-compatible.",
+  "setup": {
+    "providers": [
+      {
+        "id": "opencode-zen",
+        "auth_methods": ["api_key"],
+        "env_vars": ["OPENCODE_ZEN_API_KEY"],
+        "label": "OpenCode Zen (35+ curated models — pay-as-you-go)",
+        "default_model": "claude-sonnet-4-6",
+        "signup_url": "https://opencode.ai"
+      }
+    ]
+  }
+}
