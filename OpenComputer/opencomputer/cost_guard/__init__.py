@@ -39,11 +39,17 @@ from opencomputer.cost_guard.guard import (
     ProviderUsage,
     get_default_guard,
 )
+from opencomputer.cost_guard.pricing import (
+    batch_discount_for,
+    compute_call_cost,
+)
 
 __all__ = [
     "BudgetDecision",
     "BudgetExceeded",
     "CostGuard",
     "ProviderUsage",
+    "batch_discount_for",
+    "compute_call_cost",
     "get_default_guard",
 ]

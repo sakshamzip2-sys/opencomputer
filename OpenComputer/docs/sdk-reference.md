@@ -343,6 +343,17 @@ dict, required), `name` (optional, surfaced to OpenAI's
 `opencomputer.agent.structured.parse_structured()` helper for
 Pydantic-model integration.
 
+### `VisionUnsupportedError`
+
+Raised by `BaseProvider.complete_vision()` when the concrete provider
+doesn't support vision/image inputs. Subclasses `NotImplementedError`
+so callers can `try/except NotImplementedError` for a generic
+unsupported-feature catch, or match on the canonical
+`VisionUnsupportedError` when they want to differentiate vision-specific
+gaps (e.g., to fall back to a text-only summary). The default
+`BaseProvider.complete_vision` raises this with the provider name in
+the message.
+
 ---
 
 ## Channel contract
