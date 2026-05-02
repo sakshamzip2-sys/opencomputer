@@ -1,0 +1,23 @@
+{
+  "id": "zai-provider",
+  "name": "Z.AI / GLM",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "Z.AI / Zhipu (GLM-4 family) — OpenAI-compatible direct API.",
+  "model_support": {
+    "model_prefixes": ["glm-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "zai",
+        "auth_methods": ["api_key"],
+        "env_vars": ["ZAI_API_KEY"],
+        "label": "Z.AI / GLM (Zhipu models — direct API)",
+        "default_model": "glm-4-plus",
+        "signup_url": "https://open.bigmodel.cn"
+      }
+    ]
+  }
+}

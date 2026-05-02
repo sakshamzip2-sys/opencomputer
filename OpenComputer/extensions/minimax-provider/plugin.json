@@ -1,0 +1,23 @@
+{
+  "id": "minimax-provider",
+  "name": "MiniMax",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "MiniMax — OpenAI-compatible direct API.",
+  "model_support": {
+    "model_prefixes": ["abab-", "minimax-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "minimax",
+        "auth_methods": ["api_key"],
+        "env_vars": ["MINIMAX_API_KEY"],
+        "label": "MiniMax (global direct API)",
+        "default_model": "abab6.5s-chat",
+        "signup_url": "https://www.minimax.io"
+      }
+    ]
+  }
+}

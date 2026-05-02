@@ -1,0 +1,23 @@
+{
+  "id": "xai-provider",
+  "name": "xAI",
+  "kind": "provider",
+  "version": "0.1.0",
+  "entry": "plugin",
+  "description": "xAI (Grok) — OpenAI-compatible direct API. Subclasses the bundled openai-provider.",
+  "model_support": {
+    "model_prefixes": ["grok-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "xai",
+        "auth_methods": ["api_key"],
+        "env_vars": ["XAI_API_KEY"],
+        "label": "xAI (Grok models — direct API)",
+        "default_model": "grok-2-1212",
+        "signup_url": "https://console.x.ai"
+      }
+    ]
+  }
+}
