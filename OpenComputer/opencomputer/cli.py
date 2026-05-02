@@ -26,6 +26,7 @@ from opencomputer.agent.config_store import (
 )
 from opencomputer.agent.loop import AgentLoop
 from opencomputer.agent.memory_bridge import MemoryBridge
+from opencomputer.cli_error_display import format_provider_error_for_console
 from opencomputer.hooks.engine import engine as hook_engine
 from opencomputer.hooks.shell_handlers import make_shell_hook_handler
 from opencomputer.observability.logging_config import configure as configure_logging
@@ -1380,7 +1381,7 @@ def _run_chat_session(
             try:
                 asyncio.run(_run_turn(user_input))
             except Exception as e:
-                console.print(f"[bold red]error:[/bold red] {type(e).__name__}: {e}")
+                console.print(format_provider_error_for_console(e))
         _print_update_hint_if_any()
         return
 
@@ -1688,7 +1689,7 @@ def _run_chat_session(
                 _run_turn_cancellable(cleaned_text, _image_paths or None)
             )
         except Exception as e:
-            console.print(f"[bold red]error:[/bold red] {type(e).__name__}: {e}")
+            console.print(format_provider_error_for_console(e))
 
 
 @app.command()
@@ -3101,7 +3102,7 @@ def batch(
             )
         )
     except Exception as e:  # noqa: BLE001
-        console.print(f"[bold red]error:[/bold red] {type(e).__name__}: {e}")
+        console.print(format_provider_error_for_console(e))
         raise typer.Exit(1) from None
     console.print(f"[green]✓[/green] batch finished ({final_status}) — {n} result(s) → {out_path}")
 
