@@ -363,6 +363,9 @@ class AnthropicProvider(BaseProvider):
         self,
         anthropic_messages: list[dict[str, Any]],
         system: str,
+        *,
+        model: str = "",
+        idle_seconds: float = 0.0,
     ) -> tuple[Any, list[dict[str, Any]]]:
         """Apply Anthropic prompt caching (system_and_3 strategy).
 
@@ -372,11 +375,18 @@ class AnthropicProvider(BaseProvider):
         so it can be passed to the SDK's ``system=`` parameter with cache_control
         preserved.
 
+        ``model`` and ``idle_seconds`` drive the size-threshold filter and
+        the long-TTL switch via the provider's capabilities. Both default
+        safely so callers that haven't been updated still produce today's
+        cache layout.
+
         Returns:
             (system_for_sdk, messages_for_sdk) — system is a list of content
             blocks (e.g. ``[{"type": "text", "text": "...", "cache_control": ...}]``)
             when there is a system prompt, or an empty string otherwise.
         """
+        from opencomputer.agent.prompt_caching import select_cache_ttl
+
         # Build a unified list with system at index 0 (if any) so the
         # cache function can apply the system_and_3 strategy uniformly.
         unified: list[dict[str, Any]] = []
@@ -384,10 +394,22 @@ class AnthropicProvider(BaseProvider):
             unified.append({"role": "system", "content": system})
         unified.extend(anthropic_messages)
 
+        caps = self.capabilities
+        ttl = select_cache_ttl(
+            supports_long_ttl=caps.supports_long_ttl,
+            idle_seconds=idle_seconds,
+        )
+        threshold = caps.min_cache_tokens(model) if model else 0
+
         # Apply cache_control breakpoints. native_anthropic=True puts
         # cache_control on the message dict directly for tool messages
         # (Anthropic SDK pattern).
-        cached = apply_anthropic_cache_control(unified, native_anthropic=True)
+        cached = apply_anthropic_cache_control(
+            unified,
+            cache_ttl=ttl,
+            native_anthropic=True,
+            min_cache_tokens=threshold,
+        )
 
         # Extract system back out as a list of content blocks (preserves
         # cache_control). The Anthropic SDK accepts ``system=`` as either
@@ -501,7 +523,20 @@ class AnthropicProvider(BaseProvider):
         # Up to 4 cache_control breakpoints (system + last 3 non-system
         # messages) for ~75% input-token cost reduction on multi-turn
         # conversations.
-        sys_for_sdk, api_messages = self._apply_cache_control(anthropic_messages, system)
+        # Idle-aware TTL: if this provider's last call was > 4 minutes
+        # ago, the 5m cache would have expired before we got back to it.
+        # Bump to 1h on Anthropic; safe no-op for providers that don't
+        # support it. Time tracked per-provider-instance in monotonic
+        # seconds (see __init__). Read defensively because some test
+        # paths instantiate via ``__new__`` and skip __init__.
+        import time as _time
+        _now = _time.monotonic()
+        _last = getattr(self, "_last_call_ts", 0.0)
+        idle_s = (_now - _last) if _last > 0 else 0.0
+        self._last_call_ts = _now
+        sys_for_sdk, api_messages = self._apply_cache_control(
+            anthropic_messages, system, model=model, idle_seconds=idle_s,
+        )
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
@@ -592,7 +627,20 @@ class AnthropicProvider(BaseProvider):
         client = self._build_client_for_key(key) if key != self._api_key else self.client
         anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
-        sys_for_sdk, api_messages = self._apply_cache_control(anthropic_messages, system)
+        # Idle-aware TTL: if this provider's last call was > 4 minutes
+        # ago, the 5m cache would have expired before we got back to it.
+        # Bump to 1h on Anthropic; safe no-op for providers that don't
+        # support it. Time tracked per-provider-instance in monotonic
+        # seconds (see __init__). Read defensively because some test
+        # paths instantiate via ``__new__`` and skip __init__.
+        import time as _time
+        _now = _time.monotonic()
+        _last = getattr(self, "_last_call_ts", 0.0)
+        idle_s = (_now - _last) if _last > 0 else 0.0
+        self._last_call_ts = _now
+        sys_for_sdk, api_messages = self._apply_cache_control(
+            anthropic_messages, system, model=model, idle_seconds=idle_s,
+        )
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
@@ -640,7 +688,20 @@ class AnthropicProvider(BaseProvider):
         """
         anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
-        sys_for_sdk, api_messages = self._apply_cache_control(anthropic_messages, system)
+        # Idle-aware TTL: if this provider's last call was > 4 minutes
+        # ago, the 5m cache would have expired before we got back to it.
+        # Bump to 1h on Anthropic; safe no-op for providers that don't
+        # support it. Time tracked per-provider-instance in monotonic
+        # seconds (see __init__). Read defensively because some test
+        # paths instantiate via ``__new__`` and skip __init__.
+        import time as _time
+        _now = _time.monotonic()
+        _last = getattr(self, "_last_call_ts", 0.0)
+        idle_s = (_now - _last) if _last > 0 else 0.0
+        self._last_call_ts = _now
+        sys_for_sdk, api_messages = self._apply_cache_control(
+            anthropic_messages, system, model=model, idle_seconds=idle_s,
+        )
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,

@@ -133,3 +133,27 @@ def apply_anthropic_cache_control(
         _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic)
 
     return messages
+
+
+_LONG_TTL_THRESHOLD_SECONDS = 240.0  # 4 minutes — leaves 1m below the 5m cache TTL
+
+
+def select_cache_ttl(*, supports_long_ttl: bool, idle_seconds: float) -> str:
+    """Decide between '5m' (default) and '1h' (long) cache TTL.
+
+    Returns ``"1h"`` only when:
+      * the provider declares ``supports_long_ttl`` True, AND
+      * the gap since the last assistant turn exceeds 4 minutes.
+
+    The 4-minute threshold leaves a one-minute safety buffer below the
+    default 5-minute cache lifetime, so a session that pauses for 5+
+    minutes would otherwise pay a full re-prefill on the next turn.
+    The 1h TTL costs 2x base on cache write but the spend is recouped
+    after one hit; for a typical coding session with multi-minute
+    "thinking" gaps between turns this is a clean win.
+    """
+    if not supports_long_ttl:
+        return "5m"
+    if idle_seconds > _LONG_TTL_THRESHOLD_SECONDS:
+        return "1h"
+    return "5m"
