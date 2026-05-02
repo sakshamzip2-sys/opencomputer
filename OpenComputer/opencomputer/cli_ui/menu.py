@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 
 class WizardCancelled(Exception):
@@ -70,19 +70,94 @@ def radiolist(
     choices: list[Choice],
     default: int = 0,
     description: Optional[str] = None,
+    *,
+    _input: Optional[Any] = None,   # injection for tests
+    _output: Optional[Any] = None,
 ) -> int:
-    """Single-select menu. Returns selected index.
+    """Single-select menu. Returns selected index. Raises WizardCancelled
+    on ESC.
 
-    On TTY: arrow-key navigation via prompt_toolkit (Task 3 lands this).
+    On TTY: arrow-key navigation via prompt_toolkit Application.
     On non-TTY: numbered prompt via stdin.
     """
-    if not sys.stdin.isatty():
+    if not sys.stdin.isatty() and _input is None:
         return _radiolist_numbered_fallback(question, choices, default, description)
 
-    # TTY path is implemented in Task 3. For now (this commit only),
-    # fall through to numbered fallback so this task's tests pass even
-    # on a TTY-test-environment.
-    return _radiolist_numbered_fallback(question, choices, default, description)
+    flush_stdin()
+
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.formatted_text import FormattedText
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    from opencomputer.cli_ui.style import (
+        ARROW_GLYPH,
+        MENU_STYLE,
+        RADIO_OFF,
+        RADIO_ON,
+    )
+
+    cursor = [default]  # mutable index in closure
+
+    def render():
+        lines: list[tuple[str, str]] = []
+        lines.append(("class:menu.title", question + "\n"))
+        lines.append((
+            "class:menu.hint",
+            "↑↓ navigate  ENTER/SPACE select  ESC cancel\n",
+        ))
+        if description:
+            lines.append(("class:menu.description", f"  {description}\n"))
+        lines.append(("", "\n"))
+        for i, c in enumerate(choices):
+            is_sel = i == cursor[0]
+            arrow_class = "class:menu.selected.arrow" if is_sel else "class:"
+            arrow = ARROW_GLYPH if is_sel else " "
+            row_class = "class:menu.selected" if is_sel else "class:"
+            glyph = RADIO_ON if is_sel else RADIO_OFF
+            glyph_class = (
+                "class:menu.selected.glyph" if is_sel
+                else "class:menu.unselected.glyph"
+            )
+            suffix = f"  ({c.description})" if c.description else ""
+            lines.append((arrow_class, f" {arrow} "))
+            lines.append((glyph_class, f"({glyph}) "))
+            lines.append((row_class, f"{c.label}{suffix}\n"))
+        return FormattedText(lines)
+
+    bindings = KeyBindings()
+
+    @bindings.add("up")
+    def _up(event):
+        cursor[0] = (cursor[0] - 1) % len(choices)
+
+    @bindings.add("down")
+    def _down(event):
+        cursor[0] = (cursor[0] + 1) % len(choices)
+
+    @bindings.add("enter")
+    @bindings.add(" ")
+    def _select(event):
+        event.app.exit(result=cursor[0])
+
+    @bindings.add("escape")
+    @bindings.add("c-c")
+    def _cancel(event):
+        event.app.exit(exception=WizardCancelled())
+
+    layout = Layout(HSplit([Window(FormattedTextControl(render))]))
+
+    app = Application(
+        layout=layout,
+        key_bindings=bindings,
+        style=MENU_STYLE,
+        full_screen=False,
+        input=_input,
+        output=_output,
+    )
+    return app.run()
 
 
 def _radiolist_numbered_fallback(

@@ -62,3 +62,65 @@ def test_radiolist_numbered_fallback_invalid_then_valid(monkeypatch, capsys):
     assert idx == 0
     err = capsys.readouterr().err
     assert "out of range" in err.lower() or "invalid" in err.lower()
+
+
+def test_radiolist_tty_arrow_down_then_enter_selects_next(monkeypatch):
+    """Pipe input simulates a TTY user pressing Down + Enter."""
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from opencomputer.cli_ui.menu import Choice, radiolist
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text("\x1b[B\r")  # Down, Enter
+        idx = radiolist(
+            "Pick:",
+            [Choice("A", "a"), Choice("B", "b"), Choice("C", "c")],
+            default=0,
+            _input=pipe_input,
+            _output=DummyOutput(),
+        )
+
+    assert idx == 1, "Down from default 0 → index 1"
+
+
+def test_radiolist_tty_immediate_enter_returns_default(monkeypatch):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from opencomputer.cli_ui.menu import Choice, radiolist
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text("\r")
+        idx = radiolist(
+            "Pick:",
+            [Choice("A", "a"), Choice("B", "b")],
+            default=1,
+            _input=pipe_input,
+            _output=DummyOutput(),
+        )
+
+    assert idx == 1
+
+
+def test_radiolist_tty_esc_raises_wizard_cancelled(monkeypatch):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from opencomputer.cli_ui.menu import Choice, WizardCancelled, radiolist
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text("\x1b")  # ESC
+        with pytest.raises(WizardCancelled):
+            radiolist(
+                "Pick:",
+                [Choice("A", "a")],
+                _input=pipe_input,
+                _output=DummyOutput(),
+            )
