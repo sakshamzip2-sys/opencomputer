@@ -174,3 +174,60 @@ def test_loose_perms_on_global_env_does_not_crash_startup(
 
     assert loaded == {}, "loose-perm file must not be loaded"
     # Test passes as long as no exception escaped.
+
+
+def test_loads_global_env_when_oc_home_points_at_profile_leaf(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: ``_apply_profile_override`` (cli.py) sets
+    ``OPENCOMPUTER_HOME`` to the active profile's leaf dir
+    (``~/.opencomputer/profiles/<name>``). Before the fix,
+    ``load_for_profile`` derived candidate paths from
+    ``OPENCOMPUTER_HOME`` directly, so the global
+    ``~/.opencomputer/.env`` became unreachable whenever a non-default
+    profile was active — users hit "ANTHROPIC_API_KEY is not set …
+    first-run install" on every shell despite credentials being in
+    the global .env.
+    """
+    from opencomputer.security.env_loader import load_for_profile
+
+    root = tmp_path / "oc-home"
+    leaf = root / "profiles" / "coding"
+    leaf.mkdir(parents=True)
+
+    # Credential lives only in the GLOBAL .env (the exact state of a
+    # user who set up before per-profile creds existed).
+    _write_env(root / ".env", "ANTHROPIC_API_KEY=sk-global\n")
+
+    # Simulate production: OPENCOMPUTER_HOME points at the leaf.
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(leaf))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    loaded = load_for_profile("coding", apply_to_environ=False)
+    assert loaded.get("ANTHROPIC_API_KEY") == "sk-global", (
+        "global .env must be reachable when OPENCOMPUTER_HOME points "
+        f"at the profile leaf; got loaded={loaded!r}"
+    )
+
+
+def test_profile_leaf_env_still_overrides_global(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Companion to the regression above: when OPENCOMPUTER_HOME points
+    at the leaf AND a profile-local .env exists, profile-local still
+    takes precedence over the global fallback (priority order is
+    preserved by the fix)."""
+    from opencomputer.security.env_loader import load_for_profile
+
+    root = tmp_path / "oc-home"
+    leaf = root / "profiles" / "coding"
+    leaf.mkdir(parents=True)
+
+    _write_env(root / ".env", "ANTHROPIC_API_KEY=sk-global\nGITHUB_TOKEN=gh-global\n")
+    _write_env(leaf / ".env", "ANTHROPIC_API_KEY=sk-profile\n")
+
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(leaf))
+
+    loaded = load_for_profile("coding", apply_to_environ=False)
+    assert loaded["ANTHROPIC_API_KEY"] == "sk-profile", "profile-local must win"
+    assert loaded["GITHUB_TOKEN"] == "gh-global", "global fallback must still apply"
