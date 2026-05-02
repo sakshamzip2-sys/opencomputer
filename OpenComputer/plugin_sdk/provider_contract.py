@@ -103,6 +103,13 @@ class ProviderResponse:
     reasoning: str | None = None
     reasoning_details: Any = None  # list[dict[str, Any]] | None
     codex_reasoning_items: Any = None  # list[dict[str, Any]] | None
+    reasoning_replay_blocks: Any = None  # list[dict[str, Any]] | None
+    """Verbatim provider-side reasoning blocks that must be replayed on
+    the next turn (Anthropic thinking blocks with signatures). The
+    agent loop should propagate this onto the canonical Message it
+    persists, so the next turn's _to_<provider>_messages can replay it
+    on the wire. Other providers leave this ``None``.
+    """
 
 
 class RateLimitedError(RuntimeError):  # noqa: N818 — public name is the load-bearing one
