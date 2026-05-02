@@ -100,6 +100,8 @@ class Platform(str, Enum):
     IRC = "irc"
     TEAMS = "teams"
     DINGTALK = "dingtalk"
+    FEISHU = "feishu"
+    WECOM = "wecom"
 
 
 @dataclass(frozen=True, slots=True)
