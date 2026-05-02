@@ -311,6 +311,26 @@ def _build_anthropic_pdf_block(path: Path) -> dict[str, Any] | None:
     }
 
 
+def _resolve_anthropic_files_cache_enabled(runtime) -> bool:
+    """Return True iff Files API caching is opted in.
+
+    Resolution order:
+    1. ``runtime.custom["anthropic_files_cache"]`` (explicit programmatic — wins)
+    2. ``OPENCOMPUTER_ANTHROPIC_FILES_CACHE`` env var (truthy values: 1/true/yes/on)
+    3. False (default OFF)
+
+    Mirrors ``_resolve_anthropic_skills`` shape (SP4) for consistency.
+    """
+    if runtime is not None:
+        explicit = (getattr(runtime, "custom", {}) or {}).get(
+            "anthropic_files_cache"
+        )
+        if explicit is not None:
+            return bool(explicit)
+    env = os.environ.get("OPENCOMPUTER_ANTHROPIC_FILES_CACHE", "").strip().lower()
+    return env in ("1", "true", "yes", "on")
+
+
 def _content_blocks_with_attachments(
     *, text: str, attachment_paths: list[str]
 ) -> list[dict[str, Any]]:
