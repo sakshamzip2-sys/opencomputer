@@ -3117,6 +3117,91 @@ def _apply_loose_env_perms_flag() -> None:
         sys.argv = new_argv
 
 
+@app.command()
+def update() -> None:
+    """Upgrade OpenComputer to the latest release.
+
+    Detects how OC was installed and routes accordingly:
+
+    * **Git checkout** (development install) — runs ``git fetch`` then
+      ``git pull --ff-only`` from origin/main. Prints a clear error if
+      the local branch has diverged (manual rebase required).
+    * **Pip install** (PyPI release) — prints the ``pip install -U``
+      command and exits. We don't ``pip install`` ourselves because the
+      running interpreter holds a lock on its own modules and pip's
+      behavior in that scenario is platform-dependent.
+
+    The background ``cli_update_check`` already shows a hint at the end
+    of every chat session; this command lets the user act on the hint
+    without copying the install command from elsewhere.
+    """
+    import subprocess
+
+    project_root = Path(__file__).resolve().parents[1]
+    git_dir = project_root / ".git"
+
+    if not git_dir.exists():
+        # PyPI install — just print the upgrade command
+        typer.echo("OpenComputer is installed from PyPI. Upgrade with:")
+        typer.echo("")
+        typer.echo("  pip install -U opencomputer")
+        typer.echo("")
+        typer.echo("Then restart any running gateway/service.")
+        return
+
+    # Git checkout — fetch + ff-only pull
+    typer.echo("⚕ Updating OpenComputer (git checkout)...")
+    try:
+        typer.echo("→ Fetching origin...")
+        r = subprocess.run(
+            ["git", "fetch", "origin"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if r.returncode != 0:
+            typer.echo("✗ git fetch failed:")
+            for line in (r.stderr or "").splitlines()[:3]:
+                typer.echo(f"  {line}")
+            raise typer.Exit(code=1)
+
+        # Count commits behind origin/main
+        count_r = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD..origin/main"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        n = int(count_r.stdout.strip() or "0")
+        if n == 0:
+            typer.echo("✓ Already up to date.")
+            return
+
+        typer.echo(f"→ Found {n} new commit(s); pulling --ff-only...")
+        pull_r = subprocess.run(
+            ["git", "pull", "--ff-only", "origin", "main"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if pull_r.returncode != 0:
+            err = (pull_r.stderr or "").splitlines()
+            typer.echo("✗ Pull failed (local diverged from origin):")
+            typer.echo(f"  {err[0] if err else 'unknown error'}")
+            typer.echo("  Resolve manually: git stash; git pull --rebase; git stash pop")
+            raise typer.Exit(code=1)
+
+        typer.echo(f"✓ Updated to latest main (+{n} commits).")
+        typer.echo("  Restart any running gateway/service to pick up the changes.")
+    except subprocess.TimeoutExpired:
+        typer.echo("✗ git command timed out. Check your network and try again.")
+        raise typer.Exit(code=1)
+
+
 def main() -> None:
     # Profile routing runs here (not at import time) so tests and library
     # consumers can import this module without their argv being mutated.
