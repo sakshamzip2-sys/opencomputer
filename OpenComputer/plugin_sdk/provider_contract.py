@@ -126,6 +126,50 @@ class StreamEvent:
     response: ProviderResponse | None = None
 
 
+class BatchUnsupportedError(NotImplementedError):
+    """Raised when a provider doesn't support batch processing.
+
+    Subsystem E (2026-05-02). Most providers don't natively support
+    batch APIs — Anthropic does (50% cost discount, ~1hr turnaround),
+    OpenAI does with a different async-file-based shape, others don't
+    at all. Callers should catch this and fall back to serial calls
+    if they want graceful degradation.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class BatchRequest:
+    """One entry in a batch job — the input to ``submit_batch``.
+
+    Provider-agnostic shape — providers translate to their native batch
+    request format. Composes with Subsystems B (``runtime_extras``) and
+    C (``response_schema``): each batched request can carry its own
+    effort tier and schema independently.
+    """
+
+    custom_id: str
+    """Caller-supplied id for matching results to requests. Anthropic
+    requires alphanumeric + ``_-``, 1-64 chars."""
+    messages: list[Message]
+    model: str
+    system: str = ""
+    max_tokens: int = 1024
+    runtime_extras: dict | None = None
+    response_schema: dict | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BatchResult:
+    """One entry in batch results — output from ``get_batch_results``."""
+
+    custom_id: str
+    status: Literal["succeeded", "errored", "expired", "canceled", "processing"]
+    response: ProviderResponse | None = None
+    """Populated when ``status == "succeeded"``."""
+    error: str = ""
+    """Populated when ``status == "errored"``."""
+
+
 class JsonSchemaSpec(TypedDict, total=False):
     """Provider-agnostic structured-outputs schema spec.
 
@@ -242,6 +286,43 @@ class BaseProvider(ABC):
         """
         ...
 
+    async def submit_batch(self, requests: list[BatchRequest]) -> str:
+        """Submit a batch job — returns a provider-specific batch_id.
+
+        Subsystem E (2026-05-02). Generic interface for batch APIs.
+        Anthropic supports natively (50% cost discount, ~1hr typical
+        turnaround). OpenAI supports with a different async-file-based
+        shape. Most providers don't support at all.
+
+        Default implementation raises :class:`BatchUnsupportedError`.
+        Providers that support batch override this method and translate
+        ``requests`` to their native batch creation API.
+
+        Use cases (per Anthropic Doc 7):
+        - Auto-skill-evolution LLM judge (offline, post-session)
+        - Edge research / signal-postmortem (overnight)
+        - Scheduled briefings across many tickers
+        - Bulk classification / extraction
+        """
+        raise BatchUnsupportedError(
+            f"{self.name} does not support batch processing"
+        )
+
+    async def get_batch_results(self, batch_id: str) -> list[BatchResult]:
+        """Get current results for a previously-submitted batch.
+
+        Returns one :class:`BatchResult` per request. Status of each
+        entry indicates lifecycle state (``processing`` for in-flight,
+        ``succeeded`` for finished, etc.).
+
+        Caller is responsible for polling — this method does not block.
+
+        Default raises :class:`BatchUnsupportedError`.
+        """
+        raise BatchUnsupportedError(
+            f"{self.name} does not support batch processing"
+        )
+
     async def count_tokens(
         self,
         *,
@@ -274,6 +355,9 @@ class BaseProvider(ABC):
 
 __all__ = [
     "BaseProvider",
+    "BatchRequest",
+    "BatchResult",
+    "BatchUnsupportedError",
     "JsonSchemaSpec",
     "ProviderResponse",
     "RateLimitedError",

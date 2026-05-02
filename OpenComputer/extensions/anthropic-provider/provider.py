@@ -728,6 +728,90 @@ class AnthropicProvider(BaseProvider):
 
         yield StreamEvent(kind="done", response=self._parse_response(final))
 
+    async def submit_batch(self, requests):
+        """Submit a batch via Anthropic's ``messages.batches.create``.
+
+        Subsystem E (2026-05-02). 50% cost discount, ~1hr typical
+        turnaround, 24h max. Composes with effort (Subsystem B) and
+        response_schema (Subsystem C).
+        """
+        from plugin_sdk.provider_contract import BatchRequest as _Br
+
+        entries: list[dict] = []
+        for req in requests:
+            assert isinstance(req, _Br)
+            params: dict[str, Any] = {
+                "model": req.model,
+                "max_tokens": req.max_tokens,
+                "messages": self._to_anthropic_messages(req.messages),
+            }
+            if req.system:
+                params["system"] = req.system
+            if supports_temperature(req.model):
+                params["temperature"] = 1.0
+            if req.runtime_extras:
+                from opencomputer.agent.runtime_flags import (
+                    anthropic_kwargs_from_runtime,
+                )
+                params.update(
+                    anthropic_kwargs_from_runtime(
+                        model=req.model,
+                        reasoning_effort=req.runtime_extras.get("reasoning_effort"),
+                        service_tier=req.runtime_extras.get("service_tier"),
+                    )
+                )
+            if req.response_schema is not None:
+                output_config = params.get("output_config", {})
+                output_config["format"] = {
+                    "type": "json_schema",
+                    "schema": req.response_schema["schema"],
+                }
+                params["output_config"] = output_config
+            entries.append({"custom_id": req.custom_id, "params": params})
+
+        batch = await self.client.messages.batches.create(requests=entries)
+        return batch.id
+
+    async def get_batch_results(self, batch_id: str):
+        """Fetch results for a batch.
+
+        Returns one BatchResult per entry. If the batch is still
+        processing, returns a single placeholder with
+        ``status="processing"`` — caller polls again later.
+        """
+        from plugin_sdk.provider_contract import BatchResult as _Br
+
+        batch = await self.client.messages.batches.retrieve(batch_id)
+        if batch.processing_status == "in_progress":
+            return [_Br(custom_id="__pending__", status="processing")]
+
+        out: list = []
+        async for entry in await self.client.messages.batches.results(batch_id):
+            result_obj = entry.result
+            result_type = getattr(result_obj, "type", "errored")
+            if result_type == "succeeded":
+                response = self._parse_response(result_obj.message)
+                out.append(
+                    _Br(
+                        custom_id=entry.custom_id,
+                        status="succeeded",
+                        response=response,
+                    )
+                )
+            else:
+                err_obj = getattr(result_obj, "error", None)
+                err_msg = ""
+                if err_obj is not None:
+                    err_msg = str(getattr(err_obj, "message", err_obj))
+                out.append(
+                    _Br(
+                        custom_id=entry.custom_id,
+                        status=result_type,
+                        error=err_msg,
+                    )
+                )
+        return out
+
     async def count_tokens(
         self,
         *,
