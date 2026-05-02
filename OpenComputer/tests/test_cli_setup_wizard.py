@@ -59,15 +59,15 @@ def test_deferred_vs_live_section_split():
     """As sub-projects ship, sections move from deferred → live.
     F0+F1+F2: inference_provider + messaging_platforms.
     S1: agent_settings. S5: launchd_service. M1: prior_install_detect.
-    Remaining 3 deferred (S2, S3, S4)."""
+    S4: tools. Remaining 2 deferred (S2 TTS, S3 terminal-backend)."""
     from opencomputer.cli_setup.sections import SECTION_REGISTRY
     deferred = {s.key for s in SECTION_REGISTRY if s.deferred}
     live = {s.key for s in SECTION_REGISTRY if not s.deferred}
-    assert deferred == {"tts_provider", "terminal_backend", "tools"}
+    assert deferred == {"tts_provider", "terminal_backend"}
     assert live == {
         "opencomputer_prior_detect",
         "inference_provider", "messaging_platforms", "agent_settings",
-        "launchd_service",
+        "tools", "launchd_service",
     }
 
 
