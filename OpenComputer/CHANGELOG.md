@@ -4,6 +4,16 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Changed — Thinking History UI v3: Claude.ai Visual Parity
+
+Refactored v2's collapsed line and expanded tree to match Claude.ai's web UX exactly.
+
+**Collapsed line** when summary is present: now JUST `<summary> ›` (chevron-right). Dropped the metadata clutter (`💭 Thought for X · turn #N · K actions — /reasoning show to expand`) — that information moves into the expanded tree where it belongs. Fallback when summary is None still shows the metadata + reasoning-show hint so users always have a path to the full view.
+
+**Expanded tree** (via `/reasoning show <N>` or `Ctrl+X Ctrl+R`): summary becomes the bold header with `⌄` (chevron-down). Tool-action rows now use semantic icons: `📄` for file ops (Edit/Write/Read/MultiEdit/NotebookEdit), `⚙️` for shell tools (Bash), `🔧` for everything else. File-tool actions render the path as an indented italic chip below the action name. Tree ends with a `⊘ Done · K actions in X.Xs` footer.
+
+True click-to-toggle interactivity remains out of scope (would need a Textual migration); the chevron is a visual hint and `Ctrl+X Ctrl+R` / `/reasoning show <N>` are still the actual triggers.
+
 ### Added — Thinking History UI v2: AI Summaries
 
 The collapsed thinking-history line and the expanded `/reasoning show` tree now lead with a Haiku-generated one-line summary of what the AI did each turn (e.g. "Wrote a haiku about sloths · turn #5 · 3 actions — /reasoning show to expand"). Generated via a daemon thread with a 1.5s join cap; falls back gracefully to the metadata-only format on slow/failed summarization while still writing the summary to the store asynchronously for later `/reasoning show <N>` access. Pattern ported wholesale from `title_generator.py`. Adds `ReasoningTurn.summary: str | None` field + `ReasoningStore.update_summary(turn_id, summary)` method (atomic-replace via `dataclasses.replace`).

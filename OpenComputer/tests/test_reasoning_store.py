@@ -253,6 +253,9 @@ def test_store_update_summary_unknown_id_is_noop():
 
 
 def test_render_turn_tree_includes_summary_when_present():
+    """v3 (Claude.ai parity, Image #9): when summary is set, the
+    header is JUST the summary + ⌄ (chevron-down). Metadata clutter
+    (Turn #N, "Thought for X") moves OUT of the header."""
     import io
 
     from rich.console import Console
@@ -269,7 +272,111 @@ def test_render_turn_tree_includes_summary_when_present():
     Console(file=out, force_terminal=False, width=120).print(tree)
     text = out.getvalue()
     assert "Wrote a poem about sloths" in text
+    assert "⌄" in text  # expanded chevron
+    # Metadata MUST NOT appear when summary is present (v3 clean header).
+    assert "Turn #1" not in text
+    assert "Thought for" not in text
+
+
+def test_render_turn_tree_v3_uses_semantic_icons():
+    """v3: file-tools get 📄, shell-tools get ⚙️, others get 🔧."""
+    import io
+
+    from rich.console import Console
+
+    from opencomputer.cli_ui.reasoning_store import render_turn_tree
+
+    store = ReasoningStore()
+    store.append(
+        thinking="x",
+        duration_s=0.1,
+        tool_actions=[
+            ToolAction(name="Edit", args_preview="file_path=foo.py", ok=True, duration_s=0.05),
+            ToolAction(name="Bash", args_preview="ls -la", ok=True, duration_s=0.02),
+            ToolAction(name="WebFetch", args_preview="url=https://x.com", ok=True, duration_s=0.5),
+        ],
+    )
+    out = io.StringIO()
+    Console(file=out, force_terminal=False, width=120).print(
+        render_turn_tree(store.get_latest())
+    )
+    text = out.getvalue()
+    assert "📄" in text  # Edit gets file icon
+    assert "⚙" in text   # Bash gets shell icon (full ⚙️ may render as ⚙)
+    assert "🔧" in text  # WebFetch gets default icon
+
+
+def test_render_turn_tree_v3_extracts_path_chip_from_file_tool_args():
+    """v3: file tools display the path as an indented chip below."""
+    import io
+
+    from rich.console import Console
+
+    from opencomputer.cli_ui.reasoning_store import render_turn_tree
+
+    store = ReasoningStore()
+    store.append(
+        thinking="x",
+        duration_s=0.1,
+        tool_actions=[
+            ToolAction(name="Edit", args_preview="file_path=foo.md, content=hello", ok=True, duration_s=0.05),
+        ],
+    )
+    out = io.StringIO()
+    Console(file=out, force_terminal=False, width=120).print(
+        render_turn_tree(store.get_latest())
+    )
+    text = out.getvalue()
+    assert "foo.md" in text
+
+
+def test_render_turn_tree_v3_done_footer_with_totals():
+    """v3: tree ends with '⊘ Done · K actions in X.Xs' row."""
+    import io
+
+    from rich.console import Console
+
+    from opencomputer.cli_ui.reasoning_store import render_turn_tree
+
+    store = ReasoningStore()
+    store.append(
+        thinking="x",
+        duration_s=0.1,
+        tool_actions=[
+            ToolAction(name="Edit", args_preview="path=a.py", ok=True, duration_s=0.05),
+            ToolAction(name="Bash", args_preview="ls", ok=True, duration_s=0.02),
+        ],
+    )
+    out = io.StringIO()
+    Console(file=out, force_terminal=False, width=120).print(
+        render_turn_tree(store.get_latest())
+    )
+    text = out.getvalue()
+    assert "Done" in text
+    assert "2 actions" in text
+
+
+def test_render_turn_tree_v3_no_summary_falls_back_to_metadata_header():
+    """When no summary (Haiku failed/slow), header is today's metadata
+    format so users still see turn-id + duration."""
+    import io
+
+    from rich.console import Console
+
+    from opencomputer.cli_ui.reasoning_store import render_turn_tree
+
+    store = ReasoningStore()
+    store.append(thinking="x", duration_s=0.5, tool_actions=[])
+    turn = store.get_latest()
+    assert turn is not None
+    assert turn.summary is None
+    tree = render_turn_tree(turn)
+    out = io.StringIO()
+    Console(file=out, force_terminal=False, width=120).print(tree)
+    text = out.getvalue()
+    # Metadata header IS present in fallback mode.
     assert "Turn #1" in text
+    assert "Thought for" in text
 
 
 def test_render_turn_tree_omits_summary_line_when_none():

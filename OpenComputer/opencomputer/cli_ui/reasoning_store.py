@@ -127,63 +127,136 @@ def _fmt_duration(seconds: float) -> str:
     return f"{seconds:.1f}s"
 
 
+_FILE_TOOLS = frozenset({"Edit", "Write", "Read", "MultiEdit", "NotebookEdit"})
+_SHELL_TOOLS = frozenset({"Bash", "BashTool"})
+
+
+def _action_icon(tool_name: str) -> str:
+    """Map a tool name to a semantic icon for the expanded tree."""
+    if tool_name in _FILE_TOOLS:
+        return "📄"
+    if tool_name in _SHELL_TOOLS:
+        return "⚙️"
+    return "🔧"
+
+
+def _extract_path_chip(action: ToolAction) -> str | None:
+    """Extract a single file path from a file-tool's args_preview for
+    the chip display. Best-effort; returns None when no clean path is
+    extractable.
+
+    Args previews look like ``"file_path=/tmp/foo.md, content=..."`` or
+    ``"path=foo.md"`` — pluck the value of the path-ish key.
+    """
+    if action.name not in _FILE_TOOLS:
+        return None
+    preview = action.args_preview or ""
+    for key in ("file_path", "path", "notebook_path"):
+        marker = f"{key}="
+        if marker in preview:
+            tail = preview.split(marker, 1)[1]
+            value = tail.split(",", 1)[0].strip().strip('"').strip("'")
+            return value or None
+    return None
+
+
 def render_turn_tree(turn: ReasoningTurn) -> Tree:
-    """Render one ReasoningTurn as a Rich Tree for the console.
+    """Render one ReasoningTurn as a Rich Tree matching Claude.ai's web
+    UX (Image #9 — expanded form):
 
-    Layout::
+        Wrote a haiku about sloths ⌄                  (header)
+        ├── 🧠 The user wants me to think about...    (reasoning text)
+        ├── 📄 Edit                                    (file action)
+        │       foo.md                                 (path chip)
+        ├── ⚙️ Bash · ls -la                          (shell action)
+        └── ⊘ Done · 3 actions in 1.8s                (footer)
 
-        💭 Turn #N · Thought for X.Xs · K actions
-        ├── 🧠 Reasoning: <thinking text>
-        ├── 🔧 Tool(args) ✓ 0.05s
-        └── 🔧 Tool(args) ✗ 0.12s
+    When ``turn.summary`` is None (Haiku slow / failed), the header
+    falls back to today's metadata-bold layout so users always see
+    the turn id + duration + action count.
 
-    Empty thinking and empty tool-action lists each get a single
-    placeholder child so users see the structure, not just a header.
+    Empty-thinking and empty-tool-action turns each get a single
+    placeholder child so the structure is visible even when sparse.
     """
     s = "" if turn.action_count == 1 else "s"
-    metadata = Text.assemble(
-        ("💭 ", "dim cyan"),
-        (f"Turn #{turn.turn_id}", "bold cyan"),
-        ("  ·  ", "dim"),
-        (f"Thought for {_fmt_duration(turn.duration_s)}", "dim cyan"),
-        ("  ·  ", "dim"),
-        (f"{turn.action_count} action{s}", "dim cyan"),
-    )
+
     if turn.summary:
-        # Lead with the AI-generated summary; metadata on a second line.
-        header = Text.assemble(
-            (turn.summary, "bold"),
-            ("\n", ""),
-            metadata,
-        )
+        # Header is just the summary + chevron-down (expanded). The
+        # collapsed form (printed by streaming.py.finalize) uses ›
+        # (chevron-right). Together they read like a section heading.
+        header = Text.assemble((turn.summary, "bold"), ("  ⌄", "dim"))
     else:
-        header = metadata
+        # No summary → today's metadata-bold header so users still get
+        # the turn id + duration + action count.
+        header = Text.assemble(
+            ("💭 ", "dim cyan"),
+            (f"Turn #{turn.turn_id}", "bold cyan"),
+            ("  ·  ", "dim"),
+            (f"Thought for {_fmt_duration(turn.duration_s)}", "dim cyan"),
+            ("  ·  ", "dim"),
+            (f"{turn.action_count} action{s}", "dim cyan"),
+        )
+
     tree = Tree(header, guide_style="grey50")
 
+    # Reasoning text node — semantic icon (brain = "the AI was thinking").
     if turn.thinking:
-        # Indent multi-line thinking under a single "Reasoning:" node so
-        # the tree connectors stay clean.
-        thinking_node = tree.add(Text.assemble(("🧠 Reasoning: ", "dim cyan")))
-        for line in turn.thinking.splitlines() or [turn.thinking]:
+        lines = turn.thinking.splitlines() or [turn.thinking]
+        thinking_node = tree.add(
+            Text.assemble(("🧠 ", "dim"), (lines[0], "dim"))
+        )
+        for line in lines[1:]:
             thinking_node.add(Text(line, style="dim"))
     else:
         tree.add(Text("(no extended thinking)", style="italic dim"))
 
+    # Tool actions — semantic icons + optional path chips.
     if turn.tool_actions:
         for action in turn.tool_actions:
             mark = "✓" if action.ok else "✗"
             mark_style = "green" if action.ok else "red"
-            tree.add(
-                Text.assemble(
-                    ("🔧 ", "dim"),
-                    (action.name, "bold"),
-                    ("(", "dim"),
-                    (action.args_preview, "dim"),
-                    (") ", "dim"),
-                    (mark, mark_style),
-                    (f"  {_fmt_duration(action.duration_s)}", "dim"),
+            icon = _action_icon(action.name)
+            chip = _extract_path_chip(action)
+            if chip:
+                # File action: action name on top, file chip indented.
+                action_node = tree.add(
+                    Text.assemble(
+                        (f"{icon} ", "dim"),
+                        (action.name, "bold"),
+                        ("  ", ""),
+                        (mark, mark_style),
+                        (f"  {_fmt_duration(action.duration_s)}", "dim"),
+                    )
                 )
+                action_node.add(Text(chip, style="italic dim"))
+            else:
+                # Shell or other: show args inline (truncated).
+                args_brief = (action.args_preview or "").strip()
+                if len(args_brief) > 60:
+                    args_brief = args_brief[:57] + "..."
+                tree.add(
+                    Text.assemble(
+                        (f"{icon} ", "dim"),
+                        (action.name, "bold"),
+                        ((f"  ·  {args_brief}" if args_brief else ""), "dim"),
+                        ("  ", ""),
+                        (mark, mark_style),
+                        (f"  {_fmt_duration(action.duration_s)}", "dim"),
+                    )
+                )
+        # Done footer with totals — Claude.ai parity (Image #9).
+        total_dur = sum(a.duration_s for a in turn.tool_actions)
+        tree.add(
+            Text.assemble(
+                ("⊘ ", "dim green"),
+                ("Done", "bold green"),
+                (
+                    f"  ·  {turn.action_count} action{s}"
+                    f" in {_fmt_duration(total_dur)}",
+                    "dim",
+                ),
             )
+        )
     else:
         tree.add(Text("(no tool actions)", style="italic dim"))
 
