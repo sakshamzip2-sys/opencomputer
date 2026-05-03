@@ -256,7 +256,7 @@ def _register_browser_control_alias() -> None:
     """
     _register_extension_alias(
         "browser_control", _BROWSER_CONTROL_DIR,
-        submodules=("schema", "_tool", "plugin"),
+        submodules=("schema", "_tool", "_dispatcher_bootstrap", "plugin"),
     )
 
 
