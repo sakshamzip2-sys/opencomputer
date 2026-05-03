@@ -13,9 +13,10 @@ Source: claude-code's `AskUserQuestion`, hermes's `clarify_tool`.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Awaitable, Protocol
+from typing import Protocol
 
 
 @dataclass(frozen=True, slots=True)

@@ -593,6 +593,21 @@ the built-in `AskUserQuestion` tool.
 Frozen dataclass — the user's reply. Fields: `text`, `option_index`
 (set if the user picked one of the supplied options).
 
+### `AskUserQuestionHandler`
+
+Protocol — async callable signature `(InteractionRequest) -> Awaitable[InteractionResponse]`.
+Implementations are installed at session start by whichever surface
+owns the user-input layer (the CLI installs a Rich-Prompt-based
+handler; gateway/wire surfaces install their own variants when ready).
+
+### `ASK_USER_QUESTION_HANDLER`
+
+`ContextVar[AskUserQuestionHandler | None]` — the currently installed
+handler, or `None` if none. Tools call `.get()` and use the handler
+if non-`None`, else fall back to a legacy stdin path. ContextVar
+(not module global) so concurrent sessions / subagent contexts each
+see their own handler.
+
 ---
 
 ## Memory
