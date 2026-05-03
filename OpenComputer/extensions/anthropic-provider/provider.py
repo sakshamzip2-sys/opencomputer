@@ -580,6 +580,127 @@ def _build_anthropic_multimodal_content(
     )
 
 
+def _strip_orphan_tool_results(
+    wire: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop ``tool_result`` blocks whose ``tool_use_id`` has no matching
+    ``tool_use`` in the immediately-preceding assistant message.
+
+    Anthropic's API rejects an orphan ``tool_result`` with::
+
+        messages.N.content.0: unexpected ``tool_use_id`` ... Each
+        ``tool_result`` block must have a corresponding ``tool_use``
+        block in the previous message.
+
+    Upstream invariants in OpenComputer's pipeline (compaction's
+    ``_safe_split_index`` / ``_safe_drop_index``, the message converter
+    above) preserve tool_use/tool_result pairs atomically. This pass is
+    a defense-in-depth backstop: if any future filter / truncation /
+    history slicer drops the assistant turn that owned a ``tool_use``
+    while keeping its ``tool_result``, we rewrite the orphaned wire
+    payload before it reaches the API instead of 400'ing the user.
+
+    Behavior:
+      * If a ``tool_result`` is missing its matching ``tool_use``,
+        remove just that block from the wire message's content list.
+      * If removing all blocks empties a tool_result-only message
+        (the canonical shape produced by ``role=='tool'`` source rows),
+        drop the whole message.
+      * A WARNING is logged so the upstream regression is visible
+        instead of silently swallowed.
+
+    Pure function — does not mutate ``wire``. Idempotent.
+    """
+    if not wire:
+        return wire
+
+    def _is_tool_result_only(msg: dict[str, Any]) -> bool:
+        """User-role message whose content list is exclusively
+        ``tool_result`` blocks — the canonical converter output for a
+        ``role='tool'`` source row, including parallel-batch fan-outs."""
+        if msg.get("role") != "user":
+            return False
+        content = msg.get("content")
+        if not isinstance(content, list) or not content:
+            return False
+        return all(
+            isinstance(b, dict) and b.get("type") == "tool_result"
+            for b in content
+        )
+
+    def _last_owning_assistant_ids(
+        out: list[dict[str, Any]],
+    ) -> set[str]:
+        """Walk back through ``out`` skipping consecutive tool_result-only
+        user messages (which is how parallel-batch tool returns are
+        emitted) until the immediately-preceding assistant turn. Return
+        the set of ``tool_use`` ids it carries.
+
+        Anthropic's validator allows multiple consecutive tool_result
+        user messages that all reference the same prior assistant turn;
+        treating only ``out[-1]`` as the matching turn would over-strip
+        legitimate tool_results in parallel batches.
+        """
+        idx = len(out) - 1
+        while idx >= 0 and _is_tool_result_only(out[idx]):
+            idx -= 1
+        if idx < 0:
+            return set()
+        prev_msg = out[idx]
+        if prev_msg.get("role") != "assistant":
+            return set()
+        prev_content = prev_msg.get("content")
+        if not isinstance(prev_content, list):
+            return set()
+        ids: set[str] = set()
+        for blk in prev_content:
+            if (
+                isinstance(blk, dict)
+                and blk.get("type") == "tool_use"
+                and blk.get("id")
+            ):
+                ids.add(str(blk["id"]))
+        return ids
+
+    new_wire: list[dict[str, Any]] = []
+    dropped = 0
+    for m in wire:
+        content = m.get("content")
+        if not isinstance(content, list):
+            new_wire.append(m)
+            continue
+        prev_ids = _last_owning_assistant_ids(new_wire)
+        kept_blocks: list[Any] = []
+        for blk in content:
+            if (
+                isinstance(blk, dict)
+                and blk.get("type") == "tool_result"
+            ):
+                tu_id = blk.get("tool_use_id")
+                if tu_id and tu_id not in prev_ids:
+                    dropped += 1
+                    continue
+            kept_blocks.append(blk)
+        if not kept_blocks:
+            # Whole message is orphaned (tool_result-only converted from
+            # role='tool' source). Drop the message entirely so we don't
+            # ship an empty user message to the API.
+            continue
+        new_msg = dict(m)
+        new_msg["content"] = kept_blocks
+        new_wire.append(new_msg)
+
+    if dropped:
+        _log.warning(
+            "anthropic-provider: stripped %d orphan tool_result block(s) "
+            "before wire — upstream history is missing the matching "
+            "tool_use turn(s). This is a backstop; the root cause should "
+            "be fixed upstream (compaction / history slicing).",
+            dropped,
+        )
+    return new_wire
+
+
 class AnthropicProviderConfig(BaseModel):
     """Pydantic schema for AnthropicProvider construction kwargs.
 
@@ -821,7 +942,7 @@ class AnthropicProvider(BaseProvider):
                     )
                 else:
                     out.append({"role": m.role, "content": m.content})
-        return out
+        return _strip_orphan_tool_results(out)
 
     async def _to_anthropic_messages_async(
         self,
@@ -900,7 +1021,7 @@ class AnthropicProvider(BaseProvider):
                     )
                 else:
                     out.append({"role": m.role, "content": m.content})
-        return out
+        return _strip_orphan_tool_results(out)
 
     def _apply_cache_control(
         self,
