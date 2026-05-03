@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>OpenComputer always-on gateway daemon</Description>
+    <URI>\OpenComputerGateway</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>9999</Count>
+    </RestartOnFailure>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Hidden>false</Hidden>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{executable}</Command>
+      <Arguments>--headless --profile {profile} gateway</Arguments>
+      <WorkingDirectory>{workdir}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
