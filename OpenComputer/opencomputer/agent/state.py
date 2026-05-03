@@ -34,7 +34,7 @@ from plugin_sdk.core import Message, ToolCall
 #: to NULL. v5 = Tier-A item 11 ``tool_usage`` table — per-tool-call
 #: telemetry for ``opencomputer insights`` (tool, duration_ms, error,
 #: model, ts). Existing data unaffected; the table starts empty.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -216,6 +216,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (4, 5): "_migrate_v4_to_v5",
     (5, 6): "_migrate_v5_to_v6",
     (6, 7): "_migrate_v6_to_v7",
+    (7, 8): "_migrate_v7_to_v8",
 }
 
 
@@ -453,6 +454,32 @@ def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
             ON recall_citations(session_id, turn_index);
         """
     )
+
+
+def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
+    """Phase 1 of outcome-aware learning (2026-05-03).
+
+    Adds the scoring columns on top of Phase 0's ``turn_outcomes`` table.
+    Composite score is purely arithmetic (no LLM); judge_* columns are
+    populated by the cheap LLM judge in ``agent/reviewer.py`` when budget
+    allows. ``turn_score`` is the fused 0.4*composite + 0.6*judge.
+
+    All columns nullable so partial Phase 0 / Phase 1 deployments
+    coexist — Phase 1 simply doesn't fill them yet.
+    """
+    for col, typ in (
+        ("composite_score", "REAL"),
+        ("judge_score", "REAL"),
+        ("judge_reasoning", "TEXT"),
+        ("judge_model", "TEXT"),
+        ("turn_score", "REAL"),
+        ("scored_at", "REAL"),
+    ):
+        try:
+            conn.execute(f'ALTER TABLE turn_outcomes ADD COLUMN "{col}" {typ}')
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
 
 #: Columns that historically arrived via numbered ALTER migrations.

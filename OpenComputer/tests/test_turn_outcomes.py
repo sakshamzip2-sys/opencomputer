@@ -86,6 +86,15 @@ def test_schema_version_at_or_above_7(tmp_path):
     assert row[0] >= 7
 
 
+def test_schema_v8_adds_scoring_columns(tmp_path):
+    """Phase 1 of outcome-aware learning: scoring columns."""
+    db = SessionDB(tmp_path / "s.db")
+    cols = _cols(db, "turn_outcomes")
+    expected = {"composite_score", "judge_score", "judge_reasoning",
+                "judge_model", "turn_score", "scored_at"}
+    assert expected.issubset(cols), f"missing: {expected - cols}"
+
+
 def test_turn_outcomes_fk_cascade_on_session_delete(tmp_path):
     """When a session is deleted, its turn_outcomes rows must cascade."""
     import time
