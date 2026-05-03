@@ -59,7 +59,11 @@ def test_chain_detects_tamper(tmp_path):
         assert log.verify_chain() is False
 
 
-def test_status_transition_appends_chain_link(tmp_path):
+def test_status_transition_logs_status_and_chain_still_validates(tmp_path):
+    """Status transitions UPDATE the row's status fields but do NOT
+    re-chain (v0 design: chain protects as-drafted content; status flips
+    are logged via UPDATE; cryptographic chain of status transitions is
+    a v0.5 item)."""
     db = SessionDB(tmp_path / "s.db")
     with db._connect() as conn:
         log = PolicyAuditLogger(conn, hmac_key=b"k" * 32)
@@ -79,11 +83,12 @@ def test_status_transition_appends_chain_link(tmp_path):
             (rid,),
         ).fetchone()
 
-    assert first_hmac != second_hmac
+    # hmac unchanged — chain protects as-drafted, not transitions
+    assert first_hmac == second_hmac
     assert status[0] == "pending_approval"
     assert status[1] == "user"
 
-    # Chain still validates after the transition
+    # Chain still validates
     with db._connect() as conn:
         log = PolicyAuditLogger(conn, hmac_key=b"k" * 32)
         assert log.verify_chain() is True
