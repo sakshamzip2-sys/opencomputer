@@ -718,10 +718,18 @@ async def read_user_input(
                 return
             input_buffer.text = f"/{slash_text}"
             input_buffer.cursor_position = len(input_buffer.text)
+            # Re-filter so the dropdown collapses after selection (matches
+            # the file-completion path above). Without this, the dropdown's
+            # reserved screen rows stay on-screen as a blank gap until the
+            # next keystroke triggers on_text_changed.
+            _refilter(input_buffer.text)
 
     @kb.add(Keys.ControlI, filter=Condition(_has_dropdown))  # Tab
     def _tab(event):  # noqa: ANN001
         _apply_selection()
+        # Belt-and-braces: explicitly invalidate so the layout re-renders
+        # the now-empty dropdown ConditionalContainer immediately.
+        event.app.invalidate()
 
     @kb.add(Keys.BackTab)  # Shift+Tab — cycle permission modes
     def _shift_tab(event):  # noqa: ANN001
@@ -782,6 +790,11 @@ async def read_user_input(
         if state["matches"]:
             state["matches"] = []
             state["selected_idx"] = 0
+            # Force the layout to re-render — without this, the dropdown's
+            # reserved screen rows stay on-screen as a blank gap (matches
+            # the Shift+Tab and Ctrl+P handlers below which also invalidate
+            # after mutating state).
+            event.app.invalidate()
         else:
             input_buffer.text = ""
 
