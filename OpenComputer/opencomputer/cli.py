@@ -944,6 +944,28 @@ def _run_chat_session(
     from opencomputer.cli_ui import ReasoningStore as _ReasoningStore
     if "_reasoning_store" not in runtime.custom:
         runtime.custom["_reasoning_store"] = _ReasoningStore()
+
+    # Phase B (model-agnostic thinking): stash the active provider's
+    # native-thinking capability for the configured model on
+    # runtime.custom. The ThinkingInjector + AgentLoop's stream wrapper
+    # both read this to decide whether to activate the prompt-based
+    # <think>-tag fallback for non-native providers (gpt-4o,
+    # OpenRouter routes, legacy Claude 3.x, etc.).
+    try:
+        runtime.custom["_provider_supports_native_thinking"] = (
+            provider.supports_native_thinking_for(cfg.model.model)
+        )
+    except Exception:  # noqa: BLE001 — never crash on capability sniff
+        runtime.custom["_provider_supports_native_thinking"] = False
+
+    # Register the ThinkingInjector once per process. Idempotent — if a
+    # previous session/test re-init already registered it, unregister
+    # first to avoid InjectionEngine.register's "already registered"
+    # ValueError.
+    from opencomputer.agent.injection import engine as injection_engine
+    from opencomputer.agent.thinking_injector import ThinkingInjector
+    injection_engine.unregister("thinking_tags_fallback")
+    injection_engine.register(ThinkingInjector())
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
     mcp_mgr = MCPManager(tool_registry=registry)
 
