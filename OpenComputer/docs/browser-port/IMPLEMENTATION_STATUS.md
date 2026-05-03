@@ -4,7 +4,7 @@
 >
 > Authoritative design: [BLUEPRINT.md](BLUEPRINT.md). Reference material: [docs/refs/openclaw/browser/](../refs/openclaw/browser/).
 >
-> Last updated: 2026-05-03 by s5 (Wave 3 claimed — wiring + e2e on `feat/browser-port-wave3`).
+> Last updated: 2026-05-03 by s5 (Wave 3 review — wiring + e2e on `feat/browser-port-wave3`; PR pending).
 
 ---
 
@@ -39,7 +39,7 @@ If a row is `blocked`, write **what** it's blocked on in the row so other sessio
 | W1c | `server_context/` | [BRIEF-05](BRIEF-05-server-and-auth.md) | 1 | `chrome/`, `profiles/` | s3 | feat/browser-port-wave1 | merged | [#392](https://github.com/sakshamzip2-sys/opencomputer/pull/392) | 37 tests; ProfileDriver injection, last_target_id fallback chain |
 | W2a | `tools_core/` | [BRIEF-03](BRIEF-03-pw-tools-core.md) | 2 | `session/` | s4 | feat/browser-port-wave2 | review | [#396](https://github.com/sakshamzip2-sys/opencomputer/pull/396) | 96 tests; per-act-kind dispatch + 3-phase nav-guard observer |
 | W2b | `server/` | [BRIEF-05](BRIEF-05-server-and-auth.md) | 2 | `session/`, `snapshot/`, `server_context/` | s4 | feat/browser-port-wave2 | review | [#396](https://github.com/sakshamzip2-sys/opencomputer/pull/396) | 82 tests; ~46 routes, auth, CSRF, in-process dispatcher |
-| W3 | `client/` + `tools.py` + `plugin.py` + e2e | [BRIEF-06](BRIEF-06-client-and-utils.md) | 3 | all | s5 | feat/browser-port-wave3 | claimed | — | wiring + integration tests |
+| W3 | `client/` + `_tool.py` + `plugin.py` + e2e | [BRIEF-06](BRIEF-06-client-and-utils.md) | 3 | all | s5 | feat/browser-port-wave3 | review | (pending) | 81 unit + 1 e2e + plugin smoke. Filename `_tool.py` (singular underscore) chosen over `tools.py` to dodge the sys.modules['tools'] race against coding-harness — see PR description |
 | W4 | `providers/base.py` + retrofit | (deferred) | 4 | W3 done | — | — | not started | — | Hermes seam; post-v0.1 |
 
 ## Pending decisions blocking specific waves
