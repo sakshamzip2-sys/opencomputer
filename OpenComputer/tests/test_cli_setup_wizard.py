@@ -51,7 +51,7 @@ def test_section_registry_has_eight_entries_with_correct_order():
         "tts_provider",
         "terminal_backend",
         "tools",
-        "launchd_service",
+        "service_install",
     ]
 
 
@@ -64,7 +64,7 @@ def test_all_sections_are_live():
     assert live == {
         "opencomputer_prior_detect",
         "inference_provider", "messaging_platforms", "agent_settings",
-        "tts_provider", "terminal_backend", "tools", "launchd_service",
+        "tts_provider", "terminal_backend", "tools", "service_install",
     }
 
 

@@ -1053,6 +1053,33 @@ def _result_to_check(name: str, result: CheckResult) -> Check:
     return Check(name=name, status=_level_to_status(result), detail=result.message)
 
 
+def _check_service() -> Check:
+    """Cross-platform always-on daemon health check.
+
+    Returns ``skip`` when running on a platform without a backend
+    (e.g., FreeBSD), ``pass`` if the service is enabled and running,
+    ``warn`` if the file is present but not running, ``fail`` if the
+    install file is missing entirely.
+    """
+    try:
+        from opencomputer.service.base import ServiceUnsupportedError
+        from opencomputer.service.factory import get_backend
+    except ImportError as exc:
+        return Check("service", "fail", f"import error: {exc}")
+    try:
+        backend = get_backend()
+    except ServiceUnsupportedError as exc:
+        return Check("service", "skip", f"not supported on this platform ({exc})")
+    s = backend.status()
+    if s.running:
+        return Check("service", "pass", f"{backend.NAME} running (pid={s.pid})")
+    if s.enabled:
+        return Check("service", "warn", f"{backend.NAME} enabled but not running")
+    if s.file_present:
+        return Check("service", "warn", f"{backend.NAME} file present but not enabled")
+    return Check("service", "skip", f"{backend.NAME} not installed (run `oc service install`)")
+
+
 def run_doctor(fix: bool = False) -> int:
     """Run all checks and print a report. Returns the number of failed checks.
 
@@ -1078,6 +1105,8 @@ def run_doctor(fix: bool = False) -> int:
     checks.extend(_check_profile_and_overlay())
     # Phase 14.F / C4 — per-profile C1/C2/C3 artifact drift detection.
     checks.extend(_check_profile_artifacts())
+    # Always-on daemon (cross-platform) — install state.
+    checks.append(_check_service())
 
     try:
         mcp_checks = asyncio.run(_check_mcp(cfg))

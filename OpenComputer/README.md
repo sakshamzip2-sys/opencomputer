@@ -51,6 +51,10 @@ pip install -e ".[dev]"
 ```bash
 # 1. Run the setup wizard — picks provider, saves config
 opencomputer setup
+# Optional: have the wizard register OpenComputer as an always-on system
+# service (launchd / systemd / Task Scheduler). See
+# docs/runbooks/always-on-daemon.md for the full reference.
+opencomputer setup --install-daemon
 
 # 2. Export your API key (setup tells you which)
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -78,6 +82,10 @@ opencomputer doctor          # diagnose config/env issues
 opencomputer config show     # print effective config
 opencomputer config get KEY  # read one config value (e.g. model.provider)
 opencomputer config set KEY VALUE
+opencomputer service install # register as always-on system service (cross-platform)
+opencomputer service status  # is it running?
+opencomputer service logs    # tail the gateway log
+opencomputer service doctor  # diagnose service health
 ```
 
 ## Skills Hub

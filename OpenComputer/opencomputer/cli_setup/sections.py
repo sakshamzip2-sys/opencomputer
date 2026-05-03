@@ -62,15 +62,15 @@ def _build_registry() -> list[WizardSection]:
         is_inference_provider_configured,
         run_inference_provider_section,
     )
-    from opencomputer.cli_setup.section_handlers.launchd_service import (
-        run_launchd_service_section,
-    )
     from opencomputer.cli_setup.section_handlers.messaging_platforms import (
         is_messaging_platforms_configured,
         run_messaging_platforms_section,
     )
     from opencomputer.cli_setup.section_handlers.prior_install import (
         run_prior_install_section,
+    )
+    from opencomputer.cli_setup.section_handlers.service_install import (
+        run_service_install_section,
     )
     from opencomputer.cli_setup.section_handlers.terminal_backend import (
         run_terminal_backend_section,
@@ -149,12 +149,13 @@ def _build_registry() -> list[WizardSection]:
             handler=run_tools_section,
         ),
         WizardSection(
-            key="launchd_service", icon="◆", title="Launchd Service",
+            key="service_install", icon="◆", title="Always-On System Service",
             description=(
-                "Run gateway as a launchd service (starts on login).\n"
-                "macOS only — no-op on Linux/Windows."
+                "Install the gateway as a system service so it runs on login\n"
+                "and restarts on crash. Cross-platform: launchd (macOS),\n"
+                "systemd-user (Linux), Task Scheduler (Windows)."
             ),
-            handler=run_launchd_service_section,
+            handler=run_service_install_section,
         ),
     ]
 
