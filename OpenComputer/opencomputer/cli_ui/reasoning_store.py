@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Any, Literal
 
 from rich.console import Console
 from rich.text import Text
@@ -21,9 +22,73 @@ from rich.tree import Tree
 _DEFAULT_MAX_TURNS = 50
 
 
+#: Mirror of Vercel AI Elements ``ToolPart["state"]`` union (see
+#: vercel/ai-elements packages/elements/src/tool.tsx). Values kept
+#: identical so a future cross-runtime tool-status bridge stays
+#: interoperable. Rich-on-terminal can't reproduce the React badge
+#: animation but the state vocabulary IS reproducible.
+ToolState = Literal[
+    "approval-requested",
+    "approval-responded",
+    "input-streaming",
+    "input-available",
+    "output-available",
+    "output-denied",
+    "output-error",
+]
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """AI-Elements-shaped projection of a tool dispatch.
+
+    Field names mirror Vercel AI Elements' ``ToolUIPart`` /
+    ``DynamicToolUIPart`` verbatim (camelCase ``toolName`` / ``errorText``
+    preserved deliberately for round-trip JSON interop with the AI SDK
+    schema). Constructed by :meth:`ReasoningTurn.tool_calls` from the
+    existing :class:`ToolAction` records — no new instrumentation
+    needed for back-compat.
+    """
+
+    type: str                       # noqa: A003 — mirror "tool-<name>"
+    toolName: str                   # noqa: N815 — AI Elements field name
+    state: ToolState
+    input: dict | None              # noqa: A003 — mirror AI Elements
+    output: dict | str | None
+    errorText: str | None           # noqa: N815 — AI Elements field
+    started_at: float
+    ended_at: float | None
+    description: str | None = None  # PR #390 — AI-generated per-action summary
+
+
+@dataclass(frozen=True)
+class TimelineStep:
+    """Aggregate event log entry for one turn. Drives ReasoningView's
+    expanded-state body. ``parent_id`` lets a tool nest under an
+    iteration; today most are flat (no parent)."""
+
+    id: int
+    kind: Literal["iteration", "tool", "reasoning", "web_search"]
+    label: str
+    detail: str | None
+    status: str                     # ToolState | "completed" | "in_progress"
+    started_at: float
+    ended_at: float | None
+    parent_id: int | None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class ToolAction:
-    """One tool dispatch within a turn. Immutable record."""
+    """One tool dispatch within a turn. Immutable record.
+
+    Original record kept verbatim for back-compat with existing
+    ``render_turn_tree`` + tests + per-action description pipeline
+    (PR #390). New optional fields (``started_at``, ``ended_at``,
+    ``input``, ``output``, ``errorText``) all default to None so
+    existing callers don't break; they're populated by the streaming
+    renderer's enriched ``on_tool_start`` / ``on_tool_end`` kwargs.
+    """
 
     name: str
     args_preview: str
@@ -36,6 +101,13 @@ class ToolAction:
     a daemon thread after :meth:`ReasoningStore.append`. ``None`` when
     the description call hasn't completed yet, was empty, or failed —
     the renderer falls back to the args_preview in that case."""
+
+    # AI-Elements-port fields (additive, all optional for back-compat):
+    started_at: float | None = None
+    ended_at: float | None = None
+    input: dict | None = None        # noqa: A003 — mirror AI Elements
+    output: dict | str | None = None
+    errorText: str | None = None     # noqa: N815 — AI Elements field
 
 
 @dataclass(frozen=True)
@@ -56,6 +128,94 @@ class ReasoningTurn:
     @property
     def action_count(self) -> int:
         return len(self.tool_actions)
+
+    @property
+    def tool_calls(self) -> tuple[ToolCall, ...]:
+        """AI-Elements-shaped projection of :attr:`tool_actions`.
+
+        Built on demand from the existing ToolAction records; no
+        persistence change. Maps OC's ``ok: bool`` / errorText absence
+        onto AI Elements' ``state`` union:
+        - ``ok=True`` → ``output-available``
+        - ``ok=False`` (no errorText) → ``output-error``
+        - ``ok=False`` AND ``errorText`` set → ``output-error``
+
+        ``type`` follows AI Elements' ``tool-<name>`` convention so the
+        wire shape round-trips with the AI SDK if a future bridge
+        forwards these to a web client.
+        """
+        out: list[ToolCall] = []
+        for a in self.tool_actions:
+            if a.errorText is not None:
+                state: ToolState = "output-error"
+            elif a.ok:
+                state = "output-available"
+            else:
+                state = "output-error"
+            started = a.started_at if a.started_at is not None else 0.0
+            ended = (
+                a.ended_at
+                if a.ended_at is not None
+                else (started + a.duration_s if started else None)
+            )
+            out.append(
+                ToolCall(
+                    type=f"tool-{a.name}",
+                    toolName=a.name,
+                    state=state,
+                    input=a.input,
+                    output=a.output,
+                    errorText=a.errorText,
+                    started_at=started,
+                    ended_at=ended,
+                    description=a.description,
+                )
+            )
+        return tuple(out)
+
+    @property
+    def timeline(self) -> tuple[TimelineStep, ...]:
+        """Aggregate event log built on demand. Today's emission is
+        flat: one ``reasoning`` step (if thinking text exists) plus one
+        ``tool`` step per tool action. ``parent_id`` is None for all
+        v1 entries; iteration-nesting is reserved for a follow-on once
+        the agent loop emits per-iteration markers.
+        """
+        steps: list[TimelineStep] = []
+        next_id = 1
+
+        if self.thinking:
+            steps.append(
+                TimelineStep(
+                    id=next_id,
+                    kind="reasoning",
+                    label="Reasoning",
+                    detail=None,    # body lives in turn.thinking
+                    status="completed",
+                    started_at=0.0,  # turn-relative; absolute lost on store push
+                    ended_at=self.duration_s,
+                    parent_id=None,
+                    metadata={"chars": len(self.thinking)},
+                )
+            )
+            next_id += 1
+
+        for tc in self.tool_calls:
+            steps.append(
+                TimelineStep(
+                    id=next_id,
+                    kind="tool",
+                    label=tc.toolName,
+                    detail=tc.description or None,
+                    status=tc.state,
+                    started_at=tc.started_at,
+                    ended_at=tc.ended_at,
+                    parent_id=None,
+                    metadata={"type": tc.type},
+                )
+            )
+            next_id += 1
+        return tuple(steps)
 
 
 class ReasoningStore:
@@ -322,18 +482,34 @@ def render_turns_to_text(turns: list[ReasoningTurn]) -> str:
     garbage when the dispatcher routes the output as message content via
     ``opencomputer/agent/loop.py``). Unicode tree connectors (``├──``,
     ``└──``) Rich draws by default are preserved.
+
+    Uses the AI Elements port (:class:`ReasoningView` in
+    ``opencomputer.cli_ui.reasoning_view``) at ``open=True`` so the
+    expanded view ships the AI-Elements-shaped Tool sections with
+    Parameters / Result blocks under each tool call. Falls back to the
+    legacy :func:`render_turn_tree` when the import is unavailable
+    (defensive — currently always available, but keeps the boundary
+    explicit in case the view module changes shape).
     """
     buf = io.StringIO()
     console = Console(file=buf, color_system=None, width=120, no_color=True)
-    for t in turns:
-        console.print(render_turn_tree(t))
+    try:
+        from opencomputer.cli_ui.reasoning_view import ReasoningView
+        for t in turns:
+            console.print(ReasoningView(turn=t, open=True))
+    except ImportError:
+        for t in turns:
+            console.print(render_turn_tree(t))
     return buf.getvalue().rstrip()
 
 
 __all__ = [
     "ReasoningStore",
     "ReasoningTurn",
+    "TimelineStep",
     "ToolAction",
+    "ToolCall",
+    "ToolState",
     "render_turn_tree",
     "render_turns_to_text",
 ]
