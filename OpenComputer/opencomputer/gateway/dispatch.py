@@ -112,12 +112,54 @@ def _build_end_of_turn_signals(
 
 
 async def _record_turn_outcome_async(db, sig) -> None:
-    """Fire-and-forget telemetry write. Never propagates exceptions."""
+    """Fire-and-forget telemetry write. Never propagates exceptions.
+
+    P0-6: after the DB write, publishes a ``TurnCompletedEvent`` on the
+    typed event bus so any subscriber (Honcho extension, analytics
+    dashboards, custom reactors) can observe per-turn outcomes without
+    dispatch importing or knowing about them. Decouples Phase 0
+    capture from any downstream provider — preserves the SDK boundary
+    (plugins never import from opencomputer/*; they subscribe to the
+    bus and let the bus deliver).
+    """
     try:
         from opencomputer.agent.turn_outcome_recorder import TurnOutcomeRecorder
         TurnOutcomeRecorder(db).record(sig)
     except Exception as e:  # noqa: BLE001 — telemetry must never block
         logger.warning("outcome recording failed: %s", e)
+        return
+
+    # Publish the event AFTER the DB write succeeded — subscribers
+    # see only durable outcomes.
+    try:
+        from opencomputer.ingestion.bus import get_default_bus
+        from plugin_sdk.ingestion import TurnCompletedEvent
+
+        evt = TurnCompletedEvent(
+            session_id=sig.session_id,
+            source="gateway.dispatch",
+            turn_index=sig.turn_index,
+            signals={
+                "tool_call_count": sig.tool_call_count,
+                "tool_success_count": sig.tool_success_count,
+                "tool_error_count": sig.tool_error_count,
+                "tool_blocked_count": sig.tool_blocked_count,
+                "self_cancel_count": sig.self_cancel_count,
+                "retry_count": sig.retry_count,
+                "vibe_before": sig.vibe_before,
+                "vibe_after": sig.vibe_after,
+                "reply_latency_s": sig.reply_latency_s,
+                "affirmation_present": sig.affirmation_present,
+                "correction_present": sig.correction_present,
+                "conversation_abandoned": sig.conversation_abandoned,
+                "duration_s": sig.duration_s,
+            },
+        )
+        bus = get_default_bus()
+        if bus is not None:
+            await bus.apublish(evt)
+    except Exception as e:  # noqa: BLE001 — bus failures must never block
+        logger.warning("turn_completed event publish failed: %s", e)
 
 
 async def _backfill_prior_turn_async(

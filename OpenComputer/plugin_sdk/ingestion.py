@@ -212,6 +212,25 @@ class TurnStartEvent(SignalEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class TurnCompletedEvent(SignalEvent):
+    """Fires after a turn's ``turn_outcomes`` row has been written.
+
+    Phase 0 of outcome-aware learning. Publishes the same payload that
+    just landed in the DB so any subscriber (Honcho extension, future
+    analytics dashboards, custom reactors) can observe it without
+    coupling to the dispatch path. Decoupling the consumer side avoids
+    SDK-boundary violations from dispatch.py importing extensions.
+
+    The ``signals`` field is a dict mirror of ``TurnSignals`` —
+    JSON-serialisable for easy persistence by subscribers.
+    """
+
+    event_type: str = field(default="turn_completed", init=False)
+    turn_index: int = 0
+    signals: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class DelegationCompleteEvent(SignalEvent):
     """Fires after DelegateTool subagent finishes.
 
@@ -387,6 +406,7 @@ __all__ = [
     "HookSignalEvent",
     # PR-8: bus-driven memory hooks (T3.2)
     "TurnStartEvent",
+    "TurnCompletedEvent",
     "DelegationCompleteEvent",
     "MemoryWriteEvent",
     # T1 of ambient foreground sensor plan (2026-04-27)
