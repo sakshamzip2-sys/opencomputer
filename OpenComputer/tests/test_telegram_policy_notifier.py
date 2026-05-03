@@ -21,6 +21,8 @@ from policy_notifier import (  # noqa: E402
 
 @pytest.mark.asyncio
 async def test_pending_approval_event_triggers_dm():
+    import asyncio
+
     bus = get_default_bus()
     sent: list[tuple[str, str]] = []
 
@@ -41,7 +43,10 @@ async def test_pending_approval_event_triggers_dm():
         engine_version="MostCitedBelowMedian/1",
         reason="cited 7x mean 0.30",
     )
-    await bus.apublish(evt)
+    bus.publish(evt)
+    # The notifier handler is sync but spawns the actual send via
+    # asyncio.create_task — yield to the loop so scheduled tasks run.
+    await asyncio.sleep(0)
 
     assert len(sent) == 1
     chat_id, text = sent[0]
@@ -65,13 +70,16 @@ async def test_active_status_does_not_trigger_dm():
         bus=bus, admin_chat_id="123", send_fn=fake_send,
     )
 
+    import asyncio
+
     evt = PolicyChangeEvent(
         source="x", change_id="c1",
         knob_kind="recall_penalty", target_id="1",
         status="active",  # not pending_approval
         approval_mode="auto_ttl", engine_version="X/1", reason="r",
     )
-    await bus.apublish(evt)
+    bus.publish(evt)
+    await asyncio.sleep(0)
 
     assert sent == []
     sub.unsubscribe()
@@ -89,6 +97,8 @@ async def test_reverted_event_triggers_dm():
         bus=bus, admin_chat_id="123", send_fn=fake_send,
     )
 
+    import asyncio
+
     evt = PolicyRevertedEvent(
         source="cron.auto_revert",
         change_id="abcdef12",
@@ -96,7 +106,8 @@ async def test_reverted_event_triggers_dm():
         target_id="42",
         reverted_reason="statistical: post_mean 0.40 < baseline - 1σ",
     )
-    await bus.apublish(evt)
+    bus.publish(evt)
+    await asyncio.sleep(0)
 
     assert len(sent) == 1
     text = sent[0][1]
@@ -118,6 +129,8 @@ async def test_send_failure_does_not_propagate():
         bus=bus, admin_chat_id="123", send_fn=boom,
     )
 
+    import asyncio
+
     evt = PolicyChangeEvent(
         source="x", change_id="c1",
         knob_kind="recall_penalty", target_id="1",
@@ -126,5 +139,6 @@ async def test_send_failure_does_not_propagate():
         engine_version="X/1", reason="r",
     )
     # Must not raise
-    await bus.apublish(evt)
+    bus.publish(evt)
+    await asyncio.sleep(0)
     sub.unsubscribe()

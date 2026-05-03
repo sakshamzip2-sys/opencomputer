@@ -1,8 +1,13 @@
 """Phase 2 v0 slash commands: /policy-changes, /policy-approve, /policy-revert.
 
-Audit display + manual approval/revert primitives. Reuses the existing
-slash-handler call shape; the dispatcher in slash_dispatcher.py wires
-them in.
+Audit display + manual approval/revert primitives.
+
+Two surfaces, same logic:
+  - Bare async handlers (handle_policy_*): used by tests + the CLI
+    wrappers in cli.py (oc policy show).
+  - SlashCommand subclasses (PolicyChangesCommand etc.): registered with
+    the agent loop's slash dispatcher so users can type /policy-changes
+    inside a chat turn.
 """
 from __future__ import annotations
 
@@ -12,6 +17,8 @@ import time
 from dataclasses import dataclass
 
 from opencomputer.agent.policy_audit import PolicyAuditLogger
+from plugin_sdk.runtime_context import RuntimeContext
+from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 
 _logger = logging.getLogger(__name__)
 
@@ -189,6 +196,74 @@ def _publish_reverted_event(**kwargs) -> None:
         bus.publish(PolicyRevertedEvent(source="slash.policy_revert", **kwargs))
     except Exception as e:  # noqa: BLE001
         _logger.warning("PolicyRevertedEvent publish failed: %s", e)
+
+
+# ─── SlashCommand class wrappers (registered into the dispatcher) ───
+
+
+def _resolve_db_and_key(runtime: RuntimeContext):
+    """Pull SessionDB + HMAC key from runtime + active profile."""
+    from opencomputer.agent.config import _home
+    from opencomputer.agent.policy_audit_key import get_policy_audit_hmac_key
+
+    db = runtime.custom.get("session_db")
+    if db is None:
+        from opencomputer.agent.config_store import default_config
+        from opencomputer.agent.state import SessionDB
+        cfg = default_config()
+        db = SessionDB(cfg.session.db_path)
+    key = get_policy_audit_hmac_key(_home())
+    return db, key
+
+
+class PolicyChangesCommand(SlashCommand):
+    name = "policy-changes"
+    description = (
+        "List recent policy-engine decisions: /policy-changes [--days N]"
+    )
+
+    async def execute(
+        self, args: str, runtime: RuntimeContext,
+    ) -> SlashCommandResult:
+        db, _ = _resolve_db_and_key(runtime)
+        out = await handle_policy_changes(db=db, args=args)
+        return SlashCommandResult(output=out.text, handled=True)
+
+
+class PolicyApproveCommand(SlashCommand):
+    name = "policy-approve"
+    description = (
+        "Approve a pending_approval policy change: /policy-approve <id>"
+    )
+
+    async def execute(
+        self, args: str, runtime: RuntimeContext,
+    ) -> SlashCommandResult:
+        db, key = _resolve_db_and_key(runtime)
+        out = await handle_policy_approve(db=db, args=args, hmac_key=key)
+        return SlashCommandResult(output=out.text, handled=True)
+
+
+class PolicyRevertCommand(SlashCommand):
+    name = "policy-revert"
+    description = "Manually revert a policy change: /policy-revert <id>"
+
+    async def execute(
+        self, args: str, runtime: RuntimeContext,
+    ) -> SlashCommandResult:
+        db, key = _resolve_db_and_key(runtime)
+        out = await handle_policy_revert(db=db, args=args, hmac_key=key)
+        return SlashCommandResult(output=out.text, handled=True)
+
+
+__all__ = [
+    "PolicyApproveCommand",
+    "PolicyChangesCommand",
+    "PolicyRevertCommand",
+    "handle_policy_approve",
+    "handle_policy_changes",
+    "handle_policy_revert",
+]
 
 
 def _compute_baseline(conn) -> tuple[float, float]:
