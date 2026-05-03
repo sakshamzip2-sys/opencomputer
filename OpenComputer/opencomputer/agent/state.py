@@ -34,7 +34,7 @@ from plugin_sdk.core import Message, ToolCall
 #: to NULL. v5 = Tier-A item 11 ``tool_usage`` table — per-tool-call
 #: telemetry for ``opencomputer insights`` (tool, duration_ms, error,
 #: model, ts). Existing data unaffected; the table starts empty.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -217,6 +217,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (5, 6): "_migrate_v5_to_v6",
     (6, 7): "_migrate_v6_to_v7",
     (7, 8): "_migrate_v7_to_v8",
+    (8, 9): "_migrate_v8_to_v9",
 }
 
 
@@ -480,6 +481,74 @@ def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
+
+
+def _migrate_v8_to_v9(conn: sqlite3.Connection) -> None:
+    """Phase 2 v0 of outcome-aware learning (2026-05-03).
+
+    Two changes:
+
+    1. ``episodic_events`` gets ``recall_penalty REAL DEFAULT 0.0`` and
+       ``recall_penalty_updated_at REAL`` columns. The recall pipeline
+       multiplies BM25 score by ``max(0.05, 1 - penalty * decay(age))`` so
+       penalised memories are suppressed but never literally unreachable.
+
+    2. ``policy_changes`` table — HMAC-chained audit log for every
+       reversible policy decision the engine makes. Mirrors the consent
+       audit pattern (prev_hmac → row_hmac chain, verify_chain detects
+       tamper). Status field tracks the lifecycle:
+       drafted → pending_approval | pending_evaluation → active | reverted
+                                                         | expired_decayed
+    """
+    for col, typ in (
+        ("recall_penalty", "REAL DEFAULT 0.0"),
+        ("recall_penalty_updated_at", "REAL"),
+    ):
+        try:
+            conn.execute(
+                f'ALTER TABLE episodic_events ADD COLUMN "{col}" {typ}'
+            )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS policy_changes (
+            id                              TEXT PRIMARY KEY,
+            ts_drafted                      REAL NOT NULL,
+            ts_applied                      REAL,
+            knob_kind                       TEXT NOT NULL,
+            target_id                       TEXT NOT NULL,
+            prev_value                      TEXT NOT NULL,
+            new_value                       TEXT NOT NULL,
+            reason                          TEXT NOT NULL,
+            expected_effect                 TEXT,
+            revert_after                    REAL,
+            rollback_hook                   TEXT NOT NULL,
+            recommendation_engine_version   TEXT NOT NULL,
+            approval_mode                   TEXT NOT NULL,
+            approved_by                     TEXT,
+            approved_at                     REAL,
+            hmac_prev                       TEXT NOT NULL,
+            hmac_self                       TEXT NOT NULL,
+            status                          TEXT NOT NULL,
+            eligible_turn_count             INTEGER DEFAULT 0,
+            pre_change_baseline_mean        REAL,
+            pre_change_baseline_std         REAL,
+            post_change_mean                REAL,
+            reverted_at                     REAL,
+            reverted_reason                 TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_policy_changes_status
+            ON policy_changes(status);
+        CREATE INDEX IF NOT EXISTS idx_policy_changes_target
+            ON policy_changes(knob_kind, target_id);
+        CREATE INDEX IF NOT EXISTS idx_policy_changes_engine
+            ON policy_changes(recommendation_engine_version);
+        """
+    )
 
 
 #: Columns that historically arrived via numbered ALTER migrations.
