@@ -1,0 +1,28 @@
+"""{{ plugin_name }} — adapter-pack plugin entry.
+
+Distributes one or more @adapter-decorated recipes. The
+``adapter-runner`` plugin auto-discovers any adapter file under
+``adapters/**/*.py`` and registers each as a synthetic
+``<Site><Name>`` tool — but for explicit registration (and for
+adapter packs hosted via ``opencomputer plugin install file://``),
+``register()`` calls ``register_adapter_pack`` so the host can
+register tools on demand without waiting for adapter-runner's
+discovery walk.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+
+def register(api) -> None:
+    """Register every adapter under ``adapters/``."""
+    try:
+        from extensions.adapter_runner import register_adapter_pack  # type: ignore[import-not-found]
+    except ImportError:
+        # adapter-runner plugin not installed; nothing to do.
+        return
+    register_adapter_pack(
+        api,
+        adapters_dir=Path(__file__).parent / "adapters",
+    )

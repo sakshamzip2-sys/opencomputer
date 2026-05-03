@@ -1,0 +1,16 @@
+{
+  "args": {"limit": 5},
+  "rowCount": {"min": 5, "max": 5},
+  "columns": ["rank", "title", "score", "author", "comments", "url"],
+  "patterns": {
+    "rank": "^[0-9]+$",
+    "title": ".+",
+    "url": "^https?://"
+  },
+  "notEmpty": ["title", "author", "url"],
+  "types": {
+    "rank": "int",
+    "score": "int",
+    "comments": "int"
+  }
+}

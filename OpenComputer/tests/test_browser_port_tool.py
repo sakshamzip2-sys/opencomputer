@@ -53,12 +53,18 @@ def _reset_warnings():
 
 
 def test_schema_action_enum_complete():
+    # 16 v0.3 actions + 9 added in Wave 4 (adapter promotion).
     assert {a.value for a in BrowserAction} == {
+        # v0.3 (16)
         "status", "start", "stop", "profiles", "tabs", "open", "focus",
         "close", "snapshot", "screenshot", "navigate", "console", "pdf",
         "upload", "dialog", "act",
+        # Wave 4 (9)
+        "network_start", "network_list", "network_detail",
+        "resource_timing", "analyze",
+        "adapter_new", "adapter_save", "adapter_validate", "verify",
     }
-    assert len(BrowserAction) == 16
+    assert len(BrowserAction) == 25
 
 
 def test_schema_act_kind_enum_complete():

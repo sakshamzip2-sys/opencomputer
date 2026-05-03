@@ -1,0 +1,26 @@
+"""Example adapter — replace with your real implementation.
+
+Returns a tiny static fixture so the pack's smoke test passes
+out-of-the-box. Replace ``run`` with logic that hits your target site.
+"""
+
+from __future__ import annotations
+
+from extensions.adapter_runner import Strategy, adapter
+
+
+@adapter(
+    site="example",
+    name="command",
+    description="Example {{ plugin_name }} adapter — replace me.",
+    domain="example.com",
+    strategy=Strategy.PUBLIC,
+    browser=False,
+    args=[
+        {"name": "limit", "type": "int", "default": 5, "help": "Max rows"},
+    ],
+    columns=["id", "label"],
+)
+async def run(args, ctx):
+    n = max(1, int(args.get("limit") or 5))
+    return [{"id": i, "label": f"row {i}"} for i in range(1, n + 1)]

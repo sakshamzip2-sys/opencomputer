@@ -48,6 +48,16 @@ class BrowserAction(str, Enum):
     UPLOAD = "upload"
     DIALOG = "dialog"
     ACT = "act"
+    # Wave 4 — adapter promotion + recon surface (BLUEPRINT §5).
+    NETWORK_START = "network_start"
+    NETWORK_LIST = "network_list"
+    NETWORK_DETAIL = "network_detail"
+    RESOURCE_TIMING = "resource_timing"
+    ANALYZE = "analyze"
+    ADAPTER_NEW = "adapter_new"
+    ADAPTER_SAVE = "adapter_save"
+    ADAPTER_VALIDATE = "adapter_validate"
+    VERIFY = "verify"
 
 
 class BrowserActKind(str, Enum):
@@ -151,7 +161,16 @@ def browser_params_json_schema() -> dict[str, Any]:
                     "a URL. console reads buffered console messages. pdf "
                     "saves the page to PDF. upload arms a file chooser. "
                     "dialog arms an alert/confirm/prompt response. act runs "
-                    "an inner element-level operation (see request.kind)."
+                    "an inner element-level operation (see request.kind). "
+                    "Wave 4 (adapter promotion): network_start arms request "
+                    "capture; network_list / network_detail read it back; "
+                    "resource_timing reads performance.getEntriesByType "
+                    "('resource') from page context (THE killer recon move "
+                    "for endpoint discovery on already-loaded pages); "
+                    "analyze runs a one-shot site recon; adapter_new / "
+                    "adapter_save scaffold or persist an adapter file; "
+                    "adapter_validate runs static checks; verify runs an "
+                    "adapter against its verify/<name>.json fixture."
                 ),
             },
             "target": {
@@ -239,6 +258,47 @@ def browser_params_json_schema() -> dict[str, Any]:
             "delta": {"type": "integer"},
             "level": {"type": "string"},
             "clear": {"type": "boolean"},
+            # Wave 4 — adapter / recon fields. All optional; the per-action
+            # dispatcher validates which combination is required.
+            "site": {
+                "type": "string",
+                "description": "Adapter site id (lowercase, e.g. 'hackernews'). "
+                "Required by adapter_new / adapter_save / adapter_validate / verify.",
+            },
+            "name": {
+                "type": "string",
+                "description": "Adapter command name (lowercase, e.g. 'top'). "
+                "Required by adapter_new / adapter_save / adapter_validate / verify.",
+            },
+            "domain": {
+                "type": "string",
+                "description": "Site domain for new adapter scaffolds.",
+            },
+            "strategy": {
+                "type": "string",
+                "enum": ["public", "cookie", "ui", "intercept"],
+                "description": "Adapter authentication tier — see Strategy enum.",
+            },
+            "path": {
+                "type": "string",
+                "description": "File path for adapter_validate / adapter_save.",
+            },
+            "filter": {
+                "type": "string",
+                "description": "URL substring filter for network_list / "
+                "resource_timing.",
+            },
+            "requestId": {
+                "type": "string",
+                "description": "Captured request id for network_detail.",
+            },
+            "run_body": {
+                "type": "string",
+                "description": "Indented Python body for adapter_save's run() function.",
+            },
+            "overwrite": {"type": "boolean"},
+            "skip_import": {"type": "boolean"},
+            "adapters_root": {"type": "string"},
         },
         "required": ["action"],
     }

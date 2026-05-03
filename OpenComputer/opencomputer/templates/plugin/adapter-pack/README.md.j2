@@ -1,0 +1,53 @@
+# {{ plugin_name }}
+
+{{ description }}
+
+Adapter-pack plugin — distributes one or more `@adapter`-decorated
+recipes that turn website APIs into deterministic, reusable agent tools.
+
+## Install
+
+```bash
+# from a local checkout
+opencomputer plugin install file:///path/to/{{ plugin_id }}
+
+# from GitHub
+opencomputer plugin install github:{{ author }}/{{ plugin_id }}
+```
+
+## Layout
+
+```
+{{ plugin_id }}/
+├── plugin.json           — manifest (kind=tool, entry=plugin)
+├── plugin.py             — calls register_adapter_pack on the api
+├── adapters/<site>/      — one .py per adapter, plus verify/<name>.json
+│   └── example/
+│       └── command.py    — sample @adapter
+└── README.md             — this file
+```
+
+## Authoring
+
+See the `adapter-author` skill bundled with `browser-control` for the
+full runbook (recon → write → verify).
+
+Quick start:
+
+```python
+from extensions.adapter_runner import adapter, Strategy
+
+@adapter(
+    site="example",
+    name="command",
+    description="...",
+    domain="example.com",
+    strategy=Strategy.PUBLIC,
+    columns=["..."],
+)
+async def run(args, ctx):
+    return await ctx.fetch("https://example.com/api/data")
+```
+
+The `adapter-runner` plugin discovers + registers your adapters
+automatically on the next agent boot.

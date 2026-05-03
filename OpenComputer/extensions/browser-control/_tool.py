@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import warnings
 from typing import Any, ClassVar
 
@@ -279,6 +280,25 @@ class Browser(BaseTool):
             data = await actions.browser_act(
                 request, profile=profile, base_url=base_url
             )
+        # ─── Wave 4 — adapter promotion + recon surface ─────────────
+        elif action is BrowserAction.NETWORK_START:
+            data = await _do_network_start(actions, args, profile, base_url)
+        elif action is BrowserAction.NETWORK_LIST:
+            data = await _do_network_list(actions, args, profile, base_url)
+        elif action is BrowserAction.NETWORK_DETAIL:
+            data = await _do_network_detail(actions, args, profile, base_url)
+        elif action is BrowserAction.RESOURCE_TIMING:
+            data = await _do_resource_timing(actions, args, profile, base_url)
+        elif action is BrowserAction.ANALYZE:
+            data = await _do_analyze(actions, args, profile, base_url)
+        elif action is BrowserAction.ADAPTER_NEW:
+            data = _do_adapter_new(args)
+        elif action is BrowserAction.ADAPTER_SAVE:
+            data = _do_adapter_save(args)
+        elif action is BrowserAction.ADAPTER_VALIDATE:
+            data = _do_adapter_validate(args)
+        elif action is BrowserAction.VERIFY:
+            data = await _do_verify(args, profile)
         else:
             return ToolResult(
                 tool_call_id=call.id,
@@ -351,6 +371,354 @@ def _jsonify(data: Any) -> str:
         return json.dumps(data, default=str)
     except (TypeError, ValueError):
         return str(data)
+
+
+# ─── Wave 4 action handlers ────────────────────────────────────────────
+
+
+async def _do_network_start(
+    actions: Any, args: dict[str, Any], profile: str | None, base_url: str | None
+) -> Any:
+    """Begin capturing network requests on the active page.
+
+    Implementation: clears the existing buffer + arms a fresh capture.
+    The control service already buffers requests via Network.* events;
+    we use the existing /requests endpoint with ``clear=true`` to reset
+    the buffer, leaving capture armed for a subsequent ``network_list``.
+    """
+    target_id = _opt_str(args.get("targetId") or args.get("target_id"))
+    return await actions.browser_requests(
+        target_id=target_id, clear=True, profile=profile, base_url=base_url
+    )
+
+
+async def _do_network_list(
+    actions: Any, args: dict[str, Any], profile: str | None, base_url: str | None
+) -> Any:
+    """Return captured requests (URL/method/status/...). Optional URL filter."""
+    target_id = _opt_str(args.get("targetId") or args.get("target_id"))
+    url_filter = _opt_str(args.get("filter") or args.get("url_pattern"))
+    return await actions.browser_requests(
+        target_id=target_id, filter=url_filter, profile=profile, base_url=base_url
+    )
+
+
+async def _do_network_detail(
+    actions: Any, args: dict[str, Any], profile: str | None, base_url: str | None
+) -> Any:
+    """Get the full body for one request (by request_id or URL)."""
+    request_id = _opt_str(args.get("requestId") or args.get("request_id"))
+    if not request_id:
+        raise BrowserServiceError(
+            "network_detail requires 'requestId' (from network_list output)"
+        )
+    return await actions.browser_response_body(
+        request_id=request_id, profile=profile, base_url=base_url
+    )
+
+
+async def _do_resource_timing(
+    actions: Any, args: dict[str, Any], profile: str | None, base_url: str | None
+) -> Any:
+    """Read ``performance.getEntriesByType('resource')`` from page context.
+
+    THE killer recon move per the user's BUILD.md — works on already-loaded
+    pages where live ``network_list`` capture misses everything.
+    """
+    pattern = _opt_str(args.get("filter") or args.get("url_pattern"))
+    if pattern:
+        # Best-effort substring filter inside the page expression.
+        js_filter = (
+            f".filter(r => r.name && r.name.indexOf({json.dumps(pattern)}) !== -1)"
+        )
+    else:
+        js_filter = ""
+    expression = (
+        "Array.from(performance.getEntriesByType('resource'))"
+        + js_filter
+        + ".map(r => ({name: r.name, type: r.initiatorType, "
+        "duration: Math.round(r.duration), size: r.transferSize}))"
+    )
+    return await actions.browser_act(
+        {"kind": "evaluate", "expression": expression},
+        profile=profile,
+        base_url=base_url,
+    )
+
+
+async def _do_analyze(
+    actions: Any, args: dict[str, Any], profile: str | None, base_url: str | None
+) -> dict[str, Any]:
+    """One-shot site recon (BLUEPRINT §11).
+
+    navigate(url) → resource_timing → neighbor adapters → anti-bot signals
+    → returns a structured "use Pattern X, endpoint Y" report.
+    """
+    url = _required(args, "url")
+    out: dict[str, Any] = {"url": url, "candidate_endpoints": []}
+    # 1) Navigate. Best-effort: don't fail the analyze on a transient
+    # navigation hiccup — we still get partial data from the existing
+    # tab.
+    try:
+        nav = await actions.browser_navigate(
+            url=url, target_id=None, profile=profile, base_url=base_url
+        )
+        if isinstance(nav, dict):
+            out["targetId"] = nav.get("targetId") or nav.get("target_id")
+    except BrowserServiceError as exc:
+        out["navigate_error"] = str(exc)
+
+    # 2) Resource timing — find API URLs the page already fetched.
+    try:
+        timing = await _do_resource_timing(actions, {}, profile, base_url)
+    except BrowserServiceError as exc:
+        timing = {"error": str(exc)}
+    api_calls: list[dict[str, Any]] = []
+    if isinstance(timing, dict):
+        raw = timing.get("result") or timing.get("value") or timing
+        candidates = raw if isinstance(raw, list) else []
+        for entry in candidates:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "")
+            if any(
+                marker in name
+                for marker in ("/api/", "/trpc/", "/graphql", "/v1/", "/v2/")
+            ):
+                api_calls.append(entry)
+    out["candidate_endpoints"] = api_calls[:10]
+
+    # 3) Neighbor adapters — same domain matches in the registry.
+    try:
+        from extensions.adapter_runner import (  # type: ignore[import-not-found]
+            get_registered_adapters,
+        )
+
+        host = url.split("/")[2] if "://" in url else ""
+        neighbors = []
+        for spec in get_registered_adapters():
+            if spec.domain and spec.domain in host:
+                neighbors.append(f"{spec.site}/{spec.name}")
+        out["neighbor_adapters"] = neighbors
+    except Exception:  # noqa: BLE001
+        out["neighbor_adapters"] = []
+
+    # 4) Anti-bot signals — trivial heuristic on document.title (real
+    # detection lands in v0.5).
+    try:
+        anti = await actions.browser_act(
+            {
+                "kind": "evaluate",
+                "expression": (
+                    "({title: document.title, body: "
+                    "document.body && document.body.innerText.slice(0, 500)})"
+                ),
+            },
+            profile=profile,
+            base_url=base_url,
+        )
+        body_lower = ""
+        if isinstance(anti, dict):
+            inner = anti.get("result") or anti.get("value") or anti
+            if isinstance(inner, dict):
+                body_lower = (inner.get("body") or "").lower()
+        indicators: list[str] = []
+        for marker in ("captcha", "are you human", "cloudflare"):
+            if marker in body_lower:
+                indicators.append(marker)
+        out["anti_bot"] = {"detected": bool(indicators), "indicators": indicators}
+    except BrowserServiceError:
+        out["anti_bot"] = {"detected": False, "indicators": []}
+
+    # 5) Pattern hint — pure heuristic (real classification lands in
+    # v0.5; this is enough to nudge the agent the right way).
+    if api_calls:
+        out["pattern"] = "A"  # §1 network — page calls API directly
+    else:
+        out["pattern"] = "B"  # §2 state — likely embedded in __INITIAL_STATE__
+    return out
+
+
+def _do_adapter_new(args: dict[str, Any]) -> dict[str, Any]:
+    """Scaffold a new adapter file at ``<adapters_root>/<site>/<name>.py``.
+
+    Default ``adapters_root`` is ``~/.opencomputer/<profile>/adapters``;
+    callers can override with ``adapters_root`` (e.g. tests) or
+    ``path`` (full file path).
+    """
+    site = _required(args, "site")
+    name = _required(args, "name")
+    description = _opt_str(args.get("description")) or f"{site} {name} adapter"
+    domain = _opt_str(args.get("domain")) or f"{site}.example"
+    strategy = _opt_str(args.get("strategy")) or "public"
+    explicit_path = _opt_str(args.get("path"))
+    adapters_root = _opt_str(args.get("adapters_root"))
+
+    from pathlib import Path
+
+    if explicit_path:
+        target = Path(explicit_path)
+    else:
+        if adapters_root:
+            root = Path(adapters_root)
+        else:
+            home = os.environ.get("OPENCOMPUTER_HOME") or str(
+                Path.home() / ".opencomputer" / "default"
+            )
+            root = Path(home) / "adapters"
+        target = root / site / f"{name}.py"
+
+    if target.exists() and not bool(args.get("overwrite", False)):
+        raise BrowserServiceError(
+            f"adapter file already exists at {target} (pass overwrite=true)"
+        )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(_render_adapter_stub(site, name, description, domain, strategy))
+    return {"path": str(target), "site": site, "name": name}
+
+
+def _render_adapter_stub(
+    site: str, name: str, description: str, domain: str, strategy: str
+) -> str:
+    browser_flag = "False" if strategy.lower() == "public" else "True"
+    return (
+        '"""Adapter: '
+        + f"{site}/{name}.\n"
+        + '\n'
+        + f"{description}\n"
+        + '"""\n\n'
+        + 'from __future__ import annotations\n\n'
+        + 'from extensions.adapter_runner import adapter, Strategy\n\n\n'
+        + '@adapter(\n'
+        + f'    site="{site}",\n'
+        + f'    name="{name}",\n'
+        + f'    description="{description}",\n'
+        + f'    domain="{domain}",\n'
+        + f'    strategy=Strategy.{strategy.upper()},\n'
+        + f'    browser={browser_flag},\n'
+        + '    args=[\n'
+        + '        # {"name": "limit", "type": "int", "default": 20, "help": "..."},\n'
+        + '    ],\n'
+        + '    columns=[\n'
+        + '        # "rank", "title", ...\n'
+        + '    ],\n'
+        + ')\n'
+        + 'async def run(args, ctx):\n'
+        + '    """Implement the adapter logic and return list[dict] rows."""\n'
+        + f'    raise NotImplementedError("fill in {site}/{name} adapter logic")\n'
+    )
+
+
+def _do_adapter_save(args: dict[str, Any]) -> dict[str, Any]:
+    """Replay last successful flow as a recipe; write Python module to disk.
+
+    v0.4 ships the structural plumbing. The recorder side (capturing a
+    sequence of Browser calls into a replayable trace) lands as the
+    autofix flow in v0.5; for now ``adapter_save`` writes a stub
+    populated with the user-provided ``run_body`` string. The agent
+    that just figured out a flow can pass the JS / fetch sequence it
+    used as the body.
+    """
+    site = _required(args, "site")
+    name = _required(args, "name")
+    body = _opt_str(args.get("run_body"))
+    description = _opt_str(args.get("description")) or f"{site} {name} adapter"
+    domain = _opt_str(args.get("domain")) or f"{site}.example"
+    strategy = _opt_str(args.get("strategy")) or "cookie"
+
+    from pathlib import Path
+
+    explicit_path = _opt_str(args.get("path"))
+    if explicit_path:
+        target = Path(explicit_path)
+    else:
+        home = os.environ.get("OPENCOMPUTER_HOME") or str(
+            Path.home() / ".opencomputer" / "default"
+        )
+        target = Path(home) / "adapters" / site / f"{name}.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if body:
+        # Indent the user-provided body so it sits inside ``async def run``.
+        indented = "\n".join("    " + line for line in body.splitlines())
+    else:
+        indented = (
+            '    # TODO: paste the successful flow here.\n'
+            '    raise NotImplementedError("fill me in")'
+        )
+    # Strategy.PUBLIC adapters don't need browser=True; everything else does.
+    browser_flag = "False" if strategy.lower() == "public" else "True"
+    source = (
+        '"""Adapter: '
+        + f"{site}/{name} (saved from a successful Browser flow)."
+        + '"""\n\n'
+        + 'from __future__ import annotations\n\n'
+        + 'from extensions.adapter_runner import adapter, Strategy\n\n\n'
+        + '@adapter(\n'
+        + f'    site="{site}",\n'
+        + f'    name="{name}",\n'
+        + f'    description="{description}",\n'
+        + f'    domain="{domain}",\n'
+        + f'    strategy=Strategy.{strategy.upper()},\n'
+        + f'    browser={browser_flag},\n'
+        + ')\n'
+        + 'async def run(args, ctx):\n'
+        + indented
+        + '\n'
+    )
+    target.write_text(source)
+    return {"path": str(target)}
+
+
+def _do_adapter_validate(args: dict[str, Any]) -> dict[str, Any]:
+    """Static checks on a saved adapter source file."""
+    path = _required(args, "path")
+    skip_import = bool(args.get("skip_import", False))
+    from pathlib import Path
+
+    from extensions.adapter_runner._validation import (  # type: ignore[import-not-found]
+        validate_adapter_file,
+    )
+
+    result = validate_adapter_file(Path(path), skip_import=skip_import)
+    return {
+        "ok": result.ok,
+        "errors": result.errors,
+        "warnings": result.warnings,
+        "tool_name": result.spec.tool_name if result.spec else None,
+    }
+
+
+async def _do_verify(args: dict[str, Any], profile: str | None) -> dict[str, Any]:
+    """Run an adapter against its ``verify/<name>.json`` fixture."""
+    site = _required(args, "site")
+    name = _required(args, "name")
+    from pathlib import Path
+
+    from extensions.adapter_runner._decorator import (  # type: ignore[import-not-found]
+        get_adapter,
+    )
+    from extensions.adapter_runner._verify import (  # type: ignore[import-not-found]
+        verify_adapter,
+    )
+
+    spec = get_adapter(site, name)
+    if spec is None:
+        raise BrowserServiceError(
+            f"no registered adapter for ({site}, {name}); "
+            "import the adapter file first or run discovery"
+        )
+    home = os.environ.get("OPENCOMPUTER_HOME") or str(
+        Path.home() / ".opencomputer" / "default"
+    )
+    result = await verify_adapter(
+        spec, profile_home=Path(home), profile=profile
+    )
+    return {
+        "ok": result.ok,
+        "failures": result.failures,
+        "warnings": result.warnings,
+        "rows_returned": result.rows_returned,
+    }
 
 
 # ─── deprecation shims ─────────────────────────────────────────────────

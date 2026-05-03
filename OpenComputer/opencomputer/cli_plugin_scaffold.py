@@ -50,9 +50,20 @@ TEMPLATES_ROOT: Final[Path] = Path(__file__).resolve().parent / "templates"
 
 #: The kinds the CLI accepts. Note "toolkit" is UX sugar for the SDK's
 #: ``"tool"`` kind — mapping lives in ``toolkit/plugin.json.j2``.
-PluginKind = Literal["channel", "provider", "toolkit", "mixed"]
+#:
+#: ``"adapter-pack"`` (Wave 4 / v0.4) is also a ``"tool"``-kind plugin
+#: in the manifest sense — see ``adapter-pack/plugin.json.j2``. The
+#: distinction is purely UX: it scaffolds an ``adapters/`` directory
+#: + a ``register_adapter_pack`` boilerplate ``plugin.py``.
+PluginKind = Literal["channel", "provider", "toolkit", "mixed", "adapter-pack"]
 
-_VALID_KINDS: Final[tuple[str, ...]] = ("channel", "provider", "toolkit", "mixed")
+_VALID_KINDS: Final[tuple[str, ...]] = (
+    "channel",
+    "provider",
+    "toolkit",
+    "mixed",
+    "adapter-pack",
+)
 
 
 def _derive_module_name(plugin_id: str) -> str:
