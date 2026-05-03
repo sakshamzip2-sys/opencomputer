@@ -2531,6 +2531,34 @@ def policy_disable() -> None:
     typer.echo("policy_engine.enabled = False")
 
 
+@policy_app.command("tool-risk")
+def policy_tool_risk(
+    days: int = typer.Option(
+        7, "--days", "-d", help="Days of tool_usage to analyze.",
+    ),
+) -> None:
+    """Per-tool risk signals: error rate + self-cancel rate (read-only)."""
+    from opencomputer.evolution.tool_risk import compute_tool_risk
+
+    db, _ = _policy_session_db()
+    rows = compute_tool_risk(db, days=days)
+    if not rows:
+        typer.echo(f"No tool_usage in the last {days} days.")
+        return
+
+    typer.echo(f"Tool risk (last {days} days):")
+    typer.echo(
+        f"{'tool':<24} {'calls':>6} {'err%':>6} {'cancel%':>8} {'avg ms':>8}"
+    )
+    for r in rows:
+        typer.echo(
+            f"{r.tool:<24} {r.n_calls:>6} "
+            f"{r.error_rate * 100:>5.1f}% "
+            f"{r.self_cancel_rate * 100:>7.1f}% "
+            f"{r.mean_duration_ms:>8.0f}"
+        )
+
+
 @policy_app.command("status")
 def policy_status(
     metrics: bool = typer.Option(

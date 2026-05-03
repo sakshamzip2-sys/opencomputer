@@ -142,8 +142,19 @@ def list_snapshots(profile_home: Path, *, limit: int = 20) -> list[dict[str, Any
     return out
 
 
-def restore_snapshot(profile_home: Path, snapshot_id: str) -> int:
+def restore_snapshot(
+    profile_home: Path,
+    snapshot_id: str,
+    *,
+    only: list[str] | None = None,
+    skip: list[str] | None = None,
+) -> int:
     """Restore state from a quick snapshot. Returns count of files restored.
+
+    v0.5: ``only`` and ``skip`` enable per-file selective restore.
+    Names are matched against the manifest's relative paths (e.g.
+    ``sessions.db``, ``config.yaml``). When both are specified ``only``
+    wins (skip is ignored).
 
     Overwrites current files. ``.db`` files use a temp-then-move sequence
     so a partial write doesn't leave the DB corrupt. **Note:** any process
@@ -165,8 +176,17 @@ def restore_snapshot(profile_home: Path, snapshot_id: str) -> int:
     except (json.JSONDecodeError, OSError):
         return 0
 
+    only_set = set(only) if only else None
+    skip_set = set(skip) if skip and not only else set()
+
     restored = 0
     for rel in meta.get("files", {}):
+        # Selective filter
+        if only_set is not None and rel not in only_set:
+            continue
+        if rel in skip_set:
+            continue
+
         src = snap_dir / rel
         if not src.exists():
             continue
@@ -176,7 +196,6 @@ def restore_snapshot(profile_home: Path, snapshot_id: str) -> int:
 
         try:
             if dst.suffix == ".db":
-                # Atomic-ish: copy to .name.snap_restore, then rename.
                 tmp = dst.parent / f".{dst.name}.snap_restore"
                 shutil.copy2(src, tmp)
                 dst.unlink(missing_ok=True)
@@ -187,8 +206,30 @@ def restore_snapshot(profile_home: Path, snapshot_id: str) -> int:
         except (OSError, PermissionError) as exc:
             logger.error("failed to restore %s: %s", rel, exc)
 
-    logger.info("restored %d files from snapshot %s", restored, snapshot_id)
+    selector = (
+        f" only={sorted(only_set)}" if only_set else
+        f" skip={sorted(skip_set)}" if skip_set else
+        ""
+    )
+    logger.info(
+        "restored %d files from snapshot %s%s",
+        restored, snapshot_id, selector,
+    )
     return restored
+
+
+def list_snapshot_files(profile_home: Path, snapshot_id: str) -> list[str]:
+    """List the relative paths in a snapshot's manifest. Used by
+    ``oc snapshot list-files <id>`` to support selective restore."""
+    snap_dir = snapshot_root(profile_home) / snapshot_id
+    manifest_path = snap_dir / "manifest.json"
+    if not manifest_path.exists():
+        return []
+    try:
+        meta = json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+    return sorted(meta.get("files", {}).keys())
 
 
 def prune_snapshots(profile_home: Path, *, keep: int = DEFAULT_KEEP) -> int:
