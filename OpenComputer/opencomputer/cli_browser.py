@@ -68,9 +68,13 @@ def chrome_command():
     from pathlib import Path
 
     repo = Path(__file__).resolve().parents[1]
+    # The helper moved into the browser-port chrome/ subpackage in W3.
+    # Load it as a one-off module so this CLI command stays decoupled
+    # from the package's relative-import chain (which would require
+    # the test conftest's package alias to be registered first).
     spec = _ilu.spec_from_file_location(
         "_chrome_launch_for_cli",
-        str(repo / "extensions" / "browser-control" / "chrome_launch.py"),
+        str(repo / "extensions" / "browser-control" / "chrome" / "cdp_user_command.py"),
     )
     mod = _ilu.module_from_spec(spec)
     spec.loader.exec_module(mod)

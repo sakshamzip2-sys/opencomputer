@@ -248,15 +248,15 @@ def _register_anthropic_provider_alias() -> None:
 def _register_browser_control_alias() -> None:
     """Eager-exec + parent-binding.
 
-    Submodules use ``_`` prefix (``_tools``, ``_browser_session``) to
-    avoid sys.path collisions with coding-harness's ``tools/`` package.
-    Tests that previously imported via ``extensions.browser_control.tools``
-    or ``extensions.browser_control.browser`` need updating to the new
-    names.
+    Browser-control is the OpenClaw browser port (W3 wired Browser
+    discriminator + deprecation shims + plugin entry). Submodules use
+    ``_`` prefix on the per-tool entry (``_tool``) to avoid sys.path
+    collisions with coding-harness's ``tools/`` package — same lesson
+    PR #394 burned in for the legacy ``_tools.py`` predecessor.
     """
     _register_extension_alias(
         "browser_control", _BROWSER_CONTROL_DIR,
-        submodules=("_browser_session", "_tools", "plugin"),
+        submodules=("schema", "_tool", "plugin"),
     )
 
 

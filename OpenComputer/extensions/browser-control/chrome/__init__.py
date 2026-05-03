@@ -12,6 +12,10 @@ Depends on profiles/ (resolved config types) and _utils/ (atomic write).
 
 from __future__ import annotations
 
+from .cdp_user_command import (
+    CHROME_LAUNCH_COMMANDS,
+    chrome_launch_command,
+)
 from .decoration import (
     decorate_openclaw_profile,
     ensure_profile_clean_exit,
@@ -36,8 +40,10 @@ from .lifecycle import (
 )
 
 __all__ = [
+    "CHROME_LAUNCH_COMMANDS",
     "RunningChrome",
     "build_chrome_launch_args",
+    "chrome_launch_command",
     "decorate_openclaw_profile",
     "ensure_profile_clean_exit",
     "is_chrome_cdp_ready",

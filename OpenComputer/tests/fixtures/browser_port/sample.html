@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>OpenClaw Port Wave 3 Fixture</title>
+</head>
+<body>
+  <h1 id="heading">Browser-port e2e fixture</h1>
+  <p>This is a static HTML page used by the W3 e2e tests.</p>
+
+  <form id="probe-form">
+    <label for="probe-input">Input:</label>
+    <input id="probe-input" name="probe" type="text" value="">
+    <button id="probe-submit" type="button">Submit</button>
+  </form>
+
+  <p id="status">idle</p>
+
+  <script>
+    const input = document.getElementById("probe-input");
+    const submit = document.getElementById("probe-submit");
+    const status = document.getElementById("status");
+    submit.addEventListener("click", () => {
+      status.textContent = "submitted: " + input.value;
+    });
+  </script>
+</body>
+</html>

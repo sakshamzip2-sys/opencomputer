@@ -1,20 +1,20 @@
-"""OS-specific Chrome launch command for CDP attach mode.
+"""Shell command that the user runs to launch their existing Chrome
+with ``--remote-debugging-port=9222`` against their normal profile.
 
-Returns the shell command the user runs to launch Chrome with
-``--remote-debugging-port=9222`` against their existing Chrome profile,
-so logins / cookies / extensions are preserved when OpenComputer
-attaches via CDP.
+Used by ``oc browser chrome`` (CLI) for the existing-session profile
+flow — auto-launching the user's browser is intentionally OUT of scope;
+they own that decision.
 
-We deliberately do NOT auto-launch Chrome — it's the user's browser,
-their choice. The 'oc browser chrome' CLI prints the command for the
-user to copy and run in a separate terminal.
+Ported from the legacy top-level ``chrome_launch.py`` (deleted in W3)
+into the ``chrome/`` package so the CLI can find it next to the rest
+of the Chrome process management code.
 """
 
 from __future__ import annotations
 
 import sys
 
-CHROME_LAUNCH_COMMANDS = {
+CHROME_LAUNCH_COMMANDS: dict[str, str] = {
     "darwin": (
         '/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome '
         '--remote-debugging-port=9222 '
@@ -35,8 +35,8 @@ CHROME_LAUNCH_COMMANDS = {
 def chrome_launch_command(platform: str | None = None) -> str:
     """Return the shell command to launch Chrome with CDP debugging enabled.
 
-    Uses the user's existing Chrome profile so logins, cookies, and
-    extensions are preserved.
+    Reuses the user's existing Chrome profile so logins, cookies, and
+    extensions are preserved when OpenComputer attaches via CDP.
 
     Raises ``NotImplementedError`` for platforms we haven't templated;
     the caller should fall back to a generic message instructing the
@@ -52,3 +52,6 @@ def chrome_launch_command(platform: str | None = None) -> str:
             "OPENCOMPUTER_BROWSER_CDP_URL=http://localhost:9222."
         )
     return CHROME_LAUNCH_COMMANDS[platform]
+
+
+__all__ = ["CHROME_LAUNCH_COMMANDS", "chrome_launch_command"]

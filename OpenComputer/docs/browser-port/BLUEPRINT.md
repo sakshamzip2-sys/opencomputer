@@ -41,7 +41,12 @@ extensions/browser-control/
 ├── plugin.json                # manifest
 ├── README.md                  # rewrite: what this is now
 │
-├── tools.py                   # the single Browser tool + deprecation shims
+├── _tool.py                   # the single Browser tool + deprecation shims
+│                              # NOTE: leading-underscore singular filename, not
+│                              # `tools.py`, to dodge the sys.modules['tools']
+│                              # race against coding-harness/tools/ — same
+│                              # lesson PR #394 burned in for the legacy
+│                              # _tools.py predecessor (W3, 2026-05-03).
 ├── schema.py                  # pydantic models for action params (flat schema for OpenAI compat)
 │
 ├── server/                    # HTTP control surface — subsystem 05
