@@ -94,6 +94,15 @@ def _register_extension_alias(
     if not ext_dir.exists():
         return
 
+    # Mirror the production loader (opencomputer/plugins/loader.py) which
+    # inserts the plugin directory at sys.path[0] before importing the
+    # entry module. Without this, plugins that use bare sibling imports
+    # (``from browser import ...``, ``from tools import ...``) ImportError
+    # under pytest even though they work in production.
+    ext_path_str = str(ext_dir.resolve())
+    if ext_path_str not in sys.path:
+        sys.path.insert(0, ext_path_str)
+
     full_pkg_name = f"extensions.{underscore_name}"
     if full_pkg_name not in sys.modules:
         mod = types.ModuleType(full_pkg_name)
@@ -122,6 +131,16 @@ def _register_extension_alias(
         sub_mod = importlib.util.module_from_spec(spec)
         sub_mod.__package__ = full_pkg_name
         sys.modules[full_name] = sub_mod
+        # Class-identity alias: production loader puts the plugin dir on
+        # sys.path so a sibling does ``from browser import BrowserError``;
+        # the resulting module lands in sys.modules under the bare name
+        # ``browser``. If the conftest only registers
+        # ``extensions.browser_control.browser`` and lets a downstream
+        # module re-import via the bare name, Python re-execs the file
+        # → two BrowserError CLASSES → ``except BrowserError:`` misses
+        # the test's instance. Aliasing the bare name to the same object
+        # keeps class identity intact across both import paths.
+        sys.modules.setdefault(sub, sub_mod)
         if exec_modules:
             spec.loader.exec_module(sub_mod)
         if bind_on_parent:
@@ -227,10 +246,17 @@ def _register_anthropic_provider_alias() -> None:
 
 
 def _register_browser_control_alias() -> None:
-    """Eager-exec + parent-binding."""
+    """Eager-exec + parent-binding.
+
+    Submodules use ``_`` prefix (``_tools``, ``_browser_session``) to
+    avoid sys.path collisions with coding-harness's ``tools/`` package.
+    Tests that previously imported via ``extensions.browser_control.tools``
+    or ``extensions.browser_control.browser`` need updating to the new
+    names.
+    """
     _register_extension_alias(
         "browser_control", _BROWSER_CONTROL_DIR,
-        submodules=("browser", "tools", "plugin"),
+        submodules=("_browser_session", "_tools", "plugin"),
     )
 
 

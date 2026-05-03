@@ -16,7 +16,7 @@ import pytest
 
 def _load_browser_module():
     repo = Path(__file__).resolve().parent.parent
-    provider_path = repo / "extensions" / "browser-control" / "browser.py"
+    provider_path = repo / "extensions" / "browser-control" / "_browser_session.py"
     module_name = f"_browser_control_under_test_{id(provider_path)}"
     spec = importlib.util.spec_from_file_location(module_name, str(provider_path))
     mod = importlib.util.module_from_spec(spec)

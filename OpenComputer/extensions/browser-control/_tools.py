@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any, ClassVar
 
-from extensions.browser_control.browser import (
+from _browser_session import (  # type: ignore[import-not-found]
     BrowserError,
     PageSnapshot,
     click_element,

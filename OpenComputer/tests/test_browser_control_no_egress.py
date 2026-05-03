@@ -42,7 +42,7 @@ _DENIED_NETWORK_IMPORTS: frozenset[str] = frozenset(
 # Legacy plugin entry-point files. The new browser-port subpackages (under
 # directory names listed in `_BROWSER_PORT_DIRS`) implement an explicit HTTP
 # control plane and are exempt from this guard.
-_LEGACY_FILES: tuple[str, ...] = ("browser.py", "plugin.py", "tools.py")
+_LEGACY_FILES: tuple[str, ...] = ("_browser_session.py", "plugin.py", "_tools.py")
 _BROWSER_PORT_DIRS: tuple[str, ...] = (
     "_utils",
     "profiles",
