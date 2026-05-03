@@ -131,12 +131,16 @@ stt-groq = [
 voice-edge = [
   "edge-tts>=6.1",
 ]
-# Optional: browser-control plugin (Playwright-based automation).
+# Optional: browser-control plugin (Playwright-based automation + the
+# OpenClaw browser port — see OpenComputer/docs/browser-port/BLUEPRINT.md).
 # Install with `pip install opencomputer[browser]`, then:
 #   playwright install chromium
 # Sessions are isolated per-call by default. See extensions/browser-control/.
 browser = [
   "playwright>=1.40",
+  # Browser-port subsystems:
+  "send2trash>=1.8",   # cross-platform trash for profile reset/delete (W0a)
+  "websockets>=12",    # CDP WS handshake check (W0c lifecycle.is_chrome_cdp_ready)
 ]
 
 [project.scripts]
