@@ -120,6 +120,55 @@ async def _record_turn_outcome_async(db, sig) -> None:
         logger.warning("outcome recording failed: %s", e)
 
 
+async def _backfill_prior_turn_async(
+    db,
+    *,
+    session_id: str,
+    user_text: str,
+    now_ts: float,
+) -> None:
+    """P0-4b: at start-of-next-turn, fill in the prior turn_outcomes
+    row's affirmation/correction/latency from the new user message.
+
+    Targets the most recent row in this session whose
+    ``reply_latency_s`` is still NULL (i.e., not yet back-filled). If
+    no such row exists (first turn of session, or end-of-turn writer
+    hasn't committed yet), this is a clean no-op.
+
+    Fire-and-forget; swallows all exceptions so a telemetry failure
+    can never block the user reply.
+    """
+    try:
+        from opencomputer.agent.affirmation_lexicon import (
+            detect_affirmation,
+            detect_correction,
+        )
+
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT id, created_at FROM turn_outcomes "
+                "WHERE session_id = ? AND reply_latency_s IS NULL "
+                "ORDER BY created_at DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if not row:
+                return  # first message of session, or race with end-of-turn write
+
+            latency = max(0.0, now_ts - float(row["created_at"]))
+            affirm = int(detect_affirmation(user_text or ""))
+            correct = int(detect_correction(user_text or ""))
+
+            conn.execute(
+                "UPDATE turn_outcomes "
+                "SET affirmation_present = ?, correction_present = ?, "
+                "    reply_latency_s = ? "
+                "WHERE id = ?",
+                (affirm, correct, latency, row["id"]),
+            )
+    except Exception as e:  # noqa: BLE001 — telemetry guard
+        logger.warning("turn_outcomes backfill failed: %s", e)
+
+
 def _format_user_facing_error(exc: Exception) -> str:
     """Render an exception from the agent loop as a one-liner the user
     can read on a chat surface.
@@ -583,6 +632,24 @@ class Dispatch:
             # with non-empty images as a vision-only turn.
             user_message = event.text or ""
             images = list(event.attachments) if event.attachments else None
+            # P0-4b: back-fill the prior turn's affirmation/correction/
+            # latency from this incoming user message. Fire-and-forget;
+            # if there's no prior turn (first message of session) it's
+            # a clean no-op. Wrapped in try/except so a telemetry
+            # failure can never block dispatch.
+            try:
+                _backfill_task = asyncio.create_task(
+                    _backfill_prior_turn_async(
+                        loop.db,
+                        session_id=session_id,
+                        user_text=user_message,
+                        now_ts=time.time(),
+                    )
+                )
+                _pending_outcome_writes.add(_backfill_task)
+                _backfill_task.add_done_callback(_pending_outcome_writes.discard)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("backfill scheduling failed: %s", e)
             # Hermes channel-port (PR 5): per-channel ephemeral system
             # prompt + auto-loaded skills. When the inbound MessageEvent
             # carries a ``channel_id`` (Telegram DM Topics surface this
