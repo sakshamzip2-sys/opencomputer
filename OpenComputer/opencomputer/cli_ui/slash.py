@@ -228,6 +228,14 @@ SLASH_REGISTRY: list[CommandDef] = [
         category="meta",
         args_hint=("[level|show [N|all|last]|hide|status]"),
     ),
+    CommandDef(
+        name="sources",
+        description=(
+            "Expand web sources from a past turn (collapsed by default at finalize)."
+        ),
+        category="meta",
+        args_hint="[N|all|last]",
+    ),
 ]
 
 

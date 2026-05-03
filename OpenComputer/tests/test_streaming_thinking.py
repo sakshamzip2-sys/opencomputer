@@ -591,10 +591,12 @@ def test_finalize_no_thinking_no_tools_still_emits_nothing() -> None:
 # ─── v5: Card-style Panel + flicker fix ──────────────────────────────────
 
 
-def test_finalize_collapsed_line_v5_uses_rounded_panel() -> None:
-    """v5 (Claude.ai card parity, Image #13): the collapsed line is
-    wrapped in a rounded Panel with the chevron in the subtitle.
-    Box-drawing characters from ROUNDED appear in the captured output."""
+def test_finalize_collapsed_line_renders_inline_no_box() -> None:
+    """Collapsed reasoning summary renders as inline dim text matching
+    the Sources block trigger idiom — NO rounded Panel box, just summary
+    text + chevron. Reverted from v5/v6 boxed Panel after user feedback
+    that the box made the summary look like a UI control rather than a
+    quiet annotation."""
     from unittest.mock import patch
 
     from opencomputer.cli_ui.reasoning_store import ReasoningStore
@@ -617,13 +619,14 @@ def test_finalize_collapsed_line_v5_uses_rounded_panel() -> None:
                 show_reasoning=False,
             )
     text = out.getvalue()
-    # Rounded box-drawing chars present (╭ ╮ ╰ ╯ are ROUNDED corners).
-    assert "╭" in text or "╮" in text or "╰" in text or "╯" in text, (
-        f"expected rounded panel chars; got:\n{text}"
-    )
-    # Summary still inside the panel.
+    # NO rounded box-drawing chars — inline only.
+    for ch in ("╭", "╮", "╰", "╯"):
+        assert ch not in text, (
+            f"unexpected rounded panel char {ch!r} in inline render:\n{text}"
+        )
+    # Summary still rendered (now as inline dim text, not boxed).
     assert "Wrote a haiku about sloths" in text
-    # v6 (Claude.ai parity): chevron inline; no /reasoning hint, no chord.
+    # Chevron present; no slash-command friction surfaced inline.
     assert "›" in text
     assert "/reasoning show" not in text
     assert "Ctrl+X" not in text

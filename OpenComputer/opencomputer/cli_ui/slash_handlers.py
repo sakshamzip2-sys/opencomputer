@@ -132,6 +132,12 @@ class SlashContext:
     on_reasoning_dispatch: Callable[[str], str] = lambda _args: (
         "/reasoning callback not wired"
     )
+    #: ``/sources [args]`` — retroactively expand a turn's web sources.
+    #: Same closure pattern as ``on_reasoning_dispatch`` — both share
+    #: the per-session ReasoningStore. Empty default echoes a hint.
+    on_sources_dispatch: Callable[[str], str] = lambda _args: (
+        "/sources callback not wired"
+    )
 
 
 def _split_args(text: str) -> tuple[str, list[str]]:
@@ -790,6 +796,25 @@ def _handle_reasoning(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_sources(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/sources [args]`` — delegate to the agent SourcesCommand.
+
+    Same bridge pattern as ``/reasoning`` — closes over the live
+    RuntimeContext so cli_ui doesn't import the agent runtime
+    directly. Re-renders any past turn's web sources in their
+    expanded form, since the trigger printed at finalize is a
+    static glyph (Rich scrollback is immutable post-Live.stop).
+    """
+    try:
+        output = ctx.on_sources_dispatch(" ".join(args))
+    except Exception as e:  # noqa: BLE001
+        ctx.console.print(f"[yellow]/sources failed: {e}[/yellow]")
+        return SlashResult(handled=True)
+    if output:
+        ctx.console.print(output)
+    return SlashResult(handled=True)
+
+
 _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "exit": _handle_exit,
     "clear": _handle_clear,
@@ -819,6 +844,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "retry":    _handle_retry,
     "stop":     _handle_stop_bg,
     "reasoning": _handle_reasoning,
+    "sources": _handle_sources,
 }
 
 

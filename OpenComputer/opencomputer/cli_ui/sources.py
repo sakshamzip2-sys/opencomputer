@@ -300,34 +300,60 @@ def rewrite_inline_url_refs(text: str, registry: SourcesRegistry) -> str:
 # ─────────────────────────── renderer ───────────────────────────────
 
 
-def render_sources_block(console: Console, sources: list[Source]) -> None:
-    """Render the Sources block to the console.
+#: Cap on how many domains we list inside the collapsed trigger badge.
+#: Mirrors AI Elements' ``InlineCitationCardTrigger`` which shows
+#: ``hostname [+N-1]`` — i.e. the first source's hostname plus a count
+#: of the rest. We show up to 3 domains for terminal legibility before
+#: collapsing the tail into ``+N-3``.
+_TRIGGER_DOMAIN_PEEK = 3
 
-    Layout (terminal port — closest analogue to AI Elements):
 
-        ─── 3 sources ──────────
-         1 indianexpress.com · India's Q1 GDP up 8.4%
-         2 pcquest.com · AI in Indian fintech 2026 review
-         3 reuters.com · RBI policy ahead
+def _render_trigger(sources: list[Source], *, is_open: bool) -> Text:
+    """Port of <SourcesTrigger> — ``📖 Used N sources [domains] ⌄/›``.
 
-    Title cell carries an OSC 8 hyperlink to the URL when the terminal
-    supports it (Rich emits the escape sequence; ignored elsewhere).
-    Empty registry → no-op (no header, no separator, no blank line).
+    Acts as a header above the per-source list when ``is_open`` (the
+    default — see render_sources_block). Each domain in the peek is
+    OSC 8 hyperlinked to its source URL so cmd-click opens the source
+    in the browser (iTerm2 / Ghostty / Wezterm / GNOME Terminal /
+    modern Konsole). Terminals that don't support OSC 8 silently
+    render plain text; no degradation.
     """
-    if not sources:
-        return
-
     n = len(sources)
-    header = Text()
-    header.append("─── ", style="grey50")
-    header.append(f"{n} source{'' if n == 1 else 's'}", style="dim cyan")
-    header.append(" ", style="grey50")
-    # Pad the rule to a reasonable width; keep terminal-agnostic.
-    header.append("─" * 40, style="grey50")
-    console.print(header)
+    trigger = Text()
+    trigger.append("📖 ", style="dim")
+    trigger.append(
+        f"Used {n} source{'' if n == 1 else 's'}", style="bold dim cyan"
+    )
 
+    # Pair each domain with its source URL for OSC 8 hyperlinks.
+    peek_pairs: list[tuple[str, str]] = []
+    for s in sources:
+        if s.domain:
+            peek_pairs.append((s.domain, s.url))
+        if len(peek_pairs) >= _TRIGGER_DOMAIN_PEEK:
+            break
+    rest = sum(1 for s in sources if s.domain) - len(peek_pairs)
+
+    if peek_pairs:
+        trigger.append("  [", style="dim")
+        for i, (domain, url) in enumerate(peek_pairs):
+            if i > 0:
+                trigger.append(", ", style="dim")
+            # OSC 8 hyperlink — cmd-click opens the URL in the browser.
+            trigger.append(domain, style=f"dim cyan link {url}" if url else "dim cyan")
+        if rest > 0:
+            trigger.append(f" +{rest}", style="dim")
+        trigger.append("]", style="dim")
+
+    trigger.append("  ", style="")
+    trigger.append("⌄" if is_open else "›", style="dim")
+    return trigger
+
+
+def _render_expanded_list(sources: list[Source]) -> list[Text]:
+    """Per-source rows for the expanded state (one Text per source)."""
+    rows: list[Text] = []
     for i, s in enumerate(sources, 1):
-        # Compose: "  N domain · title"  with the title hyperlinked.
         row = Text()
         row.append(f" {i:>2} ", style="dim")
         row.append(s.domain or s.url, style="dim cyan")
@@ -336,7 +362,50 @@ def render_sources_block(console: Console, sources: list[Source]) -> None:
             row.append(s.title, style=f"link {s.url}")
         else:
             row.append(s.title)
-        console.print(row)
+        rows.append(row)
+    return rows
+
+
+def render_sources_block(
+    console: Console,
+    sources: list[Source],
+    *,
+    open: bool = True,                    # noqa: A002 — mirror AI Elements
+) -> None:
+    """Render the Sources block to the console.
+
+    **Default is expanded** (``open=True``) — the structured per-source
+    list is the value we're delivering, so we show it without making
+    the user reach for a slash command. Trigger sits above as a
+    header:
+
+        📖 Used 3 sources  [indianexpress.com, pcquest.com, reuters.com]  ⌄
+         1 indianexpress.com  ·  India's Q1 GDP up 8.4%
+         2 pcquest.com        ·  AI in Indian fintech 2026 review
+         3 reuters.com        ·  RBI policy ahead
+
+    Pass ``open=False`` for the collapsed-only state (header alone, no
+    rows) — useful from inside other components that handle their own
+    expansion / deferred render. The default behaviour at finalize
+    always renders expanded.
+
+    Click-to-toggle the chevron isn't wired — Rich's ``console.print``
+    produces immutable scrollback once Live has stopped, so retroactive
+    re-render of a past turn (e.g. one that scrolled off-screen) goes
+    through the ``/sources`` slash command, mirroring how the reasoning
+    card uses ``/reasoning show``. Empty list → no-op.
+
+    Each domain in the trigger header carries an OSC 8 hyperlink to its
+    source URL so cmd-click opens it directly in the browser. Each row
+    title also OSC 8 hyperlinks to its URL.
+    """
+    if not sources:
+        return
+
+    console.print(_render_trigger(sources, is_open=open))
+    if open:
+        for row in _render_expanded_list(sources):
+            console.print(row)
     console.print("")  # trailing blank line so the footer breathes
 
 

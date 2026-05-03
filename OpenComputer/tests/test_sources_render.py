@@ -268,7 +268,12 @@ def test_render_sources_block_is_noop_for_empty_registry() -> None:
     assert out == ""
 
 
-def test_render_sources_block_prints_count_header_and_per_source_row() -> None:
+def test_render_default_is_expanded_with_header_and_per_row_titles() -> None:
+    """Default render is the AI Elements expanded Collapsible state:
+    trigger as a header (``📖 Used N sources [domains] ⌄``) followed
+    by per-source rows. No slash-command friction — sources visible
+    immediately.
+    """
     from opencomputer.cli_ui.sources import enrich_url, render_sources_block
 
     console = _record_console()
@@ -278,11 +283,87 @@ def test_render_sources_block_prints_count_header_and_per_source_row() -> None:
     ]
     render_sources_block(console, sources)
     out = console.export_text(clear=False)
-    assert "2 sources" in out
+    # Trigger header present
+    assert "Used 2 sources" in out
+    assert "⌄" in out                      # expanded chevron
+    # Domain peek in the trigger header
     assert "indianexpress.com" in out
-    assert "India Q1 GDP" in out
     assert "pcquest.com" in out
+    # Per-source title rows are rendered
+    assert "India Q1 GDP" in out
     assert "AI fintech" in out
+    # Collapsed-only chevron must NOT appear in default render
+    assert "›" not in out
+    # No slash-command friction in the default render
+    assert "/sources to expand" not in out
+    assert "/sources" not in out
+
+
+def test_collapsed_trigger_hyperlinks_each_domain_via_osc8() -> None:
+    """Each domain in the trigger header is rendered as an OSC 8
+    hyperlink to its source URL — so cmd-click in iTerm2/Ghostty/
+    Wezterm opens the source directly. Verified in both default
+    (expanded) and ``open=False`` (header-only) modes.
+    """
+    from opencomputer.cli_ui.sources import enrich_url, render_sources_block
+
+    console = _record_console()
+    sources = [
+        enrich_url("https://indianexpress.com/article/x", title="India Q1 GDP"),
+        enrich_url("https://pcquest.com/article/y", title="AI fintech"),
+    ]
+    render_sources_block(console, sources)
+    ansi = console.export_text(styles=True, clear=False)
+    # Both URLs MUST appear in the ANSI escape stream (Rich emits OSC 8
+    # for each `link <url>` style applied to the domain spans).
+    assert "https://indianexpress.com/article/x" in ansi
+    assert "https://pcquest.com/article/y" in ansi
+
+
+def test_render_open_false_shows_header_only() -> None:
+    """Passing ``open=False`` switches to the header-only state — no
+    per-source rows. Useful for embedding inside other components that
+    handle their own expansion. Default behaviour at finalize is open=True.
+    """
+    from opencomputer.cli_ui.sources import enrich_url, render_sources_block
+
+    console = _record_console()
+    sources = [
+        enrich_url("https://indianexpress.com/x", title="India Q1 GDP"),
+        enrich_url("https://pcquest.com/y", title="AI fintech"),
+    ]
+    render_sources_block(console, sources, open=False)
+    out = console.export_text(clear=False)
+    assert "Used 2 sources" in out
+    assert "›" in out                      # collapsed chevron
+    assert "⌄" not in out                  # expanded chevron absent
+    # Per-source title rows must NOT be present in collapsed mode.
+    assert "India Q1 GDP" not in out
+    assert "AI fintech" not in out
+
+
+def test_render_trigger_collapses_extra_domains_with_plus_n_count() -> None:
+    """When >3 domains, the trigger HEADER shows the first 3 + ``+N``
+    overflow badge — mirroring AI Elements' InlineCitationCardTrigger
+    ``+N-1``. Per-source rows below are unaffected (all 5 listed)."""
+    from opencomputer.cli_ui.sources import enrich_url, render_sources_block
+
+    sources = [
+        enrich_url(f"https://site{i}.com/x", title=f"T{i}") for i in range(5)
+    ]
+    console = _record_console()
+    render_sources_block(console, sources, open=False)   # header-only to inspect peek
+    out = console.export_text(clear=False)
+    assert "Used 5 sources" in out
+    assert "site0.com" in out
+    assert "site1.com" in out
+    assert "site2.com" in out
+    # Tail is collapsed into +2 (5 total minus first 3 shown).
+    assert "+2" in out
+    # And the 4th/5th domains are NOT spelled out in the trigger header
+    # (in header-only mode there are no rows below either).
+    assert "site3.com" not in out
+    assert "site4.com" not in out
 
 
 def test_render_sources_block_uses_singular_for_one() -> None:
@@ -299,13 +380,16 @@ def test_render_emits_osc_8_hyperlink_when_url_present() -> None:
     """Rich renders OSC 8 hyperlinks when style contains 'link <url>'.
 
     Capture the ANSI export to verify the escape sequence is in the output.
+    Hyperlinks live on per-source rows, so this test uses ``open=True``.
     """
     from opencomputer.cli_ui.sources import enrich_url, render_sources_block
 
     console = _record_console()
-    render_sources_block(console, [
-        enrich_url("https://example.com/page", title="Example Title"),
-    ])
+    render_sources_block(
+        console,
+        [enrich_url("https://example.com/page", title="Example Title")],
+        open=True,
+    )
     ansi = console.export_text(styles=True, clear=False)
     # OSC 8 sequence opens with ESC ] 8 ;; <url> ESC \  — Rich emits this
     # when a link style is applied. The URL itself should appear in the
