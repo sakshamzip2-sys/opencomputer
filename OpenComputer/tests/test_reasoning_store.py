@@ -98,3 +98,122 @@ def test_reasoning_turn_dataclass_is_frozen():
     assert isinstance(t, ReasoningTurn)
     with pytest.raises(Exception):
         t.thinking = "tampered"  # type: ignore[misc]
+
+
+# ─── render_turn_tree (Task 5) ──────────────────────────────────────────
+
+
+def test_render_turn_tree_returns_rich_tree_with_expected_nodes():
+    import io
+
+    from rich.console import Console
+
+    from opencomputer.cli_ui.reasoning_store import render_turn_tree
+
+    store = ReasoningStore()
+    turn = store.append(
+        thinking="Let me think about how to do this carefully.",
+        duration_s=0.8,
+        tool_actions=[
+            ToolAction(name="Read", args_preview="foo.py", ok=True, duration_s=0.05),
+            ToolAction(name="Edit", args_preview="bar.py", ok=True, duration_s=0.12),
+            ToolAction(name="Bash", args_preview="ls", ok=False, duration_s=0.03),
+        ],
+    )
+
+    tree = render_turn_tree(turn)
+    out = io.StringIO()
+    Console(file=out, force_terminal=False, width=120).print(tree)
+    text = out.getvalue()
+
+    assert "Turn #1" in text
+    assert "Thought for" in text
+    assert "3 actions" in text
+    assert "Let me think about" in text
+    assert "Read" in text and "foo.py" in text
+    assert "Edit" in text and "bar.py" in text
+    assert "Bash" in text and "ls" in text
+    # Failed call indicator.
+    assert "✗" in text
+
+
+def test_render_turn_tree_handles_no_thinking():
+    import io
+
+    from rich.console import Console
+
+    from opencomputer.cli_ui.reasoning_store import render_turn_tree
+
+    store = ReasoningStore()
+    turn = store.append(
+        thinking="",
+        duration_s=0.2,
+        tool_actions=[
+            ToolAction(name="Bash", args_preview="ls", ok=True, duration_s=0.05),
+        ],
+    )
+    tree = render_turn_tree(turn)
+    out = io.StringIO()
+    Console(file=out, force_terminal=False, width=120).print(tree)
+    text = out.getvalue()
+    assert "Turn #1" in text
+    assert "Bash" in text
+    # No reasoning child node when thinking is empty.
+    assert "Reasoning:" not in text
+    assert "(no extended thinking)" in text
+
+
+def test_render_turn_tree_handles_no_actions():
+    import io
+
+    from rich.console import Console
+
+    from opencomputer.cli_ui.reasoning_store import render_turn_tree
+
+    store = ReasoningStore()
+    turn = store.append(thinking="just thinking", duration_s=0.5, tool_actions=[])
+    tree = render_turn_tree(turn)
+    out = io.StringIO()
+    Console(file=out, force_terminal=False, width=120).print(tree)
+    text = out.getvalue()
+    assert "Turn #1" in text
+    assert "just thinking" in text
+    assert "(no tool actions)" in text
+
+
+def test_render_turns_to_text_emits_no_ansi():
+    """Critical for SlashCommandResult.output: must not contain ANSI
+    escape codes since the dispatcher routes the output as message
+    content (see opencomputer/agent/loop.py)."""
+    from opencomputer.cli_ui.reasoning_store import render_turns_to_text
+
+    store = ReasoningStore()
+    store.append(thinking="alpha", duration_s=0.1, tool_actions=[
+        ToolAction(name="Read", args_preview="x.py", ok=True, duration_s=0.05),
+    ])
+    text = render_turns_to_text(store.get_all())
+    # ANSI escape sequences begin with \x1b[
+    assert "\x1b[" not in text, f"unexpected ANSI in output: {text!r}"
+    # But Unicode tree connectors must be preserved.
+    assert "Turn #1" in text
+    assert ("├──" in text or "└──" in text)
+
+
+def test_render_turns_to_text_handles_multiple_turns():
+    from opencomputer.cli_ui.reasoning_store import render_turns_to_text
+
+    store = ReasoningStore()
+    store.append(thinking="alpha", duration_s=0.1, tool_actions=[])
+    store.append(thinking="beta", duration_s=0.2, tool_actions=[])
+    text = render_turns_to_text(store.get_all())
+    assert "Turn #1" in text
+    assert "Turn #2" in text
+    assert "alpha" in text
+    assert "beta" in text
+
+
+def test_render_turns_to_text_handles_empty_list():
+    """Defensive: an empty list returns an empty string, not a crash."""
+    from opencomputer.cli_ui.reasoning_store import render_turns_to_text
+
+    assert render_turns_to_text([]) == ""
