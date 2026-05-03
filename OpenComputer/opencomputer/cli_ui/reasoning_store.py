@@ -62,6 +62,23 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class Source:
+    """Mirror of Vercel AI Elements ``Source`` anchor props
+    (sources.tsx): ``href``, ``title``. Plus optional metadata
+    Claude.ai exposes but AI Elements' minimal port doesn't:
+    ``tool`` (which OC tool produced this source) and ``snippet``
+    (short excerpt). Extracted at render time from the existing
+    WebSearch / WebFetch ToolAction outputs — no new tool
+    instrumentation needed.
+    """
+
+    href: str                       # the URL
+    title: str                      # display label
+    tool: str | None = None         # e.g. "WebSearch", "WebFetch"
+    snippet: str | None = None      # short excerpt, if available
+
+
+@dataclass(frozen=True)
 class TimelineStep:
     """Aggregate event log entry for one turn. Drives ReasoningView's
     expanded-state body. ``parent_id`` lets a tool nest under an
@@ -172,6 +189,68 @@ class ReasoningTurn:
                 )
             )
         return tuple(out)
+
+    @property
+    def sources(self) -> tuple[Source, ...]:
+        """Web sources surfaced this turn. Extracted from the existing
+        WebSearch / WebFetch :class:`ToolAction` outputs — no new tool
+        instrumentation needed.
+
+        - **WebSearch**: parses the markdown listing the tool emits
+          (pattern: ``N. **Title**\\n   url``).
+        - **WebFetch**: uses ``input["url"]`` as href, with the tool
+          name as the title placeholder (no structured title is
+          available from a raw page fetch).
+
+        De-duplicated by href, preserving first-seen order so the
+        rendered list matches the chronological tool-call order.
+        """
+        import re
+
+        seen: dict[str, Source] = {}
+        # WebSearch markdown pattern: 'N. **Title**\n   url'
+        # Capture title (group 1) and url (group 2); be lenient on
+        # whitespace + ordinal digits.
+        ws_re = re.compile(
+            r"^\s*\d+\.\s+\*\*(?P<title>[^*]+)\*\*\s*\n\s+(?P<url>https?://\S+)",
+            re.MULTILINE,
+        )
+
+        for action in self.tool_actions:
+            tool = action.name
+            output_text = ""
+            if isinstance(action.output, str):
+                output_text = action.output
+            elif isinstance(action.output, dict):
+                # Tools may eventually emit structured output; check the
+                # common 'content' key as a string fallback.
+                content = action.output.get("content")
+                if isinstance(content, str):
+                    output_text = content
+
+            if tool == "WebSearch" and output_text:
+                for m in ws_re.finditer(output_text):
+                    href = m.group("url").rstrip(".,);")
+                    title = m.group("title").strip()
+                    if href and href not in seen:
+                        seen[href] = Source(
+                            href=href, title=title, tool=tool
+                        )
+            elif tool == "WebFetch":
+                href = (action.input or {}).get("url") if action.input else None
+                if href and href not in seen:
+                    # No structured title available from a raw fetch.
+                    # Use the URL's host+path as a placeholder title.
+                    from urllib.parse import urlparse
+                    parsed = urlparse(href)
+                    title = parsed.netloc + parsed.path
+                    seen[href] = Source(
+                        href=href,
+                        title=title or href,
+                        tool=tool,
+                    )
+
+        return tuple(seen.values())
 
     @property
     def timeline(self) -> tuple[TimelineStep, ...]:
@@ -506,6 +585,7 @@ def render_turns_to_text(turns: list[ReasoningTurn]) -> str:
 __all__ = [
     "ReasoningStore",
     "ReasoningTurn",
+    "Source",
     "TimelineStep",
     "ToolAction",
     "ToolCall",
