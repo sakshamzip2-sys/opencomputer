@@ -37,6 +37,7 @@ from opencomputer.agent.state import SessionDB
 from opencomputer.cron.auto_revert import run_auto_revert_due
 from opencomputer.cron.decay_sweep import run_decay_sweep
 from opencomputer.cron.policy_engine_tick import run_engine_tick
+from opencomputer.cron.score_turns import run_score_turns
 from opencomputer.cron.turn_outcomes_sweep import (
     sweep_abandonments,
     sweep_self_cancels,
@@ -91,6 +92,16 @@ def run_system_tick() -> dict[str, str | int]:
         "policy_engine_tick",
         lambda: run_engine_tick(db=db, flags=flags, hmac_key=hmac_key).value,
     )
+
+    # Phase 1 — backfill composite + judge + turn_score on unscored rows
+    score_result = _safe_call("score_turns", lambda: run_score_turns(db=db))
+    if isinstance(score_result, dict):
+        summary["score_turns_judged"] = score_result.get("judged", 0)
+        summary["score_turns_composite_only"] = score_result.get(
+            "composite_only", 0,
+        )
+    else:
+        summary["score_turns"] = score_result
 
     logger.info("system_tick summary: %s", summary)
     return summary
