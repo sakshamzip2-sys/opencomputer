@@ -36,7 +36,9 @@ from opencomputer.agent.policy_audit_key import get_policy_audit_hmac_key
 from opencomputer.agent.state import SessionDB
 from opencomputer.cron.auto_revert import run_auto_revert_due
 from opencomputer.cron.decay_sweep import run_decay_sweep
+from opencomputer.cron.policy_digest import run_policy_digest
 from opencomputer.cron.policy_engine_tick import run_engine_tick
+from opencomputer.cron.prune_turn_outcomes import run_prune_turn_outcomes
 from opencomputer.cron.score_turns import run_score_turns
 from opencomputer.cron.turn_outcomes_sweep import (
     sweep_abandonments,
@@ -102,6 +104,19 @@ def run_system_tick() -> dict[str, str | int]:
         )
     else:
         summary["score_turns"] = score_result
+
+    # v0.5 — Task A: digest cron (no-op outside the configured hour or if
+    # already fired today)
+    summary["policy_digest"] = _safe_call(
+        "policy_digest",
+        lambda: run_policy_digest(db=db, flags=flags),
+    )
+
+    # v0.5 — Task D: data retention prune
+    summary["prune_turn_outcomes"] = _safe_call(
+        "prune_turn_outcomes",
+        lambda: run_prune_turn_outcomes(db=db, flags=flags),
+    )
 
     logger.info("system_tick summary: %s", summary)
     return summary

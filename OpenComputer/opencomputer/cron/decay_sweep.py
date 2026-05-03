@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass
 
 from opencomputer.agent.policy_audit import PolicyAuditLogger
+from opencomputer.agent.policy_audit_log import PolicyAuditLog
 from opencomputer.agent.recall_synthesizer import decay_factor
 
 _logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ def run_decay_sweep(*, db, hmac_key: bytes) -> DecaySweepResult:
 
     with db._connect() as conn:
         audit = PolicyAuditLogger(conn, hmac_key)
+        audit_log = PolicyAuditLog(conn, hmac_key)
 
         active_rows = conn.execute(
             """
@@ -57,6 +59,11 @@ def run_decay_sweep(*, db, hmac_key: bytes) -> DecaySweepResult:
             effective = penalty * decay_factor(age_days=age_days)
             if effective < 0.05:
                 audit.append_status_transition(cid, "expired_decayed")
+                audit_log.append_transition(
+                    change_id=cid, status="expired_decayed",
+                    actor="cron.decay_sweep",
+                    reason=f"effective penalty {effective:.4f} < 0.05",
+                )
                 result.expired_count += 1
 
         cutoff = now - _PENDING_DISCARD_WINDOW_S
@@ -69,6 +76,11 @@ def run_decay_sweep(*, db, hmac_key: bytes) -> DecaySweepResult:
             audit.append_status_transition(
                 row["id"], "expired_decayed",
                 reverted_reason="pending_approval auto-discarded after 7 days",
+            )
+            audit_log.append_transition(
+                change_id=row["id"], status="expired_decayed",
+                actor="cron.decay_sweep",
+                reason="pending_approval auto-discarded after 7 days",
             )
             result.pending_discarded += 1
 

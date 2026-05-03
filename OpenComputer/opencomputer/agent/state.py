@@ -34,7 +34,7 @@ from plugin_sdk.core import Message, ToolCall
 #: to NULL. v5 = Tier-A item 11 ``tool_usage`` table — per-tool-call
 #: telemetry for ``opencomputer insights`` (tool, duration_ms, error,
 #: model, ts). Existing data unaffected; the table starts empty.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -218,6 +218,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (6, 7): "_migrate_v6_to_v7",
     (7, 8): "_migrate_v7_to_v8",
     (8, 9): "_migrate_v8_to_v9",
+    (9, 10): "_migrate_v9_to_v10",
 }
 
 
@@ -552,6 +553,39 @@ def _migrate_v8_to_v9(conn: sqlite3.Connection) -> None:
             ON policy_changes(knob_kind, target_id);
         CREATE INDEX IF NOT EXISTS idx_policy_changes_engine
             ON policy_changes(recommendation_engine_version);
+        """
+    )
+
+
+def _migrate_v9_to_v10(conn: sqlite3.Connection) -> None:
+    """v0.5 of outcome-aware learning (2026-05-03).
+
+    Adds the ``policy_audit_log`` append-only HMAC chain table for
+    cryptographically protected status transitions. Closes the v0
+    deferral noted in policy_audit.py: status transitions in v0 were
+    UPDATEs to ``policy_changes`` (chain protected as-drafted only).
+    v0.5 adds a second chain that protects every transition.
+
+    The drafted-row chain in ``policy_changes`` stays as-is for
+    backward compatibility — verify_chain on that still validates
+    immutable as-drafted content. The new ``policy_audit_log`` table
+    is the authoritative history of status changes.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS policy_audit_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            change_id   TEXT NOT NULL,
+            ts          REAL NOT NULL,
+            status      TEXT NOT NULL,
+            actor       TEXT,
+            reason      TEXT,
+            hmac_prev   TEXT NOT NULL,
+            hmac_self   TEXT NOT NULL,
+            FOREIGN KEY (change_id) REFERENCES policy_changes(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_policy_audit_log_change
+            ON policy_audit_log(change_id, ts);
         """
     )
 

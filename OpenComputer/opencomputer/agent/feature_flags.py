@@ -30,6 +30,17 @@ DEFAULT_POLICY_FLAGS: dict[str, Any] = {
     "revert_threshold_sigma": 1.0,
     "decay_factor_per_day": 0.95,
     "minimum_deviation_threshold": 0.10,
+    # v0.5 — Task A: digest collapses per-event Telegram pings into a
+    # single daily DM at digest_hour_local. Set digest_mode=False to
+    # keep per-event pings (v0 behaviour).
+    "digest_mode": True,
+    "digest_hour_local": 9,
+}
+
+#: v0.5 — Task D: data retention defaults (top-level ``data_retention``
+#: key, NOT nested under policy_engine).
+DEFAULT_DATA_RETENTION: dict[str, Any] = {
+    "turn_outcomes_days": 90,
 }
 
 
@@ -61,10 +72,13 @@ class FeatureFlags:
         parts = dotted_key.split(".")
         for p in parts:
             if not isinstance(node, dict) or p not in node:
-                # Fall back to spec defaults for known policy_engine.* keys
+                # Fall back to spec defaults for known top-level keys
                 if dotted_key.startswith("policy_engine."):
                     leaf = parts[-1]
                     return DEFAULT_POLICY_FLAGS.get(leaf, default)
+                if dotted_key.startswith("data_retention."):
+                    leaf = parts[-1]
+                    return DEFAULT_DATA_RETENTION.get(leaf, default)
                 return default
             node = node[p]
         return node

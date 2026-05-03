@@ -2532,7 +2532,12 @@ def policy_disable() -> None:
 
 
 @policy_app.command("status")
-def policy_status() -> None:
+def policy_status(
+    metrics: bool = typer.Option(
+        False, "--metrics", "-m",
+        help="Also show recommendation-engine quality stats (last 30d).",
+    ),
+) -> None:
     """Show feature_flags + trust ramp + safe-decision count."""
     from opencomputer.agent.trust_ramp import TrustRamp
 
@@ -2550,6 +2555,28 @@ def policy_status() -> None:
     typer.echo(f"  revert sigma threshold:   {flags.read('policy_engine.revert_threshold_sigma')}")
     typer.echo(f"  decay factor / day:       {flags.read('policy_engine.decay_factor_per_day')}")
     typer.echo(f"  no-op deviation gate:     {flags.read('policy_engine.minimum_deviation_threshold')}")
+    typer.echo(f"  digest mode:              {flags.read('policy_engine.digest_mode')}")
+    typer.echo(f"  data retention (days):    {flags.read('data_retention.turn_outcomes_days')}")
+
+    if metrics:
+        from opencomputer.evolution.engine_metrics import compute_engine_quality
+
+        typer.echo("\nEngine quality (last 30 days):")
+        rows = compute_engine_quality(db, days=30)
+        if not rows:
+            typer.echo("  (no recommendations in window)")
+            return
+        for m in rows:
+            typer.echo(f"\n  {m.engine_version}")
+            typer.echo(
+                f"    recs={m.n_recommendations} "
+                f"(pending={m.n_pending} active={m.n_active} "
+                f"expired={m.n_expired_decayed} reverted={m.n_reverted})"
+            )
+            typer.echo(
+                f"    unrevert_rate={m.unrevert_rate:.1%}  "
+                f"revert_rate={m.revert_rate:.1%}"
+            )
 
 
 @app.command()
