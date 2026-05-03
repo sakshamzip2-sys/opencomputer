@@ -37,8 +37,8 @@ If a row is `blocked`, write **what** it's blocked on in the row so other sessio
 | W1a | `session/` | [BRIEF-02](BRIEF-02-cdp-and-session.md) | 1 | `chrome/` | s3 | feat/browser-port-wave1 | merged | [#392](https://github.com/sakshamzip2-sys/opencomputer/pull/392) | 73 tests; CDP dedup + retry, force-disconnect, role-ref LRU, nav guard |
 | W1b | `snapshot/` | [BRIEF-04](BRIEF-04-ai-and-snapshot.md) | 1 | `_utils/` | s3 | feat/browser-port-wave1 | merged | [#392](https://github.com/sakshamzip2-sys/opencomputer/pull/392) | 35 tests; Path 2 (aria) + Path 3 (Chrome MCP), 7×6 screenshot grid |
 | W1c | `server_context/` | [BRIEF-05](BRIEF-05-server-and-auth.md) | 1 | `chrome/`, `profiles/` | s3 | feat/browser-port-wave1 | merged | [#392](https://github.com/sakshamzip2-sys/opencomputer/pull/392) | 37 tests; ProfileDriver injection, last_target_id fallback chain |
-| W2a | `tools_core/` | [BRIEF-03](BRIEF-03-pw-tools-core.md) | 2 | `session/` | s4 | feat/browser-port-wave2 | review | — | 96 tests; per-act-kind dispatch + 3-phase nav-guard observer |
-| W2b | `server/` | [BRIEF-05](BRIEF-05-server-and-auth.md) | 2 | `session/`, `snapshot/`, `server_context/` | s4 | feat/browser-port-wave2 | review | — | 82 tests; ~46 routes, auth, CSRF, in-process dispatcher |
+| W2a | `tools_core/` | [BRIEF-03](BRIEF-03-pw-tools-core.md) | 2 | `session/` | s4 | feat/browser-port-wave2 | review | [#396](https://github.com/sakshamzip2-sys/opencomputer/pull/396) | 96 tests; per-act-kind dispatch + 3-phase nav-guard observer |
+| W2b | `server/` | [BRIEF-05](BRIEF-05-server-and-auth.md) | 2 | `session/`, `snapshot/`, `server_context/` | s4 | feat/browser-port-wave2 | review | [#396](https://github.com/sakshamzip2-sys/opencomputer/pull/396) | 82 tests; ~46 routes, auth, CSRF, in-process dispatcher |
 | W3 | `client/` + `tools.py` + `plugin.py` + e2e | [BRIEF-06](BRIEF-06-client-and-utils.md) (TBD) | 3 | all | — | — | not started | — | wiring + integration tests |
 | W4 | `providers/base.py` + retrofit | (deferred) | 4 | W3 done | — | — | not started | — | Hermes seam; post-v0.1 |
 
