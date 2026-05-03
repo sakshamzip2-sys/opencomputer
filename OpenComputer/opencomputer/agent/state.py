@@ -34,7 +34,7 @@ from plugin_sdk.core import Message, ToolCall
 #: to NULL. v5 = Tier-A item 11 ``tool_usage`` table — per-tool-call
 #: telemetry for ``opencomputer insights`` (tool, duration_ms, error,
 #: model, ts). Existing data unaffected; the table starts empty.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -215,6 +215,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (3, 4): "_migrate_v3_to_v4",
     (4, 5): "_migrate_v4_to_v5",
     (5, 6): "_migrate_v5_to_v6",
+    (6, 7): "_migrate_v6_to_v7",
 }
 
 
@@ -376,6 +377,80 @@ def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
             ON vibe_log(session_id, timestamp DESC);
         CREATE INDEX IF NOT EXISTS idx_vibe_log_classifier
             ON vibe_log(classifier_version, timestamp DESC);
+        """
+    )
+
+
+def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
+    """Phase 0 of outcome-aware learning (2026-05-03).
+
+    Adds two new tables:
+
+    1. ``turn_outcomes`` — one row per completed assistant turn, capturing
+       implicit signals (tool success/failure counts, vibe before/after,
+       reply latency, affirmation/correction regex hits, abandonment flag,
+       standing-order violations). Phase 1 layers ``composite_score`` /
+       ``judge_score`` / ``turn_score`` columns on top via migration v8.
+
+    2. ``recall_citations`` — links a turn to each memory the recall tool
+       returned for it. Phase 2 v0's recommendation engine
+       (``MostCitedBelowMedian/1``) joins on this table to compute mean
+       downstream ``turn_score`` per memory. Without it the engine cannot
+       distinguish "memory M was actually surfaced in turn T" from "memory
+       M happens to share a session_id with turn T."
+
+    Both tables CASCADE on ``sessions`` deletion (consistent with messages
+    and episodic_events FK behavior). ``turn_outcomes.schema_version``
+    carries an internal mini-version so a future column reshuffle can
+    branch on it without bumping the global SCHEMA_VERSION twice.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS turn_outcomes (
+            id                          TEXT PRIMARY KEY,
+            session_id                  TEXT NOT NULL,
+            turn_index                  INTEGER NOT NULL,
+            created_at                  REAL NOT NULL,
+            tool_call_count             INTEGER DEFAULT 0,
+            tool_success_count          INTEGER DEFAULT 0,
+            tool_error_count            INTEGER DEFAULT 0,
+            tool_blocked_count          INTEGER DEFAULT 0,
+            self_cancel_count           INTEGER DEFAULT 0,
+            retry_count                 INTEGER DEFAULT 0,
+            vibe_before                 TEXT,
+            vibe_after                  TEXT,
+            reply_latency_s             REAL,
+            affirmation_present         INTEGER DEFAULT 0,
+            correction_present          INTEGER DEFAULT 0,
+            conversation_abandoned      INTEGER DEFAULT 0,
+            standing_order_violations   TEXT,
+            duration_s                  REAL,
+            schema_version              INTEGER DEFAULT 1,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_turn_outcomes_session
+            ON turn_outcomes(session_id, turn_index);
+        CREATE INDEX IF NOT EXISTS idx_turn_outcomes_created
+            ON turn_outcomes(created_at);
+
+        CREATE TABLE IF NOT EXISTS recall_citations (
+            id                          TEXT PRIMARY KEY,
+            session_id                  TEXT NOT NULL,
+            turn_index                  INTEGER NOT NULL,
+            episodic_event_id           TEXT,
+            candidate_kind              TEXT NOT NULL,
+            candidate_text_id           TEXT,
+            bm25_score                  REAL,
+            adjusted_score              REAL,
+            retrieved_at                REAL NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_recall_citations_episodic
+            ON recall_citations(episodic_event_id);
+        CREATE INDEX IF NOT EXISTS idx_recall_citations_session_turn
+            ON recall_citations(session_id, turn_index);
         """
     )
 
