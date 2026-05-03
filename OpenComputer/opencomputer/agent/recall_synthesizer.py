@@ -45,13 +45,49 @@ _MIN_CANDIDATES_FOR_SYNTHESIS = 3
 class RecallCandidate:
     """One row passed to the synthesizer. Shape matches what FTS5
     surfaces: a tag (``episodic`` / ``message``), an id, a session
-    pointer, a turn index, and the raw text the synthesizer can quote."""
+    pointer, a turn index, and the raw text the synthesizer can quote.
+
+    Phase 2 v0 adds optional ``bm25_score`` + ``adjusted_score`` fields
+    so the recall pipeline can carry the FTS5 raw rank alongside the
+    post-penalty score that determined sort order.
+    """
 
     kind: str  # "episodic" or "message"
     id: str
     session_id: str
     turn_index: int | None
     text: str
+    bm25_score: float | None = None
+    adjusted_score: float | None = None
+
+
+# ─── Phase 2 v0: recall_penalty decay helpers ──────────────────────
+
+_DECAY_PER_DAY = 0.95
+_PENALTY_FLOOR = 0.05
+
+
+def decay_factor(age_days: float) -> float:
+    """Exponential decay: 0.95^days. Reaches ~0.05 around day 60."""
+    if age_days <= 0:
+        return 1.0
+    return _DECAY_PER_DAY ** age_days
+
+
+def apply_recall_penalty(
+    raw_score: float, recall_penalty: float, age_days: float,
+) -> float:
+    """Multiplicative score adjustment.
+
+    Floor at 0.05 ensures penalised memories remain reachable for
+    re-evaluation — the engine can't cause a cascade of "memory
+    penalised → never cited → can never recover."
+    """
+    if recall_penalty <= 0:
+        return raw_score
+    effective_penalty = recall_penalty * decay_factor(age_days)
+    multiplier = max(_PENALTY_FLOOR, 1.0 - effective_penalty)
+    return raw_score * multiplier
 
 
 def _candidates_to_prompt_block(candidates: list[RecallCandidate]) -> str:
