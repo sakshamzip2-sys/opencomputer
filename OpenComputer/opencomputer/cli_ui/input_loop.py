@@ -42,6 +42,21 @@ from opencomputer.cli_ui.slash_completer import (
 )
 from opencomputer.cli_ui.turn_cancel import TurnCancelScope
 
+
+def build_reasoning_show_handler():
+    """Factory for the Ctrl+X Ctrl+R chord handler.
+
+    Separated from the prompt_toolkit binding so it can be unit-tested
+    without spinning up a full PromptSession. The binding (registered
+    inside ``build_prompt_session``) calls this factory's return value
+    and submits the result.
+    """
+
+    def _handler() -> str:
+        return "/reasoning show"
+
+    return _handler
+
 #: Regex that finds image-attachment placeholders in a submitted message.
 #: Format: ``[image: /abs/path/to/file.png]``. Captures the path so the
 #: chat loop can extract attachments and strip the marker before passing
@@ -214,6 +229,16 @@ def build_prompt_session(
             # Editor missing or spawn failed — keep buffer intact rather
             # than crashing the prompt session.
             pass
+
+    # Reasoning Dropdown v2 — Ctrl+X Ctrl+R injects /reasoning show
+    # and submits, so users can expand the last turn's thinking + tool
+    # actions without typing 16 chars. Chord syntax (not bare Ctrl+R)
+    # avoids stomping prompt_toolkit's emacs-mode reverse-search default.
+    @kb.add(Keys.ControlX, Keys.ControlR)
+    def _ctrl_x_ctrl_r(event):  # noqa: ANN001
+        text = build_reasoning_show_handler()()
+        event.current_buffer.text = text
+        event.current_buffer.validate_and_handle()
 
     @kb.add(Keys.BracketedPaste)
     def _bracketed_paste(event):  # noqa: ANN001

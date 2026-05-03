@@ -137,3 +137,196 @@ def test_chat_loop_passes_thinking_callback_to_step_once() -> None:
     cb("a")
     cb("b")
     assert captured == ["a", "b"]
+
+
+# ─── Reasoning Dropdown v2 — unbounded tool history ─────────────────────
+
+
+def test_renderer_records_unbounded_tool_history() -> None:
+    """Tool-call panel evicts after 3 visible rows (_TOOL_PANEL_MAX_ROWS).
+    The parallel _tool_history must keep ALL completed calls so the
+    /reasoning show tree can render the full action sequence.
+    """
+    r, _buf, _con = _make_renderer()
+    with r:
+        for i in range(5):
+            idx = r.on_tool_start(f"Tool{i}", f"arg{i}")
+            r.on_tool_end(f"Tool{i}", idx, ok=(i % 2 == 0))
+
+    history = r.tool_history()
+    assert [a.name for a in history] == [f"Tool{i}" for i in range(5)]
+    assert [a.ok for a in history] == [True, False, True, False, True]
+    # Visible panel still capped at 3.
+    assert len(r._tool_calls) == 3
+
+
+# ─── Reasoning Dropdown v2 — push to ReasoningStore on finalize ─────────
+
+
+def test_finalize_pushes_turn_into_reasoning_store() -> None:
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    store = ReasoningStore()
+    renderer = StreamingRenderer(
+        Console(file=io.StringIO()), reasoning_store=store
+    )
+    with renderer:
+        renderer.on_thinking_chunk("Let me ")
+        renderer.on_thinking_chunk("think...")
+        idx = renderer.on_tool_start("Read", "foo.py")
+        renderer.on_tool_end("Read", idx, ok=True)
+        renderer.finalize(
+            reasoning="Let me think...",
+            iterations=1,
+            in_tok=10,
+            out_tok=20,
+            elapsed_s=1.5,
+            show_reasoning=False,
+        )
+
+    turn = store.get_latest()
+    assert turn is not None
+    assert turn.turn_id == 1
+    assert turn.thinking == "Let me think..."
+    assert turn.action_count == 1
+    assert turn.tool_actions[0].name == "Read"
+
+
+def test_finalize_skips_store_push_when_no_store_attached() -> None:
+    """Backwards compat: existing callers that don't pass a store must
+    keep working without crashing."""
+    renderer = StreamingRenderer(Console(file=io.StringIO()))  # no store
+    with renderer:
+        renderer.finalize(
+            reasoning="x",
+            iterations=1,
+            in_tok=1,
+            out_tok=1,
+            elapsed_s=0.1,
+            show_reasoning=False,
+        )
+    # No exception; nothing else to assert.
+
+
+def test_finalize_records_turn_even_without_thinking() -> None:
+    """Tool-only turns (no extended-thinking) must still be recorded
+    so /reasoning show all shows them."""
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    store = ReasoningStore()
+    renderer = StreamingRenderer(Console(file=io.StringIO()), reasoning_store=store)
+    with renderer:
+        idx = renderer.on_tool_start("Bash", "ls")
+        renderer.on_tool_end("Bash", idx, ok=True)
+        renderer.finalize(
+            reasoning=None,
+            iterations=1,
+            in_tok=5,
+            out_tok=5,
+            elapsed_s=0.5,
+            show_reasoning=False,
+        )
+    turn = store.get_latest()
+    assert turn is not None
+    assert turn.thinking == ""
+    assert turn.action_count == 1
+
+
+def test_finalize_skips_empty_no_op_turn() -> None:
+    """A turn with neither thinking nor tool calls is a no-op and
+    should NOT pollute /reasoning show all with empty entries."""
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    store = ReasoningStore()
+    renderer = StreamingRenderer(Console(file=io.StringIO()), reasoning_store=store)
+    with renderer:
+        renderer.finalize(
+            reasoning=None,
+            iterations=1,
+            in_tok=1,
+            out_tok=1,
+            elapsed_s=0.1,
+            show_reasoning=False,
+        )
+    assert store.get_all() == []
+
+
+# ─── Reasoning Dropdown v2 — collapsed-line format with turn id ─────────
+
+
+def test_collapsed_line_includes_turn_id_and_action_count() -> None:
+    import re
+
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    out = io.StringIO()
+    store = ReasoningStore()
+    renderer = StreamingRenderer(
+        Console(file=out, force_terminal=False), reasoning_store=store
+    )
+    with renderer:
+        renderer.on_thinking_chunk("hmm")
+        idx1 = renderer.on_tool_start("Read", "a")
+        renderer.on_tool_end("Read", idx1, ok=True)
+        idx2 = renderer.on_tool_start("Edit", "b")
+        renderer.on_tool_end("Edit", idx2, ok=True)
+        renderer.finalize(
+            reasoning="hmm",
+            iterations=1,
+            in_tok=1,
+            out_tok=1,
+            elapsed_s=0.1,
+            show_reasoning=False,
+        )
+    text = out.getvalue()
+    assert re.search(r"turn #1", text), text
+    assert re.search(r"2 actions", text), text
+    assert "/reasoning show to expand" in text
+
+
+def test_collapsed_line_omits_turn_id_when_store_missing() -> None:
+    """Backwards compat: legacy callers without a store keep the old
+    format without turn id."""
+    out = io.StringIO()
+    renderer = StreamingRenderer(Console(file=out, force_terminal=False))
+    with renderer:
+        renderer.on_thinking_chunk("hmm")
+        renderer.finalize(
+            reasoning="hmm",
+            iterations=1,
+            in_tok=1,
+            out_tok=1,
+            elapsed_s=0.1,
+            show_reasoning=False,
+        )
+    text = out.getvalue()
+    assert "turn #" not in text
+    assert "/reasoning show to expand" in text
+
+
+def test_collapsed_line_singular_action_no_plural_s() -> None:
+    """Cosmetic: '1 action' not '1 actions'."""
+    import re
+
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    out = io.StringIO()
+    store = ReasoningStore()
+    renderer = StreamingRenderer(
+        Console(file=out, force_terminal=False), reasoning_store=store
+    )
+    with renderer:
+        renderer.on_thinking_chunk("x")
+        idx = renderer.on_tool_start("Read", "a")
+        renderer.on_tool_end("Read", idx, ok=True)
+        renderer.finalize(
+            reasoning="x",
+            iterations=1,
+            in_tok=1,
+            out_tok=1,
+            elapsed_s=0.1,
+            show_reasoning=False,
+        )
+    text = out.getvalue()
+    assert re.search(r"\b1 action\b", text), text
+    assert "1 actions" not in text

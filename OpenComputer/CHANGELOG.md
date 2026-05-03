@@ -4,6 +4,12 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Reasoning Dropdown v2
+
+`/reasoning show` finally works retroactively — expands the most recent thinking block instead of only affecting the next turn (the long-standing UX bug from PR #266). New `/reasoning show <N>` and `/reasoning show all` retrieve any past turn from a per-session in-memory `ReasoningStore` (capped to 50 turns, FIFO eviction). Output renders as a Rich Tree showing the reasoning text and the **full** sequence of tool actions taken — no longer capped at the 3 visible in the live panel. New `Ctrl+X Ctrl+R` chord triggers `/reasoning show` without typing. Collapsed line now shows turn id + action count: `💭 Thought for 0.8s · turn #5 · 3 actions — /reasoning show to expand`.
+
+Files: `opencomputer/cli_ui/reasoning_store.py` (new), `streaming.py` (renderer captures + pushes on finalize), `cli.py` (per-session store wiring), `agent/slash_commands_impl/reasoning_cmd.py` (rewritten command), `cli_ui/input_loop.py` (chord keybinding). 50 new tests; full suite green (7990 passed).
+
 ### Added — Multi-profile gateway routing
 
 `~/.opencomputer/bindings.yaml` maps inbound messages to profiles; multiple `AgentLoop`s run in parallel under their own `ContextVar`-scoped profile home. New `oc bindings list/show/add/remove/set-default/test` CLI. Profiles act as agents in OpenClaw's sense — workspace, memory, tools, prompt all isolated per profile. (Phase 4 of profile-as-agent — built atop Phase 1 PR #279, Phase 2 PR #281, Phase 3 commits, architectural HOME-mutation fix PR #284, follow-ups PR #286.)

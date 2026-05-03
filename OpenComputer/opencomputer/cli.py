@@ -939,6 +939,11 @@ def _run_chat_session(
     runtime = RuntimeContext(
         plan_mode=plan, yolo_mode=yolo, permission_mode=permission_mode,
     )
+    # One ReasoningStore per chat session — survives across turns,
+    # accessed by /reasoning show and the renderer's finalize().
+    from opencomputer.cli_ui import ReasoningStore as _ReasoningStore
+    if "_reasoning_store" not in runtime.custom:
+        runtime.custom["_reasoning_store"] = _ReasoningStore()
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
     mcp_mgr = MCPManager(tool_registry=registry)
 
@@ -1100,7 +1105,10 @@ def _run_chat_session(
 
         from opencomputer.cli_ui import StreamingRenderer
 
-        with StreamingRenderer(console) as renderer:
+        with StreamingRenderer(
+            console,
+            reasoning_store=runtime.custom.get("_reasoning_store"),
+        ) as renderer:
             renderer.start_thinking()
             import time as _time
 
@@ -1143,11 +1151,21 @@ def _run_chat_session(
                 printed_header["val"] = True
             console.print(text, end="", markup=False, highlight=False)
 
+        # Capture thinking deltas in plain mode too so /reasoning show
+        # works in headless / piped sessions. We don't render the
+        # thinking panel (Live UI is off in this path) — just record.
+        thinking_chunks: list[str] = []
+
+        def _capture_thinking(text: str) -> None:
+            if text:
+                thinking_chunks.append(text)
+
         result = await loop.run_conversation(
             user_message=user_input,
             session_id=session_id,
             runtime=runtime,
             stream_callback=on_chunk,
+            thinking_callback=_capture_thinking,
             images=images,
         )
         # Tier 2.B — terminal bell on turn complete (if /bell on).
@@ -1164,6 +1182,25 @@ def _run_chat_session(
             f"[dim]({result.iterations} iterations · "
             f"{result.input_tokens} in / {result.output_tokens} out)[/dim]\n"
         )
+
+        # Push the turn into the ReasoningStore so /reasoning show
+        # works in plain (non-Live-UI) mode too. Mirrors the
+        # StreamingRenderer.finalize push for the Live path. Skip the
+        # no-op-turn check since plain mode lacks tool_history capture
+        # — record any turn that produced reasoning text.
+        store = runtime.custom.get("_reasoning_store")
+        if store is not None:
+            reasoning_text = (
+                getattr(result.final_message, "reasoning", None)
+                or "".join(thinking_chunks)
+                or ""
+            ).strip()
+            if reasoning_text:
+                store.append(
+                    thinking=reasoning_text,
+                    duration_s=0.0,  # plain mode doesn't track per-turn duration
+                    tool_actions=[],  # plain mode doesn't capture tool actions
+                )
 
     # Phase 1 TUI uplift — PromptSession + slash dispatch + cancel scope
     # + KeyboardListener for mid-stream ESC. Falls back to legacy line-

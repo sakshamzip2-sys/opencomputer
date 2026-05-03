@@ -39,7 +39,9 @@ from rich.spinner import Spinner
 from rich.text import Text
 
 if TYPE_CHECKING:
-    pass
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+from opencomputer.cli_ui.reasoning_store import ToolAction
 
 #: Module-level sentinel for "the active renderer right now". Set by
 #: :meth:`StreamingRenderer.__enter__`; cleared by ``__exit__``. The
@@ -90,8 +92,14 @@ class StreamingRenderer:
     we currently create one per turn for simplicity.
     """
 
-    def __init__(self, console: Console) -> None:
+    def __init__(
+        self,
+        console: Console,
+        *,
+        reasoning_store: ReasoningStore | None = None,
+    ) -> None:
         self.console = console
+        self._reasoning_store = reasoning_store
         self._buffer: list[str] = []
         # Live thinking buffer + first-chunk timestamp. Both are written
         # by on_thinking_chunk and read by _render / finalize. The
@@ -106,6 +114,10 @@ class StreamingRenderer:
             OrderedDict()
         )
         self._tool_call_seq = 0
+        # Unbounded parallel history of completed tool calls. Used by
+        # the reasoning tree (which needs the full sequence, not the
+        # last-3 visible window).
+        self._tool_history: list[ToolAction] = []
         self._live: Live | None = None
         self._stream_started = False
         self._turn_started_at = 0.0
@@ -192,14 +204,38 @@ class StreamingRenderer:
         return idx
 
     def on_tool_end(self, name: str, idx: int, ok: bool) -> None:
-        """Mark a tool call as completed. Idempotent — late callbacks
-        for evicted rows are silently dropped."""
+        """Mark a tool call as completed. Idempotent for the visible
+        panel — late callbacks for evicted rows are silently dropped
+        from the panel but ALWAYS captured in :attr:`_tool_history` for
+        the reasoning tree.
+        """
         row = self._tool_calls.get((name, idx))
-        if row is None:
-            return
-        row.ended_at = time.monotonic()
-        row.ok = ok
+        if row is not None:
+            row.ended_at = time.monotonic()
+            row.ok = ok
+            duration = row.ended_at - row.started_at
+            args_preview = row.args_preview
+        else:
+            # Row was evicted from the visible panel before the end
+            # callback arrived. Synthesize a minimal record for the
+            # history so the tree still shows it.
+            duration = 0.0
+            args_preview = ""
+        self._tool_history.append(
+            ToolAction(
+                name=name,
+                args_preview=args_preview,
+                ok=ok,
+                duration_s=duration,
+            )
+        )
         self._refresh()
+
+    def tool_history(self) -> list[ToolAction]:
+        """Return the full ordered list of completed tool calls this
+        turn. Includes calls evicted from the visible 3-row panel.
+        """
+        return list(self._tool_history)
 
     # ─── finalize ──────────────────────────────────────────────────
 
@@ -259,10 +295,26 @@ class StreamingRenderer:
                     )
                 )
             else:
+                # Collapsed format. When a store is attached, prefix the
+                # turn id + action count so users can refer to it
+                # explicitly: "/reasoning show 5".
+                next_turn_id = (
+                    self._reasoning_store.peek_next_id()
+                    if self._reasoning_store is not None
+                    else None
+                )
+                action_count = len(self._tool_history)
+                meta_parts: list[str] = [
+                    f"💭 Thought for {_fmt_duration(thinking_elapsed)}"
+                ]
+                if next_turn_id is not None:
+                    meta_parts.append(f"turn #{next_turn_id}")
+                if action_count > 0:
+                    s = "" if action_count == 1 else "s"
+                    meta_parts.append(f"{action_count} action{s}")
+                meta = " · ".join(meta_parts)
                 self.console.print(
-                    f"[dim cyan]💭 Thought for "
-                    f"{_fmt_duration(thinking_elapsed)} "
-                    f"— /reasoning show to expand[/dim cyan]"
+                    f"[dim cyan]{meta} — /reasoning show to expand[/dim cyan]"
                 )
 
         # Final answer as Markdown — re-rendered from the full buffer
@@ -284,6 +336,24 @@ class StreamingRenderer:
             f"{rate:.0f} tok/s · "
             f"{_fmt_duration(elapsed_s)})[/dim]\n"
         )
+
+        # Push captured state into the per-session store so the
+        # /reasoning show command can re-render this turn later.
+        # Skip turns that are pure no-ops (no thinking, no tools) — they
+        # add noise to /reasoning show all without information value.
+        if self._reasoning_store is not None:
+            thinking_str = (reasoning or "").strip()
+            if thinking_str or self._tool_history:
+                thinking_elapsed_for_store = (
+                    (time.monotonic() - self._thinking_started_at)
+                    if self._thinking_started_at > 0.0
+                    else elapsed_s
+                )
+                self._reasoning_store.append(
+                    thinking=thinking_str,
+                    duration_s=thinking_elapsed_for_store,
+                    tool_actions=self._tool_history,
+                )
 
     # ─── internals ─────────────────────────────────────────────────
 
