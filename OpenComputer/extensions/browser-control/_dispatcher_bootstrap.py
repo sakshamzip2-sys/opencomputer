@@ -29,28 +29,47 @@ released after the cooperative ``await`` chain completes; subsequent
 callers see a populated dispatcher slot and skip the lock entirely (fast
 path).
 
-Driver composition gaps (TODO wave-3.2)
----------------------------------------
+Wave-3.2 — CDP tab openers
+--------------------------
 W3 shipped the ``ProfileDriver`` interface and per-capability callable
-slots but did NOT wire production callables. We fill the slots here with
-the existing ``chrome/launch.py`` + ``chrome/lifecycle.py`` +
-``snapshot/chrome_mcp.py`` helpers, which is enough for ``status`` /
-``profiles`` (state-only reads) and the `openclaw` driver path. The
-remote-CDP path (``connect_remote`` / ``disconnect_remote``) and the
-Playwright-attached ``connect_managed`` slot remain unwired — full
-wiring lands in wave-3.2 once an integration test exercises them.
+slots but did NOT wire production callables for the local-managed
+(openclaw) tab opener / focuser / closer paths. This module now wires:
 
-The ``TabOpsBackend`` is similarly a partial wire-up. ``list_tabs`` is
-required (no default), and we hand it a small CDP /json-based reader so
-``handle_list_tabs`` works for the local-managed driver. The other
-six per-action callables are best-effort no-ops or raise — again, enough
-for status/list-tabs to work, with the bigger wiring deferred.
+  * ``connect_managed`` — given the launched ``RunningChrome``, attach
+    Playwright via ``connect_browser`` and wrap as a
+    ``PlaywrightSession`` so ``runtime.playwright_session`` becomes
+    populated for downstream agent handlers (snapshot / screenshot /
+    navigate by target_id).
+  * ``open_tab_via_cdp`` — ``new_page()`` + ``page.goto(url)`` (the
+    navigation guard is reused from the agent handlers via the
+    pre-nav SSRF check) and returns ``TabInfo(target_id, url, title)``.
+  * ``focus_tab_via_cdp`` — looks up the page via
+    ``PlaywrightSession.get_page_for_target`` and calls
+    ``page.bring_to_front()``.
+  * ``close_tab_via_cdp`` — looks up the page and calls ``page.close()``.
+
+Remote-CDP wiring (``connect_remote`` / ``disconnect_remote``) remains
+out of scope; persistent-Playwright tab ops likewise stay deferred.
+
+Per-profile cache
+-----------------
+We cache the ``RunningChrome`` + ``ConnectedBrowser`` + ``PlaywrightSession``
+keyed by profile name on a module-level dict. The cache is consulted by
+``connect_managed`` so a second call doesn't re-launch Chrome; it's also
+consulted by ``page_resolver`` (wired into ``ctx.extra``) so the agent
+handler page-resolution path uses the same session the openers populated.
+
+# TODO(wave-3.3): cleanup cache on plugin teardown — there is no clean
+# shutdown story yet for in-process plugins. The cache leaks the
+# RunningChrome subprocess + the Playwright Browser handle on process
+# exit, which is acceptable since the OS reaps them.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 _log = logging.getLogger("opencomputer.browser_control.dispatcher_bootstrap")
@@ -58,6 +77,26 @@ _log = logging.getLogger("opencomputer.browser_control.dispatcher_bootstrap")
 # Single-flight init lock. Module-level so concurrent ``Browser.execute``
 # calls in the same process share it.
 _init_lock = asyncio.Lock()
+
+
+# ─── per-profile managed-Chrome cache ────────────────────────────────
+
+
+@dataclass(slots=True)
+class _ManagedProfileEntry:
+    """Cached state for a single managed (openclaw) profile.
+
+    Populated lazily on the first ``connect_managed`` call for a given
+    profile name, then re-used for the lifetime of the Python process.
+    """
+
+    running: Any  # RunningChrome
+    connected: Any  # ConnectedBrowser
+    session: Any  # PlaywrightSession
+
+
+_managed_cache: dict[str, _ManagedProfileEntry] = {}
+_managed_cache_lock = asyncio.Lock()
 
 
 async def ensure_dispatcher_app_ready() -> None:
@@ -106,7 +145,7 @@ async def _build_dispatcher_app() -> Any:
     # (tests/test_browser_port_*_audit.py). For wave-3 hotfix we resolve
     # against an empty raw section, which yields the documented defaults
     # (enabled=True, default_profile='openclaw', user-profile present).
-    # TODO(wave-3.2): plumb the active profile's `browser:` section in
+    # TODO(wave-3.3): plumb the active profile's `browser:` section in
     # via a plugin-level hook on the SDK side so user overrides
     # (executable_path, headless, ssrf_policy, ...) take effect.
     resolved = resolve_browser_config({"enabled": True}, {})
@@ -133,16 +172,85 @@ async def _build_dispatcher_app() -> Any:
         auth=auth,
         bind_http=False,  # in-process only — no socket
     )
+    # Wire a page_resolver into ctx.extra so the agent handlers
+    # (navigate / snapshot / screenshot / act / ...) resolve pages off
+    # the same PlaywrightSession the openers populated.
+    _wire_page_resolver(handle.app)
     return handle.app
+
+
+def _wire_page_resolver(app: Any) -> None:
+    """Stash a page_resolver on the BrowserRouteContext.extra dict.
+
+    The agent handlers consult ``ctx.extra["page_resolver"]`` first; if
+    absent they fall back to walking ``runtime.playwright_session``
+    directly. Wiring the resolver here means navigate-by-target-id keeps
+    working after openers create new pages; without it the fallback
+    still works because we populate ``runtime.playwright_session`` in
+    ``connect_managed``.
+    """
+    ctx = getattr(app.state, "browser_ctx", None)
+    if ctx is None:
+        return
+
+    async def _resolver(runtime: Any, target_id: str) -> Any:
+        sess = runtime.playwright_session
+        if sess is None:
+            raise RuntimeError(
+                f"profile {runtime.profile.name!r} has no PlaywrightSession; "
+                "connect_managed was not called"
+            )
+        return await sess.get_page_for_target(target_id)
+
+    ctx.extra["page_resolver"] = _resolver
+
+
+# ─── managed-Chrome connect / cache ──────────────────────────────────
+
+
+async def _connect_managed_cached(profile: Any, running: Any) -> Any:
+    """Attach Playwright to a launched Chrome and cache the result.
+
+    Returns a ``PlaywrightSession`` ready for the agent handler page-
+    resolution path. The cache key is the profile name; subsequent
+    calls for the same profile return the cached session unless the
+    underlying ``RunningChrome`` PID has changed (which it shouldn't,
+    because the bootstrap-level cache also short-circuits launches).
+    """
+    from extensions.browser_control.session import (  # type: ignore[import-not-found]
+        PlaywrightSession,
+        connect_browser,
+    )
+
+    profile_name = profile.name
+    async with _managed_cache_lock:
+        cached = _managed_cache.get(profile_name)
+        if cached is not None and cached.running is running:
+            return cached.session
+
+        connected = await connect_browser(running.cdp_url)
+        session = PlaywrightSession(browser=connected.browser, cdp_url=running.cdp_url)
+        _managed_cache[profile_name] = _ManagedProfileEntry(
+            running=running,
+            connected=connected,
+            session=session,
+        )
+        _log.debug(
+            "connect_managed: profile=%s pid=%s cdp=%s — Playwright attached",
+            profile_name,
+            getattr(running, "pid", None),
+            running.cdp_url,
+        )
+        return session
 
 
 def _build_default_profile_driver() -> Any:
     """Wire the openclaw + chrome-mcp driver paths.
 
-    ``connect_managed`` (Playwright attach), ``connect_remote``, and
+    ``connect_managed`` attaches Playwright to the launched Chrome and
+    caches the resulting session per profile. ``connect_remote`` /
     ``disconnect_remote`` remain ``None`` for now — no production caller
-    exercises those paths in W3, and the partial wiring is enough for
-    the actions this hotfix unblocks. TODO(wave-3.2).
+    exercises those paths in W3.x; the remote-CDP path lands later.
     """
     from extensions.browser_control.chrome import (  # type: ignore[import-not-found]
         launch_openclaw_chrome,
@@ -158,23 +266,26 @@ def _build_default_profile_driver() -> Any:
         spawn_chrome_mcp,
     )
 
-    # We need access to the ResolvedBrowserConfig to call
-    # launch_openclaw_chrome(resolved, profile). The driver protocol
-    # only hands us the profile, so we close over the resolved config
-    # at construction time. Since the resolved config is per-bootstrap
-    # we'd have to thread it through; for the openclaw default profile
-    # the launch helper accepts an optional ``resolved`` we don't have
-    # here, so we reconstruct a minimal one. TODO(wave-3.2): take this
-    # closure out of the bootstrap and pass `resolved` through.
-
     async def _launch_managed(profile: ResolvedBrowserProfile) -> Any:
         # Re-resolve a default config — cheap, idempotent, no I/O.
         from extensions.browser_control.profiles.resolver import (  # type: ignore[import-not-found]
             resolve_browser_config,
         )
 
+        # Short-circuit: if we already cached a RunningChrome for this
+        # profile, return it instead of relaunching.
+        cached = _managed_cache.get(profile.name)
+        if cached is not None and cached.running is not None:
+            running = cached.running
+            proc = getattr(running, "proc", None)
+            if proc is None or proc.returncode is None:
+                return running
+
         resolved_local = resolve_browser_config({"enabled": True}, {})
         return await launch_openclaw_chrome(resolved_local, profile)
+
+    async def _connect_managed(profile: ResolvedBrowserProfile, running: Any) -> Any:
+        return await _connect_managed_cached(profile, running)
 
     async def _stop_managed(running: Any) -> None:
         await stop_openclaw_chrome(running)
@@ -192,56 +303,167 @@ def _build_default_profile_driver() -> Any:
 
     return ProfileDriver(
         launch_managed=_launch_managed,
-        connect_managed=None,  # TODO(wave-3.2): attach Playwright session
+        connect_managed=_connect_managed,
         stop_managed=_stop_managed,
         spawn_chrome_mcp=_spawn_chrome_mcp,
         close_chrome_mcp=_close_chrome_mcp,
-        connect_remote=None,  # TODO(wave-3.2): remote-CDP wiring
+        connect_remote=None,  # TODO(wave-3.3): remote-CDP wiring
         disconnect_remote=None,
     )
 
 
 def _build_default_tab_ops_backend() -> Any:
-    """Best-effort tab ops backend.
+    """CDP-driven tab ops backend for the local-managed (openclaw) profile.
 
-    ``list_tabs`` is the only required field. We point it at a
-    minimal "empty list" reader so ``handle_status`` works without
-    tripping on an unconfigured backend; the per-driver openers /
-    focusers / closers stay ``None`` and route handlers will surface a
-    clear error if invoked before wave-3.2 fills them in.
+    The four required callables for a local-managed profile:
 
-    TODO(wave-3.2): wire CDP /json/new and /json/close, plus the chrome-
-    mcp tabs surface, so the openclaw and user profiles can actually
-    open / focus / close tabs from production.
+      * ``list_tabs(runtime)`` — walks ``runtime.playwright_session``'s
+        pages and returns one ``TabInfo`` per accessible page.
+      * ``open_tab_via_cdp(runtime, url)`` — creates a new Page in the
+        first context (or a new context if none) and navigates to
+        ``url``. Returns ``TabInfo(target_id, url, title)``.
+      * ``focus_tab_via_cdp(runtime, target_id)`` — locates the page by
+        target_id and calls ``bring_to_front()``.
+      * ``close_tab_via_cdp(runtime, target_id)`` — locates the page by
+        target_id and calls ``close()``.
+
+    The chrome-mcp / persistent-playwright variants stay ``None``;
+    routes for those profile shapes will surface a clear error
+    ("no chrome-mcp opener") if invoked. Wave-3.3 lands those.
     """
     from extensions.browser_control.server_context import (  # type: ignore[import-not-found]
         ProfileRuntimeState,
+        TabInfo,
     )
     from extensions.browser_control.server_context.tab_ops import (  # type: ignore[import-not-found]
         TabOpsBackend,
     )
+    from extensions.browser_control.session.target_id import (  # type: ignore[import-not-found]
+        page_target_id,
+    )
 
-    async def _list_tabs(runtime: ProfileRuntimeState) -> list:
-        # Minimal viable: when no driver is connected we return an empty
-        # list. The real CDP /json reader lands in wave-3.2.
-        return []
+    async def _list_tabs(runtime: ProfileRuntimeState) -> list[TabInfo]:
+        sess = runtime.playwright_session
+        if sess is None:
+            return []
+        out: list[TabInfo] = []
+        for page in sess.list_pages():
+            try:
+                tid = await page_target_id(page, cdp_url=sess.cdp_url)
+            except Exception:  # noqa: BLE001
+                continue
+            if not tid:
+                continue
+            try:
+                title = await page.title()
+            except Exception:  # noqa: BLE001
+                title = ""
+            url = getattr(page, "url", "") or ""
+            out.append(TabInfo(target_id=tid, url=url, title=title))
+        return out
 
-    return TabOpsBackend(list_tabs=_list_tabs)
+    async def _new_page_for_session(sess: Any) -> Any:
+        """Pick a context off the connected browser (or create one) and
+        return a fresh Page with the navigation guard pre-installed.
+        """
+        contexts = list(getattr(sess.browser, "contexts", []) or [])
+        if contexts:
+            ctx = contexts[0]
+        else:
+            ctx = await sess.browser.new_context()
+        return await ctx.new_page()
+
+    async def _open_tab_via_cdp(
+        runtime: ProfileRuntimeState, url: str
+    ) -> TabInfo:
+        sess = runtime.playwright_session
+        if sess is None:
+            raise RuntimeError(
+                f"open_tab: profile {runtime.profile.name!r} has no PlaywrightSession; "
+                "ensure_profile_running was not called"
+            )
+
+        page = await _new_page_for_session(sess)
+
+        # Navigate. Any SSRF policy is enforced by the navigate route's
+        # pre-nav check; the openers themselves trust the caller for
+        # the simple "open and goto" path. The 20s default mirrors the
+        # navigate handler.
+        try:
+            await page.goto(url, timeout=20_000)
+        except Exception as exc:
+            # Best-effort: close the half-opened page so we don't leak
+            # an empty tab.
+            try:
+                await page.close()
+            except Exception:  # noqa: BLE001
+                pass
+            raise RuntimeError(f"open_tab: navigation to {url!r} failed: {exc}") from exc
+
+        tid = await page_target_id(page, cdp_url=sess.cdp_url)
+        if not tid:
+            raise RuntimeError(
+                f"open_tab: could not resolve target_id for new page at {url!r}"
+            )
+
+        try:
+            title = await page.title()
+        except Exception:  # noqa: BLE001
+            title = ""
+        final_url = getattr(page, "url", url) or url
+        return TabInfo(target_id=tid, url=final_url, title=title)
+
+    async def _focus_tab_via_cdp(
+        runtime: ProfileRuntimeState, target_id: str
+    ) -> None:
+        sess = runtime.playwright_session
+        if sess is None:
+            raise RuntimeError(
+                f"focus_tab: profile {runtime.profile.name!r} has no PlaywrightSession"
+            )
+        page = await sess.get_page_for_target(target_id)
+        await page.bring_to_front()
+
+    async def _close_tab_via_cdp(
+        runtime: ProfileRuntimeState, target_id: str
+    ) -> None:
+        sess = runtime.playwright_session
+        if sess is None:
+            raise RuntimeError(
+                f"close_tab: profile {runtime.profile.name!r} has no PlaywrightSession"
+            )
+        try:
+            page = await sess.get_page_for_target(target_id)
+        except LookupError:
+            # Already closed — idempotent.
+            return
+        await page.close()
+
+    return TabOpsBackend(
+        list_tabs=_list_tabs,
+        open_tab_via_cdp=_open_tab_via_cdp,
+        focus_tab_via_cdp=_focus_tab_via_cdp,
+        close_tab_via_cdp=_close_tab_via_cdp,
+    )
 
 
 def reset_for_tests() -> None:
     """Test helper — clears the dispatcher slot and recreates the lock.
 
     Lets tests isolate the lazy-init pathway without tripping over a
-    process-global app set by an earlier test.
+    process-global app set by an earlier test. Also clears the per-
+    profile managed-Chrome cache so tests don't observe leftover
+    sessions from a previous test's mocks.
     """
-    global _init_lock
+    global _init_lock, _managed_cache_lock
     from extensions.browser_control.client.fetch import (  # type: ignore[import-not-found]
         set_default_dispatcher_app,
     )
 
     set_default_dispatcher_app(None)
     _init_lock = asyncio.Lock()
+    _managed_cache.clear()
+    _managed_cache_lock = asyncio.Lock()
 
 
 __all__ = [

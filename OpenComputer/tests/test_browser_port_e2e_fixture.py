@@ -133,3 +133,93 @@ async def test_full_flow_against_fixture(tmp_path):
 
     # Cleanup: reset the module-level dispatcher app
     set_default_dispatcher_app(None)
+
+
+# ─── wave-3.2: real CDP openers — open / focus / close end-to-end ──────
+
+
+@pytest.mark.skipif(
+    not _have_chromium(),
+    reason="chromium binary not installed (run `playwright install chromium`)",
+)
+@pytest.mark.skipif(
+    os.environ.get("OPENCOMPUTER_SKIP_BROWSER_E2E", "") == "1",
+    reason="OPENCOMPUTER_SKIP_BROWSER_E2E=1",
+)
+@pytest.mark.asyncio
+async def test_real_cdp_open_focus_close_against_fixture(tmp_path):  # noqa: ARG001
+    """The full hot path with a real browser — no mocks.
+
+    Uses the production lazy-bootstrap path (``ensure_dispatcher_app_ready``)
+    so this exercises exactly what the agent will hit in production:
+    Browser(action=open, url=...) → in-process dispatcher → CDP openers
+    → real Playwright + real Chromium → file:// fixture URL.
+    """
+    from extensions.browser_control._dispatcher_bootstrap import (
+        reset_for_tests,
+    )
+    from extensions.browser_control._tool import Browser
+
+    from plugin_sdk.core import ToolCall
+
+    reset_for_tests()
+    try:
+        tool = Browser()
+        fixture_url = _fixture_url()
+
+        # 1) Open a tab via the production tool surface.
+        open_result = await tool.execute(
+            ToolCall(
+                id="open-1",
+                name="Browser",
+                arguments={"action": "open", "url": fixture_url},
+            )
+        )
+        assert open_result.is_error is False, (
+            f"Browser(action=open) failed: {open_result.content!r}"
+        )
+        # The response is a JSON-shaped string; sanity-check key tokens.
+        assert "target_id" in open_result.content
+        assert "tab" in open_result.content
+
+        # Pull target_id off the JSON content so we can test focus/close.
+        import json
+
+        content_obj = (
+            json.loads(open_result.content)
+            if isinstance(open_result.content, str)
+            else open_result.content
+        )
+        tab_obj = content_obj.get("tab", {}) if isinstance(content_obj, dict) else {}
+        target_id = tab_obj.get("target_id")
+        assert isinstance(target_id, str) and target_id, (
+            f"missing target_id in {open_result.content!r}"
+        )
+
+        # 2) Focus the tab.
+        focus_result = await tool.execute(
+            ToolCall(
+                id="focus-1",
+                name="Browser",
+                arguments={"action": "focus", "targetId": target_id},
+            )
+        )
+        assert focus_result.is_error is False, (
+            f"Browser(action=focus) failed: {focus_result.content!r}"
+        )
+
+        # 3) Close the tab.
+        close_result = await tool.execute(
+            ToolCall(
+                id="close-1",
+                name="Browser",
+                arguments={"action": "close", "targetId": target_id},
+            )
+        )
+        assert close_result.is_error is False, (
+            f"Browser(action=close) failed: {close_result.content!r}"
+        )
+    finally:
+        # Best-effort: reset the dispatcher cache so other tests get a
+        # clean slate (the underlying Chrome will leak — wave-3.3).
+        reset_for_tests()

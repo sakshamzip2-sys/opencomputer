@@ -146,10 +146,17 @@ async def _run_connect(
             timeout_ms = _BASE_TIMEOUT_MS + attempt * _TIMEOUT_INCREMENT_MS
             try:
                 async with no_proxy_lease(normalized):
+                    # playwright-python wants `headers` as a dict[str, str]
+                    # in newer versions but rejects it in some intermediate
+                    # builds where it expects list[{name, value}]. The
+                    # safest path: don't pass headers when empty (the
+                    # default case for openclaw-managed CDP attach).
+                    connect_kwargs: dict[str, Any] = {"timeout": timeout_ms}
+                    if headers:
+                        connect_kwargs["headers"] = headers
                     browser = await pw.chromium.connect_over_cdp(
                         normalized,
-                        timeout=timeout_ms,
-                        headers=headers or {},
+                        **connect_kwargs,
                     )
             except Exception as exc:  # noqa: BLE001 — Playwright errors vary
                 last_err = exc
