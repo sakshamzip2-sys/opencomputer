@@ -217,3 +217,73 @@ def test_render_turns_to_text_handles_empty_list():
     from opencomputer.cli_ui.reasoning_store import render_turns_to_text
 
     assert render_turns_to_text([]) == ""
+
+
+# ─── Summary support (v2 — Thinking History UI) ──────────────────────────
+
+
+def test_reasoning_turn_has_optional_summary_field():
+    """Summary defaults to None; new field doesn't break existing
+    construction."""
+    turn = ReasoningTurn(turn_id=1, thinking="x", duration_s=0.1)
+    assert turn.summary is None
+
+
+def test_store_update_summary_sets_field_for_existing_turn():
+    store = ReasoningStore()
+    store.append(thinking="x", duration_s=0.1, tool_actions=[])
+    store.append(thinking="y", duration_s=0.2, tool_actions=[])
+    store.update_summary(turn_id=1, summary="first turn")
+    store.update_summary(turn_id=2, summary="second turn")
+    t1 = store.get_by_id(1)
+    t2 = store.get_by_id(2)
+    assert t1 is not None and t1.summary == "first turn"
+    assert t2 is not None and t2.summary == "second turn"
+
+
+def test_store_update_summary_unknown_id_is_noop():
+    """No exception when the turn was evicted or never existed —
+    summary writes are best-effort from a background thread."""
+    store = ReasoningStore()
+    store.append(thinking="x", duration_s=0.1, tool_actions=[])
+    # Should not raise.
+    store.update_summary(turn_id=99, summary="never landed")
+    t = store.get_by_id(1)
+    assert t is not None and t.summary is None
+
+
+def test_render_turn_tree_includes_summary_when_present():
+    import io
+    from rich.console import Console
+    from opencomputer.cli_ui.reasoning_store import render_turn_tree
+
+    store = ReasoningStore()
+    store.append(thinking="raw thinking text", duration_s=0.5, tool_actions=[])
+    store.update_summary(turn_id=1, summary="Wrote a poem about sloths")
+    turn = store.get_latest()
+    assert turn is not None
+    tree = render_turn_tree(turn)
+    out = io.StringIO()
+    Console(file=out, force_terminal=False, width=120).print(tree)
+    text = out.getvalue()
+    assert "Wrote a poem about sloths" in text
+    assert "Turn #1" in text
+
+
+def test_render_turn_tree_omits_summary_line_when_none():
+    """No summary → header is just the metadata line."""
+    import io
+    from rich.console import Console
+    from opencomputer.cli_ui.reasoning_store import render_turn_tree
+
+    store = ReasoningStore()
+    store.append(thinking="raw", duration_s=0.5, tool_actions=[])
+    turn = store.get_latest()
+    assert turn is not None
+    assert turn.summary is None
+    tree = render_turn_tree(turn)
+    out = io.StringIO()
+    Console(file=out, force_terminal=False, width=120).print(tree)
+    text = out.getvalue()
+    assert "Turn #1" in text
+    assert "Thought for" in text
