@@ -323,6 +323,31 @@ class OpenAIProvider(BaseProvider):
             extracts_cache_tokens=_extract,
             min_cache_tokens=lambda _model: 1024,
             supports_long_ttl=False,
+            # Static fallback for the BaseProvider.supports_native_thinking_for
+            # default impl. Overridden below with per-model prefix check —
+            # only o-series + gpt-5+ have native reasoning; gpt-4o/gpt-4
+            # users get the prompt-based fallback for model-agnostic thinking.
+            supports_native_thinking=True,
+        )
+
+    def supports_native_thinking_for(self, model: str) -> bool:
+        """Per-model native-reasoning decision for OpenAI.
+
+        Only o-series models (o1, o3, o4) and gpt-5+ have native
+        reasoning APIs (``reasoning_content`` deltas). For gpt-4o,
+        gpt-4-turbo, gpt-3.5 etc. the agent loop's ``ThinkingTagsParser``
+        fallback activates so users still see a reasoning panel.
+
+        The list is conservative — when new reasoning-capable model
+        families ship, add their prefixes here. Bleeding-edge users can
+        also override this method via a custom provider plugin until we
+        update the list.
+        """
+        name = (model or "").lower()
+        prefixes = ("o1", "o3", "o4", "gpt-5")
+        return any(
+            name.startswith(p) or name.startswith(f"openai/{p}")
+            for p in prefixes
         )
 
     def _parse_response(self, resp: ChatCompletion) -> ProviderResponse:

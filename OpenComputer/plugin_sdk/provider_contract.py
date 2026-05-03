@@ -121,6 +121,12 @@ class ProviderCapabilities:
       model name. Default returns 0 (no filter).
     * ``supports_long_ttl`` — True if the provider exposes a 1-hour cache
       TTL knob (Anthropic only today).
+    * ``supports_native_thinking`` — True if the provider has a native
+      extended-thinking / reasoning API that already emits
+      ``thinking_delta`` events from :meth:`stream_complete`. When False,
+      the agent loop activates the prompt-based fallback (system-prompt
+      instruction + ``<think>...</think>`` tag parser) so users get
+      model-agnostic thinking visibility.
     """
 
     requires_reasoning_resend_in_tool_cycle: bool = False
@@ -130,6 +136,16 @@ class ProviderCapabilities:
     )
     min_cache_tokens: Callable[[str], int] = field(default=_default_min_cache_tokens)
     supports_long_ttl: bool = False
+    supports_native_thinking: bool = False
+    """True if the provider's :meth:`stream_complete` natively emits
+    ``thinking_delta`` events (Anthropic extended thinking, OpenAI
+    o-series reasoning). When False, the loop wires a prompt-based
+    fallback (``<think>...</think>`` injection + tag parser) so even
+    non-thinking models surface a reasoning panel via the existing
+    ``thinking_callback`` chain.
+
+    Default ``False`` — existing providers see no behaviour change
+    until they opt in."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +421,23 @@ class BaseProvider(ABC):
         providers behave exactly as today until they explicitly opt in.
         """
         return ProviderCapabilities()
+
+    def supports_native_thinking_for(self, model: str) -> bool:
+        """Per-model native-thinking declaration.
+
+        Returns True if this provider's :meth:`stream_complete` natively
+        emits ``thinking_delta`` events for the given model. The agent
+        loop reads this at session start to decide whether to wire the
+        prompt-based fallback (``<think>`` system instruction +
+        ``ThinkingTagsParser``) — when False, the fallback activates so
+        non-native models surface a reasoning panel via the existing
+        ``thinking_callback`` chain.
+
+        Default: returns the static :attr:`capabilities.supports_native_thinking`.
+        Providers with model-dependent support (Anthropic legacy vs Claude 4+,
+        OpenAI o-series vs gpt-4o) override this to make the per-model decision.
+        """
+        return bool(self.capabilities.supports_native_thinking)
 
     async def complete_vision(
         self,

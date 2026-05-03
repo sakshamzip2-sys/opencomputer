@@ -10,6 +10,14 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 Files: `opencomputer/cli_ui/reasoning_store.py` (new), `streaming.py` (renderer captures + pushes on finalize), `cli.py` (per-session store wiring), `agent/slash_commands_impl/reasoning_cmd.py` (rewritten command), `cli_ui/input_loop.py` (chord keybinding). 50 new tests; full suite green (7990 passed).
 
+### Added — Model-Agnostic Extended Thinking
+
+Extended thinking now works on EVERY provider, not just Anthropic + OpenAI o-series. New `BaseProvider.supports_native_thinking_for(model)` method declares per-model native support; `ProviderCapabilities.supports_native_thinking: bool` is the static fallback for the default impl. Anthropic delegates to `supports_adaptive_thinking()` (modern Sonnet/Opus 4+ → True; legacy 3.x → False). OpenAI returns True for o-series + gpt-5+ prefixes; gpt-4o, gpt-4, gpt-3.5 → False.
+
+For providers/models that report False, a new `ThinkingInjector` (DynamicInjectionProvider) adds a system-prompt instruction telling the model to wrap its reasoning in `<think>...</think>` tags, and a new `ThinkingTagsParser` transparently extracts those tags from the text stream and re-emits them as `thinking_delta` events. The existing `thinking_callback` → `StreamingRenderer` → `ReasoningStore` pipeline (PR #382) picks them up unchanged — `/reasoning show` now works on any model.
+
+The parser handles tag splits across chunk boundaries, multiple thinking blocks per response, unclosed tags (flushes on done), false positives like `if x < think_max:` (conservative tag-prefix matching), code-block context (skips `<think>` inside ` ``` ` fences), and passes non-text events through verbatim.
+
 ### Added — Multi-profile gateway routing
 
 `~/.opencomputer/bindings.yaml` maps inbound messages to profiles; multiple `AgentLoop`s run in parallel under their own `ContextVar`-scoped profile home. New `oc bindings list/show/add/remove/set-default/test` CLI. Profiles act as agents in OpenClaw's sense — workspace, memory, tools, prompt all isolated per profile. (Phase 4 of profile-as-agent — built atop Phase 1 PR #279, Phase 2 PR #281, Phase 3 commits, architectural HOME-mutation fix PR #284, follow-ups PR #286.)

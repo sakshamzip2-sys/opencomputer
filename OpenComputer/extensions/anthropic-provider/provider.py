@@ -729,7 +729,23 @@ class AnthropicProvider(BaseProvider):
             extracts_cache_tokens=_extract,
             min_cache_tokens=_min_tokens,
             supports_long_ttl=True,
+            # Static fallback for the BaseProvider.supports_native_thinking_for
+            # default impl. Overridden below with per-model logic that uses
+            # supports_adaptive_thinking() so legacy models (Opus 3.5 etc.)
+            # correctly route through the prompt-based fallback.
+            supports_native_thinking=True,
         )
+
+    def supports_native_thinking_for(self, model: str) -> bool:
+        """Per-model native-thinking decision for Anthropic.
+
+        Modern models (Sonnet 4+, Opus 4+, Haiku 4.5+) emit
+        ``thinking_delta`` events natively when extended thinking is
+        enabled. Legacy models (Opus 3.5, Sonnet 3.5) do not — for
+        those, the agent loop's ``ThinkingTagsParser`` fallback
+        activates so users still see a reasoning panel.
+        """
+        return supports_adaptive_thinking(model)
 
     # ─── message conversion ─────────────────────────────────────────
 

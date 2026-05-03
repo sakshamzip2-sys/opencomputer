@@ -2882,7 +2882,7 @@ class AgentLoop:
         )
         if stream_callback is not None:
             final_response = None
-            async for event in self.provider.stream_complete(
+            stream_source = self.provider.stream_complete(
                 model=model_name,
                 messages=wire_messages,
                 system=system,
@@ -2890,7 +2890,30 @@ class AgentLoop:
                 max_tokens=max_tokens_override or self.config.model.max_tokens,
                 temperature=self.config.model.temperature,
                 **_extra_kwargs,
-            ):
+            )
+            # Phase B (model-agnostic thinking): when the provider does
+            # NOT have native thinking for this model AND the user has
+            # effort > "none", wrap the stream so <think>...</think>
+            # tags emitted by the model in plain text deltas are
+            # transparently extracted and re-emitted as thinking_delta
+            # events. The matching system-prompt instruction is added
+            # by ThinkingInjector. Native-thinking providers skip this
+            # wrap entirely and use their existing thinking_delta path.
+            #
+            # Read flags directly from self._runtime.custom — they're
+            # internal plumbing, not something the provider needs to
+            # know about (so they're not in runtime_flags_from_custom's
+            # allowlist).
+            _eff = str(_runtime_extras.get("reasoning_effort") or "medium").lower()
+            _native = bool(
+                self._runtime.custom.get(
+                    "_provider_supports_native_thinking", False
+                )
+            )
+            if _eff != "none" and not _native:
+                from opencomputer.agent.thinking_parser import ThinkingTagsParser
+                stream_source = ThinkingTagsParser().wrap(stream_source)
+            async for event in stream_source:
                 if event.kind == "text_delta":
                     stream_callback(event.text)
                 elif event.kind == "thinking_delta":
