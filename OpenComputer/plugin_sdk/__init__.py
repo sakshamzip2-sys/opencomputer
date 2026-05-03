@@ -84,7 +84,12 @@ from plugin_sdk.ingestion import (
     register_normalizer,
 )
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
-from plugin_sdk.interaction import InteractionRequest, InteractionResponse
+from plugin_sdk.interaction import (
+    ASK_USER_QUESTION_HANDLER,
+    AskUserQuestionHandler,
+    InteractionRequest,
+    InteractionResponse,
+)
 from plugin_sdk.memory import MemoryProvider
 from plugin_sdk.pdf_helpers import (
     PDF_HARD_PAGE_LIMIT,
@@ -200,7 +205,9 @@ __all__ = [
     "HealthRunFn",
     "HealthStatus",
     "RepairResult",
-    # interaction (Phase 11b)
+    # interaction (Phase 11b + AUQ-handler context)
+    "ASK_USER_QUESTION_HANDLER",
+    "AskUserQuestionHandler",
     "InteractionRequest",
     "InteractionResponse",
     # memory (Phase 10f)
