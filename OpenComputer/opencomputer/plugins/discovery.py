@@ -22,7 +22,9 @@ from typing import Literal
 
 from opencomputer.plugins.security import _path_is_inside, validate_plugin_root
 from plugin_sdk.core import (
+    AuthChoice,
     ModelSupport,
+    PluginActivation,
     PluginManifest,
     PluginSetup,
     SetupChannel,
@@ -126,6 +128,18 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
                     label=p.label,
                     default_model=p.default_model,
                     signup_url=p.signup_url,
+                    # Task 3 (openclaw-parity) — rich auth UI metadata.
+                    auth_choices=tuple(
+                        AuthChoice(
+                            method=a.method,
+                            label=a.label,
+                            cli_flag=a.cli_flag,
+                            option_key=a.option_key,
+                            group=a.group,
+                            onboarding_priority=a.onboarding_priority,
+                        )
+                        for a in p.auth_choices
+                    ),
                 )
                 for p in schema.setup.providers
             ),
@@ -143,6 +157,18 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
             requires_runtime=schema.setup.requires_runtime,
         )
         if schema.setup is not None
+        else None
+    )
+    # Sub-project G (openclaw-parity) Task 2 — activation block.
+    activation = (
+        PluginActivation(
+            on_providers=tuple(schema.activation.on_providers),
+            on_channels=tuple(schema.activation.on_channels),
+            on_commands=tuple(schema.activation.on_commands),
+            on_tools=tuple(schema.activation.on_tools),
+            on_models=tuple(schema.activation.on_models),
+        )
+        if schema.activation is not None
         else None
     )
     return PluginManifest(
@@ -171,6 +197,10 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
         legacy_plugin_ids=tuple(schema.legacy_plugin_ids),
         # Sub-project G.23 (Tier 4 OpenClaw port) — cheap setup metadata
         setup=setup,
+        # Sub-project G (openclaw-parity) Task 1 — min host version pin.
+        min_host_version=schema.min_host_version,
+        # Sub-project G (openclaw-parity) Task 2 — activation triggers.
+        activation=activation,
     )
 
 

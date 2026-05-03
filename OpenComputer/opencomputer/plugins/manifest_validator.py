@@ -32,6 +32,23 @@ _VERSION_RE = re.compile(r"^\d+(\.\d+){0,2}(?:-[\w.]+)?$")
 PluginKind = Literal["channel", "provider", "tool", "skill", "mixed"]
 
 
+class AuthChoiceSchema(BaseModel):
+    """Validator mirror of ``plugin_sdk.core.AuthChoice``.
+
+    Sub-project G (openclaw-parity) Task 3. Rich auth-method UI / CLI
+    metadata; rejected when present in v3 manifests, allowed in v4+.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: str = Field(min_length=1, max_length=32)
+    label: str = Field(default="", max_length=128)
+    cli_flag: str = Field(default="", max_length=64)
+    option_key: str = Field(default="", max_length=128)
+    group: str = Field(default="", max_length=64)
+    onboarding_priority: int = Field(default=0)
+
+
 class SetupProviderSchema(BaseModel):
     """Typed mirror of `plugin_sdk.core.SetupProvider` for validation only.
 
@@ -39,6 +56,8 @@ class SetupProviderSchema(BaseModel):
     ``PluginManifestSetupProvider`` shape from
     ``sources/openclaw-2026.4.23/src/plugins/manifest.ts:76-83``.
     Sub-project G.24 adds the display fields used by the setup wizard.
+    Sub-project G (openclaw-parity) Task 3 adds ``auth_choices`` rich
+    auth UI metadata.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -50,6 +69,9 @@ class SetupProviderSchema(BaseModel):
     label: str = Field(default="", max_length=128)
     default_model: str = Field(default="", max_length=128)
     signup_url: str = Field(default="", max_length=512)
+    # Task 3 (openclaw-parity) — rich auth UI metadata; default empty
+    # list = legacy auth_methods-only behavior.
+    auth_choices: list[AuthChoiceSchema] = Field(default_factory=list)
 
     @field_validator("auth_methods", "env_vars", mode="before")
     @classmethod
@@ -118,6 +140,33 @@ class ModelSupportSchema(BaseModel):
         return v
 
 
+class PluginActivationSchema(BaseModel):
+    """Validator mirror of ``plugin_sdk.core.PluginActivation``.
+
+    Sub-project G (openclaw-parity) Task 2. Manifest-declared activation
+    triggers; ``None`` on the parent manifest = legacy ``tool_names``
+    inference path.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    on_providers: list[str] = Field(default_factory=list)
+    on_channels: list[str] = Field(default_factory=list)
+    on_commands: list[str] = Field(default_factory=list)
+    on_tools: list[str] = Field(default_factory=list)
+    on_models: list[str] = Field(default_factory=list)
+
+    @field_validator(
+        "on_providers", "on_channels", "on_commands", "on_tools", "on_models",
+        mode="before",
+    )
+    @classmethod
+    def _drop_empty_strings(cls, v: object) -> object:
+        if isinstance(v, list):
+            return [s for s in v if isinstance(s, str) and s.strip()]
+        return v
+
+
 class PluginManifestSchema(BaseModel):
     """Typed mirror of `plugin_sdk.core.PluginManifest` for validation only."""
 
@@ -168,6 +217,27 @@ class PluginManifestSchema(BaseModel):
     # Phase 14.M/N — already in use via ProfileConfig/WorkspaceOverlay but
     # manifests often carry a schema_version field. Accept it silently.
     schema_version: int | None = Field(default=None)
+    # Sub-project G (openclaw-parity) Task 1 — minimum opencomputer
+    # __version__ this plugin requires; empty = no check. Validated as
+    # PEP 440 version below.
+    min_host_version: str = Field(default="", max_length=32)
+    # Sub-project G (openclaw-parity) Task 2 — manifest-declared
+    # activation triggers; None = legacy tool_names inference.
+    activation: PluginActivationSchema | None = Field(default=None)
+
+    @field_validator("min_host_version")
+    @classmethod
+    def _min_host_version_format(cls, v: str) -> str:
+        if v == "":
+            return v
+        from packaging.version import InvalidVersion, Version
+        try:
+            Version(v)
+        except InvalidVersion as e:
+            raise ValueError(
+                f"min_host_version {v!r} is not a valid PEP 440 / semver string ({e})"
+            ) from e
+        return v
 
     @field_validator("legacy_plugin_ids", mode="before")
     @classmethod
@@ -232,7 +302,9 @@ def validate_manifest(data: dict[str, Any]) -> tuple[PluginManifestSchema | None
 
 
 __all__ = [
+    "AuthChoiceSchema",
     "ModelSupportSchema",
+    "PluginActivationSchema",
     "PluginKind",
     "PluginManifestSchema",
     "PluginSetupSchema",

@@ -24,10 +24,12 @@ from plugin_sdk.consent import (
     ConsentTier,
 )
 from plugin_sdk.core import (
+    AuthChoice,
     Message,
     MessageEvent,
     ModelSupport,
     Platform,
+    PluginActivation,
     PluginActivationSource,
     PluginManifest,
     PluginSetup,
@@ -158,7 +160,9 @@ __all__ = [
     "SendResult",
     "ModelSupport",
     "PluginManifest",
+    "PluginActivation",
     "PluginActivationSource",
+    "AuthChoice",
     "PluginSetup",
     "ProcessingOutcome",
     "SetupChannel",
