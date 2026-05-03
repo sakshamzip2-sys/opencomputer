@@ -7,7 +7,6 @@ import warnings
 from typing import Any
 
 import pytest
-
 from extensions.browser_control._tool import (
     DEPRECATION_SHIMS,
     Browser,
@@ -18,6 +17,7 @@ from extensions.browser_control.schema import (
     BrowserActKind,
     browser_params_json_schema,
 )
+
 from plugin_sdk.core import ToolCall, ToolResult
 
 

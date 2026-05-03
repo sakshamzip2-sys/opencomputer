@@ -10,6 +10,9 @@ Public surface:
 
 from __future__ import annotations
 
+# Server-side error class re-exported here for client callers that want
+# to catch a single name. Keep the import path stable.
+from .._utils.errors import BrowserServiceError  # noqa: E402
 from .actions import BrowserActions
 from .auth import (
     inject_auth_headers,
@@ -34,10 +37,6 @@ from .tab_registry import (
     track_session_browser_tab,
     untrack_session_browser_tab,
 )
-
-# Server-side error class re-exported here for client callers that want
-# to catch a single name. Keep the import path stable.
-from .._utils.errors import BrowserServiceError  # noqa: E402
 
 __all__ = [
     "BrowserActions",

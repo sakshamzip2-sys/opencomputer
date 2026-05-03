@@ -49,17 +49,29 @@ def _truncate(text: str, max_chars: int) -> str:
 
 
 class BrowserTool(BaseTool):
+    """Lightweight fetch-only browser tool from the dev-tools plugin.
+
+    Renamed from ``Browser`` to ``BrowserFetch`` in the browser-port W3
+    PR (2026-05-03) because the new ``browser-control`` plugin owns the
+    canonical ``Browser`` name. This tool is now a focused
+    "render-and-extract-text" wrapper; for full automation
+    (navigate / click / fill / snapshot tree / screenshot / etc.), use
+    the browser-control Browser tool.
+    """
+
     parallel_safe = False  # one browser context per call — keep serialized
 
     @property
     def schema(self) -> ToolSchema:
         return ToolSchema(
-            name="Browser",
+            name="BrowserFetch",
             description=(
-                "Fetch a JavaScript-rendered web page via a headless browser. "
-                "Use when WebFetch returns empty or near-empty content "
-                "(usually a sign of a single-page app that builds the DOM with "
-                "JS). Slower + heavier than WebFetch — prefer WebFetch first. "
+                "Fetch a JavaScript-rendered web page via a headless browser "
+                "and return the visible text. Use when WebFetch returns empty "
+                "or near-empty content (a sign of a single-page app that "
+                "builds the DOM with JS). For interactive automation "
+                "(navigate / click / fill / snapshot / screenshot / etc.), "
+                "use the browser-control plugin's `Browser` tool instead. "
                 "Requires `pip install playwright && playwright install chromium`."
             ),
             parameters={

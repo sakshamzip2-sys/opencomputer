@@ -64,7 +64,7 @@ def _bootstrap_package_namespace() -> None:
         sys.modules[_PKG] = pkg
         # Bind the synthesised package as an attribute of the parent so
         # ``from extensions import browser_control`` works.
-        setattr(sys.modules[_PARENT_PKG], "browser_control", pkg)
+        sys.modules[_PARENT_PKG].browser_control = pkg
 
 
 def register(api: Any) -> None:
@@ -74,8 +74,8 @@ def register(api: Any) -> None:
     # Imports go through the package alias so the relative imports
     # inside ``client/`` and ``server/`` resolve correctly.
     from extensions.browser_control._tool import (  # type: ignore[import-not-found]
-        Browser,
         DEPRECATION_SHIMS,
+        Browser,
     )
 
     # ── Browser tool ──────────────────────────────────────────────

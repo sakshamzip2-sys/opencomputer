@@ -30,7 +30,6 @@ from extensions.browser_control.client import (  # noqa: E402
     set_default_dispatcher_app,
 )
 
-
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "browser_port" / "sample.html"
 
 

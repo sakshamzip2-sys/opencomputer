@@ -11,7 +11,8 @@ act / screenshot get 20s.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 from urllib.parse import quote
 
 from ..server.auth import BrowserAuth

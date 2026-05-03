@@ -26,7 +26,8 @@ try:
 except ImportError:  # pragma: no cover - browser extras gate this
     BaseModel = object  # type: ignore[assignment, misc]
     ConfigDict = dict  # type: ignore[assignment, misc]
-    def Field(*_a: Any, **_kw: Any) -> Any:  # type: ignore[no-redef]
+
+    def Field(*_a: Any, **_kw: Any) -> Any:  # noqa: N802 — mirror pydantic's PascalCase
         return None
 
 

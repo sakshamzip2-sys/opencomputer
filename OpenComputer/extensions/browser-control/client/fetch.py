@@ -31,7 +31,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Literal, Mapping
+from collections.abc import Mapping
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from .._utils.errors import BrowserServiceError
@@ -233,7 +234,7 @@ async def _fetch_dispatcher(
 
     try:
         result = await asyncio.wait_for(coro, timeout=timeout)
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         raise BrowserServiceError(
             f"In-process dispatcher timed out after {timeout:g}s: {path}"
             + _BROWSER_TOOL_MODEL_HINT

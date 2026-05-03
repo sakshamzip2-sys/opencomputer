@@ -6,7 +6,6 @@ import base64
 from pathlib import Path
 
 import pytest
-
 from extensions.browser_control.client.proxy_files import (
     apply_proxy_paths,
     persist_proxy_files,

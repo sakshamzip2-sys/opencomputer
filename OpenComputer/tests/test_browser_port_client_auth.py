@@ -4,7 +4,6 @@ auth-header injection."""
 from __future__ import annotations
 
 import pytest
-
 from extensions.browser_control.client.auth import (
     BrowserAuth,
     inject_auth_headers,

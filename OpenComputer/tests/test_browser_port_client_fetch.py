@@ -7,7 +7,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from extensions.browser_control._utils.errors import BrowserServiceError
 from extensions.browser_control.client.fetch import (
     fetch_browser_json,

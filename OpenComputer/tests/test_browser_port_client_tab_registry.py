@@ -7,7 +7,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from extensions.browser_control.client.tab_registry import (
     close_tracked_browser_tabs_for_sessions,
     count_tracked_session_browser_tabs_for_tests,

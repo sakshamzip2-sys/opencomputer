@@ -27,10 +27,6 @@ import logging
 import warnings
 from typing import Any, ClassVar
 
-from plugin_sdk.consent import CapabilityClaim, ConsentTier
-from plugin_sdk.core import ToolCall, ToolResult
-from plugin_sdk.tool_contract import BaseTool, ToolSchema
-
 # Imports go through the ``extensions.browser_control`` package
 # (synthesised in ``plugin.py::_bootstrap_package_namespace`` at
 # runtime, registered by ``tests/conftest.py`` under tests). The
@@ -38,7 +34,6 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 # and ``server/`` to resolve.
 from extensions.browser_control.client import (  # type: ignore[import-not-found]
     BrowserActions,
-    BrowserAuth,
     BrowserServiceError,
 )
 from extensions.browser_control.schema import (  # type: ignore[import-not-found]
@@ -46,6 +41,10 @@ from extensions.browser_control.schema import (  # type: ignore[import-not-found
     BrowserActKind,
     browser_params_json_schema,
 )
+
+from plugin_sdk.consent import CapabilityClaim, ConsentTier
+from plugin_sdk.core import ToolCall, ToolResult
+from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 _log = logging.getLogger("opencomputer.browser_control.tool")
 
@@ -333,6 +332,13 @@ def _emit_deprecation_once(name: str, replacement: str) -> None:
     )
 
 
+_SHIM_SUNSET_SUFFIX = (
+    " Deprecated in v0.3 of browser-control; sunsets next minor release. "
+    "The Browser tool covers this surface with a richer two-level "
+    "discriminator — see plugin README for the migration table."
+)
+
+
 def _make_shim(
     *,
     legacy_name: str,
@@ -346,6 +352,10 @@ def _make_shim(
     consent_tier_attr: int = 2,
 ) -> type[BaseTool]:
     """Construct a one-off ``BaseTool`` subclass that shims to ``Browser``."""
+    # Always append the sunset suffix so every shim description carries
+    # the migration nudge AND clears the 120-char audit floor enforced by
+    # tests/test_tool_descriptions_audit.py.
+    full_description = description + _SHIM_SUNSET_SUFFIX
 
     cls_capability_claims: tuple[CapabilityClaim, ...] = (
         CapabilityClaim(
@@ -376,7 +386,7 @@ def _make_shim(
         def schema(self) -> ToolSchema:
             return ToolSchema(
                 name=legacy_name,
-                description=description,
+                description=full_description,
                 parameters=parameters,
             )
 

@@ -81,7 +81,7 @@ def test_register_function_lands_all_three_named_tools() -> None:
     api = _FakeAPI()
     plugin_mod.register(api)
     names = {t.schema.name for t in api.registered}
-    assert names == {"GitDiff", "Browser", "Fal"}
+    assert names == {"GitDiff", "BrowserFetch", "Fal"}
 
 
 # ─── GitDiffTool ────────────────────────────────────────────────────────
@@ -221,7 +221,9 @@ async def test_browser_rejects_non_http_scheme(monkeypatch: pytest.MonkeyPatch) 
 def test_browser_schema_declares_required_fields() -> None:
     browser_mod = _import_plugin_module("browser_tool.py")
     schema = browser_mod.BrowserTool().schema
-    assert schema.name == "Browser"
+    # Renamed in W3 (browser-port wave 3) so the canonical 'Browser'
+    # name belongs to the browser-control plugin.
+    assert schema.name == "BrowserFetch"
     assert "url" in schema.parameters["properties"]
     assert schema.parameters["required"] == ["url"]
 

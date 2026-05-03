@@ -8,7 +8,7 @@ bearer token. Caller-supplied auth headers are never overwritten.
 from __future__ import annotations
 
 import ipaddress
-from typing import Mapping, MutableMapping
+from collections.abc import Mapping, MutableMapping
 from urllib.parse import urlsplit
 
 from ..server.auth import BrowserAuth
