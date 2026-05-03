@@ -79,7 +79,18 @@ def make_rich_handler(*, console: Console) -> AskUserQuestionHandler:
                 pass
             active._live = None  # let the next stream tick recreate it
         console.print(_format_question(req))
-        raw = console.input("> ")
+        # Pause the per-turn KeyboardListener (if running) so it doesn't
+        # steal keystrokes from console.input — without this the tool
+        # hangs at "0.0s running" forever (daemon thread + cbreak mode
+        # vs blocking input() race).
+        from opencomputer.cli_ui.keyboard_listener import current_listener
+
+        listener = current_listener()
+        if listener is not None:
+            with listener.pause_for_input():
+                raw = console.input("> ")
+        else:
+            raw = console.input("> ")
         return _resolve_option(req, raw)
 
     return _handler

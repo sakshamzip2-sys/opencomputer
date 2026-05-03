@@ -305,7 +305,18 @@ _register_voice_mode_alias()
 _register_openai_provider_alias()
 _register_gemini_provider_alias()
 _register_anthropic_provider_alias()
-_register_browser_control_alias()
+# browser-control transitively imports fastapi via server/app.py during
+# the alias eager-exec. The introspection cross-platform CI job
+# deliberately skips installing the [browser] extras, so fastapi is
+# missing there — guard the registration so the rest of conftest still
+# loads. Tests that actually need browser-control will hit the
+# ImportError on their own import statement (which is the right place
+# for it).
+try:
+    _register_browser_control_alias()
+except ModuleNotFoundError as _e:
+    if "fastapi" not in str(_e):
+        raise
 _register_affect_injection_alias()
 _register_screen_awareness_alias()
 _register_ollama_provider_alias()
