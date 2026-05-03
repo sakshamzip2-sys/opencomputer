@@ -97,6 +97,32 @@ class HonchoSelfHostedProvider(MemoryProvider):
             timeout=_DEFAULT_REQUEST_TIMEOUT_S,
         )
 
+    # ─── Phase 0 outcome-aware learning subscription ────────────────
+
+    def subscribe_to_outcome_events(self, bus):
+        """Register a handler for ``TurnCompletedEvent`` on the typed
+        event bus. Honcho is always-on per profile (Sub-project A), so
+        we always want to observe outcome events the dispatch layer
+        publishes after each turn.
+
+        v0: handler logs the event at INFO level so it shows up in the
+        per-session log stream. v0.5 will route to a structured Honcho
+        observation endpoint once the upstream supports it.
+
+        Returns the :class:`Subscription` handle. Caller (or tests)
+        invokes ``.unsubscribe()`` to tear down.
+        """
+        def _handler(evt) -> None:
+            try:
+                logger.info(
+                    "turn_completed session=%s turn=%d signals=%s",
+                    evt.session_id, evt.turn_index, dict(evt.signals),
+                )
+            except Exception as e:  # noqa: BLE001 — never re-raise from a bus handler
+                logger.warning("honcho outcome handler failed: %s", e)
+
+        return bus.subscribe("turn_completed", _handler)
+
     # ─── MemoryProvider protocol ───────────────────────────────────
 
     @property

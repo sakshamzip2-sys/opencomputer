@@ -2471,6 +2471,87 @@ def logout_cmd(
     _logout(provider)
 
 
+# ─── Phase 2 v0: outcome-aware learning policy CLI ──────────────────
+
+policy_app = typer.Typer(
+    help="Outcome-aware learning policy engine controls.",
+    no_args_is_help=True,
+)
+app.add_typer(policy_app, name="policy")
+
+
+def _policy_session_db():
+    """Open the active profile's SessionDB."""
+    from opencomputer.agent.config import _home
+    from opencomputer.agent.config_store import default_config
+    from opencomputer.agent.state import SessionDB
+
+    cfg = default_config()
+    return SessionDB(cfg.session.db_path), _home()
+
+
+def _policy_flags():
+    from opencomputer.agent.config import _home
+    from opencomputer.agent.feature_flags import FeatureFlags
+
+    return FeatureFlags(_home() / "feature_flags.json")
+
+
+@policy_app.command("show")
+def policy_show(
+    days: int = typer.Option(
+        7, "--days", "-d", help="Days of history to display.",
+    ),
+) -> None:
+    """List policy changes from the last N days."""
+    import asyncio
+
+    from opencomputer.agent.slash_commands_impl.policy import (
+        handle_policy_changes,
+    )
+
+    db, _ = _policy_session_db()
+    out = asyncio.run(handle_policy_changes(db=db, args=f"--days {days}"))
+    typer.echo(out.text)
+
+
+@policy_app.command("enable")
+def policy_enable() -> None:
+    """Turn the recommendation engine ON."""
+    flags = _policy_flags()
+    flags.write("policy_engine.enabled", True)
+    typer.echo("policy_engine.enabled = True")
+
+
+@policy_app.command("disable")
+def policy_disable() -> None:
+    """Turn the recommendation engine OFF (kill switch)."""
+    flags = _policy_flags()
+    flags.write("policy_engine.enabled", False)
+    typer.echo("policy_engine.enabled = False")
+
+
+@policy_app.command("status")
+def policy_status() -> None:
+    """Show feature_flags + trust ramp + safe-decision count."""
+    from opencomputer.agent.trust_ramp import TrustRamp
+
+    db, _ = _policy_session_db()
+    flags = _policy_flags()
+    ramp = TrustRamp(db, flags)
+
+    typer.echo("Policy engine:")
+    typer.echo(f"  enabled:                  {flags.read('policy_engine.enabled')}")
+    typer.echo(f"  daily_change_budget:      {flags.read('policy_engine.daily_change_budget')}")
+    typer.echo(f"  N safe decisions needed:  {flags.read('policy_engine.auto_approve_after_n_safe_decisions')}")
+    typer.echo(f"  safe decisions so far:    {ramp.safe_decision_count()}")
+    typer.echo(f"  current phase:            {'B (auto-approve TTL)' if ramp.is_phase_b() else 'A (explicit approval)'}")
+    typer.echo(f"  min eligible turns (revert): {flags.read('policy_engine.min_eligible_turns_for_revert')}")
+    typer.echo(f"  revert sigma threshold:   {flags.read('policy_engine.revert_threshold_sigma')}")
+    typer.echo(f"  decay factor / day:       {flags.read('policy_engine.decay_factor_per_day')}")
+    typer.echo(f"  no-op deviation gate:     {flags.read('policy_engine.minimum_deviation_threshold')}")
+
+
 @app.command()
 def skills() -> None:
     """List available skills."""

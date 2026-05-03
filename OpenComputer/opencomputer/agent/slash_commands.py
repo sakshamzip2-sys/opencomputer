@@ -44,6 +44,11 @@ from opencomputer.agent.slash_commands_impl.persona_mode_cmd import (
     PersonaModeCommand,
 )
 from opencomputer.agent.slash_commands_impl.platforms_cmd import PlatformsCommand
+from opencomputer.agent.slash_commands_impl.policy import (
+    PolicyApproveCommand,
+    PolicyChangesCommand,
+    PolicyRevertCommand,
+)
 from opencomputer.agent.slash_commands_impl.profile_suggest_cmd import (
     ProfileSuggestCommand,
 )
@@ -103,6 +108,10 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # 2026-04-30 — profile-suggest analyzes recent persona usage and
     # recommends create/switch actions. User-pull only.
     ProfileSuggestCommand,
+    # 2026-05-03 — Phase 2 v0 outcome-aware learning policy commands.
+    PolicyChangesCommand,
+    PolicyApproveCommand,
+    PolicyRevertCommand,
 )
 
 

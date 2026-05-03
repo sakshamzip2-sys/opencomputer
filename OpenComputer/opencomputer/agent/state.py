@@ -34,7 +34,7 @@ from plugin_sdk.core import Message, ToolCall
 #: to NULL. v5 = Tier-A item 11 ``tool_usage`` table — per-tool-call
 #: telemetry for ``opencomputer insights`` (tool, duration_ms, error,
 #: model, ts). Existing data unaffected; the table starts empty.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 9
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -215,6 +215,9 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (3, 4): "_migrate_v3_to_v4",
     (4, 5): "_migrate_v4_to_v5",
     (5, 6): "_migrate_v5_to_v6",
+    (6, 7): "_migrate_v6_to_v7",
+    (7, 8): "_migrate_v7_to_v8",
+    (8, 9): "_migrate_v8_to_v9",
 }
 
 
@@ -376,6 +379,179 @@ def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
             ON vibe_log(session_id, timestamp DESC);
         CREATE INDEX IF NOT EXISTS idx_vibe_log_classifier
             ON vibe_log(classifier_version, timestamp DESC);
+        """
+    )
+
+
+def _migrate_v6_to_v7(conn: sqlite3.Connection) -> None:
+    """Phase 0 of outcome-aware learning (2026-05-03).
+
+    Adds two new tables:
+
+    1. ``turn_outcomes`` — one row per completed assistant turn, capturing
+       implicit signals (tool success/failure counts, vibe before/after,
+       reply latency, affirmation/correction regex hits, abandonment flag,
+       standing-order violations). Phase 1 layers ``composite_score`` /
+       ``judge_score`` / ``turn_score`` columns on top via migration v8.
+
+    2. ``recall_citations`` — links a turn to each memory the recall tool
+       returned for it. Phase 2 v0's recommendation engine
+       (``MostCitedBelowMedian/1``) joins on this table to compute mean
+       downstream ``turn_score`` per memory. Without it the engine cannot
+       distinguish "memory M was actually surfaced in turn T" from "memory
+       M happens to share a session_id with turn T."
+
+    Both tables CASCADE on ``sessions`` deletion (consistent with messages
+    and episodic_events FK behavior). ``turn_outcomes.schema_version``
+    carries an internal mini-version so a future column reshuffle can
+    branch on it without bumping the global SCHEMA_VERSION twice.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS turn_outcomes (
+            id                          TEXT PRIMARY KEY,
+            session_id                  TEXT NOT NULL,
+            turn_index                  INTEGER NOT NULL,
+            created_at                  REAL NOT NULL,
+            tool_call_count             INTEGER DEFAULT 0,
+            tool_success_count          INTEGER DEFAULT 0,
+            tool_error_count            INTEGER DEFAULT 0,
+            tool_blocked_count          INTEGER DEFAULT 0,
+            self_cancel_count           INTEGER DEFAULT 0,
+            retry_count                 INTEGER DEFAULT 0,
+            vibe_before                 TEXT,
+            vibe_after                  TEXT,
+            reply_latency_s             REAL,
+            affirmation_present         INTEGER DEFAULT 0,
+            correction_present          INTEGER DEFAULT 0,
+            conversation_abandoned      INTEGER DEFAULT 0,
+            standing_order_violations   TEXT,
+            duration_s                  REAL,
+            schema_version              INTEGER DEFAULT 1,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_turn_outcomes_session
+            ON turn_outcomes(session_id, turn_index);
+        CREATE INDEX IF NOT EXISTS idx_turn_outcomes_created
+            ON turn_outcomes(created_at);
+
+        CREATE TABLE IF NOT EXISTS recall_citations (
+            id                          TEXT PRIMARY KEY,
+            session_id                  TEXT NOT NULL,
+            turn_index                  INTEGER NOT NULL,
+            episodic_event_id           TEXT,
+            candidate_kind              TEXT NOT NULL,
+            candidate_text_id           TEXT,
+            bm25_score                  REAL,
+            adjusted_score              REAL,
+            retrieved_at                REAL NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_recall_citations_episodic
+            ON recall_citations(episodic_event_id);
+        CREATE INDEX IF NOT EXISTS idx_recall_citations_session_turn
+            ON recall_citations(session_id, turn_index);
+        """
+    )
+
+
+def _migrate_v7_to_v8(conn: sqlite3.Connection) -> None:
+    """Phase 1 of outcome-aware learning (2026-05-03).
+
+    Adds the scoring columns on top of Phase 0's ``turn_outcomes`` table.
+    Composite score is purely arithmetic (no LLM); judge_* columns are
+    populated by the cheap LLM judge in ``agent/reviewer.py`` when budget
+    allows. ``turn_score`` is the fused 0.4*composite + 0.6*judge.
+
+    All columns nullable so partial Phase 0 / Phase 1 deployments
+    coexist — Phase 1 simply doesn't fill them yet.
+    """
+    for col, typ in (
+        ("composite_score", "REAL"),
+        ("judge_score", "REAL"),
+        ("judge_reasoning", "TEXT"),
+        ("judge_model", "TEXT"),
+        ("turn_score", "REAL"),
+        ("scored_at", "REAL"),
+    ):
+        try:
+            conn.execute(f'ALTER TABLE turn_outcomes ADD COLUMN "{col}" {typ}')
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+
+
+def _migrate_v8_to_v9(conn: sqlite3.Connection) -> None:
+    """Phase 2 v0 of outcome-aware learning (2026-05-03).
+
+    Two changes:
+
+    1. ``episodic_events`` gets ``recall_penalty REAL DEFAULT 0.0`` and
+       ``recall_penalty_updated_at REAL`` columns. The recall pipeline
+       multiplies BM25 score by ``max(0.05, 1 - penalty * decay(age))`` so
+       penalised memories are suppressed but never literally unreachable.
+
+    2. ``policy_changes`` table — HMAC-chained audit log for every
+       reversible policy decision the engine makes. Mirrors the consent
+       audit pattern (prev_hmac → row_hmac chain, verify_chain detects
+       tamper). Status field tracks the lifecycle:
+       drafted → pending_approval | pending_evaluation → active | reverted
+                                                         | expired_decayed
+    """
+    for col, typ in (
+        ("recall_penalty", "REAL DEFAULT 0.0"),
+        ("recall_penalty_updated_at", "REAL"),
+    ):
+        try:
+            conn.execute(
+                f'ALTER TABLE episodic_events ADD COLUMN "{col}" {typ}'
+            )
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            # Tolerate "no such table" (legacy DB upgrade path where
+            # episodic_events was never created by v0→v1 baseline) and
+            # "duplicate column name" (idempotent re-run). Anything else
+            # is a genuine schema bug.
+            if "duplicate column name" not in msg and "no such table" not in msg:
+                raise
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS policy_changes (
+            id                              TEXT PRIMARY KEY,
+            ts_drafted                      REAL NOT NULL,
+            ts_applied                      REAL,
+            knob_kind                       TEXT NOT NULL,
+            target_id                       TEXT NOT NULL,
+            prev_value                      TEXT NOT NULL,
+            new_value                       TEXT NOT NULL,
+            reason                          TEXT NOT NULL,
+            expected_effect                 TEXT,
+            revert_after                    REAL,
+            rollback_hook                   TEXT NOT NULL,
+            recommendation_engine_version   TEXT NOT NULL,
+            approval_mode                   TEXT NOT NULL,
+            approved_by                     TEXT,
+            approved_at                     REAL,
+            hmac_prev                       TEXT NOT NULL,
+            hmac_self                       TEXT NOT NULL,
+            status                          TEXT NOT NULL,
+            eligible_turn_count             INTEGER DEFAULT 0,
+            pre_change_baseline_mean        REAL,
+            pre_change_baseline_std         REAL,
+            post_change_mean                REAL,
+            reverted_at                     REAL,
+            reverted_reason                 TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_policy_changes_status
+            ON policy_changes(status);
+        CREATE INDEX IF NOT EXISTS idx_policy_changes_target
+            ON policy_changes(knob_kind, target_id);
+        CREATE INDEX IF NOT EXISTS idx_policy_changes_engine
+            ON policy_changes(recommendation_engine_version);
         """
     )
 
@@ -1074,7 +1250,18 @@ class SessionDB:
         FTS5 reserves `.` as a column-qualifier separator, so queries like
         `auth.py` syntax-error without quoting. We always wrap in double
         quotes for safe phrase search.
+
+        Phase 2 v0: applies ``recall_penalty`` to the BM25 ranking so
+        memories the policy engine has flagged as under-performing get
+        suppressed in retrieval. The penalty decays exponentially over
+        ~60 days back to neutral. Floor of 0.05 means penalised memories
+        are never literally unreachable — the engine can't cause a
+        cascade of "penalised → never cited → can never recover."
         """
+        from opencomputer.agent.recall_synthesizer import (
+            apply_recall_penalty,
+        )
+
         stripped = query.strip()
         if not stripped:
             return []
@@ -1082,14 +1269,39 @@ class SessionDB:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT e.id, e.session_id, e.turn_index, e.summary, "
-                "e.tools_used, e.file_paths, e.timestamp "
+                "e.tools_used, e.file_paths, e.timestamp, "
+                "e.recall_penalty, e.recall_penalty_updated_at, "
+                "bm25(episodic_fts) AS bm25_rank "
                 "FROM episodic_fts "
                 "JOIN episodic_events e ON e.id = episodic_fts.rowid "
-                "WHERE episodic_fts MATCH ? "
-                "ORDER BY e.timestamp DESC LIMIT ?",
-                (safe_q, limit),
+                "WHERE episodic_fts MATCH ?",
+                (safe_q,),
             ).fetchall()
-            return [dict(r) for r in rows]
+
+        # Apply recall_penalty multiplicatively. FTS5 returns NEGATIVE
+        # rank values (lower = better match); we convert to magnitude
+        # for the penalty math then re-sort by adjusted score.
+        now = time.time()
+        scored: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            penalty = d.get("recall_penalty") or 0.0
+            updated = d.get("recall_penalty_updated_at")
+            age_days = ((now - updated) / 86400.0) if updated else 0.0
+            magnitude = abs(d.get("bm25_rank") or 0.0)
+            d["adjusted_score"] = apply_recall_penalty(
+                magnitude, penalty, age_days,
+            )
+            scored.append(d)
+
+        # Highest adjusted_score first; ties broken by recency.
+        scored.sort(
+            key=lambda x: (
+                -(x.get("adjusted_score") or 0.0),
+                -(x.get("timestamp") or 0.0),
+            ),
+        )
+        return scored[:limit]
 
     def list_episodic(self, session_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         """List episodic events — for one session if provided, else newest across all."""
@@ -1344,6 +1556,69 @@ class SessionDB:
             d["error_rate"] = (errs / calls) if calls else 0.0
             out.append(d)
         return out
+
+
+    # ─── Phase 0 outcome-aware learning helpers ─────────────────────
+
+    def query_tool_usage_in_window(
+        self,
+        *,
+        session_id: str,
+        start_ts: float,
+        end_ts: float,
+    ) -> dict[str, int]:
+        """Aggregate tool_usage counts within a turn's wall-clock window.
+
+        Used by gateway/dispatch.py at end-of-turn to populate
+        ``turn_outcomes.tool_*_count`` columns. Returns a dict with keys
+        ``call_count``, ``success_count``, ``error_count``,
+        ``blocked_count``. Pre-v5 DBs (no tool_usage table) return zeros.
+        """
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT outcome, error FROM tool_usage "
+                    "WHERE session_id = ? AND ts >= ? AND ts <= ?",
+                    (session_id, start_ts, end_ts),
+                ).fetchall()
+        except sqlite3.OperationalError:
+            return {
+                "call_count": 0,
+                "success_count": 0,
+                "error_count": 0,
+                "blocked_count": 0,
+            }
+        call = len(rows)
+        success = sum(1 for r in rows if r[0] == "success")
+        blocked = sum(1 for r in rows if r[0] == "blocked")
+        # ``error`` flag covers failure + cancelled + anything non-success.
+        # We separate "blocked" (consent gate refusal) from "error" since
+        # the composite scorer treats them differently — blocked is a
+        # safety win, not a failure.
+        error = sum(1 for r in rows if r[1] == 1 and r[0] != "blocked")
+        return {
+            "call_count": call,
+            "success_count": success,
+            "error_count": error,
+            "blocked_count": blocked,
+        }
+
+    def query_recent_vibes(
+        self,
+        *,
+        session_id: str,
+        before_ts: float,
+        limit: int = 2,
+    ) -> list[str]:
+        """Return up to ``limit`` most-recent vibe verdicts at or before
+        ``before_ts``. Index 0 is the most recent. Empty list if none."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT vibe FROM vibe_log WHERE session_id = ? "
+                "AND timestamp <= ? ORDER BY timestamp DESC LIMIT ?",
+                (session_id, before_ts, limit),
+            ).fetchall()
+        return [r[0] for r in rows]
 
 
 __all__ = ["SessionDB"]
