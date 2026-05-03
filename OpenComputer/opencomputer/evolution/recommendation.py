@@ -33,7 +33,7 @@ class Recommendation:
         return self.noop_reason is not None
 
     @classmethod
-    def noop(cls, reason: NoOpReason) -> "Recommendation":
+    def noop(cls, reason: NoOpReason) -> Recommendation:
         return cls(
             knob_kind="",
             target_id="",

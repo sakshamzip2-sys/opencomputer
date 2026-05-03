@@ -16,7 +16,6 @@ import time
 
 from opencomputer.agent.feature_flags import FeatureFlags
 
-
 _LONG_ACTIVE_AGE_S = 30 * 86400
 
 

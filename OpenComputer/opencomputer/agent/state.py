@@ -509,7 +509,12 @@ def _migrate_v8_to_v9(conn: sqlite3.Connection) -> None:
                 f'ALTER TABLE episodic_events ADD COLUMN "{col}" {typ}'
             )
         except sqlite3.OperationalError as exc:
-            if "duplicate column name" not in str(exc).lower():
+            msg = str(exc).lower()
+            # Tolerate "no such table" (legacy DB upgrade path where
+            # episodic_events was never created by v0→v1 baseline) and
+            # "duplicate column name" (idempotent re-run). Anything else
+            # is a genuine schema bug.
+            if "duplicate column name" not in msg and "no such table" not in msg:
                 raise
 
     conn.executescript(

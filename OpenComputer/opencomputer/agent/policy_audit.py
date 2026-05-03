@@ -28,7 +28,6 @@ import uuid
 from dataclasses import dataclass
 from typing import Final
 
-
 GENESIS_HMAC: Final[str] = "0" * 64
 
 
