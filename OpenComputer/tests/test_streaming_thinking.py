@@ -281,7 +281,8 @@ def test_collapsed_line_includes_turn_id_and_action_count() -> None:
     text = out.getvalue()
     assert re.search(r"turn #1", text), text
     assert re.search(r"2 actions", text), text
-    assert "/reasoning show to expand" in text
+    # v5: hint moved to the Panel subtitle — phrasing is "/reasoning show".
+    assert "/reasoning show" in text
 
 
 def test_collapsed_line_omits_turn_id_when_store_missing() -> None:
@@ -301,7 +302,8 @@ def test_collapsed_line_omits_turn_id_when_store_missing() -> None:
         )
     text = out.getvalue()
     assert "turn #" not in text
-    assert "/reasoning show to expand" in text
+    # v5: hint moved to the Panel subtitle — phrasing is "/reasoning show".
+    assert "/reasoning show" in text
 
 
 def test_collapsed_line_singular_action_no_plural_s() -> None:
@@ -576,3 +578,96 @@ def test_finalize_no_thinking_no_tools_still_emits_nothing() -> None:
     assert "Thought" not in text
     assert "💭" not in text
     assert "/reasoning show" not in text
+
+
+# ─── v5: Card-style Panel + flicker fix ──────────────────────────────────
+
+
+def test_finalize_collapsed_line_v5_uses_rounded_panel() -> None:
+    """v5 (Claude.ai card parity, Image #13): the collapsed line is
+    wrapped in a rounded Panel with the chevron in the subtitle.
+    Box-drawing characters from ROUNDED appear in the captured output."""
+    from unittest.mock import patch
+
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    out = io.StringIO()
+    store = ReasoningStore()
+    with patch(
+        "opencomputer.agent.reasoning_summary.generate_summary",
+        return_value="Wrote a haiku about sloths",
+    ):
+        renderer = StreamingRenderer(
+            Console(file=out, force_terminal=False, width=120),
+            reasoning_store=store,
+        )
+        with renderer:
+            renderer.on_thinking_chunk("hmm")
+            renderer.finalize(
+                reasoning="hmm",
+                iterations=1, in_tok=1, out_tok=1, elapsed_s=0.1,
+                show_reasoning=False,
+            )
+    text = out.getvalue()
+    # Rounded box-drawing chars present (╭ ╮ ╰ ╯ are ROUNDED corners).
+    assert "╭" in text or "╮" in text or "╰" in text or "╯" in text, (
+        f"expected rounded panel chars; got:\n{text}"
+    )
+    # Summary still inside the panel.
+    assert "Wrote a haiku about sloths" in text
+    # Chevron + subtitle hint visible.
+    assert "›" in text
+    assert "/reasoning show" in text
+
+
+def test_finalize_flicker_fix_summary_join_happens_before_live_stop() -> None:
+    """v5 flicker fix: the summary thread is joined BEFORE live.stop()
+    so the user doesn't see ~1.5s of empty space between 'thinking
+    panel disappears' and 'final state appears'.
+
+    White-box: verify by spying that live.stop happens AFTER the
+    summary call returns."""
+    from unittest.mock import patch
+
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    out = io.StringIO()
+    store = ReasoningStore()
+    timeline: list[str] = []
+
+    # Patch generate_summary to record when it's called.
+    def _slow_summary(text):
+        timeline.append("summary_returned")
+        return "Did stuff"
+
+    renderer = StreamingRenderer(
+        Console(file=out, force_terminal=False, width=120),
+        reasoning_store=store,
+    )
+
+    # Wrap _live.stop to record its call ordering.
+    with renderer:
+        renderer.start_thinking()  # creates the Live
+        renderer.on_thinking_chunk("x")
+        assert renderer._live is not None, "Live must be started for this test"
+        original_stop = renderer._live.stop
+
+        def _spy_stop(*args, **kwargs):
+            timeline.append("live_stopped")
+            return original_stop(*args, **kwargs)
+        renderer._live.stop = _spy_stop
+
+        with patch(
+            "opencomputer.agent.reasoning_summary.generate_summary",
+            side_effect=_slow_summary,
+        ):
+            renderer.finalize(
+                reasoning="x",
+                iterations=1, in_tok=1, out_tok=1, elapsed_s=0.1,
+                show_reasoning=False,
+            )
+
+    # The summary must have completed BEFORE live.stop ran.
+    assert timeline == ["summary_returned", "live_stopped"], (
+        f"expected summary BEFORE live_stopped; got {timeline}"
+    )

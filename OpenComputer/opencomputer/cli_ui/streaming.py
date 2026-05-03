@@ -269,15 +269,6 @@ class StreamingRenderer:
         summary line for tool-driven exchanges (e.g. weather query →
         WebFetch → "Reported NYC weather").
         """
-        # Stop Live first so subsequent console.print writes go to the
-        # real terminal cleanly.
-        if self._live is not None:
-            try:
-                self._live.stop()
-            except Exception:  # noqa: BLE001
-                pass
-            self._live = None
-
         # ─── Decide what this turn contained ──────────────────────────
         thinking_str = (reasoning or "").strip()
         has_thinking = bool(thinking_str)
@@ -319,6 +310,27 @@ class StreamingRenderer:
             except Exception:  # noqa: BLE001 — never crash on summary spawn
                 _summary_thread = None
 
+        # ─── Wait for summary BEFORE stopping Live ──────────────────────
+        # Flicker fix (user-reported, 2026-05-03): previously the call
+        # sequence was {stop Live} → {wait ~1.5s for summary} → {print
+        # final content}. With transient=True, the Live region was
+        # erased on stop, leaving the user staring at empty space for
+        # ~1.5s before the final state appeared. Now we keep the Live
+        # region (showing the streaming state the user already saw)
+        # alive during the summary wait — only stopping right before
+        # we have the final content ready to print. The visible gap
+        # shrinks from ~1.5s to ~30ms (imperceptible).
+        if _summary_thread is not None and not show_reasoning:
+            _summary_thread.join(timeout=1.5)
+        # NOW stop Live so subsequent console.print writes go to the
+        # real terminal cleanly.
+        if self._live is not None:
+            try:
+                self._live.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._live = None
+
         # ─── Print thinking section ──────────────────────────────────
         if has_anything:
             # Prefer the panel-anchored timestamp (set on the FIRST
@@ -343,10 +355,9 @@ class StreamingRenderer:
                     )
                 )
             else:
-                # Collapsed format. Wait briefly for the summary thread
-                # so the rich format can land 95%+ of the time.
-                if _summary_thread is not None:
-                    _summary_thread.join(timeout=1.5)
+                # Collapsed format. Summary thread already joined
+                # above (before Live.stop) so the result is ready to
+                # read immediately — no extra wait here.
                 _summary_str = _summary_cell["value"]
                 next_turn_id = (
                     self._reasoning_store.peek_next_id()
@@ -356,15 +367,24 @@ class StreamingRenderer:
                 action_count = len(self._tool_history)
 
                 if _summary_str:
-                    # v3 (Claude.ai parity, Image #10): clean —
-                    # `<summary> ›`. No metadata clutter; metadata
-                    # moves to the expanded tree's header.
+                    # v5 (Claude.ai card-style parity, Image #13):
+                    # wrap the collapsed summary in a rounded panel
+                    # so it visually reads like a clickable card. The
+                    # chevron sits in the panel's subtitle slot.
+                    from rich.box import ROUNDED
                     self.console.print(
-                        f"[bold]{_summary_str}[/bold] [dim]›[/dim]"
+                        Panel(
+                            Text.assemble((_summary_str, "bold")),
+                            box=ROUNDED,
+                            border_style="grey50",
+                            padding=(0, 2),
+                            subtitle="› /reasoning show or Ctrl+X Ctrl+R",
+                            subtitle_align="right",
+                        )
                     )
                 else:
-                    # Fallback: metadata + reasoning-show hint. Lead-icon
-                    # depends on what happened this turn.
+                    # Fallback: metadata + reasoning-show hint, also
+                    # wrapped in the rounded card for visual consistency.
                     meta_parts: list[str] = []
                     if has_thinking:
                         meta_parts.append(
@@ -383,8 +403,16 @@ class StreamingRenderer:
                         s = "" if action_count == 1 else "s"
                         meta_parts.append(f"{action_count} action{s}")
                     meta = " · ".join(meta_parts)
+                    from rich.box import ROUNDED
                     self.console.print(
-                        f"[dim cyan]{meta} — /reasoning show to expand[/dim cyan]"
+                        Panel(
+                            Text(meta, style="dim cyan"),
+                            box=ROUNDED,
+                            border_style="grey50",
+                            padding=(0, 2),
+                            subtitle="› /reasoning show",
+                            subtitle_align="right",
+                        )
                     )
 
         # Final answer as Markdown — re-rendered from the full buffer
