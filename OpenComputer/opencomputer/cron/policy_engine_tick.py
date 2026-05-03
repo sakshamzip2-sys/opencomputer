@@ -19,9 +19,28 @@ from opencomputer.agent.policy_audit import PolicyAuditLogger
 from opencomputer.agent.policy_audit import PolicyChangeEvent as _AuditEvent
 from opencomputer.agent.policy_audit_log import PolicyAuditLog
 from opencomputer.agent.trust_ramp import TrustRamp
+from opencomputer.evolution.engine_protocol import default_registry
 from opencomputer.evolution.policy_engine import MostCitedBelowMedianV1
 
 _logger = logging.getLogger(__name__)
+
+
+def _bootstrap_registry() -> None:
+    """Auto-register the v0 engine so single-engine deployments work
+    without explicit registration. Idempotent.
+
+    Uses attribute lookup on the engine_protocol module so this still
+    sees the current registry after a test fixture's reset_registry()
+    reassignment (otherwise the ``from … import default_registry``
+    binding here would be stale)."""
+    from opencomputer.evolution import engine_protocol
+    if not engine_protocol.default_registry.all_versions():
+        engine_protocol.default_registry.register(
+            MostCitedBelowMedianV1(), default=True,
+        )
+
+
+_bootstrap_registry()
 
 
 class EngineTickResult(str, Enum):
@@ -52,15 +71,32 @@ def run_engine_tick(*, db, flags: FeatureFlags, hmac_key: bytes) -> EngineTickRe
         )
         return EngineTickResult.BUDGET_EXHAUSTED
 
-    engine = MostCitedBelowMedianV1(
-        min_citations=5,
-        cooldown_days=7,
-        deviation_threshold=float(
-            flags.read("policy_engine.minimum_deviation_threshold", 0.10)
-        ),
-        penalty_step=0.20,
-        penalty_cap=0.80,
-    )
+    # Pluggable engine selection. ``policy_engine.engine_strategy`` is one of
+    # 'default' | 'hash' | 'weighted'. 'default' uses the registered default
+    # (v0 behavior). 'hash' / 'weighted' enable A/B with deterministic
+    # per-(knob_kind, day) routing.
+    strategy = str(flags.read("policy_engine.engine_strategy", "default"))
+    if strategy != default_registry._strategy:
+        default_registry.set_strategy(strategy)
+
+    # The hash strategy needs a knob_kind upfront; for engine-selection
+    # before we know the recommendation we use 'recall_penalty' (only
+    # production knob today). Once a 2nd knob ships in v0.5+, the engine
+    # can be parameterized via per-knob registries.
+    engine = default_registry.choose(knob_kind="recall_penalty")
+    if engine is None:
+        # Fallback path — no engine registered. Should never happen given
+        # _bootstrap_registry but defended for hot-reload edge cases.
+        engine = MostCitedBelowMedianV1(
+            min_citations=5,
+            cooldown_days=7,
+            deviation_threshold=float(
+                flags.read("policy_engine.minimum_deviation_threshold", 0.10)
+            ),
+            penalty_step=0.20,
+            penalty_cap=0.80,
+        )
+
     rec = engine.recommend(db)
     if rec.is_noop():
         _logger.info("engine noop: %s", rec.noop_reason)

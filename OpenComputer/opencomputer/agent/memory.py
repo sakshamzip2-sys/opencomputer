@@ -97,6 +97,10 @@ class SkillMeta:
     version: str = "0.1.0"
     references: tuple[SkillReference, ...] = field(default_factory=tuple)
     examples: tuple[SkillReference, ...] = field(default_factory=tuple)
+    #: v0.5+: priority weight from frontmatter ``priority:`` key.
+    #: Higher = surfaced earlier. None = unweighted (alphabetical fallback).
+    #: Future engines may auto-update this based on outcome data.
+    priority: float | None = None
 
 
 # ─── bus helper (T3.2 PR-8) ───────────────────────────────────────────
@@ -512,6 +516,16 @@ class MemoryManager:
                 examples = _load_references_dir(
                     skill_dir / "examples", markdown_only=False
                 )
+                # v0.5+: priority is optional. Frontmatter accepts a
+                # numeric value; non-numeric or missing → None (unweighted).
+                priority_raw = meta.get("priority")
+                priority: float | None
+                try:
+                    priority = (
+                        float(priority_raw) if priority_raw is not None else None
+                    )
+                except (TypeError, ValueError):
+                    priority = None
                 out.append(
                     SkillMeta(
                         id=skill_dir.name,
@@ -521,8 +535,18 @@ class MemoryManager:
                         version=str(meta.get("version", "0.1.0")),
                         references=references,
                         examples=examples,
+                        priority=priority,
                     )
                 )
+        # v0.5+: stable sort by (priority DESC NULLS LAST, name ASC).
+        # Skills without priority retain alphabetical ordering — zero
+        # behavior change for v0 skills that don't set the field.
+        out.sort(
+            key=lambda s: (
+                -s.priority if s.priority is not None else float("inf"),
+                s.name,
+            )
+        )
         return out
 
     def load_skill_body(self, skill_id: str) -> str:
