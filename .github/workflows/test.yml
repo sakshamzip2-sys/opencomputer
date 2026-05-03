@@ -103,7 +103,9 @@ jobs:
         # claim is documented in extensions/voice-mode/README.md.
         #
         # Service tests cover the cross-platform always-on daemon backends
-        # (systemd / launchd / schtasks). Subprocess-mocked, so they run
-        # uniformly on all three OSes.
+        # (systemd / launchd / schtasks). Subprocess-mocked tests run
+        # uniformly on all three OSes; the new test_service_windows_e2e.py
+        # adds REAL schtasks.exe shell-out, gated to Windows only — that
+        # is what gives the Windows backend real-hardware verification.
         shell: bash
-        run: pytest tests/test_introspection_*.py tests/test_no_agpl_imports.py tests/test_doctor_introspection_checks.py tests/test_ambient_*.py tests/test_skill_evolution_*.py tests/test_service_*.py tests/test_cli_service_commands.py tests/test_cli_install_daemon_flag.py tests/test_doctor_service_section.py -v --tb=short
+        run: pytest tests/test_introspection_*.py tests/test_no_agpl_imports.py tests/test_doctor_introspection_checks.py tests/test_ambient_*.py tests/test_skill_evolution_*.py tests/test_service_*.py tests/test_cli_service_commands.py tests/test_cli_install_daemon_flag.py tests/test_doctor_service_section.py tests/test_gateway_startup_ping.py -v --tb=short
