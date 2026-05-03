@@ -171,7 +171,10 @@ def test_sanitize_caps_length_when_no_useful_extension():
 def test_move_to_trash_delegates_to_send2trash(tmp_path):
     victim = tmp_path / "doomed.txt"
     victim.write_text("bye")
-    with patch("extensions.browser_control._utils.trash.send2trash") as mock:
+    # Patch at the source module — `send2trash` is now a lazy import
+    # inside `move_to_trash`, so the function looks it up via the
+    # `send2trash` package, not as an attribute on `_utils.trash`.
+    with patch("send2trash.send2trash") as mock:
         move_to_trash(victim)
     mock.assert_called_once_with(str(victim))
 
@@ -179,7 +182,7 @@ def test_move_to_trash_delegates_to_send2trash(tmp_path):
 def test_move_to_trash_accepts_pathlike(tmp_path):
     victim = tmp_path / "doomed.txt"
     victim.write_text("bye")
-    with patch("extensions.browser_control._utils.trash.send2trash") as mock:
+    with patch("send2trash.send2trash") as mock:
         move_to_trash(str(victim))
     mock.assert_called_once_with(str(victim))
 
