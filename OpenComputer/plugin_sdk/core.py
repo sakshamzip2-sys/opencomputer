@@ -196,7 +196,7 @@ class SetupProvider:
     where to go. Empty string suppresses the hint.
     """
 
-    auth_choices: tuple["AuthChoice", ...] = ()
+    auth_choices: tuple[AuthChoice, ...] = ()
     """Rich UI / CLI metadata per auth method.
 
     Sub-project G (openclaw-parity) Task 3. Mirrors openclaw

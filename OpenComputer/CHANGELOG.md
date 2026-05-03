@@ -4,6 +4,24 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — OpenClaw-parity port (Sub-project G)
+
+Ports nine load-bearing pieces of openclaw's plugin/wire contract that the original openclaw-reference-import wave missed. Manifest schema bumped v3 → v4; every new field optional, so v3 manifests parse unchanged.
+
+- `PluginManifest.min_host_version` — minimum `opencomputer.__version__` required; PEP 440 / semver / calver. Enforced at load time before the entry module is imported. `PluginIncompatibleError` raised on mismatch; `load_plugin` catches → log + skip so other plugins keep loading. `extensions/anthropic-provider/plugin.json` pinned to `"2026.1.1"` as the canonical example.
+- `PluginManifest.activation` block — manifest-declared triggers: `on_providers`, `on_channels`, `on_commands`, `on_tools`, `on_models`. New `opencomputer.plugins.activation_planner.plan_activations` function reads it. Falls back to legacy `tool_names` inference (Sub-project E, PR #26) when absent.
+- `SetupProvider.auth_choices` (`tuple[AuthChoice, ...]`) — rich auth UI metadata: per-method `label`, `cli_flag`, `option_key`, `group`, `onboarding_priority`. Wizard reads `auth_choices` first when populated; falls back to `auth_methods: list[str]`.
+- `plugin.json` is now JSON5-tolerant: comments + trailing commas allowed. Two-tier parse — `json.loads` first (zero overhead for compliant manifests), `json5.loads` only on `JSONDecodeError`. Adds `json5>=0.9` dep (~30KB pure-Python).
+- 256KB cap (`MAX_MANIFEST_BYTES`) on `plugin.json` size at discovery — defends against pathological / malicious 100MB manifest DOS.
+- `opencomputer plugin inspect <id>` CLI subcommand + `opencomputer.plugins.inspect_shape.PluginShape` classifier — compares manifest claims to actual `LoadedPlugin.registrations`. Status is `valid` or `drift`; surfaces `tool 'X' declared but not registered` / `tool 'Y' registered but not declared` style messages. Optional tools tolerated when absent.
+- `plugin_sdk.SecretRef` + `SecretResolver` — typed wire primitive whose `model_dump()` never carries the value (only ref_id + hint). Per-process registry resolves ref_id → value in-process. Adoption is opportunistic; only new wire methods.
+- `opencomputer.gateway.error_codes.ErrorCode` (StrEnum, 10 codes) + `WireResponse.code: str | None` — programmable error categories. Old wire callers ignore the field; new clients can `match` on it.
+- `tests/test_plugin_extension_boundary.py` + `tests/fixtures/plugin_extension_import_boundary_inventory.json` — frozen-inventory test that fails on any NEW `from opencomputer.*` import in `extensions/*.py`. 26 existing violators frozen; cleanup is per-extension follow-up. `scripts/refresh_extension_boundary_inventory.py` regenerates the fixture.
+
+Out of scope: `plugin_sdk/__init__.py` subpath split (item #10 from audit — plugin-author-visible refactor, deserves its own PR + migration guide), cleanup of the 26 boundary violators (separate per-extension PRs over time), migration of existing wire methods to `SecretRef` (opportunistic only).
+
+Spec: `docs/superpowers/specs/2026-05-03-openclaw-parity-port-design.md` · Plan: `docs/superpowers/plans/2026-05-03-openclaw-parity-port.md`.
+
 ### Changed — Thinking History UI v3: Claude.ai Visual Parity
 
 Refactored v2's collapsed line and expanded tree to match Claude.ai's web UX exactly.

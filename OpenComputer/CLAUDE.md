@@ -291,6 +291,20 @@ Canvas rendering, native mobile apps, voice wake-word, Atropos RL, trajectory co
 
 **Plugin registration is Python-declarative, not YAML-based.** There are no `manifest.yaml` or `manifest.toml` files in `extensions/`. Each plugin's metadata (name, description, kind, tool set) is declared via a `register(api)` function in its `plugin.py`, typically constructing a `PluginManifest` from `plugin_sdk`. Don't hunt for YAML manifests — they don't exist.
 
+**Manifest schema v4 fields (Sub-project G openclaw-parity, 2026-05-03):**
+
+- `min_host_version` (string) — minimum `opencomputer.__version__` required; empty = no check. Validated as PEP 440 / semver / calver. Enforced at `loader.load_plugin` BEFORE entry-module import; mismatch → log + skip with `PluginIncompatibleError`. `extensions/anthropic-provider/plugin.json` uses this as the canonical example.
+- `activation` (object) — manifest-declared triggers: `on_providers`, `on_channels`, `on_commands`, `on_tools`, `on_models`. Read by `opencomputer.plugins.activation_planner.plan_activations`. Falls back to legacy `tool_names` inference (Sub-project E, PR #26) when absent. Existing Sub-project E demand-driven path remains unchanged.
+- `setup.providers[].auth_choices` (array) — rich auth UI metadata: per-method `label`, `cli_flag`, `option_key`, `group`, `onboarding_priority`. Falls back to legacy `auth_methods: list[str]` interpretation when empty.
+- `plugin.json` is now JSON5-tolerant (comments, trailing commas) via two-tier parse: `json.loads` first, `json5.loads` only on JSONDecodeError. Plain JSON manifests pay zero overhead.
+- 256KB cap on `plugin.json` size at discovery (`MAX_MANIFEST_BYTES`); pathological files skipped with a warning.
+- New: `opencomputer plugin inspect <id>` — compares manifest claims to actual `LoadedPlugin.registrations` post-load. Status `valid` / `drift`.
+- New: `plugin_sdk.SecretRef` + `SecretResolver` — typed wire primitive whose `model_dump()` never includes the value. Adoption is opportunistic (new wire methods only).
+- New: `opencomputer.gateway.error_codes.ErrorCode` (StrEnum) + `WireResponse.code: str | None` — typed error categories that wire clients can match on. Old clients ignore.
+- New: `tests/test_plugin_extension_boundary.py` — frozen-inventory test that fails on any NEW `from opencomputer.*` import inside `extensions/*.py`. Existing 26 violators frozen at `tests/fixtures/plugin_extension_import_boundary_inventory.json`. Cleanup is a per-extension follow-up.
+
+All v4 fields are optional; v3 manifests parse unchanged.
+
 **Schema-name uniqueness is the collision guard for tool names.** If two plugins register tools with the same `schema().name`, `ToolRegistry` raises `ValueError` at load. Tool names are PascalCase by convention (Edit, MultiEdit, Read, TodoWrite, etc.) — the SDK boundary test keeps this honest.
 
 **Settings-based hooks — declare shell hooks without writing a plugin (III.6).** The top-level `hooks:` key in `~/.opencomputer/<profile>/config.yaml` accepts the same event-keyed shape Claude Code uses in `.claude/settings.json`:
