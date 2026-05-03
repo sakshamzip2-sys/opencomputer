@@ -422,6 +422,23 @@ class BaseProvider(ABC):
         """
         return ProviderCapabilities()
 
+    def supports_native_thinking_for(self, model: str) -> bool:
+        """Per-model native-thinking declaration.
+
+        Returns True if this provider's :meth:`stream_complete` natively
+        emits ``thinking_delta`` events for the given model. The agent
+        loop reads this at session start to decide whether to wire the
+        prompt-based fallback (``<think>`` system instruction +
+        ``ThinkingTagsParser``) — when False, the fallback activates so
+        non-native models surface a reasoning panel via the existing
+        ``thinking_callback`` chain.
+
+        Default: returns the static :attr:`capabilities.supports_native_thinking`.
+        Providers with model-dependent support (Anthropic legacy vs Claude 4+,
+        OpenAI o-series vs gpt-4o) override this to make the per-model decision.
+        """
+        return bool(self.capabilities.supports_native_thinking)
+
     async def complete_vision(
         self,
         *,
