@@ -67,9 +67,15 @@ class SlashContext:
     on_snapshot_create: Callable[[str | None], str | None] = lambda label: None
     #: ``/snapshot list`` — return snapshot manifests, newest first.
     on_snapshot_list: Callable[[], list[dict]] = list
-    #: ``/snapshot restore <id>`` — overwrite current state from snapshot;
-    #: returns count of files restored (0 if id not found).
-    on_snapshot_restore: Callable[[str], int] = lambda sid: 0
+    #: ``/snapshot restore <id> [--only a,b] [--skip x,y]`` — overwrite
+    #: current state from snapshot. Optional ``only`` / ``skip`` filters
+    #: enable selective restore (v0.5+). Returns count of files restored.
+    on_snapshot_restore: Callable[
+        [str, list[str] | None, list[str] | None], int,
+    ] = lambda sid, only, skip: 0
+    #: ``/snapshot list-files <id>`` — return the snapshot's manifest
+    #: file list, for selective-restore UX.
+    on_snapshot_list_files: Callable[[str], list[str]] = lambda sid: []
     #: ``/snapshot prune`` — drop snapshots beyond the keep cap; returns
     #: count deleted.
     on_snapshot_prune: Callable[[], int] = lambda: 0
@@ -388,23 +394,64 @@ def _handle_snapshot(ctx: SlashContext, args: list[str]) -> SlashResult:
     if sub == "restore":
         if len(args) < 2:
             ctx.console.print(
-                "[red]usage:[/red] /snapshot restore <id>  "
-                "[dim](try /snapshot list first)[/dim]"
+                "[red]usage:[/red] /snapshot restore <id> "
+                "[--only a,b] [--skip x,y]  "
+                "[dim](try /snapshot list-files <id>)[/dim]"
             )
             return SlashResult(handled=True)
         sid = args[1].strip()
-        n = ctx.on_snapshot_restore(sid)
+        # Parse optional --only / --skip filters (v0.5+)
+        only_list: list[str] | None = None
+        skip_list: list[str] | None = None
+        i = 2
+        while i < len(args):
+            tok = args[i]
+            if tok == "--only" and i + 1 < len(args):
+                only_list = [s.strip() for s in args[i + 1].split(",") if s.strip()]
+                i += 2
+            elif tok == "--skip" and i + 1 < len(args):
+                skip_list = [s.strip() for s in args[i + 1].split(",") if s.strip()]
+                i += 2
+            else:
+                i += 1
+        n = ctx.on_snapshot_restore(sid, only_list, skip_list)
         if n > 0:
+            sel = ""
+            if only_list:
+                sel = f" (only: {', '.join(only_list)})"
+            elif skip_list:
+                sel = f" (skipped: {', '.join(skip_list)})"
             ctx.console.print(
-                f"[green]restored {n} files[/green] from snapshot {sid}.\n"
+                f"[green]restored {n} files[/green]{sel} from snapshot {sid}.\n"
                 "[yellow]restart recommended[/yellow] for state.db / config "
                 "changes to take effect."
             )
         else:
             ctx.console.print(
-                f"[red]restore failed[/red] — snapshot {sid!r} not found "
-                "or has no manifest."
+                f"[red]restore failed[/red] — snapshot {sid!r} not found, "
+                "no manifest, or filter excluded all files."
             )
+        return SlashResult(handled=True)
+
+    if sub == "list-files":
+        if len(args) < 2:
+            ctx.console.print(
+                "[red]usage:[/red] /snapshot list-files <id>"
+            )
+            return SlashResult(handled=True)
+        sid = args[1].strip()
+        files = ctx.on_snapshot_list_files(sid)
+        if not files:
+            ctx.console.print(
+                f"[yellow]no manifest[/yellow] for snapshot {sid!r}"
+            )
+            return SlashResult(handled=True)
+        ctx.console.print(f"[bold]Files in snapshot {sid}:[/bold]")
+        for f in files:
+            ctx.console.print(f"  • {f}")
+        ctx.console.print(
+            "\n[dim]Use --only / --skip with /snapshot restore to filter.[/dim]"
+        )
         return SlashResult(handled=True)
 
     if sub == "prune":

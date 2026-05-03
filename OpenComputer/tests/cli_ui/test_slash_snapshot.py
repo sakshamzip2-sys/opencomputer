@@ -53,7 +53,7 @@ def snap_ctx():
         # newest first
         return list(reversed(list(store.values())))
 
-    def restore(sid: str) -> int:
+    def restore(sid: str, only=None, skip=None) -> int:
         return 5 if sid in store else 0
 
     def prune() -> int:

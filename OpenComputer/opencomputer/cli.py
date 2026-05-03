@@ -1296,10 +1296,19 @@ def _run_chat_session(
 
         return list_snapshots(profile_home, limit=50)
 
-    def _on_snapshot_restore(snapshot_id: str) -> int:
+    def _on_snapshot_restore(
+        snapshot_id: str,
+        only: list[str] | None = None,
+        skip: list[str] | None = None,
+    ) -> int:
         from opencomputer.snapshot import restore_snapshot
 
-        return restore_snapshot(profile_home, snapshot_id)
+        return restore_snapshot(profile_home, snapshot_id, only=only, skip=skip)
+
+    def _on_snapshot_list_files(snapshot_id: str) -> list[str]:
+        from opencomputer.snapshot.quick import list_snapshot_files
+
+        return list_snapshot_files(profile_home, snapshot_id)
 
     def _on_snapshot_prune() -> int:
         from opencomputer.snapshot import prune_snapshots
@@ -1760,6 +1769,7 @@ def _run_chat_session(
                 on_snapshot_create=_on_snapshot_create,
                 on_snapshot_list=_on_snapshot_list,
                 on_snapshot_restore=_on_snapshot_restore,
+                on_snapshot_list_files=_on_snapshot_list_files,
                 on_snapshot_prune=_on_snapshot_prune,
                 on_reload=_on_reload,
                 on_reload_mcp=_on_reload_mcp,
