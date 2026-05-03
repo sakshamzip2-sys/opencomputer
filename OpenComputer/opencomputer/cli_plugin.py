@@ -217,7 +217,13 @@ def where(
     raise typer.Exit(code=1)
 
 
-_VALID_KINDS: tuple[str, ...] = ("channel", "provider", "toolkit", "mixed")
+_VALID_KINDS: tuple[str, ...] = (
+    "channel",
+    "provider",
+    "toolkit",
+    "mixed",
+    "adapter-pack",
+)
 
 
 def _smoke_load_plugin(plugin_dir: Path) -> None:

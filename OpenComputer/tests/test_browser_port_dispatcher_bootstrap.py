@@ -514,3 +514,373 @@ def test_tab_ops_backend_has_cdp_callables_wired():
     # chrome-mcp / persistent-playwright variants stay unwired
     assert backend.open_tab_via_mcp is None
     assert backend.open_tab_via_playwright is None
+
+
+# --- wave-3.3: managed-cache liveness check --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cache_evicts_when_chrome_dead(monkeypatch):
+    """A cached entry whose Chrome subprocess has exited must be evicted.
+
+    Populate the cache with a fake _ManagedProfileEntry whose proc has a
+    non-None returncode (i.e. dead). Call _launch_managed via the wired
+    driver: it must NOT short-circuit on the cache; it must call
+    launch_openclaw_chrome and the returned RunningChrome must be the
+    fresh one (different identity from the dead cached entry's running).
+    The dead entry must be gone from the cache.
+    """
+    cfg = resolve_browser_config({"enabled": True}, {})
+    profile = resolve_profile(cfg, "openclaw")
+    assert profile is not None
+
+    fake_browser = _FakeBrowser()
+    dead_running = _FakeRunningChrome(pid=11111)
+    dead_running.proc = _FakeProc(returncode=137)  # SIGKILL exit code
+
+    from extensions.browser_control.session.cdp import ConnectedBrowser
+    from extensions.browser_control.session.playwright_session import PlaywrightSession
+
+    dead_entry = _boot._ManagedProfileEntry(
+        running=dead_running,
+        connected=ConnectedBrowser(browser=fake_browser, cdp_url=dead_running.cdp_url),
+        session=PlaywrightSession(browser=fake_browser, cdp_url=dead_running.cdp_url),
+    )
+    _boot._managed_cache[profile.name] = dead_entry
+
+    fresh_running = _FakeRunningChrome(pid=22222)
+
+    launch_calls = 0
+
+    async def _fake_launch(_resolved, _profile):
+        nonlocal launch_calls
+        launch_calls += 1
+        return fresh_running
+
+    monkeypatch.setattr(
+        "extensions.browser_control.chrome.launch_openclaw_chrome", _fake_launch
+    )
+
+    # Track force_disconnect calls — the eviction path should call it
+    # to drop the CDP-level cache too.
+    fd_calls: list[str] = []
+
+    async def _fake_fd(cdp_url: str) -> None:
+        fd_calls.append(cdp_url)
+
+    monkeypatch.setattr(
+        "extensions.browser_control.session.cdp.force_disconnect_playwright_for_target",
+        _fake_fd,
+    )
+
+    driver = _boot._build_default_profile_driver()
+    out = await driver.launch_managed(profile)
+    assert out is fresh_running
+    assert out is not dead_running
+    assert launch_calls == 1
+    # Cache must NOT contain the dead entry any more (and must not
+    # have been re-populated by _launch_managed — that's
+    # _connect_managed's job).
+    assert profile.name not in _boot._managed_cache
+    # The CDP cache should have been evicted for the dead entry's URL.
+    assert dead_running.cdp_url in fd_calls
+
+
+@pytest.mark.asyncio
+async def test_cache_reuses_when_chrome_alive(monkeypatch):
+    """A cached entry whose Chrome is alive must be reused — no relaunch."""
+    cfg = resolve_browser_config({"enabled": True}, {})
+    profile = resolve_profile(cfg, "openclaw")
+    assert profile is not None
+
+    fake_browser = _FakeBrowser()
+    alive_running = _FakeRunningChrome(pid=33333)
+    # _FakeProc default returncode=None means alive
+    assert alive_running.proc.returncode is None
+
+    from extensions.browser_control.session.cdp import ConnectedBrowser
+    from extensions.browser_control.session.playwright_session import PlaywrightSession
+
+    _boot._managed_cache[profile.name] = _boot._ManagedProfileEntry(
+        running=alive_running,
+        connected=ConnectedBrowser(browser=fake_browser, cdp_url=alive_running.cdp_url),
+        session=PlaywrightSession(browser=fake_browser, cdp_url=alive_running.cdp_url),
+    )
+
+    launch_calls = 0
+
+    async def _fake_launch(_resolved, _profile):
+        nonlocal launch_calls
+        launch_calls += 1
+        return _FakeRunningChrome(pid=99999)
+
+    monkeypatch.setattr(
+        "extensions.browser_control.chrome.launch_openclaw_chrome", _fake_launch
+    )
+
+    driver = _boot._build_default_profile_driver()
+    out = await driver.launch_managed(profile)
+    # Identity check: the same alive_running, no fresh launch.
+    assert out is alive_running
+    assert launch_calls == 0
+    # Cache untouched.
+    assert _boot._managed_cache[profile.name].running is alive_running
+
+
+@pytest.mark.asyncio
+async def test_cache_idempotent_on_concurrent_dead_detection(monkeypatch):
+    """Two concurrent _launch_managed callers find the dead entry; the
+    eviction (force_disconnect + cache pop) happens at most once.
+
+    Both callers race into the dead-cache short-circuit; the cache lock
+    serializes the eviction such that exactly one of them observes the
+    dead entry and triggers force_disconnect. The second caller (after
+    the lock is released) finds an empty cache and skips eviction.
+
+    Note: _launch_managed itself does NOT single-flight relaunches —
+    that protection lives in server_context.lifecycle._profile_locks
+    at the layer above. So two concurrent direct callers may each call
+    launch_openclaw_chrome. The contract this test enforces is:
+      * neither caller is handed back the dead entry,
+      * eviction is idempotent (force_disconnect fires exactly once),
+      * no exceptions are raised under the race.
+    """
+    cfg = resolve_browser_config({"enabled": True}, {})
+    profile = resolve_profile(cfg, "openclaw")
+    assert profile is not None
+
+    fake_browser = _FakeBrowser()
+    dead_running = _FakeRunningChrome(pid=11111)
+    dead_running.proc = _FakeProc(returncode=137)
+
+    from extensions.browser_control.session.cdp import ConnectedBrowser
+    from extensions.browser_control.session.playwright_session import PlaywrightSession
+
+    _boot._managed_cache[profile.name] = _boot._ManagedProfileEntry(
+        running=dead_running,
+        connected=ConnectedBrowser(browser=fake_browser, cdp_url=dead_running.cdp_url),
+        session=PlaywrightSession(browser=fake_browser, cdp_url=dead_running.cdp_url),
+    )
+
+    launch_calls = 0
+    eviction_seen: list[bool] = []
+
+    async def _fake_launch(_resolved, _profile):
+        nonlocal launch_calls
+        launch_calls += 1
+        # By the time launch is called, the dead entry must already be
+        # gone from the cache — eviction happened before the relaunch.
+        eviction_seen.append(profile.name not in _boot._managed_cache)
+        # Tiny await so the second concurrent caller has a chance to
+        # observe the same evicted state.
+        await asyncio.sleep(0.01)
+        return _FakeRunningChrome(pid=22222)
+
+    monkeypatch.setattr(
+        "extensions.browser_control.chrome.launch_openclaw_chrome", _fake_launch
+    )
+
+    fd_calls: list[str] = []
+
+    async def _fake_fd(cdp_url: str) -> None:
+        fd_calls.append(cdp_url)
+
+    monkeypatch.setattr(
+        "extensions.browser_control.session.cdp.force_disconnect_playwright_for_target",
+        _fake_fd,
+    )
+
+    driver = _boot._build_default_profile_driver()
+    results = await asyncio.gather(
+        driver.launch_managed(profile),
+        driver.launch_managed(profile),
+    )
+    # Both callers receive a (fresh) RunningChrome. They may be the
+    # same identity if the second caller observed the lock-protected
+    # state, but more likely each gets its own — the behaviour we
+    # care about is no caller gets the dead entry, and the eviction
+    # is idempotent (no crash).
+    for r in results:
+        assert r is not dead_running
+    # Eviction must have happened before any relaunch — both observed
+    # the empty cache before fake_launch ran.
+    assert all(eviction_seen)
+    # force_disconnect should have been called exactly once for the
+    # dead entry (idempotent eviction — second caller finds an empty
+    # cache and does not re-evict).
+    assert fd_calls.count(dead_running.cdp_url) == 1
+
+
+@pytest.mark.asyncio
+async def test_connect_managed_evicts_dead_cached_session(monkeypatch):
+    """_connect_managed_cached with a dead-Chrome cached entry must
+    rebuild the session against the fresh ``running``.
+
+    Populate the cache with a session keyed to a dead RunningChrome,
+    then call _connect_managed_cached with a *new* RunningChrome
+    (simulating what _launch_managed would have produced after dead-
+    detection). The returned session must be a fresh one (not the
+    cached dead session).
+    """
+    cfg = resolve_browser_config({"enabled": True}, {})
+    profile = resolve_profile(cfg, "openclaw")
+    assert profile is not None
+
+    fake_browser_dead = _FakeBrowser()
+    fake_browser_alive = _FakeBrowser()
+
+    dead_running = _FakeRunningChrome(pid=11111, cdp_url="http://127.0.0.1:18801")
+    dead_running.proc = _FakeProc(returncode=137)
+
+    from extensions.browser_control.session.cdp import ConnectedBrowser
+    from extensions.browser_control.session.playwright_session import PlaywrightSession
+
+    dead_session = PlaywrightSession(
+        browser=fake_browser_dead, cdp_url=dead_running.cdp_url
+    )
+    _boot._managed_cache[profile.name] = _boot._ManagedProfileEntry(
+        running=dead_running,
+        connected=ConnectedBrowser(
+            browser=fake_browser_dead, cdp_url=dead_running.cdp_url
+        ),
+        session=dead_session,
+    )
+
+    connect_calls = 0
+
+    async def _fake_connect_browser(cdp_url: str, **_kw):
+        nonlocal connect_calls
+        connect_calls += 1
+        return ConnectedBrowser(browser=fake_browser_alive, cdp_url=cdp_url)
+
+    from extensions.browser_control.session import cdp as cdp_mod
+
+    monkeypatch.setattr(cdp_mod, "connect_browser", _fake_connect_browser)
+    monkeypatch.setattr(
+        "extensions.browser_control.session.connect_browser", _fake_connect_browser
+    )
+
+    async def _fake_fd(cdp_url: str) -> None:  # noqa: ARG001 — best-effort
+        return None
+
+    monkeypatch.setattr(
+        "extensions.browser_control.session.cdp.force_disconnect_playwright_for_target",
+        _fake_fd,
+    )
+
+    fresh_running = _FakeRunningChrome(pid=22222, cdp_url="http://127.0.0.1:18802")
+    sess = await _boot._connect_managed_cached(profile, fresh_running)
+    assert sess is not dead_session
+    assert connect_calls == 1
+    # Cache should now point at the fresh entry.
+    cached = _boot._managed_cache[profile.name]
+    assert cached.running is fresh_running
+    assert cached.session is sess
+
+
+@pytest.mark.asyncio
+async def test_connect_managed_liveness_probe_rebuilds_when_same_running_died(monkeypatch):
+    """The liveness probe in _connect_managed_cached itself catches a
+    dead proc even when the caller passes back the *same* RunningChrome
+    identity.
+
+    Scenario: a previous _connect_managed call cached a session against
+    ``running``. Chrome then died out-of-band (proc.returncode set).
+    A subsequent caller (perhaps holding a stale runtime.running ref)
+    calls _connect_managed_cached(profile, running). Without the
+    liveness probe, the identity check ``cached.running is running``
+    would still match → return the dead session. With the probe, we
+    detect the dead proc, evict, and rebuild.
+    """
+    cfg = resolve_browser_config({"enabled": True}, {})
+    profile = resolve_profile(cfg, "openclaw")
+    assert profile is not None
+
+    fake_browser_old = _FakeBrowser()
+    # Same running object as the caller will pass — but the proc has
+    # since died.
+    running = _FakeRunningChrome(pid=11111)
+
+    from extensions.browser_control.session.cdp import ConnectedBrowser
+    from extensions.browser_control.session.playwright_session import PlaywrightSession
+
+    dead_session = PlaywrightSession(
+        browser=fake_browser_old, cdp_url=running.cdp_url
+    )
+    _boot._managed_cache[profile.name] = _boot._ManagedProfileEntry(
+        running=running,
+        connected=ConnectedBrowser(browser=fake_browser_old, cdp_url=running.cdp_url),
+        session=dead_session,
+    )
+
+    # Now simulate Chrome dying — flip running.proc.returncode.
+    running.proc = _FakeProc(returncode=137)
+
+    fake_browser_new = _FakeBrowser()
+
+    async def _fake_connect_browser(cdp_url: str, **_kw):
+        return ConnectedBrowser(browser=fake_browser_new, cdp_url=cdp_url)
+
+    from extensions.browser_control.session import cdp as cdp_mod
+
+    monkeypatch.setattr(cdp_mod, "connect_browser", _fake_connect_browser)
+    monkeypatch.setattr(
+        "extensions.browser_control.session.connect_browser", _fake_connect_browser
+    )
+
+    async def _fake_fd(cdp_url: str) -> None:  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr(
+        "extensions.browser_control.session.cdp.force_disconnect_playwright_for_target",
+        _fake_fd,
+    )
+
+    # Caller passes the SAME running back — identity check would have
+    # short-circuited without the liveness probe.
+    sess = await _boot._connect_managed_cached(profile, running)
+    cached = _boot._managed_cache[profile.name]
+    assert cached.running is running
+    assert sess is not dead_session
+    assert cached.session is sess
+    # The fresh session uses the new browser handle.
+    assert sess.browser is fake_browser_new
+
+
+def test_is_running_alive_helper():
+    """Unit test the liveness probe helper directly."""
+    # None → dead.
+    assert _boot._is_running_alive(None) is False
+    # No proc attribute → dead (unknown).
+    class _NoProc:
+        pass
+    assert _boot._is_running_alive(_NoProc()) is False
+    # Asyncio-style: returncode is None means alive.
+    alive = _FakeRunningChrome()
+    assert alive.proc.returncode is None
+    assert _boot._is_running_alive(alive) is True
+    # Asyncio-style: returncode set means dead.
+    dead = _FakeRunningChrome()
+    dead.proc = _FakeProc(returncode=137)
+    assert _boot._is_running_alive(dead) is False
+    # Popen-style: poll() returns None means alive.
+    class _PopenAlive:
+        returncode = None
+
+        def poll(self):
+            return None
+
+    class _PopenDead:
+        returncode = None
+
+        def poll(self):
+            return 0
+
+    class _RunningPopenAlive:
+        proc = _PopenAlive()
+
+    class _RunningPopenDead:
+        proc = _PopenDead()
+
+    assert _boot._is_running_alive(_RunningPopenAlive()) is True
+    assert _boot._is_running_alive(_RunningPopenDead()) is False

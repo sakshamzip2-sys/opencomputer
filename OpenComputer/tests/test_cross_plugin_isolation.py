@@ -22,6 +22,33 @@ from pathlib import Path
 
 EXTENSIONS_ROOT = Path(__file__).resolve().parent.parent / "extensions"
 
+# Plugins that act as runtimes/SDKs other plugins legitimately extend.
+# Importing from these is by design, not a boundary violation. Matches
+# the SDK pattern (`plugin_sdk/`) but at the extension layer:
+#
+#   adapter-runner — exposes ``@adapter`` decorator + ``Strategy`` enum +
+#                     ``register_adapter_pack`` so adapter-pack plugins
+#                     and `browser-control/adapters/*` can author tools.
+#
+# When more runtime plugins ship, replace this hardcoded set with a
+# `plugin.json` metadata flag (e.g. ``"kind": "runtime"``) and read it
+# at scan time. Tracked in v0.5+ as DEFERRED follow-up.
+RUNTIME_PLUGINS = {
+    "adapter-runner",
+}
+
+# Bidirectional pairs that are by-design coupled. Each entry says
+# "plugin A may import from plugin B AND vice versa." The TODO is to
+# break A→B with dependency injection in v0.5; for now, surface the
+# pair explicitly so future grep can find it.
+ALLOWED_BIDIRECTIONAL = {
+    # adapter-runner's ctx wires Browser actions into the adapter
+    # `ctx` object for COOKIE/UI/INTERCEPT adapters. Long-term, the
+    # browser actions should be injected from browser-control's side
+    # via api.register hooks, not imported. Tracked in DEFERRED.md.
+    frozenset({"adapter-runner", "browser-control"}),
+}
+
 
 def _canonical_names(plugin_dir_name: str) -> set[str]:
     """Return folder name + its underscore-normalized variant.
@@ -53,6 +80,13 @@ def _scan_for_cross_imports(root: Path) -> list[str]:
                 continue
             for other_name, other_aliases in name_to_aliases.items():
                 if other_name == plugin.name:
+                    continue
+                # Skip declared runtime plugins — by design extensible
+                # from sibling plugins (analogue of plugin_sdk).
+                if other_name in RUNTIME_PLUGINS:
+                    continue
+                # Skip pairs explicitly allowlisted as by-design coupled.
+                if frozenset({plugin.name, other_name}) in ALLOWED_BIDIRECTIONAL:
                     continue
                 # A sibling's alias set may share entries with our own only
                 # if the folder names collide after normalization — in that

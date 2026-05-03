@@ -1,0 +1,21 @@
+{
+  "id": "adapter-runner",
+  "name": "adapter-runner",
+  "description": "Discovers @adapter-decorated recipes (bundled, plugin packs, user) and registers each as a synthetic OpenComputer tool. Companion to browser-control: turns successful Browser-tool flows into deterministic, reusable, agent-callable tools. v0.4 adapter-promotion surface.",
+  "version": "0.4.0",
+  "kind": "tool",
+  "enabled_by_default": true,
+  "entry": "plugin",
+  "author": "OpenComputer",
+  "license": "MIT",
+  "tool_names": [
+    "AmazonTrackPrice",
+    "ApplePodcastsSearch",
+    "ArxivSearch",
+    "ChatgptAppNewChat",
+    "CursorAppRecentFiles",
+    "GithubNotifications",
+    "HackernewsTop",
+    "RedditHot"
+  ]
+}

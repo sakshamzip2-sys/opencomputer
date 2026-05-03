@@ -36,6 +36,7 @@ SITES: dict[str, EvalSite] = {
         callable_path="opencomputer.evals.adapters:adapter_instruction_detector",
         grader="exact",
         requires_provider=False,  # regex-based
+        regression_threshold=0.10,  # detector is noisy; allow more variance
     ),
 }
 

@@ -19,16 +19,20 @@ from typing import Any
 def adapter_reflect(case_input: dict[str, Any]) -> str:
     """Wrap opencomputer.evolution.reflect for evaluation.
 
-    case_input shape: {"session_excerpt": str}
-    Returns: the reflection text the model produced.
+    case_input shape: {"events": [<TrajectoryEvent dict>, ...]}
+    Returns: joined Insight texts for the rubric grader.
 
-    NOTE: deferred — reflect_for_eval raises NotImplementedError
-    until a TrajectoryRecord-from-text fabricator is built.
-    See docs/superpowers/notes/2026-05-02-plan-vs-reality-discoveries.md.
+    Legacy "session_excerpt" shape is rejected — TrajectoryRecord's
+    privacy contract requires structured events, not free text.
     """
     from opencomputer.evolution.reflect import reflect_for_eval
 
-    return reflect_for_eval(case_input["session_excerpt"])
+    if "events" not in case_input:
+        raise KeyError(
+            "reflect adapter requires 'events' key — "
+            "legacy 'session_excerpt' shape is no longer supported"
+        )
+    return reflect_for_eval(case_input["events"])
 
 
 def adapter_llm_extractor(case_input: dict[str, Any]) -> dict[str, Any]:

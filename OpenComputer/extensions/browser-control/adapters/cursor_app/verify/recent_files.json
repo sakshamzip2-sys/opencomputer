@@ -1,0 +1,6 @@
+{
+  "args": {"limit": 5},
+  "rowCount": {"min": 0},
+  "columns": ["path", "basename", "url"],
+  "notes": "Requires Cursor running with --remote-debugging-port. Skip in CI."
+}

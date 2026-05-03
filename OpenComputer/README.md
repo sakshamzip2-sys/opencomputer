@@ -459,6 +459,22 @@ extensions/my-channel/
 
 See `extensions/telegram/` for a working reference.
 
+## Eval system
+
+OpenComputer ships an eval harness for LLM-decision sites — places where a model
+or detector makes a structured choice. Every change is gated against frozen
+baselines; CI fails on regressions past a per-site threshold.
+
+```bash
+oc eval run all                 # run all sites, write to history
+oc eval run X --verbose         # see failing case details inline
+oc eval run all --json          # machine-readable
+oc eval regress all             # CI gate
+oc eval dashboard               # render evals/dashboard/index.html
+```
+
+See [docs/refs/evals.md](docs/refs/evals.md) for the full reference.
+
 ## License
 
 MIT — see `LICENSE.md`.

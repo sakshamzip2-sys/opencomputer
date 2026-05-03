@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ..chrome.lifecycle import is_chrome_reachable
 from ..profiles.capabilities import (
     BrowserProfileCapabilities,
     get_browser_profile_capabilities,
@@ -112,7 +113,34 @@ async def ensure_profile_running(
             await _reconcile_teardown(runtime, driver=driver)
 
         if runtime.status == ProfileStatus.RUNNING:
-            return runtime
+            # Wave 3.3 — liveness probe. Out-of-band Chrome death (kill -9,
+            # crash, OS sigkill) leaves status==RUNNING but the Playwright
+            # session points at a dead WebSocket. Without this check,
+            # every subsequent Browser action over that WS hangs until
+            # timeout. existing-session / remote-cdp profiles don't track
+            # ``runtime.running`` and short-circuit normally.
+            #
+            # We probe via HTTP /json/version, NOT subprocess returncode:
+            # on macOS Chrome's command-line launcher exits cleanly after
+            # forking the real browser (proc.returncode==0 even when
+            # Chrome is alive), so the subprocess signal is unreliable.
+            # The HTTP probe is the actual ground truth.
+            if runtime.running is None:
+                return runtime
+            reachable = await is_chrome_reachable(
+                runtime.running.cdp_url, timeout_ms=500
+            )
+            if reachable:
+                return runtime
+            _log.info(
+                "profile %r: Chrome unreachable on cached %s; "
+                "resetting to STOPPED and re-bringing-up",
+                profile_name,
+                runtime.running.cdp_url,
+            )
+            runtime.running = None
+            runtime.playwright_session = None
+            runtime.status = ProfileStatus.STOPPED
 
         runtime.status = ProfileStatus.STARTING
         runtime.last_error = None

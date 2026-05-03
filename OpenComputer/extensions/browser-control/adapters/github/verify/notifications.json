@@ -1,0 +1,6 @@
+{
+  "args": {"all": true, "limit": 1},
+  "rowCount": {"min": 0},
+  "columns": ["repo", "type", "title", "reason", "updated_at", "url"],
+  "notes": "Skip in CI (requires GITHUB_TOKEN). Smoke-only when token is set."
+}
