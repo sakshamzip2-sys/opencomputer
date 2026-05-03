@@ -248,19 +248,26 @@ class StreamingRenderer:
         out_tok: int,
         elapsed_s: float,
         show_reasoning: bool = False,
+        assistant_response: str | None = None,
     ) -> None:
-        """Stop the Live, render the final markdown + thinking panel /
-        collapsed summary + token-rate footer. Caller MUST exit the
-        context manager after calling this.
+        """Stop the Live, render the thinking-history line + final
+        markdown + token-rate footer. Caller MUST exit the context
+        manager after calling this.
 
-        ``show_reasoning`` (default ``False``, set by ``/reasoning show``
-        via ``runtime.custom["show_reasoning"]``) controls whether the
-        full thinking panel stays visible after streaming completes:
+        Print rules:
 
-        * ``False`` (default) → panel collapses to a one-line
-          ``💭 Thought for 3.2s — /reasoning show to expand`` summary.
-          The live panel that streamed during the turn is replaced.
-        * ``True`` → full panel rendered with the reasoning text.
+        * ``show_reasoning=True`` AND ``reasoning`` non-empty →
+          full thinking panel above the answer.
+        * Else, if EITHER thinking OR tool actions occurred → a
+          collapsed thinking-history line (with AI summary if Haiku
+          completed in time, else metadata fallback).
+        * No-op turns (no thinking AND no tools) → nothing printed.
+
+        ``assistant_response`` (optional) — the model's final response
+        text. Used as a fallback summary input when ``reasoning`` is
+        empty (tool-only turns) so users still get a Claude.ai-style
+        summary line for tool-driven exchanges (e.g. weather query →
+        WebFetch → "Reported NYC weather").
         """
         # Stop Live first so subsequent console.print writes go to the
         # real terminal cleanly.
@@ -271,24 +278,36 @@ class StreamingRenderer:
                 pass
             self._live = None
 
-        # v2 (Thinking History UI): kick off async summary generation
-        # as early as possible so the result can land in the collapsed
-        # line below. The thread writes to a mutable cell so we can
-        # read it after the brief join. No-op if no thinking text or
-        # no store attached.
+        # ─── Decide what this turn contained ──────────────────────────
+        thinking_str = (reasoning or "").strip()
+        has_thinking = bool(thinking_str)
+        has_tools = bool(self._tool_history)
+        # Match the store-push gate (line further below) — same condition
+        # for visible cue and for storage. Avoids the regression where
+        # tool-only turns were captured silently with no user indicator.
+        has_anything = has_thinking or has_tools
+
+        # Summary input: prefer thinking text (richer signal); fall back
+        # to assistant response so tool-only turns still get a summary.
+        _summary_input = thinking_str or (assistant_response or "").strip()
+
+        # Kick off async summary generation early. Skip when:
+        #  - no store (nowhere to write back),
+        #  - no input (nothing to summarize),
+        #  - show_reasoning=True (full panel mode is already the rich view).
         _summary_cell: dict[str, str | None] = {"value": None}
         _summary_thread = None
-        _thinking_for_summary = (reasoning or "").strip()
         if (
             self._reasoning_store is not None
-            and _thinking_for_summary
+            and _summary_input
             and not show_reasoning
+            and has_anything
         ):
             try:
                 from opencomputer.agent.reasoning_summary import generate_summary
 
                 def _run_summary() -> None:
-                    _summary_cell["value"] = generate_summary(_thinking_for_summary)
+                    _summary_cell["value"] = generate_summary(_summary_input)
 
                 import threading as _threading
                 _summary_thread = _threading.Thread(
@@ -300,21 +319,21 @@ class StreamingRenderer:
             except Exception:  # noqa: BLE001 — never crash on summary spawn
                 _summary_thread = None
 
-        if reasoning and reasoning.strip():
+        # ─── Print thinking section ──────────────────────────────────
+        if has_anything:
             # Prefer the panel-anchored timestamp (set on the FIRST
-            # thinking chunk) so the duration reflects how long the
-            # model spent thinking, not the wall-clock since turn-start.
-            # Falls back to the caller-provided elapsed_s if no live
-            # thinking arrived this turn.
+            # thinking chunk). Falls back to the caller-provided
+            # elapsed_s when there were no thinking deltas this turn.
             thinking_elapsed = (
                 (time.monotonic() - self._thinking_started_at)
                 if self._thinking_started_at > 0.0
                 else elapsed_s
             )
-            if show_reasoning:
+            if show_reasoning and has_thinking:
+                # Full panel — only when there's actual thinking text.
                 self.console.print(
                     Panel(
-                        Text(reasoning.strip(), style="dim"),
+                        Text(thinking_str, style="dim"),
                         title=Text(
                             f"💭 Thinking ({_fmt_duration(thinking_elapsed)})",
                             style="dim cyan",
@@ -324,12 +343,8 @@ class StreamingRenderer:
                     )
                 )
             else:
-                # Collapsed format. When a store is attached, prefix the
-                # turn id + action count so users can refer to it
-                # explicitly: "/reasoning show 5". When the v2 summary
-                # thread completed in time (1.5s cap, Haiku is usually
-                # well under that), lead with the summary so the line
-                # reads like Image #7 ("Wrote a haiku · turn #5 · ...").
+                # Collapsed format. Wait briefly for the summary thread
+                # so the rich format can land 95%+ of the time.
                 if _summary_thread is not None:
                     _summary_thread.join(timeout=1.5)
                 _summary_str = _summary_cell["value"]
@@ -339,28 +354,35 @@ class StreamingRenderer:
                     else None
                 )
                 action_count = len(self._tool_history)
-                meta_parts: list[str] = [
-                    f"💭 Thought for {_fmt_duration(thinking_elapsed)}"
-                ]
-                if next_turn_id is not None:
-                    meta_parts.append(f"turn #{next_turn_id}")
-                if action_count > 0:
-                    s = "" if action_count == 1 else "s"
-                    meta_parts.append(f"{action_count} action{s}")
-                meta = " · ".join(meta_parts)
+
                 if _summary_str:
-                    # v3 (Claude.ai parity, Image #10): just summary +
-                    # chevron-right. No metadata clutter — the metadata
-                    # moves to the expanded tree's header so the
-                    # collapsed form reads like a section heading.
-                    # Use Ctrl+X Ctrl+R or /reasoning show <N> to expand.
+                    # v3 (Claude.ai parity, Image #10): clean —
+                    # `<summary> ›`. No metadata clutter; metadata
+                    # moves to the expanded tree's header.
                     self.console.print(
                         f"[bold]{_summary_str}[/bold] [dim]›[/dim]"
                     )
                 else:
-                    # Fallback when summary is unavailable: today's
-                    # metadata-only format with an explicit hint about
-                    # how to see the full reasoning + tool actions.
+                    # Fallback: metadata + reasoning-show hint. Lead-icon
+                    # depends on what happened this turn.
+                    meta_parts: list[str] = []
+                    if has_thinking:
+                        meta_parts.append(
+                            f"💭 Thought for {_fmt_duration(thinking_elapsed)}"
+                        )
+                    elif has_tools:
+                        s = "" if action_count == 1 else "s"
+                        meta_parts.append(
+                            f"🔧 Used {action_count} tool{s}"
+                        )
+                    if next_turn_id is not None:
+                        meta_parts.append(f"turn #{next_turn_id}")
+                    if has_thinking and action_count > 0:
+                        # Append action count when both are present
+                        # (tool-only mode already includes count above).
+                        s = "" if action_count == 1 else "s"
+                        meta_parts.append(f"{action_count} action{s}")
+                    meta = " · ".join(meta_parts)
                     self.console.print(
                         f"[dim cyan]{meta} — /reasoning show to expand[/dim cyan]"
                     )
@@ -387,60 +409,58 @@ class StreamingRenderer:
 
         # Push captured state into the per-session store so the
         # /reasoning show command can re-render this turn later.
-        # Skip turns that are pure no-ops (no thinking, no tools) — they
-        # add noise to /reasoning show all without information value.
-        if self._reasoning_store is not None:
-            thinking_str = (reasoning or "").strip()
-            if thinking_str or self._tool_history:
-                thinking_elapsed_for_store = (
-                    (time.monotonic() - self._thinking_started_at)
-                    if self._thinking_started_at > 0.0
-                    else elapsed_s
+        # Same gate as the visible cue above (has_anything) — keeps
+        # storage and display in sync.
+        if self._reasoning_store is not None and has_anything:
+            thinking_elapsed_for_store = (
+                (time.monotonic() - self._thinking_started_at)
+                if self._thinking_started_at > 0.0
+                else elapsed_s
+            )
+            appended_turn = self._reasoning_store.append(
+                thinking=thinking_str,
+                duration_s=thinking_elapsed_for_store,
+                tool_actions=self._tool_history,
+            )
+            # If the inline summary thread already produced a value,
+            # copy it into the store so /reasoning show <N> picks it
+            # up. If the thread is still running past the 1.5s cap,
+            # hand off to a deferred-storage thread.
+            if _summary_cell["value"]:
+                self._reasoning_store.update_summary(
+                    turn_id=appended_turn.turn_id,
+                    summary=_summary_cell["value"],
                 )
-                appended_turn = self._reasoning_store.append(
-                    thinking=thinking_str,
-                    duration_s=thinking_elapsed_for_store,
-                    tool_actions=self._tool_history,
-                )
-                # If the inline summary thread already produced a
-                # value, copy it into the store so /reasoning show <N>
-                # picks it up. If not, kick off the daemon variant —
-                # it will write back asynchronously.
-                if _summary_cell["value"]:
-                    self._reasoning_store.update_summary(
-                        turn_id=appended_turn.turn_id,
-                        summary=_summary_cell["value"],
-                    )
-                elif thinking_str and (
-                    _summary_thread is None
-                    or not _summary_thread.is_alive()
-                    and _summary_cell["value"] is None
-                ):
-                    # Inline thread either wasn't started, or finished
-                    # with None (LLM failure). Don't bother re-running.
-                    pass
-                elif thinking_str and _summary_thread is not None:
-                    # Inline thread is still running past our 1.5s cap.
-                    # Hand it off: when it completes, write the result
-                    # to the store. The thread already targets
-                    # _summary_cell, so wrap with a small helper.
-                    import threading as _threading
+            elif _summary_input and (
+                _summary_thread is None
+                or not _summary_thread.is_alive()
+                and _summary_cell["value"] is None
+            ):
+                # Inline thread either wasn't started, or finished
+                # with None (LLM failure). Don't bother re-running.
+                pass
+            elif _summary_input and _summary_thread is not None:
+                # Inline thread is still running past our 1.5s cap.
+                # Hand it off: when it completes, write the result
+                # to the store. The thread already targets
+                # _summary_cell, so wrap with a small helper.
+                import threading as _threading
 
-                    def _store_when_done(
-                        store=self._reasoning_store,
-                        turn_id=appended_turn.turn_id,
-                        cell=_summary_cell,
-                        thread=_summary_thread,
-                    ) -> None:
-                        thread.join()
-                        if cell["value"]:
-                            store.update_summary(turn_id=turn_id, summary=cell["value"])
+                def _store_when_done(
+                    store=self._reasoning_store,
+                    turn_id=appended_turn.turn_id,
+                    cell=_summary_cell,
+                    thread=_summary_thread,
+                ) -> None:
+                    thread.join()
+                    if cell["value"]:
+                        store.update_summary(turn_id=turn_id, summary=cell["value"])
 
-                    _threading.Thread(
-                        target=_store_when_done,
-                        daemon=True,
-                        name="reason-summary-deferred-store",
-                    ).start()
+                _threading.Thread(
+                    target=_store_when_done,
+                    daemon=True,
+                    name="reason-summary-deferred-store",
+                ).start()
 
     # ─── internals ─────────────────────────────────────────────────
 
