@@ -9,14 +9,17 @@ import pytest
 def _gateway_with_adapters(*adapters, **cfg_kwargs):
     """Construct a Gateway via __new__ so we don't need __init__'s deps.
 
-    _fire_startup_pings only reads ``self.config`` and ``self._adapters``,
+    _fire_startup_pings only reads ``self._config`` and ``self._adapters``,
     so a partially-constructed Gateway is enough for unit testing.
+    Use the real attribute name (``_config``) — using a different name
+    would let the test pass while production code crashes with
+    ``AttributeError: 'Gateway' object has no attribute 'config'``.
     """
     from opencomputer.agent.config import GatewayConfig
     from opencomputer.gateway.server import Gateway
 
     gw = Gateway.__new__(Gateway)
-    gw.config = GatewayConfig(**cfg_kwargs)
+    gw._config = GatewayConfig(**cfg_kwargs)
     gw._adapters = list(adapters)
     return gw
 
@@ -101,11 +104,11 @@ async def test_startup_ping_handles_malformed_entry() -> None:
     # mixed-shape tuple: one bad entry, one good one. The good one
     # must still fire.
     object.__setattr__(
-        gw.config, "startup_ping_chats",
+        gw._config, "startup_ping_chats",
         ("not-a-tuple", ("telegram", "ok-chat")),
     )
     await gw._fire_startup_pings()
-    adapter.send.assert_awaited_once_with("ok-chat", gw.config.startup_ping_message)
+    adapter.send.assert_awaited_once_with("ok-chat", gw._config.startup_ping_message)
 
 
 @pytest.mark.asyncio
@@ -121,6 +124,35 @@ async def test_startup_ping_fires_to_multiple_platforms() -> None:
     await gw._fire_startup_pings()
     tg.send.assert_awaited_once_with("100", "up")
     dc.send.assert_awaited_once_with("200", "up")
+
+
+@pytest.mark.asyncio
+async def test_startup_ping_works_against_real_gateway_init() -> None:
+    """Regression: _fire_startup_pings reads self._config (private attr).
+
+    The bug shipped in PR #380: the implementation used self.config but
+    Gateway.__init__ stores it as self._config — production crashed with
+    AttributeError on first invocation. Unit tests that bypass __init__
+    via __new__ silently lied. This test constructs a real Gateway via
+    Gateway(config=...) so any future drift between attribute names
+    fails fast.
+    """
+    from opencomputer.agent.config import GatewayConfig
+    from opencomputer.gateway.server import Gateway
+
+    adapter = _fake_adapter("telegram")
+    cfg = GatewayConfig(
+        startup_ping_chats=(("telegram", "real-chat"),),
+        startup_ping_message="real-msg",
+    )
+    # Construct through the real __init__. Gateway requires loop OR
+    # router; _fire_startup_pings doesn't touch either, so a stub loop
+    # is enough.
+    fake_loop = MagicMock()
+    gw = Gateway(loop=fake_loop, config=cfg)
+    gw._adapters = [adapter]
+    await gw._fire_startup_pings()
+    adapter.send.assert_awaited_once_with("real-chat", "real-msg")
 
 
 @pytest.mark.asyncio
