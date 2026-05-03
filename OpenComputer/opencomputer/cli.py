@@ -2496,8 +2496,11 @@ from opencomputer.cli_webhook import webhook_app  # noqa: E402
 app.add_typer(adapter_app, name="adapter")
 app.add_typer(consent_app, name="consent")
 
-# ─── service (systemd-user, Linux deployment) ─────────────────────────
-service_app = typer.Typer(help="Install/uninstall the systemd user service (Linux).")
+# ─── service (cross-platform always-on daemon) ────────────────────────
+service_app = typer.Typer(
+    help="Install/uninstall the always-on system service "
+         "(systemd / launchd / Task Scheduler).",
+)
 app.add_typer(service_app, name="service")
 
 
@@ -2506,8 +2509,12 @@ def _service_install(
     profile: str = typer.Option("default", help="Which profile to run."),
     extra_args: str = typer.Option(
         # 'gateway' (NOT 'chat') is the right default for a service unit:
-        # 'chat' is interactive and would exit immediately under systemd
-        # (no stdin). 'gateway' is the long-running channel daemon.
+        # 'chat' is interactive and would exit immediately under the
+        # service manager (no stdin). 'gateway' is the long-running
+        # channel daemon. Linux template substitutes this into ExecStart;
+        # macOS/Windows templates currently hardcode the args and ignore
+        # this value, but it's preserved for backward compat with v1
+        # callers that pass --extra-args.
         "gateway",
         help=(
             "Args after `opencomputer --headless --profile <p>`. "
@@ -2517,35 +2524,63 @@ def _service_install(
         ),
     ),
 ) -> None:
-    """Write and reload a systemd user unit. Run `systemctl --user enable --now opencomputer` after."""
-    import shutil as _shutil
+    """Register OpenComputer as an always-on system service.
 
-    from opencomputer import service as _service_mod
+    Cross-platform: routes to systemd-user (Linux), launchd (macOS), or
+    Task Scheduler (Windows) via the factory. Each backend writes the
+    appropriate config file and asks the OS service manager to enable
+    + start it. Idempotent — re-installs replace any prior install.
+    """
+    from opencomputer.service.factory import get_backend
 
-    exe = _shutil.which("opencomputer") or f"{sys.executable} -m opencomputer"
-    path = _service_mod.install_systemd_unit(
-        executable=exe,
-        workdir=str(Path.home()),
-        profile=profile,
-        extra_args=extra_args,
-    )
-    typer.echo(f"installed: {path}")
-    typer.echo("next: systemctl --user enable --now opencomputer")
+    backend = get_backend()
+    result = backend.install(profile=profile, extra_args=extra_args)
+    typer.echo(f"installed ({result.backend}): {result.config_path}")
+    if result.enabled:
+        typer.echo(
+            "started" if result.started
+            else "enabled (not yet running — re-run `oc service status` shortly)",
+        )
+    else:
+        typer.echo(
+            "warning: file written but OS register call failed — "
+            "see notes below; you may need to enable manually.",
+        )
+    for note in result.notes:
+        typer.echo(f"note: {note}")
 
 
 @service_app.command("uninstall")
 def _service_uninstall() -> None:
-    """Stop, disable, and remove the systemd user unit."""
-    from opencomputer import service as _service_mod
-    path = _service_mod.uninstall_systemd_unit()
-    typer.echo(f"removed: {path}" if path else "no unit installed")
+    """Stop + disable + remove the system service file (cross-platform)."""
+    from opencomputer.service.factory import get_backend
+
+    backend = get_backend()
+    result = backend.uninstall()
+    if result.file_removed:
+        typer.echo(f"removed ({result.backend}): {result.config_path}")
+    else:
+        typer.echo(f"no service installed ({result.backend} backend)")
+    for note in result.notes:
+        typer.echo(f"note: {note}")
 
 
 @service_app.command("status")
 def _service_status() -> None:
-    """Report whether the unit is active."""
-    from opencomputer import service as _service_mod
-    typer.echo("active" if _service_mod.is_active() else "inactive")
+    """Report whether the service is enabled + running (cross-platform)."""
+    from opencomputer.service.factory import get_backend
+
+    backend = get_backend()
+    s = backend.status()
+    if s.running:
+        pid_str = f" (pid={s.pid})" if s.pid else ""
+        typer.echo(f"running{pid_str} [{s.backend}]")
+    elif s.enabled:
+        typer.echo(f"enabled but not running [{s.backend}]")
+    elif s.file_present:
+        typer.echo(f"installed but not enabled [{s.backend}]")
+    else:
+        typer.echo(f"not installed [{s.backend}]")
 
 
 # ─── new: cross-platform start / stop / logs / doctor ────────────────
