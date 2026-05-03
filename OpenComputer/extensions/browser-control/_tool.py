@@ -52,6 +52,29 @@ _log = logging.getLogger("opencomputer.browser_control.tool")
 _emitted: set[str] = set()
 
 
+async def _ensure_dispatcher_ready_or_raise() -> None:
+    """Lazy-init the in-process dispatcher app on first Browser call.
+
+    Wraps any bootstrap failure as a ``BrowserServiceError`` so the
+    Browser ``execute()`` error path renders it as a model-visible tool
+    error rather than a tool internal exception. Re-import locally so
+    test reloads of ``_dispatcher_bootstrap`` (which swaps the module
+    in ``sys.modules``) take effect — the import is cheap.
+    """
+    try:
+        from extensions.browser_control._dispatcher_bootstrap import (  # type: ignore[import-not-found]
+            ensure_dispatcher_app_ready,
+        )
+
+        await ensure_dispatcher_app_ready()
+    except BrowserServiceError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise BrowserServiceError(
+            f"Failed to initialize browser-control dispatcher: {exc}"
+        ) from exc
+
+
 # ─── Browser tool — the single discriminator surface ──────────────────
 
 
@@ -88,6 +111,11 @@ class Browser(BaseTool):
         sandbox: Any | None = None,
         audit: Any | None = None,
     ) -> None:
+        # Track whether the caller injected a custom actions object — in
+        # that case (unit tests with a fake) we skip the dispatcher
+        # bootstrap because the fake never routes through the in-process
+        # FastAPI app anyway.
+        self._actions_injected = actions is not None
         self._actions = actions or BrowserActions()
         self._consent_gate = consent_gate
         self._sandbox = sandbox
@@ -103,6 +131,15 @@ class Browser(BaseTool):
 
     async def execute(self, call: ToolCall) -> ToolResult:
         try:
+            # Lazy bootstrap of the in-process dispatcher app. ``register()``
+            # in plugin.py only registers the tool surface; the FastAPI app
+            # is built (idempotently, single-flight) on first use here so
+            # we don't pay the init cost when Browser is never invoked.
+            # Skip when caller injected a custom actions stub — that's
+            # the unit-test path; the stub never routes through the
+            # in-process FastAPI app, so building it would be wasted.
+            if not self._actions_injected:
+                await _ensure_dispatcher_ready_or_raise()
             return await self._dispatch(call)
         except BrowserServiceError as exc:
             return ToolResult(

@@ -18,6 +18,8 @@ import os
 
 
 def move_to_trash(path: str | os.PathLike[str]) -> None:
-    from send2trash import send2trash  # lazy: keeps this module import-clean without [browser] extras
+    from send2trash import (
+        send2trash,  # lazy: keeps this module import-clean without [browser] extras
+    )
 
     send2trash(os.fspath(path))
