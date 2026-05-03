@@ -1402,6 +1402,53 @@ this only when building Anthropic-style requests.
 
 ---
 
+## Wire primitives (Sub-project G openclaw-parity Task 8)
+
+Typed wire primitives that should never leak through the protocol.
+Mirrors openclaw `primitives.secretref.test.ts`.
+
+### `SecretRef`
+
+```python
+from plugin_sdk import SecretRef
+
+ref = SecretRef(ref_id="abc123", hint="anthropic-api-key")
+ref.model_dump()  # -> {"$secret_ref": "abc123", "hint": "anthropic-api-key"}
+```
+
+Frozen dataclass with two fields:
+
+- `ref_id` — opaque uuid hex; the wire representation.
+- `hint` — human-readable label, safe to log (e.g. `"anthropic-api-key"`).
+
+The dump explicitly uses the discriminator `$secret_ref` so receivers
+can detect a SecretRef inside an arbitrary `dict[str, Any]` params
+blob. The class itself never carries the value — that's the whole
+point. Callers that have a value to attach use `SecretResolver.register`.
+
+### `SecretResolver`
+
+```python
+from plugin_sdk import SecretResolver
+
+resolver = SecretResolver()
+ref = resolver.register(value="sk-ant-...", hint="anthropic-api-key")
+# wire transport sends ref.model_dump() — no value goes over the wire
+resolved = resolver.resolve(ref)  # -> "sk-ant-..."
+```
+
+Per-process registry mapping `ref_id` → secret value. Out-of-band from
+the wire. Intentionally not pickled; intentionally not thread-safe (wrap
+externally if shared across threads). Two resolver instances are
+isolated — one resolver doesn't know about another's refs.
+
+Use a fresh resolver per natural secret-scope boundary (per-session,
+per-call, per-test). Adoption pattern: reach for `SecretRef` in NEW
+wire methods that carry credentials. Migrating existing
+`params: dict[str, Any]` callsites is a separate hardening pass.
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute

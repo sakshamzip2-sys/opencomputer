@@ -139,6 +139,7 @@ from plugin_sdk.skill_source import SkillBundle, SkillMeta, SkillSource, TrustLe
 from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 from plugin_sdk.transports import NormalizedRequest, NormalizedResponse, TransportBase
+from plugin_sdk.wire_primitives import SecretRef, SecretResolver
 from plugin_sdk.user_model import (
     Edge,
     EdgeKind,
@@ -294,4 +295,8 @@ __all__ = [
     "PDF_SOFT_PAGE_LIMIT",
     "count_pdf_pages",
     "pdf_to_base64",
+    # Wire primitives (Sub-project G openclaw-parity Task 8) - typed
+    # secret-ref so wire transports never serialize raw credentials.
+    "SecretRef",
+    "SecretResolver",
 ]
