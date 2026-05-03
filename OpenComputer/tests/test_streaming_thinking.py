@@ -158,3 +158,94 @@ def test_renderer_records_unbounded_tool_history() -> None:
     assert [a.ok for a in history] == [True, False, True, False, True]
     # Visible panel still capped at 3.
     assert len(r._tool_calls) == 3
+
+
+# ─── Reasoning Dropdown v2 — push to ReasoningStore on finalize ─────────
+
+
+def test_finalize_pushes_turn_into_reasoning_store() -> None:
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    store = ReasoningStore()
+    renderer = StreamingRenderer(
+        Console(file=io.StringIO()), reasoning_store=store
+    )
+    with renderer:
+        renderer.on_thinking_chunk("Let me ")
+        renderer.on_thinking_chunk("think...")
+        idx = renderer.on_tool_start("Read", "foo.py")
+        renderer.on_tool_end("Read", idx, ok=True)
+        renderer.finalize(
+            reasoning="Let me think...",
+            iterations=1,
+            in_tok=10,
+            out_tok=20,
+            elapsed_s=1.5,
+            show_reasoning=False,
+        )
+
+    turn = store.get_latest()
+    assert turn is not None
+    assert turn.turn_id == 1
+    assert turn.thinking == "Let me think..."
+    assert turn.action_count == 1
+    assert turn.tool_actions[0].name == "Read"
+
+
+def test_finalize_skips_store_push_when_no_store_attached() -> None:
+    """Backwards compat: existing callers that don't pass a store must
+    keep working without crashing."""
+    renderer = StreamingRenderer(Console(file=io.StringIO()))  # no store
+    with renderer:
+        renderer.finalize(
+            reasoning="x",
+            iterations=1,
+            in_tok=1,
+            out_tok=1,
+            elapsed_s=0.1,
+            show_reasoning=False,
+        )
+    # No exception; nothing else to assert.
+
+
+def test_finalize_records_turn_even_without_thinking() -> None:
+    """Tool-only turns (no extended-thinking) must still be recorded
+    so /reasoning show all shows them."""
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    store = ReasoningStore()
+    renderer = StreamingRenderer(Console(file=io.StringIO()), reasoning_store=store)
+    with renderer:
+        idx = renderer.on_tool_start("Bash", "ls")
+        renderer.on_tool_end("Bash", idx, ok=True)
+        renderer.finalize(
+            reasoning=None,
+            iterations=1,
+            in_tok=5,
+            out_tok=5,
+            elapsed_s=0.5,
+            show_reasoning=False,
+        )
+    turn = store.get_latest()
+    assert turn is not None
+    assert turn.thinking == ""
+    assert turn.action_count == 1
+
+
+def test_finalize_skips_empty_no_op_turn() -> None:
+    """A turn with neither thinking nor tool calls is a no-op and
+    should NOT pollute /reasoning show all with empty entries."""
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    store = ReasoningStore()
+    renderer = StreamingRenderer(Console(file=io.StringIO()), reasoning_store=store)
+    with renderer:
+        renderer.finalize(
+            reasoning=None,
+            iterations=1,
+            in_tok=1,
+            out_tok=1,
+            elapsed_s=0.1,
+            show_reasoning=False,
+        )
+    assert store.get_all() == []

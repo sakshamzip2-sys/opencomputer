@@ -92,8 +92,14 @@ class StreamingRenderer:
     we currently create one per turn for simplicity.
     """
 
-    def __init__(self, console: Console) -> None:
+    def __init__(
+        self,
+        console: Console,
+        *,
+        reasoning_store: "ReasoningStore | None" = None,
+    ) -> None:
         self.console = console
+        self._reasoning_store = reasoning_store
         self._buffer: list[str] = []
         # Live thinking buffer + first-chunk timestamp. Both are written
         # by on_thinking_chunk and read by _render / finalize. The
@@ -314,6 +320,24 @@ class StreamingRenderer:
             f"{rate:.0f} tok/s · "
             f"{_fmt_duration(elapsed_s)})[/dim]\n"
         )
+
+        # Push captured state into the per-session store so the
+        # /reasoning show command can re-render this turn later.
+        # Skip turns that are pure no-ops (no thinking, no tools) — they
+        # add noise to /reasoning show all without information value.
+        if self._reasoning_store is not None:
+            thinking_str = (reasoning or "").strip()
+            if thinking_str or self._tool_history:
+                thinking_elapsed_for_store = (
+                    (time.monotonic() - self._thinking_started_at)
+                    if self._thinking_started_at > 0.0
+                    else elapsed_s
+                )
+                self._reasoning_store.append(
+                    thinking=thinking_str,
+                    duration_s=thinking_elapsed_for_store,
+                    tool_actions=self._tool_history,
+                )
 
     # ─── internals ─────────────────────────────────────────────────
 
