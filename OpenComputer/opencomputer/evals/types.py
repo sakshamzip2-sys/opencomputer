@@ -26,6 +26,8 @@ class EvalSite:
     schema: dict | None = None
     rubric_id: str | None = None
     requires_provider: bool = True
+    regression_threshold: float = 0.05
+    """Accuracy drop (as fraction, not %) that trips the regression gate."""
 
 
 @dataclass(frozen=True)
