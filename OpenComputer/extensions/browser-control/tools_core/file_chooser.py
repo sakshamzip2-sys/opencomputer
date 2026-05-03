@@ -85,7 +85,7 @@ async def arm_file_chooser(
         try:
             try:
                 chooser = await asyncio.wait_for(fut, timeout=timeout_s)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return
             if _current(page) != arm_id:
                 return

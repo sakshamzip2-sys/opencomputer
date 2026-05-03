@@ -53,6 +53,4 @@ def is_persistent_browser_profile_mutation(method: str | None, path: str | None)
         return True
     if m == "POST" and p == "/reset-profile":
         return True
-    if m == "DELETE" and _PROFILES_NAMED_RE.match(p):
-        return True
-    return False
+    return bool(m == "DELETE" and _PROFILES_NAMED_RE.match(p))

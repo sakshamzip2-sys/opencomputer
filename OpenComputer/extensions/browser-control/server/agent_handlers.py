@@ -22,7 +22,8 @@ be misleading anyway.
 from __future__ import annotations
 
 import logging
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from ..server_context import select_target_id
 from ..tools_core import (

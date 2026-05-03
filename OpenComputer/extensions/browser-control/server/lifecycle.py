@@ -38,9 +38,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from ..profiles.config import ResolvedBrowserConfig, SsrfPolicy
 from ..server_context import BrowserServerState, ProfileDriver, teardown_profile
 from ..server_context.tab_ops import TabOpsBackend
-from ..profiles.config import ResolvedBrowserConfig, SsrfPolicy
 from .app import create_app
 from .auth import BrowserAuth, ensure_browser_control_auth
 from .handlers import BrowserRouteContext

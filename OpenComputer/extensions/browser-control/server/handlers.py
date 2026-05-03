@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 from ..profiles.capabilities import get_browser_profile_capabilities
 from ..profiles.config import SsrfPolicy
@@ -26,11 +26,17 @@ from ..server_context import (
     ProfileRuntimeState,
     TabInfo,
     TabNotFoundError,
-    close_tab as ctx_close_tab,
     ensure_profile_running,
-    focus_tab as ctx_focus_tab,
-    open_tab as ctx_open_tab,
     teardown_profile,
+)
+from ..server_context import (
+    close_tab as ctx_close_tab,
+)
+from ..server_context import (
+    focus_tab as ctx_focus_tab,
+)
+from ..server_context import (
+    open_tab as ctx_open_tab,
 )
 from ..server_context.state import known_profile_names, list_profile_statuses
 from ..server_context.tab_ops import TabOpsBackend

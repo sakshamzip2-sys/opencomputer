@@ -26,7 +26,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from .._utils import sanitize_filename
-from .._utils.atomic_write import atomic_write_bytes  # for path-traversal-safe rename pattern  # noqa: F401
+from .._utils.atomic_write import (
+    atomic_write_bytes,  # for path-traversal-safe rename pattern  # noqa: F401
+)
 
 _arm_counter = 0
 _page_arm_id: dict[int, int] = {}
@@ -109,7 +111,7 @@ async def capture_download(
     timeout_s = max(1.0, handle.timeout_ms / 1000.0)
     try:
         download = await asyncio.wait_for(handle.future, timeout=timeout_s)
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         _detach(handle)
         raise TimeoutError(
             f"timed out waiting for download (arm_id={handle.arm_id})"

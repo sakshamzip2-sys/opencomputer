@@ -70,7 +70,7 @@ async def read_response_body(
     try:
         try:
             response = await asyncio.wait_for(fut, timeout=timeout_s)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise TimeoutError(
                 f"timed out waiting for response matching {url_pattern!r}"
             ) from exc

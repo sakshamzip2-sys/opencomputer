@@ -67,7 +67,7 @@ async def arm_dialog(
         try:
             try:
                 dialog = await asyncio.wait_for(fut, timeout=timeout_s)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return
             current = _current_arm_id(page)
             if current != arm_id:

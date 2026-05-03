@@ -59,9 +59,7 @@ def should_auto_generate_browser_auth(env: Mapping[str, str] | None = None) -> b
     e = env if env is not None else os.environ
     if e.get("OPENCOMPUTER_ENV", "").lower() == "test":
         return False
-    if e.get("PYTEST_CURRENT_TEST"):
-        return False
-    return True
+    return not e.get("PYTEST_CURRENT_TEST")
 
 
 def resolve_browser_control_auth(

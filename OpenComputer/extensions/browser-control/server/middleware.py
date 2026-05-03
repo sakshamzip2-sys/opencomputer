@@ -80,12 +80,12 @@ class BodyLimitMiddleware:
                 body = event.get("body") or b""
                 total += len(body)
                 if total > limit:
-                    raise _BodyTooLarge()
+                    raise _BodyTooLargeError()
             return event
 
         try:
             return await self.app(scope, wrapped_receive, send)  # type: ignore[misc]
-        except _BodyTooLarge:
+        except _BodyTooLargeError:
             await _send_status(  # type: ignore[arg-type]
                 send,
                 413,
@@ -95,7 +95,7 @@ class BodyLimitMiddleware:
             return None
 
 
-class _BodyTooLarge(Exception):
+class _BodyTooLargeError(Exception):
     pass
 
 

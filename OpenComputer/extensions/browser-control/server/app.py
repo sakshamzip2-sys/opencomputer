@@ -13,13 +13,11 @@ BodyLimit first, then Auth, then CSRF (CSRF ends up outermost).
 
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi import FastAPI
 
 from .csrf import CSRFMiddleware
 from .handlers import BrowserRouteContext
-from .middleware import BrowserAuthMiddleware, BodyLimitMiddleware, DEFAULT_BODY_LIMIT_BYTES
+from .middleware import DEFAULT_BODY_LIMIT_BYTES, BodyLimitMiddleware, BrowserAuthMiddleware
 from .routes import register_all
 
 

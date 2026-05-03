@@ -45,15 +45,15 @@ from .handlers import (
     resolve_profile_name,
 )
 from .lifecycle import (
-    BrowserServerHandle,
     LOOPBACK_HOST,
+    BrowserServerHandle,
     start_browser_control_server,
     stop_browser_control_server,
 )
 from .middleware import (
+    DEFAULT_BODY_LIMIT_BYTES,
     BodyLimitMiddleware,
     BrowserAuthMiddleware,
-    DEFAULT_BODY_LIMIT_BYTES,
 )
 from .policy import (
     is_persistent_browser_profile_mutation,

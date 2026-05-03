@@ -25,13 +25,13 @@ from dataclasses import dataclass, field
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
+from ..profiles.config import SsrfPolicy
 from ..session.nav_guard import (
     InvalidBrowserNavigationUrlError,
     NavigationGuardPolicy,
     SsrfBlockedError,
     assert_browser_navigation_allowed,
 )
-from ..profiles.config import SsrfPolicy
 
 T = TypeVar("T")
 
@@ -243,7 +243,7 @@ async def _observe_delayed_navigation(
     try:
         try:
             await asyncio.wait_for(done.wait(), timeout=grace_ms / 1000.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
     finally:
         if callable(off):
@@ -292,7 +292,7 @@ async def _validate_navigations(
         raise subframe_err
 
 
-async def assert_interaction_navigation_completed_safely(
+async def assert_interaction_navigation_completed_safely[T](
     action: Callable[[], Awaitable[T]],
     *,
     page: Any,

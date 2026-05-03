@@ -60,11 +60,9 @@ async def snapshot_role_via_playwright(
     scope: Any = page
     if frame_selector:
         scope = page.frame_locator(frame_selector)
-    if selector:
-        scope = scope.locator(selector)
-    else:
-        # Default to :root so we get the whole document tree.
-        scope = scope.locator(":root")
+    # Default to :root so we get the whole document tree when no selector
+    # is given.
+    scope = scope.locator(selector) if selector else scope.locator(":root")
 
     aria_text = await scope.aria_snapshot()
     if not isinstance(aria_text, str):
