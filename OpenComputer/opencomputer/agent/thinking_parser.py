@@ -32,7 +32,6 @@ from collections.abc import AsyncIterator
 
 from plugin_sdk.provider_contract import StreamEvent
 
-
 _OPEN_TAG = "<think>"
 _CLOSE_TAG = "</think>"
 

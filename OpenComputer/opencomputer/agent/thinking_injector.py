@@ -21,7 +21,6 @@ from __future__ import annotations
 
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
 
-
 _INSTRUCTION = """\
 ## Extended Thinking
 

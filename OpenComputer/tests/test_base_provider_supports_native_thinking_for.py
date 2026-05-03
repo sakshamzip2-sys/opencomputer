@@ -2,13 +2,13 @@
 contract."""
 from __future__ import annotations
 
+from plugin_sdk.core import Message
 from plugin_sdk.provider_contract import (
     BaseProvider,
     ProviderCapabilities,
     ProviderResponse,
     Usage,
 )
-from plugin_sdk.core import Message
 
 
 class _FakeProvider(BaseProvider):
