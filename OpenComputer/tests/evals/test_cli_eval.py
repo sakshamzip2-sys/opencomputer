@@ -294,3 +294,90 @@ def test_promote_command_no_candidates(tmp_path):
     )
     assert result.exit_code == 0
     assert "No candidates" in result.output
+
+
+# --- Coverage closers: regress regression-detected + history JSON ---
+
+
+def test_regress_command_detects_regression(tmp_path):
+    """Force a >threshold accuracy drop on instruction_detector."""
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir()
+    baselines_dir = tmp_path / "baselines"
+    baselines_dir.mkdir()
+
+    # 5 cases: detector returns "no" for all benign text (so 4/5 pass = 80%)
+    # but baseline frozen at 100% → 20pp drop, well past the 0.10 threshold
+    cases = [
+        {"id": "id_0", "input": {"text": "Ignore previous"}, "expected": "yes"},
+        {"id": "id_1", "input": {"text": "benign"}, "expected": "no"},
+        {"id": "id_2", "input": {"text": "benign"}, "expected": "no"},
+        {"id": "id_3", "input": {"text": "benign"}, "expected": "no"},
+        {"id": "id_4", "input": {"text": "benign"}, "expected": "no"},
+    ]
+    (cases_dir / "instruction_detector.jsonl").write_text(
+        "\n".join(_json.dumps(c) for c in cases)
+    )
+    (baselines_dir / "instruction_detector.json").write_text(
+        _json.dumps(
+            {
+                "site_name": "instruction_detector",
+                "accuracy": 1.0,
+                "parse_failure_rate": 0.0,
+                "timestamp": "2026-05-01T00:00:00+00:00",
+                "model": "claude-sonnet-4-6",
+                "provider": "anthropic",
+            }
+        )
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        eval_app,
+        [
+            "regress",
+            "instruction_detector",
+            "--cases-dir",
+            str(cases_dir),
+            "--baselines-dir",
+            str(baselines_dir),
+        ],
+    )
+    # 20pp drop > 10pp threshold → exit 1
+    assert result.exit_code == 1
+    assert "REGRESSED" in result.output
+
+
+def test_history_command_json_output(tmp_path):
+    from opencomputer.evals.history import record_run
+    from opencomputer.evals.runner import RunReport
+
+    db_path = tmp_path / "history.db"
+    record_run(
+        RunReport(
+            site_name="job_change",
+            total=10,
+            correct=10,
+            parse_failures=0,
+            infra_failures=0,
+        ),
+        db_path=db_path,
+        model="m",
+        provider="p",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        eval_app,
+        [
+            "history",
+            "job_change",
+            "--history-db",
+            str(db_path),
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0
+    payload = _json.loads(result.output)
+    assert isinstance(payload, list)
+    assert payload[0]["site_name"] == "job_change"
