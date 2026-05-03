@@ -27,12 +27,31 @@ import os
 import select
 import sys
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from opencomputer.cli_ui.turn_cancel import TurnCancelScope
 
 _log = logging.getLogger("opencomputer.cli_ui.keyboard_listener")
+
+#: The active per-turn KeyboardListener, published by ``start()`` and
+#: cleared by ``stop()``. Mirrors the renderer's ``_CURRENT`` pattern
+#: so other modules (notably the AskUserQuestion handler) can find the
+#: listener without threading a reference through the call stack.
+#:
+#: WHY: AskUserQuestion blocks on ``console.input("> ")`` mid-turn,
+#: but the listener has stdin in cbreak mode AND is reading bytes via
+#: a daemon thread. Without a way to pause the listener, ``input()``
+#: races the daemon thread for keystrokes and hangs forever (the bug
+#: the user saw as "stuck at 0.0s running").
+_CURRENT_LISTENER: KeyboardListener | None = None
+
+
+def current_listener() -> KeyboardListener | None:
+    """Return the currently-active per-turn listener, or None."""
+    return _CURRENT_LISTENER
 
 #: The single byte that means "user pressed ESC". Sequences like arrow
 #: keys also start with this byte (``\x1b[A``), but we treat any byte
@@ -65,9 +84,14 @@ class KeyboardListener:
 
     def start(self) -> None:
         """Begin watching stdin. No-op if stdin isn't a TTY or already running."""
+        global _CURRENT_LISTENER
         if self._thread is not None and self._thread.is_alive():
             return
         from opencomputer.headless import is_headless
+        # Always publish self as current — the AskUserQuestion handler
+        # needs to find the listener even on no-TTY paths so its
+        # pause_for_input no-op short-circuit works uniformly.
+        _CURRENT_LISTENER = self
         if not sys.stdin.isatty() or is_headless():
             return
         self._stop_event.clear()
@@ -78,11 +102,40 @@ class KeyboardListener:
 
     def stop(self) -> None:
         """Stop the listener thread. Idempotent."""
+        global _CURRENT_LISTENER
         self._stop_event.set()
         t = self._thread
         if t is not None and t.is_alive():
             t.join(timeout=0.5)
         self._thread = None
+        if _CURRENT_LISTENER is self:
+            _CURRENT_LISTENER = None
+
+    @contextmanager
+    def pause_for_input(self) -> Iterator[None]:
+        """Stop the listener for the duration of a blocking line read.
+
+        AskUserQuestion fires mid-turn while the listener owns stdin
+        in cbreak mode. ``console.input("> ")`` calls ``builtins.input()``
+        which expects cooked-mode line discipline AND exclusive stdin
+        access — neither of which holds while the daemon thread is
+        running. Without this pause, ``input()`` blocks forever (the
+        listener thread reads each byte before ``input()`` sees it,
+        and cbreak mode means even any byte that slips through doesn't
+        flush on Enter).
+
+        Re-arms the listener on exit IFF it was actually running on
+        entry — never spuriously starts a listener the caller didn't
+        want.
+        """
+        was_running = self._thread is not None and self._thread.is_alive()
+        if was_running:
+            self.stop()
+        try:
+            yield
+        finally:
+            if was_running:
+                self.start()
 
     def _handle_byte(self, b: bytes) -> None:
         """Pure helper — exposed for tests. Cancels scope on ESC."""
