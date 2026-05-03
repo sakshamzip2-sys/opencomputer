@@ -8,8 +8,13 @@
   "kind": "provider",
   "entry": "plugin",
   "tool_names": [],
+  "min_host_version": "2026.1.1",
   "model_support": {
     "model_prefixes": ["claude-"]
+  },
+  "activation": {
+    "on_providers": ["anthropic"],
+    "on_models": ["claude-"]
   },
   "setup": {
     "providers": [

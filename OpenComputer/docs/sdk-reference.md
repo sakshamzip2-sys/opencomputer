@@ -126,9 +126,45 @@ fields:
   (G.24). Empty string falls back to `id`.
 - `default_model` — model id pre-filled by the wizard (G.24).
 - `signup_url` — where the user can obtain an API key (G.24).
+- `auth_choices` — `tuple[AuthChoice, ...]`. Rich UI / CLI metadata
+  per auth method (Sub-project G openclaw-parity Task 3). Empty tuple
+  falls back to legacy `auth_methods` interpretation; when set, the
+  wizard reads `auth_choices` first.
 
 Mirrors OpenClaw's `PluginManifestSetupProvider` at
 `sources/openclaw-2026.4.23/src/plugins/manifest.ts:76-83`.
+
+### `AuthChoice`
+
+Frozen dataclass holding rich UI / CLI metadata for one auth method.
+Sub-project G (openclaw-parity) Task 3. Mirrors openclaw's
+`providerAuthChoices` shape so the setup wizard + CLI flags can be
+derived from manifest rather than hand-wired per provider. Six fields:
+
+- `method` — required, matches one of `SetupProvider.auth_methods`
+  (e.g. `"api_key"`, `"bearer"`, `"oauth_device"`).
+- `label` — human-readable choice label (e.g. `"Anthropic API key"`).
+- `cli_flag` — CLI flag that supplies this credential
+  (e.g. `"--anthropic-key"`).
+- `option_key` — internal config key (e.g. `"anthropic.api_key"`).
+- `group` — group hint for clustering related auth in the wizard
+  (e.g. `"anthropic-auth"`).
+- `onboarding_priority` — `int`; higher shown first.
+
+### `PluginActivation`
+
+Frozen dataclass holding manifest-declared activation triggers.
+Sub-project G (openclaw-parity) Task 2. Five fields, all tuples:
+
+- `on_providers` — provider ids that activate this plugin.
+- `on_channels` — channel ids that activate this plugin.
+- `on_commands` — slash commands whose invocation activates the plugin.
+- `on_tools` — tool names whose request activates the plugin.
+- `on_models` — model id prefixes that activate the plugin.
+
+`PluginManifest.activation` is `None` by default — the loader falls
+back to `tool_names`-based inference (Sub-project E behavior). When
+set, `activation_planner.plan_activations` reads it instead.
 
 ### `SetupChannel`
 
@@ -1363,6 +1399,53 @@ source_b64 = pdf_to_base64(pdf_bytes)
 Standard-base64 encode PDF bytes for the Anthropic `document` content
 block's `source.data` field. Bedrock takes raw bytes (not base64) — use
 this only when building Anthropic-style requests.
+
+---
+
+## Wire primitives (Sub-project G openclaw-parity Task 8)
+
+Typed wire primitives that should never leak through the protocol.
+Mirrors openclaw `primitives.secretref.test.ts`.
+
+### `SecretRef`
+
+```python
+from plugin_sdk import SecretRef
+
+ref = SecretRef(ref_id="abc123", hint="anthropic-api-key")
+ref.model_dump()  # -> {"$secret_ref": "abc123", "hint": "anthropic-api-key"}
+```
+
+Frozen dataclass with two fields:
+
+- `ref_id` — opaque uuid hex; the wire representation.
+- `hint` — human-readable label, safe to log (e.g. `"anthropic-api-key"`).
+
+The dump explicitly uses the discriminator `$secret_ref` so receivers
+can detect a SecretRef inside an arbitrary `dict[str, Any]` params
+blob. The class itself never carries the value — that's the whole
+point. Callers that have a value to attach use `SecretResolver.register`.
+
+### `SecretResolver`
+
+```python
+from plugin_sdk import SecretResolver
+
+resolver = SecretResolver()
+ref = resolver.register(value="sk-ant-...", hint="anthropic-api-key")
+# wire transport sends ref.model_dump() — no value goes over the wire
+resolved = resolver.resolve(ref)  # -> "sk-ant-..."
+```
+
+Per-process registry mapping `ref_id` → secret value. Out-of-band from
+the wire. Intentionally not pickled; intentionally not thread-safe (wrap
+externally if shared across threads). Two resolver instances are
+isolated — one resolver doesn't know about another's refs.
+
+Use a fresh resolver per natural secret-scope boundary (per-session,
+per-call, per-test). Adoption pattern: reach for `SecretRef` in NEW
+wire methods that carry credentials. Migrating existing
+`params: dict[str, Any]` callsites is a separate hardening pass.
 
 ---
 

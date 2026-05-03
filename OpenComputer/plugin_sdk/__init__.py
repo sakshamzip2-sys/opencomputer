@@ -24,10 +24,12 @@ from plugin_sdk.consent import (
     ConsentTier,
 )
 from plugin_sdk.core import (
+    AuthChoice,
     Message,
     MessageEvent,
     ModelSupport,
     Platform,
+    PluginActivation,
     PluginActivationSource,
     PluginManifest,
     PluginSetup,
@@ -145,6 +147,7 @@ from plugin_sdk.user_model import (
     UserModelQuery,
     UserModelSnapshot,
 )
+from plugin_sdk.wire_primitives import SecretRef, SecretResolver
 
 __all__ = [
     "__version__",
@@ -158,7 +161,9 @@ __all__ = [
     "SendResult",
     "ModelSupport",
     "PluginManifest",
+    "PluginActivation",
     "PluginActivationSource",
+    "AuthChoice",
     "PluginSetup",
     "ProcessingOutcome",
     "SetupChannel",
@@ -290,4 +295,8 @@ __all__ = [
     "PDF_SOFT_PAGE_LIMIT",
     "count_pdf_pages",
     "pdf_to_base64",
+    # Wire primitives (Sub-project G openclaw-parity Task 8) - typed
+    # secret-ref so wire transports never serialize raw credentials.
+    "SecretRef",
+    "SecretResolver",
 ]

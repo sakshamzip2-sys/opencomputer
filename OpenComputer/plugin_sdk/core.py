@@ -196,6 +196,16 @@ class SetupProvider:
     where to go. Empty string suppresses the hint.
     """
 
+    auth_choices: tuple[AuthChoice, ...] = ()
+    """Rich UI / CLI metadata per auth method.
+
+    Sub-project G (openclaw-parity) Task 3. Mirrors openclaw
+    ``providerAuthChoices``. Empty tuple = wizard falls back to the
+    legacy ``auth_methods: tuple[str, ...]`` interpretation. When
+    populated, the wizard reads ``auth_choices`` first to render
+    per-method ``label``, ``cli_flag``, etc.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class SetupChannel:
@@ -290,6 +300,46 @@ class ModelSupport:
 
 
 @dataclass(frozen=True, slots=True)
+class PluginActivation:
+    """Manifest-declared triggers for demand-driven plugin activation.
+
+    Sub-project G (openclaw-parity) Task 2. Lets the activation planner
+    decide when a plugin loads from manifest alone, without inferring
+    from ``tool_names``. Empty tuples = no trigger of that kind. When
+    the whole block is ``None`` on ``PluginManifest``, the planner falls
+    back to legacy ``tool_names`` inference (Sub-project E behavior).
+
+    Mirrors openclaw's ``activation`` shape at
+    ``sources/openclaw-2026.4.23/src/plugins/manifest.ts``.
+    """
+
+    on_providers: tuple[str, ...] = ()
+    on_channels: tuple[str, ...] = ()
+    on_commands: tuple[str, ...] = ()
+    on_tools: tuple[str, ...] = ()
+    on_models: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AuthChoice:
+    """Rich UI / CLI metadata for one auth method.
+
+    Sub-project G (openclaw-parity) Task 3. Mirrors openclaw's
+    ``providerAuthChoices`` shape so the setup wizard + CLI flags can
+    be derived from manifest rather than hand-wired per provider.
+    Empty strings on optional fields = "absent"; keeps wire shape
+    uniform.
+    """
+
+    method: str
+    label: str = ""
+    cli_flag: str = ""
+    option_key: str = ""
+    group: str = ""
+    onboarding_priority: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class PluginManifest:
     """Metadata for a plugin — parsed from plugin.json at discovery time."""
 
@@ -374,6 +424,16 @@ class PluginManifest:
     # ``None`` means "no declarations", and core keeps its legacy
     # hard-coded behavior for that plugin (backwards-compatible).
     setup: PluginSetup | None = None
+    # Sub-project G (openclaw-parity) Task 1 - minimum opencomputer host
+    # version this plugin was built against. Empty string = no check.
+    # Compared via packaging.version.Version at load time; a plugin
+    # pinning a future version against an older host is rejected before
+    # its entry module is imported.
+    min_host_version: str = ""
+    # Sub-project G (openclaw-parity) Task 2 - manifest-declared
+    # activation triggers. None = legacy tool_names-only inference path
+    # (Sub-project E). When set, activation_planner reads it instead.
+    activation: PluginActivation | None = None
 
 
 # ─── Plugin activation source (Task I.7) ───────────────────────────────

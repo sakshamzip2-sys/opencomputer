@@ -1,0 +1,111 @@
+{
+  "extensions/affect-injection/provider.py": [
+    "opencomputer.agent.state",
+    "opencomputer.agent.vibe_classifier",
+    "opencomputer.awareness.life_events.registry"
+  ],
+  "extensions/anthropic-provider/provider.py": [
+    "opencomputer.agent.anthropic_client",
+    "opencomputer.agent.config",
+    "opencomputer.agent.credential_pool",
+    "opencomputer.agent.model_capabilities",
+    "opencomputer.agent.prompt_caching",
+    "opencomputer.agent.rate_guard",
+    "opencomputer.agent.runtime_flags",
+    "opencomputer.inference.observability",
+    "opencomputer.inference.pricing",
+    "opencomputer.tools.schema_sanitizer"
+  ],
+  "extensions/browser-bridge/adapter.py": [
+    "opencomputer.ingestion.bus"
+  ],
+  "extensions/coding-harness/hooks/plan_block.py": [
+    "opencomputer.tools.bash_safety"
+  ],
+  "extensions/coding-harness/introspection/tools.py": [
+    "opencomputer.agent.config",
+    "opencomputer.tools.vision_analyze"
+  ],
+  "extensions/coding-harness/plugin.py": [
+    "opencomputer.agent.bg_notify",
+    "opencomputer.agent.injection_providers"
+  ],
+  "extensions/coding-harness/tools/background.py": [
+    "opencomputer.agent.bg_notify",
+    "opencomputer.hooks.engine",
+    "opencomputer.profiles"
+  ],
+  "extensions/coding-harness/tools/edit.py": [
+    "opencomputer.tools._file_read_state",
+    "opencomputer.tools.edit_diff_format",
+    "opencomputer.tools.file_state"
+  ],
+  "extensions/coding-harness/tools/multi_edit.py": [
+    "opencomputer.tools._file_read_state",
+    "opencomputer.tools.edit_diff_format",
+    "opencomputer.tools.file_state"
+  ],
+  "extensions/coding-harness/tools/run_tests.py": [
+    "opencomputer.profiles"
+  ],
+  "extensions/dev-tools/diff_tool.py": [
+    "opencomputer.profiles"
+  ],
+  "extensions/discord/adapter.py": [
+    "opencomputer.agent.config",
+    "opencomputer.agent.state",
+    "opencomputer.agent.steer",
+    "opencomputer.gateway.dispatch",
+    "opencomputer.plugins.registry"
+  ],
+  "extensions/discord/server_tool.py": [
+    "opencomputer.agent.config_store"
+  ],
+  "extensions/gemini-oauth-provider/provider.py": [
+    "opencomputer.auth.google_code_assist",
+    "opencomputer.auth.google_oauth"
+  ],
+  "extensions/memory-honcho/bootstrap.py": [
+    "opencomputer.profiles"
+  ],
+  "extensions/memory-honcho/plugin.py": [
+    "opencomputer.profiles"
+  ],
+  "extensions/nous-portal-provider/provider.py": [
+    "opencomputer.auth",
+    "opencomputer.auth.device_code"
+  ],
+  "extensions/openai-provider/provider.py": [
+    "opencomputer.agent.credential_pool",
+    "opencomputer.agent.rate_guard",
+    "opencomputer.agent.runtime_flags",
+    "opencomputer.inference.observability",
+    "opencomputer.inference.pricing"
+  ],
+  "extensions/skill-evolution/skill_extractor.py": [
+    "opencomputer.agent.structured"
+  ],
+  "extensions/skill-evolution/subscriber.py": [
+    "opencomputer.hooks.runner"
+  ],
+  "extensions/telegram/adapter.py": [
+    "opencomputer.agent.steer",
+    "opencomputer.gateway.dispatch",
+    "opencomputer.security.scope_lock"
+  ],
+  "extensions/telegram/plugin.py": [
+    "opencomputer.ingestion.bus"
+  ],
+  "extensions/voice-mode/stt.py": [
+    "opencomputer.voice.stt"
+  ],
+  "extensions/voice-mode/tts_playback.py": [
+    "opencomputer.voice.tts"
+  ],
+  "extensions/webhook/tokens.py": [
+    "opencomputer.agent.config"
+  ],
+  "extensions/whatsapp-bridge/bridge_supervisor.py": [
+    "opencomputer.profiles"
+  ]
+}

@@ -35,6 +35,11 @@ class WireResponse(BaseModel):
     ok: bool
     payload: dict[str, Any] | None = None
     error: str | None = None
+    # Sub-project G (openclaw-parity) Task 9 - programmable error
+    # category. Optional; old clients ignore. Value mirrors
+    # opencomputer.gateway.error_codes.ErrorCode (snake_case strings)
+    # so the wire shape is stable even if the enum gains new codes.
+    code: str | None = None
 
 
 # ─── Events (server-push) ───────────────────────────────────────

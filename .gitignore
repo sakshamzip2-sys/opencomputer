@@ -6,6 +6,9 @@
 # OS
 .DS_Store
 
+# Git worktrees
+/.worktrees/
+
 # Python virtualenvs within subprojects
 **/.venv/
 **/__pycache__/

@@ -763,4 +763,47 @@ def plugin_demand(
     _console.print(f"Run: opencomputer plugin enable {top_id}")
 
 
+@plugin_app.command("inspect")
+def plugin_inspect(plugin_id: str) -> None:
+    """Inspect a plugin's shape - compare manifest claims to actual registrations.
+
+    Sub-project G (openclaw-parity) Task 7. Mirrors openclaw's
+    ``plugins inspect`` command. Prints declared vs actual tools /
+    channels / providers / hooks and any drift between them. Exit code
+    1 when drift detected.
+    """
+    from opencomputer.plugins.inspect_shape import inspect_shape
+
+    shape = inspect_shape(plugin_id)
+    _console.print(f"Plugin: {shape.plugin_id}")
+    _console.print(f"Status: {shape.classification}")
+    _console.print("")
+    _console.print("Declared tools (manifest):")
+    for t in shape.declared_tools or ("(none)",):
+        _console.print(f"  - {t}")
+    _console.print("Actual tools (registered):")
+    for t in shape.actual_tools or ("(none)",):
+        _console.print(f"  - {t}")
+    _console.print("")
+    _console.print("Declared providers (manifest):")
+    for p in shape.declared_providers or ("(none)",):
+        _console.print(f"  - {p}")
+    _console.print("Actual providers (registered):")
+    for p in shape.actual_providers or ("(none)",):
+        _console.print(f"  - {p}")
+    _console.print("")
+    _console.print("Declared channels (manifest):")
+    for c in shape.declared_channels or ("(none)",):
+        _console.print(f"  - {c}")
+    _console.print("Actual channels (registered):")
+    for c in shape.actual_channels or ("(none)",):
+        _console.print(f"  - {c}")
+    if shape.drift:
+        _console.print("")
+        _console.print("[yellow]DRIFT:[/yellow]")
+        for d in shape.drift:
+            _console.print(f"  - {d}")
+        raise typer.Exit(code=1)
+
+
 __all__ = ["plugin_app"]

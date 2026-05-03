@@ -22,7 +22,9 @@ from typing import Literal
 
 from opencomputer.plugins.security import _path_is_inside, validate_plugin_root
 from plugin_sdk.core import (
+    AuthChoice,
     ModelSupport,
+    PluginActivation,
     PluginManifest,
     PluginSetup,
     SetupChannel,
@@ -68,6 +70,12 @@ _IGNORE_DIRS = {
     "build",
 }
 
+# Sub-project G (openclaw-parity) Task 5 — defence against pathological
+# manifests. 256KB is plenty for any reasonable plugin description; this
+# rejects 100MB DOS attempts before any parse happens. Mirrors openclaw's
+# manifest size limit at sources/openclaw-2026.4.23/src/plugins/manifest.ts.
+MAX_MANIFEST_BYTES = 256 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class PluginCandidate:
@@ -84,11 +92,39 @@ class PluginCandidate:
 
 
 def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
+    # Sub-project G (openclaw-parity) Task 5 — size cap before any read.
     try:
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except Exception as e:  # noqa: BLE001
-        logger.warning("failed to parse manifest %s: %s", manifest_path, e)
+        size = manifest_path.stat().st_size
+    except OSError as e:
+        logger.warning("failed to stat manifest %s: %s", manifest_path, e)
         return None
+    if size > MAX_MANIFEST_BYTES:
+        logger.warning(
+            "manifest %s exceeds %d bytes (size=%d) - skipping",
+            manifest_path,
+            MAX_MANIFEST_BYTES,
+            size,
+        )
+        return None
+    try:
+        text = manifest_path.read_text(encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("failed to read manifest %s: %s", manifest_path, e)
+        return None
+    # Sub-project G (openclaw-parity) Task 4 — JSON5 tolerance. Try
+    # strict json first (zero overhead for compliant manifests); fall
+    # back to json5 only on JSONDecodeError so authors can use comments
+    # and trailing commas. Mirrors openclaw manifest.json5-tolerance.test.ts.
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            import json5 as _json5
+
+            data = _json5.loads(text)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("failed to parse manifest %s: %s", manifest_path, e)
+            return None
     # Phase 12g: typed pydantic validation runs first so wrong types,
     # unknown kinds, malformed ids etc. fail with a useful message before
     # we ever construct the dataclass. One bad plugin shouldn't break
@@ -126,6 +162,18 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
                     label=p.label,
                     default_model=p.default_model,
                     signup_url=p.signup_url,
+                    # Task 3 (openclaw-parity) — rich auth UI metadata.
+                    auth_choices=tuple(
+                        AuthChoice(
+                            method=a.method,
+                            label=a.label,
+                            cli_flag=a.cli_flag,
+                            option_key=a.option_key,
+                            group=a.group,
+                            onboarding_priority=a.onboarding_priority,
+                        )
+                        for a in p.auth_choices
+                    ),
                 )
                 for p in schema.setup.providers
             ),
@@ -143,6 +191,18 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
             requires_runtime=schema.setup.requires_runtime,
         )
         if schema.setup is not None
+        else None
+    )
+    # Sub-project G (openclaw-parity) Task 2 — activation block.
+    activation = (
+        PluginActivation(
+            on_providers=tuple(schema.activation.on_providers),
+            on_channels=tuple(schema.activation.on_channels),
+            on_commands=tuple(schema.activation.on_commands),
+            on_tools=tuple(schema.activation.on_tools),
+            on_models=tuple(schema.activation.on_models),
+        )
+        if schema.activation is not None
         else None
     )
     return PluginManifest(
@@ -171,6 +231,10 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
         legacy_plugin_ids=tuple(schema.legacy_plugin_ids),
         # Sub-project G.23 (Tier 4 OpenClaw port) — cheap setup metadata
         setup=setup,
+        # Sub-project G (openclaw-parity) Task 1 — min host version pin.
+        min_host_version=schema.min_host_version,
+        # Sub-project G (openclaw-parity) Task 2 — activation triggers.
+        activation=activation,
     )
 
 

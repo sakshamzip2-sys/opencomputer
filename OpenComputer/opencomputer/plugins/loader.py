@@ -36,6 +36,50 @@ from plugin_sdk.runtime_context import RequestContext
 logger = logging.getLogger("opencomputer.plugins.loader")
 
 
+# Sub-project G (openclaw-parity) Task 10 — min_host_version enforcement.
+
+
+class PluginIncompatibleError(RuntimeError):
+    """Raised at load time when a plugin's ``min_host_version`` exceeds
+    the running ``opencomputer.__version__``.
+
+    Halts that plugin's load — others continue. Caller (load_plugin)
+    catches and logs + returns None so one bad plugin can't break the
+    rest of the registry.
+    """
+
+
+def _check_min_host_version(
+    *, plugin_id: str, min_host_version: str, host_version: str
+) -> None:
+    """Compare a plugin's ``min_host_version`` to the running host.
+
+    Empty ``min_host_version`` skips the check (back-compat for v3
+    manifests). Otherwise parse with ``packaging.version.Version`` and
+    raise :class:`PluginIncompatibleError` on mismatch.
+
+    Sub-project G (openclaw-parity) Task 10. Mirrors openclaw
+    ``min-host-version.ts`` semantics.
+    """
+    if not min_host_version:
+        return
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        required = Version(min_host_version)
+        current = Version(host_version)
+    except InvalidVersion as e:
+        raise PluginIncompatibleError(
+            f"plugin {plugin_id!r} declares unparseable min_host_version "
+            f"{min_host_version!r}: {e}"
+        ) from e
+    if current < required:
+        raise PluginIncompatibleError(
+            f"plugin {plugin_id!r} requires opencomputer >= "
+            f"{min_host_version} but host is {host_version}"
+        )
+
+
 # Common short names plugins use for their sibling files. Clearing these
 # between plugin loads prevents two plugins (both with a top-level
 # ``provider.py``, ``realtime.py``, etc.) from sharing the first-loaded
@@ -1074,6 +1118,23 @@ def load_plugin(
     if not entry:
         logger.warning("plugin '%s' has no 'entry' field in manifest", manifest.id)
         return None
+
+    # Sub-project G (openclaw-parity) Task 10 — enforce min_host_version
+    # BEFORE we import the plugin's entry module. A version mismatch
+    # never invokes plugin code — fail closed with a clear log line, but
+    # don't propagate the exception (other plugins must still load).
+    if manifest.min_host_version:
+        try:
+            import opencomputer
+
+            _check_min_host_version(
+                plugin_id=manifest.id,
+                min_host_version=manifest.min_host_version,
+                host_version=opencomputer.__version__,
+            )
+        except PluginIncompatibleError as e:
+            logger.warning("incompatible plugin '%s': %s", manifest.id, e)
+            return None
 
     # Single-instance enforcement (Task B6). Acquire BEFORE import so we
     # don't run plugin code twice in parallel profiles.
