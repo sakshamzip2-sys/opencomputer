@@ -323,6 +323,16 @@ async def tick(*, verbose: bool = True) -> int:
         logger.debug("Cron tick skipped — another instance holds the lock")
         return 0
 
+    # Phase 0 + Phase 2 v0 system jobs always fire on every tick. They
+    # are individually idempotent + gated by data-availability checks
+    # so over-running is harmless. A failure inside any one job is
+    # logged but doesn't abort the user-cron flow below.
+    try:
+        from opencomputer.cron.system_jobs import run_system_tick
+        run_system_tick()
+    except Exception:  # noqa: BLE001
+        logger.exception("system_tick failed; continuing with user cron")
+
     try:
         due = get_due_jobs()
         if not due:

@@ -1250,7 +1250,18 @@ class SessionDB:
         FTS5 reserves `.` as a column-qualifier separator, so queries like
         `auth.py` syntax-error without quoting. We always wrap in double
         quotes for safe phrase search.
+
+        Phase 2 v0: applies ``recall_penalty`` to the BM25 ranking so
+        memories the policy engine has flagged as under-performing get
+        suppressed in retrieval. The penalty decays exponentially over
+        ~60 days back to neutral. Floor of 0.05 means penalised memories
+        are never literally unreachable — the engine can't cause a
+        cascade of "penalised → never cited → can never recover."
         """
+        from opencomputer.agent.recall_synthesizer import (
+            apply_recall_penalty,
+        )
+
         stripped = query.strip()
         if not stripped:
             return []
@@ -1258,14 +1269,39 @@ class SessionDB:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT e.id, e.session_id, e.turn_index, e.summary, "
-                "e.tools_used, e.file_paths, e.timestamp "
+                "e.tools_used, e.file_paths, e.timestamp, "
+                "e.recall_penalty, e.recall_penalty_updated_at, "
+                "bm25(episodic_fts) AS bm25_rank "
                 "FROM episodic_fts "
                 "JOIN episodic_events e ON e.id = episodic_fts.rowid "
-                "WHERE episodic_fts MATCH ? "
-                "ORDER BY e.timestamp DESC LIMIT ?",
-                (safe_q, limit),
+                "WHERE episodic_fts MATCH ?",
+                (safe_q,),
             ).fetchall()
-            return [dict(r) for r in rows]
+
+        # Apply recall_penalty multiplicatively. FTS5 returns NEGATIVE
+        # rank values (lower = better match); we convert to magnitude
+        # for the penalty math then re-sort by adjusted score.
+        now = time.time()
+        scored: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            penalty = d.get("recall_penalty") or 0.0
+            updated = d.get("recall_penalty_updated_at")
+            age_days = ((now - updated) / 86400.0) if updated else 0.0
+            magnitude = abs(d.get("bm25_rank") or 0.0)
+            d["adjusted_score"] = apply_recall_penalty(
+                magnitude, penalty, age_days,
+            )
+            scored.append(d)
+
+        # Highest adjusted_score first; ties broken by recency.
+        scored.sort(
+            key=lambda x: (
+                -(x.get("adjusted_score") or 0.0),
+                -(x.get("timestamp") or 0.0),
+            ),
+        )
+        return scored[:limit]
 
     def list_episodic(self, session_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         """List episodic events — for one session if provided, else newest across all."""
