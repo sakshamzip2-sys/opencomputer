@@ -295,10 +295,26 @@ class StreamingRenderer:
                     )
                 )
             else:
+                # Collapsed format. When a store is attached, prefix the
+                # turn id + action count so users can refer to it
+                # explicitly: "/reasoning show 5".
+                next_turn_id = (
+                    self._reasoning_store.peek_next_id()
+                    if self._reasoning_store is not None
+                    else None
+                )
+                action_count = len(self._tool_history)
+                meta_parts: list[str] = [
+                    f"💭 Thought for {_fmt_duration(thinking_elapsed)}"
+                ]
+                if next_turn_id is not None:
+                    meta_parts.append(f"turn #{next_turn_id}")
+                if action_count > 0:
+                    s = "" if action_count == 1 else "s"
+                    meta_parts.append(f"{action_count} action{s}")
+                meta = " · ".join(meta_parts)
                 self.console.print(
-                    f"[dim cyan]💭 Thought for "
-                    f"{_fmt_duration(thinking_elapsed)} "
-                    f"— /reasoning show to expand[/dim cyan]"
+                    f"[dim cyan]{meta} — /reasoning show to expand[/dim cyan]"
                 )
 
         # Final answer as Markdown — re-rendered from the full buffer

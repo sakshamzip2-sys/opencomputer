@@ -249,3 +249,84 @@ def test_finalize_skips_empty_no_op_turn() -> None:
             show_reasoning=False,
         )
     assert store.get_all() == []
+
+
+# ─── Reasoning Dropdown v2 — collapsed-line format with turn id ─────────
+
+
+def test_collapsed_line_includes_turn_id_and_action_count() -> None:
+    import re
+
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    out = io.StringIO()
+    store = ReasoningStore()
+    renderer = StreamingRenderer(
+        Console(file=out, force_terminal=False), reasoning_store=store
+    )
+    with renderer:
+        renderer.on_thinking_chunk("hmm")
+        idx1 = renderer.on_tool_start("Read", "a")
+        renderer.on_tool_end("Read", idx1, ok=True)
+        idx2 = renderer.on_tool_start("Edit", "b")
+        renderer.on_tool_end("Edit", idx2, ok=True)
+        renderer.finalize(
+            reasoning="hmm",
+            iterations=1,
+            in_tok=1,
+            out_tok=1,
+            elapsed_s=0.1,
+            show_reasoning=False,
+        )
+    text = out.getvalue()
+    assert re.search(r"turn #1", text), text
+    assert re.search(r"2 actions", text), text
+    assert "/reasoning show to expand" in text
+
+
+def test_collapsed_line_omits_turn_id_when_store_missing() -> None:
+    """Backwards compat: legacy callers without a store keep the old
+    format without turn id."""
+    out = io.StringIO()
+    renderer = StreamingRenderer(Console(file=out, force_terminal=False))
+    with renderer:
+        renderer.on_thinking_chunk("hmm")
+        renderer.finalize(
+            reasoning="hmm",
+            iterations=1,
+            in_tok=1,
+            out_tok=1,
+            elapsed_s=0.1,
+            show_reasoning=False,
+        )
+    text = out.getvalue()
+    assert "turn #" not in text
+    assert "/reasoning show to expand" in text
+
+
+def test_collapsed_line_singular_action_no_plural_s() -> None:
+    """Cosmetic: '1 action' not '1 actions'."""
+    import re
+
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    out = io.StringIO()
+    store = ReasoningStore()
+    renderer = StreamingRenderer(
+        Console(file=out, force_terminal=False), reasoning_store=store
+    )
+    with renderer:
+        renderer.on_thinking_chunk("x")
+        idx = renderer.on_tool_start("Read", "a")
+        renderer.on_tool_end("Read", idx, ok=True)
+        renderer.finalize(
+            reasoning="x",
+            iterations=1,
+            in_tok=1,
+            out_tok=1,
+            elapsed_s=0.1,
+            show_reasoning=False,
+        )
+    text = out.getvalue()
+    assert re.search(r"\b1 action\b", text), text
+    assert "1 actions" not in text
