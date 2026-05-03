@@ -404,6 +404,38 @@ class GatewayConfig:
 
     photo_burst_window: float = 0.8
 
+    # ─── Startup ping (the OpenClaw "back online" magic message) ──────
+    # Opt-in. When the gateway finishes connecting all adapters, send a
+    # one-off message to each (platform, chat_id) in this tuple. Lets a
+    # boot-after-shutdown ping you on whichever channel(s) you choose,
+    # confirming the agent is back.
+    #
+    # Platform-agnostic — works for any channel adapter that implements
+    # BaseChannelAdapter.send() — i.e. all 15 currently bundled adapters
+    # (telegram, discord, slack, matrix, whatsapp, signal, email,
+    # webhook, mattermost, sms, irc, imessage, homeassistant, dingtalk,
+    # feishu). Just use the platform's lowercase name in the tuple and
+    # the destination identifier the platform expects (chat ID for
+    # Telegram, channel ID for Discord/Slack, room ID for Matrix,
+    # email address for email, phone for SMS/WhatsApp, etc.).
+    #
+    # Configure via ~/.opencomputer/<profile>/config.yaml:
+    #
+    #   gateway:
+    #     startup_ping_chats:
+    #       - [telegram, "123456789"]
+    #       - [discord, "987654321"]
+    #       - [slack, "C0123456789"]
+    #       - [matrix, "!abc123:matrix.org"]
+    #       - [email, "you@example.com"]
+    #       - [whatsapp, "+15551234567"]
+    #     startup_ping_message: "OpenComputer back online"
+    #
+    # Empty tuple (default) = disabled. Failures are logged and
+    # swallowed — a flaky channel must never wedge gateway boot.
+    startup_ping_chats: tuple[tuple[str, str], ...] = ()
+    startup_ping_message: str = "OpenComputer back online"
+
 
 @dataclass(frozen=True, slots=True)
 class DeepeningConfig:

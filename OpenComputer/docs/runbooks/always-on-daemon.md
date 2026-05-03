@@ -146,10 +146,39 @@ and the agent fully reconstitutes the moment the OS boots.
 3. OS executes:  oc --headless --profile <p> gateway
 4. oc loads ~/.opencomputer/<profile>/config.yaml + credentials
 5. Gateway loads channel adapters → each adapter reconnects
-   (bot identity is server-side persistent on Telegram/Discord/Matrix)
+   (bot identity is server-side persistent on Telegram/Discord/Matrix/...)
 6. Adapters announce "online"; heartbeat scheduler ticks
-7. (Optional) First heartbeat sends a "back online" message — the magic ping
+7. (Optional, opt-in) First heartbeat sends a "back online" message
+   to your configured channel(s) — the magic ping
 ```
+
+### Enabling the "back online" ping
+
+Edit `~/.opencomputer/<profile>/config.yaml`:
+
+```yaml
+gateway:
+  startup_ping_chats:
+    - [telegram, "123456789"]            # Telegram chat ID
+    - [discord, "987654321"]             # Discord channel ID
+    - [slack, "C0123456789"]             # Slack channel ID
+    - [matrix, "!abc123:matrix.org"]     # Matrix room ID
+    - [email, "you@example.com"]         # email address
+    - [whatsapp, "+15551234567"]         # phone with country code
+    - [signal, "+15551234567"]
+    - [sms, "+15551234567"]
+    - [webhook, "https://..."]           # webhook URL
+    - [mattermost, "channel-id"]
+    - [homeassistant, "service.notify"]
+    - [imessage, "+15551234567"]
+    - [irc, "#channel"]
+  startup_ping_message: "OpenComputer back online"
+```
+
+The feature is **platform-agnostic** — it works for any channel adapter
+that implements `BaseChannelAdapter.send()` (i.e. all 15 bundled ones).
+Configure as many destinations as you want; failures on one adapter are
+logged and skipped (a flaky channel never wedges the gateway boot).
 
 ## Sleep vs shutdown
 
