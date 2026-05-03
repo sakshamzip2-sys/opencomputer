@@ -380,6 +380,16 @@ See `RELEASE.md` — basically bump version in two places, tag `vX.Y.Z`, push. C
 
 7. **HookContext.runtime is optional for backwards compat.** Hooks written before Phase 6a don't pass it. New hooks should read modes through `effective_permission_mode(ctx.runtime)` (exported from `plugin_sdk`) rather than `ctx.runtime.plan_mode` / `ctx.runtime.yolo_mode` directly — the helper accounts for slash-command toggles living in `runtime.custom`.
 
+8. **Two launchd modules co-exist with deliberately distinct purposes.**
+   - `opencomputer/service/launchd.py` — daily profile-analyze cron (`StartCalendarInterval`)
+   - `opencomputer/service/_macos_launchd.py` — always-on gateway plist (`KeepAlive`, `RunAtLoad`)
+
+   The leading underscore marks the new module as backend-internal — called via
+   `service.factory.get_backend()` Protocol dispatch, not directly. The two
+   modules deliberately do not share code; their lifecycles and triggers differ.
+   The cross-platform always-on daemon (also covers Linux systemd-user and
+   Windows Task Scheduler) is documented in `docs/runbooks/always-on-daemon.md`.
+
 ---
 
 ## 8. User preferences (learned across this project)

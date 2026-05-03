@@ -15,6 +15,8 @@ warnings.warn(
     stacklevel=2,
 )
 
-from .service_install import run_service_install_section as run_launchd_service_section
+from .service_install import (  # noqa: E402  — must follow warnings.warn()
+    run_service_install_section as run_launchd_service_section,
+)
 
 __all__ = ["run_launchd_service_section"]

@@ -62,15 +62,15 @@ def _build_registry() -> list[WizardSection]:
         is_inference_provider_configured,
         run_inference_provider_section,
     )
-    from opencomputer.cli_setup.section_handlers.service_install import (
-        run_service_install_section,
-    )
     from opencomputer.cli_setup.section_handlers.messaging_platforms import (
         is_messaging_platforms_configured,
         run_messaging_platforms_section,
     )
     from opencomputer.cli_setup.section_handlers.prior_install import (
         run_prior_install_section,
+    )
+    from opencomputer.cli_setup.section_handlers.service_install import (
+        run_service_install_section,
     )
     from opencomputer.cli_setup.section_handlers.terminal_backend import (
         run_terminal_backend_section,

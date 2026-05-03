@@ -23,7 +23,7 @@ _TEMPLATE = (Path(__file__).parent / "templates" / "opencomputer.service").read_
 # Single source of truth — also exported from service.base for the
 # cross-platform factory. Re-export here for backward compatibility:
 # existing code does ``from opencomputer.service import ServiceUnsupportedError``.
-from .base import ServiceUnsupportedError
+from .base import ServiceUnsupportedError  # noqa: E402  — follows _TEMPLATE module-level read
 
 
 def render_systemd_unit(

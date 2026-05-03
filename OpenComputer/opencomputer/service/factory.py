@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from .base import ServiceBackend
 
 
-def get_backend() -> "ServiceBackend":
+def get_backend() -> ServiceBackend:
     """Return the module-level ServiceBackend conforming to the current platform.
 
     Lazy imports keep test bootstrap fast and avoid loading unused

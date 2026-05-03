@@ -90,7 +90,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,voice]"
 
-      - name: Run introspection + AGPL guard + doctor + ambient + skill-evolution tests
+      - name: Run introspection + AGPL guard + doctor + ambient + skill-evolution + service tests
         # Explicit `shell: bash` so glob expansion works uniformly across
         # all three OSes — PowerShell (Windows default) doesn't expand
         # `*.py` the way bash does and would pass the literal star to pytest.
@@ -101,5 +101,9 @@ jobs:
         # Voice-mode tests still run on the main `pytest` job (ubuntu, both
         # Python versions), which is sufficient coverage. The cross-platform
         # claim is documented in extensions/voice-mode/README.md.
+        #
+        # Service tests cover the cross-platform always-on daemon backends
+        # (systemd / launchd / schtasks). Subprocess-mocked, so they run
+        # uniformly on all three OSes.
         shell: bash
-        run: pytest tests/test_introspection_*.py tests/test_no_agpl_imports.py tests/test_doctor_introspection_checks.py tests/test_ambient_*.py tests/test_skill_evolution_*.py -v --tb=short
+        run: pytest tests/test_introspection_*.py tests/test_no_agpl_imports.py tests/test_doctor_introspection_checks.py tests/test_ambient_*.py tests/test_skill_evolution_*.py tests/test_service_*.py tests/test_cli_service_commands.py tests/test_cli_install_daemon_flag.py tests/test_doctor_service_section.py -v --tb=short
