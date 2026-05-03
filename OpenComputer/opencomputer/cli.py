@@ -939,6 +939,11 @@ def _run_chat_session(
     runtime = RuntimeContext(
         plan_mode=plan, yolo_mode=yolo, permission_mode=permission_mode,
     )
+    # One ReasoningStore per chat session — survives across turns,
+    # accessed by /reasoning show and the renderer's finalize().
+    from opencomputer.cli_ui import ReasoningStore as _ReasoningStore
+    if "_reasoning_store" not in runtime.custom:
+        runtime.custom["_reasoning_store"] = _ReasoningStore()
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
     mcp_mgr = MCPManager(tool_registry=registry)
 
@@ -1100,7 +1105,10 @@ def _run_chat_session(
 
         from opencomputer.cli_ui import StreamingRenderer
 
-        with StreamingRenderer(console) as renderer:
+        with StreamingRenderer(
+            console,
+            reasoning_store=runtime.custom.get("_reasoning_store"),
+        ) as renderer:
             renderer.start_thinking()
             import time as _time
 
