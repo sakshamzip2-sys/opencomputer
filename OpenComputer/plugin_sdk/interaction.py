@@ -13,7 +13,10 @@ Source: claude-code's `AskUserQuestion`, hermes's `clarify_tool`.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+from typing import Protocol
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,4 +41,33 @@ class InteractionResponse:
     option_index: int | None = None
 
 
-__all__ = ["InteractionRequest", "InteractionResponse"]
+class AskUserQuestionHandler(Protocol):
+    """Async callable that asks the user a question and returns the reply.
+
+    Installed once per session by whichever surface owns the user-input
+    layer (today: the CLI's Rich/prompt_toolkit stack; tomorrow: a
+    gateway worker that handles the suspend/resume dance).
+    """
+
+    def __call__(
+        self, req: InteractionRequest
+    ) -> Awaitable[InteractionResponse]: ...
+
+
+#: ContextVar holding the current handler, or ``None`` if no surface has
+#: installed one. Tools call ``ASK_USER_QUESTION_HANDLER.get()`` and use
+#: the handler if non-None, else fall back to the legacy stdin path.
+#:
+#: ContextVar (not a module global) so concurrent sessions / subagent
+#: contexts each see their own handler — important for delegate trees.
+ASK_USER_QUESTION_HANDLER: ContextVar[AskUserQuestionHandler | None] = (
+    ContextVar("ASK_USER_QUESTION_HANDLER", default=None)
+)
+
+
+__all__ = [
+    "ASK_USER_QUESTION_HANDLER",
+    "AskUserQuestionHandler",
+    "InteractionRequest",
+    "InteractionResponse",
+]

@@ -14,7 +14,10 @@ from __future__ import annotations
 import sys
 
 from plugin_sdk.core import ToolCall, ToolResult
-from plugin_sdk.interaction import InteractionRequest
+from plugin_sdk.interaction import (
+    ASK_USER_QUESTION_HANDLER,
+    InteractionRequest,
+)
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 
@@ -116,7 +119,26 @@ class AskUserQuestionTool(BaseTool):
             presentation="choice" if options else "text",
         )
 
+        # Prefer the installed handler (CLI's Rich-Prompt path). Falls
+        # back to legacy stdin only when no surface has installed one
+        # (headless scripts, piped input, tests without handler).
+        handler = ASK_USER_QUESTION_HANDLER.get()
         try:
+            if handler is not None:
+                resp = await handler(req)
+                if resp.option_index is not None and 0 <= resp.option_index < len(options):
+                    return ToolResult(
+                        tool_call_id=call.id,
+                        content=(
+                            f"User chose option {resp.option_index + 1}: "
+                            f"{options[resp.option_index]}"
+                        ),
+                    )
+                return ToolResult(
+                    tool_call_id=call.id,
+                    content=f"User answered: {resp.text}",
+                )
+            # Legacy fallback path.
             answer = _prompt_stdin(req)
         except (EOFError, KeyboardInterrupt):
             return ToolResult(
@@ -125,7 +147,7 @@ class AskUserQuestionTool(BaseTool):
                 is_error=True,
             )
 
-        # If the user typed a number that maps to an option, expand it.
+        # Legacy stdin path: numeric option expansion.
         if options and answer.strip().isdigit():
             idx = int(answer.strip()) - 1
             if 0 <= idx < len(options):
