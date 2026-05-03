@@ -120,24 +120,57 @@ def _run_async(coro: Any) -> Any:
     )
 
 
-def reflect_for_eval(session_excerpt: str) -> str:
-    """Eval-only entry point — INCOMPLETE.
+def reflect_for_eval(events: list[dict]) -> str:
+    """Eval-only entry point.
 
-    A real shim must fabricate a list[TrajectoryRecord], call
-    ReflectionEngine.reflect(records), and return a text representation
-    of the resulting Insights for the LLM-rubric grader to score.
+    Builds a synthetic TrajectoryRecord from the structured event list,
+    runs ReflectionEngine.reflect(), and returns the joined Insight texts
+    for the LLM-rubric grader to score.
 
-    Constructing a representative TrajectoryRecord requires understanding
-    the dataclass + the Jinja2 template's expected fields. Deferred to a
-    future session.
-
-    Used by ``opencomputer.evals.adapters.adapter_reflect`` only.
+    The input shape mirrors the TrajectoryEvent contract — adapter
+    callers MUST pass structured events, not free text. session_id is
+    fixed to "_eval_synthetic" so eval-only records cannot accidentally
+    pollute the production evolution store.
     """
-    raise NotImplementedError(
-        "reflect_for_eval is deferred. Build a TrajectoryRecord-from-text "
-        "fabricator and wire ReflectionEngine.reflect() through this entry. "
-        "See docs/superpowers/notes/2026-05-02-plan-vs-reality-discoveries.md."
+    import time
+
+    from opencomputer.evolution.trajectory import (
+        SCHEMA_VERSION_CURRENT,
+        TrajectoryEvent,
     )
+
+    if not isinstance(events, list):
+        raise ValueError(f"events must be a list, got {type(events).__name__}")
+
+    session_id = "_eval_synthetic"
+    started_at = time.time()
+    traj_events: list[TrajectoryEvent] = []
+    for i, ev in enumerate(events):
+        traj_events.append(
+            TrajectoryEvent(
+                session_id=session_id,
+                message_id=i,
+                action_type=ev["action_type"],
+                tool_name=ev.get("tool_name"),
+                outcome=ev["outcome"],
+                timestamp=started_at + i,
+                metadata=ev.get("metadata", {}),
+            )
+        )
+
+    record = TrajectoryRecord(
+        id=None,
+        session_id=session_id,
+        schema_version=SCHEMA_VERSION_CURRENT,
+        started_at=started_at,
+        ended_at=started_at + len(events),
+        events=tuple(traj_events),
+        completion_flag=True,
+    )
+
+    engine = ReflectionEngine()
+    insights = engine.reflect([record])
+    return "\n".join(getattr(i, "text", str(i)) for i in insights)
 
 
 def _cache_key(records: list[TrajectoryRecord]) -> str:

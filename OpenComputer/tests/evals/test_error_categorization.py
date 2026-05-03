@@ -11,7 +11,6 @@ import pytest
 from opencomputer.evals.runner import run_site
 from opencomputer.evals.types import GradeResult
 
-
 # --- Task 1.1: GradeResult.error_category --------------------------------
 
 

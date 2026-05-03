@@ -46,6 +46,15 @@ jobs:
       - name: Run pytest
         run: pytest tests/ -v --tb=short
 
+      - name: Eval regression gate
+        # `oc eval regress all` exits non-zero if any baselined site's
+        # accuracy drops past its per-site threshold. Rubric-graded sites
+        # (require ANTHROPIC_API_KEY) are skipped if the secret is unset
+        # so PRs from forks still pass on deterministic-graded sites.
+        run: python -m opencomputer.cli eval regress all --cases-dir evals/cases --baselines-dir evals/baselines
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
   # Cross-platform verification of the introspection + ambient modules'
   # cross-platform claims. Public repo = unlimited free CI on all 3 OSes.
   test-cross-platform:
