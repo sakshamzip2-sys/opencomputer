@@ -118,6 +118,14 @@ class StreamingRenderer:
         # the reasoning tree (which needs the full sequence, not the
         # last-3 visible window).
         self._tool_history: list[ToolAction] = []
+        # AI-Elements port: side-table for the full ``input`` dict + the
+        # absolute ``started_at`` ts captured at on_tool_start, attached
+        # to the eventual ToolAction at on_tool_end. Kept off
+        # _ToolCallRow because that class is a UI-panel concern (3-row
+        # window); this is a per-history-entry concern (unbounded).
+        self._pending_inputs: dict[
+            tuple[str, int], tuple[dict | None, float]
+        ] = {}
         self._live: Live | None = None
         self._stream_started = False
         self._turn_started_at = 0.0
@@ -185,17 +193,36 @@ class StreamingRenderer:
         self._thinking_buffer.append(text)
         self._refresh()
 
-    def on_tool_start(self, name: str, args_preview: str) -> int:
+    def on_tool_start(
+        self,
+        name: str,
+        args_preview: str,
+        *,
+        input: dict | None = None,  # noqa: A002 — mirror AI Elements
+    ) -> int:
         """Register the start of a tool call. Returns an opaque id the
         caller passes back to :meth:`on_tool_end` so concurrent calls
-        of the same tool don't collide."""
+        of the same tool don't collide.
+
+        ``input`` (optional, AI-Elements naming preserved) is the full
+        parameter dict for the call — when provided, it's stored on
+        the eventual :class:`ToolAction` for the AI-Elements-style
+        expanded view (ReasoningView). Back-compat default ``None``
+        preserves the existing behaviour for callers that only have the
+        truncated ``args_preview`` string.
+        """
         self._tool_call_seq += 1
         idx = self._tool_call_seq
+        started_at = time.monotonic()
         self._tool_calls[(name, idx)] = _ToolCallRow(
             name=name,
             args_preview=_truncate_args_preview(args_preview, self.console.width),
-            started_at=time.monotonic(),
+            started_at=started_at,
         )
+        # Stash the full input dict + start ts in a side map keyed by
+        # (name, idx) so on_tool_end can attach them to the ToolAction
+        # without growing _ToolCallRow (which is a UI panel concern).
+        self._pending_inputs[(name, idx)] = (input, started_at)
         # Keep only the last N rows visible. Pop oldest from the front
         # of the OrderedDict.
         while len(self._tool_calls) > _TOOL_PANEL_MAX_ROWS:
@@ -203,15 +230,31 @@ class StreamingRenderer:
         self._refresh()
         return idx
 
-    def on_tool_end(self, name: str, idx: int, ok: bool) -> None:
+    def on_tool_end(
+        self,
+        name: str,
+        idx: int,
+        ok: bool,
+        *,
+        output: dict | str | None = None,
+        errorText: str | None = None,  # noqa: N803 — mirror AI Elements
+    ) -> None:
         """Mark a tool call as completed. Idempotent for the visible
         panel — late callbacks for evicted rows are silently dropped
         from the panel but ALWAYS captured in :attr:`_tool_history` for
         the reasoning tree.
+
+        ``output`` and ``errorText`` (optional, AI-Elements naming
+        preserved) populate the AI-Elements-shaped ToolCall projection
+        on :class:`ReasoningTurn`. Back-compat defaults ``None`` keep
+        existing callers green; when only the legacy ``ok`` bool is
+        passed, the projection sets state to ``output-available`` /
+        ``output-error`` accordingly with no body.
         """
         row = self._tool_calls.get((name, idx))
+        ended_at = time.monotonic()
         if row is not None:
-            row.ended_at = time.monotonic()
+            row.ended_at = ended_at
             row.ok = ok
             duration = row.ended_at - row.started_at
             args_preview = row.args_preview
@@ -221,12 +264,21 @@ class StreamingRenderer:
             # history so the tree still shows it.
             duration = 0.0
             args_preview = ""
+        # Pull the matched start metadata if we recorded it.
+        input_dict, started_at = self._pending_inputs.pop(
+            (name, idx), (None, None)
+        )
         self._tool_history.append(
             ToolAction(
                 name=name,
                 args_preview=args_preview,
                 ok=ok,
                 duration_s=duration,
+                started_at=started_at,
+                ended_at=ended_at,
+                input=input_dict,
+                output=output,
+                errorText=errorText,
             )
         )
         self._refresh()
@@ -366,21 +418,22 @@ class StreamingRenderer:
                 )
                 action_count = len(self._tool_history)
 
-                # v6 — Claude.ai web parity (Image #10):
-                # content-width rounded card, summary text bold, chevron
-                # ``›`` inline at the end of the text. No subtitle, no
-                # right-aligned hint — match the web UI exactly.
-                from rich.box import ROUNDED
+                # AI Elements port (PR — feat/ai-elements-reasoning-port):
+                # build a transient ReasoningTurn-shaped record from the
+                # in-flight state and render via ReasoningView.
+                # This replaces the inline v6 Panel block (PR #395) but
+                # produces the same visual at default ``open=False``
+                # (the summary trigger as a content-width rounded card).
+                # The full expanded form is reachable retroactively via
+                # ``/reasoning show`` once the turn is in the store.
+                from opencomputer.cli_ui.reasoning_store import ReasoningTurn
+                from opencomputer.cli_ui.reasoning_view import ReasoningView
 
-                if _summary_str:
-                    body = Text.assemble(
-                        (_summary_str, "bold"),
-                        ("  ", ""),
-                        ("›", "dim"),
-                    )
-                else:
-                    # Fallback: metadata cell when summarizer hasn't
-                    # produced text (model down, no API key, timeout).
+                # When the summarizer hasn't produced text, fall back to
+                # the same metadata-cell synthesis the v6 inline block
+                # did — so the trigger is never blank.
+                _trigger_summary = _summary_str
+                if not _trigger_summary:
                     meta_parts: list[str] = []
                     if has_thinking:
                         meta_parts.append(
@@ -394,20 +447,20 @@ class StreamingRenderer:
                     if has_thinking and action_count > 0:
                         s = "" if action_count == 1 else "s"
                         meta_parts.append(f"{action_count} action{s}")
-                    meta = " · ".join(meta_parts)
-                    body = Text.assemble(
-                        (meta, "dim cyan"),
-                        ("  ", ""),
-                        ("›", "dim"),
-                    )
+                    _trigger_summary = " · ".join(meta_parts) or None
 
+                _preview_turn = ReasoningTurn(
+                    turn_id=next_turn_id or 0,
+                    thinking=thinking_str,
+                    duration_s=thinking_elapsed,
+                    tool_actions=tuple(self._tool_history),
+                    summary=_trigger_summary,
+                )
                 self.console.print(
-                    Panel(
-                        body,
-                        box=ROUNDED,
-                        border_style="grey50",
-                        padding=(0, 2),
-                        expand=False,
+                    ReasoningView(
+                        turn=_preview_turn,
+                        isStreaming=False,   # finalize fires post-stream
+                        open=False,          # collapsed trigger card
                     )
                 )
 
