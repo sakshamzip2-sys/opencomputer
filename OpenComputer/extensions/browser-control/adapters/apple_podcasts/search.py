@@ -14,7 +14,11 @@ from extensions.adapter_runner import Strategy, adapter
 @adapter(
     site="apple_podcasts",
     name="search",
-    description="Apple Podcasts search via iTunes Search API.",
+    description=(
+        "Search Apple Podcasts via the iTunes Search API. Returns title, author, "
+        "feed URL, episode count, and artwork for matching shows. Public API, no "
+        "authentication required. Use for podcast discovery and metadata lookups."
+    ),
     domain="itunes.apple.com",
     strategy=Strategy.PUBLIC,
     browser=False,

@@ -16,7 +16,11 @@ from extensions.adapter_runner import Strategy, adapter
 @adapter(
     site="chatgpt_app",
     name="new_chat",
-    description="Open a fresh ChatGPT desktop chat (Electron CDP).",
+    description=(
+        "Open a new chat in the ChatGPT desktop app via Electron Chrome DevTools "
+        "Protocol. Requires the desktop app already running with --remote-debugging-port. "
+        "Use to compose a fresh prompt; not for sending or reading existing chats."
+    ),
     domain="chat.openai.com",
     strategy=Strategy.INTERCEPT,
     browser=True,

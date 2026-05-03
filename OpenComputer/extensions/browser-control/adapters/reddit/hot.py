@@ -15,7 +15,11 @@ _UA = "OpenComputer-Adapter/0.4 (https://github.com/sakshamzip2-sys/opencomputer
 @adapter(
     site="reddit",
     name="hot",
-    description="Reddit hot posts in a subreddit — title/score/comments/author.",
+    description=(
+        "Fetch hot posts from a Reddit subreddit (title, score, comments, author, "
+        "URL). Uses the public Reddit JSON endpoint; respects rate limits and User-"
+        "Agent header. Use for discovery; do NOT use for scraping at high volume."
+    ),
     domain="reddit.com",
     strategy=Strategy.PUBLIC,
     browser=False,

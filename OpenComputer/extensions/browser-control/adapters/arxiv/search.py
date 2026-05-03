@@ -17,7 +17,11 @@ _ATOM_NS = {"a": "http://www.w3.org/2005/Atom"}
 @adapter(
     site="arxiv",
     name="search",
-    description="arXiv preprint search — title/authors/abstract/published/url.",
+    description=(
+        "Search arXiv preprints by free-text query and return title, authors, "
+        "abstract, published date, and URL for each hit. Uses the public arXiv API "
+        "(no auth). Prefer this over WebFetch for academic paper discovery."
+    ),
     domain="arxiv.org",
     strategy=Strategy.PUBLIC,
     browser=False,
