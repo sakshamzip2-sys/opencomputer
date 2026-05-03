@@ -605,17 +605,26 @@ _ = Path
 def extract_for_eval(text: str) -> dict:
     """Eval-only entry point.
 
-    Calls the production extractor (Ollama-backed) and returns its
-    fields as a dict. The eval harness's SchemaMatchGrader checks
-    field-level correctness against case.expected.
+    Two-stage Ollama guard:
+      1. is_ollama_available() — binary on PATH
+      2. catch ExtractorUnavailableError — daemon down / model not pulled
 
-    Used by ``opencomputer.evals.adapters.adapter_llm_extractor`` only;
-    not part of the public API.
-
-    Returns an empty-ish dict on parse failure (production behaviour
-    via :func:`_parse_extraction`'s ArtifactExtraction() default).
+    Either failure raises OllamaUnavailableError (alias of
+    ExtractorUnavailableError) so the eval runner classifies the case
+    as infra_error (excluded from accuracy), not parse_error.
     """
-    extraction = extract_artifact(text)
+    if not is_ollama_available():
+        raise OllamaUnavailableError(
+            "Ollama is not on PATH; llm_extractor eval cannot run. "
+            "Install + start ollama, or skip this site in CI."
+        )
+    try:
+        extraction = extract_artifact(text)
+    except ExtractorUnavailableError as e:
+        raise OllamaUnavailableError(
+            f"Ollama daemon unreachable: {e}. "
+            "Run 'ollama serve' or skip this site in CI."
+        ) from e
     return {
         "topic": extraction.topic,
         "people": list(extraction.people),
