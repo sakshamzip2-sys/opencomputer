@@ -15,7 +15,8 @@ import time
 from enum import Enum
 
 from opencomputer.agent.feature_flags import FeatureFlags
-from opencomputer.agent.policy_audit import PolicyAuditLogger, PolicyChangeEvent
+from opencomputer.agent.policy_audit import PolicyAuditLogger
+from opencomputer.agent.policy_audit import PolicyChangeEvent as _AuditEvent
 from opencomputer.agent.trust_ramp import TrustRamp
 from opencomputer.evolution.policy_engine import MostCitedBelowMedianV1
 
@@ -70,7 +71,7 @@ def run_engine_tick(*, db, flags: FeatureFlags, hmac_key: bytes) -> EngineTickRe
 
     with db._connect() as conn:
         audit = PolicyAuditLogger(conn, hmac_key)
-        evt = PolicyChangeEvent(
+        evt = _AuditEvent(
             knob_kind=rec.knob_kind,
             target_id=str(rec.target_id),
             prev_value=json.dumps(rec.prev_value),
@@ -92,17 +93,45 @@ def run_engine_tick(*, db, flags: FeatureFlags, hmac_key: bytes) -> EngineTickRe
                 ts_applied=time.time(),
                 approved_by="auto",
             )
+            final_status = "pending_evaluation"
+            tick_result = EngineTickResult.DRAFTED_AUTO_APPLIED
             _logger.info(
                 "auto-approved %s mode=%s revert_after=%s",
                 row_id, mode, revert_after,
             )
-            return EngineTickResult.DRAFTED_AUTO_APPLIED
         else:
             audit.append_status_transition(row_id, "pending_approval")
+            final_status = "pending_approval"
+            tick_result = EngineTickResult.DRAFTED_PENDING
             _logger.info(
                 "drafted pending approval %s mode=%s", row_id, mode,
             )
-            return EngineTickResult.DRAFTED_PENDING
+
+    _publish_policy_change_event(
+        change_id=row_id,
+        knob_kind=rec.knob_kind,
+        target_id=str(rec.target_id),
+        status=final_status,
+        approval_mode=mode,
+        engine_version=rec.engine_version,
+        reason=rec.reason,
+    )
+    return tick_result
+
+
+def _publish_policy_change_event(**kwargs) -> None:
+    """Fire PolicyChangeEvent on the default bus. Best-effort; never
+    propagates exceptions (a publish failure must not break the cron)."""
+    try:
+        from opencomputer.ingestion.bus import get_default_bus
+        from plugin_sdk.ingestion import PolicyChangeEvent
+
+        bus = get_default_bus()
+        if bus is None:
+            return
+        bus.publish(PolicyChangeEvent(source="cron.policy_engine", **kwargs))
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("PolicyChangeEvent publish failed: %s", e)
 
 
 def _baseline_for(conn) -> tuple[float, float]:

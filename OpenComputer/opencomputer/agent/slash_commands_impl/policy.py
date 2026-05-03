@@ -169,7 +169,26 @@ async def handle_policy_revert(
             reverted_reason="user-initiated /policy-revert",
         )
 
+    _publish_reverted_event(
+        change_id=full_id,
+        knob_kind=knob_kind,
+        target_id=str(target_id),
+        reverted_reason="user-initiated /policy-revert",
+    )
     return SlashOutput(text=f"reverted {full_id[:8]}")
+
+
+def _publish_reverted_event(**kwargs) -> None:
+    try:
+        from opencomputer.ingestion.bus import get_default_bus
+        from plugin_sdk.ingestion import PolicyRevertedEvent
+
+        bus = get_default_bus()
+        if bus is None:
+            return
+        bus.publish(PolicyRevertedEvent(source="slash.policy_revert", **kwargs))
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("PolicyRevertedEvent publish failed: %s", e)
 
 
 def _compute_baseline(conn) -> tuple[float, float]:

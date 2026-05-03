@@ -212,6 +212,42 @@ class TurnStartEvent(SignalEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class PolicyChangeEvent(SignalEvent):
+    """Fires when a policy decision changes status.
+
+    Phase 2 v0 of outcome-aware learning. Emitted by the engine cron
+    on draft + apply, by slash commands on approve/revert, and by the
+    auto-revert sweep. Subscribers (Telegram extension, dashboards,
+    custom reactors) consume the event to surface or react to policy
+    decisions without coupling to the cron path.
+    """
+
+    event_type: str = field(default="policy_change", init=False)
+    change_id: str = ""
+    knob_kind: str = ""
+    target_id: str = ""
+    status: str = ""
+    approval_mode: str = ""
+    engine_version: str = ""
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyRevertedEvent(SignalEvent):
+    """Fires when a policy_change reaches status='reverted'.
+
+    Distinguished from PolicyChangeEvent so subscribers can react
+    specifically to rollbacks (e.g., user-visible notification 'change X
+    was rolled back because metric Y degraded')."""
+
+    event_type: str = field(default="policy_reverted", init=False)
+    change_id: str = ""
+    knob_kind: str = ""
+    target_id: str = ""
+    reverted_reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class TurnCompletedEvent(SignalEvent):
     """Fires after a turn's ``turn_outcomes`` row has been written.
 
@@ -407,6 +443,8 @@ __all__ = [
     # PR-8: bus-driven memory hooks (T3.2)
     "TurnStartEvent",
     "TurnCompletedEvent",
+    "PolicyChangeEvent",
+    "PolicyRevertedEvent",
     "DelegationCompleteEvent",
     "MemoryWriteEvent",
     # T1 of ambient foreground sensor plan (2026-04-27)

@@ -75,15 +75,22 @@ def run_auto_revert_due(*, db, flags: FeatureFlags, hmac_key: bytes) -> int:
             ):
                 rollback = json.loads(rollback_hook_json)
                 _execute_rollback(conn, target_id, rollback)
+                reverted_reason = (
+                    f"statistical: post_mean {post_mean:.3f} < "
+                    f"baseline {baseline_mean:.3f} - "
+                    f"{sigma:.1f}σ (std {baseline_std:.3f}, "
+                    f"N={eligible_n})"
+                )
                 audit.append_status_transition(
                     change_id, "reverted",
                     post_change_mean=post_mean,
-                    reverted_reason=(
-                        f"statistical: post_mean {post_mean:.3f} < "
-                        f"baseline {baseline_mean:.3f} - "
-                        f"{sigma:.1f}σ (std {baseline_std:.3f}, "
-                        f"N={eligible_n})"
-                    ),
+                    reverted_reason=reverted_reason,
+                )
+                _publish_reverted_event(
+                    change_id=change_id,
+                    knob_kind="recall_penalty",
+                    target_id=str(target_id),
+                    reverted_reason=reverted_reason,
                 )
                 transitions += 1
             else:
@@ -94,6 +101,20 @@ def run_auto_revert_due(*, db, flags: FeatureFlags, hmac_key: bytes) -> int:
                 transitions += 1
 
     return transitions
+
+
+def _publish_reverted_event(**kwargs) -> None:
+    """Fire PolicyRevertedEvent on the default bus. Best-effort."""
+    try:
+        from opencomputer.ingestion.bus import get_default_bus
+        from plugin_sdk.ingestion import PolicyRevertedEvent
+
+        bus = get_default_bus()
+        if bus is None:
+            return
+        bus.publish(PolicyRevertedEvent(source="cron.auto_revert", **kwargs))
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("PolicyRevertedEvent publish failed: %s", e)
 
 
 def _execute_rollback(conn, target_id: str, rollback: dict) -> None:
