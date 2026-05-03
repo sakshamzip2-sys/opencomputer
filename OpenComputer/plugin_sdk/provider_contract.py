@@ -121,6 +121,12 @@ class ProviderCapabilities:
       model name. Default returns 0 (no filter).
     * ``supports_long_ttl`` — True if the provider exposes a 1-hour cache
       TTL knob (Anthropic only today).
+    * ``supports_native_thinking`` — True if the provider has a native
+      extended-thinking / reasoning API that already emits
+      ``thinking_delta`` events from :meth:`stream_complete`. When False,
+      the agent loop activates the prompt-based fallback (system-prompt
+      instruction + ``<think>...</think>`` tag parser) so users get
+      model-agnostic thinking visibility.
     """
 
     requires_reasoning_resend_in_tool_cycle: bool = False
@@ -130,6 +136,16 @@ class ProviderCapabilities:
     )
     min_cache_tokens: Callable[[str], int] = field(default=_default_min_cache_tokens)
     supports_long_ttl: bool = False
+    supports_native_thinking: bool = False
+    """True if the provider's :meth:`stream_complete` natively emits
+    ``thinking_delta`` events (Anthropic extended thinking, OpenAI
+    o-series reasoning). When False, the loop wires a prompt-based
+    fallback (``<think>...</think>`` injection + tag parser) so even
+    non-thinking models surface a reasoning panel via the existing
+    ``thinking_callback`` chain.
+
+    Default ``False`` — existing providers see no behaviour change
+    until they opt in."""
 
 
 @dataclass(frozen=True, slots=True)
