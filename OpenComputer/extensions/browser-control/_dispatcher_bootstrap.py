@@ -99,6 +99,56 @@ _managed_cache: dict[str, _ManagedProfileEntry] = {}
 _managed_cache_lock = asyncio.Lock()
 
 
+# Liveness probe lives in chrome/lifecycle so server_context can use the
+# same helper without crossing into the dispatcher layer. Re-export the
+# private alias for backward-compat with W3.3's tests.
+from .chrome.lifecycle import is_running_alive as _is_running_alive  # noqa: E402, I001
+
+
+async def _close_managed_entry_best_effort(entry: _ManagedProfileEntry) -> None:
+    """Best-effort teardown of a popped cache entry's Playwright handles.
+
+    Uses ``force_disconnect_playwright_for_target`` to evict the CDP-
+    level cache (``session.cdp._cached_by_cdp_url``) too — without that,
+    the next ``connect_browser`` would return the stale handle. All
+    failures are swallowed.
+    """
+    cdp_url = getattr(entry.running, "cdp_url", None) if entry.running is not None else None
+    if cdp_url:
+        try:
+            from extensions.browser_control.session.cdp import (  # type: ignore[import-not-found]
+                force_disconnect_playwright_for_target,
+            )
+
+            await force_disconnect_playwright_for_target(cdp_url)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("evict: force_disconnect raised: %s", exc)
+    # Fall back to closing the Browser handle directly in case the CDP-
+    # cache eviction missed it (e.g. the entry's connected.browser is a
+    # different object than what's cached by URL).
+    browser = getattr(entry.connected, "browser", None) if entry.connected is not None else None
+    close = getattr(browser, "close", None) if browser is not None else None
+    if callable(close):
+        try:
+            result = close()
+            if asyncio.iscoroutine(result):
+                # Fire-and-forget — never await a possibly-hung close on
+                # a dead WS. The CDP-level eviction above already
+                # ensures the next connect makes a fresh connection.
+                async def _swallow() -> None:
+                    try:
+                        await result
+                    except Exception as exc:  # noqa: BLE001
+                        _log.debug("evict: browser.close raised: %s", exc)
+
+                try:
+                    asyncio.create_task(_swallow())
+                except RuntimeError:
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("evict: browser.close call raised: %s", exc)
+
+
 async def ensure_dispatcher_app_ready() -> None:
     """Build + register the in-process dispatcher app if not already set.
 
@@ -213,9 +263,16 @@ async def _connect_managed_cached(profile: Any, running: Any) -> Any:
 
     Returns a ``PlaywrightSession`` ready for the agent handler page-
     resolution path. The cache key is the profile name; subsequent
-    calls for the same profile return the cached session unless the
-    underlying ``RunningChrome`` PID has changed (which it shouldn't,
-    because the bootstrap-level cache also short-circuits launches).
+    calls for the same profile return the cached session unless
+
+      * the underlying ``RunningChrome`` identity differs (a fresh
+        launch happened upstream), or
+      * the cached entry's Chrome subprocess is no longer alive
+        (out-of-band death — see ``_is_running_alive``).
+
+    Wave 3.3 — without the liveness probe, a cached entry pointing at
+    a dead Chrome would be returned to callers that then hang on the
+    dead CDP WebSocket. We evict + re-attach in that case.
     """
     from extensions.browser_control.session import (  # type: ignore[import-not-found]
         PlaywrightSession,
@@ -223,9 +280,31 @@ async def _connect_managed_cached(profile: Any, running: Any) -> Any:
     )
 
     profile_name = profile.name
+    stale_entry: _ManagedProfileEntry | None = None
     async with _managed_cache_lock:
         cached = _managed_cache.get(profile_name)
-        if cached is not None and cached.running is running:
+        if cached is not None:
+            # Liveness gate: only honour the cache if the cached Chrome
+            # process is the one the caller passed AND it is still
+            # alive. Otherwise evict so we re-attach against the fresh
+            # ``running``.
+            if cached.running is running and _is_running_alive(cached.running):
+                return cached.session
+            # Stale — drop the entry under the lock; close the
+            # Playwright handles outside the lock so a slow close()
+            # can't pin the cache lock for other callers.
+            _managed_cache.pop(profile_name, None)
+            stale_entry = cached
+
+    if stale_entry is not None:
+        await _close_managed_entry_best_effort(stale_entry)
+
+    async with _managed_cache_lock:
+        # Re-check under the lock — another coroutine that raced us to
+        # the eviction may have already re-populated the cache for the
+        # same fresh ``running``.
+        cached = _managed_cache.get(profile_name)
+        if cached is not None and cached.running is running and _is_running_alive(cached.running):
             return cached.session
 
         connected = await connect_browser(running.cdp_url)
@@ -273,13 +352,25 @@ def _build_default_profile_driver() -> Any:
         )
 
         # Short-circuit: if we already cached a RunningChrome for this
-        # profile, return it instead of relaunching.
-        cached = _managed_cache.get(profile.name)
-        if cached is not None and cached.running is not None:
-            running = cached.running
-            proc = getattr(running, "proc", None)
-            if proc is None or proc.returncode is None:
-                return running
+        # profile AND its subprocess is still alive, return it instead
+        # of relaunching.
+        #
+        # Wave 3.3 — if the proc is dead (out-of-band kill, crash) we
+        # MUST evict the stale cache entry (and close its Playwright
+        # handles best-effort) so a subsequent ``_connect_managed``
+        # builds a fresh session against the relaunched Chrome rather
+        # than handing back the dead WS handle.
+        stale_entry: _ManagedProfileEntry | None = None
+        async with _managed_cache_lock:
+            cached = _managed_cache.get(profile.name)
+            if cached is not None and cached.running is not None:
+                if _is_running_alive(cached.running):
+                    return cached.running
+                _managed_cache.pop(profile.name, None)
+                stale_entry = cached
+
+        if stale_entry is not None:
+            await _close_managed_entry_best_effort(stale_entry)
 
         resolved_local = resolve_browser_config({"enabled": True}, {})
         return await launch_openclaw_chrome(resolved_local, profile)
