@@ -1725,6 +1725,26 @@ def _run_chat_session(
                 _image_queue.append(str(p.resolve()))
                 return (True, f"queued image for next turn: {p.name}")
 
+            def _on_reasoning_dispatch(args: str) -> str:
+                # Bridge cli_ui's sync slash dispatcher into the async
+                # ReasoningCommand. Closes over ``runtime`` so the
+                # command sees the live reasoning store + effort flags.
+                import asyncio as _asyncio_rsn
+
+                from opencomputer.agent.slash_commands_impl.reasoning_cmd import (
+                    ReasoningCommand,
+                )
+                cmd = ReasoningCommand()
+                try:
+                    res = _asyncio_rsn.run(cmd.execute(args, runtime))
+                except RuntimeError:
+                    loop_inner = _asyncio_rsn.get_event_loop()
+                    fut = _asyncio_rsn.run_coroutine_threadsafe(
+                        cmd.execute(args, runtime), loop_inner,
+                    )
+                    res = fut.result(timeout=10.0)
+                return getattr(res, "output", "") or ""
+
             slash_ctx = SlashContext(
                 console=console,
                 session_id=session_id,
@@ -1749,6 +1769,7 @@ def _run_chat_session(
                 on_retry=_on_retry,
                 on_stop_bg=_on_stop_bg,
                 on_image_attach=_on_image_attach,
+                on_reasoning_dispatch=_on_reasoning_dispatch,
             )
             result = dispatch_slash(user_input, slash_ctx)
             if result.exit_loop:
