@@ -401,6 +401,10 @@ class AgentLoop:
         # per-call activity bump fires.
         self._loop_started_at: float = time.monotonic()
         self._last_activity_at: float = self._loop_started_at
+        # ACP depth: tool_callback fires on tool start/complete. Re-set by
+        # run_conversation; declared here so _dispatch_tool_calls callers that
+        # bypass run_conversation don't hit AttributeError.
+        self._tool_callback: Any = None
         self.db = db or SessionDB(config.session.db_path)
         # Opt-in: prune stale sessions per config.session.auto_prune_*.
         # Default disabled (auto_prune_days=0); never deletes anything
@@ -598,6 +602,7 @@ class AgentLoop:
         runtime: RuntimeContext | None = None,
         stream_callback=None,
         thinking_callback=None,
+        tool_callback=None,
         system_prompt_override: str | None = None,
         initial_messages: list[Message] | None = None,
         images: list[str] | None = None,
@@ -1092,6 +1097,7 @@ class AgentLoop:
         # without threading another arg through every call site.
         self._loop_started_at = time.monotonic()
         self._last_activity_at = self._loop_started_at
+        self._tool_callback = tool_callback  # ACP depth: fire on tool start/complete
 
         # T1 of auto-skill-evolution plan — wrap iteration loop +
         # budget-exhausted exit in try/except/finally so the agent
@@ -3191,6 +3197,11 @@ class AgentLoop:
                     session_id=session_id,
                 )
                 return result
+            if self._tool_callback is not None:
+                try:
+                    self._tool_callback("start", c.name, c.id or "", c.arguments)
+                except Exception:
+                    pass
             try:
                 result = await registry.dispatch(
                     c,
@@ -3260,6 +3271,14 @@ class AgentLoop:
                         session_id=session_id,
                         runtime=self._runtime,
                     )
+                if self._tool_callback is not None:
+                    try:
+                        self._tool_callback(
+                            "complete", c.name, c.id or "",
+                            getattr(result, "content", str(result)),
+                        )
+                    except Exception:
+                        pass
                 return result
 
         if self.config.loop.parallel_tools and self._all_parallel_safe(calls):

@@ -66,6 +66,7 @@ class ACPServer:
             "prompt": self._handle_prompt,
             "cancel": self._handle_cancel,
             "listSessions": self._handle_list_sessions,
+            "requestPermission": self._handle_request_permission,
         }
 
     async def serve_stdio(self) -> None:
@@ -128,15 +129,15 @@ class ACPServer:
     async def _handle_initialize(self, params: dict[str, Any]) -> dict[str, Any]:
         self._client_capabilities = params.get("clientCapabilities", {}) or {}
         self._initialized = True
+        from opencomputer.acp.auth import detect_provider
+
         return {
             "protocolVersion": ACP_PROTOCOL_VERSION,
-            "serverName": ACP_SERVER_NAME,
-            "serverVersion": ACP_SERVER_VERSION,
+            "serverInfo": {"name": ACP_SERVER_NAME, "version": ACP_SERVER_VERSION},
             "serverCapabilities": {
-                "promptStreaming": True,
-                "sessionPersistence": True,
-                "tools": True,
-                "cancel": True,
+                "streaming": True,
+                "cancellation": True,
+                "provider": detect_provider(),
             },
         }
 
@@ -184,6 +185,27 @@ class ACPServer:
 
     async def _handle_list_sessions(self, params: dict[str, Any]) -> dict[str, Any]:
         return {"sessions": [{"sessionId": sid} for sid in self._sessions]}
+
+    async def _handle_request_permission(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle IDE-side permission request. Auto-deny if no session/gate."""
+        session_id = params.get("sessionId", "")
+        command = params.get("command", "unknown")
+        description = params.get("description", "")
+        session = self._sessions.get(session_id)
+        if session is None:
+            return {"outcome": "deny", "reason": "session not found"}
+        gate = getattr(session, "_consent_gate", None)
+        if gate is None:
+            logger.debug(
+                "acp: requestPermission for session %s — no gate, auto-deny", session_id
+            )
+            return {"outcome": "deny", "reason": "no consent gate in this session"}
+        from opencomputer.acp.permissions import make_approval_callback
+
+        loop = asyncio.get_event_loop()
+        cb = make_approval_callback(session_id, gate, loop)
+        outcome = cb(command, description)
+        return {"outcome": outcome}
 
     # --- transport ---
 

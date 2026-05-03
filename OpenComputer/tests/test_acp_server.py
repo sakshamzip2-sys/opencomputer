@@ -42,9 +42,12 @@ async def test_initialize_returns_capabilities(server_with_capture):
     assert len(captured) == 1
     result = captured[0]["result"]
     assert result["protocolVersion"] == ACP_PROTOCOL_VERSION
-    assert result["serverName"] == ACP_SERVER_NAME
-    assert result["serverCapabilities"]["promptStreaming"] is True
-    assert result["serverCapabilities"]["sessionPersistence"] is True
+    # serverInfo shape (updated in ACP depth uplift)
+    assert result["serverInfo"]["name"] == ACP_SERVER_NAME
+    caps = result["serverCapabilities"]
+    assert caps["streaming"] is True
+    assert caps["cancellation"] is True
+    assert "provider" in caps
 
 
 @pytest.mark.asyncio
@@ -138,3 +141,26 @@ def test_acp_module_exports():
     from opencomputer.acp import ACPServer, ACPSession
     assert ACPServer is not None
     assert ACPSession is not None
+
+
+def test_detect_provider_returns_string_or_none():
+    from opencomputer.acp.auth import detect_provider, has_provider
+    result = detect_provider()
+    assert result is None or isinstance(result, str)
+    assert isinstance(has_provider(), bool)
+
+
+@pytest.mark.asyncio
+async def test_initialize_includes_provider_in_capabilities():
+    """initialize response should include serverCapabilities.provider."""
+    server = ACPServer()
+    result = await server._handle_initialize({"clientCapabilities": {}})
+    caps = result.get("serverCapabilities", {})
+    assert "provider" in caps
+
+
+@pytest.mark.asyncio
+async def test_request_permission_method_registered():
+    """ACPServer should handle 'requestPermission' method."""
+    server = ACPServer()
+    assert "requestPermission" in server._handlers

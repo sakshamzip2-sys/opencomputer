@@ -31,14 +31,15 @@ class TestServerStructure:
         s = build_server()
         assert s.name == "opencomputer"
 
-    def test_ten_tools_registered(self) -> None:
+    def test_eleven_tools_registered(self) -> None:
         # Original 5 + Tier-A item 14 (channels_list, events_poll) +
         # Tier-A item 14 follow-up (messages_send, messages_send_status,
-        # events_wait) = 10 tools.
+        # events_wait) + attachments_fetch = 11 tools.
         s = build_server()
         tools = asyncio.run(s.list_tools())
         names = sorted(t.name for t in tools)
         assert names == [
+            "attachments_fetch",
             "channels_list",
             "consent_history",
             "events_poll",
@@ -90,6 +91,81 @@ class TestMessagesReadTool:
     def test_unknown_session_returns_empty_list(self) -> None:
         s = build_server()
         result = asyncio.run(_call_tool(s, "messages_read", {"session_id": "nope", "limit": 10}))
+        assert result == []
+
+
+class TestAttachmentsFetchTool:
+    def test_unknown_session_returns_empty(self) -> None:
+        s = build_server()
+        result = asyncio.run(
+            _call_tool(s, "attachments_fetch", {"session_id": "nope", "message_id": 999})
+        )
+        assert result == []
+
+    def test_existing_attachment_returned_as_base64(self, tmp_path: Path) -> None:
+        import base64
+        import json
+        import sqlite3
+
+        db_path = tmp_path / "sessions.db"
+        # Create a minimal sessions + messages schema
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, started_at REAL, "
+                "platform TEXT, model TEXT, title TEXT, ended_at REAL)"
+            )
+            conn.execute(
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, "
+                "role TEXT, content TEXT, timestamp REAL, attachments TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO sessions VALUES ('sess1', 0, 'cli', 'model', 'title', NULL)"
+            )
+            attachment_file = tmp_path / "test_attachment.txt"
+            attachment_file.write_bytes(b"hello attachment")
+            conn.execute(
+                "INSERT INTO messages (id, session_id, role, content, timestamp, attachments) "
+                "VALUES (1, 'sess1', 'user', 'msg', 0, ?)",
+                (json.dumps([str(attachment_file)]),),
+            )
+
+        s = build_server()
+        result = asyncio.run(
+            _call_tool(s, "attachments_fetch", {"session_id": "sess1", "message_id": 1})
+        )
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["path"] == str(attachment_file)
+        assert base64.b64decode(result[0]["content_b64"]) == b"hello attachment"
+        assert "mime_type" in result[0]
+
+    def test_missing_attachment_file_skipped(self, tmp_path: Path) -> None:
+        import json
+        import sqlite3
+
+        db_path = tmp_path / "sessions.db"
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, started_at REAL, "
+                "platform TEXT, model TEXT, title TEXT, ended_at REAL)"
+            )
+            conn.execute(
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, "
+                "role TEXT, content TEXT, timestamp REAL, attachments TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO sessions VALUES ('sess2', 0, 'cli', 'model', 'title', NULL)"
+            )
+            conn.execute(
+                "INSERT INTO messages (id, session_id, role, content, timestamp, attachments) "
+                "VALUES (1, 'sess2', 'user', 'msg', 0, ?)",
+                (json.dumps([str(tmp_path / "does_not_exist.png")]),),
+            )
+
+        s = build_server()
+        result = asyncio.run(
+            _call_tool(s, "attachments_fetch", {"session_id": "sess2", "message_id": 1})
+        )
         assert result == []
 
 
