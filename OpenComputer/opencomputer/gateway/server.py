@@ -263,11 +263,11 @@ class Gateway:
         outlived a multi-month shutdown gets a confirmation message
         on boot.
         """
-        chats = getattr(self.config, "startup_ping_chats", ())
+        chats = getattr(self._config, "startup_ping_chats", ())
         if not chats:
             return
         message = getattr(
-            self.config, "startup_ping_message",
+            self._config, "startup_ping_message",
             "OpenComputer back online",
         )
         adapters_by_platform = {a.platform.value: a for a in self._adapters}
