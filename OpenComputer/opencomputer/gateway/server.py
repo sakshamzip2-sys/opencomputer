@@ -247,6 +247,57 @@ class Gateway:
             name="gateway-fatal-error-supervisor",
         )
 
+        # Startup ping (the OpenClaw "back online" magic message).
+        # Opt-in via gateway.startup_ping_chats. Fires once after every
+        # adapter has had a chance to connect. Fail-open — a flaky
+        # channel must never wedge gateway boot.
+        await self._fire_startup_pings()
+
+    async def _fire_startup_pings(self) -> None:
+        """Send the configured startup-ping message to each (platform, chat).
+
+        Skipped silently when ``gateway.startup_ping_chats`` is empty.
+        Each per-chat send is wrapped in its own try/except so one bad
+        chat ID doesn't drop the others. This is the OpenClaw-style
+        "boot → first heartbeat ping" feature: a bot identity that
+        outlived a multi-month shutdown gets a confirmation message
+        on boot.
+        """
+        chats = getattr(self.config, "startup_ping_chats", ())
+        if not chats:
+            return
+        message = getattr(
+            self.config, "startup_ping_message",
+            "OpenComputer back online",
+        )
+        adapters_by_platform = {a.platform.value: a for a in self._adapters}
+        for entry in chats:
+            try:
+                platform, chat_id = entry
+            except (TypeError, ValueError):
+                logger.warning(
+                    "gateway: startup_ping_chats entry malformed (expected "
+                    "(platform, chat_id) tuple), got %r", entry,
+                )
+                continue
+            adapter = adapters_by_platform.get(str(platform))
+            if adapter is None:
+                logger.info(
+                    "gateway: startup ping skipped — no adapter registered "
+                    "for platform=%r (chat=%r)", platform, chat_id,
+                )
+                continue
+            try:
+                await adapter.send(str(chat_id), message)
+                logger.info(
+                    "gateway: startup ping sent to %s/%s", platform, chat_id,
+                )
+            except Exception as exc:  # noqa: BLE001 — fail-open
+                logger.warning(
+                    "gateway: startup ping to %s/%s failed (continuing): %s",
+                    platform, chat_id, exc,
+                )
+
     async def _start_outgoing_drainer(self) -> None:
         from opencomputer.agent.config import _home
         from opencomputer.plugins.registry import registry as plugin_registry
