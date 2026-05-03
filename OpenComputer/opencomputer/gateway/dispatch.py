@@ -41,6 +41,85 @@ if TYPE_CHECKING:
 logger = logging.getLogger("opencomputer.gateway.dispatch")
 
 
+# ─── P0-4: outcome-aware learning telemetry hook ─────────────────────
+#
+# Phase 0 records implicit per-turn signals into ``turn_outcomes`` after
+# every completed turn. Fire-and-forget: never blocks the user reply
+# path; swallows DB errors so a telemetry failure can't break dispatch.
+#
+# A module-level set keeps strong references to in-flight tasks so the
+# event loop's GC doesn't collect them mid-write (standard asyncio
+# fire-and-forget pattern).
+
+_pending_outcome_writes: set[asyncio.Task] = set()
+
+
+def _compute_turn_index(db, session_id: str) -> int:
+    """Return the next turn_index for this session.
+
+    Cheap query against the new ``idx_turn_outcomes_session`` index.
+    Idempotent — re-running just gives the same +1, which the recorder
+    handles cleanly (it doesn't enforce uniqueness on (session, turn);
+    the rare race produces two rows the engine dedups by created_at).
+    """
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(turn_index), -1) + 1 FROM turn_outcomes "
+            "WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    return int(row[0])
+
+
+def _build_end_of_turn_signals(
+    db,
+    *,
+    session_id: str,
+    turn_index: int,
+    start_ts: float,
+    end_ts: float,
+):
+    """Compose a TurnSignals at end-of-turn from data already captured.
+
+    Deliberately leaves ``affirmation_present``, ``correction_present``,
+    and ``reply_latency_s`` at their defaults (False / False / None).
+    Those columns are populated by P0-4b's start-of-next-turn back-fill
+    once we know the next user message — at end-of-turn we don't have it
+    yet.
+    """
+    from opencomputer.agent.turn_outcome_recorder import TurnSignals
+
+    counts = db.query_tool_usage_in_window(
+        session_id=session_id, start_ts=start_ts, end_ts=end_ts,
+    )
+    vibes = db.query_recent_vibes(
+        session_id=session_id, before_ts=end_ts, limit=2,
+    )
+    vibe_after = vibes[0] if len(vibes) >= 1 else None
+    vibe_before = vibes[1] if len(vibes) >= 2 else None
+
+    return TurnSignals(
+        session_id=session_id,
+        turn_index=turn_index,
+        tool_call_count=counts["call_count"],
+        tool_success_count=counts["success_count"],
+        tool_error_count=counts["error_count"],
+        tool_blocked_count=counts["blocked_count"],
+        vibe_before=vibe_before,
+        vibe_after=vibe_after,
+        duration_s=max(0.0, end_ts - start_ts),
+    )
+
+
+async def _record_turn_outcome_async(db, sig) -> None:
+    """Fire-and-forget telemetry write. Never propagates exceptions."""
+    try:
+        from opencomputer.agent.turn_outcome_recorder import TurnOutcomeRecorder
+        TurnOutcomeRecorder(db).record(sig)
+    except Exception as e:  # noqa: BLE001 — telemetry must never block
+        logger.warning("outcome recording failed: %s", e)
+
+
 def _format_user_facing_error(exc: Exception) -> str:
     """Render an exception from the agent loop as a one-liner the user
     can read on a chat surface.
@@ -520,6 +599,9 @@ class Dispatch:
             # any PluginAPI lazy paths resolve to the right profile for
             # the duration of this dispatch.
             from plugin_sdk.profile_context import set_profile
+            # P0-4: capture wall-clock around run_conversation so we
+            # can record a turn_outcomes row at the end.
+            turn_start_ts = time.time()
             try:
                 with set_profile(profile_home):
                     if self._plugin_api is not None:
@@ -537,6 +619,25 @@ class Dispatch:
                             images=images,
                             runtime=runtime,
                         )
+                # P0-4: schedule turn_outcomes write fire-and-forget.
+                # Errors are swallowed inside _record_turn_outcome_async
+                # so a telemetry failure never breaks the user reply.
+                turn_end_ts = time.time()
+                try:
+                    sig = _build_end_of_turn_signals(
+                        loop.db,
+                        session_id=session_id,
+                        turn_index=_compute_turn_index(loop.db, session_id),
+                        start_ts=turn_start_ts,
+                        end_ts=turn_end_ts,
+                    )
+                    task = asyncio.create_task(
+                        _record_turn_outcome_async(loop.db, sig)
+                    )
+                    _pending_outcome_writes.add(task)
+                    task.add_done_callback(_pending_outcome_writes.discard)
+                except Exception as e:  # noqa: BLE001 — telemetry guard
+                    logger.warning("outcome scheduling failed: %s", e)
                 return result.final_message.content or None
             except Exception as e:  # noqa: BLE001
                 # Always log full traceback for debugging; user only

@@ -1421,4 +1421,67 @@ class SessionDB:
         return out
 
 
+    # ─── Phase 0 outcome-aware learning helpers ─────────────────────
+
+    def query_tool_usage_in_window(
+        self,
+        *,
+        session_id: str,
+        start_ts: float,
+        end_ts: float,
+    ) -> dict[str, int]:
+        """Aggregate tool_usage counts within a turn's wall-clock window.
+
+        Used by gateway/dispatch.py at end-of-turn to populate
+        ``turn_outcomes.tool_*_count`` columns. Returns a dict with keys
+        ``call_count``, ``success_count``, ``error_count``,
+        ``blocked_count``. Pre-v5 DBs (no tool_usage table) return zeros.
+        """
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT outcome, error FROM tool_usage "
+                    "WHERE session_id = ? AND ts >= ? AND ts <= ?",
+                    (session_id, start_ts, end_ts),
+                ).fetchall()
+        except sqlite3.OperationalError:
+            return {
+                "call_count": 0,
+                "success_count": 0,
+                "error_count": 0,
+                "blocked_count": 0,
+            }
+        call = len(rows)
+        success = sum(1 for r in rows if r[0] == "success")
+        blocked = sum(1 for r in rows if r[0] == "blocked")
+        # ``error`` flag covers failure + cancelled + anything non-success.
+        # We separate "blocked" (consent gate refusal) from "error" since
+        # the composite scorer treats them differently — blocked is a
+        # safety win, not a failure.
+        error = sum(1 for r in rows if r[1] == 1 and r[0] != "blocked")
+        return {
+            "call_count": call,
+            "success_count": success,
+            "error_count": error,
+            "blocked_count": blocked,
+        }
+
+    def query_recent_vibes(
+        self,
+        *,
+        session_id: str,
+        before_ts: float,
+        limit: int = 2,
+    ) -> list[str]:
+        """Return up to ``limit`` most-recent vibe verdicts at or before
+        ``before_ts``. Index 0 is the most recent. Empty list if none."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT vibe FROM vibe_log WHERE session_id = ? "
+                "AND timestamp <= ? ORDER BY timestamp DESC LIMIT ?",
+                (session_id, before_ts, limit),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+
 __all__ = ["SessionDB"]
