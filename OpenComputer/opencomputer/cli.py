@@ -1077,6 +1077,17 @@ def _run_chat_session(
     from opencomputer.headless import is_headless
     use_live_ui = sys.stdout.isatty() and not is_headless()
 
+    # Install the AskUserQuestion handler so the tool integrates with
+    # our Rich/prompt_toolkit terminal stack instead of competing with
+    # it via raw stdin reads (which hangs forever — Rich.Live owns
+    # stdin while live). When use_live_ui is False (headless / piped),
+    # the tool's legacy stdin path is preserved for script use.
+    if use_live_ui:
+        from opencomputer.cli_ui.ask_user_question_handler import (
+            install_rich_handler as _install_auq,
+        )
+        _install_auq(console=console)
+
     # Phase 1 TUI uplift — closure-captured cumulative token tally so
     # /cost can read it. Mutated (not rebound) inside both _run_turn
     # variants below; no `nonlocal` needed.
