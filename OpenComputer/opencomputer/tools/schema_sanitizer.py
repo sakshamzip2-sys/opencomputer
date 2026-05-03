@@ -223,18 +223,27 @@ def _strip_unsupported_constraints(node: Any) -> Any:
     """
     if isinstance(node, dict):
         node_type = node.get("type")
-        if node_type in {"integer", "number"}:
-            for key in _NUMERIC_CONSTRAINT_KEYS:
-                node.pop(key, None)
-        elif node_type == "array":
-            for key in _ARRAY_CONSTRAINT_KEYS:
-                node.pop(key, None)
-        elif node_type == "object":
-            for key in _OBJECT_CONSTRAINT_KEYS:
-                node.pop(key, None)
-            # Anthropic requires every object node to declare this
-            # explicitly; missing field → 400. Always set to False.
-            node["additionalProperties"] = False
+        # Guard: the recursive walker descends into containers (e.g.
+        # ``properties``) whose keys are arbitrary user-chosen names. If
+        # one of those names is literally ``"type"`` (e.g. an adapter
+        # arg named ``type``), ``node.get("type")`` returns that
+        # property's schema (a dict), not a JSON Schema type string.
+        # Hashing a dict into the set below crashes with TypeError.
+        # Only run type-specific cleanup when ``type`` is a string;
+        # otherwise fall through to the generic recursion.
+        if isinstance(node_type, str):
+            if node_type in {"integer", "number"}:
+                for key in _NUMERIC_CONSTRAINT_KEYS:
+                    node.pop(key, None)
+            elif node_type == "array":
+                for key in _ARRAY_CONSTRAINT_KEYS:
+                    node.pop(key, None)
+            elif node_type == "object":
+                for key in _OBJECT_CONSTRAINT_KEYS:
+                    node.pop(key, None)
+                # Anthropic requires every object node to declare this
+                # explicitly; missing field → 400. Always set to False.
+                node["additionalProperties"] = False
         for key, value in list(node.items()):
             node[key] = _strip_unsupported_constraints(value)
         return node
