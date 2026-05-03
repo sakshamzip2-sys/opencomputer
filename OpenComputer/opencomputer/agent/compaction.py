@@ -427,8 +427,29 @@ class CompactionEngine(ContextEngine):
     def _truncate_fallback(
         self, messages: list[Message], split_idx: int
     ) -> CompactionResult:
-        """Degraded path: drop N oldest non-system messages."""
-        drop = min(self.config.fallback_drop_count, split_idx)
+        """Degraded path: drop N oldest non-system messages.
+
+        The naive ``messages[drop:]`` slice can orphan a ``tool_result``
+        from its matching ``tool_use`` when the cut lands inside a tool
+        cycle (e.g. ``messages[drop]`` is a ``tool`` whose owning
+        assistant lives at ``messages[drop-1]``). That produces a 400
+        from Anthropic on the next turn:
+
+            messages.N.content.0: unexpected ``tool_use_id`` ... Each
+            ``tool_result`` block must have a corresponding ``tool_use``
+            block in the previous message.
+
+        Mirror :meth:`_safe_split_index` here: walk the drop boundary
+        forward (toward the recent end) until it lands on a clean turn
+        boundary — i.e. the FIRST surviving message is not a ``tool``,
+        and the message before it (which is being dropped) is not an
+        assistant carrying ``tool_calls``. Walking forward (not
+        backward) preserves the "drop at least N" intent of the
+        fallback while never producing an orphan. If no clean boundary
+        exists in the range, drop everything (degraded but coherent).
+        """
+        target = min(self.config.fallback_drop_count, split_idx)
+        drop = self._safe_drop_index(messages, target)
         new_msgs = messages[drop:]
         synthetic = Message(
             role="assistant",
@@ -440,6 +461,44 @@ class CompactionEngine(ContextEngine):
             degraded=True,
             reason="aux-failed-truncated",
         )
+
+    def _safe_drop_index(
+        self, messages: list[Message], target: int
+    ) -> int:
+        """Forward-walk ``target`` to a tool-pair-safe boundary.
+
+        Returns the smallest ``drop >= target`` such that
+        ``messages[drop:]`` does not begin with a ``tool`` whose
+        matching ``tool_use`` lies in ``messages[:drop]``, AND
+        ``messages[drop-1]`` (the LAST dropped message) is not an
+        assistant whose ``tool_calls`` reference a ``tool_call_id`` in
+        the surviving slice.
+
+        If walking past the end is required (no clean boundary exists),
+        return ``len(messages)`` — the fallback then drops everything,
+        which is degraded but never orphans a tool_use/tool_result
+        pair on the wire.
+        """
+        n = len(messages)
+        idx = max(0, min(target, n))
+        while idx < n:
+            head = messages[idx]
+            prev = messages[idx - 1] if idx > 0 else None
+            prev_has_tool_use = (
+                prev is not None
+                and prev.role == "assistant"
+                and bool(prev.tool_calls)
+            )
+            # Unsafe if surviving slice starts with a ``tool`` (its
+            # matching tool_use would be in the dropped prefix), OR if
+            # the LAST dropped message is an assistant with tool_calls
+            # (its matching tool_results would be in the surviving
+            # slice). Walk forward in either case.
+            if head.role == "tool" or prev_has_tool_use:
+                idx += 1
+                continue
+            return idx
+        return n
 
 
 def _flatten_for_summary(messages: list[Message]) -> str:
