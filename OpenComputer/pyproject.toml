@@ -44,6 +44,10 @@ dependencies = [
   "pyperclip>=1.8",
   "rapidocr-onnxruntime>=1.2.3",
   "filelock>=3.16",
+  # JSON5 manifest tolerance — comments + trailing commas in plugin.json
+  # (Sub-project G openclaw-parity Task 4). Two-tier parse: json.loads
+  # first, json5.loads only on JSONDecodeError. ~30KB pure-Python lib.
+  "json5>=0.9",
   # Hermes-parity arrow-key picker for `oc model` and other interactive
   # selections (PR after #275). Falls back to curses then numbered list
   # when this package is absent — install is required only for the

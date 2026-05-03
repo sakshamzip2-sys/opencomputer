@@ -70,6 +70,12 @@ _IGNORE_DIRS = {
     "build",
 }
 
+# Sub-project G (openclaw-parity) Task 5 — defence against pathological
+# manifests. 256KB is plenty for any reasonable plugin description; this
+# rejects 100MB DOS attempts before any parse happens. Mirrors openclaw's
+# manifest size limit at sources/openclaw-2026.4.23/src/plugins/manifest.ts.
+MAX_MANIFEST_BYTES = 256 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class PluginCandidate:
@@ -86,11 +92,39 @@ class PluginCandidate:
 
 
 def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
+    # Sub-project G (openclaw-parity) Task 5 — size cap before any read.
     try:
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except Exception as e:  # noqa: BLE001
-        logger.warning("failed to parse manifest %s: %s", manifest_path, e)
+        size = manifest_path.stat().st_size
+    except OSError as e:
+        logger.warning("failed to stat manifest %s: %s", manifest_path, e)
         return None
+    if size > MAX_MANIFEST_BYTES:
+        logger.warning(
+            "manifest %s exceeds %d bytes (size=%d) - skipping",
+            manifest_path,
+            MAX_MANIFEST_BYTES,
+            size,
+        )
+        return None
+    try:
+        text = manifest_path.read_text(encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("failed to read manifest %s: %s", manifest_path, e)
+        return None
+    # Sub-project G (openclaw-parity) Task 4 — JSON5 tolerance. Try
+    # strict json first (zero overhead for compliant manifests); fall
+    # back to json5 only on JSONDecodeError so authors can use comments
+    # and trailing commas. Mirrors openclaw manifest.json5-tolerance.test.ts.
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            import json5 as _json5
+
+            data = _json5.loads(text)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("failed to parse manifest %s: %s", manifest_path, e)
+            return None
     # Phase 12g: typed pydantic validation runs first so wrong types,
     # unknown kinds, malformed ids etc. fail with a useful message before
     # we ever construct the dataclass. One bad plugin shouldn't break
