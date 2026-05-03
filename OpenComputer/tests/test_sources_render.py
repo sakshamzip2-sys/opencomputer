@@ -270,7 +270,7 @@ def test_render_sources_block_is_noop_for_empty_registry() -> None:
 
 def test_render_default_is_collapsed_one_line_trigger() -> None:
     """Default render is the AI Elements collapsed Collapsible state:
-    ``📖 Used N sources [domains]  ›`` — no per-source rows.
+    ``📖 Used N sources [domains]  ›  /sources to expand`` — no per-source rows.
     """
     from opencomputer.cli_ui.sources import enrich_url, render_sources_block
 
@@ -291,6 +291,41 @@ def test_render_default_is_collapsed_one_line_trigger() -> None:
     assert "India Q1 GDP" not in out
     assert "AI fintech" not in out
     assert "⌄" not in out                  # expanded chevron is absent
+    # Discoverable hint at the actual interactive primitive — slash command.
+    assert "/sources to expand" in out
+
+
+def test_collapsed_trigger_hyperlinks_each_domain_via_osc8() -> None:
+    """Each domain in the collapsed peek is rendered as an OSC 8
+    hyperlink to its source URL — so cmd-click in iTerm2/Ghostty/
+    Wezterm opens the source directly without expanding the block.
+    """
+    from opencomputer.cli_ui.sources import enrich_url, render_sources_block
+
+    console = _record_console()
+    sources = [
+        enrich_url("https://indianexpress.com/article/x", title="India Q1 GDP"),
+        enrich_url("https://pcquest.com/article/y", title="AI fintech"),
+    ]
+    render_sources_block(console, sources)
+    ansi = console.export_text(styles=True, clear=False)
+    # Both URLs MUST appear in the ANSI escape stream (Rich emits OSC 8
+    # for each `link <url>` style applied to the domain spans).
+    assert "https://indianexpress.com/article/x" in ansi
+    assert "https://pcquest.com/article/y" in ansi
+
+
+def test_open_true_suppresses_expand_hint() -> None:
+    """When already expanded, the `/sources to expand` hint would be
+    redundant — it must not appear."""
+    from opencomputer.cli_ui.sources import enrich_url, render_sources_block
+
+    console = _record_console()
+    render_sources_block(
+        console, [enrich_url("https://a.com/", title="A")], open=True
+    )
+    out = console.export_text(clear=False)
+    assert "/sources to expand" not in out
 
 
 def test_render_open_true_shows_full_per_source_list() -> None:

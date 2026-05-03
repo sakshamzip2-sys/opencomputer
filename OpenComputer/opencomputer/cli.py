@@ -1754,6 +1754,28 @@ def _run_chat_session(
                     res = fut.result(timeout=10.0)
                 return getattr(res, "output", "") or ""
 
+            def _on_sources_dispatch(args: str) -> str:
+                # Same bridge as _on_reasoning_dispatch — both share the
+                # per-session ReasoningStore on runtime.custom. The
+                # SourcesCommand reads ReasoningTurn.sources (which
+                # extracts URLs from WebSearch/WebFetch tool output) and
+                # re-renders them via render_sources_block(open=True).
+                import asyncio as _asyncio_src
+
+                from opencomputer.agent.slash_commands_impl.sources_cmd import (
+                    SourcesCommand,
+                )
+                cmd = SourcesCommand()
+                try:
+                    res = _asyncio_src.run(cmd.execute(args, runtime))
+                except RuntimeError:
+                    loop_inner = _asyncio_src.get_event_loop()
+                    fut = _asyncio_src.run_coroutine_threadsafe(
+                        cmd.execute(args, runtime), loop_inner,
+                    )
+                    res = fut.result(timeout=10.0)
+                return getattr(res, "output", "") or ""
+
             slash_ctx = SlashContext(
                 console=console,
                 session_id=session_id,
@@ -1780,6 +1802,7 @@ def _run_chat_session(
                 on_stop_bg=_on_stop_bg,
                 on_image_attach=_on_image_attach,
                 on_reasoning_dispatch=_on_reasoning_dispatch,
+                on_sources_dispatch=_on_sources_dispatch,
             )
             result = dispatch_slash(user_input, slash_ctx)
             if result.exit_loop:

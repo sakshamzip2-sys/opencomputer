@@ -308,13 +308,25 @@ def rewrite_inline_url_refs(text: str, registry: SourcesRegistry) -> str:
 _TRIGGER_DOMAIN_PEEK = 3
 
 
-def _render_trigger(sources: list[Source], *, is_open: bool) -> Text:
-    """Port of <SourcesTrigger> — ``📖 Used N sources [domains] ›/⌄``.
+def _render_trigger(
+    sources: list[Source],
+    *,
+    is_open: bool,
+    show_expand_hint: bool = True,
+) -> Text:
+    """Port of <SourcesTrigger> — ``📖 Used N sources [domains] ›  /sources``.
 
     Visual hierarchy mirrors the reference's Collapsible trigger: book
-    glyph, count, optional domain peek, chevron. Chevron flips ``›`` ↔
-    ``⌄`` based on open state (matches reasoning_view.SourcesView and
-    the ChevronDownIcon rotation in the reference).
+    glyph, count, optional domain peek, chevron, and a discoverable
+    hint pointing at the ``/sources`` slash command (the actual
+    interactive primitive — see the renderer docstring for the
+    constraint).
+
+    Each domain in the peek carries an OSC 8 hyperlink to its source
+    URL — terminals that support hyperlinks (iTerm2, Ghostty, Wezterm,
+    GNOME Terminal, modern Konsole) let the user cmd-click a domain to
+    open it directly without expanding the block. Terminals that don't
+    support OSC 8 silently render plain text; no degradation.
     """
     n = len(sources)
     trigger = Text()
@@ -323,18 +335,35 @@ def _render_trigger(sources: list[Source], *, is_open: bool) -> Text:
         f"Used {n} source{'' if n == 1 else 's'}", style="bold dim cyan"
     )
 
-    domains = [s.domain for s in sources if s.domain]
-    if domains:
-        peek = domains[:_TRIGGER_DOMAIN_PEEK]
-        rest = len(domains) - len(peek)
+    # Pair each domain with its source URL for OSC 8 hyperlinks.
+    peek_pairs: list[tuple[str, str]] = []
+    for s in sources:
+        if s.domain:
+            peek_pairs.append((s.domain, s.url))
+        if len(peek_pairs) >= _TRIGGER_DOMAIN_PEEK:
+            break
+    rest = sum(1 for s in sources if s.domain) - len(peek_pairs)
+
+    if peek_pairs:
         trigger.append("  [", style="dim")
-        trigger.append(", ".join(peek), style="dim cyan")
+        for i, (domain, url) in enumerate(peek_pairs):
+            if i > 0:
+                trigger.append(", ", style="dim")
+            # OSC 8 hyperlink — cmd-click opens the URL in the browser.
+            trigger.append(domain, style=f"dim cyan link {url}" if url else "dim cyan")
         if rest > 0:
             trigger.append(f" +{rest}", style="dim")
         trigger.append("]", style="dim")
 
     trigger.append("  ", style="")
     trigger.append("⌄" if is_open else "›", style="dim")
+
+    # Hint at the slash command — the actual mechanism for retroactive
+    # expansion. Mirrors how /reasoning show works for the thinking card.
+    if show_expand_hint and not is_open:
+        trigger.append("  ", style="")
+        trigger.append("/sources to expand", style="dim italic")
+
     return trigger
 
 
@@ -374,10 +403,13 @@ def render_sources_block(
          2 pcquest.com        ·  AI in Indian fintech 2026 review
          3 reuters.com        ·  RBI policy ahead
 
-    Click-to-expand can't be reproduced on a printed line in a write-once
-    terminal stream (same constraint PR #406's ReasoningView ran into),
-    so the expanded form is reachable retroactively via the per-turn
-    reasoning record. Empty list → no-op (no trigger, no separator).
+    Click-to-expand on the chevron itself isn't wired — Rich's
+    ``console.print`` produces immutable scrollback (the printed bytes
+    aren't re-readable by the renderer once Live has stopped at
+    finalize). The actual interactive primitive is the ``/sources``
+    slash command, mirroring how the reasoning card uses
+    ``/reasoning show`` for retroactive expansion. The trigger surfaces
+    that hint inline so it's discoverable. Empty list → no-op.
 
     Title cell carries an OSC 8 hyperlink to the URL when the terminal
     supports it (Rich emits the escape sequence; ignored elsewhere).
