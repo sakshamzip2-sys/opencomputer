@@ -38,11 +38,6 @@ opencomputer/
   agent/
     credential_pool.py          ← MODIFY (144 → ~600 LOC)
     credential_sources.py       ← CREATE (~400 LOC)
-    bedrock_adapter.py          ← CREATE (~900 LOC)
-    codex_responses_adapter.py  ← CREATE (~700 LOC)
-    copilot_acp_client.py       ← CREATE (~600 LOC)
-    model_resolver.py           ← MODIFY (register new provider slugs)
-  agent/
     loop.py                     ← MODIFY (add tool_callback param to run() + _dispatch_tool_calls)
   acp/
     events.py                   ← CREATE (~190 LOC)
@@ -52,15 +47,26 @@ opencomputer/
     server.py                   ← MODIFY (add _send_notification + auth middleware + permission hooks)
     session.py                  ← MODIFY (add event_queue + emit_event)
   mcp/
-    server.py                   ← MODIFY (add permissions_list_open + permissions_respond + attachments_fetch)
+    server.py                   ← MODIFY (add attachments_fetch; permissions_respond stays deferred)
+
+extensions/
+  bedrock-provider/
+    plugin.py                   ← CREATE (register(api) → api.register_provider("bedrock", BedrockProvider))
+    bedrock_adapter.py          ← CREATE (format-conversion, ~900 LOC)
+  codex-provider/
+    plugin.py                   ← CREATE (register(api) → api.register_provider("codex", CodexProvider))
+    codex_responses_adapter.py  ← CREATE (~700 LOC)
+  copilot-acp-provider/
+    plugin.py                   ← CREATE (register(api) → api.register_provider("copilot-acp", CopilotACPProvider))
+    copilot_acp_client.py       ← CREATE (~600 LOC)
 
 tests/
   test_credential_pool.py       ← MODIFY (extend)
   test_credential_sources.py    ← CREATE
-  test_bedrock_adapter.py       ← CREATE
-  test_codex_responses_adapter.py ← CREATE
-  test_copilot_acp_client.py    ← CREATE
-  test_mcp_serve.py             ← CREATE
+  test_bedrock_provider.py      ← CREATE (mocks boto3, tests format round-trip)
+  test_codex_provider.py        ← CREATE (tests format conversion)
+  test_copilot_acp_provider.py  ← CREATE (mocks subprocess)
+  test_mcp_serve.py             ← MODIFY (add attachments_fetch test)
   test_acp_events.py            ← CREATE
   test_acp_permissions.py       ← CREATE
 ```
@@ -93,67 +99,68 @@ tests/
 
 ---
 
-### PR 2 — Bedrock + Codex Adapters
+### PR 2 — Bedrock + Codex Provider Plugins
 
-Both expose an OpenAI-compatible `.chat.completions.create()` facade consumed identically by `loop.py`.
+Both are **new plugins in `extensions/`**, following the exact pattern of `extensions/anthropic-provider/` and `extensions/openai-provider/`. Each plugin has a `plugin.py` with `register(api)` and an adapter module. Plugins may only import from `plugin_sdk/` (enforced by `tests/test_phase6a.py`) — the format-conversion logic is self-contained inside each plugin directory.
 
-**Bedrock adapter (`bedrock_adapter.py`):**
-- Uses `boto3` Converse API (already in `pyproject.toml` as `bedrock` optional dep)
-- Strips `hermes_constants` + `hermes_cli.auth` — replaces with OC `config_store` for region/profile
-- Format conversion: OpenAI `messages[]` + `tools[]` → Bedrock `contentBlocks[]` + `toolConfig`
-- Response normalization: Bedrock `output.message` → OpenAI `choices[0].message`
-- Streaming: `converseStream` → yield OpenAI-shaped delta chunks
-- Dynamic model discovery via `list_foundation_models()` control plane call
-- Provider slug: `bedrock/<model-id>` (e.g. `bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0`)
+**`extensions/bedrock-provider/`:**
+- `bedrock_adapter.py` — format conversion module (~900 LOC):
+  - OC `Message[]` + `Tool[]` → Bedrock Converse API `contentBlocks[]` + `toolConfig` and back
+  - Lazy `boto3` import (`pip install opencomputer[bedrock]`)
+  - Strips all `hermes_constants` + `hermes_cli.auth` refs; reads region/profile from env vars directly
+  - Streaming: `converseStream` event-stream → yield `StreamEvent` objects
+- `plugin.py` — `BedrockProvider(BaseProvider)`:
+  - Implements `complete()` + `stream_complete()` delegating to adapter
+  - Reads `AWS_PROFILE` / `AWS_REGION` / `AWS_ACCESS_KEY_ID` from env
+  - `register(api)`: `api.register_provider("bedrock", BedrockProvider)`
 
-**Codex adapter (`codex_responses_adapter.py`):**
-- Pure format-conversion; zero external deps
-- OpenAI Chat `messages[]` → Responses API `input[]` with `input_text` / `input_image` parts
-- Tool calls: `tool_calls[]` → Responses API `function_call` items
-- Inlines `DEFAULT_AGENT_IDENTITY` constant (removes `agent.prompt_builder` import)
-- Provider slug: `codex/<model-id>` (e.g. `codex/codex-mini-latest`)
+**`extensions/codex-provider/`:**
+- `codex_responses_adapter.py` — pure format conversion (~700 LOC):
+  - OC `Message[]` + `Tool[]` → OpenAI Responses API `input[]` items and back
+  - Inlines `DEFAULT_AGENT_IDENTITY` string constant; zero non-stdlib deps
+  - Streaming via `httpx` AsyncClient (already in OC deps)
+- `plugin.py` — `CodexProvider(BaseProvider)`:
+  - Implements `complete()` + `stream_complete()`
+  - Reads `OPENAI_API_KEY` from env
+  - `register(api)`: `api.register_provider("codex", CodexProvider)`
 
-**`model_resolver.py`:** Register `bedrock/` and `codex/` prefixes → return appropriate adapter instance.
+**Tests:** `tests/test_bedrock_provider.py` + `tests/test_codex_provider.py` — format round-trip unit tests (no live API calls). Mock `boto3.client` for Bedrock. No `model_resolver.py` changes needed.
 
-**Tests:** Format-round-trip unit tests (no live AWS/OpenAI calls). Mock `boto3.client` for Bedrock tests.
-
-**Deps:** `boto3` (already optional). No new deps for Codex.
+**Deps:** `boto3` (already optional dep in `pyproject.toml`). `httpx` (already core). No new deps.
 
 ---
 
-### PR 3 — Copilot ACP Adapter
+### PR 3 — Copilot ACP Provider Plugin
 
-**What it does:** Spawns `copilot --acp --stdio` subprocess, speaks JSON-RPC to it, presents OpenAI-compatible facade to OC's agent loop.
+New plugin in `extensions/copilot-acp-provider/`. Spawns `copilot --acp --stdio` subprocess, speaks JSON-RPC to it, wraps as a `BaseProvider`.
 
-**Hermes-internal imports inlined (~15 LOC each):**
-- `agent.file_safety.get_read_block_error` / `is_write_denied` → path-check helpers checking `~/.opencomputer/blocked_paths.txt` (or `OC_BLOCKED_PATHS` env var)
-- `agent.redact.redact_sensitive_text` → regex scrubber stripping `Bearer <token>` / `sk-...` patterns from logged strings
+**`extensions/copilot-acp-provider/`:**
+- `copilot_acp_client.py` (~600 LOC):
+  - Subprocess management: spawn `copilot --acp --stdio`, read/write JSON-RPC over stdio
+  - Drops `agent.file_safety` import (Hermes-internal); replaces with a simple `OC_BLOCKED_PATHS` env-var check (~10 LOC inline)
+  - Drops `agent.redact` import; replaces with `re.sub(r'Bearer\s+\S+', 'Bearer [REDACTED]', ...)` inline
+  - Renames env vars: `OC_COPILOT_ACP_COMMAND` (was `HERMES_COPILOT_ACP_COMMAND`), `OC_COPILOT_ACP_ARGS`
+  - Defaults: `copilot --acp --stdio` (requires `copilot` CLI in `$PATH`)
+- `plugin.py` — `CopilotACPProvider(BaseProvider)`:
+  - Wraps `copilot_acp_client.py` as `complete()` + `stream_complete()`
+  - `register(api)`: `api.register_provider("copilot-acp", CopilotACPProvider)`
 
-**Config:**
-- `OC_COPILOT_ACP_COMMAND` env var (was `HERMES_COPILOT_ACP_COMMAND`)
-- `OC_COPILOT_ACP_ARGS` env var (was `HERMES_COPILOT_ACP_ARGS`)
-- Defaults: `copilot --acp --stdio` (requires `copilot` CLI in `$PATH`)
-
-**Provider slug:** `acp://copilot` registered in `model_resolver.py`.
-
-**Tests:** Mock subprocess with `unittest.mock.patch`. Test JSON-RPC encode/decode, tool call round-trip, timeout handling.
+**Tests:** `tests/test_copilot_acp_provider.py` — mock subprocess. Test JSON-RPC encode/decode, tool call round-trip, timeout.
 
 **Deps:** No new deps. `subprocess` + `threading` from stdlib.
 
 ---
 
-### PR 4 — MCP Serve (complete the existing server)
+### PR 4 — MCP Server: `attachments_fetch`
 
-**Context:** `opencomputer/mcp/server.py` already exists (470 LOC) with 10 tools: `sessions_list`, `session_get`, `messages_read`, `recall_search`, `consent_history`, `channels_list`, `events_poll`, `messages_send`, `messages_send_status`, `events_wait`. The existing file honestly defers `permissions_respond` (needs F1 write-back path). PR 4 closes that gap and adds `attachments_fetch`.
+**Context:** `opencomputer/mcp/server.py` already exists (470 LOC) with 10 tools already shipping. The file honestly defers `permissions_respond` because pending consent requests are in-memory in the live agent process and not accessible from the MCP subprocess. That deferral stays.
 
-**Changes to `opencomputer/mcp/server.py`:**
-- **`permissions_list_open(limit=50)`** — query `consent/store.py` for pending approval requests; returns list of `{id, capability, description, requested_at}`
-- **`permissions_respond(request_id, outcome)`** — write consent decision (`once | always | deny`) back via `consent/gate.py`; validates `outcome` enum before writing
-- **`attachments_fetch(session_id, message_id)`** — reads the file path stored in a message's attachment field; returns base64-encoded content with MIME type
+**Single addition to `opencomputer/mcp/server.py`:**
+- **`attachments_fetch(session_id, message_id)`** — reads the `attachments` JSON column (added 2026-04-27) from the `messages` table; deserializes as `list[str]` of file paths; returns base64-encoded content + MIME type for each path. Returns `[]` if message has no attachments or paths no longer exist.
 
 **No CLI changes needed** — `opencomputer mcp serve` already works via `cli_mcp.py:354`.
 
-**Tests:** Add 3 new test functions to `tests/test_mcp_serve.py`; mock `consent/store.py` and `consent/gate.py`.
+**Tests:** Add 1 new test to `tests/test_mcp_serve.py`; uses an in-memory SQLite DB.
 
 **Deps:** No new deps.
 
