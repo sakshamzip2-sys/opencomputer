@@ -330,3 +330,137 @@ def test_collapsed_line_singular_action_no_plural_s() -> None:
     text = out.getvalue()
     assert re.search(r"\b1 action\b", text), text
     assert "1 actions" not in text
+
+
+# ─── v2: Thinking History UI — collapsed-line summary ────────────────────
+
+
+def test_finalize_collapsed_line_includes_summary_when_available() -> None:
+    """When the inline summary thread completes within the 1.5s join,
+    the collapsed line includes the summary as a bold lead-in."""
+    from unittest.mock import patch
+
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    out = io.StringIO()
+    store = ReasoningStore()
+
+    with patch(
+        "opencomputer.agent.reasoning_summary.generate_summary",
+        return_value="Wrote a haiku about sloths",
+    ):
+        renderer = StreamingRenderer(
+            Console(file=out, force_terminal=False), reasoning_store=store
+        )
+        with renderer:
+            renderer.on_thinking_chunk("let me think about haikus")
+            renderer.finalize(
+                reasoning="let me think about haikus",
+                iterations=1,
+                in_tok=1,
+                out_tok=1,
+                elapsed_s=0.1,
+                show_reasoning=False,
+            )
+    text = out.getvalue()
+    assert "Wrote a haiku about sloths" in text
+    t = store.get_by_id(1)
+    assert t is not None and t.summary == "Wrote a haiku about sloths"
+
+
+def test_finalize_collapsed_line_falls_back_when_summary_unavailable() -> None:
+    """When generate_summary returns None (LLM failure), the collapsed
+    line falls back to today's metadata-only format."""
+    from unittest.mock import patch
+
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    out = io.StringIO()
+    store = ReasoningStore()
+    with patch(
+        "opencomputer.agent.reasoning_summary.generate_summary",
+        return_value=None,
+    ):
+        renderer = StreamingRenderer(
+            Console(file=out, force_terminal=False), reasoning_store=store
+        )
+        with renderer:
+            renderer.on_thinking_chunk("hmm")
+            renderer.finalize(
+                reasoning="hmm",
+                iterations=1,
+                in_tok=1,
+                out_tok=1,
+                elapsed_s=0.1,
+                show_reasoning=False,
+            )
+    text = out.getvalue()
+    assert "Thought for" in text
+    assert "/reasoning show" in text
+    t = store.get_by_id(1)
+    assert t is not None and t.summary is None
+
+
+def test_finalize_skips_summary_when_show_reasoning_true() -> None:
+    """When show_reasoning=True (full panel mode), no summary call —
+    the panel itself is the rich view."""
+    from unittest.mock import patch
+
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    out = io.StringIO()
+    store = ReasoningStore()
+    call_count = {"n": 0}
+
+    def _counting(*args, **kwargs):
+        call_count["n"] += 1
+        return None
+
+    with patch(
+        "opencomputer.agent.reasoning_summary.generate_summary",
+        side_effect=_counting,
+    ):
+        renderer = StreamingRenderer(
+            Console(file=out, force_terminal=False), reasoning_store=store
+        )
+        with renderer:
+            renderer.on_thinking_chunk("x")
+            renderer.finalize(
+                reasoning="x",
+                iterations=1,
+                in_tok=1,
+                out_tok=1,
+                elapsed_s=0.1,
+                show_reasoning=True,
+            )
+    assert call_count["n"] == 0, "summary thread should NOT spawn when show_reasoning=True"
+
+
+def test_finalize_no_summary_thread_when_no_store() -> None:
+    """No store attached → no summary thread (nowhere to write the
+    result back)."""
+    from unittest.mock import patch
+
+    out = io.StringIO()
+    call_count = {"n": 0}
+
+    def _counting(*args, **kwargs):
+        call_count["n"] += 1
+        return None
+
+    with patch(
+        "opencomputer.agent.reasoning_summary.generate_summary",
+        side_effect=_counting,
+    ):
+        renderer = StreamingRenderer(Console(file=out, force_terminal=False))
+        with renderer:
+            renderer.on_thinking_chunk("x")
+            renderer.finalize(
+                reasoning="x",
+                iterations=1,
+                in_tok=1,
+                out_tok=1,
+                elapsed_s=0.1,
+                show_reasoning=False,
+            )
+    assert call_count["n"] == 0

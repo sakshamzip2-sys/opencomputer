@@ -254,7 +254,9 @@ def test_store_update_summary_unknown_id_is_noop():
 
 def test_render_turn_tree_includes_summary_when_present():
     import io
+
     from rich.console import Console
+
     from opencomputer.cli_ui.reasoning_store import render_turn_tree
 
     store = ReasoningStore()
@@ -273,7 +275,9 @@ def test_render_turn_tree_includes_summary_when_present():
 def test_render_turn_tree_omits_summary_line_when_none():
     """No summary → header is just the metadata line."""
     import io
+
     from rich.console import Console
+
     from opencomputer.cli_ui.reasoning_store import render_turn_tree
 
     store = ReasoningStore()
