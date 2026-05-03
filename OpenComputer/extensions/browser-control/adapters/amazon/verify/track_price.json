@@ -1,0 +1,6 @@
+{
+  "args": {"url": "https://www.amazon.com/dp/B08N5WRWNW"},
+  "rowCount": {"min": 0, "max": 1},
+  "columns": ["title", "price", "currency", "in_stock", "url"],
+  "notes": "Browser-required; skip when no Chrome session available."
+}

@@ -4,7 +4,15 @@ Vertically-integrated browser automation. One agent-facing tool
 (`Browser`) backed by a managed Chrome process driven via Playwright /
 CDP. Ports OpenClaw's TypeScript browser plugin into Python; preserves
 its security perimeter; opens a clean seam for Hermes-style alternate
-providers (Browserbase / Firecrawl / Camoufox) that ship in v0.2.
+providers (Browserbase / Firecrawl / Camoufox) that ship in v0.7+.
+
+**v0.4 (Wave 4) adds adapter promotion** — turn a successful Browser
+flow into a permanent, deterministic, agent-callable tool. See the
+[curated starter adapter pack](adapters/README.md) and the
+[adapter-author skill](skills/adapter-author/SKILL.md) for the full
+playbook. Companion plugin: [`adapter-runner`](../adapter-runner/) —
+discovers `@adapter`-decorated recipes and registers each as a synthetic
+`<Site><Name>` tool.
 
 **Always on.** `enabled_by_default: true` is honored at runtime via
 Layer D in `opencomputer/plugins/registry.py` even when a profile uses
@@ -125,8 +133,39 @@ extensions/browser-control/
 ├── tools_core/                # act primitives — click/type/etc. (W2)
 ├── snapshot/                  # ARIA tree + screenshot grid (W1)
 ├── server_context/            # per-profile runtime state (W1)
-└── _utils/                    # atomic_write, errors, trash, ...
+├── _utils/                    # atomic_write, errors, trash, ...
+│
+├── adapters/                  # ⭐ v0.4 — curated starter adapter pack
+│   ├── hackernews/top.py      #   PUBLIC: HN top stories
+│   ├── arxiv/search.py        #   PUBLIC: arXiv search
+│   ├── reddit/hot.py          #   PUBLIC: subreddit hot posts
+│   ├── github/notifications.py # COOKIE/HEADER: GH notifications via token
+│   ├── apple_podcasts/search.py # PUBLIC: iTunes Search API
+│   ├── amazon/track_price.py  #   COOKIE: logged-in product price
+│   ├── cursor_app/recent_files.py # INTERCEPT: Cursor.app via CDP
+│   └── chatgpt_app/new_chat.py # INTERCEPT: ChatGPT desktop via CDP
+│
+└── skills/                    # ⭐ v0.4 — agent-side authoring helper
+    └── adapter-author/SKILL.md
 ```
+
+## v0.4 — adapter promotion (Wave 4)
+
+Eight new actions on top of the v0.3 surface, plus a companion plugin:
+
+| Action | Purpose |
+|---|---|
+| `network_start` / `network_list` / `network_detail` | Live capture + replay |
+| `resource_timing` | Read `performance.getEntriesByType('resource')` from page (THE killer recon move) |
+| `analyze` | One-shot site recon — pattern + candidate endpoints + neighbors |
+| `adapter_new` / `adapter_save` | Scaffold or save a recipe |
+| `adapter_validate` | Static checks |
+| `verify` | Run an adapter against its `verify/<name>.json` fixture |
+
+The `adapter-runner` plugin (sibling dir) discovers `@adapter`-decorated
+modules and registers each as a synthetic `<Site><Name>` tool. The
+[adapter-author skill](skills/adapter-author/SKILL.md) is the playbook;
+the [bundled starter pack](adapters/README.md) is the reference.
 
 ## Migration from the legacy 5+6 tools
 

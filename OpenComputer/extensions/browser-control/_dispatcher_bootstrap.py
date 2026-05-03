@@ -382,7 +382,14 @@ def _build_default_profile_driver() -> Any:
         await stop_openclaw_chrome(running)
 
     async def _spawn_chrome_mcp(profile: ResolvedBrowserProfile) -> Any:
-        return await spawn_chrome_mcp(profile)
+        # spawn_chrome_mcp is keyword-only — passing the profile positionally
+        # crashes with "takes 0 positional arguments but 1 was given". Extract
+        # the relevant fields and pass as kwargs. (Wave 4 hotfix — surfaced
+        # when the agent first exercised the existing-session/user profile.)
+        return await spawn_chrome_mcp(
+            profile_name=profile.name,
+            user_data_dir=str(profile.user_data_dir) if profile.user_data_dir else None,
+        )
 
     async def _close_chrome_mcp(client: Any) -> None:
         close = getattr(client, "close", None) or getattr(client, "aclose", None)

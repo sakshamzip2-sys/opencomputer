@@ -1,0 +1,6 @@
+{
+  "args": {},
+  "rowCount": {"min": 0, "max": 1},
+  "columns": ["status", "url"],
+  "notes": "Requires ChatGPT desktop running with --remote-debugging-port. Skip in CI."
+}

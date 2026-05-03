@@ -1,0 +1,10 @@
+{
+  "args": {"subreddit": "programming", "limit": 5},
+  "rowCount": {"min": 1, "max": 5},
+  "columns": ["rank", "title", "score", "author", "comments", "subreddit", "url"],
+  "patterns": {
+    "url": "^https?://www\\.reddit\\.com/",
+    "rank": "^[0-9]+$"
+  },
+  "notEmpty": ["title", "url", "subreddit"]
+}

@@ -31,6 +31,7 @@ _AMBIENT_DIR = _EXT_DIR / "ambient-sensors"
 _SKILL_EVO_DIR = _EXT_DIR / "skill-evolution"
 _VOICE_MODE_DIR = _EXT_DIR / "voice-mode"
 _BROWSER_CONTROL_DIR = _EXT_DIR / "browser-control"
+_ADAPTER_RUNNER_DIR = _EXT_DIR / "adapter-runner"
 _AFFECT_INJECTION_DIR = _EXT_DIR / "affect-injection"
 _OPENAI_PROVIDER_DIR = _EXT_DIR / "openai-provider"
 _GEMINI_PROVIDER_DIR = _EXT_DIR / "gemini-provider"
@@ -260,6 +261,36 @@ def _register_browser_control_alias() -> None:
     )
 
 
+def _register_adapter_runner_alias() -> None:
+    """Eager-exec + parent-binding for the Wave 4 adapter-runner plugin.
+
+    Mirrors browser-control's pattern: synthesise the underscore alias
+    so adapter modules + tests can do
+    ``from extensions.adapter_runner import adapter, Strategy``.
+    Submodules use the leading-underscore pattern to avoid sys.modules
+    collisions with sibling plugins.
+    """
+    _register_extension_alias(
+        "adapter_runner", _ADAPTER_RUNNER_DIR,
+        submodules=(
+            "_strategy", "_decorator", "_site_memory", "_ctx",
+            "_runner", "_discovery", "_validation", "_trace",
+            "_verify", "plugin",
+        ),
+    )
+    # adapter_runner's __init__.py has public re-exports (adapter, Strategy,
+    # clear_registry_for_tests, register_adapter_pack). The helper loads
+    # named submodules but doesn't execute the package's __init__, so those
+    # symbols never get bound on the package. Force-exec it now.
+    init_file = _ADAPTER_RUNNER_DIR / "__init__.py"
+    if init_file.exists():
+        package = sys.modules.get("extensions.adapter_runner")
+        if package is not None:
+            with open(init_file, encoding="utf-8") as f:
+                code = compile(f.read(), str(init_file), "exec")
+            exec(code, package.__dict__)
+
+
 def _register_affect_injection_alias() -> None:
     """Eager-exec + parent-binding."""
     _register_extension_alias(
@@ -317,6 +348,7 @@ try:
 except ModuleNotFoundError as _e:
     if "fastapi" not in str(_e):
         raise
+_register_adapter_runner_alias()
 _register_affect_injection_alias()
 _register_screen_awareness_alias()
 _register_ollama_provider_alias()
