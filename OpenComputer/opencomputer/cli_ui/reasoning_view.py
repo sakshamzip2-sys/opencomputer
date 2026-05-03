@@ -47,10 +47,8 @@ from __future__ import annotations
 
 import json
 
-from rich.box import ROUNDED
 from rich.console import Console, ConsoleOptions, RenderResult
 from rich.padding import Padding
-from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 from rich.tree import Tree
@@ -515,29 +513,31 @@ class ReasoningView:
 
         return tree
 
-    def render_collapsed(self) -> Panel:
-        """Collapsed-card form. Matches v6 PR #395 layout exactly so
-        the on-screen appearance during normal operation is preserved.
-        """
-        return Panel(
-            self.render_trigger(),
-            box=ROUNDED,
-            border_style="grey50",
-            padding=(0, 2),
-            expand=False,
-        )
+    def render_collapsed(self) -> Text:
+        """Collapsed form — inline dim text, no Panel box.
 
-    def render_expanded(self) -> Panel:
-        """Expanded-card form. The trigger sits on the panel border;
-        content (markdown + tools) fills the body.
+        Matches the visual idiom of the Sources trigger
+        (``cli_ui/sources.py`` ``_render_trigger``): a single line of
+        dim styled text with a chevron at the end. The boxed Panel
+        wrapper used pre-2026-05-03 made the reasoning summary look
+        like a UI control (read: the boxed user-input prompt) when
+        it should read like a quiet inline annotation. Removing the
+        box brings the collapsed reasoning summary in line with how
+        Sources renders its header — dim, inline, no chrome.
         """
-        return Panel(
-            self.render_content(),
-            box=ROUNDED,
-            border_style="grey50",
-            padding=(0, 2),
-            expand=False,
-        )
+        return self.render_trigger()
+
+    def render_expanded(self) -> Tree:
+        """Expanded form — Tree without the Panel chrome.
+
+        Same de-boxing rationale as :meth:`render_collapsed`. The
+        Tree's guide lines already provide enough visual hierarchy
+        to mark this as a reasoning subtree; a Panel border around
+        it adds noise the user explicitly flagged. ``/reasoning
+        show <N>`` retroactively re-renders any past turn in this
+        same form.
+        """
+        return self.render_content()
 
     def __rich__(self):
         """Rich renderable dispatch — collapsed when ``open=False``

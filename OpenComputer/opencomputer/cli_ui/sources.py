@@ -308,25 +308,15 @@ def rewrite_inline_url_refs(text: str, registry: SourcesRegistry) -> str:
 _TRIGGER_DOMAIN_PEEK = 3
 
 
-def _render_trigger(
-    sources: list[Source],
-    *,
-    is_open: bool,
-    show_expand_hint: bool = True,
-) -> Text:
-    """Port of <SourcesTrigger> — ``📖 Used N sources [domains] ›  /sources``.
+def _render_trigger(sources: list[Source], *, is_open: bool) -> Text:
+    """Port of <SourcesTrigger> — ``📖 Used N sources [domains] ⌄/›``.
 
-    Visual hierarchy mirrors the reference's Collapsible trigger: book
-    glyph, count, optional domain peek, chevron, and a discoverable
-    hint pointing at the ``/sources`` slash command (the actual
-    interactive primitive — see the renderer docstring for the
-    constraint).
-
-    Each domain in the peek carries an OSC 8 hyperlink to its source
-    URL — terminals that support hyperlinks (iTerm2, Ghostty, Wezterm,
-    GNOME Terminal, modern Konsole) let the user cmd-click a domain to
-    open it directly without expanding the block. Terminals that don't
-    support OSC 8 silently render plain text; no degradation.
+    Acts as a header above the per-source list when ``is_open`` (the
+    default — see render_sources_block). Each domain in the peek is
+    OSC 8 hyperlinked to its source URL so cmd-click opens the source
+    in the browser (iTerm2 / Ghostty / Wezterm / GNOME Terminal /
+    modern Konsole). Terminals that don't support OSC 8 silently
+    render plain text; no degradation.
     """
     n = len(sources)
     trigger = Text()
@@ -357,13 +347,6 @@ def _render_trigger(
 
     trigger.append("  ", style="")
     trigger.append("⌄" if is_open else "›", style="dim")
-
-    # Hint at the slash command — the actual mechanism for retroactive
-    # expansion. Mirrors how /reasoning show works for the thinking card.
-    if show_expand_hint and not is_open:
-        trigger.append("  ", style="")
-        trigger.append("/sources to expand", style="dim italic")
-
     return trigger
 
 
@@ -387,32 +370,34 @@ def render_sources_block(
     console: Console,
     sources: list[Source],
     *,
-    open: bool = False,                   # noqa: A002 — mirror AI Elements
+    open: bool = True,                    # noqa: A002 — mirror AI Elements
 ) -> None:
     """Render the Sources block to the console.
 
-    **Default is collapsed** — matches AI Elements' Collapsible (``open``
-    is unset → false on shadcn). One-line dropdown trigger:
-
-        📖 Used 3 sources  [indianexpress.com, pcquest.com, reuters.com]  ›
-
-    Pass ``open=True`` for the full expanded list:
+    **Default is expanded** (``open=True``) — the structured per-source
+    list is the value we're delivering, so we show it without making
+    the user reach for a slash command. Trigger sits above as a
+    header:
 
         📖 Used 3 sources  [indianexpress.com, pcquest.com, reuters.com]  ⌄
          1 indianexpress.com  ·  India's Q1 GDP up 8.4%
          2 pcquest.com        ·  AI in Indian fintech 2026 review
          3 reuters.com        ·  RBI policy ahead
 
-    Click-to-expand on the chevron itself isn't wired — Rich's
-    ``console.print`` produces immutable scrollback (the printed bytes
-    aren't re-readable by the renderer once Live has stopped at
-    finalize). The actual interactive primitive is the ``/sources``
-    slash command, mirroring how the reasoning card uses
-    ``/reasoning show`` for retroactive expansion. The trigger surfaces
-    that hint inline so it's discoverable. Empty list → no-op.
+    Pass ``open=False`` for the collapsed-only state (header alone, no
+    rows) — useful from inside other components that handle their own
+    expansion / deferred render. The default behaviour at finalize
+    always renders expanded.
 
-    Title cell carries an OSC 8 hyperlink to the URL when the terminal
-    supports it (Rich emits the escape sequence; ignored elsewhere).
+    Click-to-toggle the chevron isn't wired — Rich's ``console.print``
+    produces immutable scrollback once Live has stopped, so retroactive
+    re-render of a past turn (e.g. one that scrolled off-screen) goes
+    through the ``/sources`` slash command, mirroring how the reasoning
+    card uses ``/reasoning show``. Empty list → no-op.
+
+    Each domain in the trigger header carries an OSC 8 hyperlink to its
+    source URL so cmd-click opens it directly in the browser. Each row
+    title also OSC 8 hyperlinks to its URL.
     """
     if not sources:
         return
