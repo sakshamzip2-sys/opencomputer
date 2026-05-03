@@ -141,6 +141,8 @@ browser = [
   # Browser-port subsystems:
   "send2trash>=1.8",   # cross-platform trash for profile reset/delete (W0a)
   "websockets>=12",    # CDP WS handshake check (W0c lifecycle.is_chrome_cdp_ready)
+  "fastapi>=0.110",    # HTTP control surface (W2b)
+  "uvicorn>=0.27",     # ASGI runner for FastAPI (W2b)
 ]
 
 [project.scripts]

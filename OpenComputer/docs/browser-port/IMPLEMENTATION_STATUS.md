@@ -4,7 +4,7 @@
 >
 > Authoritative design: [BLUEPRINT.md](BLUEPRINT.md). Reference material: [docs/refs/openclaw/browser/](../refs/openclaw/browser/).
 >
-> Last updated: 2026-05-03 by s3 (Wave 1 review — W1a/W1b/W1c bundled on `feat/browser-port-wave1`; PR pending).
+> Last updated: 2026-05-03 by s4 (Wave 2 review — W2a/W2b bundled on `feat/browser-port-wave2`; PR pending).
 
 ---
 
@@ -31,14 +31,14 @@ If a row is `blocked`, write **what** it's blocked on in the row so other sessio
 
 | # | Subsystem | Brief | Wave | Depends on | Owner | Branch | Status | PR | Notes |
 |---|---|---|---|---|---|---|---|---|---|
-| W0a | `_utils/` | [BRIEF-utils](BRIEF-utils.md) | 0 | — | s2 | feat/browser-port-foundation | review | [#392](https://github.com/sakshamzip2-sys/opencomputer/pull/392) | 24 tests; atomic_write fsync verified |
-| W0b | `profiles/` | [BRIEF-01](BRIEF-01-chrome-and-profiles.md) | 0 | — | s2 | feat/browser-port-foundation | review | [#392](https://github.com/sakshamzip2-sys/opencomputer/pull/392) | 41 tests; pull-based resolver + capabilities |
-| W0c | `chrome/` | [BRIEF-01](BRIEF-01-chrome-and-profiles.md) | 0 | `profiles/`, `_utils/` | s2 | feat/browser-port-foundation | review | [#392](https://github.com/sakshamzip2-sys/opencomputer/pull/392) | 39 tests; mocked spawn+probe; legacy no-egress guard rescoped |
-| W1a | `session/` | [BRIEF-02](BRIEF-02-cdp-and-session.md) | 1 | `chrome/` | s3 | feat/browser-port-wave1 | review | [#392](https://github.com/sakshamzip2-sys/opencomputer/pull/392) | 73 tests; CDP dedup + retry, force-disconnect, role-ref LRU, nav guard |
-| W1b | `snapshot/` | [BRIEF-04](BRIEF-04-ai-and-snapshot.md) | 1 | `_utils/` | s3 | feat/browser-port-wave1 | review | [#392](https://github.com/sakshamzip2-sys/opencomputer/pull/392) | 35 tests; Path 2 (aria) + Path 3 (Chrome MCP), 7×6 screenshot grid |
-| W1c | `server_context/` | [BRIEF-05](BRIEF-05-server-and-auth.md) | 1 | `chrome/`, `profiles/` | s3 | feat/browser-port-wave1 | review | [#392](https://github.com/sakshamzip2-sys/opencomputer/pull/392) | 37 tests; ProfileDriver injection, last_target_id fallback chain |
-| W2a | `tools_core/` | [BRIEF-03](BRIEF-03-pw-tools-core.md) (TBD) | 2 | `session/` | — | — | not started | — | the workhorse; densest subsystem |
-| W2b | `server/` | [BRIEF-05](BRIEF-05-server-and-auth.md) (TBD) | 2 | `session/`, `snapshot/`, `server_context/` | — | — | not started | — | HTTP server, auth, routes, dispatcher |
+| W0a | `_utils/` | [BRIEF-utils](BRIEF-utils.md) | 0 | — | s2 | feat/browser-port-foundation | merged | [#376](https://github.com/sakshamzip2-sys/opencomputer/pull/376) | 24 tests; atomic_write fsync verified |
+| W0b | `profiles/` | [BRIEF-01](BRIEF-01-chrome-and-profiles.md) | 0 | — | s2 | feat/browser-port-foundation | merged | [#376](https://github.com/sakshamzip2-sys/opencomputer/pull/376) | 41 tests; pull-based resolver + capabilities |
+| W0c | `chrome/` | [BRIEF-01](BRIEF-01-chrome-and-profiles.md) | 0 | `profiles/`, `_utils/` | s2 | feat/browser-port-foundation | merged | [#376](https://github.com/sakshamzip2-sys/opencomputer/pull/376) | 39 tests; mocked spawn+probe; legacy no-egress guard rescoped |
+| W1a | `session/` | [BRIEF-02](BRIEF-02-cdp-and-session.md) | 1 | `chrome/` | s3 | feat/browser-port-wave1 | merged | [#392](https://github.com/sakshamzip2-sys/opencomputer/pull/392) | 73 tests; CDP dedup + retry, force-disconnect, role-ref LRU, nav guard |
+| W1b | `snapshot/` | [BRIEF-04](BRIEF-04-ai-and-snapshot.md) | 1 | `_utils/` | s3 | feat/browser-port-wave1 | merged | [#392](https://github.com/sakshamzip2-sys/opencomputer/pull/392) | 35 tests; Path 2 (aria) + Path 3 (Chrome MCP), 7×6 screenshot grid |
+| W1c | `server_context/` | [BRIEF-05](BRIEF-05-server-and-auth.md) | 1 | `chrome/`, `profiles/` | s3 | feat/browser-port-wave1 | merged | [#392](https://github.com/sakshamzip2-sys/opencomputer/pull/392) | 37 tests; ProfileDriver injection, last_target_id fallback chain |
+| W2a | `tools_core/` | [BRIEF-03](BRIEF-03-pw-tools-core.md) | 2 | `session/` | s4 | feat/browser-port-wave2 | review | [#396](https://github.com/sakshamzip2-sys/opencomputer/pull/396) | 96 tests; per-act-kind dispatch + 3-phase nav-guard observer |
+| W2b | `server/` | [BRIEF-05](BRIEF-05-server-and-auth.md) | 2 | `session/`, `snapshot/`, `server_context/` | s4 | feat/browser-port-wave2 | review | [#396](https://github.com/sakshamzip2-sys/opencomputer/pull/396) | 82 tests; ~46 routes, auth, CSRF, in-process dispatcher |
 | W3 | `client/` + `tools.py` + `plugin.py` + e2e | [BRIEF-06](BRIEF-06-client-and-utils.md) (TBD) | 3 | all | — | — | not started | — | wiring + integration tests |
 | W4 | `providers/base.py` + retrofit | (deferred) | 4 | W3 done | — | — | not started | — | Hermes seam; post-v0.1 |
 
