@@ -12,8 +12,20 @@ import logging
 
 import pytest
 
-from opencomputer.ingestion.bus import get_default_bus
+from opencomputer.ingestion.bus import get_default_bus, reset_default_bus
 from plugin_sdk.ingestion import TurnCompletedEvent
+
+
+@pytest.fixture(autouse=True)
+def _reset_bus():
+    """Reset the module-global default bus before EACH test in this file.
+
+    Other tests in the suite leave subscribers attached; cross-test
+    leakage causes assertion drift here because we're checking caplog
+    output that's tied to subscriber-added log lines."""
+    reset_default_bus()
+    yield
+    reset_default_bus()
 
 
 @pytest.mark.asyncio
@@ -23,11 +35,17 @@ async def test_honcho_subscriber_receives_turn_completed_event(caplog):
     sys.path.insert(0, "extensions/memory-honcho")
     from provider import HonchoSelfHostedProvider
 
+    # Set propagating root-logger level BEFORE the subscriber registers,
+    # so caplog captures the INFO-level event log regardless of which
+    # logger instance the provider module ended up bound to (different
+    # qualifying paths produce distinct logger instances in some
+    # full-suite import orders).
+    caplog.set_level(logging.INFO)
+
     provider = HonchoSelfHostedProvider()
     bus = get_default_bus()
     sub = provider.subscribe_to_outcome_events(bus)
 
-    caplog.set_level(logging.INFO, logger="memory-honcho")
     evt = TurnCompletedEvent(
         session_id="sess_1",
         source="gateway.dispatch",
