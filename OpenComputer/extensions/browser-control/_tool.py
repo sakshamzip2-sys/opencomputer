@@ -609,6 +609,66 @@ def _render_adapter_stub(
     )
 
 
+def _ensure_adapter_runner_namespace() -> None:
+    """Eagerly bootstrap ``extensions.adapter_runner`` before importing it.
+
+    Bug 1 fix — ``Browser(action="adapter_validate")`` and
+    ``adapter_save`` import ``extensions.adapter_runner._validation``
+    (and friends) and then ``_import_adapter_file()`` exec's a user
+    adapter file whose first line reads
+    ``from extensions.adapter_runner import adapter, Strategy``. Both
+    paths require the hyphenated-on-disk plugin dir to be reachable
+    via the underscore module name. The adapter-runner plugin's
+    ``register()`` does this at boot, but ``_tool.py`` may run before
+    that plugin loaded (load order isn't guaranteed) — so we
+    self-bootstrap here. Idempotent.
+
+    Mirrors ``extensions/adapter-runner/plugin.py::_bootstrap_package_namespace``
+    but kept self-contained (no ``from extensions.adapter_runner...``
+    import) so it works even when the alias isn't registered yet.
+    """
+    import sys
+    import types
+    from pathlib import Path
+
+    # ``extensions/browser-control/_tool.py`` → walk up two parents to
+    # reach ``extensions/`` then into the sibling adapter-runner plugin.
+    extensions_root = Path(__file__).resolve().parent.parent
+    plugin_root = extensions_root / "adapter-runner"
+    if not plugin_root.is_dir():
+        return  # plugin missing on disk — nothing to bootstrap
+
+    extensions_root_str = str(extensions_root)
+    if extensions_root_str not in sys.path:
+        sys.path.insert(0, extensions_root_str)
+
+    if "extensions" not in sys.modules:
+        parent = types.ModuleType("extensions")
+        parent.__path__ = [extensions_root_str]
+        parent.__package__ = "extensions"
+        sys.modules["extensions"] = parent
+
+    pkg = sys.modules.get("extensions.adapter_runner")
+    if pkg is None:
+        pkg = types.ModuleType("extensions.adapter_runner")
+        pkg.__path__ = [str(plugin_root)]
+        pkg.__package__ = "extensions.adapter_runner"
+        sys.modules["extensions.adapter_runner"] = pkg
+        sys.modules["extensions"].adapter_runner = pkg  # type: ignore[attr-defined]
+
+    if not hasattr(pkg, "adapter"):
+        init_file = plugin_root / "__init__.py"
+        if init_file.is_file():
+            try:
+                source = init_file.read_text(encoding="utf-8")
+                code = compile(source, str(init_file), "exec")
+                exec(code, pkg.__dict__)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "adapter-runner namespace bootstrap failed: %s", exc
+                )
+
+
 def _do_adapter_save(args: dict[str, Any]) -> dict[str, Any]:
     """Replay last successful flow as a recipe; write Python module to disk.
 
@@ -618,7 +678,15 @@ def _do_adapter_save(args: dict[str, Any]) -> dict[str, Any]:
     populated with the user-provided ``run_body`` string. The agent
     that just figured out a flow can pass the JS / fetch sequence it
     used as the body.
+
+    Bug 2 fix — after writing the adapter file, eagerly import it so
+    the ``@adapter`` decorator runs and the spec lands in the
+    process-wide registry, then promote the spec to a callable tool
+    via ``register_adapter_at_runtime``. The new tool is callable in
+    the same session; ``tool_name`` (or ``already_registered`` /
+    ``register_error``) is bubbled up so the agent knows what to call.
     """
+    _ensure_adapter_runner_namespace()
     site = _required(args, "site")
     name = _required(args, "name")
     body = _opt_str(args.get("run_body"))
@@ -666,11 +734,50 @@ def _do_adapter_save(args: dict[str, Any]) -> dict[str, Any]:
         + '\n'
     )
     target.write_text(source)
-    return {"path": str(target)}
+
+    out: dict[str, Any] = {"path": str(target)}
+
+    # ── hot-reload (Bug 2): import the file so the decorator runs +
+    # promote the spec to a synthetic tool on the live PluginAPI. The
+    # agent can then invoke ``<Site><Name>`` in this same session.
+    try:
+        from extensions.adapter_runner._decorator import (  # type: ignore[import-not-found]
+            get_adapter,
+        )
+        from extensions.adapter_runner._discovery import (  # type: ignore[import-not-found]
+            _import_adapter_file,
+        )
+        from extensions.adapter_runner.plugin import (  # type: ignore[import-not-found]
+            register_adapter_at_runtime,
+        )
+    except ImportError as exc:
+        out["hot_reload"] = {
+            "registered": False,
+            "reason": f"adapter-runner not importable: {exc}",
+        }
+        return out
+
+    import_err = _import_adapter_file(target, prefix="hotreload")
+    if import_err:
+        out["hot_reload"] = {"registered": False, "reason": import_err}
+        return out
+    spec = get_adapter(site, name)
+    if spec is None:
+        out["hot_reload"] = {
+            "registered": False,
+            "reason": (
+                f"adapter file imported but no spec for ({site}, {name}) "
+                "landed in the registry — check the @adapter decorator"
+            ),
+        }
+        return out
+    out["hot_reload"] = register_adapter_at_runtime(spec)
+    return out
 
 
 def _do_adapter_validate(args: dict[str, Any]) -> dict[str, Any]:
     """Static checks on a saved adapter source file."""
+    _ensure_adapter_runner_namespace()
     path = _required(args, "path")
     skip_import = bool(args.get("skip_import", False))
     from pathlib import Path

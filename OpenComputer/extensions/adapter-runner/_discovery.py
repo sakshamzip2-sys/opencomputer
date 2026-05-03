@@ -119,13 +119,32 @@ def _walk_python_files(root: Path) -> list[Path]:
     return out
 
 
+#: Canonical-path → synthetic-mod-name. Lets the per-prefix call sites
+#: (bundled/plugins/user/validate/hotreload) coexist without re-running
+#: the ``@adapter`` decorator twice on the same file — the second call
+#: would raise the duplicate-source-path ``ValueError`` from the
+#: decorator. Cleared by ``clear_registry_for_tests``.
+_PATH_INDEX: dict[str, str] = {}
+
+
 def _import_adapter_file(path: Path, *, prefix: str) -> str | None:
     """Import a single adapter ``.py`` under a synthetic unique name.
 
     Returns a human-readable error string on failure, or None on
-    success. Idempotent: re-importing the same path on the same
-    process is a no-op (sys.modules cache hit).
+    success. Idempotent on two axes:
+
+      - Same ``(path, prefix)`` pair → ``sys.modules`` cache hit.
+      - Same ``path`` under a different prefix → ``_PATH_INDEX`` hit
+        (avoids re-running ``@adapter`` and tripping the duplicate
+        source-path guard).
     """
+    # Resolve to canonical path so the path-keyed cache catches relative
+    # vs absolute and via-symlink calls as the same file.
+    canonical = str(path.resolve()) if path.exists() else str(path)
+    cached_mod = _PATH_INDEX.get(canonical)
+    if cached_mod is not None and cached_mod in sys.modules:
+        return None  # already imported under any prefix
+
     # Synthetic module name: ``oc_adapter.<prefix>.<relative-path-with-dots>``
     # so ``bundled/hackernews/top.py`` becomes
     # ``oc_adapter.bundled.hackernews.top``. Slashes → dots, drop ``.py``.
@@ -141,6 +160,7 @@ def _import_adapter_file(path: Path, *, prefix: str) -> str | None:
         f"oc_adapter.{prefix}.__root__"
     )
     if mod_name in sys.modules:
+        _PATH_INDEX[canonical] = mod_name
         return None  # already imported
 
     spec = importlib.util.spec_from_file_location(mod_name, str(path))
@@ -155,6 +175,7 @@ def _import_adapter_file(path: Path, *, prefix: str) -> str | None:
         sys.modules.pop(mod_name, None)
         _log.warning("Failed to import adapter %s: %s", path, exc)
         return f"{path}: {exc!r}"
+    _PATH_INDEX[canonical] = mod_name
     return None
 
 

@@ -320,6 +320,14 @@ def clear_registry_for_tests() -> None:
     for key in list(sys.modules):
         if key.startswith("oc_adapter."):
             sys.modules.pop(key, None)
+    # Also wipe the path-keyed import cache so tests that re-use the
+    # same file path (with different bodies) re-trigger the import.
+    try:
+        from ._discovery import _PATH_INDEX
+
+        _PATH_INDEX.clear()
+    except ImportError:
+        pass
 
 
 __all__ = [

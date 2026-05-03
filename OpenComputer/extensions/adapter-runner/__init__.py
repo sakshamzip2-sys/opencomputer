@@ -33,8 +33,21 @@ __all__ = [
     "clear_registry_for_tests",
     "get_adapter",
     "get_registered_adapters",
+    "register_adapter_at_runtime",
     "register_adapter_pack",
 ]
+
+
+def register_adapter_at_runtime(spec):  # type: ignore[no-untyped-def]
+    """Hot-reload entrypoint — see ``plugin.register_adapter_at_runtime``.
+
+    Re-exported here so ``Browser(action="adapter_save")`` can call it
+    via ``from extensions.adapter_runner import register_adapter_at_runtime``
+    without poking at the plugin module directly.
+    """
+    from .plugin import register_adapter_at_runtime as _impl
+
+    return _impl(spec)
 
 
 def register_adapter_pack(api, *, adapters_dir):
