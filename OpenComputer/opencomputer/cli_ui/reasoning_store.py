@@ -39,6 +39,12 @@ class ReasoningTurn:
     thinking: str
     duration_s: float
     tool_actions: tuple[ToolAction, ...] = field(default_factory=tuple)
+    summary: str | None = None
+    """LLM-generated one-line description of this turn's intent
+    (e.g. "Wrote a haiku about sloths"). Set asynchronously after
+    :meth:`ReasoningStore.append` by a daemon thread (see
+    :mod:`opencomputer.agent.reasoning_summary`); may remain ``None``
+    if the summary call timed out, was empty, or failed."""
 
     @property
     def action_count(self) -> int:
@@ -48,9 +54,10 @@ class ReasoningTurn:
 class ReasoningStore:
     """Append-only ring buffer of :class:`ReasoningTurn`.
 
-    Thread-safety: NOT thread-safe. The CLI chat loop is single-threaded
-    so this is fine; if a future caller needs concurrent appends, wrap
-    accesses with a lock.
+    Thread-safety: the CLI chat loop is single-threaded for appends.
+    :meth:`update_summary` may be called from a daemon thread, but it
+    targets a specific turn_id (different slot than the next append)
+    and uses :func:`dataclasses.replace` for atomic-replace semantics.
     """
 
     def __init__(self, max_turns: int = _DEFAULT_MAX_TURNS) -> None:
@@ -94,6 +101,24 @@ class ReasoningStore:
         """
         return self._next_id
 
+    def update_summary(self, *, turn_id: int, summary: str) -> None:
+        """Set the summary on a previously-appended turn.
+
+        Called from a background daemon thread (see
+        :mod:`opencomputer.agent.reasoning_summary`); safe because the
+        frozen dataclass is replaced wholesale via
+        :func:`dataclasses.replace` (atomic swap, no in-place mutation).
+
+        Unknown ``turn_id`` is a silent no-op — the turn may have been
+        evicted by the time the summary call returned (slow LLM + chatty
+        session past the 50-turn cap).
+        """
+        from dataclasses import replace
+        for i, t in enumerate(self._turns):
+            if t.turn_id == turn_id:
+                self._turns[i] = replace(t, summary=summary)
+                return
+
 
 def _fmt_duration(seconds: float) -> str:
     """Match streaming.py's duration formatter."""
@@ -116,7 +141,7 @@ def render_turn_tree(turn: ReasoningTurn) -> Tree:
     placeholder child so users see the structure, not just a header.
     """
     s = "" if turn.action_count == 1 else "s"
-    header = Text.assemble(
+    metadata = Text.assemble(
         ("💭 ", "dim cyan"),
         (f"Turn #{turn.turn_id}", "bold cyan"),
         ("  ·  ", "dim"),
@@ -124,6 +149,15 @@ def render_turn_tree(turn: ReasoningTurn) -> Tree:
         ("  ·  ", "dim"),
         (f"{turn.action_count} action{s}", "dim cyan"),
     )
+    if turn.summary:
+        # Lead with the AI-generated summary; metadata on a second line.
+        header = Text.assemble(
+            (turn.summary, "bold"),
+            ("\n", ""),
+            metadata,
+        )
+    else:
+        header = metadata
     tree = Tree(header, guide_style="grey50")
 
     if turn.thinking:

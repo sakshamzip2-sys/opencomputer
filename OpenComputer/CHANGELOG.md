@@ -4,6 +4,10 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Thinking History UI v2: AI Summaries
+
+The collapsed thinking-history line and the expanded `/reasoning show` tree now lead with a Haiku-generated one-line summary of what the AI did each turn (e.g. "Wrote a haiku about sloths · turn #5 · 3 actions — /reasoning show to expand"). Generated via a daemon thread with a 1.5s join cap; falls back gracefully to the metadata-only format on slow/failed summarization while still writing the summary to the store asynchronously for later `/reasoning show <N>` access. Pattern ported wholesale from `title_generator.py`. Adds `ReasoningTurn.summary: str | None` field + `ReasoningStore.update_summary(turn_id, summary)` method (atomic-replace via `dataclasses.replace`).
+
 ### Added — Reasoning Dropdown v2
 
 `/reasoning show` finally works retroactively — expands the most recent thinking block instead of only affecting the next turn (the long-standing UX bug from PR #266). New `/reasoning show <N>` and `/reasoning show all` retrieve any past turn from a per-session in-memory `ReasoningStore` (capped to 50 turns, FIFO eviction). Output renders as a Rich Tree showing the reasoning text and the **full** sequence of tool actions taken — no longer capped at the 3 visible in the live panel. New `Ctrl+X Ctrl+R` chord triggers `/reasoning show` without typing. Collapsed line now shows turn id + action count: `💭 Thought for 0.8s · turn #5 · 3 actions — /reasoning show to expand`.
