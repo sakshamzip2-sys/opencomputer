@@ -49,6 +49,7 @@ from opencomputer.agent.slash_commands_impl.policy import (
     PolicyChangesCommand,
     PolicyMetricsCommand,
     PolicyRevertCommand,
+    PolicyToolRiskCommand,
 )
 from opencomputer.agent.slash_commands_impl.profile_suggest_cmd import (
     ProfileSuggestCommand,
@@ -114,6 +115,7 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     PolicyApproveCommand,
     PolicyRevertCommand,
     PolicyMetricsCommand,
+    PolicyToolRiskCommand,
 )
 
 

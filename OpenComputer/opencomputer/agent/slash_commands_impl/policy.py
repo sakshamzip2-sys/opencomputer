@@ -304,11 +304,50 @@ class PolicyMetricsCommand(SlashCommand):
         return SlashCommandResult(output="\n".join(lines), handled=True)
 
 
+class PolicyToolRiskCommand(SlashCommand):
+    name = "policy-tool-risk"
+    description = "Per-tool risk signals: error rate + self-cancel rate"
+
+    async def execute(
+        self, args: str, runtime: RuntimeContext,
+    ) -> SlashCommandResult:
+        from opencomputer.evolution.tool_risk import compute_tool_risk
+
+        db, _ = _resolve_db_and_key(runtime)
+        days = 7
+        parts = args.strip().split()
+        if "--days" in parts:
+            try:
+                days = int(parts[parts.index("--days") + 1])
+            except (IndexError, ValueError):
+                pass
+
+        rows = compute_tool_risk(db, days=days)
+        if not rows:
+            return SlashCommandResult(
+                output=f"No tool_usage in last {days}d.", handled=True,
+            )
+
+        lines = [
+            f"Tool risk (last {days} days):",
+            f"{'tool':<24} {'calls':>6} {'err%':>6} {'cancel%':>8} {'avg ms':>8}",
+        ]
+        for r in rows:
+            lines.append(
+                f"{r.tool:<24} {r.n_calls:>6} "
+                f"{r.error_rate * 100:>5.1f}% "
+                f"{r.self_cancel_rate * 100:>7.1f}% "
+                f"{r.mean_duration_ms:>8.0f}"
+            )
+        return SlashCommandResult(output="\n".join(lines), handled=True)
+
+
 __all__ = [
     "PolicyApproveCommand",
     "PolicyChangesCommand",
     "PolicyMetricsCommand",
     "PolicyRevertCommand",
+    "PolicyToolRiskCommand",
     "handle_policy_approve",
     "handle_policy_changes",
     "handle_policy_revert",

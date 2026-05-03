@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -40,8 +41,15 @@ from rich.text import Text
 
 if TYPE_CHECKING:
     from opencomputer.cli_ui.reasoning_store import ReasoningStore
+    from opencomputer.cli_ui.sources import _HitLike
 
 from opencomputer.cli_ui.reasoning_store import ToolAction
+from opencomputer.cli_ui.sources import (
+    SourcesRegistry,
+    render_sources_block,
+    rewrite_inline_url_refs,
+    strip_emitted_sources_block,
+)
 
 #: Module-level sentinel for "the active renderer right now". Set by
 #: :meth:`StreamingRenderer.__enter__`; cleared by ``__exit__``. The
@@ -132,6 +140,11 @@ class StreamingRenderer:
         # Compact assistant header is shown once when the first chunk
         # arrives, so the dim "oc ›" prefix doesn't repaint every frame.
         self._header_shown = False
+        # Per-turn source accumulator. Fed by tool callbacks (WebSearch
+        # etc. push their hits here via add_search_sources) and by the
+        # prose rewrite pass in finalize. Renders as the Sources block
+        # between markdown body and footer when non-empty.
+        self._sources = SourcesRegistry()
 
     # ─── lifecycle ────────────────────────────────────────────────
 
@@ -288,6 +301,26 @@ class StreamingRenderer:
         turn. Includes calls evicted from the visible 3-row panel.
         """
         return list(self._tool_history)
+
+    # ─── sources bridge ────────────────────────────────────────────
+
+    def add_search_sources(self, hits: Iterable[_HitLike]) -> None:
+        """Push search-tool hits into the per-turn source registry.
+
+        Called by ``WebSearchTool`` (and any other search-style tool)
+        after a successful query. Title + snippet come from the search
+        backend response — no extra fetch needed during render. Empty
+        iterable is a safe no-op; duplicate URLs are deduped by the
+        registry.
+        """
+        try:
+            self._sources.add_search_hits(hits)
+        except Exception as exc:  # noqa: BLE001 — UI bridge must never
+            # crash the tool call. Worst case: source goes unrendered.
+            import logging
+            logging.getLogger(__name__).debug(
+                "add_search_sources failed: %s", exc
+            )
 
     # ─── finalize ──────────────────────────────────────────────────
 
@@ -469,11 +502,29 @@ class StreamingRenderer:
         # "ansi_dark"`` uses the terminal's own ANSI colors instead of
         # Pygments' monokai (which has a hardcoded dark background that
         # shows up as a black band on dark terminals).
+        #
+        # Two source-related passes happen here, in order:
+        #   1. Strip the model's ad-hoc "Sources:\n  • <url>" trailer
+        #      from the prose (it'll be replaced by the structured
+        #      Sources block below). URLs the strip surfaces are
+        #      registered into the registry so they still render.
+        #   2. Rewrite ``(https://...)`` parentheticals to ``[N]``
+        #      references. Auto-registers new URLs as a side effect.
+        # The token-rate footer is printed AFTER, untouched.
         if self._buffer:
             content = "".join(self._buffer)
+            content, stripped_urls = strip_emitted_sources_block(content)
+            for url in stripped_urls:
+                self._sources.add_url(url)
+            content = rewrite_inline_url_refs(content, self._sources)
             if self._header_shown:
                 self.console.print("[bold magenta]oc ›[/bold magenta]")
             self.console.print(Markdown(content, code_theme="ansi_dark"))
+
+        # Sources block — only renders when the registry has entries.
+        # Sits between the answer markdown and the token-rate footer
+        # (the footer is intentionally the last thing printed).
+        render_sources_block(self.console, self._sources.sources())
 
         # Token-rate footer.
         rate = (out_tok / elapsed_s) if elapsed_s > 0 else 0.0

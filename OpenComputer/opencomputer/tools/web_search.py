@@ -161,6 +161,20 @@ class WebSearchTool(BaseTool):
                 tool_call_id=call.id,
                 content=f"No results for {query!r} via {provider}",
             )
+
+        # Feed the per-turn source registry so the renderer can swap
+        # the ugly model-emitted "Sources:" dump for a structured block.
+        # Best-effort: no-op when no renderer is active (non-TTY runs,
+        # non-chat callers like the wire server, tests). Never fails the
+        # tool call — rendering is a UI concern, search is a tool concern.
+        try:
+            from opencomputer.cli_ui.streaming import current_renderer
+            renderer = current_renderer()
+            if renderer is not None:
+                renderer.add_search_sources(hits)
+        except Exception:  # noqa: BLE001
+            pass
+
         return ToolResult(
             tool_call_id=call.id,
             content=_format_hits_as_markdown(query, hits, provider),
