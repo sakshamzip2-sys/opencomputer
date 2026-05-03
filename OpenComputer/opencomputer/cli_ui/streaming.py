@@ -96,7 +96,7 @@ class StreamingRenderer:
         self,
         console: Console,
         *,
-        reasoning_store: "ReasoningStore | None" = None,
+        reasoning_store: ReasoningStore | None = None,
     ) -> None:
         self.console = console
         self._reasoning_store = reasoning_store
