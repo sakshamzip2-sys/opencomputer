@@ -20,9 +20,10 @@ from pathlib import Path
 
 _TEMPLATE = (Path(__file__).parent / "templates" / "opencomputer.service").read_text()
 
-
-class ServiceUnsupportedError(RuntimeError):
-    """Raised when service install is attempted on a non-systemd platform."""
+# Single source of truth — also exported from service.base for the
+# cross-platform factory. Re-export here for backward compatibility:
+# existing code does ``from opencomputer.service import ServiceUnsupportedError``.
+from .base import ServiceUnsupportedError
 
 
 def render_systemd_unit(
