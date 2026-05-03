@@ -1155,6 +1155,11 @@ def _run_chat_session(
                 out_tok=result.output_tokens,
                 elapsed_s=elapsed,
                 show_reasoning=runtime.custom.get("show_reasoning", False),
+                # Pass the response text so tool-only turns (no extended
+                # thinking) still get a Haiku summary in the collapsed
+                # line — e.g. "Reported NYC weather" for a weather query
+                # that called WebFetch but didn't reason explicitly.
+                assistant_response=getattr(result.final_message, "content", None),
             )
             # Tier 2.B — terminal bell on turn complete (if /bell on).
             from opencomputer.cli_ui.bell import maybe_emit_bell

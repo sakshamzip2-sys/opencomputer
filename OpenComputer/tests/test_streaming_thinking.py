@@ -474,3 +474,105 @@ def test_finalize_no_summary_thread_when_no_store() -> None:
                 show_reasoning=False,
             )
     assert call_count["n"] == 0
+
+
+# ─── Bug fix: tool-only turns must still print collapsed line ────────────
+
+
+def test_finalize_tool_only_turn_prints_collapsed_line() -> None:
+    """REGRESSION (user-reported, 2026-05-03): a turn with NO extended
+    thinking but WITH tool actions (e.g. weather query → WebFetch) was
+    printing nothing — no collapsed line, no metadata fallback. Root
+    cause: the collapsed-line gate was `if reasoning and reasoning.strip()`
+    which skips tool-only turns. Store push uses `if thinking_str or
+    self._tool_history` which DOES capture them — but the user has no
+    visible cue.
+
+    Fix: broaden the collapsed-line gate to match the store-push gate.
+    """
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    out = io.StringIO()
+    store = ReasoningStore()
+    renderer = StreamingRenderer(
+        Console(file=out, force_terminal=False), reasoning_store=store
+    )
+    with renderer:
+        idx = renderer.on_tool_start("WebFetch", "url=https://weather.com/nyc")
+        renderer.on_tool_end("WebFetch", idx, ok=True)
+        # NOTE: no on_thinking_chunk — this is a tool-only turn.
+        renderer.finalize(
+            reasoning=None,
+            iterations=2,
+            in_tok=1790,
+            out_tok=201,
+            elapsed_s=9.7,
+            show_reasoning=False,
+        )
+    text = out.getvalue()
+    # SOMETHING about the turn must be visible — either an action count,
+    # the tool name, or the reasoning-show hint. The exact format is
+    # implementation-defined but the user MUST see a cue.
+    assert (
+        "1 action" in text
+        or "WebFetch" in text
+        or "/reasoning show" in text
+    ), f"tool-only turn produced no visible cue: {text!r}"
+
+
+def test_finalize_tool_only_turn_with_assistant_response_summary() -> None:
+    """When the model produces a response without extended thinking,
+    the summary thread should fall back to the response text as input
+    (so users still get a Claude.ai-style summary line)."""
+    from unittest.mock import patch
+
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+    out = io.StringIO()
+    store = ReasoningStore()
+    with patch(
+        "opencomputer.agent.reasoning_summary.generate_summary",
+        return_value="Reported NYC weather",
+    ):
+        renderer = StreamingRenderer(
+            Console(file=out, force_terminal=False), reasoning_store=store
+        )
+        with renderer:
+            idx = renderer.on_tool_start("WebFetch", "url=...")
+            renderer.on_tool_end("WebFetch", idx, ok=True)
+            renderer.finalize(
+                reasoning=None,
+                iterations=2,
+                in_tok=100,
+                out_tok=50,
+                elapsed_s=2.0,
+                show_reasoning=False,
+                assistant_response="NYC right now: 53°F, overcast",
+            )
+    text = out.getvalue()
+    # Summary appears in the collapsed line.
+    assert "Reported NYC weather" in text
+    # And in the store for /reasoning show.
+    t = store.get_by_id(1)
+    assert t is not None and t.summary == "Reported NYC weather"
+
+
+def test_finalize_no_thinking_no_tools_still_emits_nothing() -> None:
+    """No-op turns (no thinking, no tools) STILL emit nothing — that's
+    the correct behavior. Only the inconsistent gating for tool-only
+    turns is the bug."""
+    out = io.StringIO()
+    renderer = StreamingRenderer(Console(file=out, force_terminal=False))
+    with renderer:
+        renderer.finalize(
+            reasoning=None,
+            iterations=1,
+            in_tok=1,
+            out_tok=1,
+            elapsed_s=0.1,
+            show_reasoning=False,
+        )
+    text = out.getvalue()
+    assert "Thought" not in text
+    assert "💭" not in text
+    assert "/reasoning show" not in text
