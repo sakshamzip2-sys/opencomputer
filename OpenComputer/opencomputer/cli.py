@@ -2013,13 +2013,33 @@ def wire(
 
 
 @app.command()
-def gateway() -> None:
+def gateway(
+    install_daemon: bool = typer.Option(
+        False, "--install-daemon",
+        help=(
+            "Install OpenComputer as an always-on system service and exit "
+            "(does not run the gateway in the foreground)."
+        ),
+    ),
+    daemon_profile: str = typer.Option(
+        "default", "--daemon-profile",
+        help="Profile to install the daemon for (only with --install-daemon).",
+    ),
+) -> None:
     """Run the gateway daemon — connects all configured channel adapters.
 
     Requires provider API key + at least one channel token (TELEGRAM_BOT_TOKEN,
     DISCORD_BOT_TOKEN, etc.) in the environment. The same agent loop runs,
     but input comes from channels instead of the terminal.
     """
+    if install_daemon:
+        from opencomputer.service.factory import get_backend
+        backend = get_backend()
+        result = backend.install(profile=daemon_profile, extra_args="gateway")
+        typer.echo(f"Installed {result.backend} service at {result.config_path}")
+        for note in result.notes:
+            typer.echo(f"note: {note}")
+        raise typer.Exit(0)
     _configure_logging_once()
     from opencomputer.gateway.server import Gateway
     from opencomputer.mcp.client import MCPManager
@@ -2149,6 +2169,17 @@ def setup(
             "Implies --new (legacy wizard does not support this flag)."
         ),
     ),
+    install_daemon: bool = typer.Option(
+        False, "--install-daemon",
+        help=(
+            "After completing the wizard, install OpenComputer as an "
+            "always-on system service."
+        ),
+    ),
+    daemon_profile: str = typer.Option(
+        "default", "--daemon-profile",
+        help="Profile to install the daemon for (only with --install-daemon).",
+    ),
 ) -> None:
     """Interactive first-run wizard — pick provider, enter key, test.
 
@@ -2165,13 +2196,26 @@ def setup(
     With ``--non-interactive`` (implies ``--new``): all prompts are
     skipped — sections with existing config keep their values, fresh
     sections skip without prompting. Useful for CI / scripts.
+
+    With ``--install-daemon``: after the wizard returns, registers
+    OpenComputer as an always-on system service via the right backend
+    for the current platform (systemd on Linux, launchd on macOS,
+    Task Scheduler on Windows).
     """
     if non_interactive or new:
         from opencomputer.cli_setup.wizard import run_setup as run_setup_new
         run_setup_new(non_interactive=non_interactive)
-        return
-    from opencomputer.setup_wizard import run_setup
-    run_setup()
+    else:
+        from opencomputer.setup_wizard import run_setup
+        run_setup()
+
+    if install_daemon:
+        from opencomputer.service.factory import get_backend
+        backend = get_backend()
+        result = backend.install(profile=daemon_profile, extra_args="gateway")
+        typer.echo(f"\nInstalled {result.backend} service at {result.config_path}")
+        for note in result.notes:
+            typer.echo(f"  note: {note}")
 
 
 @app.command()
@@ -2502,6 +2546,89 @@ def _service_status() -> None:
     """Report whether the unit is active."""
     from opencomputer import service as _service_mod
     typer.echo("active" if _service_mod.is_active() else "inactive")
+
+
+# ─── new: cross-platform start / stop / logs / doctor ────────────────
+
+
+@service_app.command("start")
+def _service_start() -> None:
+    """OS-level start (no install). Idempotent."""
+    from opencomputer.service.factory import get_backend
+    backend = get_backend()
+    ok = backend.start()
+    typer.echo("started" if ok else "start failed")
+    raise typer.Exit(0 if ok else 1)
+
+
+@service_app.command("stop")
+def _service_stop() -> None:
+    """OS-level stop (does not uninstall the service)."""
+    from opencomputer.service.factory import get_backend
+    backend = get_backend()
+    ok = backend.stop()
+    typer.echo("stopped" if ok else "stop failed")
+    raise typer.Exit(0 if ok else 1)
+
+
+@service_app.command("logs")
+def _service_logs(
+    n: int = typer.Option(100, "-n", "--lines", help="Number of recent lines."),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Stream new lines."),
+) -> None:
+    """Tail the gateway logs (journald on Linux, file tail on macOS/Windows)."""
+    from opencomputer.service.factory import get_backend
+    backend = get_backend()
+    for line in backend.follow_logs(lines=n, follow=follow):
+        typer.echo(line)
+
+
+@service_app.command("doctor")
+def _service_doctor() -> None:
+    """Diagnostic health check for the service."""
+    from opencomputer.service.factory import get_backend
+    backend = get_backend()
+    status = backend.status()
+    checks: list[tuple[str, str, str]] = [
+        ("executable_resolvable", "OK", _executable_or_warn()),
+        (
+            "config_file_present",
+            "OK" if status.file_present else "FAIL",
+            "yes" if status.file_present else "missing — run `oc service install`",
+        ),
+        (
+            "service_enabled",
+            "OK" if status.enabled else "WARN",
+            "yes" if status.enabled else "not enabled",
+        ),
+        (
+            "service_running",
+            "OK" if status.running else "WARN",
+            f"pid={status.pid}" if status.running else "not running",
+        ),
+    ]
+    crash_terms = ("Traceback", "panic", "FATAL")
+    has_crash = any(
+        t in line for line in status.last_log_lines for t in crash_terms
+    )
+    checks.append(
+        (
+            "recent_crashes",
+            "WARN" if has_crash else "OK",
+            "found in last 5 lines" if has_crash else "none in last 5 lines",
+        ),
+    )
+    for name, level, detail in checks:
+        typer.echo(f"  [{level}] {name}: {detail}")
+
+
+def _executable_or_warn() -> str:
+    try:
+        from opencomputer.service._common import resolve_executable
+        return resolve_executable()
+    except RuntimeError as exc:
+        return f"WARN: {exc}"
+
 
 app.add_typer(cost_app, name="cost")
 app.add_typer(cron_app, name="cron")
