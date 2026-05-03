@@ -5,7 +5,6 @@ from typer.testing import CliRunner
 
 from opencomputer.cli import app
 
-
 runner = CliRunner()
 
 
