@@ -1579,6 +1579,15 @@ def _run_chat_session(
                     return (False, f"invalid model id: {new_model!r}")
                 new_model_cfg = _dc.replace(loop.config.model, model=canonical)
                 loop.config = _dc.replace(loop.config, model=new_model_cfg)
+                # Phase B: refresh native-thinking flag for the new model so
+                # the prompt-based fallback activates correctly mid-session
+                # (e.g. swapping claude-sonnet-4 → gpt-4o without a stale flag).
+                try:
+                    runtime.custom["_provider_supports_native_thinking"] = (
+                        loop.provider.supports_native_thinking_for(canonical)
+                    )
+                except Exception:  # noqa: BLE001
+                    runtime.custom["_provider_supports_native_thinking"] = False
                 return (True, f"swapped to {canonical}")
 
             def _on_provider_swap(new_provider: str) -> tuple[bool, str]:
@@ -1602,6 +1611,16 @@ def _run_chat_session(
                     loop.config.model, provider=new_provider
                 )
                 loop.config = _dc.replace(loop.config, model=new_model_cfg)
+                # Phase B: refresh native-thinking flag for the new provider
+                # so the prompt-based fallback activates correctly. The new
+                # provider may have entirely different per-model support
+                # than the previous one.
+                try:
+                    runtime.custom["_provider_supports_native_thinking"] = (
+                        loop.provider.supports_native_thinking_for(loop.config.model.model)
+                    )
+                except Exception:  # noqa: BLE001
+                    runtime.custom["_provider_supports_native_thinking"] = False
                 return (True, f"swapped to {new_provider}")
 
             def _on_compress() -> tuple[bool, int, int, str]:

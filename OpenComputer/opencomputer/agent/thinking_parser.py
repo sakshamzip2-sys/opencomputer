@@ -34,15 +34,25 @@ from plugin_sdk.provider_contract import StreamEvent
 
 _OPEN_TAG = "<think>"
 _CLOSE_TAG = "</think>"
+_CODE_FENCE = "```"
 
 
 class ThinkingTagsParser:
     """Wraps an ``AsyncIterator[StreamEvent]`` and extracts thinking
     tags from ``text_delta`` events. Other event kinds pass through
-    unchanged."""
+    unchanged.
+
+    Code-fence safety: ``<think>`` tags appearing INSIDE a markdown
+    fenced code block (between ``` and ```) are treated as literal
+    text — the model legitimately discusses XML/the parser itself in
+    code examples, and silently consuming those tags would corrupt
+    user-visible output. The fence state machine tracks an even/odd
+    count of ``` runs across the stream.
+    """
 
     def __init__(self) -> None:
         self._in_thinking = False
+        self._in_code_fence = False
         self._partial = ""
 
     async def wrap(
@@ -85,25 +95,59 @@ class ThinkingTagsParser:
                             )
                         text = text[close_at + len(_CLOSE_TAG):]
                         self._in_thinking = False
-                else:
-                    open_at = text.find(_OPEN_TAG)
-                    if open_at == -1:
-                        # No open tag in this chunk. Emit everything
-                        # except the trailing partial-tag suffix.
-                        emit, hold = _split_with_tag_buffer(text, _OPEN_TAG)
+                elif self._in_code_fence:
+                    # Inside ```...``` — pass through everything as text
+                    # until the closing fence. <think> tags inside are
+                    # literal content (e.g. the model showing code that
+                    # contains the tag).
+                    fence_at = text.find(_CODE_FENCE)
+                    if fence_at == -1:
+                        emit, hold = _split_with_tag_buffer(text, _CODE_FENCE)
                         if emit:
-                            yield StreamEvent(
-                                kind="text_delta", text=emit
-                            )
+                            yield StreamEvent(kind="text_delta", text=emit)
                         self._partial = hold
                         text = ""
                     else:
-                        # Found open tag.
-                        if open_at > 0:
+                        # Emit through+including the closing fence; exit.
+                        end = fence_at + len(_CODE_FENCE)
+                        yield StreamEvent(kind="text_delta", text=text[:end])
+                        text = text[end:]
+                        self._in_code_fence = False
+                else:
+                    # Not thinking, not in code fence. Look for whichever
+                    # comes first: a <think> open tag OR a ``` fence start.
+                    think_at = text.find(_OPEN_TAG)
+                    fence_at = text.find(_CODE_FENCE)
+                    if think_at == -1 and fence_at == -1:
+                        # Neither found — emit text with hold for whichever
+                        # potential prefix is longer at the tail.
+                        _, hold_think = _split_with_tag_buffer(text, _OPEN_TAG)
+                        _, hold_fence = _split_with_tag_buffer(text, _CODE_FENCE)
+                        hold = (
+                            hold_think
+                            if len(hold_think) >= len(hold_fence)
+                            else hold_fence
+                        )
+                        emit = text[: len(text) - len(hold)] if hold else text
+                        if emit:
+                            yield StreamEvent(kind="text_delta", text=emit)
+                        self._partial = hold
+                        text = ""
+                    elif fence_at != -1 and (
+                        think_at == -1 or fence_at < think_at
+                    ):
+                        # Code fence opens first — enter fence mode.
+                        end = fence_at + len(_CODE_FENCE)
+                        yield StreamEvent(kind="text_delta", text=text[:end])
+                        text = text[end:]
+                        self._in_code_fence = True
+                    else:
+                        # <think> first — enter thinking mode.
+                        if think_at > 0:
                             yield StreamEvent(
-                                kind="text_delta", text=text[:open_at],
+                                kind="text_delta", text=text[:think_at],
                             )
-                        text = text[open_at + len(_OPEN_TAG):]
+                        text = text[think_at + len(_OPEN_TAG):]
                         self._in_thinking = True
 
     async def _flush(self) -> AsyncIterator[StreamEvent]:

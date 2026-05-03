@@ -155,3 +155,63 @@ def test_python_less_than_operator_does_not_trigger_partial_match():
     # The whole thing is text — no thinking events.
     assert _texts(out, "thinking_delta") == ""
     assert _texts(out, "text_delta") == "if x < think_max: do_it()"
+
+
+def test_think_tag_inside_fenced_code_block_is_treated_as_literal():
+    """Critical: when the model writes a code example containing
+    <think>, the parser must NOT consume it as thinking. Otherwise
+    the model can't teach about XML, can't document this very feature,
+    can't reply to 'what does the parser do?' without silent
+    corruption."""
+    parser = ThinkingTagsParser()
+    src = _from_chunks(
+        "Here is the syntax:\n```xml\n<think>example</think>\n```\nDone."
+    )
+    out = asyncio.run(_to_list(parser.wrap(src)))
+    # All text, no thinking extraction inside the fence.
+    assert _texts(out, "thinking_delta") == ""
+    assert _texts(out, "text_delta") == (
+        "Here is the syntax:\n```xml\n<think>example</think>\n```\nDone."
+    )
+
+
+def test_think_tag_outside_fence_extracted_normally_after_fence():
+    """A <think> block AFTER a closed fence should still be extracted."""
+    parser = ThinkingTagsParser()
+    src = _from_chunks(
+        "Code: ```py\n<think>literal</think>\n```\n"
+        "<think>real reasoning</think>\nAnswer: 42"
+    )
+    out = asyncio.run(_to_list(parser.wrap(src)))
+    # Inside-fence <think> is text; outside-fence <think> is thinking.
+    assert _texts(out, "thinking_delta") == "real reasoning"
+    text = _texts(out, "text_delta")
+    assert "<think>literal</think>" in text  # inside fence preserved
+    assert "<think>real reasoning</think>" not in text  # outside extracted
+    assert text.endswith("Answer: 42")
+
+
+def test_code_fence_split_across_chunks():
+    """Triple-backtick split mid-fence — parser must hold back partial
+    backticks, just like partial tags."""
+    parser = ThinkingTagsParser()
+    src = _from_chunks("hi `", "``code <think>x</think> code", "``` ok")
+    out = asyncio.run(_to_list(parser.wrap(src)))
+    # Inside the fence, <think> is literal.
+    assert _texts(out, "thinking_delta") == ""
+    full_text = _texts(out, "text_delta")
+    assert "```code <think>x</think> code```" in full_text
+    assert full_text.endswith(" ok")
+
+
+def test_open_tag_before_fence_still_enters_thinking():
+    """If <think> comes BEFORE a ``` block, thinking mode kicks in."""
+    parser = ThinkingTagsParser()
+    src = _from_chunks(
+        "<think>reasoning</think>\nCode:\n```py\nx = 1\n```\nDone."
+    )
+    out = asyncio.run(_to_list(parser.wrap(src)))
+    assert _texts(out, "thinking_delta") == "reasoning"
+    text = _texts(out, "text_delta")
+    assert "```py" in text and "x = 1" in text and "```" in text
+    assert text.endswith("Done.")
