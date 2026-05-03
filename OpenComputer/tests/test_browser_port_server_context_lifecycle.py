@@ -23,6 +23,43 @@ def _state() -> BrowserServerState:
     return BrowserServerState(resolved=resolve_browser_config({}))
 
 
+class _AliveProc:
+    """Minimal stub: looks alive to is_running_alive (returncode=None)."""
+
+    returncode: int | None = None
+
+    def poll(self) -> int | None:
+        return None
+
+
+class _FakeRunning:
+    """Minimal RunningChrome shape for lifecycle tests.
+
+    Provides ``proc`` (alive) and ``cdp_url`` so the W3.3 liveness probe
+    (which calls ``is_chrome_reachable(running.cdp_url)``) has a target
+    to mock against.
+    """
+
+    def __init__(self, name: str = "openclaw") -> None:
+        self.proc = _AliveProc()
+        self.name = name
+        self.cdp_url = f"http://127.0.0.1:18793/?fake={name}"
+
+
+@pytest.fixture(autouse=True)
+def _stub_is_chrome_reachable(monkeypatch):
+    """Default: liveness probe says reachable (alive). Tests that need the
+    'unreachable' path can override via monkeypatch."""
+
+    async def _reachable(*args, **kwargs) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        "extensions.browser_control.server_context.lifecycle.is_chrome_reachable",
+        _reachable,
+    )
+
+
 # ─── ensure_profile_running ──────────────────────────────────────────
 
 
@@ -70,9 +107,9 @@ async def test_ensure_chrome_mcp_uses_mcp_driver() -> None:
 async def test_ensure_is_idempotent_when_already_running() -> None:
     launches: list[str] = []
 
-    async def launch(profile) -> str:
+    async def launch(profile) -> _FakeRunning:
         launches.append(profile.name)
-        return "running"
+        return _FakeRunning(profile.name)
 
     state = _state()
     driver = ProfileDriver(launch_managed=launch)
@@ -89,12 +126,12 @@ async def test_ensure_dedupes_concurrent_calls() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def launch(profile) -> str:
+    async def launch(profile) -> _FakeRunning:
         nonlocal n_launches
         n_launches += 1
         started.set()
         await release.wait()
-        return "running"
+        return _FakeRunning(profile.name)
 
     state = _state()
     driver = ProfileDriver(launch_managed=launch)
@@ -105,6 +142,48 @@ async def test_ensure_dedupes_concurrent_calls() -> None:
     a, b = await asyncio.gather(t1, t2)
     assert a is b
     assert n_launches == 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_relaunches_when_chrome_died_out_of_band(monkeypatch) -> None:
+    """Wave 3.3: status==RUNNING but Chrome unreachable → re-bring-up.
+
+    The HTTP probe (``is_chrome_reachable``) detects out-of-band Chrome
+    death (kill -9, crash, OS sigkill — anything that takes Chrome off
+    the CDP port). Lifecycle resets state to STOPPED and falls through
+    to _bring_up. Without this, Browser actions over the dead WS would
+    hang until timeout.
+    """
+    launches: list[str] = []
+
+    async def launch(profile) -> _FakeRunning:
+        launches.append(profile.name)
+        return _FakeRunning(profile.name)
+
+    # Probe always says unreachable. (It only fires on the SECOND call —
+    # the first goes through the STOPPED→STARTING path which doesn't probe.)
+    async def _probe(*args, **kwargs) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        "extensions.browser_control.server_context.lifecycle.is_chrome_reachable",
+        _probe,
+    )
+
+    state = _state()
+    driver = ProfileDriver(launch_managed=launch)
+
+    # First call — fresh launch (probe never fires here; status is STOPPED).
+    a = await ensure_profile_running(state, "openclaw", driver=driver)
+    assert a.status == ProfileStatus.RUNNING
+    assert launches == ["openclaw"]
+    old_running = a.running
+
+    # Second call — status==RUNNING, probe says unreachable, must relaunch.
+    b = await ensure_profile_running(state, "openclaw", driver=driver)
+    assert b.status == ProfileStatus.RUNNING
+    assert launches == ["openclaw", "openclaw"]
+    assert b.running is not old_running
 
 
 @pytest.mark.asyncio

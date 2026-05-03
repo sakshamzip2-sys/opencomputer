@@ -3,6 +3,10 @@
   is_chrome_reachable      HTTP GET /json/version (lightweight liveness).
   is_chrome_cdp_ready      Stronger: open the WS, send Browser.getVersion,
                            wait for matching id reply. Used as the launch gate.
+  is_running_alive         Local subprocess-state probe — does NOT touch the
+                           network. Detects out-of-band Chrome death (kill -9,
+                           crash, OS sigkill) so callers don't hand back a
+                           cached handle pointing at a dead WS. Wave 3.3.
   stop_openclaw_chrome     SIGTERM, poll until reachable=False, then SIGKILL.
 
 `ssrf_policy` is accepted for API stability with W1's nav_guard work; this
@@ -28,6 +32,42 @@ _DEFAULT_REACHABLE_TIMEOUT_MS = 1500
 _DEFAULT_CDP_HANDSHAKE_TIMEOUT_MS = 3000
 _DEFAULT_STOP_TIMEOUT_MS = 2500
 _STOP_POLL_INTERVAL_S = 0.05
+
+
+# ─── local subprocess-state probe (no network) ────────────────────────
+
+
+def is_running_alive(running: Any) -> bool:
+    """Probe whether a `RunningChrome`'s subprocess is alive.
+
+    Wave 3.3 — out-of-band Chrome death (user `kill -9`, OS sigkill,
+    crash) leaves cached state pointing at a dead WebSocket. Anything
+    calling over that WS hangs until timeout. Cache-read paths in both
+    `_dispatcher_bootstrap` and `server_context.lifecycle` use this
+    probe to decide whether to evict + relaunch.
+
+    Local-only: reads `proc.returncode` (asyncio.subprocess.Process
+    shape — None while alive, integer once exited) and falls back to
+    `proc.poll()` (sync Popen analogue). Defensive on missing
+    attributes — treats unknown state as dead, since handing back a
+    possibly-stale entry is the worse failure mode.
+    """
+    if running is None:
+        return False
+    proc = getattr(running, "proc", None)
+    if proc is None:
+        return False
+    rc = getattr(proc, "returncode", None)
+    if rc is not None:
+        return False
+    poll = getattr(proc, "poll", None)
+    if callable(poll):
+        try:
+            if poll() is not None:
+                return False
+        except Exception:  # noqa: BLE001 — defensive; treat probe failure as dead
+            return False
+    return True
 
 
 # ─── HTTP probe ───────────────────────────────────────────────────────
