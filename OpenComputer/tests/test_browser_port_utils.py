@@ -7,11 +7,20 @@ trash.move_to_trash (mocked send2trash), errors.BrowserServiceError.
 
 from __future__ import annotations
 
+import pytest
+
+# Same reason as test_browser_port_chrome.py — the underlying
+# `_utils/trash.py` imports `send2trash`, which lives in the optional
+# `[browser]` extras. Skip cleanly when the dep isn't installed.
+pytest.importorskip(
+    "send2trash",
+    reason="install with `pip install opencomputer[browser]` to run",
+)
+
 import json
 import os
 from unittest.mock import patch
 
-import pytest
 from extensions.browser_control._utils import (
     BrowserServiceError,
     atomic_write_bytes,

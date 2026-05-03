@@ -12,11 +12,24 @@ Covers:
 
 from __future__ import annotations
 
+import pytest
+
+# `extensions/browser-control/_utils/trash.py` does `from send2trash
+# import send2trash` at module top — the import chain triggered by
+# `from extensions.browser_control.chrome import ...` below pulls in
+# the _utils package and hence trash.py. send2trash lives in the
+# optional `[browser]` extras (per pyproject.toml line 142), so on
+# minimal CI installs without the extras this whole test file would
+# fail to collect with ModuleNotFoundError. Skip cleanly instead.
+pytest.importorskip(
+    "send2trash",
+    reason="install with `pip install opencomputer[browser]` to run",
+)
+
 import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from extensions.browser_control.chrome import (
     RunningChrome,
     build_chrome_launch_args,
