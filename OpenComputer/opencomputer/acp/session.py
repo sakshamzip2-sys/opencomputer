@@ -47,6 +47,15 @@ class ACPSession:
         self._cancel_event: asyncio.Event = asyncio.Event()
         self._loop_instance: Any = None  # lazy-imported AgentLoop
         self._messages: list[dict[str, Any]] = []  # in-memory transcript
+        self.event_queue: asyncio.Queue = asyncio.Queue(maxsize=256)  # buffered event log
+
+    def emit_event(self, method: str, params: Any) -> None:
+        """Send a JSON-RPC notification to the ACP client and buffer in event_queue."""
+        self._send(method, params)
+        try:
+            self.event_queue.put_nowait({"method": method, "params": params})
+        except asyncio.QueueFull:
+            pass  # bounded at 256 — drop silently when full
 
     async def _ensure_loop(self) -> None:
         """Lazy-construct AgentLoop on first prompt."""
@@ -131,24 +140,29 @@ class ACPSession:
         }
 
     async def _run_conversation(self, content: str) -> str:
-        """Bridge: call AgentLoop.run_conversation, capture final message.
+        """Bridge: call AgentLoop.run_conversation, capture final message."""
+        from opencomputer.acp.tools import build_tool_complete, build_tool_start
 
-        Signature confirmed from opencomputer/agent/loop.py:
-            async def run_conversation(
-                self,
-                user_message: str,
-                session_id: str | None = None,
-                ...
-            ) -> ConversationResult
-
-        ConversationResult.final_message is a Message with a .content str attribute.
-        """
         loop_inst = self._loop_instance
+        session_ref = self  # capture for closure
+
+        def _tool_cb(phase: str, tool_name: str, tool_call_id: str, data: Any) -> None:
+            if phase == "start":
+                session_ref.emit_event(
+                    "session/toolStart",
+                    build_tool_start(tool_name, tool_call_id, data),
+                )
+            elif phase == "complete":
+                session_ref.emit_event(
+                    "session/toolComplete",
+                    build_tool_complete(tool_call_id, data),
+                )
+
         result = await loop_inst.run_conversation(
             user_message=content,
             session_id=self.session_id,
+            tool_callback=_tool_cb,
         )
-        # ConversationResult.final_message.content is a str
         final_message = result.final_message
         final_content: str = getattr(final_message, "content", "") or ""
         self._messages.append({"role": "assistant", "content": final_content})
