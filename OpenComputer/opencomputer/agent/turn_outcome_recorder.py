@@ -44,7 +44,7 @@ class TurnSignals:
 
 
 class TurnOutcomeRecorder:
-    def __init__(self, db: "SessionDB") -> None:
+    def __init__(self, db: SessionDB) -> None:
         self._db = db
 
     def record(self, sig: TurnSignals, *, now: float | None = None) -> str:

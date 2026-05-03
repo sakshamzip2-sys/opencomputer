@@ -32,7 +32,7 @@ class CitationWrite:
 
 
 class RecallCitationsWriter:
-    def __init__(self, db: "SessionDB") -> None:
+    def __init__(self, db: SessionDB) -> None:
         self._db = db
 
     def record(self, c: CitationWrite, *, now: float | None = None) -> str:
