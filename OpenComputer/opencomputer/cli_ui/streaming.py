@@ -39,7 +39,9 @@ from rich.spinner import Spinner
 from rich.text import Text
 
 if TYPE_CHECKING:
-    pass
+    from opencomputer.cli_ui.reasoning_store import ReasoningStore
+
+from opencomputer.cli_ui.reasoning_store import ToolAction
 
 #: Module-level sentinel for "the active renderer right now". Set by
 #: :meth:`StreamingRenderer.__enter__`; cleared by ``__exit__``. The
@@ -106,6 +108,10 @@ class StreamingRenderer:
             OrderedDict()
         )
         self._tool_call_seq = 0
+        # Unbounded parallel history of completed tool calls. Used by
+        # the reasoning tree (which needs the full sequence, not the
+        # last-3 visible window).
+        self._tool_history: list[ToolAction] = []
         self._live: Live | None = None
         self._stream_started = False
         self._turn_started_at = 0.0
@@ -192,14 +198,38 @@ class StreamingRenderer:
         return idx
 
     def on_tool_end(self, name: str, idx: int, ok: bool) -> None:
-        """Mark a tool call as completed. Idempotent — late callbacks
-        for evicted rows are silently dropped."""
+        """Mark a tool call as completed. Idempotent for the visible
+        panel — late callbacks for evicted rows are silently dropped
+        from the panel but ALWAYS captured in :attr:`_tool_history` for
+        the reasoning tree.
+        """
         row = self._tool_calls.get((name, idx))
-        if row is None:
-            return
-        row.ended_at = time.monotonic()
-        row.ok = ok
+        if row is not None:
+            row.ended_at = time.monotonic()
+            row.ok = ok
+            duration = row.ended_at - row.started_at
+            args_preview = row.args_preview
+        else:
+            # Row was evicted from the visible panel before the end
+            # callback arrived. Synthesize a minimal record for the
+            # history so the tree still shows it.
+            duration = 0.0
+            args_preview = ""
+        self._tool_history.append(
+            ToolAction(
+                name=name,
+                args_preview=args_preview,
+                ok=ok,
+                duration_s=duration,
+            )
+        )
         self._refresh()
+
+    def tool_history(self) -> list[ToolAction]:
+        """Return the full ordered list of completed tool calls this
+        turn. Includes calls evicted from the visible 3-row panel.
+        """
+        return list(self._tool_history)
 
     # ─── finalize ──────────────────────────────────────────────────
 

@@ -137,3 +137,24 @@ def test_chat_loop_passes_thinking_callback_to_step_once() -> None:
     cb("a")
     cb("b")
     assert captured == ["a", "b"]
+
+
+# ─── Reasoning Dropdown v2 — unbounded tool history ─────────────────────
+
+
+def test_renderer_records_unbounded_tool_history() -> None:
+    """Tool-call panel evicts after 3 visible rows (_TOOL_PANEL_MAX_ROWS).
+    The parallel _tool_history must keep ALL completed calls so the
+    /reasoning show tree can render the full action sequence.
+    """
+    r, _buf, _con = _make_renderer()
+    with r:
+        for i in range(5):
+            idx = r.on_tool_start(f"Tool{i}", f"arg{i}")
+            r.on_tool_end(f"Tool{i}", idx, ok=(i % 2 == 0))
+
+    history = r.tool_history()
+    assert [a.name for a in history] == [f"Tool{i}" for i in range(5)]
+    assert [a.ok for a in history] == [True, False, True, False, True]
+    # Visible panel still capped at 3.
+    assert len(r._tool_calls) == 3
