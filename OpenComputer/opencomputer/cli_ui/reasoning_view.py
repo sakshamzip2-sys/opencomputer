@@ -57,6 +57,7 @@ from rich.tree import Tree
 
 from opencomputer.cli_ui.reasoning_store import (
     ReasoningTurn,
+    Source,
     ToolState,
 )
 
@@ -251,6 +252,98 @@ class _StackedRenderable:
 # ─── ReasoningView (port of <Reasoning> + <ReasoningTrigger> + <ReasoningContent>) ──
 
 
+# ─── SourcesView (port of <Sources> + <SourcesTrigger> + <SourcesContent> + <Source>) ──
+
+
+class SourcesView:
+    """Port of the ``<Sources>`` component family (sources.tsx).
+
+    Reference (vercel/ai-elements packages/elements/src/sources.tsx):
+    - ``<Sources>`` — Collapsible wrapper, ``text-primary text-xs``
+    - ``<SourcesTrigger count>`` — ``Used {count} sources`` + chevron
+    - ``<SourcesContent>`` — Collapsible body
+    - ``<Source href title>`` — anchor with ``BookIcon`` + title
+
+    Faithful port: Rich Tree with a "Used N sources" header (matches
+    AI Elements' ``count`` prop semantics) and one node per source
+    showing ``📖 title`` followed by the URL on the next line. The
+    URL is rendered as a clickable Rich link when supported by the
+    terminal (``[link=URL]URL[/link]`` markup) — closest substitute
+    for the React ``<a href target="_blank">`` semantics.
+
+    Constructor mirrors AI Elements' ``SourcesProps`` shape:
+    - ``count``: derived from ``len(sources)`` if not passed (mirrors
+      AI Elements' ``SourcesTriggerProps.count``).
+    - ``open``: collapsed by default; opens to show the source list.
+    """
+
+    def __init__(
+        self,
+        *,
+        sources: tuple[Source, ...] | list[Source],
+        open: bool = False,                  # noqa: A002 — mirror AI Elements
+        count: int | None = None,
+    ) -> None:
+        self.sources = tuple(sources)
+        self._is_open = open
+        # Mirror AI Elements: ``count`` is a separate prop on
+        # SourcesTrigger but defaults to len(sources). Caller can
+        # override (e.g. when there's a "see more" pagination).
+        self.count = count if count is not None else len(self.sources)
+
+    @property
+    def is_open(self) -> bool:
+        return self._is_open
+
+    def render_trigger(self) -> Text:
+        """Port of <SourcesTrigger> — ``Used N sources`` + chevron."""
+        chevron = "⌄" if self.is_open else "›"
+        return Text.assemble(
+            ("📖 ", "dim"),
+            (f"Used {self.count} source", "bold"),
+            ("s" if self.count != 1 else "", "bold"),
+            ("  ", ""),
+            (chevron, "dim"),
+        )
+
+    def render_content(self) -> Tree:
+        """Port of <SourcesContent> — one <Source> entry per row.
+
+        Each entry: ``📖 title`` on one line, URL on the next as a
+        Rich link (when the terminal supports OSC 8 hyperlinks; falls
+        back to plain text on terminals that don't).
+        """
+        tree = Tree(self.render_trigger(), guide_style="grey50")
+        if not self.sources:
+            tree.add(Text("(no sources)", style="italic dim"))
+            return tree
+        for src in self.sources:
+            # Rich link markup degrades gracefully on non-OSC-8 terms.
+            link = Text(src.href, style=f"dim link {src.href}")
+            label = Text.assemble(
+                ("📖 ", "dim"),
+                (src.title or src.href, "bold"),
+                (
+                    f"  · {src.tool}" if src.tool else "",
+                    "dim",
+                ),
+            )
+            entry = tree.add(label)
+            entry.add(link)
+            if src.snippet:
+                entry.add(Text(src.snippet, style="italic dim"))
+        return tree
+
+    def __rich__(self):
+        """Collapsed → just the trigger; expanded → full Tree."""
+        if self.is_open:
+            return self.render_content()
+        return self.render_trigger()
+
+
+# ─── ReasoningView (port of <Reasoning> + <ReasoningTrigger> + <ReasoningContent>) ──
+
+
 class ReasoningView:
     """Port of the ``<Reasoning>`` component family (reasoning.tsx).
 
@@ -393,6 +486,28 @@ class ReasoningView:
             if output is not None:
                 tool_node.add(output)
 
+        # Sources subsection (port of <Sources>) — appended when the
+        # turn used WebSearch / WebFetch and the extraction in
+        # ReasoningTurn.sources turned up at least one URL. Mirrors
+        # AI Elements composition where <Sources> sits as a sibling
+        # under the Reasoning aggregate.
+        if self.turn.sources:
+            sv = SourcesView(sources=self.turn.sources, open=True)
+            sources_node = tree.add(sv.render_trigger())
+            for src in self.turn.sources:
+                label = Text.assemble(
+                    ("📖 ", "dim"),
+                    (src.title or src.href, "bold"),
+                    (
+                        f"  · {src.tool}" if src.tool else "",
+                        "dim",
+                    ),
+                )
+                src_node = sources_node.add(label)
+                src_node.add(Text(src.href, style=f"dim link {src.href}"))
+                if src.snippet:
+                    src_node.add(Text(src.snippet, style="italic dim"))
+
         # No tools and no thinking → single placeholder so structure is visible.
         if not self.turn.thinking and not self.turn.tool_calls:
             tree.add(Text("(no extended thinking, no tool actions)",
@@ -444,6 +559,7 @@ def render_turn_view(
 
 __all__ = [
     "ReasoningView",
+    "SourcesView",
     "ToolView",
     "render_turn_view",
 ]
