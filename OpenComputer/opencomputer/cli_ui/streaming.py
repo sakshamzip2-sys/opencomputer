@@ -366,25 +366,21 @@ class StreamingRenderer:
                 )
                 action_count = len(self._tool_history)
 
+                # v6 — Claude.ai web parity (Image #10):
+                # content-width rounded card, summary text bold, chevron
+                # ``›`` inline at the end of the text. No subtitle, no
+                # right-aligned hint — match the web UI exactly.
+                from rich.box import ROUNDED
+
                 if _summary_str:
-                    # v5 (Claude.ai card-style parity, Image #13):
-                    # wrap the collapsed summary in a rounded panel
-                    # so it visually reads like a clickable card. The
-                    # chevron sits in the panel's subtitle slot.
-                    from rich.box import ROUNDED
-                    self.console.print(
-                        Panel(
-                            Text.assemble((_summary_str, "bold")),
-                            box=ROUNDED,
-                            border_style="grey50",
-                            padding=(0, 2),
-                            subtitle="› /reasoning show or Ctrl+X Ctrl+R",
-                            subtitle_align="right",
-                        )
+                    body = Text.assemble(
+                        (_summary_str, "bold"),
+                        ("  ", ""),
+                        ("›", "dim"),
                     )
                 else:
-                    # Fallback: metadata + reasoning-show hint, also
-                    # wrapped in the rounded card for visual consistency.
+                    # Fallback: metadata cell when summarizer hasn't
+                    # produced text (model down, no API key, timeout).
                     meta_parts: list[str] = []
                     if has_thinking:
                         meta_parts.append(
@@ -392,28 +388,28 @@ class StreamingRenderer:
                         )
                     elif has_tools:
                         s = "" if action_count == 1 else "s"
-                        meta_parts.append(
-                            f"🔧 Used {action_count} tool{s}"
-                        )
+                        meta_parts.append(f"🔧 Used {action_count} tool{s}")
                     if next_turn_id is not None:
                         meta_parts.append(f"turn #{next_turn_id}")
                     if has_thinking and action_count > 0:
-                        # Append action count when both are present
-                        # (tool-only mode already includes count above).
                         s = "" if action_count == 1 else "s"
                         meta_parts.append(f"{action_count} action{s}")
                     meta = " · ".join(meta_parts)
-                    from rich.box import ROUNDED
-                    self.console.print(
-                        Panel(
-                            Text(meta, style="dim cyan"),
-                            box=ROUNDED,
-                            border_style="grey50",
-                            padding=(0, 2),
-                            subtitle="› /reasoning show",
-                            subtitle_align="right",
-                        )
+                    body = Text.assemble(
+                        (meta, "dim cyan"),
+                        ("  ", ""),
+                        ("›", "dim"),
                     )
+
+                self.console.print(
+                    Panel(
+                        body,
+                        box=ROUNDED,
+                        border_style="grey50",
+                        padding=(0, 2),
+                        expand=False,
+                    )
+                )
 
         # Final answer as Markdown — re-rendered from the full buffer
         # so code blocks get proper syntax highlighting. ``code_theme=

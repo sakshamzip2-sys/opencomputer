@@ -281,8 +281,11 @@ def test_collapsed_line_includes_turn_id_and_action_count() -> None:
     text = out.getvalue()
     assert re.search(r"turn #1", text), text
     assert re.search(r"2 actions", text), text
-    # v5: hint moved to the Panel subtitle — phrasing is "/reasoning show".
-    assert "/reasoning show" in text
+    # v6 (Claude.ai parity): the card body ends with an inline ›
+    # chevron — no Ctrl+X Ctrl+R subtitle, no /reasoning hint string.
+    assert "›" in text
+    assert "/reasoning show" not in text
+    assert "Ctrl+X" not in text
 
 
 def test_collapsed_line_omits_turn_id_when_store_missing() -> None:
@@ -302,8 +305,10 @@ def test_collapsed_line_omits_turn_id_when_store_missing() -> None:
         )
     text = out.getvalue()
     assert "turn #" not in text
-    # v5: hint moved to the Panel subtitle — phrasing is "/reasoning show".
-    assert "/reasoning show" in text
+    # v6 (Claude.ai parity): chevron present, no /reasoning hint or chord.
+    assert "›" in text
+    assert "/reasoning show" not in text
+    assert "Ctrl+X" not in text
 
 
 def test_collapsed_line_singular_action_no_plural_s() -> None:
@@ -408,7 +413,9 @@ def test_finalize_collapsed_line_falls_back_when_summary_unavailable() -> None:
             )
     text = out.getvalue()
     assert "Thought for" in text
-    assert "/reasoning show" in text
+    # v6 (Claude.ai parity): chevron present, no /reasoning hint string.
+    assert "›" in text
+    assert "/reasoning show" not in text
     t = store.get_by_id(1)
     assert t is not None and t.summary is None
 
@@ -512,13 +519,14 @@ def test_finalize_tool_only_turn_prints_collapsed_line() -> None:
             show_reasoning=False,
         )
     text = out.getvalue()
-    # SOMETHING about the turn must be visible — either an action count,
-    # the tool name, or the reasoning-show hint. The exact format is
-    # implementation-defined but the user MUST see a cue.
+    # SOMETHING about the turn must be visible — either an action/tool
+    # count, the tool name, or the chevron from the v6 collapsed card.
+    # The exact format is implementation-defined; the user MUST see a cue.
     assert (
-        "1 action" in text
+        "1 tool" in text
+        or "1 action" in text
         or "WebFetch" in text
-        or "/reasoning show" in text
+        or "›" in text
     ), f"tool-only turn produced no visible cue: {text!r}"
 
 
@@ -615,9 +623,10 @@ def test_finalize_collapsed_line_v5_uses_rounded_panel() -> None:
     )
     # Summary still inside the panel.
     assert "Wrote a haiku about sloths" in text
-    # Chevron + subtitle hint visible.
+    # v6 (Claude.ai parity): chevron inline; no /reasoning hint, no chord.
     assert "›" in text
-    assert "/reasoning show" in text
+    assert "/reasoning show" not in text
+    assert "Ctrl+X" not in text
 
 
 def test_finalize_flicker_fix_summary_join_happens_before_live_stop() -> None:

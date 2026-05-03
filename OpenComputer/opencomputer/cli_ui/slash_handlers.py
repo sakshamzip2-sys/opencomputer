@@ -118,6 +118,14 @@ class SlashContext:
     on_image_attach: Callable[[str], tuple[bool, str]] = lambda _path: (
         False, "image attach callback not wired",
     )
+    #: ``/reasoning [args]`` — control reasoning effort + display + show
+    #: past turns. Closes over the live ``RuntimeContext`` in the chat
+    #: loop so cli_ui doesn't need to import the agent runtime. Returns
+    #: the formatted text to print (may include newlines for multi-turn
+    #: dumps). Default echoes a "not wired" hint.
+    on_reasoning_dispatch: Callable[[str], str] = lambda _args: (
+        "/reasoning callback not wired"
+    )
 
 
 def _split_args(text: str) -> tuple[str, list[str]]:
@@ -717,6 +725,24 @@ def _handle_stop_bg(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_reasoning(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/reasoning [args]`` — delegate to the agent ReasoningCommand.
+
+    The chat loop binds ``on_reasoning_dispatch`` to a closure over the
+    live RuntimeContext (which holds the reasoning store + effort flags).
+    We just join the args back into a single string and print whatever
+    the callback returns.
+    """
+    try:
+        output = ctx.on_reasoning_dispatch(" ".join(args))
+    except Exception as e:  # noqa: BLE001
+        ctx.console.print(f"[yellow]/reasoning failed: {e}[/yellow]")
+        return SlashResult(handled=True)
+    if output:
+        ctx.console.print(output)
+    return SlashResult(handled=True)
+
+
 _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "exit": _handle_exit,
     "clear": _handle_clear,
@@ -745,6 +771,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "tools":    _handle_tools_inline,
     "retry":    _handle_retry,
     "stop":     _handle_stop_bg,
+    "reasoning": _handle_reasoning,
 }
 
 

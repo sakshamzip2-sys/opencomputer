@@ -220,6 +220,14 @@ SLASH_REGISTRY: list[CommandDef] = [
         description="Kill all background processes for this session.",
         category="session",
     ),
+    CommandDef(
+        name="reasoning",
+        description=(
+            "Show past reasoning + control reasoning effort + thinking-block display."
+        ),
+        category="meta",
+        args_hint=("[level|show [N|all|last]|hide|status]"),
+    ),
 ]
 
 
