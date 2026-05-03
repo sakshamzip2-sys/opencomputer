@@ -15,8 +15,8 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from extensions.browser_control.browser import BrowserError, PageSnapshot
-from extensions.browser_control.tools import (
+from extensions.browser_control._browser_session import BrowserError, PageSnapshot
+from extensions.browser_control._tools import (
     ALL_TOOLS,
     BrowserBackTool,
     BrowserClickTool,
@@ -75,7 +75,7 @@ async def test_navigate_happy_path_mocked():
         url="https://example.com", title="Example", accessibility_tree="root",
         text_content="hello", error="",
     )
-    with patch("extensions.browser_control.tools.navigate_and_snapshot",
+    with patch("extensions.browser_control._tools.navigate_and_snapshot",
                new_callable=AsyncMock, return_value=snap):
         tool = BrowserNavigateTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_navigate",
@@ -88,7 +88,7 @@ async def test_navigate_happy_path_mocked():
 
 @pytest.mark.asyncio
 async def test_navigate_browser_error_returned():
-    with patch("extensions.browser_control.tools.navigate_and_snapshot",
+    with patch("extensions.browser_control._tools.navigate_and_snapshot",
                new_callable=AsyncMock, side_effect=BrowserError("playwright missing")):
         tool = BrowserNavigateTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_navigate",
@@ -101,7 +101,7 @@ async def test_navigate_browser_error_returned():
 async def test_navigate_snap_error_returned():
     snap = PageSnapshot(url="x", title="", accessibility_tree="", text_content="",
                         error="navigation failed: timeout")
-    with patch("extensions.browser_control.tools.navigate_and_snapshot",
+    with patch("extensions.browser_control._tools.navigate_and_snapshot",
                new_callable=AsyncMock, return_value=snap):
         tool = BrowserNavigateTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_navigate",
@@ -121,7 +121,7 @@ async def test_click_missing_args_returns_error():
 async def test_fill_happy_path_mocked():
     snap = PageSnapshot(url="x", title="t", accessibility_tree="", text_content="",
                         error="")
-    with patch("extensions.browser_control.tools.fill_input",
+    with patch("extensions.browser_control._tools.fill_input",
                new_callable=AsyncMock, return_value=snap):
         tool = BrowserFillTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_fill",
@@ -133,7 +133,7 @@ async def test_fill_happy_path_mocked():
 async def test_scrape_with_selector():
     snap = PageSnapshot(url="x", title="t", accessibility_tree="", text_content="row1\nrow2",
                         error="")
-    with patch("extensions.browser_control.tools.scrape_url",
+    with patch("extensions.browser_control._tools.scrape_url",
                new_callable=AsyncMock, return_value=snap) as mock:
         tool = BrowserScrapeTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_scrape",
@@ -146,7 +146,7 @@ async def test_scrape_with_selector():
 
 def test_browser_error_when_playwright_missing():
     """browser._import_playwright raises BrowserError with install hint."""
-    from extensions.browser_control.browser import _import_playwright
+    from extensions.browser_control._browser_session import _import_playwright
 
     real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
 
@@ -192,7 +192,7 @@ def test_fill_schema_required_url_selector_value():
 async def test_scroll_happy_path_mocked():
     snap = PageSnapshot(url="x", title="t", accessibility_tree="", text_content="bottom",
                         error="")
-    with patch("extensions.browser_control.tools.scroll_page",
+    with patch("extensions.browser_control._tools.scroll_page",
                new_callable=AsyncMock, return_value=snap) as mock:
         tool = BrowserScrollTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_scroll",
@@ -213,7 +213,7 @@ async def test_scroll_missing_url_returns_error():
 async def test_back_happy_path_mocked():
     snap = PageSnapshot(url="x", title="prev", accessibility_tree="", text_content="",
                         error="")
-    with patch("extensions.browser_control.tools.go_back",
+    with patch("extensions.browser_control._tools.go_back",
                new_callable=AsyncMock, return_value=snap):
         tool = BrowserBackTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_back",
@@ -227,7 +227,7 @@ async def test_back_happy_path_mocked():
 async def test_back_no_history_error():
     snap = PageSnapshot(url="x", title="", accessibility_tree="", text_content="",
                         error="no back history available in this session")
-    with patch("extensions.browser_control.tools.go_back",
+    with patch("extensions.browser_control._tools.go_back",
                new_callable=AsyncMock, return_value=snap):
         tool = BrowserBackTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_back",
@@ -240,7 +240,7 @@ async def test_back_no_history_error():
 async def test_press_with_selector():
     snap = PageSnapshot(url="x", title="t", accessibility_tree="", text_content="",
                         error="")
-    with patch("extensions.browser_control.tools.press_key",
+    with patch("extensions.browser_control._tools.press_key",
                new_callable=AsyncMock, return_value=snap) as mock:
         tool = BrowserPressTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_press",
@@ -268,7 +268,7 @@ async def test_get_images_happy_path():
             {"src": "b.png", "alt": "b", "width": 200, "height": 200},
         ],
     }
-    with patch("extensions.browser_control.tools.get_images",
+    with patch("extensions.browser_control._tools.get_images",
                new_callable=AsyncMock, return_value=payload):
         tool = BrowserGetImagesTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_get_images",
@@ -281,7 +281,7 @@ async def test_get_images_happy_path():
 
 @pytest.mark.asyncio
 async def test_get_images_error_dict_returned():
-    with patch("extensions.browser_control.tools.get_images",
+    with patch("extensions.browser_control._tools.get_images",
                new_callable=AsyncMock, return_value={"url": "x", "error": "boom", "images": []}):
         tool = BrowserGetImagesTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_get_images",
@@ -297,7 +297,7 @@ async def test_vision_happy_path():
         "image_base64": "iVBORw0KGgo=", "image_format": "png",
         "image_size_bytes": 8,
     }
-    with patch("extensions.browser_control.tools.vision_screenshot",
+    with patch("extensions.browser_control._tools.vision_screenshot",
                new_callable=AsyncMock, return_value=payload):
         tool = BrowserVisionTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_vision",
@@ -310,7 +310,7 @@ async def test_vision_happy_path():
 
 @pytest.mark.asyncio
 async def test_vision_error_dict_returned():
-    with patch("extensions.browser_control.tools.vision_screenshot",
+    with patch("extensions.browser_control._tools.vision_screenshot",
                new_callable=AsyncMock, return_value={"url": "x", "error": "screenshot failed"}):
         tool = BrowserVisionTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_vision",
@@ -328,7 +328,7 @@ async def test_console_happy_path():
             {"type": "error", "text": "boom", "location": "x.js"},
         ],
     }
-    with patch("extensions.browser_control.tools.get_console_messages",
+    with patch("extensions.browser_control._tools.get_console_messages",
                new_callable=AsyncMock, return_value=payload):
         tool = BrowserConsoleTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_console",
@@ -341,7 +341,7 @@ async def test_console_happy_path():
 
 @pytest.mark.asyncio
 async def test_press_browser_error_returned():
-    with patch("extensions.browser_control.tools.press_key",
+    with patch("extensions.browser_control._tools.press_key",
                new_callable=AsyncMock, side_effect=BrowserError("playwright missing")):
         tool = BrowserPressTool()
         result = await tool.execute(ToolCall(id="t1", name="browser_press",

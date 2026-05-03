@@ -1,10 +1,10 @@
 {
   "id": "browser-control",
   "name": "browser-control",
-  "description": "Browser automation via Playwright. Navigate, click, fill, scroll, press keys, snapshot, scrape, screenshot, capture console — isolated sessions by default. Default OFF.",
-  "version": "0.2.0",
+  "description": "Browser automation via Playwright. Navigate, click, fill, scroll, press keys, snapshot, scrape, screenshot, capture console — isolated sessions by default. Core feature, ALWAYS ON: enabled_by_default=true is honored at runtime via Layer D in opencomputer/plugins/registry.py — even profiles with a narrow explicit `enabled: [...]` list still load this plugin. WebFetch alone returns empty HTML shells for SPA / client-rendered pages, so the agent needs this to read modern websites.",
+  "version": "0.2.2",
   "kind": "tool",
-  "enabled_by_default": false,
+  "enabled_by_default": true,
   "entry": "plugin",
   "author": "OpenComputer",
   "license": "MIT",

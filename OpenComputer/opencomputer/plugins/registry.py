@@ -201,6 +201,34 @@ class PluginRegistry:
                         additions,
                     )
 
+        # Layer D — manifest ``enabled_by_default`` auto-include. Plugins
+        # whose manifest declares ``enabled_by_default: true`` are treated
+        # as core/always-on and force-included into ``enabled_ids`` even
+        # when a profile.yaml carries a narrow explicit ``enabled: [...]``
+        # list. Without this, ``enabled_by_default`` was a no-op at
+        # runtime — the schema field was parsed and ignored. Layer A
+        # (manifest profile scope) still gates: a core plugin that
+        # restricts itself to ``profiles: [coding]`` does NOT auto-load
+        # in other profiles. Layer A is the AUTHOR's compatibility
+        # statement; Layer D is the AUTHOR's "this is core, don't drop
+        # me" statement. Wildcard mode skips this loop because it
+        # already loads everything.
+        if not wildcard:
+            assert isinstance(enabled_ids, frozenset)
+            core_additions = sorted(
+                cand.manifest.id
+                for cand in candidates
+                if getattr(cand.manifest, "enabled_by_default", False)
+                and cand.manifest.id not in enabled_ids
+                and _manifest_allows_profile(cand.manifest, active_profile)[0]
+            )
+            if core_additions:
+                enabled_ids = enabled_ids | frozenset(core_additions)
+                logger.info(
+                    "core auto-include (enabled_by_default): %s",
+                    core_additions,
+                )
+
         for cand in candidates:
             # Layer A — manifest scope check
             allowed, reason = _manifest_allows_profile(cand.manifest, active_profile)
