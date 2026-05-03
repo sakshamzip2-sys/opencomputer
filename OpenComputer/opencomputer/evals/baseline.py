@@ -18,6 +18,9 @@ class BaselineSnapshot:
     timestamp: str
     model: str
     provider: str
+    cost_usd: float | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 @dataclass
@@ -45,6 +48,9 @@ def save_baseline(
         timestamp=datetime.now(UTC).isoformat(),
         model=model,
         provider=provider,
+        cost_usd=report.cost_usd,
+        input_tokens=report.input_tokens,
+        output_tokens=report.output_tokens,
     )
     path = baselines_dir / f"{report.site_name}.json"
     path.write_text(json.dumps(asdict(snapshot), indent=2))

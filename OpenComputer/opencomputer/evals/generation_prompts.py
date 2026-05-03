@@ -45,14 +45,17 @@ Return a JSON array. Each case has:
 
 Output the JSON array only, no preamble."""
 
-REFLECT_PROMPT = """Generate {n} diverse test cases for an open-ended post-response reflector.
+REFLECT_PROMPT = """Generate {n} diverse test cases for an agent post-response reflector.
 
-Each case has a session excerpt where the agent could have done something better.
+Each case has a structured event list representing one agent session.
+Events match the TrajectoryEvent schema.
 
 Return a JSON array. Each case has:
   id: short slug
-  input: {{"session_excerpt": <multi-turn excerpt>}}
+  input: {{"events": [{{"action_type": "tool_call"|"user_reply"|"assistant_reply"|"error", "tool_name": <str|null>, "outcome": "success"|"failure"|"blocked_by_hook"|"user_cancelled", "metadata": {{<short tool-name-level keys, no raw text>}}}}]}}
   rubric_id: "reflect_v1"
+
+Construct sessions that exhibit clear patterns: repeated failures of the same tool, mode-switching, premature termination, ignored hook blocks, etc.
 
 Output the JSON array only, no preamble."""
 

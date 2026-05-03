@@ -52,6 +52,11 @@ Reason through your grading in <thinking> tags, then output exactly 'correct' or
         prompt = self.PROMPT_TEMPLATE.format(rubric=rubric_text, response=str(actual))
         response = self.provider.complete(prompt)
         text = getattr(response, "text", str(response))
+        usage = getattr(response, "usage", None)
+        extra: dict[str, Any] = {}
+        if usage is not None:
+            extra["input_tokens"] = getattr(usage, "input_tokens", 0)
+            extra["output_tokens"] = getattr(usage, "output_tokens", 0)
 
         result_match = _RESULT_RE.search(text)
         thinking_match = _THINKING_RE.search(text)
@@ -62,10 +67,12 @@ Reason through your grading in <thinking> tags, then output exactly 'correct' or
                 correct=False,
                 reason=reasoning,
                 parse_error="no <result>...</result> tag in grader response",
+                extra=extra,
             )
 
         verdict = result_match.group(1).strip().lower()
         return GradeResult(
             correct=(verdict == "correct"),
             reason=reasoning,
+            extra=extra,
         )

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 GraderKind = Literal["exact", "schema", "rubric"]
+ErrorCategory = Literal["incorrect", "parse_error", "infra_error"]
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,8 @@ class EvalSite:
     schema: dict | None = None
     rubric_id: str | None = None
     requires_provider: bool = True
+    regression_threshold: float = 0.05
+    """Accuracy drop (as fraction, not %) that trips the regression gate."""
 
 
 @dataclass(frozen=True)
@@ -45,4 +48,5 @@ class GradeResult:
     score: float | None = None
     reason: str | None = None
     parse_error: str | None = None
+    error_category: ErrorCategory | None = None
     extra: dict[str, Any] = field(default_factory=dict)

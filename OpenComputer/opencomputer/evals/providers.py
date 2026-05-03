@@ -36,7 +36,8 @@ class ProviderShim:
         )
         # ProviderResponse.message.content is the assistant text.
         text = response.message.content if hasattr(response, "message") else str(response)
-        return type("ShimResponse", (), {"text": text})()
+        usage = getattr(response, "usage", None)
+        return type("ShimResponse", (), {"text": text, "usage": usage})()
 
 
 def get_grader_provider(model_override: str | None = None, provider_override: str | None = None) -> ProviderShim:

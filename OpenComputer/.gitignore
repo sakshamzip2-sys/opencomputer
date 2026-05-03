@@ -63,3 +63,8 @@ sessions/
 .env
 .env.local
 credentials.json
+
+# Eval system runtime artifacts
+evals/history.db
+evals/history.db-journal
+evals/dashboard/
