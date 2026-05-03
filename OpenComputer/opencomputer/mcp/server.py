@@ -133,6 +133,62 @@ def build_server() -> FastMCP:
         return out
 
     @server.tool()
+    def attachments_fetch(session_id: str, message_id: int) -> list[dict[str, Any]]:
+        """Fetch attachment file contents for a specific message.
+
+        Reads the ``attachments`` JSON column (added 2026-04-27) from the
+        messages table and returns base64-encoded content for each path
+        that still exists on disk. Useful for MCP clients that want to
+        inspect files the user attached to a prior conversation.
+
+        Args:
+            session_id: The session that owns the message.
+            message_id: Row id of the message whose attachments to fetch.
+
+        Returns:
+            List of dicts with ``path`` (original file path), ``mime_type``
+            (guessed from extension, or ``application/octet-stream``), and
+            ``content_b64`` (base64-encoded file bytes). Entries for files
+            that no longer exist on disk are silently skipped.
+        """
+        import base64
+        import json as _json
+        import mimetypes
+        import pathlib
+
+        db_path = _home() / "sessions.db"
+        try:
+            with sqlite3.connect(str(db_path)) as conn:
+                row = conn.execute(
+                    "SELECT attachments FROM messages WHERE id=? AND session_id=?",
+                    (message_id, session_id),
+                ).fetchone()
+        except sqlite3.Error:
+            return []
+        if not row or not row[0]:
+            return []
+        try:
+            paths: list[str] = _json.loads(row[0])
+        except (ValueError, TypeError):
+            return []
+        result: list[dict[str, Any]] = []
+        for path in paths:
+            try:
+                p = pathlib.Path(path)
+                if not p.exists():
+                    continue
+                raw = p.read_bytes()
+                mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+                result.append({
+                    "path": path,
+                    "mime_type": mime,
+                    "content_b64": base64.b64encode(raw).decode(),
+                })
+            except OSError:
+                continue
+        return result
+
+    @server.tool()
     def recall_search(query: str, limit: int = 20) -> list[dict[str, Any]]:
         """FTS5 full-text search across all OC session messages.
 
