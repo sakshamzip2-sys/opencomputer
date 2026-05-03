@@ -29,6 +29,13 @@ class ToolAction:
     args_preview: str
     ok: bool
     duration_s: float
+    description: str | None = None
+    """LLM-generated one-line description of what the tool action did
+    in plain English (e.g. ``"Wrote a haiku in foo.md"`` instead of
+    ``"Edit(file_path=foo.md, content=...)"``). Set asynchronously by
+    a daemon thread after :meth:`ReasoningStore.append`. ``None`` when
+    the description call hasn't completed yet, was empty, or failed —
+    the renderer falls back to the args_preview in that case."""
 
 
 @dataclass(frozen=True)
@@ -117,6 +124,34 @@ class ReasoningStore:
         for i, t in enumerate(self._turns):
             if t.turn_id == turn_id:
                 self._turns[i] = replace(t, summary=summary)
+                return
+
+    def update_tool_description(
+        self, *, turn_id: int, action_idx: int, description: str
+    ) -> None:
+        """Set the description on a specific :class:`ToolAction` within
+        a previously-appended turn.
+
+        Called from a background daemon thread that runs Haiku
+        per-action; safe because both the ToolAction and the enclosing
+        ReasoningTurn are replaced wholesale via
+        :func:`dataclasses.replace`. Unknown ``turn_id`` or out-of-range
+        ``action_idx`` is a silent no-op (turn evicted, or action list
+        changed since the description thread was spawned).
+        """
+        from dataclasses import replace
+        for i, t in enumerate(self._turns):
+            if t.turn_id == turn_id:
+                if not (0 <= action_idx < len(t.tool_actions)):
+                    return
+                old_action = t.tool_actions[action_idx]
+                new_action = replace(old_action, description=description)
+                new_actions = (
+                    t.tool_actions[:action_idx]
+                    + (new_action,)
+                    + t.tool_actions[action_idx + 1:]
+                )
+                self._turns[i] = replace(t, tool_actions=new_actions)
                 return
 
 
@@ -217,8 +252,24 @@ def render_turn_tree(turn: ReasoningTurn) -> Tree:
             mark_style = "green" if action.ok else "red"
             icon = _action_icon(action.name)
             chip = _extract_path_chip(action)
-            if chip:
-                # File action: action name on top, file chip indented.
+            if action.description:
+                # v4 Claude.ai parity: AI-generated description leads
+                # the row instead of generic tool name + args. Action
+                # name + chip (if applicable) shown as subordinates.
+                desc_node = tree.add(
+                    Text.assemble(
+                        (f"{icon} ", "dim"),
+                        (action.description, "bold"),
+                        ("  ", ""),
+                        (mark, mark_style),
+                        (f"  {_fmt_duration(action.duration_s)}", "dim"),
+                    )
+                )
+                if chip:
+                    desc_node.add(Text(chip, style="italic dim"))
+            elif chip:
+                # File action without description (description thread
+                # not done): show tool name + chip below.
                 action_node = tree.add(
                     Text.assemble(
                         (f"{icon} ", "dim"),

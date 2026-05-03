@@ -422,6 +422,24 @@ class StreamingRenderer:
                 duration_s=thinking_elapsed_for_store,
                 tool_actions=self._tool_history,
             )
+            # v4 (Claude.ai parity): kick off plain-English per-action
+            # descriptions in the background. They replace the generic
+            # tool-name + args display in the expanded /reasoning show
+            # tree with a description like "Wrote a haiku in foo.md".
+            # Fire-and-forget — daemon thread updates the store as
+            # each Haiku call lands; the next prompt is never delayed.
+            if self._tool_history:
+                try:
+                    from opencomputer.agent.reasoning_summary import (
+                        maybe_describe_tool_actions,
+                    )
+                    maybe_describe_tool_actions(
+                        store=self._reasoning_store,
+                        turn_id=appended_turn.turn_id,
+                        actions=self._tool_history,
+                    )
+                except Exception:  # noqa: BLE001 — never crash on description spawn
+                    pass
             # If the inline summary thread already produced a value,
             # copy it into the store so /reasoning show <N> picks it
             # up. If the thread is still running past the 1.5s cap,
