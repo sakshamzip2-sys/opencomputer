@@ -17,6 +17,7 @@ from enum import Enum
 from opencomputer.agent.feature_flags import FeatureFlags
 from opencomputer.agent.policy_audit import PolicyAuditLogger
 from opencomputer.agent.policy_audit import PolicyChangeEvent as _AuditEvent
+from opencomputer.agent.policy_audit_log import PolicyAuditLog
 from opencomputer.agent.trust_ramp import TrustRamp
 from opencomputer.evolution.policy_engine import MostCitedBelowMedianV1
 
@@ -66,11 +67,14 @@ def run_engine_tick(*, db, flags: FeatureFlags, hmac_key: bytes) -> EngineTickRe
         return EngineTickResult.ENGINE_NOOP
 
     ramp = TrustRamp(db, flags)
-    mode = ramp.next_approval_mode()
+    # Task E: tier-aware mode selection — recall_penalty defaults to
+    # low_blast (10 safe / 7d TTL) which matches v0 behavior.
+    mode = ramp.next_approval_mode_for(rec.knob_kind)
     revert_after = time.time() + 7 * 86400 if mode == "auto_ttl" else None
 
     with db._connect() as conn:
         audit = PolicyAuditLogger(conn, hmac_key)
+        audit_log = PolicyAuditLog(conn, hmac_key)
         evt = _AuditEvent(
             knob_kind=rec.knob_kind,
             target_id=str(rec.target_id),
@@ -84,6 +88,11 @@ def run_engine_tick(*, db, flags: FeatureFlags, hmac_key: bytes) -> EngineTickRe
             revert_after=revert_after,
         )
         row_id = audit.append_drafted(evt)
+        audit_log.append_transition(
+            change_id=row_id, status="drafted",
+            actor="cron.engine_tick",
+            reason=f"engine={rec.engine_version}",
+        )
 
         if mode == "auto_ttl":
             baseline = _baseline_for(conn)
@@ -93,6 +102,11 @@ def run_engine_tick(*, db, flags: FeatureFlags, hmac_key: bytes) -> EngineTickRe
                 ts_applied=time.time(),
                 approved_by="auto",
             )
+            audit_log.append_transition(
+                change_id=row_id, status="pending_evaluation",
+                actor="auto",
+                reason=f"auto-approved tier=auto_ttl revert_after={revert_after}",
+            )
             final_status = "pending_evaluation"
             tick_result = EngineTickResult.DRAFTED_AUTO_APPLIED
             _logger.info(
@@ -101,6 +115,11 @@ def run_engine_tick(*, db, flags: FeatureFlags, hmac_key: bytes) -> EngineTickRe
             )
         else:
             audit.append_status_transition(row_id, "pending_approval")
+            audit_log.append_transition(
+                change_id=row_id, status="pending_approval",
+                actor="cron.engine_tick",
+                reason="explicit-approval mode",
+            )
             final_status = "pending_approval"
             tick_result = EngineTickResult.DRAFTED_PENDING
             _logger.info(

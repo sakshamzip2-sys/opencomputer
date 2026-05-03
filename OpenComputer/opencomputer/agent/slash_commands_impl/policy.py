@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass
 
 from opencomputer.agent.policy_audit import PolicyAuditLogger
+from opencomputer.agent.policy_audit_log import PolicyAuditLog
 from plugin_sdk.runtime_context import RuntimeContext
 from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 
@@ -126,6 +127,11 @@ async def handle_policy_approve(
             ts_applied=time.time(),
             approved_by="user",
         )
+        audit_log = PolicyAuditLog(conn, hmac_key)
+        audit_log.append_transition(
+            change_id=full_id, status="pending_evaluation",
+            actor="user", reason="manual /policy-approve",
+        )
 
     return SlashOutput(
         text=f"approved {full_id[:8]}; will be evaluated after N=10 "
@@ -174,6 +180,11 @@ async def handle_policy_revert(
         audit.append_status_transition(
             full_id, "reverted",
             reverted_reason="user-initiated /policy-revert",
+        )
+        audit_log = PolicyAuditLog(conn, hmac_key)
+        audit_log.append_transition(
+            change_id=full_id, status="reverted",
+            actor="user", reason="manual /policy-revert",
         )
 
     _publish_reverted_event(
@@ -256,9 +267,47 @@ class PolicyRevertCommand(SlashCommand):
         return SlashCommandResult(output=out.text, handled=True)
 
 
+class PolicyMetricsCommand(SlashCommand):
+    name = "policy-metrics"
+    description = "Show recommendation-engine quality stats (last 30d)"
+
+    async def execute(
+        self, args: str, runtime: RuntimeContext,
+    ) -> SlashCommandResult:
+        from opencomputer.evolution.engine_metrics import compute_engine_quality
+
+        db, _ = _resolve_db_and_key(runtime)
+        days = 30
+        parts = args.strip().split()
+        if "--days" in parts:
+            try:
+                days = int(parts[parts.index("--days") + 1])
+            except (IndexError, ValueError):
+                pass
+
+        metrics = compute_engine_quality(db, days=days)
+        if not metrics:
+            return SlashCommandResult(
+                output=f"No engine activity in last {days}d.", handled=True,
+            )
+
+        lines = [f"Engine quality (last {days} days):"]
+        for m in metrics:
+            lines.append(
+                f"\n  {m.engine_version}\n"
+                f"    recs={m.n_recommendations} "
+                f"(pending={m.n_pending} active={m.n_active} "
+                f"expired={m.n_expired_decayed} reverted={m.n_reverted})\n"
+                f"    unrevert_rate={m.unrevert_rate:.1%}  "
+                f"revert_rate={m.revert_rate:.1%}"
+            )
+        return SlashCommandResult(output="\n".join(lines), handled=True)
+
+
 __all__ = [
     "PolicyApproveCommand",
     "PolicyChangesCommand",
+    "PolicyMetricsCommand",
     "PolicyRevertCommand",
     "handle_policy_approve",
     "handle_policy_changes",

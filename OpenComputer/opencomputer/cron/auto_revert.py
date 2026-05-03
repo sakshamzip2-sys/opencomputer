@@ -19,6 +19,7 @@ import time
 
 from opencomputer.agent.feature_flags import FeatureFlags
 from opencomputer.agent.policy_audit import PolicyAuditLogger
+from opencomputer.agent.policy_audit_log import PolicyAuditLog
 
 _logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ def run_auto_revert_due(*, db, flags: FeatureFlags, hmac_key: bytes) -> int:
 
     with db._connect() as conn:
         audit = PolicyAuditLogger(conn, hmac_key)
+        audit_log = PolicyAuditLog(conn, hmac_key)
 
         pending = conn.execute(
             "SELECT id, ts_applied, target_id, "
@@ -86,6 +88,10 @@ def run_auto_revert_due(*, db, flags: FeatureFlags, hmac_key: bytes) -> int:
                     post_change_mean=post_mean,
                     reverted_reason=reverted_reason,
                 )
+                audit_log.append_transition(
+                    change_id=change_id, status="reverted",
+                    actor="cron.auto_revert", reason=reverted_reason,
+                )
                 _publish_reverted_event(
                     change_id=change_id,
                     knob_kind="recall_penalty",
@@ -97,6 +103,11 @@ def run_auto_revert_due(*, db, flags: FeatureFlags, hmac_key: bytes) -> int:
                 audit.append_status_transition(
                     change_id, "active",
                     post_change_mean=post_mean,
+                )
+                audit_log.append_transition(
+                    change_id=change_id, status="active",
+                    actor="cron.auto_revert",
+                    reason=f"post_mean {post_mean:.3f} within ±{sigma}σ of baseline",
                 )
                 transitions += 1
 
