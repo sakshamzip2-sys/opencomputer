@@ -161,8 +161,100 @@ def maybe_summarize_turn(
     return thread
 
 
+_ACTION_PROMPT = (
+    "Describe in 5-10 plain-English words what an AI assistant just "
+    "did with the following tool call. Focus on the INTENT of the "
+    "action (what was the user-visible effect), not on the tool's "
+    "internal name or the raw args. Return ONLY the description text, "
+    "no quotes, no trailing punctuation, no prefixes."
+)
+
+
+def summarize_tool_action(
+    *, name: str, args_preview: str, ok: bool, timeout: float = 10.0
+) -> str | None:
+    """Generate a one-line plain-English description of a single tool
+    call (e.g. ``"Wrote a haiku in foo.md"`` instead of
+    ``"Edit(file_path=foo.md, content=...)"``).
+
+    Returns the cleaned string (max 120 chars) or ``None`` on empty
+    input or LLM failure. Tests patch :func:`call_llm` to mock the
+    Haiku response.
+    """
+    args = (args_preview or "").strip()[:500]
+    if not name:
+        return None
+    status = "successfully" if ok else "and the call failed"
+    payload = (
+        f"Tool: {name}\nArgs: {args}\nResult: {status}"
+    )
+    try:
+        resp = call_llm(
+            messages=[
+                {"role": "user", "content": f"{_ACTION_PROMPT}\n\n{payload}"},
+            ],
+            max_tokens=_SUMMARY_MAX_TOKENS,
+            temperature=0.3,
+            timeout=timeout,
+        )
+        raw = resp.choices[0].message.content if resp and resp.choices else ""
+        cleaned = _clean(raw)
+        return cleaned or None
+    except Exception:  # noqa: BLE001 — never let description failure crash the loop
+        logger.debug(
+            "tool-action description failed for %s", name, exc_info=True
+        )
+        return None
+
+
+def _describe_and_store(
+    store: ReasoningStore, turn_id: int, actions
+) -> None:
+    """Sequentially describe each action and write back to the store.
+
+    Sequential (not parallel) because typical turns have ≤5 tools and
+    sequential keeps thread-pool churn down. Each Haiku call is ~1-2s
+    so total background work is ~5-10s for a busy turn — well below
+    the user's typical "look at the next prompt" attention span.
+    """
+    for idx, action in enumerate(actions):
+        desc = summarize_tool_action(
+            name=action.name,
+            args_preview=action.args_preview,
+            ok=action.ok,
+        )
+        if desc:
+            store.update_tool_description(
+                turn_id=turn_id, action_idx=idx, description=desc
+            )
+
+
+def maybe_describe_tool_actions(
+    *, store: ReasoningStore, turn_id: int, actions
+) -> threading.Thread | None:
+    """Spawn a daemon thread that generates plain-English descriptions
+    for each tool action in the turn and writes them back to the store
+    via :meth:`ReasoningStore.update_tool_description`.
+
+    Returns the thread (caller may join it for tests) or ``None`` if
+    there are no actions worth describing. Fire-and-forget by design.
+    """
+    if not actions:
+        return None
+    thread = threading.Thread(
+        target=_describe_and_store,
+        args=(store, turn_id, list(actions)),
+        daemon=True,
+        name=f"tool-descriptions-turn-{turn_id}",
+    )
+    thread.start()
+    return thread
+
+
 __all__ = [
     "call_llm",
     "generate_summary",
+    "maybe_describe_tool_actions",
     "maybe_summarize_turn",
+    "summarize_tool_action",
 ]
