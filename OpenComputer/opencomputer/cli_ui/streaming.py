@@ -349,12 +349,18 @@ class StreamingRenderer:
                     meta_parts.append(f"{action_count} action{s}")
                 meta = " · ".join(meta_parts)
                 if _summary_str:
-                    # Enhanced format with summary as the lead-in.
+                    # v3 (Claude.ai parity, Image #10): just summary +
+                    # chevron-right. No metadata clutter — the metadata
+                    # moves to the expanded tree's header so the
+                    # collapsed form reads like a section heading.
+                    # Use Ctrl+X Ctrl+R or /reasoning show <N> to expand.
                     self.console.print(
-                        f"[bold]{_summary_str}[/bold] "
-                        f"[dim cyan]· {meta} — /reasoning show to expand[/dim cyan]"
+                        f"[bold]{_summary_str}[/bold] [dim]›[/dim]"
                     )
                 else:
+                    # Fallback when summary is unavailable: today's
+                    # metadata-only format with an explicit hint about
+                    # how to see the full reasoning + tool actions.
                     self.console.print(
                         f"[dim cyan]{meta} — /reasoning show to expand[/dim cyan]"
                     )

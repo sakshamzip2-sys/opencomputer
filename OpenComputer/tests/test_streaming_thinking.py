@@ -336,8 +336,10 @@ def test_collapsed_line_singular_action_no_plural_s() -> None:
 
 
 def test_finalize_collapsed_line_includes_summary_when_available() -> None:
-    """When the inline summary thread completes within the 1.5s join,
-    the collapsed line includes the summary as a bold lead-in."""
+    """v3 (Claude.ai parity, Image #10): when summary lands, the
+    collapsed line is JUST the summary + chevron — no metadata
+    clutter (no "Thought for X · turn #N · K actions — /reasoning
+    show to expand")."""
     from unittest.mock import patch
 
     from opencomputer.cli_ui.reasoning_store import ReasoningStore
@@ -363,7 +365,15 @@ def test_finalize_collapsed_line_includes_summary_when_available() -> None:
                 show_reasoning=False,
             )
     text = out.getvalue()
+    # Summary present + chevron-right indicator.
     assert "Wrote a haiku about sloths" in text
+    assert "›" in text
+    # Metadata clutter MUST NOT appear when summary is present (v3 clean).
+    assert "Thought for" not in text
+    assert "turn #" not in text
+    assert "actions" not in text
+    assert "/reasoning show to expand" not in text
+    # Store still has the summary for /reasoning show <N>.
     t = store.get_by_id(1)
     assert t is not None and t.summary == "Wrote a haiku about sloths"
 
