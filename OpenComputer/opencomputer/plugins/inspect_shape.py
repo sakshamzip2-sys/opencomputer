@@ -160,11 +160,12 @@ def inspect_shape(plugin_id: str) -> PluginShape:
                 break
         if loaded is None:
             api = plugin_registry.api()
-            load_plugin(matched, api, plugin_registry)
-            for lp in plugin_registry.loaded:
-                if lp.candidate.manifest.id == plugin_id:
-                    loaded = lp
-                    break
+            new_loaded = load_plugin(matched, api)
+            if new_loaded is not None:
+                # load_plugin returns LoadedPlugin but doesn't write to
+                # registry.loaded - that's done by load_all. For inspection
+                # we just consume the returned LoadedPlugin directly.
+                loaded = new_loaded
         if loaded is not None:
             regs = loaded.registrations
             actual_tools = tuple(sorted(regs.tool_names))
