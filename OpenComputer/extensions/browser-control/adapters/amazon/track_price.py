@@ -18,7 +18,11 @@ from extensions.adapter_runner import Strategy, adapter
 @adapter(
     site="amazon",
     name="track_price",
-    description="Read the price of a product on Amazon (logged-in session required).",
+    description=(
+        "Read the current price, title, and stock status of an Amazon product page. "
+        "Requires a logged-in session via the COOKIE strategy (signed-in browser). "
+        "Use for price tracking workflows; do NOT use for bulk scraping (rate limits)."
+    ),
     domain="amazon.com",
     strategy=Strategy.COOKIE,
     browser=True,

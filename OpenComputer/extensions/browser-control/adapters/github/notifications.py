@@ -16,7 +16,11 @@ from extensions.adapter_runner import Strategy, adapter
 @adapter(
     site="github",
     name="notifications",
-    description="GitHub notifications for the authenticated user (token via env).",
+    description=(
+        "Fetch GitHub notifications for the authenticated user via REST API. "
+        "Requires GITHUB_TOKEN env var with notifications scope. Returns repo, "
+        "subject, reason, updated_at. Use for inbox triage; prefer over WebFetch."
+    ),
     domain="github.com",
     strategy=Strategy.COOKIE,
     browser=False,

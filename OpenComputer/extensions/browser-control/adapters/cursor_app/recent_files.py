@@ -19,7 +19,11 @@ from extensions.adapter_runner import Strategy, adapter
 @adapter(
     site="cursor_app",
     name="recent_files",
-    description="Cursor.app — list recently-opened files (Electron CDP).",
+    description=(
+        "List recently-opened files from the Cursor.app editor via Electron Chrome "
+        "DevTools Protocol. Requires Cursor running with --remote-debugging-port. "
+        "Use to surface recent context for the agent; read-only, no file mutations."
+    ),
     domain="cursor.local",
     strategy=Strategy.INTERCEPT,
     browser=True,

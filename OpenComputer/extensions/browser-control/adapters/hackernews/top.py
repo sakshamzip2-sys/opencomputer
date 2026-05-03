@@ -12,7 +12,11 @@ from extensions.adapter_runner import Strategy, adapter
 @adapter(
     site="hackernews",
     name="top",
-    description="Hacker News top stories — rank/title/score/author/comments.",
+    description=(
+        "Fetch Hacker News top stories with rank, title, URL, score, author, and "
+        "comment count. Uses the public HN Firebase API (no authentication). Use "
+        "for news triage and trend monitoring; prefer over scraping the HTML page."
+    ),
     domain="news.ycombinator.com",
     strategy=Strategy.PUBLIC,
     browser=False,

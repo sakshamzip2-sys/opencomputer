@@ -8,5 +8,14 @@
   "entry": "plugin",
   "author": "OpenComputer",
   "license": "MIT",
-  "tool_names": []
+  "tool_names": [
+    "AmazonTrackPrice",
+    "ApplePodcastsSearch",
+    "ArxivSearch",
+    "ChatgptAppNewChat",
+    "CursorAppRecentFiles",
+    "GithubNotifications",
+    "HackernewsTop",
+    "RedditHot"
+  ]
 }
