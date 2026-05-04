@@ -124,8 +124,8 @@ def register_builtin_slash_commands() -> None:
 
     Idempotent — if a name is already present (e.g. another import
     already registered it, or a plugin registered the same name first)
-    we leave the existing entry alone. This matches the agent loop's
-    expectation that ``slash_commands`` is read-mostly after startup.
+    we leave the existing entry alone. Aliases follow the same yield
+    rule: an alias does NOT overwrite an existing primary registration.
     """
     for cls in _BUILTIN_COMMANDS:
         cmd = cls()
@@ -133,8 +133,15 @@ def register_builtin_slash_commands() -> None:
         if not name:
             continue
         if name in _plugin_registry.slash_commands:
-            continue
-        _plugin_registry.slash_commands[name] = cmd
+            # Re-use the already-registered instance for alias mapping
+            cmd = _plugin_registry.slash_commands[name]
+        else:
+            _plugin_registry.slash_commands[name] = cmd
+
+        # Now register aliases under the SAME instance (yields to existing)
+        for alias in getattr(cmd, "aliases", ()):
+            if alias and alias not in _plugin_registry.slash_commands:
+                _plugin_registry.slash_commands[alias] = cmd
 
 
 def get_registered_commands() -> list[Any]:

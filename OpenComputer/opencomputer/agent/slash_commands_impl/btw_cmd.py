@@ -84,6 +84,7 @@ class BtwCommand(SlashCommand):
         "Ask an ephemeral side-question using session context — "
         "no tools, not persisted"
     )
+    aliases = ("side",)
 
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self._api_key = api_key
