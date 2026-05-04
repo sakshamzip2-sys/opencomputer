@@ -29,7 +29,8 @@ def test_schema_version_is_11():
     # v9 = Phase 2 v0 outcome-aware learning (recall_penalty + policy_changes);
     # v10 = v0.5 — policy_audit_log append-only HMAC chain over status transitions;
     # v11 = Wave 5 T2 — /goal columns on the sessions table.
-    assert SCHEMA_VERSION == 11
+    # v12 = Wave 6.B — trigram FTS5 tokenizer for messages_fts.
+    assert SCHEMA_VERSION == 12
 
 
 def test_apply_migrations_on_fresh_db_creates_all_tables():
@@ -51,7 +52,7 @@ def test_apply_migrations_is_idempotent():
     conn = _fresh_conn()
     apply_migrations(conn)
     apply_migrations(conn)  # second call should be a no-op
-    assert _read_schema_version(conn) == 11
+    assert _read_schema_version(conn) == SCHEMA_VERSION
 
 
 def test_existing_v1_db_migrates_with_data_preserved():
@@ -67,7 +68,7 @@ def test_existing_v1_db_migrates_with_data_preserved():
     conn.commit()
 
     apply_migrations(conn)
-    assert _read_schema_version(conn) == 11
+    assert _read_schema_version(conn) == SCHEMA_VERSION
     got = conn.execute("SELECT id FROM sessions WHERE id='s1'").fetchone()
     assert got == ("s1",)  # data preserved
 
