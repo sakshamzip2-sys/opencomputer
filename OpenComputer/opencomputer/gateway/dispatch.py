@@ -685,6 +685,17 @@ class Dispatch:
                     adapter.on_processing_start(event.chat_id, message_id)
                 )
             )
+        # Wave 6.E.6 — bypass-running-guard slash commands. Some slash
+        # commands (currently only ``/kanban``) are durable, cheap, and
+        # should reach the user mid-turn without queuing behind a long
+        # agent reply. The class attribute ``bypass_running_guard``
+        # opts the command into this fast path.
+        bypass_result = await self._maybe_bypass_running_guard(
+            event, session_id, profile_id,
+        )
+        if bypass_result is not None:
+            return bypass_result
+
         # Per-(profile_id, session_id) lock keys make multi-profile
         # correct: same chat_id across two profiles no longer
         # interleaves through the same lock.
@@ -942,6 +953,56 @@ class Dispatch:
             await coro
         except Exception:  # noqa: BLE001
             logger.debug("lifecycle hook raised", exc_info=True)
+
+    async def _maybe_bypass_running_guard(
+        self, event, session_id: str, profile_id: str,
+    ) -> str | None:
+        """Detect + execute a bypass-running-guard slash command.
+
+        Wave 6.E.6 — Hermes parity. ``/kanban`` (and any future slash
+        command with ``bypass_running_guard = True``) skips the
+        per-session lock so a board read/write reaches the DB even
+        when a long-running agent reply is mid-flight.
+
+        Returns the command's text output if dispatched, or None if
+        the message is not a bypass-marked slash command (caller
+        proceeds with the normal locked path).
+        """
+        text = event.text or ""
+        if not text.startswith("/"):
+            return None
+        from opencomputer.agent.slash_dispatcher import parse_slash
+        parsed = parse_slash(text)
+        if parsed is None:
+            return None
+        name, args = parsed
+        from opencomputer.plugins.registry import registry as _plugin_registry
+        cmd = _plugin_registry.slash_commands.get(name)
+        if cmd is None:
+            return None
+        if not getattr(cmd, "bypass_running_guard", False):
+            return None
+        # Build a runtime context with channel info so the command can
+        # read platform / chat_id / thread_id for things like
+        # /kanban auto-subscribe.
+        custom: dict[str, Any] = {
+            "platform": event.platform.value if event.platform else None,
+            "chat_id": event.chat_id,
+            "session_id": session_id,
+            "profile_id": profile_id,
+        }
+        if event.metadata:
+            for k in ("thread_id", "user_id", "message_id"):
+                v = event.metadata.get(k)
+                if v is not None:
+                    custom[k] = v
+        runtime = RuntimeContext(custom=custom)
+        try:
+            result = await cmd.execute(args, runtime)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("bypass slash %s raised", name)
+            return f"/{name}: {type(exc).__name__}: {exc}"
+        return result.output if result is not None else None
 
     async def _typing_heartbeat(self, platform: str, chat_id: str) -> None:
         """Send typing indicator every 4s until cancelled."""

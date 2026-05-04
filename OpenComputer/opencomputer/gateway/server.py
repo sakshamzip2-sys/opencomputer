@@ -249,6 +249,21 @@ class Gateway:
         # worker agents on every ``kanban_create`` event.
         await self._start_kanban_dispatcher_loop()
 
+        # Wave 6.E.6 — register the /kanban slash command so users can
+        # read + write the board mid-chat. ``bypass_running_guard``
+        # makes it accessible even when the agent is mid-turn (lock
+        # bypass handled in Dispatch._maybe_bypass_running_guard).
+        try:
+            from opencomputer.kanban.slash_command import (
+                register_kanban_slash_commands,
+            )
+            from opencomputer.plugins.registry import registry as _plugin_registry
+            register_kanban_slash_commands(_plugin_registry)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "gateway: failed to register /kanban slash command (ignored)"
+            )
+
         # Hermes channel-port (PR 2 Task 2.3): start the fatal-error
         # supervisor so adapters that flag themselves with
         # ``_set_fatal_error`` get auto-reconnected (retryable) or
