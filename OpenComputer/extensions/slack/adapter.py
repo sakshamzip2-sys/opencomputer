@@ -104,6 +104,18 @@ class SlackAdapter(BaseChannelAdapter):
         # the number of concurrent active threads.
         self._typing_status: dict[str, str] = {}
 
+        # Wave 6.A — Hermes-port (8fb861ea6) — channel-scoped skill bindings.
+        # Maps Slack channel id → list of skill names to inject when an
+        # inbound message arrives in that channel. Empty / missing →
+        # no per-channel skill scoping (preserves pre-Wave-6 behaviour).
+        # The gateway / agent loop pulls these via ``skills_for_channel``
+        # when constructing the per-turn skill set.
+        self._channel_skill_bindings: dict[str, list[str]] = {
+            str(k): list(v or [])
+            for k, v in (config.get("channel_skill_bindings") or {}).items()
+            if isinstance(v, (list, tuple))
+        }
+
         # PR #221 follow-up Item 3 — ConsentGate inline-button surface.
         # ``_approval_callback`` is the function the gateway / agent loop
         # registers via :meth:`set_approval_callback` to receive button
@@ -202,6 +214,20 @@ class SlackAdapter(BaseChannelAdapter):
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+    def skills_for_channel(self, chat_id: str) -> list[str]:
+        """Return the skills bound to ``chat_id`` (Wave 6.A — Hermes 8fb861ea6).
+
+        The gateway / agent loop calls this when routing a Slack
+        message into the agent so per-channel skill scoping can be
+        applied. Empty list = no scoping — agent uses its default
+        skill set.
+
+        Channel ids are stored as strings; callers pass whatever Slack
+        returns (typically ``C…`` for public channels, ``D…`` for DMs,
+        ``G…`` for groups).
+        """
+        return list(self._channel_skill_bindings.get(str(chat_id), []))
 
     async def send_multiple_images(
         self,
