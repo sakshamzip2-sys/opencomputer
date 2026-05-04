@@ -92,9 +92,11 @@ class MiniMaxSource(GitHubSource):
         )
 
     def fetch(self, identifier: str) -> SkillBundle | None:
-        # ``identifier`` is ``minimax/<name>``. Translate to the
-        # filesystem path under our clone (skills/<name>/SKILL.md or
-        # <name>/SKILL.md), then build the bundle from disk.
+        # ``identifier`` is ``minimax/<name>``. Build the bundle from
+        # the on-disk clone. Real upstreams (MiniMax-AI/cli) sometimes
+        # name the directory differently from the SKILL.md frontmatter
+        # ``name`` field, so we try the obvious path first then fall
+        # back to a frontmatter scan.
         if not identifier.startswith(f"{self.name}/"):
             return None
         rel = identifier[len(self.name) + 1:]
@@ -103,16 +105,24 @@ class MiniMaxSource(GitHubSource):
                 self._ensure_cloned()
             except Exception:
                 return None
-        # Try skills/<rel>/SKILL.md first, then bare <rel>/SKILL.md
-        candidates = [
-            self._clone_dir / SKILLS_SUBDIR / rel,
-            self._clone_dir / rel,
-        ]
+
+        # Path A: directory name == frontmatter name (the common case).
         skill_dir: Path | None = None
-        for c in candidates:
+        for c in (self._clone_dir / SKILLS_SUBDIR / rel,
+                  self._clone_dir / rel):
             if (c / "SKILL.md").exists():
                 skill_dir = c
                 break
+
+        # Path B: frontmatter scan. Walks every SKILL.md and matches
+        # against the requested identifier by parsed name. Slower but
+        # tolerant of dirs whose name doesn't match the skill name.
+        if skill_dir is None:
+            for skill_md_path in self._walk_skills():
+                meta = self._meta_from_skill_md(skill_md_path)
+                if meta is not None and meta.identifier == identifier:
+                    skill_dir = skill_md_path.parent
+                    break
         if skill_dir is None:
             return None
         skill_md = (skill_dir / "SKILL.md").read_text()
