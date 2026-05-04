@@ -29,12 +29,12 @@ def _patch_chain(*, final_text: str = "ok"):
     Returns a (mock_loop, mock_provider) pair so tests can inspect what
     run_conversation was called with.
     """
-    from unittest.mock import AsyncMock, MagicMock as _MM
-    mock_loop = _MM()
+    from unittest.mock import AsyncMock
+    mock_loop = MagicMock()
     mock_loop.run_conversation = AsyncMock(
-        return_value=_MM(final_message=_MM(content=final_text)),
+        return_value=MagicMock(final_message=MagicMock(content=final_text)),
     )
-    mock_provider = _MM()
+    mock_provider = MagicMock()
     return mock_loop, mock_provider
 
 

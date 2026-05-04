@@ -76,7 +76,7 @@ class APIServerAdapter(BaseChannelAdapter):
         # by run_id so POST /v1/runs/{id}/stop can cancel the underlying
         # asyncio.Task. Cleared in _handle_chat's finally block on every
         # outcome (completion / error / cancel).
-        self._active_runs: dict[str, "asyncio.Task[Any]"] = {}
+        self._active_runs: dict[str, asyncio.Task[Any]] = {}
 
     def set_handler(self, handler: ChatHandler) -> None:
         """Inject the per-request agent handler.

@@ -34,7 +34,7 @@ def SlackAdapter():  # noqa: N802
     return _load_adapter().SlackAdapter
 
 
-def _make(SlackAdapter, *, bindings=None):
+def _make(SlackAdapter, *, bindings=None):  # noqa: N803 — SlackAdapter is a class fixture
     cfg = {"bot_token": "xoxb-fake"}
     if bindings is not None:
         cfg["channel_skill_bindings"] = bindings
