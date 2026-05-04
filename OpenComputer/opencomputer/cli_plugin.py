@@ -470,7 +470,10 @@ def _active_profile_yaml_path() -> tuple[Path, str]:
 from opencomputer.agent.profile_yaml import atomic_write_yaml as _atomic_write_yaml  # noqa: E402
 
 # Re-exported so existing call sites keep working. New code should import
-# directly from ``opencomputer.agent.profile_yaml``.
+# directly from ``opencomputer.agent.profile_yaml``. Callers that do a
+# read-modify-write cycle MUST wrap the cycle in
+# :func:`opencomputer.profiles_lock.profile_yaml_lock` (PR #431) to avoid
+# last-write-wins races between sibling-shell CLI invocations.
 
 
 def _try_clear_demand_tracker(plugin_id: str) -> None:
@@ -510,6 +513,7 @@ def plugin_enable(
     loaded at AgentLoop construction time.
     """
     from opencomputer.plugins.discovery import discover, standard_search_paths
+    from opencomputer.profiles_lock import profile_yaml_lock
 
     candidates = discover(standard_search_paths())
     known_ids = {c.manifest.id for c in candidates}
@@ -522,46 +526,48 @@ def plugin_enable(
 
     path, profile_name = _active_profile_yaml_path()
 
-    if path.exists():
-        raw = yaml.safe_load(path.read_text()) or {}
-        if not isinstance(raw, dict):
+    with profile_yaml_lock(path.parent):
+        if path.exists():
+            raw = yaml.safe_load(path.read_text()) or {}
+            if not isinstance(raw, dict):
+                _console.print(
+                    f"[red]error:[/red] {path} does not contain a YAML mapping at top level"
+                )
+                raise typer.Exit(code=1)
+        else:
+            raw = {}
+
+        plugins_block = raw.get("plugins")
+        if plugins_block is None:
+            plugins_block = {"enabled": []}
+            raw["plugins"] = plugins_block
+        elif not isinstance(plugins_block, dict):
             _console.print(
-                f"[red]error:[/red] {path} does not contain a YAML mapping at top level"
+                f"[red]error:[/red] {path}: `plugins` must be a mapping"
             )
             raise typer.Exit(code=1)
-    else:
-        raw = {}
 
-    plugins_block = raw.get("plugins")
-    if plugins_block is None:
-        plugins_block = {"enabled": []}
-        raw["plugins"] = plugins_block
-    elif not isinstance(plugins_block, dict):
-        _console.print(
-            f"[red]error:[/red] {path}: `plugins` must be a mapping"
-        )
-        raise typer.Exit(code=1)
+        enabled = plugins_block.get("enabled")
+        if enabled is None:
+            enabled = []
+            plugins_block["enabled"] = enabled
+        elif not isinstance(enabled, list):
+            _console.print(
+                f"[red]error:[/red] {path}: `plugins.enabled` must be a list"
+            )
+            raise typer.Exit(code=1)
 
-    enabled = plugins_block.get("enabled")
-    if enabled is None:
-        enabled = []
-        plugins_block["enabled"] = enabled
-    elif not isinstance(enabled, list):
-        _console.print(
-            f"[red]error:[/red] {path}: `plugins.enabled` must be a list"
-        )
-        raise typer.Exit(code=1)
+        if plugin_id in enabled:
+            _console.print(
+                f"Plugin '{plugin_id}' is already enabled for profile "
+                f"'{profile_name}'. No change."
+            )
+            raise typer.Exit(code=0)
 
-    if plugin_id in enabled:
-        _console.print(
-            f"Plugin '{plugin_id}' is already enabled for profile "
-            f"'{profile_name}'. No change."
-        )
-        raise typer.Exit(code=0)
+        enabled.append(plugin_id)
 
-    enabled.append(plugin_id)
+        _atomic_write_yaml(path, raw)
 
-    _atomic_write_yaml(path, raw)
     _try_clear_demand_tracker(plugin_id)
 
     _console.print(
@@ -579,6 +585,8 @@ def plugin_disable(
     Friendly no-op if the id isn't currently enabled (including when
     profile.yaml doesn't exist yet). Writes atomically on success.
     """
+    from opencomputer.profiles_lock import profile_yaml_lock
+
     path, profile_name = _active_profile_yaml_path()
 
     def _already_not_enabled() -> None:
@@ -591,26 +599,27 @@ def plugin_disable(
         _already_not_enabled()
         raise typer.Exit(code=0)
 
-    raw = yaml.safe_load(path.read_text()) or {}
-    if not isinstance(raw, dict):
-        _console.print(
-            f"[red]error:[/red] {path} does not contain a YAML mapping at top level"
-        )
-        raise typer.Exit(code=1)
+    with profile_yaml_lock(path.parent):
+        raw = yaml.safe_load(path.read_text()) or {}
+        if not isinstance(raw, dict):
+            _console.print(
+                f"[red]error:[/red] {path} does not contain a YAML mapping at top level"
+            )
+            raise typer.Exit(code=1)
 
-    plugins_block = raw.get("plugins")
-    if not isinstance(plugins_block, dict):
-        _already_not_enabled()
-        raise typer.Exit(code=0)
+        plugins_block = raw.get("plugins")
+        if not isinstance(plugins_block, dict):
+            _already_not_enabled()
+            raise typer.Exit(code=0)
 
-    enabled = plugins_block.get("enabled")
-    if not isinstance(enabled, list) or plugin_id not in enabled:
-        _already_not_enabled()
-        raise typer.Exit(code=0)
+        enabled = plugins_block.get("enabled")
+        if not isinstance(enabled, list) or plugin_id not in enabled:
+            _already_not_enabled()
+            raise typer.Exit(code=0)
 
-    enabled.remove(plugin_id)
+        enabled.remove(plugin_id)
 
-    _atomic_write_yaml(path, raw)
+        _atomic_write_yaml(path, raw)
 
     _console.print(
         f"[green]Disabled[/green] '{plugin_id}' for profile "

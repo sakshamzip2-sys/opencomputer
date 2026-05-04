@@ -213,6 +213,12 @@ class MCPConnection:
     connect_time: float | None = None
     #: Latest connect-time error message, ``None`` when healthy.
     last_error: str | None = None
+    #: T3 (tier-2 trio, 2026-05-04). Monotonic ts of last health probe.
+    last_health_check_at: float | None = None
+    #: T3 — count of reconnect attempts within current 60s window. Cap 3.
+    reconnect_attempts: int = 0
+    #: T3 — start of current 60s reconnect window (monotonic).
+    reconnect_window_start: float | None = None
 
     def _osv_pre_flight(self, *, fail_closed: bool) -> str | None:
         """Run the OSV pre-flight check; return an error string if blocking.
@@ -448,6 +454,83 @@ class MCPConnection:
             self.state = "disconnected"
         self.connect_time = None
 
+    # T3 (tier-2 trio, 2026-05-04) — health probe + auto-reconnect
+
+    async def _probe_alive(self) -> None:
+        """Cheap liveness probe — calls list_tools() on the active session.
+
+        Raises if the server isn't responsive. Override in tests via
+        ``monkeypatch.setattr(MCPConnection, "_probe_alive", ...)``.
+        """
+        if self.session is None:
+            raise RuntimeError("no active session")
+        await self.session.list_tools()
+
+    async def health_check(self) -> bool:
+        """Probe the server. Marks state='error' on failure. Returns alive bool.
+
+        Always sets :attr:`last_health_check_at`. Skips the probe (returns
+        False) when the connection isn't currently in ``connected`` state.
+        """
+        self.last_health_check_at = time.monotonic()
+        if self.state != "connected":
+            return False
+        try:
+            await self._probe_alive()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "MCP %s health probe failed: %s", self.config.name, exc
+            )
+            self.state = "error"
+            self.last_error = str(exc)
+            return False
+
+    async def attempt_reconnect(
+        self,
+        *,
+        osv_check_enabled: bool = True,
+        osv_check_fail_closed: bool = False,
+    ) -> bool:
+        """Try one reconnect with exponential backoff. Caps at 3/60s/server.
+
+        Returns True if reconnect succeeded, False if rate-limited or the
+        underlying ``connect()`` returned False.
+        """
+        now = time.monotonic()
+
+        if (
+            self.reconnect_window_start is None
+            or now - self.reconnect_window_start > 60.0
+        ):
+            self.reconnect_window_start = now
+            self.reconnect_attempts = 0
+
+        if self.reconnect_attempts >= 3:
+            logger.warning(
+                "MCP %s reconnect rate-limited (3/min)", self.config.name
+            )
+            return False
+
+        self.reconnect_attempts += 1
+        backoff = 2 ** self.reconnect_attempts  # 2s, 4s, 8s
+        logger.info(
+            "MCP %s reconnect attempt %d (backoff %ds)",
+            self.config.name,
+            self.reconnect_attempts,
+            backoff,
+        )
+        await asyncio.sleep(backoff)
+
+        try:
+            await self.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+        return await self.connect(
+            osv_check_enabled=osv_check_enabled,
+            osv_check_fail_closed=osv_check_fail_closed,
+        )
+
 
 # ─── MCPManager — orchestrates multiple connections ───────────────
 
@@ -500,6 +583,21 @@ class MCPManager:
                 self.tool_registry.unregister(tool.schema.name)
             await conn.disconnect()
         self.connections.clear()
+
+    async def health_check_all(self) -> None:
+        """Probe every currently-connected MCP server.
+
+        T3 (tier-2 trio, 2026-05-04). Iterates :attr:`connections`,
+        skipping any that aren't in ``connected`` state. A failed probe
+        flips that connection's ``state`` to ``error`` (via
+        :meth:`MCPConnection.health_check`). Callers that want to retry
+        unhealthy servers should follow up with
+        :meth:`MCPConnection.attempt_reconnect`.
+        """
+        for conn in self.connections:
+            if conn.state != "connected":
+                continue
+            await conn.health_check()
 
     def schedule_deferred_connect(
         self,

@@ -1,17 +1,19 @@
 """Shared profile.yaml + config.yaml writers (Wave 6.D-α).
 
 Extracted from ``opencomputer/cli_plugin.py`` so the dashboard mutation
-endpoints (PR Wave 6.D-α) and the existing CLI helpers share one
-crash-safe writer. The original lived in cli_plugin.py since v0.1; this
+endpoints (Wave 6.D-α) and the existing CLI helpers share one crash-
+safe writer. The original lived in cli_plugin.py since v0.1; this
 module is the new authoritative location, and cli_plugin.py re-exports
 for backward compatibility.
 
 Crash-safety guarantees:
-- Atomic write via ``tempfile.NamedTemporaryFile`` + ``os.replace``.
-  ``os.replace`` is atomic on POSIX and same-volume on Windows.
-- ``filelock.FileLock`` ringfences the read-modify-write window so two
-  concurrent dashboard mutations (or dashboard + CLI) can't lose
-  updates. Lock file lives next to the target as ``<name>.lock``.
+- Atomic write via tmp file + ``os.replace``. ``os.replace`` is
+  atomic on POSIX and same-volume on Windows.
+- For read-modify-write cycles, :func:`modify_yaml_locked` wraps
+  :func:`opencomputer.profiles_lock.profile_yaml_lock` (PR #431) so
+  concurrent dashboard mutations and CLI ``oc plugin enable/disable``
+  invocations from sibling shells serialize cleanly at the directory
+  level instead of last-write-wins'ing each other.
 """
 
 from __future__ import annotations
@@ -21,7 +23,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from filelock import FileLock
 
 __all__ = [
     "atomic_write_yaml",
@@ -58,17 +59,19 @@ def atomic_write_yaml(path: Path, data: dict[str, Any]) -> None:
 def modify_yaml_locked(path: Path, mutate) -> dict[str, Any]:
     """Read ``path``, apply ``mutate(data)``, atomically write back.
 
-    Held under a ``filelock.FileLock`` so concurrent callers (dashboard
-    + CLI) serialize at the file level. ``mutate`` is called with the
-    parsed dict and must mutate it in place (returning anything is OK
-    but ignored). Returns the new dict for the caller's convenience.
+    Wraps :func:`opencomputer.profiles_lock.profile_yaml_lock` so
+    concurrent callers (dashboard + CLI) serialize at the directory
+    level. ``mutate`` is called with the parsed dict and must mutate
+    it in place. Returns the new dict for the caller's convenience.
 
-    Audit lens A3: closes the read-modify-write race that two browser
-    tabs or a dashboard + CLI race would otherwise hit.
+    Closes the read-modify-write race against PR #431's CLI flock —
+    dashboard mutations now interlock with ``oc plugin enable`` from
+    a sibling shell.
     """
-    lock_path = path.with_suffix(path.suffix + ".lock")
+    from opencomputer.profiles_lock import profile_yaml_lock
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    with FileLock(str(lock_path), timeout=10):
+    with profile_yaml_lock(path.parent):
         data = load_yaml(path)
         mutate(data)
         atomic_write_yaml(path, data)
