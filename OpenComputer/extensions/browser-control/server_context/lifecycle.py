@@ -146,6 +146,14 @@ async def ensure_profile_running(
         runtime.last_error = None
         try:
             await _bring_up(runtime, capabilities=capabilities, driver=driver)
+            # Bug F fix — verify the bring-up actually produced a reachable
+            # target before we declare RUNNING. Drivers can return success
+            # while their spawned Chrome dies milliseconds later (Mac
+            # sigkill, profile lock conflict, missing dep). On macOS the
+            # Chrome command-line launcher exits cleanly after forking
+            # (subprocess.returncode==0 even when Chrome is alive AND when
+            # it's dead), so the only ground truth is an end-to-end probe.
+            await _verify_bring_up_alive(runtime, capabilities=capabilities)
         except Exception as exc:  # noqa: BLE001
             runtime.status = ProfileStatus.STOPPED
             runtime.last_error = str(exc)
@@ -201,6 +209,82 @@ async def _bring_up(
     runtime.running = await driver.launch_managed(profile)
     if driver.connect_managed is not None:
         runtime.playwright_session = await driver.connect_managed(profile, runtime.running)
+
+
+class BringUpVerificationError(RuntimeError):
+    """Raised when a driver returned success but the target is unreachable.
+
+    Distinct from driver-internal errors so the lifecycle can surface a
+    clean message ("bring-up succeeded but CDP unreachable") instead of
+    bubbling driver-implementation-specific exceptions to callers.
+    """
+
+
+async def _verify_bring_up_alive(
+    runtime: ProfileRuntimeState,
+    *,
+    capabilities: BrowserProfileCapabilities,
+) -> None:
+    """End-to-end probe of the just-brought-up target.
+
+    Bug F fix — without this, ``ensure_profile_running`` only ran
+    ``is_chrome_reachable`` on RE-entry (when status was already
+    ``RUNNING``). On a fresh start, ``_bring_up`` could return cleanly
+    even when Chrome had silently died (or chrome-mcp's stdio transport
+    had wedged), and we'd flip status to RUNNING anyway. Every action
+    over that dead WebSocket then hung 20s on timeout.
+
+    Capability-routed:
+      - chrome-mcp: probe ``list_tools()`` to confirm stdio transport
+        responds within 2 s.
+      - local-managed / remote-cdp: HTTP ``/json/version`` probe of the
+        cached CDP URL.
+    """
+    if capabilities.uses_chrome_mcp:
+        client = runtime.chrome_mcp_client
+        if client is None:
+            raise BringUpVerificationError(
+                f"profile {runtime.profile.name!r}: spawn_chrome_mcp returned "
+                "but runtime.chrome_mcp_client is None"
+            )
+        list_tools = getattr(client, "list_tools", None)
+        if not callable(list_tools):
+            # Test stub: chrome-mcp client is a bare sentinel (e.g.
+            # ``return f"mcp-{profile.name}"`` in fixtures). Production
+            # ``ChromeMcpClient`` always exposes ``list_tools``.
+            return
+        try:
+            await asyncio.wait_for(list_tools(), timeout=2.0)
+        except TimeoutError as exc:
+            raise BringUpVerificationError(
+                f"profile {runtime.profile.name!r}: chrome-mcp transport "
+                "did not respond to list_tools within 2 s"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise BringUpVerificationError(
+                f"profile {runtime.profile.name!r}: chrome-mcp transport "
+                f"errored on list_tools: {exc}"
+            ) from exc
+        return
+
+    # local-managed and remote-cdp both have runtime.running.cdp_url
+    if runtime.running is None:
+        raise BringUpVerificationError(
+            f"profile {runtime.profile.name!r}: driver did not set "
+            "runtime.running"
+        )
+    cdp_url = getattr(runtime.running, "cdp_url", None)
+    if not cdp_url:
+        # Test stubs return a sentinel without cdp_url — nothing to probe.
+        # Production ``RunningChrome`` always carries cdp_url, so this
+        # branch only hits in tests where ``is_chrome_reachable`` is
+        # already monkeypatched.
+        return
+    if not await is_chrome_reachable(cdp_url, timeout_ms=2000):
+        raise BringUpVerificationError(
+            f"profile {runtime.profile.name!r}: bring-up succeeded but "
+            f"CDP unreachable at {cdp_url}"
+        )
 
 
 def _raise_driver_unsupported(

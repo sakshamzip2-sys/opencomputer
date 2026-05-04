@@ -146,13 +146,21 @@ async def test_ensure_dedupes_concurrent_calls() -> None:
 
 @pytest.mark.asyncio
 async def test_ensure_relaunches_when_chrome_died_out_of_band(monkeypatch) -> None:
-    """Wave 3.3: status==RUNNING but Chrome unreachable → re-bring-up.
+    """Wave 3.3 + Bug F: status==RUNNING but Chrome unreachable → re-bring-up.
 
     The HTTP probe (``is_chrome_reachable``) detects out-of-band Chrome
     death (kill -9, crash, OS sigkill — anything that takes Chrome off
     the CDP port). Lifecycle resets state to STOPPED and falls through
     to _bring_up. Without this, Browser actions over the dead WS would
     hang until timeout.
+
+    Bug F fix (2026-05-04) ALSO probes after each fresh ``_bring_up``
+    succeeds, so the probe fires three times in this scenario:
+
+      1. After the first launch (verify) — must succeed
+      2. On second ``ensure_profile_running`` (pre-RUNNING liveness)
+         — must fail to trigger relaunch
+      3. After the relaunch (verify) — must succeed
     """
     launches: list[str] = []
 
@@ -160,10 +168,13 @@ async def test_ensure_relaunches_when_chrome_died_out_of_band(monkeypatch) -> No
         launches.append(profile.name)
         return _FakeRunning(profile.name)
 
-    # Probe always says unreachable. (It only fires on the SECOND call —
-    # the first goes through the STOPPED→STARTING path which doesn't probe.)
+    probe_calls: list[None] = []
+
     async def _probe(*args, **kwargs) -> bool:
-        return False
+        probe_calls.append(None)
+        # Only the second probe call (the pre-RUNNING liveness check on
+        # the second ensure call) reports unreachable.
+        return len(probe_calls) != 2
 
     monkeypatch.setattr(
         "extensions.browser_control.server_context.lifecycle.is_chrome_reachable",
@@ -173,13 +184,14 @@ async def test_ensure_relaunches_when_chrome_died_out_of_band(monkeypatch) -> No
     state = _state()
     driver = ProfileDriver(launch_managed=launch)
 
-    # First call — fresh launch (probe never fires here; status is STOPPED).
+    # First call — fresh launch + verify (probe call #1 → reachable=True).
     a = await ensure_profile_running(state, "opencomputer", driver=driver)
     assert a.status == ProfileStatus.RUNNING
     assert launches == ["opencomputer"]
     old_running = a.running
 
-    # Second call — status==RUNNING, probe says unreachable, must relaunch.
+    # Second call — status==RUNNING; pre-RUNNING liveness (probe call #2)
+    # says unreachable → relaunch + verify (probe call #3 → reachable=True).
     b = await ensure_profile_running(state, "opencomputer", driver=driver)
     assert b.status == ProfileStatus.RUNNING
     assert launches == ["opencomputer", "opencomputer"]
