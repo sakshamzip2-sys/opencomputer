@@ -77,5 +77,35 @@
     return `<span class="${cls}">${text}</span>`;
   }
 
-  window.OCDash = { ocGet, ocPost, fmtNum, fmtMs, renderNav, statusPill };
+  // Subscribe to a Server-Sent Events stream (Wave 6.D-β).
+  // Returns an object with a .close() method. The browser auto-reconnects
+  // on disconnect, so the caller doesn't need to manage retries — but
+  // when the page unloads, .close() is the polite way to drop the
+  // connection.
+  function subscribeStream(url, onMessage, onError) {
+    if (!('EventSource' in window)) {
+      console.warn('EventSource not supported — SSE updates disabled');
+      return { close: () => {} };
+    }
+    // Token attached via query string (EventSource can't set headers).
+    const sep = url.includes('?') ? '&' : '?';
+    const fullUrl = token ? url + sep + 'token=' + encodeURIComponent(token) : url;
+    const es = new EventSource(fullUrl);
+    es.addEventListener('change', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        onMessage(data);
+      } catch (err) {
+        console.error('SSE parse error', err);
+      }
+    });
+    es.onerror = (e) => {
+      if (onError) onError(e);
+    };
+    return { close: () => es.close() };
+  }
+
+  window.OCDash = {
+    ocGet, ocPost, fmtNum, fmtMs, renderNav, statusPill, subscribeStream,
+  };
 })();

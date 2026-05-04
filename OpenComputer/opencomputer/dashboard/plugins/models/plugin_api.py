@@ -18,11 +18,13 @@ import sqlite3
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from opencomputer.agent.profile_yaml import modify_yaml_locked
 from opencomputer.dashboard._auth import require_session_token
+from opencomputer.dashboard._sse import mtime_watch
 
 log = logging.getLogger(__name__)
 
@@ -183,6 +185,24 @@ def _config_yaml_path():
     from opencomputer.agent.config import _home
 
     return _home() / "config.yaml"
+
+
+@router.get("/stream", dependencies=[Depends(require_session_token)])
+async def stream_changes(request: Request, days: int = 30) -> StreamingResponse:
+    """SSE stream — emits a ``change`` event when sessions.db mtime
+    bumps. Polled at 5s because sessions.db updates frequently during
+    active chat (one bump per turn ≈ several per minute).
+    """
+
+    async def _payload(_p):
+        return await model_usage(days=days)
+
+    sess_db = _config_yaml_path().parent / "sessions.db"
+    return StreamingResponse(
+        mtime_watch(sess_db, payload_fn=_payload, poll_interval=5.0),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/main", dependencies=[Depends(require_session_token)])

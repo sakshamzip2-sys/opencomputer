@@ -166,6 +166,17 @@
       document.getElementById('filter').addEventListener('input', render);
 
       try { await load(); } catch (err) { toast('failed to load: ' + err.message, 'error'); }
+
+      // Wave 6.D-β — SSE auto-refresh on profile.yaml change.
+      OCDash.subscribeStream('/api/plugins/management/stream', (data) => {
+        if (data && Array.isArray(data.plugins)) {
+          plugins = data.plugins;
+          profile = data.active_profile || profile;
+          document.getElementById('profile').textContent = profile;
+          document.getElementById('count').textContent = String(plugins.length);
+          render();
+        }
+      });
     })();
   </script>
 </body>

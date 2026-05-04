@@ -144,11 +144,30 @@
         }
       });
 
+      // Wave 6.D-β — SSE auto-refresh on sessions.db mtime bumps.
+      // Re-subscribe when the days dropdown changes so the server-side
+      // payload uses the new window.
+      let stream = null;
+      function subscribeWithDays() {
+        if (stream) stream.close();
+        const days = document.getElementById('days').value;
+        stream = OCDash.subscribeStream(
+          '/api/plugins/models/stream?days=' + days,
+          (data) => {
+            if (data && Array.isArray(data.models)) render(data.models);
+          },
+        );
+      }
+
       document.getElementById('days').addEventListener('change', () => {
         load().catch(err => toast(err.message, 'error'));
+        subscribeWithDays();
       });
 
-      try { await load(); } catch (err) { toast('failed to load: ' + err.message, 'error'); }
+      try {
+        await load();
+        subscribeWithDays();
+      } catch (err) { toast('failed to load: ' + err.message, 'error'); }
     })();
   </script>
 </body>

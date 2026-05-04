@@ -20,7 +20,8 @@ import logging
 import os
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from opencomputer.agent.profile_config import (
@@ -30,6 +31,7 @@ from opencomputer.agent.profile_config import (
 )
 from opencomputer.agent.profile_yaml import modify_yaml_locked
 from opencomputer.dashboard._auth import require_session_token
+from opencomputer.dashboard._sse import mtime_watch
 from opencomputer.plugins.discovery import discover, standard_search_paths
 from opencomputer.plugins.preset import load_preset
 
@@ -313,3 +315,24 @@ async def set_preset(body: _SetPresetBody) -> dict[str, Any]:
 
     modify_yaml_locked(yaml_path, _mutate)
     return {"ok": True, "preset": body.preset, "action": "set-preset"}
+
+
+@router.get("/stream", dependencies=[Depends(require_session_token)])
+async def stream_changes(request: Request) -> StreamingResponse:
+    """SSE stream — emits a ``change`` event whenever profile.yaml mtime
+    bumps. The frontend opens an EventSource on this URL with
+    ``?token=...`` and re-renders the table on each event.
+
+    Wave 6.D-β. The payload is the same dict the GET /list endpoint
+    returns so the SPA can update without a follow-up round trip.
+    """
+
+    async def _payload(_p):
+        return await list_plugins()
+
+    yaml_path = _profile_yaml_path()
+    return StreamingResponse(
+        mtime_watch(yaml_path, payload_fn=_payload, poll_interval=1.0),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
