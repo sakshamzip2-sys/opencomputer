@@ -35,6 +35,10 @@ from opencomputer.agent.episodic import EpisodicMemory
 from opencomputer.agent.injection import engine as injection_engine
 from opencomputer.agent.loop_safety import LoopAbortError, LoopDetector
 from opencomputer.agent.memory import MemoryManager
+from opencomputer.agent.tool_guardrails import (
+    ToolLoopGuard,
+    ToolLoopGuardrailError,
+)
 from opencomputer.agent.memory_bridge import MemoryBridge
 from opencomputer.agent.memory_context import MemoryContext
 from opencomputer.agent.prompt_builder import PromptBuilder, load_workspace_context
@@ -577,6 +581,19 @@ class AgentLoop:
         # are permissive; healthy sessions never trip.
         self._loop_detector = LoopDetector()
 
+        # Wave-5 T1 — Hermes-port tool-loop guard. Detects identical
+        # tool-name+args repetition within a turn and either warns
+        # (default 10) or hard-stops (default 25). Distinct from
+        # LoopDetector above (which is sliding-window across recent calls);
+        # the guard catches deterministic tight loops the detector misses.
+        # Reset by ``run_conversation`` at the start of each user turn.
+        _guard_cfg = getattr(config.loop, "tool_guardrail", None)
+        self._tool_guard = ToolLoopGuard(
+            warn_at=getattr(_guard_cfg, "warn_at", 10) if _guard_cfg else 10,
+            stop_at=getattr(_guard_cfg, "stop_at", 25) if _guard_cfg else 25,
+            enabled=getattr(_guard_cfg, "enabled", True) if _guard_cfg else True,
+        )
+
         # Phase 3.F — when system-control is on at construction time,
         # attach the structured-logger bus listener so SignalEvents are
         # mirrored to ``agent.log``. Best-effort: a missing system_control
@@ -1098,6 +1115,10 @@ class AgentLoop:
         self._loop_started_at = time.monotonic()
         self._last_activity_at = self._loop_started_at
         self._tool_callback = tool_callback  # ACP depth: fire on tool start/complete
+
+        # Wave-5 T1 — clear the tool-loop guard's per-turn streak so a
+        # repeated call from the previous turn doesn't pre-poison this one.
+        self._tool_guard.reset()
 
         # T1 of auto-skill-evolution plan — wrap iteration loop +
         # budget-exhausted exit in try/except/finally so the agent
@@ -3150,6 +3171,33 @@ class AgentLoop:
             decision = await hook_engine.fire_blocking(ctx)
             if decision is not None and decision.decision == "block":
                 blocked[c.id] = decision.reason or "blocked by hook"
+
+        # Wave-5 T1 — Hermes-port tool-loop guard. Observe each call after
+        # consent + PreToolUse hooks have spoken (so a tight loop the user
+        # is about to deny doesn't trip the guard) but before dispatch.
+        # On stop: mark every remaining call blocked with the guard's
+        # reason — the loop converts blocked tool_uses to error
+        # tool_results so the protocol invariant (every tool_use has a
+        # matching tool_result) survives. On warn: log the message
+        # (kept off the wire so the model isn't influenced mid-turn).
+        for c in calls:
+            if c.id in blocked:
+                continue
+            try:
+                verdict = self._tool_guard.observe(
+                    {"name": c.name, "arguments": c.arguments or {}},
+                )
+            except ToolLoopGuardrailError as exc:
+                _log.warning("tool guardrail stop: %s", exc)
+                # Block this call AND every subsequent unblocked call —
+                # we want one clean turn-end, not a cascade of stops.
+                _stop_reason = str(exc)
+                for _later in calls:
+                    if _later.id not in blocked:
+                        blocked[_later.id] = f"tool guardrail: {_stop_reason}"
+                break
+            if verdict.level == "warn":
+                _log.warning("%s", verdict.message)
 
         # III.1/III.2: gate dispatch on the allowlist too. Filtering only
         # the provider-facing schemas isn't enough — a model could still
