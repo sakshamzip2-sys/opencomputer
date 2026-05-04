@@ -671,6 +671,29 @@ class AgentLoop:
         # could start with the cap already 1 or 2 and force premature END_TURN.
         self._pause_turn_count = 0
 
+        # E7 (2026-05-04) — USER_PROMPT_SUBMIT fires once per inbound user
+        # message so observers can scan natural-language intent (e.g.
+        # PluginDemandTracker.scan_user_prompt records demand for plugins
+        # the user mentions but hasn't enabled). Fire-and-forget — never
+        # blocks the loop, never crashes it on hook init failure.
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine_ups
+            from plugin_sdk.core import Message as _MessageUPS
+            from plugin_sdk.hooks import HookContext as _HookContextUPS
+            from plugin_sdk.hooks import HookEvent as _HookEventUPS
+
+            _hook_engine_ups.fire_and_forget(
+                _HookContextUPS(
+                    event=_HookEventUPS.USER_PROMPT_SUBMIT,
+                    session_id=sid,
+                    message=_MessageUPS(role="user", content=user_message),
+                    runtime=self._runtime,
+                )
+            )
+        except Exception as _exc:  # noqa: BLE001 — never crash the loop
+            _ups_log = logging.getLogger("opencomputer.agent.loop")
+            _ups_log.debug("USER_PROMPT_SUBMIT fire failed: %s", _exc)
+
         # OpenClaw 1.C — push the (session_id, delegation_depth) frame for
         # the repetition detector. Idempotent: re-entering the same session
         # (resume mid-stream after an exception) keeps existing history so

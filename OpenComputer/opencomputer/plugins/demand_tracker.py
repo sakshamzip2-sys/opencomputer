@@ -35,6 +35,7 @@ SessionDB hasn't opened yet (e.g. in tests and before the first session).
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 import time
 from collections.abc import Callable
@@ -43,6 +44,34 @@ from pathlib import Path
 from opencomputer.plugins.discovery import PluginCandidate
 
 logger = logging.getLogger("opencomputer.plugins.demand_tracker")
+
+# E7 (2026-05-04) — synthetic ``tool_name`` value used by
+# :meth:`PluginDemandTracker.scan_user_prompt` so readers can tell
+# keyword-match signals apart from real tool-not-found signals without
+# a schema migration. The string mirrors a tool name format intentionally
+# (it'll never collide with a real tool because of the ``__`` prefix).
+USER_PROMPT_KEYWORD_MARKER = "__user_prompt_match__"
+
+# Generic English stopwords + filler that would over-match against
+# plugin manifest descriptions. Kept tight — these are words that
+# carry no information about user intent.
+_STOPWORDS = frozenset(
+    [
+        "a", "an", "and", "are", "as", "at", "be", "by", "do", "for", "from",
+        "have", "has", "i", "if", "in", "is", "it", "its", "of", "on", "or",
+        "the", "this", "that", "to", "was", "were", "will", "with", "you",
+        "your", "yours", "we", "us", "our", "they", "them", "their", "he",
+        "she", "his", "her", "but", "not", "so", "than", "then", "what",
+        "when", "where", "who", "why", "how", "can", "could", "would",
+        "should", "may", "might", "must", "shall", "into", "out", "up",
+        "down", "over", "under", "all", "any", "some", "each", "every",
+        "no", "nor", "only", "own", "same", "such", "too", "very", "just",
+        "more", "most", "less", "least", "much", "many", "few", "one", "two",
+        "first", "last", "next", "new", "old", "good", "bad", "high", "low",
+    ]
+)
+
+_WORD_RE = re.compile(r"[a-z0-9_-]+")
 
 
 _CREATE_TABLE = """
@@ -241,6 +270,82 @@ class PluginDemandTracker:
             rows = conn.execute(sql, tuple(params)).fetchall()
         return [(row["plugin_id"], int(row["cnt"])) for row in rows]
 
+    def scan_user_prompt(
+        self,
+        text: str,
+        *,
+        session_id: str = "",
+        turn_index: int = 0,
+        min_matches: int = 2,
+    ) -> list[str]:
+        """Scan a user prompt for keyword matches against disabled plugins.
+
+        E7 (2026-05-04). Tokenizes ``text`` (lowercased word-split), then
+        for every NOT-yet-enabled plugin candidate counts how many of the
+        plugin's manifest-derived terms appear in the prompt. When the
+        count reaches ``min_matches``, records a demand signal in the
+        same ``plugin_demand`` table — using
+        :data:`USER_PROMPT_KEYWORD_MARKER` as the synthetic tool_name so
+        readers can distinguish keyword signals from real tool-not-found
+        signals.
+
+        Returns the list of plugin_ids that triggered (for callers that
+        want to log/notify). Best-effort: any DB or discovery failure is
+        swallowed so the loop never crashes on demand-tracking.
+        """
+        try:
+            candidates = self.discover_fn()
+        except Exception:  # noqa: BLE001
+            logger.exception("demand-tracker: discover_fn raised in scan_user_prompt")
+            return []
+
+        prompt_tokens = _tokenize_prompt(text)
+        if not prompt_tokens:
+            return []
+
+        triggered: list[str] = []
+        rows_to_insert: list[tuple[str, str, str, int, float]] = []
+        ts = time.time()
+        for cand in candidates:
+            if (
+                self.active_profile_plugins is not None
+                and cand.manifest.id in self.active_profile_plugins
+            ):
+                continue
+            terms = _extract_plugin_terms(cand)
+            if not terms:
+                continue
+            hits = terms & prompt_tokens
+            if len(hits) < min_matches:
+                continue
+            rows_to_insert.append(
+                (
+                    cand.manifest.id,
+                    USER_PROMPT_KEYWORD_MARKER,
+                    session_id,
+                    turn_index,
+                    ts,
+                )
+            )
+            triggered.append(cand.manifest.id)
+
+        if not rows_to_insert:
+            return []
+
+        try:
+            with self._connect() as conn:
+                conn.executemany(
+                    "INSERT INTO plugin_demand "
+                    "(plugin_id, tool_name, session_id, turn_index, ts) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    rows_to_insert,
+                )
+                conn.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception("demand-tracker: scan_user_prompt write failed")
+            return []
+        return triggered
+
     def signals_by_plugin(
         self,
         session_id: str | None = None,
@@ -294,4 +399,28 @@ class PluginDemandTracker:
             return int(cur.rowcount)
 
 
-__all__ = ["PluginDemandTracker"]
+def _tokenize_prompt(text: str) -> set[str]:
+    """Lowercase + word-split + stopword filter. Returns a set for O(1) lookup."""
+    tokens = set(_WORD_RE.findall(text.lower()))
+    return {t for t in tokens if t not in _STOPWORDS and len(t) > 1}
+
+
+def _extract_plugin_terms(cand: PluginCandidate) -> set[str]:
+    """Search-relevant terms from a plugin candidate.
+
+    Pulls from manifest.id, manifest.description, and manifest.tool_names.
+    Filtered through the same stopword + length rules as prompt tokens so
+    the intersection check is symmetric.
+    """
+    terms: set[str] = set()
+    terms.update(_WORD_RE.findall(cand.manifest.id.lower()))
+    terms.update(_WORD_RE.findall((cand.manifest.description or "").lower()))
+    for tn in cand.manifest.tool_names:
+        terms.update(_WORD_RE.findall(tn.lower()))
+    return {t for t in terms if t not in _STOPWORDS and len(t) > 1}
+
+
+__all__ = [
+    "USER_PROMPT_KEYWORD_MARKER",
+    "PluginDemandTracker",
+]
