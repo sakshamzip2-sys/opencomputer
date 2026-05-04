@@ -1,0 +1,26 @@
+{
+  "id": "mlx-server-provider",
+  "name": "MLX Server Provider",
+  "version": "0.1.0",
+  "description": "MLX local-LLM server (mlx_lm.server) — Apple-Silicon-native OpenAI-compatible inference (default http://localhost:8081/v1)",
+  "author": "Saksham",
+  "license": "MIT",
+  "kind": "provider",
+  "entry": "plugin",
+  "tool_names": [],
+  "model_support": {
+    "model_prefixes": ["mlx-", "mlx-community/"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "mlx-server",
+        "auth_methods": ["api_key", "none"],
+        "env_vars": ["MLX_SERVER_API_KEY", "MLX_SERVER_BASE_URL", "MLX_SERVER_MODEL"],
+        "label": "MLX local server",
+        "default_model": "mlx-community/Llama-3.1-8B-Instruct-4bit",
+        "signup_url": "https://github.com/ml-explore/mlx-examples/tree/main/llms"
+      }
+    ]
+  }
+}
