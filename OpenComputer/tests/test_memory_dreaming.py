@@ -452,5 +452,6 @@ def test_schema_v4_adds_dreamed_into_column_and_is_nullable(tmp_path: Path) -> N
         ).fetchone()
         version = conn.execute("SELECT version FROM schema_version").fetchone()
     assert row["dreamed_into"] is None
-    # Wave 5 T2 bumped schema to 11.
-    assert int(version[0]) == 11
+    # Wave 6.B bumped schema to 12 (trigram FTS5).
+    from opencomputer.agent.state import SCHEMA_VERSION
+    assert int(version[0]) == SCHEMA_VERSION
