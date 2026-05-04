@@ -318,12 +318,12 @@ async def test_lifecycle_missing_managed_driver_raises_driver_unsupported():
     driver = ProfileDriver()  # no launch_managed
 
     with pytest.raises(DriverUnsupportedError) as exc_info:
-        await ensure_profile_running(state, "openclaw", driver=driver)
+        await ensure_profile_running(state, "opencomputer", driver=driver)
 
     err = exc_info.value
     assert err.status == 501
     assert err.code == "driver_unsupported"
-    assert err.profile == "openclaw"
+    assert err.profile == "opencomputer"
     # Still a RuntimeError subclass so ``pytest.raises(RuntimeError, ...)``
     # in legacy tests keeps matching.
     assert isinstance(err, RuntimeError)

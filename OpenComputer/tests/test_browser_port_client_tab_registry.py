@@ -27,7 +27,7 @@ class TestTrackAndUntrack:
     def test_track_and_count(self):
         track_session_browser_tab(
             session_key="s1", target_id="t1",
-            base_url="http://127.0.0.1:1", profile="openclaw",
+            base_url="http://127.0.0.1:1", profile="opencomputer",
         )
         assert count_tracked_session_browser_tabs_for_tests() == 1
 

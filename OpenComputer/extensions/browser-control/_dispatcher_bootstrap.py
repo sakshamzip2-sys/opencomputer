@@ -194,7 +194,7 @@ async def _build_dispatcher_app() -> Any:
     # the `from opencomputer ...` import would breach the SDK boundary
     # (tests/test_browser_port_*_audit.py). For wave-3 hotfix we resolve
     # against an empty raw section, which yields the documented defaults
-    # (enabled=True, default_profile='openclaw', user-profile present).
+    # (enabled=True, default_profile='opencomputer', user-profile present).
     # TODO(wave-3.3): plumb the active profile's `browser:` section in
     # via a plugin-level hook on the SDK side so user overrides
     # (executable_path, headless, ssrf_policy, ...) take effect.

@@ -40,7 +40,7 @@ class _FakeRunning:
     to mock against.
     """
 
-    def __init__(self, name: str = "openclaw") -> None:
+    def __init__(self, name: str = "opencomputer") -> None:
         self.proc = _AliveProc()
         self.name = name
         self.cdp_url = f"http://127.0.0.1:18793/?fake={name}"
@@ -78,12 +78,12 @@ async def test_ensure_local_managed_launches_via_driver() -> None:
 
     state = _state()
     driver = ProfileDriver(launch_managed=launch, connect_managed=connect)
-    runtime = await ensure_profile_running(state, "openclaw", driver=driver)
+    runtime = await ensure_profile_running(state, "opencomputer", driver=driver)
     assert runtime.status == ProfileStatus.RUNNING
-    assert runtime.running == "running-openclaw"
-    assert runtime.playwright_session == "session-openclaw"
-    assert launches == ["openclaw"]
-    assert connects == [("openclaw", "running-openclaw")]
+    assert runtime.running == "running-opencomputer"
+    assert runtime.playwright_session == "session-opencomputer"
+    assert launches == ["opencomputer"]
+    assert connects == [("opencomputer", "running-opencomputer")]
 
 
 @pytest.mark.asyncio
@@ -113,10 +113,10 @@ async def test_ensure_is_idempotent_when_already_running() -> None:
 
     state = _state()
     driver = ProfileDriver(launch_managed=launch)
-    a = await ensure_profile_running(state, "openclaw", driver=driver)
-    b = await ensure_profile_running(state, "openclaw", driver=driver)
+    a = await ensure_profile_running(state, "opencomputer", driver=driver)
+    b = await ensure_profile_running(state, "opencomputer", driver=driver)
     assert a is b
-    assert launches == ["openclaw"]
+    assert launches == ["opencomputer"]
 
 
 @pytest.mark.asyncio
@@ -135,8 +135,8 @@ async def test_ensure_dedupes_concurrent_calls() -> None:
 
     state = _state()
     driver = ProfileDriver(launch_managed=launch)
-    t1 = asyncio.create_task(ensure_profile_running(state, "openclaw", driver=driver))
-    t2 = asyncio.create_task(ensure_profile_running(state, "openclaw", driver=driver))
+    t1 = asyncio.create_task(ensure_profile_running(state, "opencomputer", driver=driver))
+    t2 = asyncio.create_task(ensure_profile_running(state, "opencomputer", driver=driver))
     await started.wait()
     release.set()
     a, b = await asyncio.gather(t1, t2)
@@ -174,15 +174,15 @@ async def test_ensure_relaunches_when_chrome_died_out_of_band(monkeypatch) -> No
     driver = ProfileDriver(launch_managed=launch)
 
     # First call — fresh launch (probe never fires here; status is STOPPED).
-    a = await ensure_profile_running(state, "openclaw", driver=driver)
+    a = await ensure_profile_running(state, "opencomputer", driver=driver)
     assert a.status == ProfileStatus.RUNNING
-    assert launches == ["openclaw"]
+    assert launches == ["opencomputer"]
     old_running = a.running
 
     # Second call — status==RUNNING, probe says unreachable, must relaunch.
-    b = await ensure_profile_running(state, "openclaw", driver=driver)
+    b = await ensure_profile_running(state, "opencomputer", driver=driver)
     assert b.status == ProfileStatus.RUNNING
-    assert launches == ["openclaw", "openclaw"]
+    assert launches == ["opencomputer", "opencomputer"]
     assert b.running is not old_running
 
 
@@ -194,8 +194,8 @@ async def test_ensure_propagates_failure_and_marks_stopped() -> None:
     state = _state()
     driver = ProfileDriver(launch_managed=launch)
     with pytest.raises(RuntimeError, match="boom"):
-        await ensure_profile_running(state, "openclaw", driver=driver)
-    runtime = state.profiles["openclaw"]
+        await ensure_profile_running(state, "opencomputer", driver=driver)
+    runtime = state.profiles["opencomputer"]
     assert runtime.status == ProfileStatus.STOPPED
     assert runtime.last_error == "boom"
 
@@ -213,7 +213,7 @@ async def test_ensure_managed_without_driver_callable_raises() -> None:
     state = _state()
     driver = ProfileDriver()  # no launch_managed
     with pytest.raises(RuntimeError, match="launch_managed"):
-        await ensure_profile_running(state, "openclaw", driver=driver)
+        await ensure_profile_running(state, "opencomputer", driver=driver)
 
 
 # ─── reconcile path ──────────────────────────────────────────────────
@@ -233,14 +233,14 @@ async def test_reconcile_marker_triggers_teardown_then_relaunch() -> None:
 
     state = _state()
     driver = ProfileDriver(launch_managed=launch, stop_managed=stop)
-    runtime = await ensure_profile_running(state, "openclaw", driver=driver)
+    runtime = await ensure_profile_running(state, "opencomputer", driver=driver)
     assert runtime.running == "running-1"
 
     # Set reconcile marker — simulate config hot-reload.
     runtime.reconcile = ReconcileMarker(
         previous_profile=runtime.profile, reason="test reconcile"
     )
-    again = await ensure_profile_running(state, "openclaw", driver=driver)
+    again = await ensure_profile_running(state, "opencomputer", driver=driver)
     assert again is runtime
     assert runtime.running == "running-2"
     assert runtime.reconcile is None
@@ -258,10 +258,10 @@ async def test_teardown_managed_calls_stop() -> None:
         stops.append(str(running))
 
     state = _state()
-    profile = state.resolved.profiles["openclaw"]
+    profile = state.resolved.profiles["opencomputer"]
     from extensions.browser_control.profiles import resolve_profile
 
-    resolved_profile = resolve_profile(state.resolved, "openclaw")
+    resolved_profile = resolve_profile(state.resolved, "opencomputer")
     assert resolved_profile is not None
     runtime = get_or_create_profile_state(state, resolved_profile)
     runtime.running = "running-abc"
@@ -302,7 +302,7 @@ async def test_teardown_swallows_driver_errors() -> None:
     state = _state()
     from extensions.browser_control.profiles import resolve_profile
 
-    resolved_profile = resolve_profile(state.resolved, "openclaw")
+    resolved_profile = resolve_profile(state.resolved, "opencomputer")
     assert resolved_profile is not None
     runtime = get_or_create_profile_state(state, resolved_profile)
     runtime.running = "running-ouch"

@@ -19,7 +19,7 @@ from extensions.browser_control.server_context import (
 
 def _runtime() -> ProfileRuntimeState:
     cfg = resolve_browser_config({})
-    p = resolve_profile(cfg, "openclaw")
+    p = resolve_profile(cfg, "opencomputer")
     assert p is not None
     return ProfileRuntimeState(profile=p)
 

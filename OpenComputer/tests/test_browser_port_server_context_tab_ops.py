@@ -19,7 +19,7 @@ from extensions.browser_control.server_context.tab_ops import TabOpsBackend
 # ─── fixtures ─────────────────────────────────────────────────────────
 
 
-def _runtime(profile_name: str = "openclaw") -> ProfileRuntimeState:
+def _runtime(profile_name: str = "opencomputer") -> ProfileRuntimeState:
     cfg = resolve_browser_config({})
     p = resolve_profile(cfg, profile_name)
     assert p is not None
@@ -36,7 +36,7 @@ def _runtime_remote() -> ProfileRuntimeState:
             "profiles": {
                 "remote": {
                     "cdp_url": "http://10.0.0.5:18800",
-                    "driver": "openclaw",
+                    "driver": "managed",
                 },
             }
         }
@@ -64,7 +64,7 @@ async def test_open_tab_via_cdp_path_for_local_managed() -> None:
     backend = TabOpsBackend(list_tabs=list_tabs, open_tab_via_cdp=open_via_cdp)
     tab = await open_tab(runtime, "https://example.com/", backend=backend)
     assert tab.target_id == "T-NEW"
-    assert opens == [("openclaw", "https://example.com/")]
+    assert opens == [("opencomputer", "https://example.com/")]
     assert runtime.last_target_id == "T-NEW"
 
 
