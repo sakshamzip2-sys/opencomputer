@@ -8,7 +8,9 @@ article it only needs the gist of.
 
 from __future__ import annotations
 
+import re
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -38,6 +40,41 @@ def _html_to_text(html: str) -> str:
     # Collapse runs of blank lines that BeautifulSoup tends to leave behind.
     lines = [line.strip() for line in raw.splitlines() if line.strip()]
     return "\n".join(lines)
+
+
+#: URL patterns that suggest the page is an article (auto-mode trigger).
+_ARTICLE_HOST_RE = re.compile(
+    r"(?:medium\.com|substack\.com|^blog\.|/blog/|/article/|/articles/|/news/|/posts/|/post/|hackernews|techcrunch|wired)",
+    re.IGNORECASE,
+)
+
+
+def _is_likely_article_url(url: str) -> bool:
+    """Heuristic: does this URL look like a news article / blog post?"""
+    parsed = urlparse(url)
+    if _ARTICLE_HOST_RE.search(parsed.netloc):
+        return True
+    return bool(_ARTICLE_HOST_RE.search(parsed.path))
+
+
+def _html_to_article(html: str) -> str:
+    """Extract just the article body using Mozilla's Readability algorithm.
+
+    Returns empty string if extraction fails or yields too little content
+    (caller can fall back to full text). Imports readability lazily so
+    web_fetch import doesn't pay the lxml load cost when the readability
+    branch is never triggered.
+    """
+    try:
+        from readability import Document  # readability-lxml
+
+        doc = Document(html)
+        article_html = doc.summary(html_partial=True) or ""
+        if len(article_html) < 50:
+            return ""
+        return _html_to_text(article_html)
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 class WebFetchTool(BaseTool):
@@ -78,6 +115,16 @@ class WebFetchTool(BaseTool):
                         "type": "number",
                         "description": (
                             f"Request timeout in seconds. Default {DEFAULT_TIMEOUT_S}."
+                        ),
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["auto", "full", "readability"],
+                        "description": (
+                            "auto = readability for article URLs, full otherwise. "
+                            "full = strip nav/script/style (existing behaviour). "
+                            "readability = extract article body only. "
+                            "Default 'auto'."
                         ),
                     },
                 },
@@ -153,8 +200,21 @@ class WebFetchTool(BaseTool):
             )
 
         ct = resp.headers.get("content-type", "").lower()
-        # Plain text / JSON: return as-is. HTML: strip first.
-        body = _html_to_text(resp.text) if "html" in ct else resp.text
+        # Plain text / JSON: return as-is. HTML: render per `mode`.
+        if "html" in ct:
+            mode = str(args.get("mode", "auto")).lower()
+            if mode not in ("auto", "full", "readability"):
+                mode = "auto"
+            if mode == "auto":
+                mode = "readability" if _is_likely_article_url(url) else "full"
+            if mode == "readability":
+                body = _html_to_article(resp.text)
+                if not body:  # graceful fallback when readability returns nothing
+                    body = _html_to_text(resp.text)
+            else:  # full
+                body = _html_to_text(resp.text)
+        else:
+            body = resp.text
 
         if len(body) > max_chars:
             body = body[:max_chars] + (

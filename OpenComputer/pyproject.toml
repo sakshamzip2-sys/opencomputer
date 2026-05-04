@@ -53,6 +53,11 @@ dependencies = [
   # when this package is absent — install is required only for the
   # nicest UX, not for correctness.
   "simple-term-menu>=1.0,<2",
+  # Mozilla Readability article-body extraction for WebFetch readability
+  # mode. Pure-Python wrapper around lxml (~25KB itself; lxml comes in as
+  # a transitive dep). Used only when WebFetch is invoked with
+  # mode="readability" or auto-mode picks readability for an article URL.
+  "readability-lxml>=0.8.1",
 ]
 
 [project.optional-dependencies]
