@@ -34,7 +34,7 @@ from plugin_sdk.core import Message, ToolCall
 #: to NULL. v5 = Tier-A item 11 ``tool_usage`` table — per-tool-call
 #: telemetry for ``opencomputer insights`` (tool, duration_ms, error,
 #: model, ts). Existing data unaffected; the table starts empty.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -87,7 +87,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content,
     content='messages',
     content_rowid='id',
-    tokenize='porter unicode61'
+    tokenize='trigram'
 );
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_insert
@@ -224,6 +224,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (8, 9): "_migrate_v8_to_v9",
     (9, 10): "_migrate_v9_to_v10",
     (10, 11): "_migrate_v10_to_v11",
+    (11, 12): "_migrate_v11_to_v12",
 }
 
 
@@ -673,6 +674,55 @@ def _migrate_v10_to_v11(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
+
+
+def _migrate_v11_to_v12(conn: sqlite3.Connection) -> None:
+    """Wave 6.B (2026-05-04) — trigram FTS5 tokenizer for CJK + substring search.
+
+    Replaces the default ``porter unicode61`` tokenizer with ``trigram``.
+    Trigram gives substring search out of the box AND CJK / Thai / Japanese
+    matching that porter cannot. Tradeoff is a ~3× larger FTS index;
+    acceptable for typical session sizes.
+
+    Migration: drop + recreate the FTS5 virtual table with the new
+    tokenizer, reindexing all existing message rows. Idempotent — safe
+    to re-run.
+
+    Fallback: if this sqlite build doesn't ship the trigram tokenizer,
+    we silently fall back to porter unicode61 so the migration doesn't
+    wedge.
+    """
+    try:
+        conn.executescript(
+            """
+            DROP TABLE IF EXISTS messages_fts;
+            CREATE VIRTUAL TABLE messages_fts USING fts5(
+                content,
+                content='messages',
+                content_rowid='id',
+                tokenize='trigram'
+            );
+            INSERT INTO messages_fts(rowid, content)
+                SELECT id, content FROM messages;
+            """
+        )
+    except sqlite3.OperationalError as exc:
+        if "trigram" in str(exc).lower():
+            conn.executescript(
+                """
+                DROP TABLE IF EXISTS messages_fts;
+                CREATE VIRTUAL TABLE messages_fts USING fts5(
+                    content,
+                    content='messages',
+                    content_rowid='id',
+                    tokenize='porter unicode61'
+                );
+                INSERT INTO messages_fts(rowid, content)
+                    SELECT id, content FROM messages;
+                """
+            )
+        else:
+            raise
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
