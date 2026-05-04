@@ -127,6 +127,12 @@ def kanban_home() -> Path:
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
+# Wave 6.E.16 — sentinel slug naming the legacy unnamed-default board
+# in cross-board operations. The ONLY slug allowed to start with an
+# underscore; the regex still rejects user-chosen leading-underscore
+# slugs to keep the namespace clean.
+DEFAULT_BOARD_SENTINEL = "_default_"
+
 
 class InvalidBoardSlugError(ValueError):
     """Raised when a board slug fails validation. Slug must be 1-64
@@ -135,20 +141,29 @@ class InvalidBoardSlugError(ValueError):
 
 
 def validate_slug(slug: str) -> None:
-    """Reject malformed slugs. Same rules as hermes.
+    """Reject malformed slugs. Same rules as hermes plus the
+    :data:`DEFAULT_BOARD_SENTINEL` exception.
 
     Raises :class:`InvalidBoardSlugError` with a user-friendly message
     on failure. Empty / non-str / wrong shape all raise.
+
+    Wave 6.E.16: the sentinel slug ``_default_`` passes validation —
+    it names the legacy unnamed-default board in cross-board
+    operations. User-chosen leading-underscore slugs still fail.
     """
     if not isinstance(slug, str) or not slug:
         raise InvalidBoardSlugError(
             "board slug must be a non-empty string"
         )
+    if slug == DEFAULT_BOARD_SENTINEL:
+        return
     if not _SLUG_RE.match(slug):
         raise InvalidBoardSlugError(
             f"board slug {slug!r} must be 1-64 characters, lowercase "
             "alphanumerics + hyphens/underscores, starting with a "
-            "letter or digit (e.g. 'project-x', 'q4_planning')"
+            f"letter or digit (e.g. 'project-x', 'q4_planning'); the "
+            f"only allowed underscore-prefix slug is "
+            f"{DEFAULT_BOARD_SENTINEL!r} (legacy default)"
         )
 
 
@@ -203,13 +218,14 @@ def active_board() -> str | None:
 def set_active_board(slug: str | None) -> None:
     """Persist the active board slug to the state file.
 
-    ``None`` clears the file (back to legacy default). The board
-    directory is NOT created here — call :func:`board_db_path` and
-    :func:`init_db` to materialize the per-board layout.
+    ``None`` (or :data:`DEFAULT_BOARD_SENTINEL`) clears the file — both
+    map to the legacy default. The board directory is NOT created
+    here — call :func:`board_db_path` and :func:`init_db` to
+    materialize the per-board layout.
     """
     state_file = _active_board_state_file()
     state_file.parent.mkdir(parents=True, exist_ok=True)
-    if slug is None:
+    if slug is None or slug == DEFAULT_BOARD_SENTINEL:
         if state_file.exists():
             state_file.unlink()
         return
@@ -218,16 +234,16 @@ def set_active_board(slug: str | None) -> None:
 
 
 def board_db_path(slug: str | None) -> Path:
-    """Compute the kanban.db path for ``slug`` (None → legacy default).
+    """Compute the kanban.db path for ``slug``.
 
-    Per-board layout::
-
-        <kanban_home>/kanban/boards/<slug>/kanban.db
-
-    Legacy (slug=None) path is ``<kanban_home>/kanban.db`` — preserved
-    for back-compat so single-board users don't migrate by accident.
+    Resolution:
+    - ``None`` → legacy unnamed default at ``<kanban_home>/kanban.db``
+    - ``DEFAULT_BOARD_SENTINEL`` (``"_default_"``, Wave 6.E.16) → same
+      legacy path; lets cross-board operations explicitly target the
+      legacy default by name
+    - any other validated slug → ``<kanban_home>/kanban/boards/<slug>/kanban.db``
     """
-    if slug is None:
+    if slug is None or slug == DEFAULT_BOARD_SENTINEL:
         return kanban_home() / "kanban.db"
     validate_slug(slug)
     return boards_root() / slug / "kanban.db"
@@ -1283,9 +1299,15 @@ def _would_cycle_global(
     MAX_CROSS_BOARD_HOPS returns True (fail-closed) — better to refuse
     a link than miss a real cycle in pathological data.
     """
-    target = (parent_board, parent_id)
+    # Wave 6.E.16 — normalize the legacy default to the sentinel slug
+    # so the walker's edge-map key shape matches what _ingest_rows
+    # produces below. None at the API surface stays an alias for the
+    # legacy default (back-compat).
+    norm_parent_board = parent_board if parent_board is not None else DEFAULT_BOARD_SENTINEL
+    norm_child_board = child_board if child_board is not None else DEFAULT_BOARD_SENTINEL
+    target = (norm_parent_board, parent_id)
     seen: set[tuple[str | None, str]] = set()
-    stack: list[tuple[str | None, str]] = [(child_board, child_id)]
+    stack: list[tuple[str | None, str]] = [(norm_child_board, child_id)]
 
     # Pre-build a global edge map by scanning every named board's
     # task_links + the current connection's task_links. NULL board
@@ -1294,29 +1316,27 @@ def _would_cycle_global(
     global_edges: dict[tuple[str | None, str], list[tuple[str | None, str]]] = {}
 
     def _ingest_rows(home_slug: str | None, rows) -> None:
+        # Wave 6.E.16 — every NULL board reference resolves to the
+        # row's home board. None home_slug means we're scanning the
+        # legacy default; map it to the sentinel so target keys match.
+        home = home_slug if home_slug is not None else DEFAULT_BOARD_SENTINEL
         for r in rows:
-            pb = r["parent_board"] if r["parent_board"] else home_slug
-            cb = r["child_board"] if r["child_board"] else home_slug
+            pb = r["parent_board"] if r["parent_board"] else home
+            cb = r["child_board"] if r["child_board"] else home
             global_edges.setdefault(
                 (pb, r["parent_id"]), [],
             ).append((cb, r["child_id"]))
 
-    # 1. Current connection — its rows' NULL slugs default to whichever
-    # board it represents. We have to detect that: if the current
-    # active board has a slug, use it; otherwise use None (legacy
-    # default).
-    current_slug = active_board()
-    rows = conn.execute(
-        "SELECT parent_id, child_id, parent_board, child_board "
-        "FROM task_links",
-    ).fetchall()
-    _ingest_rows(current_slug, rows)
-
-    # 2. Every named board (excluding the one the current conn points
-    # at) — open short-lived per-board connections.
-    for slug in list_boards():
-        if slug == current_slug:
-            continue  # already ingested via conn
+    # Wave 6.E.16 — scan EVERY board (named + legacy default) via
+    # short-lived sqlite3 connections. Don't try to attribute the
+    # passed ``conn`` to a particular slug — we can't reliably infer
+    # which file it points at, and the rows are persisted on disk so
+    # short-lived scans catch them all.
+    boards_to_scan: list[str] = list(list_boards())
+    legacy_default_path = kanban_home() / "kanban.db"
+    if legacy_default_path.exists() and DEFAULT_BOARD_SENTINEL not in boards_to_scan:
+        boards_to_scan.append(DEFAULT_BOARD_SENTINEL)
+    for slug in boards_to_scan:
         try:
             path = board_db_path(slug)
         except InvalidBoardSlugError:
