@@ -361,6 +361,34 @@ def _handle_queue(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_steer(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/steer <text>`` — Wave 5 T3 — Hermes-port (e27b0b765).
+
+    In the CLI the chat loop is never mid-turn when the slash dispatcher
+    runs (the prompt is awaiting input), so this is a queue-at-head
+    convenience alias for ``/queue <text>``. In ACP/IDE clients the
+    same command actually interrupts an in-flight turn — see
+    ``opencomputer/acp/server.py::_handle_steer``.
+    """
+    text = " ".join(args).strip()
+    if not text:
+        ctx.console.print(
+            "[red]/steer needs text[/red] — e.g. `/steer change direction please`"
+        )
+        return SlashResult(handled=True)
+    ok = ctx.on_queue_add(text)
+    if ok:
+        preview = text if len(text) <= 80 else text[:77] + "..."
+        ctx.console.print(
+            f"[green]steered[/green] — next turn will use: [dim]{preview}[/dim]"
+        )
+    else:
+        ctx.console.print(
+            "[red]queue full[/red] — drain with [cyan]/queue clear[/cyan] first."
+        )
+    return SlashResult(handled=True)
+
+
 def _handle_goal(ctx: SlashContext, args: list[str]) -> SlashResult:
     """``/goal [<text>|status|pause|resume|clear]`` — manage persistent goal.
 
@@ -899,6 +927,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "rename": _handle_rename,
     "resume": _handle_resume,
     "queue": _handle_queue,
+    "steer": _handle_steer,
     "goal": _handle_goal,
     "snapshot": _handle_snapshot,
     "reload": _handle_reload,

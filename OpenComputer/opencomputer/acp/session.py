@@ -28,9 +28,22 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True, frozen=True)
+class QueuedMessage:
+    """One pending user message buffered by ``ACPSession.queue``.
+
+    Wave 5 T3 — port hermes-agent ``e27b0b765``. Frozen so the same
+    instance can be shared between drain callers (the wire response and
+    the agent loop both read it).
+    """
+
+    text: str
 
 
 class ACPSession:
@@ -48,6 +61,19 @@ class ACPSession:
         self._loop_instance: Any = None  # lazy-imported AgentLoop
         self._messages: list[dict[str, Any]] = []  # in-memory transcript
         self.event_queue: asyncio.Queue = asyncio.Queue(maxsize=256)  # buffered event log
+
+        # Wave 5 T3 — Hermes-port /steer + /queue state.
+        # ``is_running`` flips True when ``send_prompt`` is mid-flight so
+        # /steer can detect "interrupt vs first-message" and /queue can
+        # tell "drain after current turn" from "fire next turn".
+        # ``is_interrupted`` flags that /steer was used; the agent loop
+        # consumes ``pending_user_text`` via consume_pending_user_text on
+        # the next turn entry. ``queued`` is a FIFO of QueuedMessage —
+        # ``drain_queue`` returns + clears, called when a turn ends.
+        self.is_running: bool = False
+        self.is_interrupted: bool = False
+        self.pending_user_text: str | None = None
+        self.queued: list[QueuedMessage] = []
 
     def emit_event(self, method: str, params: Any) -> None:
         """Send a JSON-RPC notification to the ACP client and buffer in event_queue."""
@@ -173,6 +199,56 @@ class ACPSession:
         was_running = not self._cancel_event.is_set()
         self._cancel_event.set()
         return was_running
+
+    # ─── Wave 5 T3 — /steer + /queue (Hermes e27b0b765 port) ─────────
+
+    def mark_running(self) -> None:
+        """Flip ``is_running`` True at the start of a prompt run.
+
+        Called by ``send_prompt`` (via the ACP server) so /steer + /queue
+        can detect "interrupt vs first-message" semantics.
+        """
+        self.is_running = True
+
+    def mark_idle(self) -> None:
+        """Flip ``is_running`` False after a prompt run finishes (success or error).
+
+        Also clears the /steer interrupt flag — the next turn's entry is
+        responsible for consuming ``pending_user_text`` via
+        :meth:`consume_pending_user_text`.
+        """
+        self.is_running = False
+        self.is_interrupted = False
+
+    async def steer(self, text: str) -> None:
+        """Interrupt the current turn with new user text.
+
+        Hermes contract: /steer fires regardless of running state. When
+        the agent loop sees ``is_interrupted`` set on the next iteration,
+        it consumes ``pending_user_text`` and treats it as the next user
+        message. On idle sessions, the steered text simply queues as
+        the next user message.
+        """
+        self.is_interrupted = True
+        self.pending_user_text = text
+
+    async def queue(self, text: str) -> None:
+        """Append text to drain after the current turn finishes.
+
+        On idle sessions, the queued text is treated as the next user
+        message (drained by the next prompt entry).
+        """
+        self.queued.append(QueuedMessage(text=text))
+
+    def drain_queue(self) -> list[QueuedMessage]:
+        """Return + clear the pending queue. Called by the loop after each turn."""
+        out, self.queued = list(self.queued), []
+        return out
+
+    def consume_pending_user_text(self) -> str | None:
+        """Pop the /steer message exactly once. None when no steer pending."""
+        text, self.pending_user_text = self.pending_user_text, None
+        return text
 
     async def load_from_db(self) -> bool:
         """Try to restore session from SessionDB. Return True if found."""

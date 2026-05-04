@@ -67,6 +67,9 @@ class ACPServer:
             "cancel": self._handle_cancel,
             "listSessions": self._handle_list_sessions,
             "requestPermission": self._handle_request_permission,
+            # Wave 5 T3 — Hermes-port /steer + /queue
+            "steer": self._handle_steer,
+            "queue": self._handle_queue,
         }
 
     async def serve_stdio(self) -> None:
@@ -185,6 +188,39 @@ class ACPServer:
 
     async def _handle_list_sessions(self, params: dict[str, Any]) -> dict[str, Any]:
         return {"sessions": [{"sessionId": sid} for sid in self._sessions]}
+
+    async def _handle_steer(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Wave 5 T3 — Hermes-port /steer.
+
+        Interrupt the in-flight turn (or queue the next user message on
+        idle) with new user text. Returns ``{status: "interrupted",
+        text: <text>}``.
+        """
+        session_id = params.get("sessionId")
+        if not session_id or session_id not in self._sessions:
+            raise KeyError(f"session not found: {session_id}")
+        text = params.get("text", "")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must be a non-empty string")
+        await self._sessions[session_id].steer(text)
+        return {"status": "interrupted", "text": text}
+
+    async def _handle_queue(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Wave 5 T3 — Hermes-port /queue.
+
+        Append user text to the per-session queue that drains after the
+        current turn. Returns ``{status: "queued", text: <text>,
+        pending: <count>}``.
+        """
+        session_id = params.get("sessionId")
+        if not session_id or session_id not in self._sessions:
+            raise KeyError(f"session not found: {session_id}")
+        text = params.get("text", "")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must be a non-empty string")
+        sess = self._sessions[session_id]
+        await sess.queue(text)
+        return {"status": "queued", "text": text, "pending": len(sess.queued)}
 
     async def _handle_request_permission(self, params: dict[str, Any]) -> dict[str, Any]:
         """Handle IDE-side permission request. Auto-deny if no session/gate."""
