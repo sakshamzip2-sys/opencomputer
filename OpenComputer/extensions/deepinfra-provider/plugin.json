@@ -1,0 +1,26 @@
+{
+  "id": "deepinfra-provider",
+  "name": "DeepInfra Provider",
+  "version": "0.1.0",
+  "description": "DeepInfra — fast OpenAI-compatible inference for Llama, Qwen, DeepSeek and other open models",
+  "author": "Saksham",
+  "license": "MIT",
+  "kind": "provider",
+  "entry": "plugin",
+  "tool_names": [],
+  "model_support": {
+    "model_prefixes": ["meta-llama/", "Qwen/", "deepseek-ai/", "mistralai/"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "deepinfra",
+        "auth_methods": ["api_key"],
+        "env_vars": ["DEEPINFRA_API_KEY"],
+        "label": "DeepInfra",
+        "default_model": "meta-llama/Meta-Llama-3.3-70B-Instruct",
+        "signup_url": "https://deepinfra.com/dash/api_keys"
+      }
+    ]
+  }
+}

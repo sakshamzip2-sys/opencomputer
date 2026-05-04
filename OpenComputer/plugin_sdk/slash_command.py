@@ -61,6 +61,11 @@ class SlashCommand(ABC):
     #: One-line description shown in ``/help`` listings.
     description: str = ""
 
+    #: Optional alternative names that resolve to the same command.
+    #: Each alias must obey the same shape rules as ``name``.
+    #: Defaults to empty tuple — backwards compatible.
+    aliases: tuple[str, ...] = ()
+
     @abstractmethod
     async def execute(
         self, args: str, runtime: RuntimeContext

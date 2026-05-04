@@ -13,6 +13,7 @@ per-event list once; firing is then a straight iteration.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections import defaultdict
@@ -74,12 +75,31 @@ class HookEngine:
 
         Returns the first non-pass decision, or None if all hooks passed.
         Handlers run in priority order — lower priority first.
+
+        ``HookSpec.timeout_ms`` (when > 0) wraps the handler in
+        ``asyncio.wait_for``. On timeout the engine logs a warning and
+        treats the handler as ``"pass"`` (fail-open) — matching OC's
+        existing hook contract (CLAUDE.md §7: a wedged hook must never
+        wedge the loop).
         """
         for _, _, spec in self._hooks.get(ctx.event, []):
             if not self._matches(spec, ctx):
                 continue
             try:
-                decision = await spec.handler(ctx)
+                if spec.timeout_ms and spec.timeout_ms > 0:
+                    decision = await asyncio.wait_for(
+                        spec.handler(ctx),
+                        timeout=spec.timeout_ms / 1000.0,
+                    )
+                else:
+                    decision = await spec.handler(ctx)
+            except TimeoutError:
+                logger.warning(
+                    "Hook %s timed out after %dms — failing open (pass)",
+                    getattr(spec.handler, "__qualname__", repr(spec.handler)),
+                    spec.timeout_ms,
+                )
+                continue  # fail-open
             except Exception:  # noqa: BLE001
                 logger.exception("blocking hook raised")
                 continue

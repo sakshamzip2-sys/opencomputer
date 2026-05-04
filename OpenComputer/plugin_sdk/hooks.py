@@ -120,6 +120,12 @@ class HookSpec:
     #: by the engine, which uses the registration index as a secondary sort
     #: key so the spec itself stays immutable.
     priority: int = 100
+    #: Per-hook timeout in milliseconds. None or 0 = no timeout (current
+    #: behaviour). When the handler exceeds this, the engine logs a warning
+    #: and treats it as 'pass' (fail-open), matching OC's existing hook
+    #: contract (CLAUDE.md §7: a wedged hook must never wedge the loop).
+    #: Mirrors openclaw's plugins.entries.<id>.hooks.timeoutMs.
+    timeout_ms: int | None = None
 
 
 __all__ = [

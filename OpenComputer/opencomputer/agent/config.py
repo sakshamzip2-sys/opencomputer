@@ -346,6 +346,13 @@ class ToolsConfig:
     """Per-tool configuration. Add a new field per tool that needs settings."""
 
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
+    #: Tool names (exact, case-sensitive) that should be skipped at
+    #: registration time. Mirrors openclaw's ``tools.deny``. Wired into
+    #: :meth:`opencomputer.tools.registry.ToolRegistry.set_denylist` at
+    #: CLI startup; callers with expensive optional-tool factories can
+    #: also call :meth:`ToolRegistry.is_denied` BEFORE construction to
+    #: skip the factory work entirely.
+    deny: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
