@@ -2,15 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
-
 from _common import (
-    DEFAULT_LOCAL_HOST,
     EMBEDDING_REGEX,
-    FOLDER_ALIASES,
-    build_cloud_aware_url,
     cloud_endpoint,
     coerce_seed,
     folder_aliases_for,
@@ -27,7 +21,6 @@ from _common import (
     safe_path_join,
     unwrap_workflow,
 )
-
 
 # =============================================================================
 # Cloud detection / URL routing
@@ -383,7 +376,7 @@ class TestRedirectHeaderStripping:
     """
 
     def _build_session(self):
-        from _common import _StripSensitiveOnRedirectSession, HAS_REQUESTS
+        from _common import HAS_REQUESTS, _StripSensitiveOnRedirectSession
         if not HAS_REQUESTS:
             import pytest
             pytest.skip("requests not installed")
