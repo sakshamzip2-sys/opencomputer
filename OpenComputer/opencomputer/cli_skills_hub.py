@@ -61,9 +61,14 @@ def _hub_root() -> Path:
 
 
 def _build_router() -> SkillSourceRouter:
-    sources: list = [WellKnownSource()]
-    taps_path = _hub_root() / "taps.json"
+    from opencomputer.skills_hub.sources.minimax import MiniMaxSource
+
     clone_root = _hub_root() / "_clones"
+    # Wave 6.E.2 — MiniMax is a default tap so users can
+    # `oc skills install minimax/<skill>` with no setup. Sits next to
+    # WellKnownSource as a curated, stable-identifier source.
+    sources: list = [WellKnownSource(), MiniMaxSource(clone_root=clone_root)]
+    taps_path = _hub_root() / "taps.json"
     for repo in TapsManager(taps_path).list():
         sources.append(GitHubSource(repo=repo, clone_root=clone_root))
     return SkillSourceRouter(sources)
