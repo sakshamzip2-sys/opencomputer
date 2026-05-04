@@ -3083,6 +3083,11 @@ from opencomputer.cli_security import security_app  # noqa: E402
 
 app.add_typer(security_app, name="security")
 
+# PR #420 Wave 5 T2 deferral closure — Ralph-loop goal CLI
+from opencomputer.cli_goal import goal_app  # noqa: E402
+
+app.add_typer(goal_app, name="goal")
+
 # Phase 3.E — pluggable sandbox strategy CLI
 from opencomputer.cli_sandbox import sandbox_app  # noqa: E402
 
