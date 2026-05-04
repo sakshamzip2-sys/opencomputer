@@ -42,6 +42,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -104,33 +105,189 @@ def kanban_home() -> Path:
     return _oc_home()
 
 
-def kanban_db_path() -> Path:
-    """Return the path to the shared ``kanban.db``.
+# ---------------------------------------------------------------------------
+# Multi-board support (Wave 6.E.8 / Hermes parity)
+# ---------------------------------------------------------------------------
+#
+# Hermes lets users keep multiple boards keyed by a slug:
+# ``~/.hermes/kanban/boards/<slug>/{kanban.db,workspaces,logs}``. We
+# mirror that with ``OC_KANBAN_BOARD`` env + an active-board state
+# file so users can ``oc kanban boards switch <slug>`` without
+# re-exporting env on every CLI call.
+#
+# Resolution precedence (highest → lowest):
+#
+# 1. ``OC_KANBAN_DB`` env (explicit path pin — already supported)
+# 2. ``OC_KANBAN_BOARD`` env (slug; resolves to per-board path)
+# 3. Active-board state file at ``<root>/kanban/.active-board``
+# 4. Legacy default ``<root>/kanban.db`` (single-board, pre-multi-board)
+#
+# Migration is lazy: existing single-board users see no change unless
+# they call ``oc kanban boards switch <slug>`` or set the env var.
 
-    Anchored at :func:`kanban_home`, not the active profile's
-    ``OC_HOME``, so profile workers and the dispatcher converge on
-    the same board.  ``OC_KANBAN_DB`` pins the path directly (highest
-    precedence) — the dispatcher injects this into worker subprocess env
-    as defense-in-depth.
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+class InvalidBoardSlugError(ValueError):
+    """Raised when a board slug fails validation. Slug must be 1-64
+    chars, lowercase alphanumeric + hyphens/underscores, starting with
+    a letter or digit."""
+
+
+def validate_slug(slug: str) -> None:
+    """Reject malformed slugs. Same rules as hermes.
+
+    Raises :class:`InvalidBoardSlugError` with a user-friendly message
+    on failure. Empty / non-str / wrong shape all raise.
+    """
+    if not isinstance(slug, str) or not slug:
+        raise InvalidBoardSlugError(
+            "board slug must be a non-empty string"
+        )
+    if not _SLUG_RE.match(slug):
+        raise InvalidBoardSlugError(
+            f"board slug {slug!r} must be 1-64 characters, lowercase "
+            "alphanumerics + hyphens/underscores, starting with a "
+            "letter or digit (e.g. 'project-x', 'q4_planning')"
+        )
+
+
+def boards_root() -> Path:
+    """Directory under which all named boards live.
+
+    ``<kanban_home>/kanban/boards/`` — siblings of the legacy
+    single-board ``kanban.db`` (which remains the unnamed default).
+    """
+    return kanban_home() / "kanban" / "boards"
+
+
+def _active_board_state_file() -> Path:
+    """File that records the currently-switched-to board slug.
+
+    Plain text, single line, slug only. Missing file = legacy default.
+    """
+    return kanban_home() / "kanban" / ".active-board"
+
+
+def active_board() -> str | None:
+    """Return the active board slug if one is set, else None.
+
+    Resolution: ``OC_KANBAN_BOARD`` env first (allows per-shell overrides
+    without touching the state file), then the state file.
+    """
+    env = os.environ.get("OC_KANBAN_BOARD", "").strip()
+    if env:
+        try:
+            validate_slug(env)
+            return env
+        except InvalidBoardSlugError:
+            # Bad env value — log + fall through to state file rather
+            # than crash. Documented behaviour.
+            return None
+    state_file = _active_board_state_file()
+    if not state_file.exists():
+        return None
+    try:
+        slug = state_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not slug:
+        return None
+    try:
+        validate_slug(slug)
+    except InvalidBoardSlugError:
+        return None
+    return slug
+
+
+def set_active_board(slug: str | None) -> None:
+    """Persist the active board slug to the state file.
+
+    ``None`` clears the file (back to legacy default). The board
+    directory is NOT created here — call :func:`board_db_path` and
+    :func:`init_db` to materialize the per-board layout.
+    """
+    state_file = _active_board_state_file()
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    if slug is None:
+        if state_file.exists():
+            state_file.unlink()
+        return
+    validate_slug(slug)
+    state_file.write_text(slug, encoding="utf-8")
+
+
+def board_db_path(slug: str | None) -> Path:
+    """Compute the kanban.db path for ``slug`` (None → legacy default).
+
+    Per-board layout::
+
+        <kanban_home>/kanban/boards/<slug>/kanban.db
+
+    Legacy (slug=None) path is ``<kanban_home>/kanban.db`` — preserved
+    for back-compat so single-board users don't migrate by accident.
+    """
+    if slug is None:
+        return kanban_home() / "kanban.db"
+    validate_slug(slug)
+    return boards_root() / slug / "kanban.db"
+
+
+def list_boards() -> list[str]:
+    """Return all known board slugs (subdirectories of boards_root).
+
+    Returns an empty list when no boards directory exists. Slugs are
+    sorted alphabetically.
+    """
+    root = boards_root()
+    if not root.exists():
+        return []
+    return sorted(
+        d.name for d in root.iterdir()
+        if d.is_dir() and _SLUG_RE.match(d.name)
+    )
+
+
+def kanban_db_path() -> Path:
+    """Return the path to the active ``kanban.db``.
+
+    Resolution precedence (highest → lowest):
+
+    1. ``OC_KANBAN_DB`` (explicit path pin)
+    2. ``OC_KANBAN_BOARD`` env / active-board state file → per-board path
+    3. Legacy ``<kanban_home>/kanban.db`` (single-board default)
+
+    The dispatcher injects ``OC_KANBAN_DB`` and ``OC_KANBAN_BOARD``
+    into worker subprocess env so workers converge on the same board
+    the dispatcher is using.
     """
     override = os.environ.get("OC_KANBAN_DB", "").strip()
     if override:
         return Path(override).expanduser()
+    slug = active_board()
+    if slug is not None:
+        return board_db_path(slug)
     return kanban_home() / "kanban.db"
 
 
 def workspaces_root() -> Path:
     """Return the directory under which ``scratch`` workspaces are created.
 
-    Anchored at :func:`kanban_home` so workspace paths are stable across
-    profile workers spawned by the dispatcher.
+    Per-board workspaces live under
+    ``<kanban_home>/kanban/boards/<slug>/workspaces/`` so each board's
+    scratch state is isolated. Legacy single-board layout uses
+    ``<kanban_home>/kanban/workspaces/``.
+
     ``OC_KANBAN_WORKSPACES_ROOT`` pins the path directly (highest
-    precedence) — the dispatcher injects this into worker subprocess env
-    as defense-in-depth.
+    precedence) — the dispatcher injects this into worker subprocess
+    env as defense-in-depth.
     """
     override = os.environ.get("OC_KANBAN_WORKSPACES_ROOT", "").strip()
     if override:
         return Path(override).expanduser()
+    slug = active_board()
+    if slug is not None:
+        return boards_root() / slug / "workspaces"
     return kanban_home() / "kanban" / "workspaces"
 
 
@@ -2142,6 +2299,14 @@ def _default_spawn(task: Task, workspace: str) -> int | None:
     # but unusual symlink / Docker layouts are caught here too.
     env["OC_KANBAN_DB"] = str(kanban_db_path())
     env["OC_KANBAN_WORKSPACES_ROOT"] = str(workspaces_root())
+    # Wave 6.E.8 — propagate active-board context to the worker so
+    # the kanban_* tools resolve to the same board the dispatcher
+    # used to claim this task. Without this, a worker subprocess
+    # would re-resolve via the active-board state file (which the
+    # user may have switched between dispatch + spawn).
+    _active = active_board()
+    if _active:
+        env["OC_KANBAN_BOARD"] = _active
     # OC_PROFILE is the author the kanban_comment tool defaults to.
     # `oc -p <assignee>` activates the profile, but the env var is
     # what the tool reads — set it explicitly here so comments are
