@@ -195,6 +195,18 @@ class TelegramAdapter(BaseChannelAdapter):
         self._free_response_chats: set[str] = {
             str(c) for c in (config.get("free_response_chats") or [])
         }
+        # Wave 6.A — chat allowlist (DEFAULT OFF / empty = all allowed).
+        # When non-empty, only listed chat IDs (groups, supergroups, forums)
+        # may interact with the bot. Private DMs are still allowed unless
+        # ``private_chats_require_allow`` is set. Forum threads are gated
+        # by their parent ``chat.id`` (Telegram threads share the parent's
+        # chat id).
+        self._allowed_chats: set[str] = {
+            str(c) for c in (config.get("allowed_chats") or [])
+        }
+        self._private_chats_require_allow: bool = bool(
+            config.get("private_chats_require_allow") or False,
+        )
         # Compile wake-word regexes once. Bad patterns are logged + dropped
         # so a single mistyped entry doesn't break inbound delivery.
         self._mention_patterns: list[re.Pattern[str]] = []
@@ -637,6 +649,12 @@ class TelegramAdapter(BaseChannelAdapter):
         if self._bot_id is not None and frm.get("id") == self._bot_id:
             return
 
+        # Wave 6.A — chat-allowlist gate. Fires BEFORE the mention gate
+        # so disallowed chats see no bot activity at all. Empty allowlist
+        # = passthrough (preserves pre-Wave-6 behaviour exactly).
+        if not self._is_chat_allowed(msg):
+            return
+
         # PR 3a.1 — mention-boundary gate. Default-OFF; when enabled
         # group messages must explicitly mention the bot or be replies
         # to it. 1:1 DMs always pass through.
@@ -861,6 +879,24 @@ class TelegramAdapter(BaseChannelAdapter):
                 return True
 
         return False
+
+    def _is_chat_allowed(self, msg: dict[str, Any]) -> bool:
+        """Wave 6.A allowlist gate. Empty allowlist = all chats allowed.
+
+        Returns True iff the message originates from a chat that is
+        permitted to interact with the bot. Private DMs pass unless
+        ``private_chats_require_allow`` is configured. Forum threads
+        share the parent ``chat.id`` so they inherit the parent's
+        allow/deny decision (forums-as-a-whole, not per-thread).
+        """
+        if not self._allowed_chats:
+            return True
+        chat = msg.get("chat") or {}
+        chat_id = str(chat.get("id", ""))
+        chat_type = chat.get("type") or "private"
+        if chat_type == "private" and not self._private_chats_require_allow:
+            return True
+        return chat_id in self._allowed_chats
 
     async def _handle_steer_command(self, *, chat_id: str, text: str) -> None:
         """Route a ``/steer <text>`` Telegram message into SteerRegistry.
