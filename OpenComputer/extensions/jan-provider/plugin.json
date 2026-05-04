@@ -1,0 +1,26 @@
+{
+  "id": "jan-provider",
+  "name": "Jan.ai Provider",
+  "version": "0.1.0",
+  "description": "Jan.ai desktop app — local OpenAI-compatible inference (default http://localhost:1337/v1)",
+  "author": "Saksham",
+  "license": "MIT",
+  "kind": "provider",
+  "entry": "plugin",
+  "tool_names": [],
+  "model_support": {
+    "model_prefixes": ["local-", "llama-", "qwen-", "mistral-", "gemma-", "tinyllama-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "jan",
+        "auth_methods": ["api_key", "none"],
+        "env_vars": ["JAN_API_KEY", "JAN_BASE_URL", "JAN_MODEL"],
+        "label": "Jan.ai (local)",
+        "default_model": "local-model",
+        "signup_url": "https://jan.ai"
+      }
+    ]
+  }
+}
