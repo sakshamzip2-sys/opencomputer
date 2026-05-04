@@ -120,21 +120,41 @@ class OpenRouterProvider(OpenAIProvider):
         # Read the OC config (fail-soft if unreadable); rebuild the
         # AsyncOpenAI client with default_headers carrying the
         # X-OpenRouter-Cache + X-OpenRouter-Cache-TTL values so the
-        # OpenRouter edge cache is activated. Response-header parsing
-        # (parse_cache_status) is deferred — would need
-        # client.with_raw_response, a non-trivial refactor of the
-        # OpenAI parent's SDK call sites.
+        # OpenRouter edge cache is activated.
+        #
+        # Wave 5 T5 final closure (response-side parsing) — install an
+        # httpx response hook on a custom http_client passed to
+        # AsyncOpenAI. The hook reads ``X-OpenRouter-Cache-Status`` from
+        # every response and stashes it on the provider instance so
+        # observability / metrics layers can read HIT/MISS without the
+        # SDK refactor of ``with_raw_response``.
         try:
             cache_headers = build_or_headers(self._load_or_cfg())
         except Exception:  # noqa: BLE001 — never let cfg-read break provider init
             cache_headers = {}
+        # Latest cache status from the most recent OpenRouter response.
+        # Defaults to MISS until a response lands.
+        self.last_or_cache_status: str = "MISS"
+
+        async def _capture_cache_status(response):  # type: ignore[no-untyped-def]
+            try:
+                status = parse_cache_status(dict(response.headers))
+                self.last_or_cache_status = status
+            except Exception:  # noqa: BLE001 — best-effort observability
+                pass
+
         if cache_headers:
+            import httpx as _httpx
             from openai import AsyncOpenAI as _AsyncOpenAI
 
+            http_client = _httpx.AsyncClient(
+                event_hooks={"response": [_capture_cache_status]},
+            )
             self.client = _AsyncOpenAI(
                 api_key=self._api_key,
                 base_url=self._base or resolved_base,
                 default_headers=cache_headers,
+                http_client=http_client,
             )
         # Stash for tests / observability.
         self._or_cache_headers: dict[str, str] = cache_headers
