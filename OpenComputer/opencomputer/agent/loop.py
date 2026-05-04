@@ -409,6 +409,14 @@ class AgentLoop:
         # run_conversation; declared here so _dispatch_tool_calls callers that
         # bypass run_conversation don't hit AttributeError.
         self._tool_callback: Any = None
+        # Wave 5 T17 closure — lazy session creation. ``_session_ensured`` is
+        # the set of session_ids whose DB row has been written this loop's
+        # lifetime; ``_pending_session_meta`` holds the platform/model/cwd
+        # captured at run_conversation entry, applied lazily on first
+        # ``_ensure_session_persisted`` call. Per-AgentLoop set (not per-sid)
+        # so subagent recursion via DelegateTool doesn't leak across instances.
+        self._session_ensured: set[str] = set()
+        self._pending_session_meta: dict[str, dict[str, Any]] = {}
         self.db = db or SessionDB(config.session.db_path)
         # Opt-in: prune stale sessions per config.session.auto_prune_*.
         # Default disabled (auto_prune_days=0); never deletes anything
@@ -685,15 +693,20 @@ class AgentLoop:
         _session_end_reason = "completed"
         _session_iterations = 0
 
-        # If this is a fresh session, create it in the DB and seed history from disk.
+        # If this is a fresh session, capture the metadata for lazy persistence
+        # and seed history from disk. Wave 5 T17 closure: the DB row is no
+        # longer eagerly written here — it's deferred until the first
+        # ``append_message`` / ``append_messages_batch`` callsite (via the
+        # ``_ensure_session_persisted`` gate). A conversation that returns
+        # before any message persists (slash-command-only turn, or Ctrl-C
+        # before any reply) leaves no row.
         existing = self.db.get_session(sid) if session_id else None
         if existing is None:
-            self.db.create_session(
-                session_id=sid,
-                platform="cli",
-                model=self.config.model.model,
-                cwd=os.getcwd(),  # Plan 3 — profile-analysis cwd-pattern signal
-            )
+            self._pending_session_meta[sid] = {
+                "platform": "cli",
+                "model": self.config.model.model,
+                "cwd": os.getcwd(),  # Plan 3 — profile-analysis cwd-pattern signal
+            }
             messages: list[Message] = []
             # Round 2B P-9: optional pre-seed for forked-context delegations.
             # ``initial_messages`` is only honoured for fresh sessions to keep
@@ -701,8 +714,11 @@ class AgentLoop:
             # the on-disk session matches in-memory state.
             if initial_messages:
                 messages.extend(initial_messages)
-                self.db.append_messages_batch(sid, list(initial_messages))
+                self._ensure_session_persisted(sid)
+                self._persist_messages_batch(sid, list(initial_messages))
         else:
+            # Existing session — already in DB, just track as ensured.
+            self._session_ensured.add(sid)
             messages = self.db.get_messages(sid)
 
         # Phase 12b6 D8: slash-command dispatch. If the user's message maps
@@ -753,7 +769,7 @@ class AgentLoop:
             user_msg = Message(role="user", content=user_message)
             messages.append(user_msg)
             self._emit_before_message_write(session_id=sid, message=user_msg)
-            self.db.append_message(sid, user_msg)
+            self._persist_message(sid, user_msg)
 
             # Hybrid dispatch — skill-source result becomes a synthetic
             # SkillTool tool_use + tool_result pair so the model sees the
@@ -775,7 +791,7 @@ class AgentLoop:
                 for m in wrap:
                     messages.append(m)
                     self._emit_before_message_write(session_id=sid, message=m)
-                    self.db.append_message(sid, m)
+                    self._persist_message(sid, m)
                 # Allow the loop to continue past this branch — the model
                 # response from the next iteration is the assistant's
                 # reply on top of the tool_result. We do NOT call
@@ -787,7 +803,7 @@ class AgentLoop:
                 )
                 messages.append(assistant_msg)
                 self._emit_before_message_write(session_id=sid, message=assistant_msg)
-                self.db.append_message(sid, assistant_msg)
+                self._persist_message(sid, assistant_msg)
                 self.db.end_session(sid)
                 # OpenClaw 1.C — slash-command path bypasses the iteration
                 # loop and its finally-block, so pop the detector frame here
@@ -1016,7 +1032,7 @@ class AgentLoop:
         )
         messages.append(user_msg)
         self._emit_before_message_write(session_id=sid, message=user_msg)
-        self.db.append_message(sid, user_msg)
+        self._persist_message(sid, user_msg)
 
         # Persona-uplift (2026-04-29): per-turn re-classification with
         # stability gate + cooldown. Pass the in-memory ``messages`` list
@@ -1211,7 +1227,7 @@ class AgentLoop:
                             # context (the nudge was already promised to
                             # the user; replaying without it would silently
                             # change the next turn's semantics).
-                            self.db.append_message(sid, nudge_msg)
+                            self._persist_message(sid, nudge_msg)
                             _log.debug(
                                 "steer: applied pending nudge for session %s "
                                 "(len=%d)",
@@ -1241,7 +1257,7 @@ class AgentLoop:
                     for body in bg_notices:
                         bg_msg = Message(role="system", content=body)
                         messages.append(bg_msg)
-                        self.db.append_message(sid, bg_msg)
+                        self._persist_message(sid, bg_msg)
                     if bg_notices:
                         _log.debug(
                             "bg-notify: applied %d pending bg exit notice(s) for session %s",
@@ -1686,7 +1702,7 @@ class AgentLoop:
                     self._emit_before_message_write(
                         session_id=sid, message=final_assistant_msg
                     )
-                    self.db.append_message(sid, final_assistant_msg)
+                    self._persist_message(sid, final_assistant_msg)
                     # Record an episodic event for this completed turn — pass the
                     # tool messages this turn produced so file paths get extracted. (PR #6)
                     if self._episodic is not None:
@@ -1793,7 +1809,7 @@ class AgentLoop:
                 messages.extend(turn_messages)
                 for _msg in turn_messages:
                     self._emit_before_message_write(session_id=sid, message=_msg)
-                self.db.append_messages_batch(sid, turn_messages)
+                self._persist_messages_batch(sid, turn_messages)
 
                 # OpenClaw 1.C — record each tool call into the repetition
                 # detector AFTER dispatch (we want to see the args the agent
@@ -1844,7 +1860,7 @@ class AgentLoop:
                     self._emit_before_message_write(
                         session_id=sid, message=_reminder,
                     )
-                    self.db.append_message(sid, _reminder)
+                    self._persist_message(sid, _reminder)
 
             # Budget exhausted
             final = Message(
@@ -1853,7 +1869,7 @@ class AgentLoop:
             )
             messages.append(final)
             self._emit_before_message_write(session_id=sid, message=final)
-            self.db.append_message(sid, final)
+            self._persist_message(sid, final)
             self.db.end_session(sid)
             return ConversationResult(
                 final_message=final,
@@ -1887,7 +1903,7 @@ class AgentLoop:
             )
             messages.append(final)
             self._emit_before_message_write(session_id=sid, message=final)
-            self.db.append_message(sid, final)
+            self._persist_message(sid, final)
             self.db.end_session(sid)
             return ConversationResult(
                 final_message=final,
@@ -2540,6 +2556,38 @@ class AgentLoop:
 
     # ─── T1 of auto-skill-evolution plan: SessionEndEvent emission ─
 
+    def _ensure_session_persisted(self, sid: str) -> None:
+        """Lazy-write the session row on first persistence demand.
+
+        Wave 5 T17 closure. ``run_conversation`` captures session metadata
+        in :attr:`_pending_session_meta` instead of eagerly calling
+        ``db.create_session``. The first ``_persist_message`` /
+        ``_persist_messages_batch`` for a fresh sid triggers this gate,
+        which calls ``db.ensure_session`` (idempotent INSERT OR IGNORE).
+        Subsequent calls within the same loop are no-ops via
+        :attr:`_session_ensured`.
+        """
+        if sid in self._session_ensured:
+            return
+        meta = self._pending_session_meta.get(sid, {})
+        self.db.ensure_session(
+            sid,
+            platform=meta.get("platform", "cli"),
+            model=meta.get("model", ""),
+            cwd=meta.get("cwd"),
+        )
+        self._session_ensured.add(sid)
+
+    def _persist_message(self, sid: str, msg: Message) -> int:
+        """Append a single message — ensures the session row first."""
+        self._ensure_session_persisted(sid)
+        return self.db.append_message(sid, msg)
+
+    def _persist_messages_batch(self, sid: str, msgs: list[Message]) -> list[int]:
+        """Append a batch of messages — ensures the session row first."""
+        self._ensure_session_persisted(sid)
+        return self.db.append_messages_batch(sid, msgs)
+
     async def _emit_session_end_event(
         self,
         *,
@@ -2658,7 +2706,7 @@ class AgentLoop:
             )
             if reflection:
                 final = _Msg(role="assistant", content=reflection)
-                self.db.append_message(session_id, final)
+                self._persist_message(session_id, final)
         except Exception:  # noqa: BLE001 — reflections are non-load-bearing
             _log.debug(
                 "learning_moments: session-end reflection failed for %s",
