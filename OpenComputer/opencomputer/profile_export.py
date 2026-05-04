@@ -288,18 +288,51 @@ def _add_dir_to_tar(
             _add_file_to_tar(tar, sub, sub_arc, include_secrets=include_secrets)
 
 
+def list_archive_files(archive_path: Path) -> list[str]:
+    """Return the relative profile-internal paths the archive would write.
+
+    Used by the CLI's ``--dry-run`` mode to preview what an import would
+    do without touching the target directory. Strips the ``profile/``
+    prefix and skips ``manifest.json`` (an envelope file, not a profile
+    artifact). Path-traversal entries are filtered out — they would be
+    rejected during a real import anyway.
+    """
+    if not archive_path.exists():
+        raise FileNotFoundError(f"archive does not exist: {archive_path}")
+    out: list[str] = []
+    with tarfile.open(archive_path, "r:gz") as tar:
+        for member in tar.getmembers():
+            if member.name == "manifest.json":
+                continue
+            if not member.name.startswith("profile/"):
+                continue
+            rel = member.name[len("profile/"):]
+            if not rel:
+                continue
+            # Skip clearly-traversal entries; real import would raise on these.
+            if ".." in Path(rel).parts:
+                continue
+            if member.isdir():
+                continue
+            out.append(rel)
+    return sorted(out)
+
+
 def import_profile(
     archive_path: Path,
     target_profile_dir: Path,
     *,
     force: bool = False,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Extract ``archive_path`` into ``target_profile_dir``.
 
     Refuses to overwrite an existing non-empty target unless ``force=True``.
     Validates the archive contains a recognizable ``manifest.json``.
 
-    Returns the manifest dict.
+    With ``dry_run=True``, validates the archive and existence checks but
+    writes nothing to disk. Always returns the manifest dict — the CLI
+    pairs this with :func:`list_archive_files` for the preview output.
     """
     if not archive_path.exists():
         raise FileNotFoundError(f"archive does not exist: {archive_path}")
@@ -315,10 +348,12 @@ def import_profile(
             "Pass force=True to overwrite."
         )
 
-    target_profile_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        target_profile_dir.mkdir(parents=True, exist_ok=True)
 
     with tarfile.open(archive_path, "r:gz") as tar:
-        # Validate manifest first
+        # Validate manifest first (in both modes — dry-run still rejects
+        # malformed archives so the preview never lies about a doomed import).
         try:
             manifest_member = tar.getmember("manifest.json")
         except KeyError as exc:
@@ -335,6 +370,26 @@ def import_profile(
                 f"unsupported archive format_version: "
                 f"{manifest.get('format_version')!r}"
             )
+
+        if dry_run:
+            # Validate path-traversal safety in dry-run too — we want the
+            # preview to surface the same error a real import would.
+            for member in tar.getmembers():
+                if member.name == "manifest.json":
+                    continue
+                if not member.name.startswith("profile/"):
+                    continue
+                rel = member.name[len("profile/"):]
+                if not rel:
+                    continue
+                target = (target_profile_dir / rel).resolve()
+                try:
+                    target.relative_to(target_profile_dir.resolve())
+                except ValueError as exc:
+                    raise ValueError(
+                        f"archive contains unsafe path: {member.name}"
+                    ) from exc
+            return manifest
 
         # Extract every member under profile/ into target_profile_dir
         for member in tar.getmembers():
@@ -373,6 +428,7 @@ def import_profile(
 __all__ = [
     "export_profile",
     "import_profile",
+    "list_archive_files",
     "_redact_env_text",
     "_redact_yaml_data",
 ]

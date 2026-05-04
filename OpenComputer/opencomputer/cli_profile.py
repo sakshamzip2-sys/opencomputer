@@ -810,16 +810,25 @@ def import_cmd(
         False, "--force",
         help="Overwrite the target profile dir if it already exists.",
     ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Preview what would be imported without writing to disk.",
+    ),
 ) -> None:
     """Import a profile from a tar.gz archive (Phase 14.H).
 
     Validates the archive's ``manifest.json`` (refuses unknown
     ``format_version``), then extracts into
     ``~/.opencomputer/<name>/``.
+
+    Pass ``--dry-run`` to validate the archive + preview the file list
+    without writing anything to the filesystem. The same existence /
+    overwrite checks are still enforced so the preview accurately
+    predicts whether a real import would succeed.
     """
     import tempfile
 
-    from opencomputer.profile_export import import_profile
+    from opencomputer.profile_export import import_profile, list_archive_files
 
     if not archive.exists():
         _console.print(f"[red]error:[/red] archive does not exist: {archive}")
@@ -842,7 +851,9 @@ def import_cmd(
         raise typer.Exit(code=1) from None
 
     try:
-        manifest = import_profile(archive, target_dir, force=force)
+        manifest = import_profile(
+            archive, target_dir, force=force, dry_run=dry_run,
+        )
     except FileExistsError as e:
         _console.print(f"[red]error:[/red] {e}")
         _console.print(
@@ -852,6 +863,24 @@ def import_cmd(
     except (ValueError, FileNotFoundError) as e:
         _console.print(f"[red]error:[/red] {e}")
         raise typer.Exit(code=1) from None
+
+    if dry_run:
+        files = list_archive_files(archive)
+        target_exists = target_dir.exists() and any(target_dir.iterdir())
+        _console.print(
+            f"[yellow]dry-run[/yellow] — no files written\n"
+            f"  would import to: {target_dir}\n"
+            f"  target dir exists: {target_exists}{' (would overwrite)' if target_exists and force else ''}\n"
+            f"  profile name: {manifest.get('profile_name')}\n"
+            f"  exported: {manifest.get('exported_at')}\n"
+            f"  oc version at export: {manifest.get('oc_version')}\n"
+            f"  secrets redacted: {not manifest.get('include_secrets')}\n"
+            f"  sessions included: {manifest.get('include_sessions')}\n"
+            f"  files that would be written ({len(files)}):"
+        )
+        for path in files:
+            _console.print(f"    {path}")
+        return
 
     _console.print(
         f"[green]imported[/green] → {target_dir}\n"
