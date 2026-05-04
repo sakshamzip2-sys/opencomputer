@@ -157,11 +157,43 @@ async def _build_agent_loop(job: dict[str, Any]) -> Any:
     )
 
 
+def _build_context_from_block(job: dict[str, Any]) -> str:
+    """Wave 6.A — build the upstream-context block for ``context_from``.
+
+    For each upstream job ID listed in ``job['context_from']``, look up
+    that job's ``last_response`` from jobs.json and emit a tagged block.
+    Missing or empty upstream responses are skipped. Empty result means
+    no upstream context (job runs as if context_from was unset).
+    """
+    refs = job.get("context_from") or []
+    if not refs:
+        return ""
+    from opencomputer.cron.jobs import load_jobs
+
+    blocks: list[str] = []
+    by_id = {j["id"]: j for j in load_jobs()}
+    for ref in refs:
+        upstream = by_id.get(ref)
+        if upstream is None:
+            continue
+        last = (upstream.get("last_response") or "").strip()
+        if not last:
+            continue
+        blocks.append(
+            f"[CONTEXT FROM upstream cron job '{upstream.get('name', ref)}' "
+            f"(id={ref}, last run {upstream.get('last_run_at', 'never')}):\n"
+            f"{last}\n]"
+        )
+    return ("\n\n".join(blocks) + "\n\n") if blocks else ""
+
+
 def _build_run_prompt(job: dict[str, Any]) -> str:
     """Construct the user prompt the agent should answer for this run.
 
     For ``--prompt`` jobs: returns the prompt verbatim with a cron-context header.
     For ``--skill`` jobs: returns "use the X skill" so the agent self-invokes.
+    Wave 6.A: ``context_from`` block (if any) is prepended after the cron
+    hint and before the user prompt.
     """
     cron_hint = (
         "[SYSTEM: You are running as a scheduled cron job. "
@@ -170,9 +202,13 @@ def _build_run_prompt(job: dict[str, Any]) -> str:
         "SILENT: If there is genuinely nothing new to report, respond with "
         "exactly \"[SILENT]\" (nothing else) to suppress delivery.]\n\n"
     )
+    upstream = _build_context_from_block(job)
     if job.get("skill"):
-        return f"{cron_hint}Use the `{job['skill']}` skill and report your findings."
-    return cron_hint + (job.get("prompt") or "")
+        return (
+            f"{cron_hint}{upstream}"
+            f"Use the `{job['skill']}` skill and report your findings."
+        )
+    return cron_hint + upstream + (job.get("prompt") or "")
 
 
 async def _run_one_job(job: dict[str, Any]) -> tuple[bool, str, str, str | None]:
@@ -198,6 +234,22 @@ async def _run_one_job(job: dict[str, Any]) -> tuple[bool, str, str, str | None]
 
     full_prompt = _build_run_prompt(job)
 
+    # Wave 6.A — per-job workdir. Apply via os.chdir for the agent run,
+    # restore after. Best-effort: missing/invalid workdir falls through
+    # to the parent-process cwd with a warning.
+    import os as _os
+
+    saved_cwd = _os.getcwd()
+    workdir = job.get("workdir")
+    if workdir:
+        try:
+            _os.chdir(workdir)
+        except OSError as exc:
+            logger.warning(
+                "cron job %s workdir=%r unusable (%s); using process cwd",
+                job_id, workdir, exc,
+            )
+
     try:
         loop = await _build_agent_loop(job)
         runtime = RuntimeContext(
@@ -213,11 +265,26 @@ async def _run_one_job(job: dict[str, Any]) -> tuple[bool, str, str, str | None]
     except TimeoutError:
         error = f"cron job '{job_name}' exceeded {_job_timeout_seconds():.0f}s timeout"
         logger.error(error)
+        try:
+            _os.chdir(saved_cwd)
+        except OSError:
+            pass
         return False, _failed_doc(job, error), "", error
     except Exception as exc:  # noqa: BLE001
         error = f"{type(exc).__name__}: {exc}"
         logger.exception("Cron job '%s' (id=%s) failed: %s", job_name, job_id, error)
+        try:
+            _os.chdir(saved_cwd)
+        except OSError:
+            pass
         return False, _failed_doc(job, error), "", error
+    finally:
+        # Restore process cwd unconditionally — a job's workdir change
+        # must NOT bleed into subsequent ticks of the scheduler.
+        try:
+            _os.chdir(saved_cwd)
+        except OSError:
+            pass
 
     final = (result.final_message.content if result and result.final_message else "") or ""
     if final.strip() == "(No response generated)":
