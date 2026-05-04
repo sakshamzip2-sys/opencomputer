@@ -275,7 +275,7 @@ def _reset_target_counter():
     yield
 
 
-def _build_runtime(profile_name: str = "openclaw") -> ProfileRuntimeState:
+def _build_runtime(profile_name: str = "opencomputer") -> ProfileRuntimeState:
     cfg = resolve_browser_config({"enabled": True}, {})
     profile = resolve_profile(cfg, profile_name)
     assert profile is not None
@@ -307,7 +307,7 @@ async def test_connect_managed_caches_per_profile(monkeypatch):
     )
 
     cfg = resolve_browser_config({"enabled": True}, {})
-    profile = resolve_profile(cfg, "openclaw")
+    profile = resolve_profile(cfg, "opencomputer")
     assert profile is not None
     running = _FakeRunningChrome()
 
@@ -322,7 +322,7 @@ async def test_launch_managed_short_circuits_when_cached(monkeypatch):
     """If a RunningChrome is already cached for the profile, _launch_managed
     returns it instead of relaunching."""
     cfg = resolve_browser_config({"enabled": True}, {})
-    profile = resolve_profile(cfg, "openclaw")
+    profile = resolve_profile(cfg, "opencomputer")
     assert profile is not None
 
     fake_browser = _FakeBrowser()
@@ -542,7 +542,7 @@ async def test_cache_evicts_when_chrome_dead(monkeypatch):
     The dead entry must be gone from the cache.
     """
     cfg = resolve_browser_config({"enabled": True}, {})
-    profile = resolve_profile(cfg, "openclaw")
+    profile = resolve_profile(cfg, "opencomputer")
     assert profile is not None
 
     fake_browser = _FakeBrowser()
@@ -601,7 +601,7 @@ async def test_cache_evicts_when_chrome_dead(monkeypatch):
 async def test_cache_reuses_when_chrome_alive(monkeypatch):
     """A cached entry whose Chrome is alive must be reused — no relaunch."""
     cfg = resolve_browser_config({"enabled": True}, {})
-    profile = resolve_profile(cfg, "openclaw")
+    profile = resolve_profile(cfg, "opencomputer")
     assert profile is not None
 
     fake_browser = _FakeBrowser()
@@ -657,7 +657,7 @@ async def test_cache_idempotent_on_concurrent_dead_detection(monkeypatch):
       * no exceptions are raised under the race.
     """
     cfg = resolve_browser_config({"enabled": True}, {})
-    profile = resolve_profile(cfg, "openclaw")
+    profile = resolve_profile(cfg, "opencomputer")
     assert profile is not None
 
     fake_browser = _FakeBrowser()
@@ -734,7 +734,7 @@ async def test_connect_managed_evicts_dead_cached_session(monkeypatch):
     cached dead session).
     """
     cfg = resolve_browser_config({"enabled": True}, {})
-    profile = resolve_profile(cfg, "openclaw")
+    profile = resolve_profile(cfg, "opencomputer")
     assert profile is not None
 
     fake_browser_dead = _FakeBrowser()
@@ -804,7 +804,7 @@ async def test_connect_managed_liveness_probe_rebuilds_when_same_running_died(mo
     detect the dead proc, evict, and rebuild.
     """
     cfg = resolve_browser_config({"enabled": True}, {})
-    profile = resolve_profile(cfg, "openclaw")
+    profile = resolve_profile(cfg, "opencomputer")
     assert profile is not None
 
     fake_browser_old = _FakeBrowser()

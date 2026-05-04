@@ -64,7 +64,7 @@ from extensions.browser_control.profiles import (
 
 def _profile() -> ResolvedBrowserProfile:
     cfg = resolve_browser_config({})
-    p = resolve_profile(cfg, "openclaw")
+    p = resolve_profile(cfg, "opencomputer")
     assert p is not None
     return p
 
@@ -173,7 +173,7 @@ def test_decoration_writes_via_atomic_json(tmp_path):
     """No direct open('w') — every JSON write must go through atomic_write_json."""
     user_data_dir = tmp_path
     with patch.object(decoration_mod, "atomic_write_json") as mock_atomic:
-        decorate_openclaw_profile(str(user_data_dir), name="openclaw", color="#FF4500")
+        decorate_openclaw_profile(str(user_data_dir), name="opencomputer", color="#FF4500")
     # Two writes: Local State + Default/Preferences.
     assert mock_atomic.call_count == 2
     paths_written = {str(call.args[0]) for call in mock_atomic.call_args_list}
@@ -240,7 +240,7 @@ def test_ensure_profile_clean_exit_writes_normal_keys(tmp_path):
 
 def test_build_chrome_launch_args_includes_required_flags():
     cfg = resolve_browser_config({})
-    profile = resolve_profile(cfg, "openclaw")
+    profile = resolve_profile(cfg, "opencomputer")
     assert profile is not None
     args = build_chrome_launch_args(cfg, profile, "/tmp/x", headless=False)
     assert f"--remote-debugging-port={profile.cdp_port}" in args
@@ -251,7 +251,7 @@ def test_build_chrome_launch_args_includes_required_flags():
 
 def test_build_chrome_launch_args_headless_toggle():
     cfg = resolve_browser_config({"headless": True})
-    profile = resolve_profile(cfg, "openclaw")
+    profile = resolve_profile(cfg, "opencomputer")
     assert profile is not None
     args = build_chrome_launch_args(cfg, profile, "/tmp/x")
     assert "--headless=new" in args
@@ -260,7 +260,7 @@ def test_build_chrome_launch_args_headless_toggle():
 
 def test_build_chrome_launch_args_no_sandbox_toggle():
     cfg = resolve_browser_config({"no_sandbox": True})
-    profile = resolve_profile(cfg, "openclaw")
+    profile = resolve_profile(cfg, "opencomputer")
     assert profile is not None
     args = build_chrome_launch_args(cfg, profile, "/tmp/x")
     assert "--no-sandbox" in args
@@ -269,7 +269,7 @@ def test_build_chrome_launch_args_no_sandbox_toggle():
 
 def test_build_chrome_launch_args_appends_extra_args_last():
     cfg = resolve_browser_config({"extra_args": ["--enable-logging"]})
-    profile = resolve_profile(cfg, "openclaw")
+    profile = resolve_profile(cfg, "opencomputer")
     assert profile is not None
     args = build_chrome_launch_args(cfg, profile, "/tmp/x")
     assert args[-1] == "--enable-logging"
@@ -333,7 +333,7 @@ def _fake_proc(pid: int = 12345) -> MagicMock:
 @pytest.mark.asyncio
 async def test_launch_openclaw_chrome_happy_path(tmp_path, monkeypatch):
     cfg = resolve_browser_config({})
-    profile = resolve_profile(cfg, "openclaw")
+    profile = resolve_profile(cfg, "opencomputer")
     assert profile is not None
 
     udir = tmp_path / "user-data"
@@ -368,7 +368,7 @@ async def test_launch_openclaw_chrome_happy_path(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_launch_openclaw_chrome_raises_on_readiness_timeout(tmp_path, monkeypatch):
     cfg = resolve_browser_config({})
-    profile = resolve_profile(cfg, "openclaw")
+    profile = resolve_profile(cfg, "opencomputer")
     assert profile is not None
 
     udir = tmp_path / "user-data"
@@ -416,7 +416,7 @@ async def test_launch_openclaw_chrome_rejects_non_loopback(monkeypatch):
         {
             "profiles": {
                 "remote": {
-                    "driver": "openclaw",
+                    "driver": "managed",
                     "cdp_url": "https://browser.example.com:9222",
                     "color": "#1F77B4",
                 }

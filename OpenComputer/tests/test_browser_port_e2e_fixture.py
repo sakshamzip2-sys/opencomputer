@@ -133,7 +133,7 @@ async def test_full_flow_against_fixture(tmp_path):
 
     # 3) Open a tab to the fixture URL — exercises POST /tabs/open
     fixture_url = _fixture_url()
-    open_resp = await actions.browser_open_tab(url=fixture_url, profile="openclaw")
+    open_resp = await actions.browser_open_tab(url=fixture_url, profile="opencomputer")
     assert isinstance(open_resp, dict)
 
     # Cleanup: reset the module-level dispatcher app

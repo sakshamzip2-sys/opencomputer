@@ -26,7 +26,7 @@ def _resolved_for_test():
 
 def _profile() -> ResolvedBrowserProfile:
     cfg = _resolved_for_test()
-    p = resolve_profile(cfg, "openclaw")
+    p = resolve_profile(cfg, "opencomputer")
     assert p is not None
     return p
 
@@ -34,10 +34,10 @@ def _profile() -> ResolvedBrowserProfile:
 def test_get_or_create_profile_state_lazy() -> None:
     state = BrowserServerState(resolved=_resolved_for_test())
     p = _profile()
-    assert "openclaw" not in state.profiles
+    assert "opencomputer" not in state.profiles
     runtime = get_or_create_profile_state(state, p)
     assert isinstance(runtime, ProfileRuntimeState)
-    assert state.profiles["openclaw"] is runtime
+    assert state.profiles["opencomputer"] is runtime
     # Re-call returns the same instance.
     again = get_or_create_profile_state(state, p)
     assert again is runtime
@@ -45,12 +45,12 @@ def test_get_or_create_profile_state_lazy() -> None:
 
 def test_known_profile_names_unions_declared_and_live() -> None:
     state = BrowserServerState(resolved=_resolved_for_test())
-    # Default config declares "openclaw" + "user".
+    # Default config declares "opencomputer" + "user".
     declared = set(state.resolved.profiles.keys())
-    assert "openclaw" in declared
+    assert "opencomputer" in declared
     assert "user" in declared
     names = known_profile_names(state)
-    assert "openclaw" in names
+    assert "opencomputer" in names
     assert "user" in names
     # Order is sorted.
     assert names == sorted(names)

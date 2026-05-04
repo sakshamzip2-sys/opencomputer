@@ -92,9 +92,9 @@ def test_resolve_browser_config_default_profile_falls_back_to_user_when_only_use
     cfg = resolve_browser_config(
         {
             "profiles": {
-                # Force only `user` to exist by overriding the openclaw entry as
+                # Force only `user` to exist by overriding the opencomputer entry as
                 # an existing-session — but ensure_default_profile re-injects
-                # `openclaw`. This test verifies the synthesized openclaw is
+                # `opencomputer`. This test verifies the synthesized opencomputer is
                 # present even when raw config tries to omit it.
                 "user": {"driver": "existing-session"},
             },
@@ -128,7 +128,7 @@ def test_resolve_profile_openclaw_default_uses_loopback_cdp_url():
     cfg = resolve_browser_config({})
     p = resolve_profile(cfg, DEFAULT_OPENCLAW_BROWSER_PROFILE_NAME)
     assert p is not None
-    assert p.driver == "openclaw"
+    assert p.driver == "managed"
     assert p.cdp_is_loopback is True
     assert p.cdp_host in ("127.0.0.1",)
     assert p.cdp_port > 0
@@ -140,7 +140,7 @@ def test_resolve_profile_remote_cdp_marks_non_loopback():
         {
             "profiles": {
                 "remote": {
-                    "driver": "openclaw",
+                    "driver": "managed",
                     "cdp_url": "https://browser.example.com:9222",
                     "color": "#1F77B4",
                 }
@@ -161,7 +161,7 @@ def test_resolve_profile_strips_stale_ws_devtools_path():
         {
             "profiles": {
                 "stale": {
-                    "driver": "openclaw",
+                    "driver": "managed",
                     "cdp_url": "ws://127.0.0.1:18800/devtools/browser/abc-def-123",
                     "cdp_port": 18800,
                     "color": "#1F77B4",
@@ -185,7 +185,7 @@ def test_resolve_profile_returns_none_when_neither_port_nor_url():
         {
             "profiles": {
                 "broken": {
-                    "driver": "openclaw",
+                    "driver": "managed",
                     "color": "#1F77B4",
                     # no cdp_port, no cdp_url
                 }
@@ -222,7 +222,7 @@ def test_capabilities_existing_session():
 
 
 def test_capabilities_remote_cdp():
-    caps = get_browser_profile_capabilities(_profile("openclaw", cdp_is_loopback=False))
+    caps = get_browser_profile_capabilities(_profile("managed", cdp_is_loopback=False))
     assert caps.mode == "remote-cdp"
     assert caps.is_remote is True
     assert caps.uses_persistent_playwright is True
@@ -230,7 +230,7 @@ def test_capabilities_remote_cdp():
 
 
 def test_capabilities_local_managed():
-    caps = get_browser_profile_capabilities(_profile("openclaw"))
+    caps = get_browser_profile_capabilities(_profile("managed"))
     assert caps.mode == "local-managed"
     assert caps.uses_chrome_mcp is False
     assert caps.supports_per_tab_ws is True
@@ -244,7 +244,7 @@ def test_capabilities_local_managed():
 @pytest.mark.parametrize(
     "name,expected",
     [
-        ("openclaw", True),
+        ("opencomputer", True),
         ("a", True),
         ("a-b-c", True),
         ("9-foo", True),
@@ -283,9 +283,9 @@ def test_allocate_color_cycles_when_exhausted():
 
 def test_get_used_ports_collects_explicit_and_url_ports():
     profiles = {
-        "a": BrowserProfileConfig(cdp_port=18810, color="#1F77B4", driver="openclaw"),
+        "a": BrowserProfileConfig(cdp_port=18810, color="#1F77B4", driver="managed"),
         "b": BrowserProfileConfig(
-            cdp_url="https://remote.example.com:9222", color="#2CA02C", driver="openclaw"
+            cdp_url="https://remote.example.com:9222", color="#2CA02C", driver="managed"
         ),
     }
     assert get_used_ports(profiles) == {18810, 9222}
@@ -293,7 +293,7 @@ def test_get_used_ports_collects_explicit_and_url_ports():
 
 def test_get_used_colors_uppercases():
     profiles = {
-        "a": BrowserProfileConfig(color="#aabbcc", driver="openclaw"),
+        "a": BrowserProfileConfig(color="#aabbcc", driver="managed"),
     }
     assert get_used_colors(profiles) == {"#AABBCC"}
 
@@ -348,7 +348,7 @@ def test_create_profile_rejects_user_data_dir_on_openclaw():
     with pytest.raises(ProfileValidationError, match="user_data_dir"):
         create_profile(
             state,
-            CreateProfileParams(name="bad", driver="openclaw", user_data_dir="/tmp/x"),
+            CreateProfileParams(name="bad", driver="managed", user_data_dir="/tmp/x"),
         )
 
 
@@ -369,7 +369,7 @@ def test_create_profile_remote_cdp_marks_remote():
     result = create_profile(
         state,
         CreateProfileParams(
-            name="cloud", driver="openclaw", cdp_url="https://browser.example.com:9222"
+            name="cloud", driver="managed", cdp_url="https://browser.example.com:9222"
         ),
     )
     assert result.is_remote is True
