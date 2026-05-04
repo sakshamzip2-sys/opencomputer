@@ -274,8 +274,20 @@ _LOOKUP: dict[str, CommandDef] = _build_lookup()
 
 
 def is_slash_command(text: str) -> bool:
-    """True iff text starts with ``/`` followed by at least one non-space char."""
-    if not text or not text.startswith("/"):
+    """True iff text is a slash command — including the bare ``?`` shortcut.
+
+    Wave 6.A — Hermes-port (7c0742220 ``mini help menu when u write ?``).
+    A bare ``?`` (or ``?`` followed only by whitespace) is treated as
+    ``/help`` to give users an at-a-glance command list without
+    remembering the slash. Any non-empty text after a leading ``/``
+    still resolves through the regular path.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if stripped == "?":
+        return True
+    if not text.startswith("/"):
         return False
     rest = text[1:].lstrip()
     return bool(rest)

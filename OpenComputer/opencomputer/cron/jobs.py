@@ -303,6 +303,8 @@ def create_job(
     notify: str | None = None,
     plan_mode: bool = True,
     enabled_toolsets: list[str] | None = None,
+    context_from: list[str] | None = None,
+    workdir: str | None = None,
 ) -> dict[str, Any]:
     """Create a new cron job.
 
@@ -368,6 +370,17 @@ def create_job(
         "notify": notify,
         "plan_mode": bool(plan_mode),
         "enabled_toolsets": enabled_toolsets,
+        # Wave 6.A — Hermes-port (5ac536592 + 852c7f3be).
+        # context_from: list of upstream job IDs whose ``last_response`` is
+        # prepended into this job's prompt so cron jobs can chain.
+        # workdir: optional cwd for the agent during this run; defaults to
+        # the current process cwd if unset.
+        "context_from": list(context_from) if context_from else None,
+        "workdir": workdir,
+        # Captured at end of each successful run; consumed by downstream
+        # jobs that list this job in their context_from. Empty until the
+        # first successful run.
+        "last_response": "",
     }
 
     with _jobs_lock:
@@ -484,8 +497,14 @@ def mark_job_run(
     success: bool,
     error: str | None = None,
     delivery_error: str | None = None,
+    response: str | None = None,
 ) -> None:
-    """Record the outcome of a job run + advance next_run_at."""
+    """Record the outcome of a job run + advance next_run_at.
+
+    ``response`` is the assistant's final message text for this run; saved
+    as ``last_response`` so downstream jobs that list this job in their
+    ``context_from`` can pull it in. ``None`` leaves the prior value.
+    """
     with _jobs_lock:
         jobs = load_jobs()
         for i, job in enumerate(jobs):
@@ -497,6 +516,11 @@ def mark_job_run(
             job["last_status"] = "ok" if success else "error"
             job["last_error"] = error if not success else None
             job["last_delivery_error"] = delivery_error
+            if response is not None:
+                # Cap stored response so a runaway 1MB job output doesn't
+                # bloat jobs.json. 8KB is generous for downstream prompt
+                # injection without overwhelming the next job's context.
+                job["last_response"] = (response or "")[:8192]
 
             if job.get("repeat"):
                 job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1
