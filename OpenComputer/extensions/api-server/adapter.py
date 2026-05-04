@@ -34,6 +34,7 @@ request/response surface, not a streaming chat channel.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -71,6 +72,11 @@ class APIServerAdapter(BaseChannelAdapter):
         self._handler: ChatHandler | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
+        # Wave 6.A — Hermes-port (0a15dbdc4) — track in-flight chat runs
+        # by run_id so POST /v1/runs/{id}/stop can cancel the underlying
+        # asyncio.Task. Cleared in _handle_chat's finally block on every
+        # outcome (completion / error / cancel).
+        self._active_runs: dict[str, "asyncio.Task[Any]"] = {}
 
     def set_handler(self, handler: ChatHandler) -> None:
         """Inject the per-request agent handler.
@@ -109,16 +115,52 @@ class APIServerAdapter(BaseChannelAdapter):
             return web.json_response(
                 {"error": "agent handler not bound"}, status=503
             )
+        # Wave 6.A — Hermes-port (0a15dbdc4 POST /v1/runs/{id}/stop).
+        # Generate a run_id and track the underlying asyncio task so a
+        # client can cancel it. Cleanup happens unconditionally in the
+        # finally block.
+        import asyncio as _asyncio
+        import uuid as _uuid
+
+        run_id = _uuid.uuid4().hex
+        task = _asyncio.create_task(self._handler(session_id, message))
+        self._active_runs[run_id] = task
         try:
-            reply = await self._handler(session_id, message)
+            reply = await task
+        except _asyncio.CancelledError:
+            return web.json_response(
+                {"session_id": session_id, "run_id": run_id, "stopped": True},
+                status=499,  # client-closed-request convention
+            )
         except Exception as e:  # noqa: BLE001
             logger.exception("api-server handler raised")
             return web.json_response(
                 {"error": f"handler error: {type(e).__name__}"}, status=500
             )
+        finally:
+            self._active_runs.pop(run_id, None)
         return web.json_response(
-            {"session_id": session_id, "response": reply}
+            {"session_id": session_id, "run_id": run_id, "response": reply}
         )
+
+    async def _handle_run_stop(self, request: web.Request) -> web.Response:
+        """``POST /v1/runs/{run_id}/stop`` — cancel an in-flight chat run.
+
+        Wave 6.A — Hermes-port (0a15dbdc4). Returns 200 if cancelled, 404
+        if the run_id is unknown (already completed or never existed).
+        """
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth[len("Bearer "):] != self._token:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        run_id = request.match_info.get("run_id", "")
+        task = self._active_runs.get(run_id)
+        if task is None:
+            return web.json_response(
+                {"error": "unknown run_id (already finished or never existed)"},
+                status=404,
+            )
+        task.cancel()
+        return web.json_response({"run_id": run_id, "stopped": True})
 
     # ─── Server lifecycle ───────────────────────────────────────────
 
@@ -127,6 +169,8 @@ class APIServerAdapter(BaseChannelAdapter):
         # uploads don't even reach the handler.
         app = web.Application(client_max_size=self.max_message_length)
         app.router.add_post("/v1/chat", self._handle_chat)
+        # Wave 6.A — Hermes-port (0a15dbdc4) — POST /v1/runs/{id}/stop
+        app.router.add_post("/v1/runs/{run_id}/stop", self._handle_run_stop)
         return app
 
     async def connect(self) -> None:
