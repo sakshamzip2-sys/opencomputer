@@ -116,6 +116,56 @@ class OpenRouterProvider(OpenAIProvider):
             or DEFAULT_OPENROUTER_BASE_URL
         )
         super().__init__(api_key=api_key, base_url=resolved_base)
+        # Wave 5 T5 closure — wire build_or_headers into the request path.
+        # Read the OC config (fail-soft if unreadable); rebuild the
+        # AsyncOpenAI client with default_headers carrying the
+        # X-OpenRouter-Cache + X-OpenRouter-Cache-TTL values so the
+        # OpenRouter edge cache is activated. Response-header parsing
+        # (parse_cache_status) is deferred — would need
+        # client.with_raw_response, a non-trivial refactor of the
+        # OpenAI parent's SDK call sites.
+        try:
+            cache_headers = build_or_headers(self._load_or_cfg())
+        except Exception:  # noqa: BLE001 — never let cfg-read break provider init
+            cache_headers = {}
+        if cache_headers:
+            from openai import AsyncOpenAI as _AsyncOpenAI
+
+            self.client = _AsyncOpenAI(
+                api_key=self._api_key,
+                base_url=self._base or resolved_base,
+                default_headers=cache_headers,
+            )
+        # Stash for tests / observability.
+        self._or_cache_headers: dict[str, str] = cache_headers
+
+    @staticmethod
+    def _load_or_cfg() -> dict:
+        """Best-effort read of the OC config so build_or_headers can see
+        ``openrouter.response_cache`` / ``response_cache_ttl``. Falls back
+        to {} on any error so provider construction never breaks because
+        of a missing or malformed config file."""
+        try:
+            from opencomputer.agent.config_store import load_config
+
+            cfg = load_config()
+            # Config is a typed dataclass; reconstruct the dict shape
+            # build_or_headers expects (it reads cfg["openrouter"]).
+            or_section = getattr(cfg, "openrouter", None)
+            if or_section is None:
+                return {}
+            return {
+                "openrouter": {
+                    "response_cache": getattr(or_section, "response_cache", True),
+                    "response_cache_ttl": getattr(
+                        or_section, "response_cache_ttl", _DEFAULT_RESPONSE_CACHE_TTL_S,
+                    ),
+                }
+            }
+        except Exception:  # noqa: BLE001
+            # config_store missing the openrouter section is normal pre-Wave-5;
+            # default to caching enabled at the spec's default TTL.
+            return {"openrouter": {"response_cache": True}}
 
     @property
     def capabilities(self):  # type: ignore[override]
