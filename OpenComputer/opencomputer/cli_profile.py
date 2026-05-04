@@ -733,6 +733,136 @@ def env_template_cmd(
     typer.echo(rendered)
 
 
+@profile_app.command("export")
+def export_cmd(
+    name: str | None = typer.Argument(
+        None, help="Profile name to export. Omit to use the active profile."
+    ),
+    output: Path | None = typer.Option(
+        None, "--output", "-o",
+        help="Output archive path (default: <profile>-<timestamp>.tar.gz in cwd).",
+    ),
+    include_secrets: bool = typer.Option(
+        False, "--include-secrets",
+        help="Do NOT redact .env values + secret-key config fields.",
+    ),
+    include_sessions: bool = typer.Option(
+        False, "--include-sessions",
+        help="Include sessions.db + llm_events.jsonl (large + private).",
+    ),
+) -> None:
+    """Export a profile to a portable tar.gz archive (Phase 14.H).
+
+    By default, redacts .env values and likely-secret config.yaml fields
+    (``*api_key*``, ``*token*``, ``*secret*``, ``*password*`` keys).
+    Sessions DB + runtime logs are excluded by default. ``mcp_oauth/``
+    and ``audit_log.jsonl`` are ALWAYS excluded.
+    """
+    import time as _time
+
+    from opencomputer import __version__ as _oc_version
+    from opencomputer.profile_export import export_profile
+
+    target_name = name or read_active_profile() or "default"
+    try:
+        profile_dir = get_profile_dir(target_name)
+    except ProfileNameError as e:
+        _console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from None
+    if not profile_dir.exists():
+        _console.print(
+            f"[red]error:[/red] profile {target_name!r} does not exist at {profile_dir}"
+        )
+        raise typer.Exit(code=1)
+
+    if output is None:
+        ts = _time.strftime("%Y%m%dT%H%M%SZ", _time.gmtime())
+        output = Path.cwd() / f"{target_name}-{ts}.tar.gz"
+
+    written = export_profile(
+        profile_dir,
+        output,
+        profile_name=target_name,
+        oc_version=_oc_version,
+        include_secrets=include_secrets,
+        include_sessions=include_sessions,
+    )
+
+    notes: list[str] = []
+    if not include_secrets:
+        notes.append("[dim](secrets redacted)[/dim]")
+    if not include_sessions:
+        notes.append("[dim](sessions excluded)[/dim]")
+    suffix = (" " + " ".join(notes)) if notes else ""
+    _console.print(
+        f"[green]exported[/green] {target_name} → {written}{suffix}"
+    )
+
+
+@profile_app.command("import")
+def import_cmd(
+    archive: Path = typer.Argument(..., help="Path to the .tar.gz archive."),
+    name: str | None = typer.Option(
+        None, "--name",
+        help="Override imported profile name (default: from manifest).",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Overwrite the target profile dir if it already exists.",
+    ),
+) -> None:
+    """Import a profile from a tar.gz archive (Phase 14.H).
+
+    Validates the archive's ``manifest.json`` (refuses unknown
+    ``format_version``), then extracts into
+    ``~/.opencomputer/<name>/``.
+    """
+    import tempfile
+
+    from opencomputer.profile_export import import_profile
+
+    if not archive.exists():
+        _console.print(f"[red]error:[/red] archive does not exist: {archive}")
+        raise typer.Exit(code=1)
+
+    # Peek the manifest with a throwaway extraction to learn the default
+    # profile name. The actual import below uses the resolved target dir.
+    with tempfile.TemporaryDirectory() as peek_dir:
+        try:
+            manifest = import_profile(archive, Path(peek_dir), force=True)
+        except (ValueError, FileNotFoundError) as e:
+            _console.print(f"[red]error:[/red] {e}")
+            raise typer.Exit(code=1) from None
+
+    target_name = name or manifest.get("profile_name") or "default"
+    try:
+        target_dir = get_profile_dir(target_name)
+    except ProfileNameError as e:
+        _console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from None
+
+    try:
+        manifest = import_profile(archive, target_dir, force=force)
+    except FileExistsError as e:
+        _console.print(f"[red]error:[/red] {e}")
+        _console.print(
+            "Use --force to overwrite, or --name to import to a different profile."
+        )
+        raise typer.Exit(code=1) from None
+    except (ValueError, FileNotFoundError) as e:
+        _console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from None
+
+    _console.print(
+        f"[green]imported[/green] → {target_dir}\n"
+        f"  profile name: {manifest.get('profile_name')}\n"
+        f"  exported: {manifest.get('exported_at')}\n"
+        f"  oc version at export: {manifest.get('oc_version')}\n"
+        f"  secrets redacted: {not manifest.get('include_secrets')}\n"
+        f"  sessions included: {manifest.get('include_sessions')}"
+    )
+
+
 @profile_app.command("path")
 def path_cmd(
     name: str | None = typer.Argument(
