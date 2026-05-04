@@ -14,6 +14,7 @@ from opencomputer.profile_export import (
     _redact_yaml_data,
     export_profile,
     import_profile,
+    list_archive_files,
 )
 
 # ─── _redact_env_text ───
@@ -278,3 +279,117 @@ def test_roundtrip_redacted_export_to_import(sample_profile, tmp_path):
     env_text = (target / ".env").read_text()
     assert "<REDACTED:" in env_text
     assert "sk-ant-actual-secret" not in env_text
+
+
+# ─── dry_run + list_archive_files ───
+
+
+def test_import_dry_run_writes_nothing(sample_profile, tmp_path):
+    archive = tmp_path / "exported.tar.gz"
+    export_profile(sample_profile, archive, profile_name="dry-test")
+
+    target = tmp_path / "would-be-imported"
+    manifest = import_profile(archive, target, dry_run=True)
+    assert manifest["profile_name"] == "dry-test"
+    # Target dir not created in dry-run
+    assert not target.exists()
+
+
+def test_import_dry_run_validates_format_version(tmp_path):
+    """Bad archives still raise in dry-run so the preview never lies."""
+    bad = tmp_path / "bad.tar.gz"
+    with tarfile.open(bad, "w:gz") as tar:
+        manifest = json.dumps({"format_version": "99"}).encode()
+        info = tarfile.TarInfo(name="manifest.json")
+        info.size = len(manifest)
+        import io as _io
+        tar.addfile(info, _io.BytesIO(manifest))
+
+    with pytest.raises(ValueError, match="format_version"):
+        import_profile(bad, tmp_path / "imported", dry_run=True)
+
+
+def test_import_dry_run_still_refuses_existing_target_without_force(
+    sample_profile, tmp_path
+):
+    """Dry-run respects the same overwrite guard so the preview matches a
+    real import's outcome."""
+    archive = tmp_path / "exported.tar.gz"
+    export_profile(sample_profile, archive)
+
+    target = tmp_path / "existing"
+    target.mkdir()
+    (target / "stuff.txt").write_text("don't overwrite me")
+
+    with pytest.raises(FileExistsError):
+        import_profile(archive, target, dry_run=True)
+
+    # Existing file untouched (it would be overwritten with --force, which
+    # dry-run should preview without actually doing).
+    assert (target / "stuff.txt").read_text() == "don't overwrite me"
+
+
+def test_import_dry_run_with_force_does_not_touch_target(sample_profile, tmp_path):
+    archive = tmp_path / "exported.tar.gz"
+    export_profile(sample_profile, archive)
+
+    target = tmp_path / "existing"
+    target.mkdir()
+    (target / "stuff.txt").write_text("preserved")
+
+    manifest = import_profile(archive, target, force=True, dry_run=True)
+    assert manifest is not None
+    # Force + dry-run: target preserved exactly
+    assert (target / "stuff.txt").read_text() == "preserved"
+    # Archive content NOT extracted
+    assert not (target / "config.yaml").exists()
+
+
+def test_list_archive_files_returns_profile_paths(sample_profile, tmp_path):
+    archive = tmp_path / "exported.tar.gz"
+    export_profile(sample_profile, archive, profile_name="list-test")
+    files = list_archive_files(archive)
+    # Strips the profile/ prefix
+    assert ".env" in files
+    assert "config.yaml" in files
+    assert "profile.yaml" in files
+    assert "MEMORY.md" in files
+    # Excludes the manifest envelope
+    assert "manifest.json" not in files
+    # Sorted output
+    assert files == sorted(files)
+
+
+def test_list_archive_files_skips_excluded_session_artifacts(
+    sample_profile, tmp_path
+):
+    archive = tmp_path / "exported.tar.gz"
+    export_profile(sample_profile, archive)  # default exclusion
+    files = list_archive_files(archive)
+    assert "sessions.db" not in files
+    assert "llm_events.jsonl" not in files
+    # logs/ subdir excluded
+    assert not any(p.startswith("logs/") for p in files)
+
+
+def test_list_archive_files_raises_for_missing_archive(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        list_archive_files(tmp_path / "does-not-exist.tar.gz")
+
+
+def test_dry_run_and_list_pair_for_cli_preview(sample_profile, tmp_path):
+    """The CLI calls both functions to render a preview — verify they
+    agree on what would happen."""
+    archive = tmp_path / "exported.tar.gz"
+    export_profile(sample_profile, archive, profile_name="preview")
+    target = tmp_path / "fresh-target"
+
+    manifest = import_profile(archive, target, dry_run=True)
+    files = list_archive_files(archive)
+
+    # Manifest values intact
+    assert manifest["profile_name"] == "preview"
+    # Files non-empty (a real export of a sample profile has multiple files)
+    assert len(files) >= 4
+    # Nothing actually written
+    assert not target.exists()
