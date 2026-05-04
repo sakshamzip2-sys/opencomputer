@@ -44,7 +44,7 @@ from .control_protocol import (
     DEFAULT_COMMAND_TIMEOUT_S,
     DEFAULT_CONTROL_DAEMON_PORT,
     DEFAULT_CONTROL_WS_PATH,
-    SUPPORTED_ACTIONS_V0_6,
+    SUPPORTED_ACTIONS,
     Command,
     ConnectedExtension,
     HelloMessage,
@@ -162,10 +162,11 @@ class ControlDaemon:
         are present. None → first extension found (production usually
         has exactly one connected per agent process).
         """
-        if cmd.action not in SUPPORTED_ACTIONS_V0_6:
+        if cmd.action not in SUPPORTED_ACTIONS:
             raise ActionNotSupportedError(
-                f"action {cmd.action!r} is not yet supported in v0.6 "
-                f"(extension can handle it but daemon translation is in v0.6.x)"
+                f"action {cmd.action!r} is not in the daemon's supported set "
+                f"(future protocol versions may drop actions; this guard is "
+                f"defensive — Wave 6 ships all 14 OpenCLI actions)"
             )
 
         target_ctx = context_id or self._first_context_id()

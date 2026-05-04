@@ -52,9 +52,18 @@ Action = Literal[
     "frames",
 ]
 
-# Subset that v0.6 actually supports end-to-end. Daemon validates against
-# this; extension doesn't care (TS code handles all 14).
-SUPPORTED_ACTIONS_V0_6: frozenset[Action] = frozenset(
+# Daemon-side gate against actions the wire schema doesn't know yet.
+# v0.6 ships all 14 OpenCLI actions — full wire parity at the daemon
+# layer (the extension code itself was a verbatim port of the
+# upstream's full action handler set, so there's no asymmetric work
+# blocking any of these).
+#
+# The frozenset is kept (rather than `len(get_args(Action))`-style
+# inference) so a future protocol version can drop an action by
+# removing it from this set without changing the type Literal — the
+# Literal is a stability surface that older clients may serialize
+# against.
+SUPPORTED_ACTIONS: frozenset[Action] = frozenset(
     {
         "exec",
         "navigate",
@@ -64,6 +73,12 @@ SUPPORTED_ACTIONS_V0_6: frozenset[Action] = frozenset(
         "network-capture-start",
         "network-capture-read",
         "cdp",
+        "set-file-input",
+        "insert-text",
+        "bind",
+        "frames",
+        "sessions",
+        "close-window",
     }
 )
 

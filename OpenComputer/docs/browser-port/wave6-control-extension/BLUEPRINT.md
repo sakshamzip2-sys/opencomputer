@@ -135,7 +135,7 @@ opencomputer setup
 
 ---
 
-## Deviations from OpenCLI (5 intentional)
+## Deviations from OpenCLI (4 intentional)
 
 | # | Deviation | Why |
 |---|---|---|
@@ -143,7 +143,8 @@ opencomputer setup
 | 2 | Two extensions, not one | We keep `extensions/browser-bridge/extension/` (passive ambient awareness, only `tabs` permission) for Layer 4. Add `control-extension/` as a sibling with `chrome.debugger`. Cleaner permission story; users who only want ambient awareness don't see the yellow warning bar. |
 | 3 | Track 1 (managed-Chrome auto-load) | OpenCLI doesn't have managed-Chrome at all — they only operate in user's real Chrome. We keep the `opencomputer` (managed) profile path and gain extension support there too via `--load-extension`. Users get isolated-Chrome-with-control AND real-Chrome-with-control as two distinct profile options. |
 | 4 | Default workspace mode | OpenCLI defaults adapter runs to `owned` (new tab/window in user's Chrome, 30s idle close). We adopt the same default but expose `--bind` flag for opting into `bound:*` mode (use user's currently-focused tab). |
-| 5 | v0.6 ships 8 of 14 actions | MVP: `exec`, `navigate`, `tabs`, `cookies`, `screenshot`, `network-capture-start`, `network-capture-read`, `cdp` (raw passthrough). The other 6 (`set-file-input`, `insert-text`, `bind`, `frames`, `sessions`, `close-window`) come in v0.6.x as adapters demand them. Keeps the v0.6 PR reviewable. |
+
+> **Note:** an earlier draft of this BLUEPRINT proposed shipping 8 of 14 actions in v0.6 and deferring 6 to v0.6.x. That deviation was dropped: the extension code is a verbatim port of OpenCLI's full handler set, so daemon-side parity is mostly removing the `_V0_6` gate. v0.6 ships **all 14 OpenCLI actions** for full general-agent capability (file uploads via `set-file-input`, robust typing via `insert-text`, current-tab UX via `bind`, iframe support via `frames`, plus `sessions` and `close-window` for diagnostics/cleanup).
 
 ---
 

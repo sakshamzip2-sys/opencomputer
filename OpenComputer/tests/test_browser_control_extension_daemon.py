@@ -170,16 +170,194 @@ async def test_concurrent_commands_demux_by_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unsupported_action_rejected() -> None:
-    """Daemon refuses v0.6.x actions before going to the wire."""
+async def test_synthetic_unsupported_action_rejected() -> None:
+    """Daemon's defensive gate refuses any action not in SUPPORTED_ACTIONS.
+
+    v0.6 ships all 14 OpenCLI actions, so production callers can't trip
+    this in normal use. The gate exists so future protocol versions can
+    drop an action by removing it from SUPPORTED_ACTIONS without that
+    breaking the type literal (which is a stability surface).
+
+    To exercise the gate we force-cast a bogus action string at
+    construction (bypassing the Literal type check).
+    """
     port = _free_port()
     daemon = await _start_daemon(port)
     try:
         async with _stub_extension_ws(port, context_id="user") as _ws:
             await asyncio.sleep(0.1)
-            cmd = daemon.make_command("bind", workspace="bound:learnx")
+            cmd = Command(id="x", action="bogus-action")  # type: ignore[arg-type]
             with pytest.raises(ActionNotSupportedError):
                 await daemon.send(cmd, context_id="user")
+    finally:
+        await daemon.stop()
+
+
+async def _stub_echo_responder(ws, *, expected_action: str, response_data) -> None:
+    """Helper: read one Command, assert its action, echo a Result with `data`."""
+    raw = await ws.recv()
+    cmd = json.loads(raw)
+    assert cmd["action"] == expected_action, (
+        f"expected {expected_action}, got {cmd['action']}"
+    )
+    await ws.send(json.dumps({"id": cmd["id"], "ok": True, "data": response_data}))
+
+
+@pytest.mark.asyncio
+async def test_bind_round_trip() -> None:
+    """bind action — workspace pin to user's currently-focused tab."""
+    port = _free_port()
+    daemon = await _start_daemon(port)
+    try:
+        async with _stub_extension_ws(port, context_id="user") as ws:
+            await asyncio.sleep(0.1)
+            stub = asyncio.create_task(
+                _stub_echo_responder(
+                    ws,
+                    expected_action="bind",
+                    response_data={"tabId": 42, "url": "https://learnx.atriauniversity.in/learn"},
+                )
+            )
+            cmd = daemon.make_command(
+                "bind",
+                workspace="bound:learnx",
+                match_domain="learnx.atriauniversity.in",
+            )
+            result = await daemon.send(cmd, context_id="user")
+            assert result.ok is True
+            assert result.data == {"tabId": 42, "url": "https://learnx.atriauniversity.in/learn"}
+            await stub
+    finally:
+        await daemon.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_file_input_round_trip() -> None:
+    """set-file-input — files+selector survive the round trip."""
+    port = _free_port()
+    daemon = await _start_daemon(port)
+    try:
+        async with _stub_extension_ws(port, context_id="user") as ws:
+            await asyncio.sleep(0.1)
+
+            async def file_responder() -> None:
+                raw = await ws.recv()
+                cmd = json.loads(raw)
+                assert cmd["action"] == "set-file-input"
+                assert cmd["files"] == ["/tmp/resume.pdf"]
+                assert cmd["selector"] == "input[type='file']"
+                await ws.send(json.dumps({"id": cmd["id"], "ok": True, "data": None}))
+
+            stub = asyncio.create_task(file_responder())
+            cmd = daemon.make_command(
+                "set-file-input",
+                files=["/tmp/resume.pdf"],
+                selector="input[type='file']",
+            )
+            result = await daemon.send(cmd, context_id="user")
+            assert result.ok is True
+            await stub
+    finally:
+        await daemon.stop()
+
+
+@pytest.mark.asyncio
+async def test_insert_text_round_trip() -> None:
+    """insert-text — text payload survives the round trip."""
+    port = _free_port()
+    daemon = await _start_daemon(port)
+    try:
+        async with _stub_extension_ws(port, context_id="user") as ws:
+            await asyncio.sleep(0.1)
+            stub = asyncio.create_task(
+                _stub_echo_responder(ws, expected_action="insert-text", response_data=None)
+            )
+            cmd = daemon.make_command("insert-text", text="hello world")
+            result = await daemon.send(cmd, context_id="user")
+            assert result.ok is True
+            await stub
+    finally:
+        await daemon.stop()
+
+
+@pytest.mark.asyncio
+async def test_frames_round_trip() -> None:
+    """frames — list iframes in a page."""
+    port = _free_port()
+    daemon = await _start_daemon(port)
+    try:
+        async with _stub_extension_ws(port, context_id="user") as ws:
+            await asyncio.sleep(0.1)
+            frame_tree = {
+                "frame": {"id": "main", "url": "https://example.com"},
+                "childFrames": [
+                    {"frame": {"id": "sub1", "url": "https://embed.example.com"}},
+                ],
+            }
+            stub = asyncio.create_task(
+                _stub_echo_responder(
+                    ws, expected_action="frames", response_data=frame_tree
+                )
+            )
+            cmd = daemon.make_command("frames", page="TARGET-UUID")
+            result = await daemon.send(cmd, context_id="user")
+            assert result.ok is True
+            assert result.data == frame_tree
+            await stub
+    finally:
+        await daemon.stop()
+
+
+@pytest.mark.asyncio
+async def test_sessions_round_trip() -> None:
+    """sessions — diagnostic listing."""
+    port = _free_port()
+    daemon = await _start_daemon(port)
+    try:
+        async with _stub_extension_ws(port, context_id="user") as ws:
+            await asyncio.sleep(0.1)
+            sessions_data = [
+                {
+                    "workspace": "default",
+                    "ownership": "owned",
+                    "tabCount": 1,
+                    "idleMsRemaining": 25_000,
+                }
+            ]
+            stub = asyncio.create_task(
+                _stub_echo_responder(
+                    ws, expected_action="sessions", response_data=sessions_data
+                )
+            )
+            cmd = daemon.make_command("sessions")
+            result = await daemon.send(cmd, context_id="user")
+            assert result.ok is True
+            assert result.data == sessions_data
+            await stub
+    finally:
+        await daemon.stop()
+
+
+@pytest.mark.asyncio
+async def test_close_window_round_trip() -> None:
+    """close-window — explicit cleanup before idle timeout."""
+    port = _free_port()
+    daemon = await _start_daemon(port)
+    try:
+        async with _stub_extension_ws(port, context_id="user") as ws:
+            await asyncio.sleep(0.1)
+            stub = asyncio.create_task(
+                _stub_echo_responder(
+                    ws,
+                    expected_action="close-window",
+                    response_data={"closed": True},
+                )
+            )
+            cmd = daemon.make_command("close-window", workspace="default")
+            result = await daemon.send(cmd, context_id="user")
+            assert result.ok is True
+            assert result.data == {"closed": True}
+            await stub
     finally:
         await daemon.stop()
 

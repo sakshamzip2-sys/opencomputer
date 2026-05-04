@@ -100,9 +100,9 @@ class ControlExtensionClient:
         extension we reflect the supported actions (since the daemon
         has no native ``list_tools`` concept).
         """
-        from .control_protocol import SUPPORTED_ACTIONS_V0_6
+        from .control_protocol import SUPPORTED_ACTIONS
 
-        return sorted(SUPPORTED_ACTIONS_V0_6)
+        return sorted(SUPPORTED_ACTIONS)
 
     async def close(self) -> None:
         """Best-effort detach from the shared daemon.

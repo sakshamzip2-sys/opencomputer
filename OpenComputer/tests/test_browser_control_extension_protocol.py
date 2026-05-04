@@ -15,7 +15,7 @@ from extensions.browser_control.control_protocol import (
     DEFAULT_CONTROL_DAEMON_PORT,
     DEFAULT_CONTROL_PING_PATH,
     DEFAULT_CONTROL_WS_PATH,
-    SUPPORTED_ACTIONS_V0_6,
+    SUPPORTED_ACTIONS,
     Command,
     ConnectedExtension,
     HelloMessage,
@@ -185,13 +185,15 @@ class TestLogMessage:
 
 
 class TestSupportedActions:
-    """v0.6 ships 8 of 14 actions; daemon gates the unsupported ones."""
+    """v0.6 ships all 14 OpenCLI actions; the gate is defensive only."""
 
     def test_supported_actions_count(self) -> None:
-        assert len(SUPPORTED_ACTIONS_V0_6) == 8
+        assert len(SUPPORTED_ACTIONS) == 14
 
-    def test_supported_set_matches_blueprint(self) -> None:
+    def test_supported_set_full_parity(self) -> None:
+        """All 14 actions from OpenCLI's protocol.ts must be supported."""
         expected = {
+            # Core (8) — read paths
             "exec",
             "navigate",
             "tabs",
@@ -200,13 +202,127 @@ class TestSupportedActions:
             "network-capture-start",
             "network-capture-read",
             "cdp",
+            # Generalized (6) — write/UX paths
+            "set-file-input",  # file uploads
+            "insert-text",  # robust typing into React/contenteditable
+            "bind",  # pin workspace to user's currently-focused tab
+            "frames",  # cross-frame iframe operations
+            "sessions",  # diagnostic — list active workspace sessions
+            "close-window",  # explicit cleanup (idle-timeout already handles)
         }
-        assert expected == SUPPORTED_ACTIONS_V0_6
+        assert expected == SUPPORTED_ACTIONS
 
-    def test_unsupported_actions_in_v0_6(self) -> None:
-        """Sanity: actions documented as v0.6.x are NOT in the v0.6 set."""
-        for unsupported in ("set-file-input", "insert-text", "bind", "frames", "sessions", "close-window"):
-            assert unsupported not in SUPPORTED_ACTIONS_V0_6
+    def test_action_literal_in_sync_with_supported_set(self) -> None:
+        """The Action Literal type and the SUPPORTED_ACTIONS set must align.
+
+        If a future change adds an action to the type but forgets the set
+        (or vice versa), this catches it.
+        """
+        from typing import get_args
+
+        from extensions.browser_control.control_protocol import Action
+
+        literal_members = set(get_args(Action))
+        # Every literal member should be supported (the gate exists for
+        # *future* protocol versions to drop, not for current omissions).
+        assert literal_members == SUPPORTED_ACTIONS, (
+            f"SUPPORTED_ACTIONS and Action Literal out of sync: "
+            f"in literal but not supported: {literal_members - SUPPORTED_ACTIONS}; "
+            f"in supported but not literal: {SUPPORTED_ACTIONS - literal_members}"
+        )
+
+
+class TestNewlySupportedActions:
+    """Round-trip serialization for the 6 actions v0.6 added beyond the read-path core.
+
+    Confirms each action's specific Command fields survive snake_case →
+    camelCase mapping cleanly. The wire shapes here mirror OpenCLI's
+    extension-side handlers so a real OpenCLI extension would accept
+    these payloads byte-for-byte.
+    """
+
+    def test_set_file_input_carries_files_and_selector(self) -> None:
+        cmd = Command(
+            id="upload-1",
+            action="set-file-input",
+            files=["/tmp/resume.pdf", "/tmp/cover.pdf"],
+            selector="input[name='attachment']",
+            page="TARGET-UUID",
+        )
+        wire = cmd.to_wire()
+        assert wire["action"] == "set-file-input"
+        assert wire["files"] == ["/tmp/resume.pdf", "/tmp/cover.pdf"]
+        assert wire["selector"] == "input[name='attachment']"
+        assert wire["page"] == "TARGET-UUID"
+
+    def test_insert_text_carries_text_payload(self) -> None:
+        cmd = Command(
+            id="type-1",
+            action="insert-text",
+            text="Hello world",
+            page="TARGET-UUID",
+        )
+        wire = cmd.to_wire()
+        assert wire["action"] == "insert-text"
+        assert wire["text"] == "Hello world"
+        assert wire["page"] == "TARGET-UUID"
+
+    def test_bind_carries_match_predicates(self) -> None:
+        cmd = Command(
+            id="bind-1",
+            action="bind",
+            workspace="bound:learnx",
+            match_domain="learnx.atriauniversity.in",
+            match_path_prefix="/learn",
+        )
+        wire = cmd.to_wire()
+        assert wire["action"] == "bind"
+        assert wire["workspace"] == "bound:learnx"
+        assert wire["matchDomain"] == "learnx.atriauniversity.in"
+        assert wire["matchPathPrefix"] == "/learn"
+        # Snake-case must not leak.
+        assert "match_domain" not in wire
+        assert "match_path_prefix" not in wire
+
+    def test_bind_works_without_match_predicates(self) -> None:
+        """Bind to currently-focused tab without domain/path filters."""
+        cmd = Command(id="bind-2", action="bind", workspace="bound:default")
+        wire = cmd.to_wire()
+        assert wire["action"] == "bind"
+        assert wire["workspace"] == "bound:default"
+        assert "matchDomain" not in wire
+        assert "matchPathPrefix" not in wire
+
+    def test_frames_carries_frame_index(self) -> None:
+        cmd = Command(
+            id="frames-1",
+            action="frames",
+            page="TARGET-UUID",
+            frame_index=2,
+        )
+        wire = cmd.to_wire()
+        assert wire["action"] == "frames"
+        assert wire["frameIndex"] == 2
+        assert "frame_index" not in wire
+
+    def test_frames_without_index_lists_all(self) -> None:
+        """Without frameIndex, `frames` is a list-frames query."""
+        cmd = Command(id="frames-2", action="frames", page="TARGET-UUID")
+        wire = cmd.to_wire()
+        assert wire["action"] == "frames"
+        assert "frameIndex" not in wire
+
+    def test_sessions_is_diagnostic_no_payload(self) -> None:
+        """sessions takes no Command fields beyond id+action."""
+        cmd = Command(id="sess-1", action="sessions")
+        wire = cmd.to_wire()
+        assert wire == {"id": "sess-1", "action": "sessions"}
+
+    def test_close_window_carries_workspace(self) -> None:
+        cmd = Command(id="close-1", action="close-window", workspace="bound:learnx")
+        wire = cmd.to_wire()
+        assert wire["action"] == "close-window"
+        assert wire["workspace"] == "bound:learnx"
 
 
 class TestProtocolDefaults:
@@ -248,4 +364,4 @@ def test_smoke_imports() -> None:
     assert HelloMessage is not None
     assert LogMessage is not None
     assert ConnectedExtension is not None
-    assert SUPPORTED_ACTIONS_V0_6
+    assert SUPPORTED_ACTIONS

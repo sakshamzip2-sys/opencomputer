@@ -105,4 +105,4 @@ Per-file mapping:
 - ✅ Track 1 wired (auto-loaded into managed Chrome)
 - ⏳ Track 2 pending Web Store submission
 - ⏳ Real OpenComputer brand icons TODO before Web Store submission
-- 8 of 14 actions ship in v0.6 (`exec`, `navigate`, `tabs`, `cookies`, `screenshot`, `network-capture-start`, `network-capture-read`, `cdp`); rest in v0.6.x
+- ✅ All 14 OpenCLI actions ship in v0.6: `exec`, `navigate`, `tabs`, `cookies`, `screenshot`, `network-capture-start`, `network-capture-read`, `cdp`, `set-file-input`, `insert-text`, `bind`, `frames`, `sessions`, `close-window`
