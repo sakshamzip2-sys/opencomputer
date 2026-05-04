@@ -150,6 +150,70 @@ class SignalAdapter(BaseChannelAdapter):
         logger.info("signal send ok: %s msg_id=%s", redact_phone(chat_id), msg_id)
         return SendResult(success=True, message_id=msg_id)
 
+    async def send_multiple_images(
+        self,
+        chat_id: str,
+        image_paths: list[str],
+        caption: str = "",
+        **kwargs: Any,
+    ) -> None:
+        """Send N images in a single Signal message via signal-cli ``send``.
+
+        Wave 5 T11 final closure (Hermes-port 3de8e2168). signal-cli's
+        ``send`` JSON-RPC method accepts an ``attachments`` array of
+        absolute file paths — one network round-trip delivers all
+        images bundled with the optional ``message`` text.
+
+        Missing files are skipped with a logged warning. RPC failure is
+        logged; no fallback (the alternate would be N separate messages,
+        which Signal renders worse than one partial bundle).
+        """
+        if not image_paths:
+            return
+        from pathlib import Path as _Path
+
+        present = []
+        for raw in image_paths:
+            p = _Path(raw)
+            if p.exists() and p.is_file():
+                present.append(str(p))
+            else:
+                logger.warning(
+                    "signal send_multiple_images: missing file %s", p,
+                )
+        if not present:
+            return
+
+        params: dict[str, Any] = {
+            "account": self._phone,
+            "recipient": [chat_id],
+            "attachments": present,
+        }
+        if caption:
+            params["message"] = caption[: self.max_message_length]
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "send-multi-image",
+            "method": "send",
+            "params": params,
+        }
+        try:
+            resp = await self._send_with_retry(
+                self.client.post,
+                f"{self._base_url}/api/v1/rpc",
+                json=payload,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "signal send_multiple_images RPC raised: %s", exc,
+            )
+            return
+        if isinstance(resp, SendResult) or getattr(resp, "status_code", 0) >= 400:
+            logger.warning(
+                "signal send_multiple_images: non-2xx to %s",
+                redact_phone(chat_id),
+            )
+
     # ─── Outbound: reaction ─────────────────────────────────────────
 
     async def send_reaction(

@@ -120,6 +120,76 @@ class MattermostAdapter(BaseChannelAdapter):
         except Exception as exc:  # noqa: BLE001
             return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
 
+    async def send_multiple_images(
+        self,
+        chat_id: str,
+        image_paths: list[str],
+        caption: str = "",
+        **kwargs: Any,
+    ) -> None:
+        """Upload N images to a Mattermost channel as one threaded post.
+
+        Wave 5 T11 final closure (Hermes-port 3de8e2168). Mattermost's
+        flow is two-step:
+
+        1. POST ``/api/v4/files?channel_id=<id>`` per image (multipart) →
+           returns ``{file_infos: [{id, ...}]}`` with the new file id.
+        2. POST ``/api/v4/posts`` with ``file_ids: [...]`` and the caption
+           as ``message`` — single threaded post with all attachments.
+
+        Per-file upload errors are logged + skipped so partial delivery
+        beats none. Missing files are skipped.
+        """
+        if not image_paths:
+            return
+        if self._client is None:
+            return
+        from pathlib import Path as _Path
+
+        file_ids: list[str] = []
+        for raw in image_paths:
+            p = _Path(raw)
+            if not p.exists() or not p.is_file():
+                logger.warning("mattermost send_multiple_images: missing file %s", p)
+                continue
+            try:
+                with p.open("rb") as fh:
+                    files = {"files": (p.name, fh, "application/octet-stream")}
+                    resp = await self._client.post(
+                        f"{self._base_url}/api/v4/files",
+                        params={"channel_id": chat_id},
+                        files=files,
+                    )
+                if resp.status_code != 201:
+                    logger.warning(
+                        "mattermost files upload(%s) HTTP %s",
+                        p.name, resp.status_code,
+                    )
+                    continue
+                body = resp.json()
+                infos = body.get("file_infos") or []
+                if infos and isinstance(infos[0], dict):
+                    fid = infos[0].get("id")
+                    if fid:
+                        file_ids.append(str(fid))
+            except Exception as exc:  # noqa: BLE001 — partial delivery beats none
+                logger.warning("mattermost files upload(%s) raised: %s", p.name, exc)
+
+        if not file_ids:
+            return
+        # Single post containing all uploaded file_ids + the caption
+        try:
+            await self._client.post(
+                f"{self._base_url}/api/v4/posts",
+                json={
+                    "channel_id": chat_id,
+                    "message": caption or "",
+                    "file_ids": file_ids,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("mattermost create_post (with files) raised: %s", exc)
+
     # ------------------------------------------------------------------
     # Reactions
     # ------------------------------------------------------------------
