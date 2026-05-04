@@ -12,8 +12,13 @@ from typing import Literal
 
 # ─── type aliases ──────────────────────────────────────────────────────
 
-BrowserDriver = Literal["managed", "existing-session"]
-BrowserProfileMode = Literal["local-managed", "local-existing-session", "remote-cdp"]
+BrowserDriver = Literal["managed", "existing-session", "control-extension"]
+BrowserProfileMode = Literal[
+    "local-managed",
+    "local-existing-session",
+    "local-control-extension",
+    "remote-cdp",
+]
 
 
 # ─── defaults / palette / regex / port range ──────────────────────────

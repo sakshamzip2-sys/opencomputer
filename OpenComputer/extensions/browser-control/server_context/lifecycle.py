@@ -59,6 +59,10 @@ class ProfileDriver:
     spawn_chrome_mcp: Callable[[ResolvedBrowserProfile], Any] | None = None
     close_chrome_mcp: Callable[[Any], Any] | None = None
 
+    # local-control-extension (Wave 6)
+    spawn_control_extension: Callable[[ResolvedBrowserProfile], Any] | None = None
+    close_control_extension: Callable[[Any], Any] | None = None
+
     # remote-cdp
     connect_remote: Callable[[ResolvedBrowserProfile], Any] | None = None
     disconnect_remote: Callable[[Any], Any] | None = None
@@ -183,6 +187,19 @@ async def _bring_up(
         runtime.chrome_mcp_client = await driver.spawn_chrome_mcp(profile)
         return
 
+    if capabilities.uses_control_extension:
+        if driver.spawn_control_extension is None:
+            _raise_driver_unsupported(
+                runtime,
+                action="start (control-extension)",
+                message=(
+                    "ProfileDriver.spawn_control_extension not provided for "
+                    f"profile {profile.name!r} (driver=control-extension)"
+                ),
+            )
+        runtime.control_extension_client = await driver.spawn_control_extension(profile)
+        return
+
     if capabilities.is_remote:
         if driver.connect_remote is None:
             _raise_driver_unsupported(
@@ -267,6 +284,20 @@ async def _verify_bring_up_alive(
             ) from exc
         return
 
+    if capabilities.uses_control_extension:
+        # Wave 6: just verify the daemon was started; the extension may
+        # not yet have connected (Chrome boots asynchronously). The
+        # client.list_tools() shim returns synchronously without
+        # requiring a live extension connection — calling it here is
+        # cheap and confirms the client wrapper itself is wired.
+        client = runtime.control_extension_client
+        if client is None:
+            raise BringUpVerificationError(
+                f"profile {runtime.profile.name!r}: spawn_control_extension "
+                "returned but runtime.control_extension_client is None"
+            )
+        return
+
     # local-managed and remote-cdp both have runtime.running.cdp_url
     if runtime.running is None:
         raise BringUpVerificationError(
@@ -326,6 +357,15 @@ async def teardown_profile(
                 await driver.close_chrome_mcp(client)
             except Exception as exc:  # noqa: BLE001
                 _log.debug("teardown: close_chrome_mcp raised: %s", exc)
+
+    if capabilities.uses_control_extension and runtime.control_extension_client is not None:
+        client = runtime.control_extension_client
+        runtime.control_extension_client = None
+        if driver.close_control_extension is not None:
+            try:
+                await driver.close_control_extension(client)
+            except Exception as exc:  # noqa: BLE001
+                _log.debug("teardown: close_control_extension raised: %s", exc)
 
     if capabilities.is_remote and runtime.playwright_session is not None:
         sess = runtime.playwright_session

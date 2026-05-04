@@ -399,12 +399,22 @@ def _build_default_profile_driver() -> Any:
         if asyncio.iscoroutine(result):
             await result
 
+    # Wave 6: control-extension driver. Imports lazily to keep the
+    # websockets dependency cost out of cold-start when only managed /
+    # chrome-mcp paths are used.
+    from .control_driver import (
+        close_browser_control_extension,
+        spawn_browser_control_extension,
+    )
+
     return ProfileDriver(
         launch_managed=_launch_managed,
         connect_managed=_connect_managed,
         stop_managed=_stop_managed,
         spawn_chrome_mcp=_spawn_chrome_mcp,
         close_chrome_mcp=_close_chrome_mcp,
+        spawn_control_extension=spawn_browser_control_extension,
+        close_control_extension=close_browser_control_extension,
         connect_remote=None,  # TODO(wave-3.3): remote-CDP wiring
         disconnect_remote=None,
     )

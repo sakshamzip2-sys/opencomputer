@@ -19,9 +19,11 @@ When starting a new wave (v0.5, v0.6, ...):
 
 ---
 
-## v0.5-PRIORITY — Browser-bridge active control (close the chrome://inspect UX gap)
+## v0.5-PRIORITY — Browser-bridge active control → SHIPPED in v0.6 (Wave 6)
 
-> **Why this is first.** Surfaced during real LearnX-flow testing on 2026-05-03: every fresh Chrome session requires the user to toggle `chrome://inspect/#remote-debugging` before `chrome-devtools-mcp` can attach. OpenCLI never asks for this — they ship a Chrome extension that owns the `chrome.debugger` permission and never depends on the external CDP port. Until we close this gap, every new install / new profile hits the same friction wall.
+> ✅ **Shipped.** See [`../wave6-control-extension/BLUEPRINT.md`](../wave6-control-extension/BLUEPRINT.md) for the implementation plan and the Wave 6 PR for the actual port. The original deferred-section text below is preserved for historical context — note that the v0.6 implementation lives at `extensions/browser-control/extension/` (NOT `extensions/browser-bridge/`, as this earlier draft suggested), since the active-control extension is architecturally a sibling of `browser-control`'s existing `managed`/`existing-session` drivers, not a part of the ambient `browser-bridge` plugin.
+
+> **Why this was first.** Surfaced during real LearnX-flow testing on 2026-05-03: every fresh Chrome session requires the user to toggle `chrome://inspect/#remote-debugging` before `chrome-devtools-mcp` can attach. OpenCLI never asks for this — they ship a Chrome extension that owns the `chrome.debugger` permission and never depends on the external CDP port. Until we close this gap, every new install / new profile hits the same friction wall.
 
 **The architectural difference**:
 
