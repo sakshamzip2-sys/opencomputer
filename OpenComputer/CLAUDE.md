@@ -2,7 +2,7 @@
 
 This file is auto-loaded at session start. It is the **single comprehensive brief** a new Claude session needs to resume work on OpenComputer without re-explaining anything.
 
-Last updated: 2026-04-24 (v1.0-candidate — all ship-gate sub-projects A/B/C/D/E merged)
+Last updated: 2026-05-05 (v1.0 release prep — pyproject 2026.5.5; tag + PyPI tag is the operator's next step)
 
 ---
 

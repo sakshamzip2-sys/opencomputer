@@ -2,6 +2,39 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
+## [2026.5.5] — v1.0 release: 8 days of dogfood-driven hardening
+
+This release is the colloquial **v1.0**: the first cut from the post-2026.4.27 dogfood window with all of the v1.0 ship-gate sub-projects merged AND the Wave 6 control-extension port + a long tail of Tier-2/4 deferral closures landed. The plugin SDK surface (`plugin_sdk/*`) reaches its v1.0 stability commitment with this tag.
+
+### Major themes since 2026.4.27
+
+- **Wave 6 — control-extension port (browser-port v0.6).** Third browser-control transport via a verbatim port of OpenCLI's Chrome extension (Apache 2.0). 14 actions, MV3 SW survival, lease lifecycle. Daemon WS server at `:18792/ext`. Track 1 managed-Chrome auto-load via `--load-extension`. 48 new tests.
+- **Wave 6.B/D/E series — kanban native + multi-board distributed.** `oc kanban` CLI + `/kanban` slash command, multi-board support, cross-board task dependencies, auto-assignment routing rules, multi-host write coordination, remote-board read proxy, production-grade cycle detection, org-chart views, kanban-worker + kanban-orchestrator skills.
+- **Phase 14.H — credential sharing.** `oc profile export/import` with default redaction, `--include-sessions`, `--include-secrets`, `--include-oauth-tokens` (closes deferral PR #462), `--dry-run` preview (closes deferral PR #454).
+- **Phase 14.G — env-template generation.** `oc profile env-template [--write]` renders `.env` skeletons from plugin manifests with non-leaking secret hints (PR #445).
+- **Local-providers bundle.** llama-cpp-server, lmstudio, jan, mlx-server — 4 OpenAI-compat local-LLM provider plugins (PR #452).
+- **Loop wall-clock bumps.** `iteration_timeout_s` 1800s → 3600s, cron `DEFAULT_JOB_TIMEOUT_S` 600s → 1200s after the user hit IterationTimeout on a long run (PR #449).
+- **F2 ConsentGate bridges for Matrix.** Reactions and bridge auto-wire (PRs #444, #451).
+- **Skills hub MiniMax smoke test + fetch fix** (PR #447).
+- **`oc goal` CLI** — Ralph-loop goal management from outside chat (closes PR #420 T2 deferral, this release).
+- **`oc usage --cache-stats`** — token + cache-hit telemetry CLI (closes PR #420 T5 deferral, this release).
+- **MCP catalog URL configurability** — env var + config field (closes PR #437 D.3 T2 deferral, this release).
+- **YAML parse-path unification** — agent loop reader and CLI mutators now share the same validator (closes E.1 latent debt, this release).
+
+### plugin_sdk stability commitment
+
+Manifest schema v3 → v4 fields (`min_host_version`, `activation`, `auth_choices`, JSON5-tolerant manifests, 256KB cap) are all **additive**. v3 manifests parse unchanged on v4 readers. Wire-level error codes and `SecretRef` are also additive — old clients ignore. The boundary test (`tests/test_phase6a.py::test_plugin_sdk_does_not_import_opencomputer`) prevents regressions.
+
+### Notes for v1.0 release operator
+
+This version bump (`2026.4.27` → `2026.5.5`) is **prep only** — the actual git tag + PyPI publish via OIDC happens after merge of this PR per the `RELEASE.md` runbook. Steps after merge:
+
+```bash
+git tag v2026.5.5
+git push origin v2026.5.5
+# → release.yml workflow publishes to PyPI via trusted publishing
+```
+
 ## [Unreleased]
 
 ### Added — Wave 6: control-extension port (browser-port v0.6)
