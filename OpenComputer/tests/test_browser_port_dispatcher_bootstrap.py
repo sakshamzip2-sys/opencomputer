@@ -505,15 +505,26 @@ def test_profile_driver_has_connect_managed_wired():
 
 
 def test_tab_ops_backend_has_cdp_callables_wired():
-    """Wave-3.2 — local-managed CDP callables must be present."""
+    """Local-managed CDP callables must be present.
+
+    Wave-3.2 wired the CDP slots; v0.5 Bug B added the chrome-mcp
+    slots so that ``Browser(action="open", profile="user", ...)`` no
+    longer crashes with ``no chrome-mcp opener``. Persistent-playwright
+    still stays unwired (remote-CDP path lands later).
+    """
     backend = _boot._build_default_tab_ops_backend()
     assert backend.list_tabs is not None
     assert backend.open_tab_via_cdp is not None
     assert backend.focus_tab_via_cdp is not None
     assert backend.close_tab_via_cdp is not None
-    # chrome-mcp / persistent-playwright variants stay unwired
-    assert backend.open_tab_via_mcp is None
+    # chrome-mcp slots — v0.5 Bug B
+    assert backend.open_tab_via_mcp is not None
+    assert backend.focus_tab_via_mcp is not None
+    assert backend.close_tab_via_mcp is not None
+    # persistent-playwright variants stay unwired
     assert backend.open_tab_via_playwright is None
+    assert backend.focus_tab_via_playwright is None
+    assert backend.close_tab_via_playwright is None
 
 
 # --- wave-3.3: managed-cache liveness check --------------------------------

@@ -92,8 +92,31 @@ class TestDispatcherTransport:
 
     @pytest.mark.asyncio
     async def test_no_dispatcher_app_raises(self, monkeypatch):
+        """When no dispatcher app is registered AND the lazy-bootstrap
+        helper can't build one (e.g. import fails), the caller still
+        sees the legacy ``BrowserServiceError("dispatcher not
+        registered ...")`` error.
+
+        Bug A fix introduces a lazy bootstrap inside
+        ``fetch_browser_json`` itself, so we monkeypatch the
+        ``_maybe_bootstrap_default_dispatcher`` helper to a no-op to
+        simulate "bootstrap unavailable" and assert the legacy error
+        path still works.
+        """
         # Reset the module-level default
         set_default_dispatcher_app(None)
+
+        # Disable the lazy-bootstrap helper so the slot stays None
+        # (simulating the embedder-stripped-build / cycle-broken case).
+        async def _noop_bootstrap() -> None:
+            return None
+
+        monkeypatch.setattr(
+            "extensions.browser_control.client.fetch."
+            "_maybe_bootstrap_default_dispatcher",
+            _noop_bootstrap,
+        )
+
         with pytest.raises(BrowserServiceError) as exc_info:
             await fetch_browser_json("GET", "/snapshot", timeout=1.0)
         assert "dispatcher" in str(exc_info.value).lower()

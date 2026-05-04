@@ -59,6 +59,33 @@ class BrowserHandlerError(RuntimeError):
         self.code = code
 
 
+class DriverUnsupportedError(BrowserHandlerError):
+    """The active profile's driver does not implement the requested action.
+
+    Bug E — surfaced as a structured 501 NOT IMPLEMENTED so the agent
+    gets a clear actionable error ("driver_unsupported") instead of an
+    opaque 404 / 500. Carries the action name, driver name, and profile
+    so the LLM can pick a different profile or action.
+    """
+
+    def __init__(
+        self,
+        *,
+        action: str,
+        driver: str,
+        profile: str,
+        message: str | None = None,
+    ) -> None:
+        msg = message or (
+            f"action {action!r} is not supported by driver {driver!r} "
+            f"(profile {profile!r})"
+        )
+        super().__init__(msg, status=501, code="driver_unsupported")
+        self.action = action
+        self.driver = driver
+        self.profile = profile
+
+
 # ─── route context ───────────────────────────────────────────────────
 
 

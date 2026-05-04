@@ -411,23 +411,28 @@ def _build_default_profile_driver() -> Any:
 
 
 def _build_default_tab_ops_backend() -> Any:
-    """CDP-driven tab ops backend for the local-managed (openclaw) profile.
+    """Tab-ops backend wiring both the local-managed and chrome-mcp paths.
 
-    The four required callables for a local-managed profile:
+    Local-managed (openclaw, Playwright/CDP):
+      * ``list_tabs(runtime)`` — walks the cached PlaywrightSession.
+      * ``open_tab_via_cdp(runtime, url)`` — ``new_page()`` + ``goto``.
+      * ``focus_tab_via_cdp(runtime, target_id)`` — ``bring_to_front()``.
+      * ``close_tab_via_cdp(runtime, target_id)`` — ``page.close()``.
 
-      * ``list_tabs(runtime)`` — walks ``runtime.playwright_session``'s
-        pages and returns one ``TabInfo`` per accessible page.
-      * ``open_tab_via_cdp(runtime, url)`` — creates a new Page in the
-        first context (or a new context if none) and navigates to
-        ``url``. Returns ``TabInfo(target_id, url, title)``.
-      * ``focus_tab_via_cdp(runtime, target_id)`` — locates the page by
-        target_id and calls ``bring_to_front()``.
-      * ``close_tab_via_cdp(runtime, target_id)`` — locates the page by
-        target_id and calls ``close()``.
+    Chrome MCP (existing-session / user profile, v0.5 Bug B):
+      * ``open_tab_via_mcp(runtime, url)`` — ``new_page`` MCP tool.
+      * ``focus_tab_via_mcp(runtime, target_id)`` — ``select_page``
+        with ``bringToFront: true``.
+      * ``close_tab_via_mcp(runtime, target_id)`` — ``close_page``.
 
-    The chrome-mcp / persistent-playwright variants stay ``None``;
-    routes for those profile shapes will surface a clear error
-    ("no chrome-mcp opener") if invoked. Wave-3.3 lands those.
+    The MCP tool names are confirmed via the upstream
+    ``chrome-devtools-mcp`` server's ``list_tools()`` response (see
+    ``docs/refs/openclaw/browser/04-ai-and-snapshot.md`` — the OpenClaw
+    integration table). Args use ``pageId: number``; we convert from
+    OpenComputer's string ``target_id`` via ``int()``.
+
+    Persistent-Playwright variants stay ``None`` for now —
+    remote-CDP opener wiring lands later.
     """
     from extensions.browser_control.server_context import (  # type: ignore[import-not-found]
         ProfileRuntimeState,
@@ -537,11 +542,178 @@ def _build_default_tab_ops_backend() -> Any:
             return
         await page.close()
 
+    # ─── chrome-mcp tab ops (v0.5 Bug B) ──────────────────────────
+
+    def _require_mcp_client(runtime: ProfileRuntimeState, verb: str) -> Any:
+        client = runtime.chrome_mcp_client
+        if client is None:
+            raise RuntimeError(
+                f"{verb}: profile {runtime.profile.name!r} has no Chrome MCP client; "
+                "ensure_profile_running was not called or spawn_chrome_mcp failed"
+            )
+        return client
+
+    def _page_id_to_target_id(page_id: Any) -> str:
+        # Chrome MCP stores ids as numbers; OpenComputer's TabInfo uses
+        # strings. Round-trip cleanly to keep selection/state stable.
+        return str(int(page_id)) if page_id is not None else ""
+
+    def _target_id_to_page_id(target_id: str, *, verb: str) -> int:
+        try:
+            return int(target_id)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"{verb}: target_id {target_id!r} is not a Chrome-MCP pageId"
+            ) from exc
+
+    async def _list_pages_via_mcp(client: Any) -> list[dict[str, Any]]:
+        """Call ``list_pages`` and normalise the structured result.
+
+        chrome-devtools-mcp returns
+        ``structuredContent: {pages: [{id, url, selected?}, ...]}``
+        when launched with ``--experimentalStructuredContent`` (the
+        default flag set we ship). We tolerate the legacy shape too.
+        """
+        result = await client.call_tool("list_pages", {})
+        sc = result.structured_content or {}
+        pages = sc.get("pages") if isinstance(sc, dict) else None
+        if not isinstance(pages, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for entry in pages:
+            if isinstance(entry, dict) and "id" in entry:
+                out.append(entry)
+        return out
+
+    async def _list_tabs_via_mcp(runtime: ProfileRuntimeState) -> list[TabInfo]:
+        client = runtime.chrome_mcp_client
+        if client is None:
+            return []
+        pages = await _list_pages_via_mcp(client)
+        out: list[TabInfo] = []
+        for entry in pages:
+            tid = _page_id_to_target_id(entry.get("id"))
+            if not tid:
+                continue
+            url = entry.get("url") or ""
+            # chrome-devtools-mcp doesn't surface titles in list_pages;
+            # leave blank — matches OpenClaw's adapter.
+            out.append(
+                TabInfo(
+                    target_id=tid,
+                    url=str(url),
+                    title="",
+                    type="page",
+                    selected=bool(entry.get("selected", False)),
+                )
+            )
+        return out
+
+    async def _open_tab_via_chrome_mcp(
+        runtime: ProfileRuntimeState, url: str
+    ) -> TabInfo:
+        client = _require_mcp_client(runtime, "open_tab")
+        # ``new_page`` opens a tab and selects it; the response carries
+        # a ``pages`` list and a ``selected`` page id so we can stamp
+        # ``last_target_id``. Some server versions echo only the new
+        # page; we handle both shapes.
+        result = await client.call_tool("new_page", {"url": url})
+        sc = result.structured_content or {}
+        target_id = ""
+        url_back = url
+        pages = sc.get("pages") if isinstance(sc, dict) else None
+        if isinstance(pages, list):
+            # Prefer the explicitly-selected page; fall back to last.
+            chosen: dict[str, Any] | None = None
+            for entry in pages:
+                if isinstance(entry, dict) and entry.get("selected"):
+                    chosen = entry
+                    break
+            if chosen is None and pages:
+                last = pages[-1]
+                if isinstance(last, dict):
+                    chosen = last
+            if chosen is not None:
+                target_id = _page_id_to_target_id(chosen.get("id"))
+                url_back = str(chosen.get("url") or url)
+        if not target_id and isinstance(sc, dict) and "id" in sc:
+            target_id = _page_id_to_target_id(sc.get("id"))
+            url_back = str(sc.get("url") or url)
+        if not target_id:
+            # Fall back to a list_pages re-read — the MCP server always
+            # tracks the live page set even if the new_page response is
+            # sparse on older builds.
+            pages = await _list_pages_via_mcp(client)
+            if pages:
+                target_id = _page_id_to_target_id(pages[-1].get("id"))
+                url_back = str(pages[-1].get("url") or url)
+        if not target_id:
+            raise RuntimeError(
+                f"open_tab: chrome-mcp new_page did not return a usable pageId "
+                f"for url={url!r}"
+            )
+        return TabInfo(
+            target_id=target_id,
+            url=url_back,
+            title="",
+            type="page",
+            selected=True,
+        )
+
+    async def _focus_tab_via_chrome_mcp(
+        runtime: ProfileRuntimeState, target_id: str
+    ) -> None:
+        client = _require_mcp_client(runtime, "focus_tab")
+        page_id = _target_id_to_page_id(target_id, verb="focus_tab")
+        await client.call_tool(
+            "select_page", {"pageId": page_id, "bringToFront": True}
+        )
+
+    async def _close_tab_via_chrome_mcp(
+        runtime: ProfileRuntimeState, target_id: str
+    ) -> None:
+        client = _require_mcp_client(runtime, "close_tab")
+        page_id = _target_id_to_page_id(target_id, verb="close_tab")
+        try:
+            await client.call_tool("close_page", {"pageId": page_id})
+        except Exception as exc:  # noqa: BLE001
+            # close_page can return a tool-error if the page is already
+            # gone — keep close_tab idempotent.
+            from extensions.browser_control.snapshot.chrome_mcp import (  # type: ignore[import-not-found]
+                ChromeMcpToolError,
+            )
+
+            if isinstance(exc, ChromeMcpToolError):
+                _log.debug(
+                    "close_tab: chrome-mcp returned tool error for pageId=%s — "
+                    "treating as already-closed: %s",
+                    page_id,
+                    exc,
+                )
+                return
+            raise
+
+    # The ``list_tabs`` callable on the backend has to dispatch by
+    # capability too — for chrome-mcp profiles, walk the MCP server's
+    # page list; for openclaw, walk the PlaywrightSession.
+    async def _list_tabs_dispatched(runtime: ProfileRuntimeState) -> list[TabInfo]:
+        from extensions.browser_control.profiles.capabilities import (  # type: ignore[import-not-found]
+            get_browser_profile_capabilities,
+        )
+
+        capabilities = get_browser_profile_capabilities(runtime.profile)
+        if capabilities.uses_chrome_mcp:
+            return await _list_tabs_via_mcp(runtime)
+        return await _list_tabs(runtime)
+
     return TabOpsBackend(
-        list_tabs=_list_tabs,
+        list_tabs=_list_tabs_dispatched,
         open_tab_via_cdp=_open_tab_via_cdp,
         focus_tab_via_cdp=_focus_tab_via_cdp,
         close_tab_via_cdp=_close_tab_via_cdp,
+        open_tab_via_mcp=_open_tab_via_chrome_mcp,
+        focus_tab_via_mcp=_focus_tab_via_chrome_mcp,
+        close_tab_via_mcp=_close_tab_via_chrome_mcp,
     )
 
 

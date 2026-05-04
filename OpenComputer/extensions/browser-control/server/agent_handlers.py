@@ -25,6 +25,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from ..profiles.capabilities import get_browser_profile_capabilities
 from ..server_context import select_target_id
 from ..tools_core import (
     EvaluateDisabledError,
@@ -41,6 +42,7 @@ from ..tools_core.refs import ref_locator as _ref_locator
 from .handlers import (
     BrowserHandlerError,
     BrowserRouteContext,
+    DriverUnsupportedError,
     _ensure_running,
     resolve_profile_name,
 )
@@ -80,6 +82,21 @@ async def _resolve_page(
         # Fallback: walk the playwright_session.
         sess = runtime.playwright_session
         if sess is None:
+            # Bug E — chrome-mcp / not-yet-attached profiles don't carry a
+            # PlaywrightSession; surface a structured 501 so the agent
+            # gets ``driver_unsupported`` rather than an opaque 503.
+            capabilities = get_browser_profile_capabilities(runtime.profile)
+            if capabilities.uses_chrome_mcp:
+                raise DriverUnsupportedError(
+                    action="page-level",
+                    driver=capabilities.mode,
+                    profile=runtime.profile.name,
+                    message=(
+                        f"page-level actions require a PlaywrightSession; "
+                        f"profile {runtime.profile.name!r} uses driver "
+                        f"{capabilities.mode!r} which has no Playwright attach"
+                    ),
+                )
             raise BrowserHandlerError(
                 "profile has no PlaywrightSession; cannot resolve page",
                 status=503,
