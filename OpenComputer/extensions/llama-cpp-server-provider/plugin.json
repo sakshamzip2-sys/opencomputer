@@ -1,0 +1,26 @@
+{
+  "id": "llama-cpp-server-provider",
+  "name": "llama.cpp Server Provider",
+  "version": "0.1.0",
+  "description": "Local OpenAI-compatible inference via llama.cpp's llama-server binary (default http://localhost:8080/v1)",
+  "author": "Saksham",
+  "license": "MIT",
+  "kind": "provider",
+  "entry": "plugin",
+  "tool_names": [],
+  "model_support": {
+    "model_prefixes": ["local-", "llama-", "qwen-", "mistral-", "gemma-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "llama-cpp-server",
+        "auth_methods": ["api_key", "none"],
+        "env_vars": ["LLAMA_CPP_SERVER_API_KEY", "LLAMA_CPP_SERVER_BASE_URL", "LLAMA_CPP_SERVER_MODEL"],
+        "label": "llama.cpp local server",
+        "default_model": "local-model",
+        "signup_url": "https://github.com/ggerganov/llama.cpp/tree/master/examples/server"
+      }
+    ]
+  }
+}
