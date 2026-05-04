@@ -199,6 +199,12 @@ class Gateway:
         # ``stop()`` wake the loop promptly without waiting up to 60s.
         self._fatal_supervisor_task: asyncio.Task[None] | None = None
         self._fatal_supervisor_stop: asyncio.Event = asyncio.Event()
+        # Wave 6.E.1 / 6.B-β — kanban dispatcher loop. Spawns sibling
+        # worker agents for kanban tasks while the gateway is running.
+        # Started in ``start()`` only when
+        # ``cfg.kanban.dispatch_in_gateway is true`` (default).
+        self._kanban_dispatcher: Any | None = None
+        self._kanban_dispatcher_task: asyncio.Task[None] | None = None
 
     def register_adapter(self, adapter: BaseChannelAdapter) -> None:
         """Register a channel adapter (usually from a loaded plugin)."""
@@ -236,6 +242,12 @@ class Gateway:
         # Auto-skill-evolution subscriber. Same opt-in / failure-isolated
         # contract as the ambient daemon — never crashes gateway boot.
         await self._start_evolution_subscriber()
+
+        # Wave 6.E.1 — kanban dispatcher loop. Reads
+        # ``cfg.kanban.dispatch_in_gateway`` (default true) and starts
+        # a periodic ``dispatch_once`` invoker that spawns sibling
+        # worker agents on every ``kanban_create`` event.
+        await self._start_kanban_dispatcher_loop()
 
         # Hermes channel-port (PR 2 Task 2.3): start the fatal-error
         # supervisor so adapters that flag themselves with
@@ -320,6 +332,51 @@ class Gateway:
         self._drainer_task = asyncio.create_task(
             self._drainer.run_forever(),
             name="gateway-outgoing-drainer",
+        )
+
+    async def _start_kanban_dispatcher_loop(self) -> None:
+        """Start the kanban dispatcher loop iff ``cfg.kanban.dispatch_in_gateway``.
+
+        Hermes deprecated the standalone ``kanban daemon`` in favor of
+        an embedded gateway loop; we ship the same shape. Failure to
+        load config or to start the loop is logged but never blocks
+        gateway boot.
+        """
+        from opencomputer.gateway.kanban_dispatcher import (
+            KanbanDispatcherLoop,
+            read_kanban_dispatch_config,
+        )
+
+        try:
+            import yaml as _yaml
+
+            from opencomputer.agent.config import _home
+            cfg_path = _home() / "config.yaml"
+            raw_cfg: dict[str, Any] = {}
+            if cfg_path.exists():
+                raw_cfg = _yaml.safe_load(cfg_path.read_text()) or {}
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            logger.warning(
+                "kanban dispatcher loop: config read failed (%s); using defaults",
+                exc,
+            )
+            raw_cfg = {}
+
+        enabled, interval, max_spawn = read_kanban_dispatch_config(raw_cfg)
+        if not enabled:
+            logger.info(
+                "kanban dispatcher loop disabled (cfg.kanban.dispatch_in_gateway=false); "
+                "use ``oc kanban dispatch`` externally to dispatch tasks."
+            )
+            return
+
+        self._kanban_dispatcher = KanbanDispatcherLoop(
+            interval_seconds=interval,
+            max_spawn=max_spawn,
+        )
+        self._kanban_dispatcher_task = asyncio.create_task(
+            self._kanban_dispatcher.run_forever(),
+            name="gateway-kanban-dispatcher",
         )
 
     async def _start_ambient_daemon(self) -> None:
@@ -523,6 +580,22 @@ class Gateway:
                 await asyncio.wait_for(self._drainer_task, timeout=3.0)
             except (TimeoutError, asyncio.CancelledError):
                 self._drainer_task.cancel()
+        # Wave 6.E.1 — kanban dispatcher loop. Stop *before* the
+        # adapters disconnect so we never spawn a worker against an
+        # adapter that's mid-teardown. dispatch_once is itself
+        # idempotent so a half-completed tick is safe to abandon.
+        if self._kanban_dispatcher is not None:
+            try:
+                await self._kanban_dispatcher.stop()
+            except Exception:  # noqa: BLE001
+                logger.exception("kanban dispatcher stop signal failed (ignored)")
+        if self._kanban_dispatcher_task is not None:
+            try:
+                await asyncio.wait_for(self._kanban_dispatcher_task, timeout=3.0)
+            except (TimeoutError, asyncio.CancelledError):
+                self._kanban_dispatcher_task.cancel()
+            self._kanban_dispatcher_task = None
+            self._kanban_dispatcher = None
         await asyncio.gather(
             *(a.disconnect() for a in self._adapters), return_exceptions=True
         )
