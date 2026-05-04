@@ -393,3 +393,165 @@ def test_dry_run_and_list_pair_for_cli_preview(sample_profile, tmp_path):
     assert len(files) >= 4
     # Nothing actually written
     assert not target.exists()
+
+
+# ─── include_oauth_tokens flag (D.4 T1 — closes PR #446 deferral) ───
+
+
+@pytest.fixture
+def profile_with_oauth(tmp_path):
+    """Profile dir that includes mcp_oauth/ with realistic token files."""
+    profile = tmp_path / "src_with_oauth"
+    profile.mkdir()
+    (profile / "config.yaml").write_text("foo: bar\n")
+    (profile / "profile.yaml").write_text("plugins:\n  enabled: []\n")
+    (profile / ".env").write_text("EMPTY=\n")
+    oauth = profile / "mcp_oauth"
+    oauth.mkdir()
+    # Per-server token files (real OAuth flow lays them out this way)
+    (oauth / "github.json").write_text(
+        '{"access_token": "gho_REAL_REFRESH_TOKEN_VALUE", '
+        '"refresh_token": "ghr_REAL_REFRESH_TOKEN_VALUE", '
+        '"expires_at": 1234567890}'
+    )
+    (oauth / "linear.json").write_text(
+        '{"access_token": "lin_api_LIVE_KEY_VALUE_FOR_LINEAR"}'
+    )
+    return profile
+
+
+def test_oauth_excluded_by_default(profile_with_oauth, tmp_path):
+    """Default: mcp_oauth/ does NOT appear in archive (preserves PR #446 behavior)."""
+    out = tmp_path / "exported.tar.gz"
+    export_profile(profile_with_oauth, out)
+    with tarfile.open(out, "r:gz") as tar:
+        names = tar.getnames()
+    assert not any(n.startswith("profile/mcp_oauth") for n in names), (
+        f"mcp_oauth leaked into default export: {[n for n in names if 'oauth' in n]}"
+    )
+
+
+def test_oauth_included_when_flag_passed(profile_with_oauth, tmp_path):
+    """include_oauth_tokens=True bundles mcp_oauth/ verbatim."""
+    out = tmp_path / "exported.tar.gz"
+    export_profile(profile_with_oauth, out, include_oauth_tokens=True)
+    with tarfile.open(out, "r:gz") as tar:
+        names = tar.getnames()
+        assert "profile/mcp_oauth/github.json" in names
+        assert "profile/mcp_oauth/linear.json" in names
+        # Verify the actual token bytes round-trip — NOT redacted
+        gh = tar.extractfile("profile/mcp_oauth/github.json").read().decode("utf-8")
+    assert "gho_REAL_REFRESH_TOKEN_VALUE" in gh
+    assert "ghr_REAL_REFRESH_TOKEN_VALUE" in gh
+    assert "<REDACTED:" not in gh
+
+
+def test_oauth_files_have_owner_only_perms_when_included(
+    profile_with_oauth, tmp_path
+):
+    """OAuth files must always be 0o600 in the archive — they hold tokens."""
+    out = tmp_path / "exported.tar.gz"
+    export_profile(profile_with_oauth, out, include_oauth_tokens=True)
+    with tarfile.open(out, "r:gz") as tar:
+        for name in ("profile/mcp_oauth/github.json", "profile/mcp_oauth/linear.json"):
+            member = tar.getmember(name)
+            assert (member.mode & 0o777) == 0o600, (
+                f"{name} has mode {oct(member.mode)} — expected 0o600"
+            )
+
+
+def test_oauth_unaffected_by_include_secrets(profile_with_oauth, tmp_path):
+    """include_secrets controls .env / config.yaml; oauth needs its own flag.
+
+    Specifically: include_secrets=True alone must NOT leak OAuth tokens.
+    """
+    out = tmp_path / "exported.tar.gz"
+    export_profile(profile_with_oauth, out, include_secrets=True)
+    with tarfile.open(out, "r:gz") as tar:
+        names = tar.getnames()
+    assert not any(n.startswith("profile/mcp_oauth") for n in names)
+
+
+def test_oauth_redaction_skipped_even_when_secrets_redacted(
+    profile_with_oauth, tmp_path
+):
+    """When include_oauth_tokens=True AND include_secrets=False, oauth still
+    bundles verbatim. Redacting it would defeat the migration use case."""
+    out = tmp_path / "exported.tar.gz"
+    export_profile(
+        profile_with_oauth, out,
+        include_secrets=False, include_oauth_tokens=True,
+    )
+    with tarfile.open(out, "r:gz") as tar:
+        gh = tar.extractfile("profile/mcp_oauth/github.json").read().decode("utf-8")
+    assert "gho_REAL_REFRESH_TOKEN_VALUE" in gh
+    assert "<REDACTED:" not in gh
+
+
+def test_manifest_records_oauth_flag(profile_with_oauth, tmp_path):
+    """Manifest records the flag so import-side audits can see it."""
+    out_default = tmp_path / "default.tar.gz"
+    out_opted = tmp_path / "opted.tar.gz"
+    export_profile(profile_with_oauth, out_default)
+    export_profile(profile_with_oauth, out_opted, include_oauth_tokens=True)
+
+    with tarfile.open(out_default, "r:gz") as tar:
+        m = json.loads(tar.extractfile("manifest.json").read())
+    assert m["include_oauth_tokens"] is False
+
+    with tarfile.open(out_opted, "r:gz") as tar:
+        m = json.loads(tar.extractfile("manifest.json").read())
+    assert m["include_oauth_tokens"] is True
+
+
+def test_oauth_roundtrip_through_import(profile_with_oauth, tmp_path):
+    """End-to-end: export with --include-oauth-tokens, import, verify
+    files land on disk with their original content."""
+    archive = tmp_path / "exported.tar.gz"
+    export_profile(profile_with_oauth, archive, include_oauth_tokens=True)
+    target = tmp_path / "imported"
+    import_profile(archive, target)
+    assert (target / "mcp_oauth" / "github.json").exists()
+    gh_text = (target / "mcp_oauth" / "github.json").read_text()
+    assert "gho_REAL_REFRESH_TOKEN_VALUE" in gh_text
+    # File mode should be 0o600 on import too
+    mode = (target / "mcp_oauth" / "github.json").stat().st_mode & 0o777
+    assert mode == 0o600
+
+
+def test_other_always_excluded_dirs_still_excluded_with_oauth_flag(
+    profile_with_oauth, tmp_path
+):
+    """include_oauth_tokens must NOT accidentally re-enable logs/ or __pycache__/.
+    Defends against the cleanup splitting the exclusion sets going wrong."""
+    (profile_with_oauth / "logs").mkdir()
+    (profile_with_oauth / "logs" / "sensitive.log").write_text("secret log")
+    (profile_with_oauth / "__pycache__").mkdir()
+    (profile_with_oauth / "__pycache__" / "x.pyc").write_bytes(b"\x00")
+
+    out = tmp_path / "exported.tar.gz"
+    export_profile(profile_with_oauth, out, include_oauth_tokens=True)
+    with tarfile.open(out, "r:gz") as tar:
+        names = tar.getnames()
+    assert not any("logs/" in n for n in names)
+    assert not any("__pycache__" in n for n in names)
+    # But oauth IS included
+    assert any("mcp_oauth/" in n for n in names)
+
+
+def test_audit_log_still_always_excluded_with_oauth_flag(
+    profile_with_oauth, tmp_path
+):
+    """audit_log.jsonl must remain unconditionally excluded — it's a
+    tamper-evident chain that should NEVER leave the device."""
+    (profile_with_oauth / "audit_log.jsonl").write_text(
+        '{"event":"sensitive","ts":1}\n'
+    )
+    out = tmp_path / "exported.tar.gz"
+    export_profile(
+        profile_with_oauth, out,
+        include_oauth_tokens=True, include_secrets=True, include_sessions=True,
+    )
+    with tarfile.open(out, "r:gz") as tar:
+        names = tar.getnames()
+    assert "profile/audit_log.jsonl" not in names

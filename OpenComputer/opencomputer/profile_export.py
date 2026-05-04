@@ -24,10 +24,13 @@ Default exclusions (when ``include_sessions=False``):
   - ``sessions.db``, ``sessions.db-wal``, ``sessions.db-shm`` — large + private
   - ``logs/`` directory — runtime logs
   - ``llm_events.jsonl`` — telemetry
-  - ``audit_log.jsonl`` — F1 audit trail
-  - ``mcp_oauth/`` — even with --include-secrets, OAuth tokens are
-    too risky to export by default; they need an explicit second flag
-    (out of scope for v1).
+  - ``audit_log.jsonl`` — F1 audit trail (always excluded; never overridable)
+  - ``mcp_oauth/`` — OAuth refresh/access tokens. Excluded by default
+    because sharing them gives the receiver live API access without
+    re-authenticating. Opt in via ``include_oauth_tokens=True`` (CLI
+    ``--include-oauth-tokens``) when migrating a profile to a different
+    machine YOU personally own. Bundled verbatim (no redaction) when
+    enabled — redacting would defeat the purpose.
 
 The exported archive contains a top-level ``manifest.json`` with the
 profile name, OC version, export timestamp, and the redaction flags
@@ -49,22 +52,30 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-#: Files always excluded from export (audit/oauth never go out).
+#: Files always excluded from export (audit log never goes out).
 _ALWAYS_EXCLUDED = frozenset(
     [
         "audit_log.jsonl",
     ]
 )
 
-#: Directories always excluded from export.
+#: Directories always excluded from export — never overridable.
 _ALWAYS_EXCLUDED_DIRS = frozenset(
     [
         "logs",
-        "mcp_oauth",  # OAuth tokens — too risky for export even with --include-secrets
         "__pycache__",
         ".cache",
     ]
 )
+
+#: Directory excluded by default but unlockable via the explicit
+#: ``include_oauth_tokens=True`` opt-in. OAuth tokens (refresh + access
+#: pairs from MCP servers) are too risky to ship out under normal
+#: ``--include-secrets`` semantics — sharing them effectively gives the
+#: receiver live API access without re-authenticating. Users who DO want
+#: to migrate a profile to a new machine they own pass this second flag
+#: explicitly.
+_OAUTH_DIR = "mcp_oauth"
 
 #: Files only included when ``include_sessions=True``.
 _SESSION_FILES = frozenset(
@@ -155,14 +166,20 @@ def _redact_yaml_text(text: str) -> str:
 
 
 def _should_include_file(
-    name: str, *, include_sessions: bool
+    name: str,
+    *,
+    include_sessions: bool,
+    include_oauth_tokens: bool = False,
 ) -> bool:
-    """Filter for files at the profile-dir top level.
+    """Filter for entries at the profile-dir top level.
 
-    Returns False for always-excluded names (regardless of flags) and
-    for session files when sessions aren't requested.
+    Returns False for always-excluded names (regardless of flags),
+    session files when sessions aren't requested, and the OAuth-tokens
+    directory unless ``include_oauth_tokens=True`` is passed.
     """
     if name in _ALWAYS_EXCLUDED_DIRS:
+        return False
+    if name == _OAUTH_DIR and not include_oauth_tokens:
         return False
     if not include_sessions and name in _SESSION_FILES:
         return False
@@ -175,8 +192,14 @@ def _make_manifest(
     oc_version: str,
     include_secrets: bool,
     include_sessions: bool,
+    include_oauth_tokens: bool = False,
 ) -> dict[str, Any]:
-    """Build the archive manifest.json content."""
+    """Build the archive manifest.json content.
+
+    ``include_oauth_tokens`` defaults to False — manifests written
+    before the flag landed never had this key, so we keep the default
+    matching the historical behavior to keep older readers happy.
+    """
     return {
         "format_version": "1",
         "profile_name": profile_name,
@@ -184,6 +207,7 @@ def _make_manifest(
         "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "include_secrets": include_secrets,
         "include_sessions": include_sessions,
+        "include_oauth_tokens": include_oauth_tokens,
     }
 
 
@@ -195,8 +219,22 @@ def export_profile(
     oc_version: str = "0.0.0",
     include_secrets: bool = False,
     include_sessions: bool = False,
+    include_oauth_tokens: bool = False,
 ) -> Path:
     """Export ``profile_dir`` to a tar.gz at ``output_path``.
+
+    ``include_oauth_tokens=True`` opts in to bundling the ``mcp_oauth/``
+    directory. OAuth tokens (refresh + access pairs from MCP servers)
+    are excluded by default because sharing them gives the receiver
+    live API access without re-authenticating. Users migrating a
+    profile to a different machine they personally own may want them.
+
+    When ``include_oauth_tokens=True``, OAuth files are bundled
+    **verbatim** — the redaction heuristics that handle ``.env`` and
+    ``config.yaml`` are NOT applied to the OAuth JSON. Redacting them
+    would defeat the purpose of the flag (you cannot reuse a redacted
+    refresh token), so this is by design. The ``include_secrets`` knob
+    still governs ``.env`` / ``config.yaml`` redaction independently.
 
     Returns the output path on success.
     """
@@ -210,6 +248,7 @@ def export_profile(
         oc_version=oc_version,
         include_secrets=include_secrets,
         include_sessions=include_sessions,
+        include_oauth_tokens=include_oauth_tokens,
     )
     manifest_bytes = json.dumps(manifest, indent=2).encode("utf-8")
 
@@ -223,7 +262,9 @@ def export_profile(
 
         for entry in sorted(profile_dir.iterdir()):
             if not _should_include_file(
-                entry.name, include_sessions=include_sessions
+                entry.name,
+                include_sessions=include_sessions,
+                include_oauth_tokens=include_oauth_tokens,
             ):
                 continue
             arcname = f"profile/{entry.name}"
@@ -233,6 +274,7 @@ def export_profile(
                     entry,
                     arcname,
                     include_secrets=include_secrets,
+                    is_oauth_dir=(entry.name == _OAUTH_DIR),
                 )
             else:
                 _add_file_to_tar(
@@ -251,9 +293,27 @@ def _add_file_to_tar(
     arcname: str,
     *,
     include_secrets: bool,
+    is_oauth_file: bool = False,
 ) -> None:
-    """Add a single file to the archive, applying redaction if needed."""
+    """Add a single file to the archive, applying redaction if needed.
+
+    OAuth-token files (``is_oauth_file=True``) are bundled verbatim and
+    given 0o600 mode regardless of the ``include_secrets`` setting —
+    redacting them would make the export useless for its intended
+    purpose (migrating to a new machine), and we always want
+    owner-only perms on tokens.
+    """
     raw = src.read_bytes()
+
+    # OAuth files: never apply redaction heuristics (would defeat the
+    # purpose of include_oauth_tokens). Always 0o600 perm.
+    if is_oauth_file:
+        info = tarfile.TarInfo(name=arcname)
+        info.size = len(raw)
+        info.mode = 0o600
+        info.mtime = int(src.stat().st_mtime)
+        tar.addfile(info, io.BytesIO(raw))
+        return
 
     if not include_secrets:
         if src.name == ".env":
@@ -276,16 +336,34 @@ def _add_dir_to_tar(
     arcname: str,
     *,
     include_secrets: bool,
+    is_oauth_dir: bool = False,
 ) -> None:
-    """Recursively add a directory to the archive."""
+    """Recursively add a directory to the archive.
+
+    ``is_oauth_dir=True`` propagates verbatim-bundle semantics to every
+    file underneath (OAuth dirs may contain nested per-server token
+    files; redacting any of them defeats the export purpose).
+    """
     for sub in sorted(src_dir.iterdir()):
         if sub.name in _ALWAYS_EXCLUDED_DIRS:
             continue
         sub_arc = f"{arcname}/{sub.name}"
         if sub.is_dir():
-            _add_dir_to_tar(tar, sub, sub_arc, include_secrets=include_secrets)
+            _add_dir_to_tar(
+                tar,
+                sub,
+                sub_arc,
+                include_secrets=include_secrets,
+                is_oauth_dir=is_oauth_dir,
+            )
         else:
-            _add_file_to_tar(tar, sub, sub_arc, include_secrets=include_secrets)
+            _add_file_to_tar(
+                tar,
+                sub,
+                sub_arc,
+                include_secrets=include_secrets,
+                is_oauth_file=is_oauth_dir,
+            )
 
 
 def list_archive_files(archive_path: Path) -> list[str]:
