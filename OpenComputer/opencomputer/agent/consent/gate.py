@@ -255,11 +255,11 @@ class ConsentGate:
         # crashing must never block the user prompt.
         try:
             from opencomputer.hooks.engine import engine as _hook_engine
-            from plugin_sdk.hooks import HookContext as _HC
-            from plugin_sdk.hooks import HookEvent as _HE
+            from plugin_sdk.hooks import HookContext as _HookCtx
+            from plugin_sdk.hooks import HookEvent as _HookEv
 
-            await _hook_engine.fire_blocking(_HC(
-                event=_HE.PRE_APPROVAL_REQUEST,
+            await _hook_engine.fire_blocking(_HookCtx(
+                event=_HookEv.PRE_APPROVAL_REQUEST,
                 session_id=session_id,
                 surface="gateway",  # request_approval is the gateway path
                 command=claim.capability_id,
@@ -363,11 +363,11 @@ class ConsentGate:
         )
         try:
             from opencomputer.hooks.engine import engine as _hook_engine
-            from plugin_sdk.hooks import HookContext as _HC
-            from plugin_sdk.hooks import HookEvent as _HE
+            from plugin_sdk.hooks import HookContext as _HookCtx
+            from plugin_sdk.hooks import HookEvent as _HookEv
 
-            await _hook_engine.fire_blocking(_HC(
-                event=_HE.POST_APPROVAL_RESPONSE,
+            await _hook_engine.fire_blocking(_HookCtx(
+                event=_HookEv.POST_APPROVAL_RESPONSE,
                 session_id=session_id,
                 surface="gateway",
                 command=claim.capability_id,

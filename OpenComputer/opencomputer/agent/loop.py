@@ -3307,11 +3307,11 @@ class AgentLoop:
                     from opencomputer.hooks.engine import (
                         engine as _post_hook_engine,
                     )
-                    from plugin_sdk.hooks import HookContext as _PostHookContext  # noqa: N814
-                    from plugin_sdk.hooks import HookEvent as _PostHookEvent  # noqa: N814
+                    from plugin_sdk.hooks import HookContext as _HookContextPost
+                    from plugin_sdk.hooks import HookEvent as _HookEventPost
 
-                    _post_hook_engine.fire_and_forget(_PostHookContext(
-                        event=_PostHookEvent.POST_TOOL_USE,
+                    _post_hook_engine.fire_and_forget(_HookContextPost(
+                        event=_HookEventPost.POST_TOOL_USE,
                         session_id=session_id,
                         tool_call=c,
                         tool_result=result,
