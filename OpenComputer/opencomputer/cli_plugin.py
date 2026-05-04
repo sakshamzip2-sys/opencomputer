@@ -476,6 +476,67 @@ from opencomputer.agent.profile_yaml import atomic_write_yaml as _atomic_write_y
 # last-write-wins races between sibling-shell CLI invocations.
 
 
+def _read_and_validate_profile_yaml(
+    path: Path, *, action_label: str
+) -> dict:
+    """Read profile.yaml + run the strict schema validator.
+
+    E.1 (PR closing the parse-path-divergence deferral): mutators
+    (plugin enable / disable) used to do a tolerant raw read with ad-hoc
+    type checks. The strict :func:`load_profile_config` reader inside
+    the agent loop applied a fuller schema. This caused the two paths
+    to disagree on edge cases — e.g. unknown top-level keys silently
+    accepted by the CLI but rejected by the loop, or
+    ``plugins.enabled: "*"`` accepted as a wildcard by the loop but
+    treated as an "enabled list" by the CLI.
+
+    This helper centralizes the read: it parses the raw YAML (so we
+    can preserve unknown-but-currently-tolerated keys for round-trip
+    write), then runs the SAME strict validator the loop uses. Both
+    halves see exactly the same shape; both halves emit the same
+    error. Round-trip preservation is intact because we keep the raw
+    dict and only validate against it.
+
+    Returns the raw parsed dict (always a dict — fresh empty dict if
+    the file doesn't exist). Exits with code 1 on schema error, after
+    printing a Rich-formatted message that includes ``action_label``
+    so users see which mutator failed.
+    """
+    from opencomputer.agent.profile_config import (
+        ProfileConfigError,
+        validate_profile_config_dict,
+    )
+
+    if not path.exists():
+        return {}
+
+    try:
+        raw = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        _console.print(
+            f"[red]error:[/red] {path}: invalid YAML ({exc}). "
+            f"Cannot {action_label} plugin until profile.yaml parses."
+        )
+        raise typer.Exit(code=1) from None
+
+    if not isinstance(raw, dict):
+        _console.print(
+            f"[red]error:[/red] {path} must contain a YAML mapping at the top level."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        validate_profile_config_dict(raw, path=path)
+    except ProfileConfigError as exc:
+        _console.print(
+            f"[red]error:[/red] {exc}\n"
+            f"Fix profile.yaml before running [cyan]oc plugin {action_label}[/cyan]."
+        )
+        raise typer.Exit(code=1) from None
+
+    return raw
+
+
 def _try_clear_demand_tracker(plugin_id: str) -> None:
     """Best-effort clear of the demand tracker's rows for ``plugin_id``.
 
@@ -527,35 +588,30 @@ def plugin_enable(
     path, profile_name = _active_profile_yaml_path()
 
     with profile_yaml_lock(path.parent):
-        if path.exists():
-            raw = yaml.safe_load(path.read_text()) or {}
-            if not isinstance(raw, dict):
-                _console.print(
-                    f"[red]error:[/red] {path} does not contain a YAML mapping at top level"
-                )
-                raise typer.Exit(code=1)
-        else:
-            raw = {}
+        raw = _read_and_validate_profile_yaml(path, action_label="enable")
 
         plugins_block = raw.get("plugins")
         if plugins_block is None:
             plugins_block = {"enabled": []}
             raw["plugins"] = plugins_block
-        elif not isinstance(plugins_block, dict):
-            _console.print(
-                f"[red]error:[/red] {path}: `plugins` must be a mapping"
-            )
-            raise typer.Exit(code=1)
-
+        # validator already enforced that plugins is a dict + enabled is
+        # list-or-"*" — here we just need to handle the "*" wildcard case
+        # and seed an empty list.
         enabled = plugins_block.get("enabled")
-        if enabled is None:
+        if enabled is None or enabled == "*":
+            # Wildcard means "all plugins allowed"; promoting to an
+            # explicit list to add a specific id would NARROW the
+            # filter, which is surprising. Reject loudly.
+            if enabled == "*":
+                _console.print(
+                    f"[red]error:[/red] {path} has `plugins.enabled: \"*\"` "
+                    "(wildcard).\n"
+                    "Adding an explicit id would narrow the filter; "
+                    "remove the wildcard first if you want a curated list."
+                )
+                raise typer.Exit(code=1)
             enabled = []
             plugins_block["enabled"] = enabled
-        elif not isinstance(enabled, list):
-            _console.print(
-                f"[red]error:[/red] {path}: `plugins.enabled` must be a list"
-            )
-            raise typer.Exit(code=1)
 
         if plugin_id in enabled:
             _console.print(
@@ -600,12 +656,7 @@ def plugin_disable(
         raise typer.Exit(code=0)
 
     with profile_yaml_lock(path.parent):
-        raw = yaml.safe_load(path.read_text()) or {}
-        if not isinstance(raw, dict):
-            _console.print(
-                f"[red]error:[/red] {path} does not contain a YAML mapping at top level"
-            )
-            raise typer.Exit(code=1)
+        raw = _read_and_validate_profile_yaml(path, action_label="disable")
 
         plugins_block = raw.get("plugins")
         if not isinstance(plugins_block, dict):

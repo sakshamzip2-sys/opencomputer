@@ -62,10 +62,135 @@ def test_both_preset_and_enabled_raises(tmp_path: Path):
         load_profile_config(tmp_path)
 
 
-def test_rejects_unknown_top_level(tmp_path: Path):
-    profile_config_path(tmp_path).write_text("preset: coding\nrogue: true\n")
-    with pytest.raises(ProfileConfigError, match="unknown"):
+def test_unknown_top_level_keys_are_tolerated(tmp_path: Path):
+    """E.1 (PR #466): unknown top-level keys are PRESERVED (not rejected).
+
+    Earlier behavior was to reject unknown keys to catch typos like
+    `presett:`, but that broke `oc plugin enable`'s ability to round-trip
+    user-added documentation fields like `description:` or `notes:`.
+    The CLI mutators always preserved unknown keys; unifying the parse
+    paths means the agent loop's reader now also tolerates them.
+    Schema validation still applies to `preset` and `plugins.*` exactly
+    as before — typos within those known blocks still fail loud."""
+    profile_config_path(tmp_path).write_text(
+        "preset: coding\ndescription: my profile\nnotes: docs\n"
+    )
+    cfg = load_profile_config(tmp_path)
+    assert cfg.preset == "coding"
+    # Unknown keys are silently absorbed — they're preserved on disk
+    # but don't appear on the typed ProfileConfig surface.
+
+
+# ─── E.1: validate_profile_config_dict — pure-function path ───
+
+
+def test_validate_dict_accepts_minimal_valid():
+    """The pure-function path that CLI mutators use accepts the
+    minimal valid shape."""
+    from opencomputer.agent.profile_config import validate_profile_config_dict
+
+    cfg = validate_profile_config_dict({"plugins": {"enabled": []}})
+    assert cfg.preset is None
+    assert cfg.enabled_plugins == frozenset()
+
+
+def test_validate_dict_rejects_non_mapping():
+    from opencomputer.agent.profile_config import validate_profile_config_dict
+
+    with pytest.raises(ProfileConfigError, match="mapping"):
+        validate_profile_config_dict([1, 2, 3])  # type: ignore[arg-type]
+
+
+def test_validate_dict_rejects_plugins_not_mapping():
+    from opencomputer.agent.profile_config import validate_profile_config_dict
+
+    with pytest.raises(ProfileConfigError, match="mapping"):
+        validate_profile_config_dict({"plugins": ["a", "b"]})
+
+
+def test_validate_dict_rejects_plugins_enabled_wrong_type():
+    from opencomputer.agent.profile_config import validate_profile_config_dict
+
+    with pytest.raises(ProfileConfigError, match="list or"):
+        validate_profile_config_dict({"plugins": {"enabled": 42}})
+
+
+def test_validate_dict_rejects_plugins_enabled_non_string_items():
+    from opencomputer.agent.profile_config import validate_profile_config_dict
+
+    with pytest.raises(ProfileConfigError, match="list of strings"):
+        validate_profile_config_dict({"plugins": {"enabled": ["ok", 42]}})
+
+
+def test_validate_dict_rejects_preset_plus_inline_enabled():
+    from opencomputer.agent.profile_config import validate_profile_config_dict
+
+    with pytest.raises(ProfileConfigError, match="both"):
+        validate_profile_config_dict(
+            {"preset": "coding", "plugins": {"enabled": ["x"]}}
+        )
+
+
+def test_validate_dict_does_not_mutate_caller_dict():
+    """validate_profile_config_dict must not pop the caller's keys.
+
+    This is load-bearing for cli_plugin which validates the same dict
+    it's about to mutate-and-write.
+    """
+    from opencomputer.agent.profile_config import validate_profile_config_dict
+
+    raw = {
+        "preset": "coding",
+        "description": "owned",
+    }
+    raw_before = dict(raw)
+    validate_profile_config_dict(raw)
+    assert raw == raw_before  # untouched, including unknown 'description'
+
+    # Round 2 — same invariant when plugins block is present
+    raw2 = {
+        "plugins": {"enabled": ["a", "b"]},
+        "owner": "saksham",
+    }
+    raw2_before = dict(raw2)
+    validate_profile_config_dict(raw2)
+    assert raw2 == raw2_before
+
+
+def test_validate_dict_treats_wildcard_string_as_star():
+    from opencomputer.agent.profile_config import validate_profile_config_dict
+
+    cfg = validate_profile_config_dict({"plugins": {"enabled": "*"}})
+    assert cfg.enabled_plugins == "*"
+
+
+def test_load_and_validate_share_error_messages(tmp_path: Path):
+    """E.1 unification check: a malformed profile.yaml must produce the
+    same ProfileConfigError text whether you go through the disk loader
+    or the in-memory validator."""
+    from opencomputer.agent.profile_config import (
+        load_profile_config,
+        validate_profile_config_dict,
+    )
+
+    profile_config_path(tmp_path).write_text("plugins:\n  enabled: 42\n")
+    raw = {"plugins": {"enabled": 42}}
+
+    try:
         load_profile_config(tmp_path)
+        loader_msg = ""
+    except ProfileConfigError as e:
+        loader_msg = str(e)
+
+    try:
+        validate_profile_config_dict(raw)
+        validator_msg = ""
+    except ProfileConfigError as e:
+        validator_msg = str(e)
+
+    # Both raised, both about the same field shape
+    assert "list or" in loader_msg
+    assert "list or" in validator_msg
 
 
 def test_rejects_non_mapping(tmp_path: Path):
