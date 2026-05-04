@@ -564,6 +564,22 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
+-- Wave 6.E.9 — Auto-assignment routing rules (Hermes 'out of scope'
+-- item). When a ready task has assignee IS NULL, the dispatcher walks
+-- this table in priority DESC, id ASC order; the first matching rule
+-- wins. pattern_kind values:
+--   'title_regex'  — re.search(pattern, task.title)
+--   'tenant'       — exact match on task.tenant
+--   'default'      — always matches (catch-all)
+CREATE TABLE IF NOT EXISTS kanban_assignment_rules (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    pattern_kind TEXT NOT NULL,
+    pattern      TEXT NOT NULL,
+    assignee     TEXT NOT NULL,
+    priority     INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_tenant          ON tasks(tenant);
@@ -576,6 +592,7 @@ CREATE INDEX IF NOT EXISTS idx_events_run            ON task_events(run_id, id);
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
+CREATE INDEX IF NOT EXISTS idx_rules_priority        ON kanban_assignment_rules(priority DESC);
 """
 
 
@@ -2203,7 +2220,7 @@ def dispatch_once(
     result.promoted = recompute_ready(conn)
 
     ready_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, title, tenant FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -2211,11 +2228,29 @@ def dispatch_once(
     for row in ready_rows:
         if max_spawn is not None and spawned >= max_spawn:
             break
-        if not row["assignee"]:
-            result.skipped_unassigned.append(row["id"])
-            continue
+        assignee = row["assignee"]
+        if not assignee:
+            # Wave 6.E.9 — auto-assignment routing rules (Hermes
+            # 'out of scope' item closed). Only consult rules when
+            # the task has no explicit assignee. Stays inside the
+            # outer dispatch transaction so two simultaneous
+            # dispatchers can't double-assign.
+            assignee = resolve_assignee(
+                conn, title=row["title"] or "", tenant=row["tenant"],
+            )
+            if assignee:
+                with write_txn(conn):
+                    conn.execute(
+                        "UPDATE tasks SET assignee = ? WHERE id = ?",
+                        (assignee, row["id"]),
+                    )
+            else:
+                result.skipped_unassigned.append(row["id"])
+                continue
         if dry_run:
-            result.spawned.append((row["id"], row["assignee"], ""))
+            # Use the locally-resolved ``assignee`` so dry-run preview
+            # reflects auto-assigned values, not stale row data.
+            result.spawned.append((row["id"], assignee, ""))
             continue
         claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
@@ -2734,6 +2769,117 @@ def remove_notify_sub(
             (task_id, platform, chat_id, thread_id or ""),
         )
     return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Wave 6.E.9 — Auto-assignment routing (Hermes 'out of scope' item)
+# ---------------------------------------------------------------------------
+
+VALID_RULE_KINDS = ("title_regex", "tenant", "default")
+
+
+class InvalidRuleError(ValueError):
+    """Raised when an assignment-rule definition is malformed."""
+
+
+def add_assignment_rule(
+    conn: sqlite3.Connection,
+    *,
+    pattern_kind: str,
+    pattern: str,
+    assignee: str,
+    priority: int = 0,
+) -> int:
+    """Insert one rule. Returns the new row id.
+
+    Validates ``pattern_kind`` against :data:`VALID_RULE_KINDS` and,
+    for ``title_regex``, that the pattern compiles. Catastrophic-
+    backtracking protection (audit lens A3): we don't run the pattern
+    against arbitrary input here, but we do reject obviously malformed
+    regexes at insert time so users see the error early.
+    """
+    if pattern_kind not in VALID_RULE_KINDS:
+        raise InvalidRuleError(
+            f"pattern_kind must be one of {VALID_RULE_KINDS}, got {pattern_kind!r}"
+        )
+    if pattern_kind == "title_regex":
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise InvalidRuleError(
+                f"title_regex pattern {pattern!r} does not compile: {exc}"
+            ) from exc
+    if not assignee or not isinstance(assignee, str):
+        raise InvalidRuleError("assignee must be a non-empty string")
+    if not isinstance(priority, int):
+        raise InvalidRuleError("priority must be an integer")
+    now = int(time.time())
+    with write_txn(conn):
+        cur = conn.execute(
+            "INSERT INTO kanban_assignment_rules "
+            "(pattern_kind, pattern, assignee, priority, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (pattern_kind, pattern, assignee, priority, now),
+        )
+    return int(cur.lastrowid)
+
+
+def list_assignment_rules(conn: sqlite3.Connection) -> list[dict]:
+    """Return all rules ordered by priority DESC, id ASC."""
+    rows = conn.execute(
+        "SELECT * FROM kanban_assignment_rules "
+        "ORDER BY priority DESC, id ASC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_assignment_rule(conn: sqlite3.Connection, rule_id: int) -> bool:
+    """Delete one rule. Returns True if it existed."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM kanban_assignment_rules WHERE id = ?",
+            (int(rule_id),),
+        )
+    return cur.rowcount > 0
+
+
+def resolve_assignee(
+    conn: sqlite3.Connection,
+    *,
+    title: str,
+    tenant: str | None,
+) -> str | None:
+    """Walk the rules table for a match. Returns the assignee or None.
+
+    Audit lens A3 mitigation: regex rules are run with a try/except so
+    a single rule's catastrophic backtracking can't poison the whole
+    dispatcher. A failed regex is logged + skipped.
+
+    Audit lens A9: the dispatcher MUST call this inside its claim
+    transaction so two simultaneous dispatchers can't double-assign.
+    """
+    rows = conn.execute(
+        "SELECT pattern_kind, pattern, assignee FROM kanban_assignment_rules "
+        "ORDER BY priority DESC, id ASC"
+    ).fetchall()
+    for r in rows:
+        kind = r["pattern_kind"]
+        pat = r["pattern"]
+        assignee = r["assignee"]
+        try:
+            if kind == "default":
+                return assignee
+            if kind == "tenant":
+                if tenant is not None and tenant == pat:
+                    return assignee
+            elif kind == "title_regex":
+                if re.search(pat, title or ""):
+                    return assignee
+        except re.error:
+            # Bad regex — skip + continue. Already validated at add
+            # time, so this is defensive.
+            continue
+    return None
 
 
 def unseen_events_for_sub(

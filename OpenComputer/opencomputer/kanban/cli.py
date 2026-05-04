@@ -408,6 +408,45 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Print the currently active board slug, or '(default)' if none",
     )
 
+    # --- rules (Wave 6.E.9 — auto-assignment routing) ---
+    p_rules = sub.add_parser(
+        "rules",
+        help="Auto-assignment routing rules (Hermes 'out of scope' item).",
+    )
+    p_rules_sub = p_rules.add_subparsers(dest="rules_action")
+
+    p_r_add = p_rules_sub.add_parser(
+        "add",
+        help="Add a rule that picks an assignee when a ready task has none.",
+    )
+    p_r_add.add_argument(
+        "--kind", required=True,
+        choices=("title_regex", "tenant", "default"),
+        help="Match strategy",
+    )
+    p_r_add.add_argument(
+        "--pattern", required=True,
+        help="Regex (kind=title_regex), tenant name (kind=tenant), or '*' (kind=default)",
+    )
+    p_r_add.add_argument("--assignee", required=True)
+    p_r_add.add_argument("--priority", type=int, default=0,
+                         help="Higher value = checked earlier. Default 0.")
+
+    p_rules_sub.add_parser("list", help="List all rules in priority order")
+
+    p_r_rm = p_rules_sub.add_parser(
+        "rm",
+        help="Delete a rule by id (use 'list' to find ids)",
+    )
+    p_r_rm.add_argument("rule_id", type=int)
+
+    p_r_test = p_rules_sub.add_parser(
+        "test",
+        help="Print which rule would match a hypothetical task title + tenant",
+    )
+    p_r_test.add_argument("title")
+    p_r_test.add_argument("--tenant", default=None)
+
     # --- log ---
     p_log = sub.add_parser(
         "log",
@@ -530,6 +569,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "context":  _cmd_context,
         "gc":       _cmd_gc,
         "boards":   _cmd_boards,
+        "rules":    _cmd_rules,
     }
     handler = handlers.get(action)
     if not handler:
@@ -1520,6 +1560,86 @@ def _cmd_boards_active(args: argparse.Namespace) -> int:
         print("(default — no named board active)")
     else:
         print(slug)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Wave 6.E.9 — Auto-assignment routing rules
+# ---------------------------------------------------------------------------
+
+
+def _cmd_rules(args: argparse.Namespace) -> int:
+    action = getattr(args, "rules_action", None)
+    if not action:
+        print(
+            "usage: oc kanban rules {add|list|rm|test} ...",
+            file=sys.stderr,
+        )
+        return 0
+    if action == "add":
+        return _cmd_rules_add(args)
+    if action == "list":
+        return _cmd_rules_list(args)
+    if action == "rm":
+        return _cmd_rules_rm(args)
+    if action == "test":
+        return _cmd_rules_test(args)
+    print(f"kanban rules: unknown action {action!r}", file=sys.stderr)
+    return 2
+
+
+def _cmd_rules_add(args: argparse.Namespace) -> int:
+    try:
+        with kb.connect() as conn:
+            rule_id = kb.add_assignment_rule(
+                conn,
+                pattern_kind=args.kind,
+                pattern=args.pattern,
+                assignee=args.assignee,
+                priority=args.priority,
+            )
+    except kb.InvalidRuleError as exc:
+        print(f"kanban rules: {exc}", file=sys.stderr)
+        return 1
+    print(f"added rule {rule_id} (kind={args.kind}, pattern={args.pattern!r}, "
+          f"assignee={args.assignee}, priority={args.priority})")
+    return 0
+
+
+def _cmd_rules_list(args: argparse.Namespace) -> int:
+    with kb.connect() as conn:
+        rules = kb.list_assignment_rules(conn)
+    if not rules:
+        print("(no auto-assignment rules — set with `oc kanban rules add`)")
+        return 0
+    print(f"{'id':>4} {'priority':>8} {'kind':<14} {'assignee':<24} pattern")
+    for r in rules:
+        print(
+            f"{r['id']:>4} {r['priority']:>8} {r['pattern_kind']:<14} "
+            f"{r['assignee']:<24} {r['pattern']}"
+        )
+    return 0
+
+
+def _cmd_rules_rm(args: argparse.Namespace) -> int:
+    with kb.connect() as conn:
+        ok = kb.delete_assignment_rule(conn, args.rule_id)
+    if not ok:
+        print(f"kanban rules: no rule with id {args.rule_id}", file=sys.stderr)
+        return 1
+    print(f"removed rule {args.rule_id}")
+    return 0
+
+
+def _cmd_rules_test(args: argparse.Namespace) -> int:
+    with kb.connect() as conn:
+        assignee = kb.resolve_assignee(
+            conn, title=args.title, tenant=args.tenant,
+        )
+    if assignee is None:
+        print(f"(no rule matches '{args.title}' tenant={args.tenant})")
+        return 0
+    print(f"matches → assignee={assignee}")
     return 0
 
 
