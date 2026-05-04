@@ -573,11 +573,15 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
 -- Each row is a peer this instance trusts. The HMAC secret is shared
 -- (used by both sides to sign + verify requests).
 CREATE TABLE IF NOT EXISTS kanban_remote_hosts (
-    slug          TEXT PRIMARY KEY,
-    url           TEXT NOT NULL,
-    hmac_secret   TEXT NOT NULL,
-    added_at      INTEGER NOT NULL,
-    last_seen_at  INTEGER
+    slug                     TEXT PRIMARY KEY,
+    url                      TEXT NOT NULL,
+    hmac_secret              TEXT NOT NULL,
+    added_at                 INTEGER NOT NULL,
+    last_seen_at             INTEGER,
+    -- Wave 6.E.15 — opt in to dir:<path> workspace payload sync.
+    -- Both sides must have this on for workspace contents to flow
+    -- across the spawn + callback boundary. 0 = off (back-compat).
+    workspace_sync_enabled   INTEGER NOT NULL DEFAULT 0
 );
 
 -- Wave 6.E.13 — Pending tasks delegated to a remote host. Server-time
@@ -744,6 +748,23 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE task_links ADD COLUMN parent_board TEXT")
     if "child_board" not in link_cols:
         conn.execute("ALTER TABLE task_links ADD COLUMN child_board TEXT")
+
+    # Wave 6.E.15 — kanban_remote_hosts gained workspace_sync_enabled
+    # column. Existing rows default to 0 (off). Migration is additive.
+    rh_table_exists = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='kanban_remote_hosts'",
+    ).fetchone() is not None
+    if rh_table_exists:
+        rh_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(kanban_remote_hosts)")
+        }
+        if "workspace_sync_enabled" not in rh_cols:
+            conn.execute(
+                "ALTER TABLE kanban_remote_hosts "
+                "ADD COLUMN workspace_sync_enabled INTEGER NOT NULL DEFAULT 0"
+            )
 
     # One-shot backfill: any task that is 'running' before runs existed
     # had its claim_lock / claim_expires / worker_pid on the task row.

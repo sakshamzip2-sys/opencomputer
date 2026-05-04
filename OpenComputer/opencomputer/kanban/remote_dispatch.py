@@ -125,11 +125,17 @@ def delegate_task_to_remote(
     callbacks (typically this host's
     ``http://<our-host>:9119/api/plugins/kanban/proxy/callback``).
 
+    Wave 6.E.15: when ``task.workspace_kind == "dir"``, the workspace
+    path exists locally, AND the host has ``workspace_sync_enabled``,
+    packs a gzipped tarball of the workspace and includes it as
+    ``workspace_payload_b64`` in the request body. Capped at the
+    workspace_payload module's default (50 MiB).
+
     Idempotency: if a row already exists for ``(task.id, host.slug)``,
     raises sqlite3.IntegrityError on the INSERT — caller should detect
     and skip re-delegation.
     """
-    payload = {
+    payload: dict = {
         "schema_version": 2,
         "task": {
             "id": task.id,
@@ -143,6 +149,32 @@ def delegate_task_to_remote(
         },
         "callback_url": local_callback_url,
     }
+
+    # Wave 6.E.15 — pack the workspace if both sides opted in.
+    if (
+        task.workspace_kind == "dir"
+        and task.workspace_path
+        and host.workspace_sync_enabled
+    ):
+        try:
+            import base64
+            from pathlib import Path as _Path
+
+            from opencomputer.kanban.workspace_payload import (
+                WorkspacePayloadError,
+                pack_workspace,
+            )
+            ws_path = _Path(task.workspace_path)
+            if ws_path.is_dir():
+                tarball = pack_workspace(ws_path)
+                payload["workspace_payload_b64"] = base64.b64encode(
+                    tarball,
+                ).decode("ascii")
+        except WorkspacePayloadError as exc:
+            raise RemoteDispatchError(
+                f"workspace pack failed for task {task.id}: {exc}"
+            ) from exc
+
     body = json.dumps(payload).encode("utf-8")
     path = "/api/plugins/kanban/proxy/spawn"
     headers = signed_headers(
@@ -335,7 +367,14 @@ def reconcile_callback(
 
     ``payload`` must contain ``remote_task_id`` and ``outcome``
     (``done`` | ``blocked`` | ``failed``). Optional ``summary``,
-    ``error``, ``metadata``.
+    ``error``, ``metadata``, and (Wave 6.E.15) ``workspace_payload_b64``.
+
+    When ``workspace_payload_b64`` is present AND this peer has
+    ``workspace_sync_enabled``, the modified workspace contents are
+    extracted into the LOCAL task's original ``dir:<path>`` location
+    via :func:`replace_workspace_atomic`. Failure to apply rolls the
+    local task to ``blocked`` rather than ``done`` so the operator
+    can see the partial result.
 
     Updates the kanban_remote_claims row + transitions the local
     task. Audit lens A6: caller MUST have already verified the HMAC
@@ -363,6 +402,52 @@ def reconcile_callback(
     summary = payload.get("summary")
     error = payload.get("error")
     metadata = payload.get("metadata")
+
+    # Wave 6.E.15 — return-trip workspace payload. Apply BEFORE the
+    # status transition so a failed apply downgrades 'done' to 'blocked'.
+    ws_apply_error: str | None = None
+    ws_payload_b64 = payload.get("workspace_payload_b64")
+    if ws_payload_b64 and outcome == "done":
+        from opencomputer.kanban import remote_hosts as _rh
+        host = _rh.find_remote_host(conn, remote_slug)
+        if host is None or not host.workspace_sync_enabled:
+            ws_apply_error = (
+                f"peer sent workspace payload but sync is disabled "
+                f"for {remote_slug!r}"
+            )
+        else:
+            local_task = kdb.get_task(conn, claim.local_task_id)
+            if (
+                local_task is not None
+                and local_task.workspace_kind == "dir"
+                and local_task.workspace_path
+            ):
+                try:
+                    import base64
+                    from pathlib import Path
+
+                    from opencomputer.kanban.workspace_payload import (
+                        WorkspacePayloadError,
+                        replace_workspace_atomic,
+                        unpack_workspace,
+                    )
+                    tarball = base64.b64decode(ws_payload_b64, validate=True)
+                    target = Path(local_task.workspace_path)
+                    staging = target.parent / (target.name + ".incoming")
+                    if staging.exists():
+                        import shutil
+                        shutil.rmtree(staging)
+                    extracted = unpack_workspace(tarball, dest=staging)
+                    replace_workspace_atomic(target, extracted)
+                except (ValueError, WorkspacePayloadError) as exc:
+                    ws_apply_error = (
+                        f"workspace payload apply failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+    if ws_apply_error is not None:
+        # Demote 'done' to 'blocked' so the operator notices.
+        outcome = "blocked"
+        error = (error + " | " + ws_apply_error) if error else ws_apply_error
 
     # Map outcome → local task status.
     final_claim_status = "done" if outcome == "done" else outcome
