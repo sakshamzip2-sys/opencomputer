@@ -70,29 +70,39 @@ def profile_config_path(profile_dir: Path) -> Path:
     return profile_dir / "profile.yaml"
 
 
-def load_profile_config(profile_dir: Path) -> ProfileConfig:
-    """Read ``<profile_dir>/profile.yaml`` into a ProfileConfig.
+def validate_profile_config_dict(
+    raw: dict, *, path: Path | str = "profile.yaml"
+) -> ProfileConfig:
+    """Validate a parsed profile.yaml dict against the schema.
 
-    Missing file returns defaults. Both-fields-set raises. Unknown
-    top-level keys raise (fail loud, not silent-drift).
+    Pure function — does NOT touch the filesystem. Use this when you've
+    already parsed the YAML (e.g. inside a flock-protected
+    read-modify-write window) and want the same validation semantics
+    that :func:`load_profile_config` enforces.
+
+    The ``path`` argument is used purely for human-readable error
+    messages and accepts a ``Path`` or a ``str`` placeholder.
+
+    What's validated:
+      * top-level shape is a mapping
+      * ``plugins`` (if present) is a mapping
+      * ``plugins.enabled`` (if present) is ``"*"`` or a list of strings
+      * ``preset`` and ``plugins.enabled`` are mutually exclusive
+
+    What's NOT rejected:
+      * Unknown top-level keys (e.g. user-added ``description``,
+        ``notes``, ``owner``). These are preserved on round-trip
+        write by both the agent loop's reader (which discards them
+        but doesn't error) and the CLI mutators (which round-trip
+        the raw dict). Rejecting these would break user workflows
+        that document profiles inline — ``test_enable_preserves_
+        other_profile_yaml_keys`` pins this behavior.
     """
-    path = profile_config_path(profile_dir)
-    if not path.exists():
-        return ProfileConfig()
-
-    raw = yaml.safe_load(path.read_text()) or {}
     if not isinstance(raw, dict):
         raise ProfileConfigError(f"{path} must contain a mapping at the top level")
 
-    preset = raw.pop("preset", None)
-    plugins_block = raw.pop("plugins", None)
-
-    # Reject unknown top-level fields — opt-in to new keys in future
-    # phases, but don't let typos like `presett:` silently become no-ops.
-    allowed_extras: set[str] = set()  # no others yet
-    unknown = set(raw.keys()) - allowed_extras
-    if unknown:
-        raise ProfileConfigError(f"{path}: unknown top-level field(s): {sorted(unknown)}")
+    preset = raw.get("preset")
+    plugins_block = raw.get("plugins")
 
     enabled: EnabledPlugins = "*"
     if plugins_block is not None:
@@ -103,7 +113,9 @@ def load_profile_config(profile_dir: Path) -> ProfileConfig:
             enabled = "*"
         elif isinstance(block_enabled, list):
             if not all(isinstance(x, str) for x in block_enabled):
-                raise ProfileConfigError(f"{path}: `plugins.enabled` must be a list of strings")
+                raise ProfileConfigError(
+                    f"{path}: `plugins.enabled` must be a list of strings"
+                )
             enabled = frozenset(block_enabled)
         else:
             raise ProfileConfigError(
@@ -120,6 +132,22 @@ def load_profile_config(profile_dir: Path) -> ProfileConfig:
         )
 
     return ProfileConfig(preset=preset, enabled_plugins=enabled)
+
+
+def load_profile_config(profile_dir: Path) -> ProfileConfig:
+    """Read ``<profile_dir>/profile.yaml`` into a ProfileConfig.
+
+    Missing file returns defaults. Delegates to
+    :func:`validate_profile_config_dict` for the actual schema check —
+    the same code path the strict CLI mutators (plugin enable/disable)
+    take, so all readers see exactly the same errors.
+    """
+    path = profile_config_path(profile_dir)
+    if not path.exists():
+        return ProfileConfig()
+
+    raw = yaml.safe_load(path.read_text()) or {}
+    return validate_profile_config_dict(raw, path=path)
 
 
 def resolve_enabled_plugins(
@@ -193,6 +221,7 @@ __all__ = [
     "ResolvedPluginFilter",
     "EnabledPlugins",
     "load_profile_config",
+    "validate_profile_config_dict",
     "resolve_enabled_plugins",
     "profile_config_path",
 ]

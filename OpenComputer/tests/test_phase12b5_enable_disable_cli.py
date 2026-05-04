@@ -149,3 +149,88 @@ def test_disable_when_not_enabled_is_friendly_noop(tmp_path, monkeypatch):
     assert "not enabled" in result.stdout
     after_yaml = _load_profile_yaml(profile_dir)
     assert before_yaml == after_yaml, "YAML content should be unchanged on no-op"
+
+
+# ─── E.1: unified validation surfaces same errors on the CLI mutator path ───
+
+
+def test_enable_rejects_plugins_block_not_mapping(tmp_path, monkeypatch):
+    """E.1 — the same shape error the agent loop sees must surface on
+    `oc plugin enable`. Previously this would silently accept and
+    overwrite, now it fails loudly."""
+    profile_dir = _isolate_home(tmp_path, monkeypatch)
+    _write_profile_yaml(profile_dir, {"plugins": ["a", "b"]})
+
+    result = _runner().invoke(plugin_app, ["enable", "coding-harness"])
+
+    assert result.exit_code == 1
+    assert "must be a mapping" in result.stdout
+
+
+def test_enable_rejects_plugins_enabled_wrong_type(tmp_path, monkeypatch):
+    """plugins.enabled must be a list-of-strings or '*'."""
+    profile_dir = _isolate_home(tmp_path, monkeypatch)
+    _write_profile_yaml(profile_dir, {"plugins": {"enabled": 42}})
+
+    result = _runner().invoke(plugin_app, ["enable", "coding-harness"])
+
+    assert result.exit_code == 1
+    assert "list or" in result.stdout
+
+
+def test_enable_rejects_plugins_enabled_non_string_items(tmp_path, monkeypatch):
+    profile_dir = _isolate_home(tmp_path, monkeypatch)
+    _write_profile_yaml(profile_dir, {"plugins": {"enabled": ["ok", 42]}})
+
+    result = _runner().invoke(plugin_app, ["enable", "coding-harness"])
+
+    assert result.exit_code == 1
+    assert "list of strings" in result.stdout
+
+
+def test_enable_rejects_preset_plus_inline_enabled(tmp_path, monkeypatch):
+    profile_dir = _isolate_home(tmp_path, monkeypatch)
+    _write_profile_yaml(
+        profile_dir, {"preset": "coding", "plugins": {"enabled": ["x"]}}
+    )
+
+    result = _runner().invoke(plugin_app, ["enable", "coding-harness"])
+
+    assert result.exit_code == 1
+    assert "both" in result.stdout
+
+
+def test_disable_rejects_plugins_enabled_wrong_type(tmp_path, monkeypatch):
+    """Symmetric: disable also runs the unified validator."""
+    profile_dir = _isolate_home(tmp_path, monkeypatch)
+    _write_profile_yaml(profile_dir, {"plugins": {"enabled": 42}})
+
+    result = _runner().invoke(plugin_app, ["disable", "coding-harness"])
+
+    assert result.exit_code == 1
+    assert "list or" in result.stdout
+
+
+def test_enable_rejects_wildcard_when_adding_explicit_id(tmp_path, monkeypatch):
+    """plugins.enabled: '*' is the wildcard. Adding an explicit id would
+    NARROW the filter (surprising), so the CLI refuses with a clear
+    message asking the user to remove the wildcard first."""
+    profile_dir = _isolate_home(tmp_path, monkeypatch)
+    _write_profile_yaml(profile_dir, {"plugins": {"enabled": "*"}})
+
+    result = _runner().invoke(plugin_app, ["enable", "coding-harness"])
+
+    assert result.exit_code == 1
+    assert "wildcard" in result.stdout.lower()
+
+
+def test_enable_rejects_invalid_yaml(tmp_path, monkeypatch):
+    """Malformed YAML must not produce a stack trace — friendly error
+    that names the file."""
+    profile_dir = _isolate_home(tmp_path, monkeypatch)
+    (profile_dir / "profile.yaml").write_text("plugins: {invalid: yaml: structure")
+
+    result = _runner().invoke(plugin_app, ["enable", "coding-harness"])
+
+    assert result.exit_code == 1
+    assert "invalid yaml" in result.stdout.lower() or "yaml" in result.stdout.lower()
