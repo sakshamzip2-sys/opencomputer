@@ -332,9 +332,10 @@ def test_timeout_exception_hierarchy() -> None:
 
 
 def test_loop_config_defaults() -> None:
-    """Round 2B P-3 default values: 300s inactivity, 1800s absolute cap."""
+    """Default values: 300s inactivity, 3600s absolute cap (raised from 1800s in
+    fix/bump-loop-timeouts after the user hit IterationTimeout on a long run)."""
     from opencomputer.agent.config import LoopConfig
 
     cfg = LoopConfig()
     assert cfg.inactivity_timeout_s == 300
-    assert cfg.iteration_timeout_s == 1800
+    assert cfg.iteration_timeout_s == 3600
