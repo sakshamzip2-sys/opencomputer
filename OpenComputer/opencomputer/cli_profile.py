@@ -750,13 +750,21 @@ def export_cmd(
         False, "--include-sessions",
         help="Include sessions.db + llm_events.jsonl (large + private).",
     ),
+    include_oauth_tokens: bool = typer.Option(
+        False, "--include-oauth-tokens",
+        help="Include the mcp_oauth/ directory verbatim — only do this when "
+        "migrating a profile to another machine YOU own. Sharing OAuth "
+        "tokens gives the receiver live API access without re-auth.",
+    ),
 ) -> None:
     """Export a profile to a portable tar.gz archive (Phase 14.H).
 
     By default, redacts .env values and likely-secret config.yaml fields
     (``*api_key*``, ``*token*``, ``*secret*``, ``*password*`` keys).
     Sessions DB + runtime logs are excluded by default. ``mcp_oauth/``
-    and ``audit_log.jsonl`` are ALWAYS excluded.
+    is excluded by default; opt in with ``--include-oauth-tokens`` when
+    migrating a profile to a different machine you own.
+    ``audit_log.jsonl`` is ALWAYS excluded.
     """
     import time as _time
 
@@ -786,6 +794,7 @@ def export_cmd(
         oc_version=_oc_version,
         include_secrets=include_secrets,
         include_sessions=include_sessions,
+        include_oauth_tokens=include_oauth_tokens,
     )
 
     notes: list[str] = []
@@ -793,6 +802,10 @@ def export_cmd(
         notes.append("[dim](secrets redacted)[/dim]")
     if not include_sessions:
         notes.append("[dim](sessions excluded)[/dim]")
+    if include_oauth_tokens:
+        notes.append("[bold yellow](OAuth tokens INCLUDED)[/bold yellow]")
+    else:
+        notes.append("[dim](OAuth tokens excluded)[/dim]")
     suffix = (" " + " ".join(notes)) if notes else ""
     _console.print(
         f"[green]exported[/green] {target_name} → {written}{suffix}"
