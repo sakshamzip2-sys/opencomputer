@@ -9,7 +9,7 @@
 
 ## TL;DR
 
-Port OpenCLI's Chrome extension (Apache 2.0) into OpenComputer as a sibling extension at `extensions/browser-bridge/control-extension/`. This eliminates the `chrome-devtools-mcp` dependency for the active-control path, removes the `chrome://inspect/#remote-debugging` toggle requirement, and gives us the same "drive your real Chrome" UX OpenCLI users get.
+Port OpenCLI's Chrome extension (Apache 2.0) into OpenComputer at `extensions/browser-control/extension/` — alongside the plugin's existing `managed` (Playwright) and `existing-session` (chrome-devtools-mcp) drivers. This eliminates the `chrome-devtools-mcp` dependency for the active-control path, removes the `chrome://inspect/#remote-debugging` toggle requirement, and gives us the same "drive your real Chrome" UX OpenCLI users get. The existing `extensions/browser-bridge/` plugin (Layer 4 ambient awareness) is **not touched** — it stays narrow.
 
 Two-track ship:
 - **Track 1 — managed Chrome (`opencomputer` profile)**: bake `--load-extension=...` into the launch args. Zero user action; extension auto-loads on every managed-Chrome boot.
@@ -55,7 +55,9 @@ We have the foundation for this (passive ambient extension at `extensions/browse
 
 ## What ships in v0.6
 
-### 1. New extension: `extensions/browser-bridge/control-extension/`
+> **Architectural placement (corrected from earlier draft):** the new active-control extension lives **inside `extensions/browser-control/`**, NOT in `extensions/browser-bridge/`. Reason: `browser-bridge` is the ambient-awareness plugin (Layer 4 — observe URLs/titles, narrow `tabs` permission, passive HTTP push). `browser-control` is the active-control plugin (drive Chrome via CDP). The new extension is a **third transport** for what `browser-control` already does (alongside `managed` Playwright and `existing-session` chrome-devtools-mcp). They belong together.
+
+### 1. New extension: `extensions/browser-control/extension/`
 
 Verbatim port (with our 5 deltas — see §"Deviations" below) of OpenCLI's extension at [`/tmp/opencli/extension/src/`](https://github.com/jackwener/opencli/tree/main/extension/src). License: Apache 2.0; we attribute on every file.
 
@@ -63,7 +65,7 @@ Source files to port:
 
 | Source file (OpenCLI) | LOC | Action | Target file (ours) |
 |---|---|---|---|
-| `protocol.ts` | 104 | Verbatim | `extensions/browser-bridge/control-extension/src/protocol.ts` |
+| `protocol.ts` | 104 | Verbatim | `extensions/browser-control/extension/src/protocol.ts` |
 | `identity.ts` | 71 | Verbatim | `.../src/identity.ts` |
 | `cdp.ts` | 554 | Verbatim | `.../src/cdp.ts` |
 | `background.ts` | 1585 | Adapt (daemon URL + workspace defaults) | `.../src/background.ts` |
@@ -72,11 +74,13 @@ Source files to port:
 
 Total: ~2300 LOC of TS source, ~150 LOC of HTML/CSS, plus our integration code.
 
+`extensions/browser-bridge/` is **not modified** by Wave 6 — its passive ambient extension stays at 45 LOC of `tabs`-only code, doing exactly what it does today.
+
 ### 2. Python daemon WS server
 
-Extend `extensions/browser-bridge/plugin.py` to host a WebSocket endpoint at `ws://127.0.0.1:18791/ext` (we already use 18791 for the ambient bridge HTTP listener — keep the port, add the WS path).
+The browser-control plugin already runs a daemon on `control_port` (default 18792) hosting the dispatcher routes. Wave 6 extends it with a new WebSocket endpoint at `ws://127.0.0.1:18792/ext` for the extension to attach to. **Same daemon, new path.**
 
-The daemon translates between our internal wire-protocol and OpenCLI's 14-action protocol that the extension speaks. Routing:
+Routing (Browser tool / adapter call → daemon translation → extension action):
 
 ```
 Browser tool action          → daemon translation     → extension action
@@ -89,10 +93,10 @@ adapter ctx.trpc_query(...)  → action="exec"          → Runtime.evaluate (ou
 adapter ctx.cookies(domain)  → action="cookies"       → chrome.cookies.getAll
 ```
 
-Three new modules:
-- `extensions/browser-bridge/control_protocol.py` — wire types matching OpenCLI's `protocol.ts`, plus our adapter-to-extension translation
-- `extensions/browser-bridge/control_daemon.py` — WS server, lease-tracking, command routing
-- `extensions/browser-bridge/control_driver.py` — `BrowserBridgeControlDriver` with the same `ProfileDriver` interface as `chrome_mcp` (so the existing `server_context/lifecycle.py` plumbing works without changes)
+Three new modules in `extensions/browser-control/`:
+- `control_protocol.py` — wire types matching OpenCLI's `protocol.ts`, plus our adapter-to-extension translation
+- `control_daemon.py` — WS endpoint, command/result correlation by id, lease tracking
+- `control_driver.py` — `BrowserControlExtensionDriver` implementing the existing `ProfileDriver` interface (alongside the `managed` and `existing-session` drivers) so the existing `server_context/lifecycle.py` plumbing works without changes
 
 ### 3. Profile driver wiring
 
@@ -104,13 +108,13 @@ BrowserDriver = Literal["managed", "existing-session", "control-extension"]
 (After Wave 5's rename, `"managed"` is what was `"openclaw"`; `"existing-session"` is the chrome-devtools-mcp path; we add `"control-extension"` for the new path.)
 
 Mode mapping:
-- `opencomputer` profile → `driver="managed"` + `--load-extension=.../control-extension/dist` baked into Chrome launch args. Track 1.
-- `user` profile → `driver="control-extension"` + extension installed by user via Web Store. Track 2.
-- `chrome-mcp-fallback` profile (new optional profile) → `driver="existing-session"`. Kept for headless / non-Chrome use cases.
+- `opencomputer` profile → `driver="managed"` + `--load-extension=.../extension/dist` baked into Chrome launch args. **Track 1** — extension auto-loads into our isolated managed Chrome (the OpenClaw model).
+- `user` profile → `driver="control-extension"` + extension installed by user via Web Store. **Track 2** — extension lives in the user's real Chrome (the OpenCLI model).
+- (legacy) profile → `driver="existing-session"` — chrome-devtools-mcp fallback. Kept for headless / non-Chrome scenarios.
 
 ### 4. Track 1: auto-load extension into managed Chrome
 
-When `opencomputer` profile launches Chrome, append `--load-extension=<repo>/extensions/browser-bridge/control-extension/dist` to Chrome args. Zero user action.
+When `opencomputer` profile launches Chrome, append `--load-extension=<repo>/extensions/browser-control/extension/dist` to Chrome args. Zero user action.
 
 Code lives in `extensions/browser-control/chrome/launch.py` — `_build_chrome_args` adds the flag when `driver=="managed"`.
 
@@ -135,7 +139,7 @@ opencomputer setup
 
 | # | Deviation | Why |
 |---|---|---|
-| 1 | Daemon is Python (not Node.js) | OpenComputer is a Python project; we already have `extensions/browser-bridge/` as a Python plugin. The wire protocol on the WS line stays identical — only the daemon implementation language changes. |
+| 1 | Daemon is Python (not Node.js) | OpenComputer is a Python project; the existing `extensions/browser-control/` daemon hosts the new WS endpoint. The wire protocol on the WS line stays identical — only the daemon implementation language changes. |
 | 2 | Two extensions, not one | We keep `extensions/browser-bridge/extension/` (passive ambient awareness, only `tabs` permission) for Layer 4. Add `control-extension/` as a sibling with `chrome.debugger`. Cleaner permission story; users who only want ambient awareness don't see the yellow warning bar. |
 | 3 | Track 1 (managed-Chrome auto-load) | OpenCLI doesn't have managed-Chrome at all — they only operate in user's real Chrome. We keep the `opencomputer` (managed) profile path and gain extension support there too via `--load-extension`. Users get isolated-Chrome-with-control AND real-Chrome-with-control as two distinct profile options. |
 | 4 | Default workspace mode | OpenCLI defaults adapter runs to `owned` (new tab/window in user's Chrome, 30s idle close). We adopt the same default but expose `--bind` flag for opting into `bound:*` mode (use user's currently-focused tab). |
@@ -155,34 +159,34 @@ This is the order to execute. Each step is independently testable, so you can pa
 
 ### Step 2 — Scaffold the control extension (~1 day)
 
-1. `mkdir -p extensions/browser-bridge/control-extension/{src,dist,icons}`
+1. `mkdir -p extensions/browser-control/extension/{src,dist,icons,LICENSES}`
 2. Create `manifest.json`:
    ```json
    {
      "manifest_version": 3,
-     "name": "OpenComputer Browser Bridge",
+     "name": "OpenComputer Browser Control",
      "version": "0.6.0",
      "description": "Active control bridge for the OpenComputer agent. Drives Chrome tabs via chrome.debugger over a localhost WebSocket.",
      "permissions": ["debugger", "tabs", "cookies", "activeTab", "alarms", "storage"],
      "host_permissions": ["<all_urls>"],
      "background": {"service_worker": "dist/background.js", "type": "module"},
      "icons": {"16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "128": "icons/icon-128.png"},
-     "action": {"default_title": "OpenComputer Browser Bridge", "default_popup": "popup.html"},
+     "action": {"default_title": "OpenComputer Browser Control", "default_popup": "popup.html"},
      "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'self'"},
      "homepage_url": "https://github.com/sakshamzip2-sys/opencomputer"
    }
    ```
 3. Port `src/protocol.ts` verbatim. Adapt:
-   - `DAEMON_PORT = 18791` (was 19825 in OpenCLI; we reuse our existing browser-bridge port)
-   - `DAEMON_WS_URL = ws://localhost:18791/ext`
-   - `DAEMON_PING_URL = http://localhost:18791/ping`
+   - `DAEMON_PORT = 18792` (was 19825 in OpenCLI; we reuse browser-control's existing daemon port)
+   - `DAEMON_WS_URL = ws://localhost:18792/ext`
+   - `DAEMON_PING_URL = http://localhost:18792/ping`
 4. Port `src/identity.ts` verbatim.
 5. Port `src/cdp.ts` verbatim. No changes needed.
 6. Port `src/background.ts`. Changes:
    - Replace `[opencli]` log prefixes with `[opencomputer]`
    - Replace `OPENCLI_*` constants/keys with `OPENCOMPUTER_*` (e.g. `OPENCOMPUTER_WINDOW_FOCUSED`, registry storage key `opencomputer_target_lease_registry_v1`)
    - `__OPENCLI_COMPAT_RANGE__` declare → `__OPENCOMPUTER_COMPAT_RANGE__`
-7. Add a build script (`extensions/browser-bridge/control-extension/build.sh` or similar) that bundles src/*.ts → dist/background.js. OpenCLI uses esbuild; we should too. Alternatively, leverage our Node setup if there's existing tooling.
+7. Add a build script (`extensions/browser-control/extension/build.sh` or similar) that bundles src/*.ts → dist/background.js. OpenCLI uses esbuild; we should too. Alternatively, leverage our Node setup if there's existing tooling.
 8. Build a minimal popup (port `popup.html`/`popup.js`). Apple-style status indicator.
 9. Generate icons (4 sizes: 16, 32, 48, 128). Use OpenComputer brand color `#FF4500` (already our default).
 
@@ -193,24 +197,24 @@ This is the order to execute. Each step is independently testable, so you can pa
 // Modifications: see git log of this file in github.com/sakshamzip2-sys/opencomputer
 ```
 
-Plus `extensions/browser-bridge/control-extension/LICENSES/openclai-apache-2.0.txt` with the full Apache 2.0 license text.
+Plus `extensions/browser-control/extension/LICENSES/openclai-apache-2.0.txt` with the full Apache 2.0 license text.
 
 ### Step 3 — Python daemon WS server (~1 day)
 
-1. Add `extensions/browser-bridge/control_protocol.py`:
+1. Add `extensions/browser-control/control_protocol.py`:
    - Pydantic models matching `protocol.ts` Command/Result types
    - `Action = Literal["exec", "navigate", "tabs", "cookies", "screenshot", "network-capture-start", "network-capture-read", "cdp"]` (8 of 14 for MVP)
 
-2. Add `extensions/browser-bridge/control_daemon.py`:
-   - WebSocket server bound to `127.0.0.1:18791/ext` using `websockets` lib (already a dep — verify)
+2. Add `extensions/browser-control/control_daemon.py`:
+   - WebSocket server bound to `127.0.0.1:18792/ext` using `websockets` lib (already a dep — verify)
    - Per-connection state: `contextId`, `extensionVersion`, `compatRange`
    - Send Command via WS, await matching Result by id
    - 30s timeout per command (matches OpenCLI's idle-leases default)
-   - Health endpoint `GET /ping` returns `{"daemon": "opencomputer", "version": "0.6.0"}`
+   - Health endpoint shares the existing `/ping` on the same port
 
-3. Add `extensions/browser-bridge/control_driver.py`:
-   - `BrowserBridgeControlDriver` implementing the `ProfileDriver` interface from `extensions/browser-control/server_context/lifecycle.py`
-   - `spawn_chrome_mcp` → `spawn_browser_bridge_control` (rename for the new mode)
+3. Add `extensions/browser-control/control_driver.py`:
+   - `BrowserControlExtensionDriver` implementing the `ProfileDriver` interface from `extensions/browser-control/server_context/lifecycle.py`
+   - Sibling to the existing `managed` and `existing-session` drivers
    - Returns a client object that the existing dispatcher code can call into
 
 4. Wire the new driver into `extensions/browser-control/_dispatcher_bootstrap.py`:
@@ -218,11 +222,11 @@ Plus `extensions/browser-bridge/control-extension/LICENSES/openclai-apache-2.0.t
 
 ### Step 4 — Track 1: managed-Chrome auto-load (~half day)
 
-1. In `extensions/browser-control/chrome/launch.py`, find `_build_chrome_args`. After existing args, append:
+1. In `extensions/browser-control/chrome/launch.py`, find `_build_chrome_args`. When `profile.driver == "managed"` and the extension dist exists, append `--load-extension`:
    ```python
-   ext_path = Path(__file__).parent.parent.parent / "browser-bridge" / "control-extension" / "dist"
-   if ext_path.exists():
-       args.append(f"--load-extension={ext_path}")
+   ext_dist = Path(__file__).parent.parent / "extension" / "dist"
+   if ext_dist.exists() and profile.driver == "managed":
+       args.append(f"--load-extension={ext_dist}")
    ```
 2. The managed-Chrome launch picks up the extension automatically. No user action.
 3. The Chrome instance now has `chrome.debugger` capability via the extension. Adapter calls route through the daemon → extension → CDP.
@@ -236,10 +240,14 @@ Plus `extensions/browser-bridge/control-extension/LICENSES/openclai-apache-2.0.t
 
 ### Step 6 — Docs + commit (~half day)
 
-1. Update `extensions/browser-bridge/README.md` with the new control-extension story
-2. Update `docs/browser-port/IMPLEMENTATION_STATUS.md` with v0.6 status
-3. Update `docs/browser-port/wave4-adapters/DEFERRED.md` to mark the v0.5-PRIORITY browser-bridge section as `→ shipped in v0.6`
-4. Commit per-step (granular history) and open PR
+1. Add `extensions/browser-control/extension/README.md` with install instructions for both Track 1 and Track 2
+2. Update `extensions/browser-control/README.md` with a note about the third driver (`control-extension`)
+3. Update `docs/browser-port/IMPLEMENTATION_STATUS.md` with v0.6 status
+4. Update `docs/browser-port/wave4-adapters/DEFERRED.md` to mark the v0.5-PRIORITY section as `→ shipped in v0.6`
+5. Update top-level `CHANGELOG.md` with v0.6 entry
+6. Commit per-step (granular history) and open PR
+
+`extensions/browser-bridge/README.md` is **NOT** modified — that plugin is untouched.
 
 ---
 
@@ -248,34 +256,44 @@ Plus `extensions/browser-bridge/control-extension/LICENSES/openclai-apache-2.0.t
 Use this when actually doing the port:
 
 ```
-[ ] extensions/browser-bridge/control-extension/manifest.json
-[ ] extensions/browser-bridge/control-extension/src/protocol.ts
-[ ] extensions/browser-bridge/control-extension/src/identity.ts
-[ ] extensions/browser-bridge/control-extension/src/cdp.ts
-[ ] extensions/browser-bridge/control-extension/src/background.ts
-[ ] extensions/browser-bridge/control-extension/popup.html
-[ ] extensions/browser-bridge/control-extension/popup.js
-[ ] extensions/browser-bridge/control-extension/icons/icon-16.png
-[ ] extensions/browser-bridge/control-extension/icons/icon-32.png
-[ ] extensions/browser-bridge/control-extension/icons/icon-48.png
-[ ] extensions/browser-bridge/control-extension/icons/icon-128.png
-[ ] extensions/browser-bridge/control-extension/LICENSES/openclai-apache-2.0.txt
-[ ] extensions/browser-bridge/control-extension/build.sh (or package.json + tsconfig.json + esbuild config)
-[ ] extensions/browser-bridge/control-extension/README.md
-[ ] extensions/browser-bridge/control_protocol.py
-[ ] extensions/browser-bridge/control_daemon.py
-[ ] extensions/browser-bridge/control_driver.py
-[ ] extensions/browser-bridge/plugin.py (extend to host the WS endpoint)
-[ ] extensions/browser-control/chrome/launch.py (add --load-extension)
-[ ] extensions/browser-control/profiles/config.py (add "control-extension" to BrowserDriver)
-[ ] extensions/browser-control/profiles/resolver.py (default user profile → control-extension)
+# New extension (lives inside browser-control plugin):
+[ ] extensions/browser-control/extension/manifest.json
+[ ] extensions/browser-control/extension/src/protocol.ts
+[ ] extensions/browser-control/extension/src/identity.ts
+[ ] extensions/browser-control/extension/src/cdp.ts
+[ ] extensions/browser-control/extension/src/background.ts
+[ ] extensions/browser-control/extension/popup.html
+[ ] extensions/browser-control/extension/popup.js
+[ ] extensions/browser-control/extension/icons/icon-16.png
+[ ] extensions/browser-control/extension/icons/icon-32.png
+[ ] extensions/browser-control/extension/icons/icon-48.png
+[ ] extensions/browser-control/extension/icons/icon-128.png
+[ ] extensions/browser-control/extension/LICENSES/openclai-apache-2.0.txt
+[ ] extensions/browser-control/extension/build.sh (or package.json + tsconfig.json + esbuild config)
+[ ] extensions/browser-control/extension/README.md
+
+# Python integration (also inside browser-control plugin):
+[ ] extensions/browser-control/control_protocol.py
+[ ] extensions/browser-control/control_daemon.py
+[ ] extensions/browser-control/control_driver.py
 [ ] extensions/browser-control/_dispatcher_bootstrap.py (wire new driver)
-[ ] tests/test_browser_bridge_control_protocol.py
-[ ] tests/test_browser_bridge_control_daemon.py
-[ ] tests/test_browser_bridge_control_e2e.py (headless Chrome integration)
-[ ] docs/browser-port/IMPLEMENTATION_STATUS.md (add v0.6 row)
+[ ] extensions/browser-control/chrome/launch.py (--load-extension for managed)
+[ ] extensions/browser-control/profiles/config.py (BrowserDriver += "control-extension")
+[ ] extensions/browser-control/profiles/resolver.py (default user profile → control-extension)
+
+# Tests:
+[ ] tests/test_browser_control_extension_protocol.py
+[ ] tests/test_browser_control_extension_daemon.py
+[ ] tests/test_browser_control_extension_e2e.py (headless Chrome integration)
+
+# Docs:
+[ ] extensions/browser-control/README.md (note the new driver)
+[ ] docs/browser-port/IMPLEMENTATION_STATUS.md (add Wave 6 row)
 [ ] docs/browser-port/wave4-adapters/DEFERRED.md (mark v0.5-PRIORITY shipped)
 [ ] CHANGELOG.md (v0.6 entry)
+
+# NOT touched (left untouched is the goal):
+[~] extensions/browser-bridge/  (passive ambient awareness only — keep narrow)
 ```
 
 ---
@@ -329,7 +347,7 @@ This is **load-bearing**. Without it, every 30s the extension forgets all leases
 | `chrome.debugger.attach` triggers permanent yellow warning bar | Certain | Document this as expected. Two-extension split keeps the yellow bar off the ambient extension. Users who care about not seeing the bar use chrome-devtools-mcp fallback. |
 | OpenCLI's lease/idle code has bugs we inherit | Low | OpenCLI's tests are present at `/tmp/opencli/extension/src/*.test.ts` — port the test suite too where it makes sense. |
 | Service-worker storage migration on extension version bump | Medium | Use `version` field in storage keys (`v1`, `v2`). Old data ignored if version mismatch. Idempotent migrations. |
-| WebSocket port collision with another tool on user's machine | Low | Port 18791 is already our existing browser-bridge port; users have already implicitly accepted it. Provide a config option to override. |
+| WebSocket port collision with another tool on user's machine | Low | Port 18792 is already our existing browser-control daemon port; users have already implicitly accepted it. Provide a config option to override. |
 
 ---
 
@@ -337,7 +355,7 @@ This is **load-bearing**. Without it, every 30s the extension forgets all leases
 
 The wave is "done" when:
 
-1. ✅ Control extension loads in unpacked-mode Chrome (`chrome://extensions` → Load unpacked → `extensions/browser-bridge/control-extension/`)
+1. ✅ Control extension loads in unpacked-mode Chrome (`chrome://extensions` → Load unpacked → `extensions/browser-control/extension/`)
 2. ✅ Extension auto-connects to running OpenComputer daemon via WS
 3. ✅ Popup shows "Connected to daemon" + daemon version + contextId
 4. ✅ `Browser(action="navigate", url="https://example.com")` from agent → extension → tab actually navigates
