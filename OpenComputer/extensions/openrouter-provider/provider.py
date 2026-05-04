@@ -37,6 +37,51 @@ OpenAIProvider = _mod.OpenAIProvider
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+# Wave 5 T5 — OpenRouter response-cache (Hermes 457c7b76c). Distinct
+# from prompt-caching: the response-cache caches the entire LLM response
+# across identical requests on OpenRouter's edge.
+_DEFAULT_RESPONSE_CACHE_TTL_S: int = 300  # 5 min — Hermes default
+_MIN_TTL_S: int = 1
+_MAX_TTL_S: int = 86400  # 24 h
+
+
+def build_or_headers(cfg: dict | None = None) -> dict[str, str]:
+    """Build OpenRouter outbound HTTP headers from the runtime config.
+
+    Adds the response-cache headers when ``openrouter.response_cache``
+    is True (default). TTL is read from
+    ``openrouter.response_cache_ttl`` and clamped to
+    ``[_MIN_TTL_S, _MAX_TTL_S]``. Caller layers these on top of any
+    provider-internal default headers.
+    """
+    or_cfg = (cfg or {}).get("openrouter") or {}
+    headers: dict[str, str] = {}
+    if or_cfg.get("response_cache", True):
+        headers["X-OpenRouter-Cache"] = "1"
+        try:
+            ttl = int(or_cfg.get("response_cache_ttl", _DEFAULT_RESPONSE_CACHE_TTL_S))
+        except (TypeError, ValueError):
+            ttl = _DEFAULT_RESPONSE_CACHE_TTL_S
+        ttl = max(_MIN_TTL_S, min(_MAX_TTL_S, ttl))
+        headers["X-OpenRouter-Cache-TTL"] = str(ttl)
+    return headers
+
+
+def parse_cache_status(response_headers: dict[str, str] | None) -> str:
+    """Read the ``X-OpenRouter-Cache-Status`` response header.
+
+    Tolerates missing header (default ``MISS``) and case-mismatched
+    headers since httpx-style mappings are case-insensitive but tests
+    sometimes pass raw lowercase dicts.
+    """
+    if not response_headers:
+        return "MISS"
+    return (
+        response_headers.get("X-OpenRouter-Cache-Status")
+        or response_headers.get("x-openrouter-cache-status")
+        or "MISS"
+    )
+
 
 class OpenRouterProvider(OpenAIProvider):
     """OpenAI-compatible provider routed through OpenRouter.
