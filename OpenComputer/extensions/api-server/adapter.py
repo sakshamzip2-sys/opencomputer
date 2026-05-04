@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -43,6 +44,21 @@ from aiohttp import web
 
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import Platform, SendResult
+
+try:
+    from openai_format import (
+        oc_response_to_openai,
+        openai_to_oc_messages,
+        streaming_delta_chunk,
+        streaming_final_chunk,
+    )
+except ImportError:  # pragma: no cover - package mode
+    from extensions.api_server.openai_format import (
+        oc_response_to_openai,
+        openai_to_oc_messages,
+        streaming_delta_chunk,
+        streaming_final_chunk,
+    )
 
 logger = logging.getLogger("opencomputer.ext.api_server")
 
@@ -164,11 +180,125 @@ class APIServerAdapter(BaseChannelAdapter):
 
     # ─── Server lifecycle ───────────────────────────────────────────
 
+    async def _handle_openai_chat_completions(
+        self, request: web.Request
+    ) -> web.Response:
+        """OpenAI-compatible ``POST /v1/chat/completions`` handler.
+
+        T2 of tier-2 trio (2026-05-04). Lets external tools that speak the
+        OpenAI Chat Completions API (Cursor, aider, LibreChat, anything
+        using the OpenAI SDK) plug OC in by setting ``OPENAI_API_BASE`` to
+        this server's URL.
+
+        v1 simplifications (deferred to follow-ups):
+          - All input messages collapse into a single annotated user
+            string ("[role] content"). True multi-turn history would
+            need agent-loop integration.
+          - Streaming returns the full response as a single SSE chunk
+            (not per-token). Token-by-token streaming needs deeper hook
+            into the agent loop.
+          - Token counts are whitespace-split estimates.
+        """
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth[len("Bearer "):] != self._token:
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "Invalid API key",
+                        "type": "invalid_request_error",
+                    }
+                },
+                status=401,
+            )
+
+        if (
+            request.content_length
+            and request.content_length > self.max_message_length
+        ):
+            return web.json_response(
+                {"error": {"message": "payload too large"}}, status=413
+            )
+
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response(
+                {"error": {"message": "invalid json body"}}, status=400
+            )
+
+        messages = payload.get("messages", [])
+        model = payload.get("model", "opencomputer")
+        stream = bool(payload.get("stream", False))
+        if not isinstance(messages, list) or not messages:
+            return web.json_response(
+                {"error": {"message": "messages required"}}, status=400
+            )
+
+        if self._handler is None:
+            return web.json_response(
+                {"error": {"message": "handler not configured"}}, status=503
+            )
+
+        oc_messages = openai_to_oc_messages(messages)
+        user_text = "\n".join(
+            f"[{m['role']}] {m['content']}" for m in oc_messages
+        )
+        session_id = payload.get("session_id", "")
+
+        if stream:
+            chunk_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+            try:
+                agent_text = await self._handler(session_id, user_text)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("openai-compat handler raised")
+                return web.json_response(
+                    {"error": {"message": str(e)}}, status=500
+                )
+            resp = web.StreamResponse(
+                status=200,
+                headers={
+                    "Content-Type": "text/event-stream",
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+            await resp.prepare(request)
+            await resp.write(
+                f"data: {streaming_delta_chunk(chunk_id, model, agent_text)}\n\n".encode()
+            )
+            await resp.write(
+                f"data: {streaming_final_chunk(chunk_id, model)}\n\n".encode()
+            )
+            await resp.write(b"data: [DONE]\n\n")
+            await resp.write_eof()
+            return resp
+
+        try:
+            agent_text = await self._handler(session_id, user_text)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("openai-compat handler raised")
+            return web.json_response(
+                {"error": {"message": str(e)}}, status=500
+            )
+
+        return web.json_response(
+            oc_response_to_openai(
+                agent_text,
+                model=model,
+                input_tokens=len(user_text.split()),
+                output_tokens=len(agent_text.split()),
+            )
+        )
+
     def _build_app(self) -> web.Application:
         # Limit per-request body size at the framework level so large
         # uploads don't even reach the handler.
         app = web.Application(client_max_size=self.max_message_length)
         app.router.add_post("/v1/chat", self._handle_chat)
+        # T2 (tier-2 trio, 2026-05-04) — OpenAI Chat Completions compat.
+        app.router.add_post(
+            "/v1/chat/completions", self._handle_openai_chat_completions
+        )
         # Wave 6.A — Hermes-port (0a15dbdc4) — POST /v1/runs/{id}/stop
         app.router.add_post("/v1/runs/{run_id}/stop", self._handle_run_stop)
         return app
