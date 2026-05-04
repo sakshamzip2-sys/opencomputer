@@ -1105,8 +1105,10 @@ def link_tasks(
     verify only that the parent task exists there.
 
     Raises ValueError on self-link, unknown task, or detected cycle.
-    Cross-board cycle detection currently only walks within-board —
-    documented limitation.
+    Wave 6.E.12: cross-board cycle detection now walks the full
+    multi-board graph via :func:`_would_cycle_global` (capped at
+    MAX_CROSS_BOARD_HOPS). Same-board cycle detection still uses the
+    original optimized walker.
     """
     if parent_id == child_id and parent_board == child_board:
         raise ValueError("a task cannot depend on itself")
@@ -1136,7 +1138,6 @@ def link_tasks(
                     raise ValueError(
                         f"parent_board {parent_board!r} has no kanban.db at {parent_db}"
                     )
-                # ATTACH read-only to verify the parent exists there.
                 # Use a fresh connection so we don't leak the ATTACH on
                 # the long-lived dispatch connection (audit lens A4).
                 with sqlite3.connect(str(parent_db)) as parent_conn:
@@ -1149,6 +1150,19 @@ def link_tasks(
                             f"unknown parent task {parent_id!r} in board "
                             f"{parent_board!r}"
                         )
+            # Wave 6.E.12 — global cycle detection. Closes the deferral
+            # documented in PR #456.
+            if _would_cycle_global(
+                conn,
+                parent_id=parent_id,
+                child_id=child_id,
+                parent_board=parent_board,
+                child_board=child_board,
+            ):
+                raise ValueError(
+                    f"linking {parent_id}@{parent_board} -> "
+                    f"{child_id}@{child_board} would create a cross-board cycle"
+                )
         conn.execute(
             "INSERT OR IGNORE INTO task_links "
             "(parent_id, child_id, parent_board, child_board) "
@@ -1186,11 +1200,11 @@ def link_tasks(
 
 
 def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
-    """Return True if adding parent->child creates a cycle.
+    """Return True if adding parent->child creates a cycle (same-board).
 
     A cycle exists iff ``parent_id`` is already a descendant of
-    ``child_id`` via existing parent->child links.  We walk downward
-    from ``child_id`` and check whether we reach ``parent_id``.
+    ``child_id`` via existing parent->child links. Walks downward
+    from ``child_id`` and checks whether we reach ``parent_id``.
     """
     seen = set()
     stack = [child_id]
@@ -1205,6 +1219,111 @@ def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> boo
             "SELECT child_id FROM task_links WHERE parent_id = ?", (node,)
         ).fetchall()
         stack.extend(r["child_id"] for r in rows)
+    return False
+
+
+# Wave 6.E.12 — Production-grade cross-board cycle detection.
+# Closes the deferral documented in PR #456.
+MAX_CROSS_BOARD_HOPS = 64
+
+
+def _would_cycle_global(
+    conn: sqlite3.Connection,
+    *,
+    parent_id: str,
+    child_id: str,
+    parent_board: str | None,
+    child_board: str | None,
+) -> bool:
+    """Detect a cycle when the proposed edge spans boards.
+
+    Walks descendants of ``(child_board, child_id)`` across boards.
+    A cycle exists iff we reach ``(parent_board, parent_id)``. Caps
+    walk at :data:`MAX_CROSS_BOARD_HOPS` to bound runtime in the face
+    of pathological data.
+
+    Production-grade implementation: scans every named board's
+    task_links table to build a global edge map. A cross-board link
+    A@x → B@y might be stored in either board's task_links (depending
+    on which connection wrote it), so we normalize by walking BOTH
+    boards' rows. Each NULL board reference is interpreted relative
+    to the row's home board (the file we're scanning).
+
+    Cross-board reads use a short-lived sqlite3 connection per board
+    (no ATTACH on the long-lived linker connection — audit lens A4).
+
+    Unreachable boards are treated as leaves. Hitting
+    MAX_CROSS_BOARD_HOPS returns True (fail-closed) — better to refuse
+    a link than miss a real cycle in pathological data.
+    """
+    target = (parent_board, parent_id)
+    seen: set[tuple[str | None, str]] = set()
+    stack: list[tuple[str | None, str]] = [(child_board, child_id)]
+
+    # Pre-build a global edge map by scanning every named board's
+    # task_links + the current connection's task_links. NULL board
+    # references in a row mean "this row's home board" (the file we're
+    # scanning right now), so we resolve at scan time, not later.
+    global_edges: dict[tuple[str | None, str], list[tuple[str | None, str]]] = {}
+
+    def _ingest_rows(home_slug: str | None, rows) -> None:
+        for r in rows:
+            pb = r["parent_board"] if r["parent_board"] else home_slug
+            cb = r["child_board"] if r["child_board"] else home_slug
+            global_edges.setdefault(
+                (pb, r["parent_id"]), [],
+            ).append((cb, r["child_id"]))
+
+    # 1. Current connection — its rows' NULL slugs default to whichever
+    # board it represents. We have to detect that: if the current
+    # active board has a slug, use it; otherwise use None (legacy
+    # default).
+    current_slug = active_board()
+    rows = conn.execute(
+        "SELECT parent_id, child_id, parent_board, child_board "
+        "FROM task_links",
+    ).fetchall()
+    _ingest_rows(current_slug, rows)
+
+    # 2. Every named board (excluding the one the current conn points
+    # at) — open short-lived per-board connections.
+    for slug in list_boards():
+        if slug == current_slug:
+            continue  # already ingested via conn
+        try:
+            path = board_db_path(slug)
+        except InvalidBoardSlugError:
+            continue
+        if not path.exists():
+            continue
+        try:
+            other = sqlite3.connect(str(path))
+            other.row_factory = sqlite3.Row
+            try:
+                rows = other.execute(
+                    "SELECT parent_id, child_id, parent_board, child_board "
+                    "FROM task_links",
+                ).fetchall()
+                _ingest_rows(slug, rows)
+            finally:
+                other.close()
+        except sqlite3.Error:
+            # Best-effort: a corrupt sibling board can't block linker
+            continue
+
+    # Walk the merged graph.
+    while stack:
+        if len(seen) >= MAX_CROSS_BOARD_HOPS:
+            return True
+        slug, node = stack.pop()
+        node_key = (slug, node)
+        if node_key == target:
+            return True
+        if node_key in seen:
+            continue
+        seen.add(node_key)
+        for next_key in global_edges.get(node_key, []):
+            stack.append(next_key)
     return False
 
 
