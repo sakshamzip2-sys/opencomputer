@@ -182,6 +182,14 @@ class Gateway:
         # never runs Discord interactions.
         if plugin_registry.shared_api is not None:
             plugin_registry.shared_api._bind_dispatch(self.dispatch)
+            # Wave 6.E.7 — bind the seeded loop's consent gate to the
+            # shared PluginAPI so plugins (e.g. matrix) can install a
+            # custom prompt handler via ``api.set_consent_prompt_handler``
+            # at register() time. Idempotent.
+            seeded_loop = router._loops.get("default") if router is not None else None
+            seeded_gate = getattr(seeded_loop, "_consent_gate", None) if seeded_loop else None
+            if seeded_gate is not None:
+                plugin_registry.shared_api._consent_gate = seeded_gate
         self._adapters: list[BaseChannelAdapter] = []
         self._drainer: OutgoingDrainer | None = None
         self._drainer_task: asyncio.Task[None] | None = None
