@@ -19,6 +19,49 @@ When starting a new wave (v0.5, v0.6, ...):
 
 ---
 
+## v0.5-PRIORITY — Browser-bridge active control (close the chrome://inspect UX gap)
+
+> **Why this is first.** Surfaced during real LearnX-flow testing on 2026-05-03: every fresh Chrome session requires the user to toggle `chrome://inspect/#remote-debugging` before `chrome-devtools-mcp` can attach. OpenCLI never asks for this — they ship a Chrome extension that owns the `chrome.debugger` permission and never depends on the external CDP port. Until we close this gap, every new install / new profile hits the same friction wall.
+
+**The architectural difference**:
+
+| | OpenCLI | OpenComputer (today) |
+|---|---|---|
+| Attach mechanism | Chrome extension with `chrome.debugger` permission | External `chrome-devtools-mcp` over CDP port 9222 |
+| User setup | Install extension once → done | Toggle `chrome://inspect/#remote-debugging` per Chrome session |
+| Multi-profile | Extension installed per profile | One CDP port shared across profiles |
+| Tab control | Native via extension API | Routed through MCP wrapper |
+
+**Foundation already in tree**: [`extensions/browser-bridge/extension/`](../../../extensions/browser-bridge/extension/) is currently a passive ambient-awareness extension (it observes Chrome state, doesn't drive it). v0.5-priority promotes it to **active control**.
+
+**For our shape (~500-800 LOC)**:
+- Extend [`extensions/browser-bridge/extension/manifest.json`](../../../extensions/browser-bridge/extension/manifest.json) to declare `chrome.debugger` + `tabs` + `webNavigation` permissions
+- Add a control-channel: extension exposes a localhost websocket (or named pipe) that the Python side connects to
+- Port the subset of `chrome-devtools-mcp` actions we actually use into extension-side handlers:
+  - `new_page`, `close_page`, `select_page`, `list_pages` — `chrome.tabs.*` API
+  - `navigate`, `evaluate`, `screenshot`, `wait_for_*` — `chrome.debugger.attach()` + `Runtime.evaluate` / `Page.navigate`
+  - `resource_timing`, network capture — `chrome.debugger` `Network.*` events
+- New driver in `extensions/browser-control/server/` — `BrowserBridgeDriver` peer of the existing `chrome_mcp` driver
+- Wire the user-profile path (`profile_name="user"`) through `BrowserBridgeDriver` instead of `chrome_mcp`; CI / synthetic profiles keep using Playwright/MCP
+- Setup story: `opencomputer browser-bridge install` opens Chrome to the extension's unpacked-load page with explicit instructions; one-time per machine, no per-session toggle
+
+**Wins over chrome-devtools-mcp**:
+- Zero `chrome://inspect` toggling
+- Multi-profile clean (extension lives in the profile, not the global Chrome instance)
+- No external Node process; the bridge is just Chrome itself
+- Survives Chrome restarts without re-attach
+
+**Risk / wrinkle**:
+- Extension has to be loaded as unpacked (or shipped via Chrome Web Store — separate review track)
+- Some CDP coverage gaps in the extension API surface (e.g. `Target.*` is partially available via `chrome.debugger`); investigate per-action before porting
+- We still want `chrome-devtools-mcp` as a fallback for headless / CI / non-Chrome browsers
+
+**Estimated scope**: ~500-800 LOC across the extension + a new Python driver + setup CLI
+
+**Foundations already in v0.4/v0.5**: `BaseBrowserHandler` driver seam, owner-task pattern from PR #423 (Bug C fix), `DriverUnsupportedError` 501 mapping (Bug E fix). The driver swap point is already clean.
+
+---
+
 ## v0.5 — High-leverage capabilities (next planned wave)
 
 ### A. Autofix flow (auto-repair broken adapters)
