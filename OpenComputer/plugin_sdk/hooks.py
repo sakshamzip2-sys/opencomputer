@@ -62,6 +62,10 @@ class HookEvent(str, Enum):
     BEFORE_COMPACTION = "BeforeCompaction"
     AFTER_COMPACTION = "AfterCompaction"
     BEFORE_MESSAGE_WRITE = "BeforeMessageWrite"
+    # Wave 5 T13/T14 — Hermes-port hook events (1ef1e4c66 + 30307a980).
+    PRE_GATEWAY_DISPATCH = "PreGatewayDispatch"
+    PRE_APPROVAL_REQUEST = "PreApprovalRequest"
+    POST_APPROVAL_RESPONSE = "PostApprovalResponse"
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,15 +95,38 @@ class HookContext:
     streamed_chunk: str | None = None
     #: Provider model name in flight — populated for PRE/POST_LLM_CALL.
     model: str | None = None
+    # Wave 5 T13/T14/T15 — Hermes-port additional fields.
+    #: Inbound gateway message text — populated for PRE_GATEWAY_DISPATCH.
+    gateway_event_text: str | None = None
+    #: Sender identifier (channel-specific) — populated for PRE_GATEWAY_DISPATCH.
+    sender_id: str | None = None
+    #: Approval surface — "cli" or "gateway" — for PRE/POST_APPROVAL_*.
+    surface: str | None = None
+    #: Command being approved (PRE/POST_APPROVAL_*).
+    command: str | None = None
+    #: User choice on POST_APPROVAL_RESPONSE — once|session|always|deny|timeout.
+    choice: str | None = None
+    #: Tool dispatch latency in ms — populated for POST_TOOL_USE +
+    #: TRANSFORM_TOOL_RESULT (Wave 5 T15 — Hermes 59b56d445).
+    duration_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class HookDecision:
     """A hook's response. PreToolUse hooks use `decision` to approve/block."""
 
-    decision: Literal["approve", "block", "pass"] = "pass"
+    # Wave 5 T13 — added "skip", "rewrite", "allow" verdicts for
+    # PreGatewayDispatch (Hermes 1ef1e4c66). "skip" drops the message
+    # silently, "rewrite" replaces gateway_event_text via rewritten_text,
+    # "allow" is a positive ack equivalent to "pass" but documents that
+    # the hook explicitly inspected and approved.
+    decision: Literal[
+        "approve", "block", "pass", "skip", "rewrite", "allow",
+    ] = "pass"
     reason: str = ""
     modified_message: str = ""  # if set, injected as a system reminder
+    #: Wave 5 T13 — for decision="rewrite", the new event text.
+    rewritten_text: str | None = None
 
 
 # Hook handler is an async callable: (ctx) -> HookDecision or None (= "pass")
@@ -154,4 +181,8 @@ ALL_HOOK_EVENTS: tuple[HookEvent, ...] = (
     HookEvent.BEFORE_COMPACTION,
     HookEvent.AFTER_COMPACTION,
     HookEvent.BEFORE_MESSAGE_WRITE,
+    # Wave 5 T13/T14
+    HookEvent.PRE_GATEWAY_DISPATCH,
+    HookEvent.PRE_APPROVAL_REQUEST,
+    HookEvent.POST_APPROVAL_RESPONSE,
 )

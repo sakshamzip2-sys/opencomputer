@@ -249,6 +249,24 @@ class ConsentGate:
                 tier_matched=None,
                 audit_event_id=audit_id,
             )
+        # Wave 5 T14 — Hermes-port pre_approval_request hook (30307a980).
+        # Observer-only (return value ignored). Plugin crashes are
+        # swallowed by the engine. Wrapped defensively because a hook
+        # crashing must never block the user prompt.
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine
+            from plugin_sdk.hooks import HookContext as _HC
+            from plugin_sdk.hooks import HookEvent as _HE
+
+            await _hook_engine.fire_blocking(_HC(
+                event=_HE.PRE_APPROVAL_REQUEST,
+                session_id=session_id,
+                surface="gateway",  # request_approval is the gateway path
+                command=claim.capability_id,
+            ))
+        except Exception:  # noqa: BLE001
+            pass
+
         try:
             prompted = await self._prompt_handler(session_id, claim, scope)
         except Exception as exc:  # noqa: BLE001
@@ -334,6 +352,30 @@ class ConsentGate:
             decision="allow" if allowed else "deny",
             reason=reason,
         ))
+        # Wave 5 T14 — Hermes-port post_approval_response hook (30307a980).
+        # Observer-only. Maps action → choice vocab the hook receives:
+        # allow_always→"always", allow_once→"once", deny→"deny",
+        # timeout (handled in the timeout branch above) writes "timeout".
+        _choice = (
+            "always" if (allowed and persist)
+            else "once" if allowed
+            else "deny"
+        )
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine
+            from plugin_sdk.hooks import HookContext as _HC
+            from plugin_sdk.hooks import HookEvent as _HE
+
+            await _hook_engine.fire_blocking(_HC(
+                event=_HE.POST_APPROVAL_RESPONSE,
+                session_id=session_id,
+                surface="gateway",
+                command=claim.capability_id,
+                choice=_choice,
+            ))
+        except Exception:  # noqa: BLE001
+            pass
+
         return ConsentDecision(
             allowed=allowed,
             reason=reason,

@@ -35,10 +35,6 @@ from opencomputer.agent.episodic import EpisodicMemory
 from opencomputer.agent.injection import engine as injection_engine
 from opencomputer.agent.loop_safety import LoopAbortError, LoopDetector
 from opencomputer.agent.memory import MemoryManager
-from opencomputer.agent.tool_guardrails import (
-    ToolLoopGuard,
-    ToolLoopGuardrailError,
-)
 from opencomputer.agent.memory_bridge import MemoryBridge
 from opencomputer.agent.memory_context import MemoryContext
 from opencomputer.agent.prompt_builder import PromptBuilder, load_workspace_context
@@ -46,6 +42,10 @@ from opencomputer.agent.reviewer import PostResponseReviewer
 from opencomputer.agent.state import SessionDB
 from opencomputer.agent.step import StepOutcome
 from opencomputer.agent.subdirectory_hints import SubdirectoryHintTracker
+from opencomputer.agent.tool_guardrails import (
+    ToolLoopGuard,
+    ToolLoopGuardrailError,
+)
 from opencomputer.agent.tool_ordering import sort_tools_for_request
 from opencomputer.tools.bash_safety import detect_destructive
 from opencomputer.tools.memory_tool import MemoryTool
@@ -3293,6 +3293,33 @@ class AgentLoop:
                     session_id=session_id,
                     result=result if outcome == "failure" else None,
                 )
+                # Wave 5 T15 — Hermes-port duration_ms (59b56d445).
+                # Capture the dispatch latency once so both POST_TOOL_USE
+                # and TRANSFORM_TOOL_RESULT see the same value.
+                _duration_ms = max(
+                    0, int((_time.monotonic() - start) * 1000),
+                )
+                # Wave 5 T15 — fire POST_TOOL_USE with duration_ms so
+                # plugins can build per-tool latency dashboards.
+                # Wrapped defensively — a hook crash must never replace
+                # the tool result the model is about to see.
+                try:
+                    from opencomputer.hooks.engine import (
+                        engine as _post_hook_engine,
+                    )
+                    from plugin_sdk.hooks import HookContext as _PostHookContext  # noqa: N814
+                    from plugin_sdk.hooks import HookEvent as _PostHookEvent  # noqa: N814
+
+                    _post_hook_engine.fire_and_forget(_PostHookContext(
+                        event=_PostHookEvent.POST_TOOL_USE,
+                        session_id=session_id,
+                        tool_call=c,
+                        tool_result=result,
+                        runtime=self._runtime,
+                        duration_ms=_duration_ms,
+                    ))
+                except Exception:  # noqa: BLE001
+                    pass
                 # Round 2A P-1: TRANSFORM_TOOL_RESULT — handlers may rewrite
                 # the result text the model is about to see. This is a
                 # blocking hook because the rewrite must complete before the
@@ -3304,6 +3331,7 @@ class AgentLoop:
                     call=c,
                     session_id=session_id,
                     runtime=self._runtime,
+                    duration_ms=_duration_ms,
                 )
                 # Round 2A P-1: TRANSFORM_TERMINAL_OUTPUT — same shape but
                 # scoped to Bash-style tools. Streaming-bash hasn't landed
@@ -3667,6 +3695,7 @@ async def _maybe_transform_tool_result(
     call: ToolCall,
     session_id: str,
     runtime: RuntimeContext,
+    duration_ms: int | None = None,
 ) -> Any:
     """Round 2A P-1: invoke TRANSFORM_TOOL_RESULT and apply ``modified_message``.
 
@@ -3674,6 +3703,10 @@ async def _maybe_transform_tool_result(
     :class:`~plugin_sdk.core.ToolResult` whose ``content`` is the handler's
     rewrite. Failures are isolated — any exception in a handler leaves the
     original result untouched (the engine logs it).
+
+    Wave 5 T15 — ``duration_ms`` is the tool's dispatch latency, forwarded
+    to the hook context so plugins can build latency dashboards without
+    instrumenting every tool individually.
     """
     from opencomputer.hooks.engine import engine as _hook_engine
     from plugin_sdk.core import ToolResult as _ToolResult
@@ -3686,6 +3719,7 @@ async def _maybe_transform_tool_result(
         tool_call=call,
         tool_result=result,
         runtime=runtime,
+        duration_ms=duration_ms,
     )
     decision = await _hook_engine.fire_blocking(ctx)
     if decision is None or not decision.modified_message:

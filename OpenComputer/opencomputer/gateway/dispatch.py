@@ -488,6 +488,40 @@ class Dispatch:
             return None
 
         session_id = self._session_id_for(event)
+
+        # Wave 5 T13 — Hermes-port pre_gateway_dispatch hook (1ef1e4c66).
+        # Fires once per inbound message before any auth check. Plugins
+        # can drop, rewrite, or allow. Plugin crashes are swallowed by
+        # the hook engine (returns None → proceed normally).
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine
+            from plugin_sdk.hooks import HookContext, HookEvent
+
+            _gw_decision = await _hook_engine.fire_blocking(
+                HookContext(
+                    event=HookEvent.PRE_GATEWAY_DISPATCH,
+                    session_id=session_id,
+                    gateway_event_text=event.text,
+                    sender_id=event.chat_id,
+                ),
+            )
+            if _gw_decision is not None:
+                if _gw_decision.decision == "skip":
+                    logger.info(
+                        "pre_gateway_dispatch: dropping message (reason=%s)",
+                        _gw_decision.reason,
+                    )
+                    return None
+                if (
+                    _gw_decision.decision == "rewrite"
+                    and _gw_decision.rewritten_text is not None
+                ):
+                    event = dataclasses.replace(
+                        event, text=_gw_decision.rewritten_text,
+                    )
+        except Exception as _gwe:  # noqa: BLE001
+            logger.debug("pre_gateway_dispatch fire failed: %s", _gwe)
+
         pure_attachment = attach_present and not text_present
 
         # ── Case 1: pure-attachment arrival joins the in-flight burst.
