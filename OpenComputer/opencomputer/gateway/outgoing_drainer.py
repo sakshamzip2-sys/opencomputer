@@ -107,8 +107,18 @@ class OutgoingDrainer:
                     msg.id, f"no live adapter for platform {msg.platform!r}",
                 )
                 continue
+            # Wave 6.E.6 — Hermes parity. Long notification bodies
+            # (kanban completion summaries, build-log dumps) get
+            # platform-truncated so they don't exceed Telegram /
+            # Discord / Matrix message-length caps. The truncate_smart
+            # helper preserves markdown code-fence boundaries.
+            body = msg.body
+            cap = getattr(adapter, "max_message_length", 0)
+            if cap and len(body) > cap:
+                from opencomputer.gateway._truncate import truncate_smart
+                body = truncate_smart(body, max_len=cap)
             try:
-                result = await adapter.send(msg.chat_id, msg.body)
+                result = await adapter.send(msg.chat_id, body)
             except Exception as e:  # noqa: BLE001 — capture for the user
                 logger.warning(
                     "outgoing drainer: send failed for %s — %s", msg.id, e,
