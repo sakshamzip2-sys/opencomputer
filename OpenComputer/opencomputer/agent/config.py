@@ -144,7 +144,7 @@ class LoopConfig:
     max_iterations: int = 50
     parallel_tools: bool = True
     inactivity_timeout_s: int = 300
-    iteration_timeout_s: int = 1800
+    iteration_timeout_s: int = 3600  # 2026-05-04: doubled from 1800 → 1h
     delegation_max_iterations: int = 50
     max_delegation_depth: int = 2
     """Cap on `DelegateTool` recursion. 2 = parent (depth 0) → child (depth 1) → grandchild (depth 2) rejected.
