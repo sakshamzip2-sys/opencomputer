@@ -1074,6 +1074,34 @@ class PluginAPI:
             )
         self.slash_commands[name] = cmd
 
+    def set_consent_prompt_handler(self, handler: Any) -> None:
+        """Install a ConsentGate prompt handler from a plugin (Wave 6.E.7).
+
+        Mirrors :meth:`opencomputer.agent.consent.gate.ConsentGate.set_prompt_handler`
+        but accessed through the narrow PluginAPI surface so plugins
+        don't need a reference to the gate object itself. Re-registration
+        replaces; pass ``None`` to disable.
+
+        The host wires this by setting ``self._consent_gate`` after
+        constructing the API; if the gate isn't bound yet (CLI/wire
+        path before gateway start), the call logs + no-ops.
+        """
+        gate = getattr(self, "_consent_gate", None)
+        if gate is None:
+            logger.warning(
+                "PluginAPI.set_consent_prompt_handler: no consent gate bound "
+                "to this API instance (likely a CLI/wire context, or the "
+                "gateway hasn't initialized the gate yet); handler ignored"
+            )
+            return
+        if not hasattr(gate, "set_prompt_handler"):
+            logger.warning(
+                "PluginAPI.set_consent_prompt_handler: bound gate has no "
+                "set_prompt_handler attribute; handler ignored"
+            )
+            return
+        gate.set_prompt_handler(handler)
+
     def register_doctor_contribution(self, contribution: Any) -> None:
         """Register a HealthContribution — runs on `opencomputer doctor [--fix]`.
 
