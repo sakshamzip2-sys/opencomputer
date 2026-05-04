@@ -163,8 +163,42 @@ async def complete_vision(
     return resp.message.content if resp and resp.message else ""
 
 
+async def complete_video(
+    *,
+    video_base64: str,
+    mime_type: str,
+    prompt: str,
+    max_tokens: int = 1024,
+    model: str | None = None,
+) -> str:
+    """Run a video completion (text + base64 video) through the configured provider.
+
+    Wave 5 T7 — Hermes-port (c9a3f36f5). Uses the OpenRouter / Gemini-style
+    multimodal-content-array shape with a ``video_url`` block whose URL
+    is a ``data:<mime>;base64,<b64>`` URI. Providers that can't decode
+    a video block raise; the caller (``video_analyze`` tool) catches
+    and surfaces a clean error.
+    """
+    from plugin_sdk.core import Message
+
+    provider = _resolve_provider()
+    data_url = f"data:{mime_type};base64,{video_base64}"
+    content = [
+        {"type": "video_url", "video_url": {"url": data_url}},
+        {"type": "text", "text": prompt},
+    ]
+    resolved_model = model or _resolve_default_model()
+    resp = await provider.complete(
+        model=resolved_model,
+        messages=[Message(role="user", content=content)],
+        max_tokens=max_tokens,
+    )
+    return resp.message.content if resp and resp.message else ""
+
+
 __all__ = [
     "complete_text",
     "complete_text_sync",
+    "complete_video",
     "complete_vision",
 ]
