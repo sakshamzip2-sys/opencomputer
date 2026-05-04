@@ -34,7 +34,7 @@ from plugin_sdk.core import Message, ToolCall
 #: to NULL. v5 = Tier-A item 11 ``tool_usage`` table — per-tool-call
 #: telemetry for ``opencomputer insights`` (tool, duration_ms, error,
 #: model, ts). Existing data unaffected; the table starts empty.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -56,8 +56,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     vibe          TEXT,    -- A.4 (2026-04-27): per-session emotional state
                            -- (frustrated|excited|tired|curious|calm|stuck|"")
     vibe_updated  REAL,    -- A.4: when vibe was last classified (epoch seconds)
-    cwd           TEXT     -- Plan 3 (2026-05-01): working dir at session start,
+    cwd           TEXT,    -- Plan 3 (2026-05-01): working dir at session start,
                            -- input signal for profile_analysis_daily cwd-clusterer
+    goal_text         TEXT,            -- Wave 5 (2026-05-04): /goal persistent target
+    goal_active       INTEGER DEFAULT 0,
+    goal_turns_used   INTEGER DEFAULT 0,
+    goal_budget       INTEGER DEFAULT 20
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -219,6 +223,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (7, 8): "_migrate_v7_to_v8",
     (8, 9): "_migrate_v8_to_v9",
     (9, 10): "_migrate_v9_to_v10",
+    (10, 11): "_migrate_v10_to_v11",
 }
 
 
@@ -641,6 +646,35 @@ def _self_heal_columns(conn: sqlite3.Connection) -> None:
                 raise
 
 
+def _migrate_v10_to_v11(conn: sqlite3.Connection) -> None:
+    """Hermes Wave 5 (2026-05-04) — /goal persistent cross-turn goals.
+
+    Adds four columns to the ``sessions`` table mirroring the existing
+    ``vibe`` / ``vibe_updated`` per-session-field pattern:
+
+    - ``goal_text``       (TEXT)    — user-stated goal; NULL when no goal set
+    - ``goal_active``     (INTEGER) — 0/1 paused/running; default 0
+    - ``goal_turns_used`` (INTEGER) — continuation turns consumed; default 0
+    - ``goal_budget``     (INTEGER) — max continuations before auto-stop; default 20
+
+    All columns NULL/0 by default — sessions without a goal are
+    indistinguishable from pre-v11 sessions.
+    """
+    for col, sql_type in (
+        ("goal_text", "TEXT"),
+        ("goal_active", "INTEGER DEFAULT 0"),
+        ("goal_turns_used", "INTEGER DEFAULT 0"),
+        ("goal_budget", "INTEGER DEFAULT 20"),
+    ):
+        try:
+            conn.execute(
+                f'ALTER TABLE sessions ADD COLUMN "{col}" {sql_type}'
+            )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+
+
 def apply_migrations(conn: sqlite3.Connection) -> None:
     """Advance DB from stored schema_version to SCHEMA_VERSION. Idempotent."""
     current = _read_schema_version(conn)
@@ -961,6 +995,98 @@ class SessionDB:
                 "UPDATE sessions SET vibe = ?, vibe_updated = ? WHERE id = ?",
                 (vibe, time.time(), session_id),
             )
+
+    # ─── Wave 5 (2026-05-04) — /goal persistent cross-turn goals ────────
+
+    def set_session_goal(
+        self, session_id: str, *, text: str, budget: int = 20
+    ) -> None:
+        """Set or replace the goal for ``session_id``. Resets turns_used to 0.
+
+        Mirrors hermes-agent ``265bd59c1``. ``budget`` is the maximum number of
+        continuation turns the loop is allowed to inject before auto-stopping.
+        """
+        with self._txn() as conn:
+            conn.execute(
+                """
+                UPDATE sessions
+                   SET goal_text = ?, goal_active = 1,
+                       goal_turns_used = 0, goal_budget = ?
+                 WHERE id = ?
+                """,
+                (text, int(budget), session_id),
+            )
+
+    def get_session_goal(self, session_id: str):
+        """Return :class:`opencomputer.agent.goal.GoalState` or ``None``."""
+        from opencomputer.agent.goal import GoalState
+
+        with self._txn() as conn:
+            row = conn.execute(
+                """
+                SELECT goal_text, goal_active, goal_turns_used, goal_budget
+                  FROM sessions WHERE id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return GoalState(
+            text=row[0],
+            active=bool(row[1]),
+            turns_used=int(row[2] or 0),
+            budget=int(row[3] or 20),
+        )
+
+    def update_session_goal(
+        self,
+        session_id: str,
+        *,
+        text: str | None = None,
+        active: bool | None = None,
+        turns_used: int | None = None,
+        budget: int | None = None,
+    ) -> None:
+        """Patch one or more goal fields. No-op if all kwargs are None."""
+        sets: list[str] = []
+        params: list[object] = []
+        if text is not None:
+            sets.append("goal_text = ?")
+            params.append(text)
+        if active is not None:
+            sets.append("goal_active = ?")
+            params.append(1 if active else 0)
+        if turns_used is not None:
+            sets.append("goal_turns_used = ?")
+            params.append(int(turns_used))
+        if budget is not None:
+            sets.append("goal_budget = ?")
+            params.append(int(budget))
+        if not sets:
+            return
+        params.append(session_id)
+        with self._txn() as conn:
+            conn.execute(
+                f"UPDATE sessions SET {', '.join(sets)} WHERE id = ?", params
+            )
+
+    def clear_session_goal(self, session_id: str) -> None:
+        """Drop the goal — sets goal_text = NULL, goal_active = 0, turns_used = 0.
+
+        ``goal_budget`` is preserved so a subsequent ``set_session_goal``
+        without an explicit budget falls back to the default.
+        """
+        with self._txn() as conn:
+            conn.execute(
+                """
+                UPDATE sessions
+                   SET goal_text = NULL, goal_active = 0, goal_turns_used = 0
+                 WHERE id = ?
+                """,
+                (session_id,),
+            )
+
+    # ─── A.4 vibe thread (continued) ─────────────────────────────────
 
     def record_vibe(
         self,

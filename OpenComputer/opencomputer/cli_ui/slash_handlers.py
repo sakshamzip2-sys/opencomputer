@@ -361,6 +361,77 @@ def _handle_queue(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_goal(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/goal [<text>|status|pause|resume|clear]`` — manage persistent goal.
+
+    No args / ``status``: show current goal.
+    ``pause``: stop continuation loop.
+    ``resume``: resume + reset turn counter.
+    ``clear``: drop the goal.
+    Anything else: set ``args`` joined with spaces as the new goal text.
+
+    Persists in the ``sessions`` table (schema v11+ ``goal_*`` columns).
+    Direct DB access bypasses callback wiring — db_path comes from
+    ``ctx.config.session.db_path`` so this handler is self-contained.
+    """
+    from opencomputer.agent.state import SessionDB
+
+    db = SessionDB(ctx.config.session.db_path)
+    sub = (args[0].lower() if args else "status")
+
+    if sub == "status" or not args:
+        g = db.get_session_goal(ctx.session_id)
+        if g is None:
+            ctx.console.print(
+                "[dim]no goal set. "
+                "Use [cyan]/goal <text>[/cyan] to set one.[/dim]"
+            )
+            return SlashResult(handled=True)
+        state = "[green]active[/green]" if g.active else "[yellow]paused[/yellow]"
+        ctx.console.print(
+            f"[bold]goal:[/bold] {g.text}\n"
+            f"  status: {state}, turn {g.turns_used}/{g.budget}"
+        )
+        return SlashResult(handled=True)
+
+    if sub == "pause":
+        if db.get_session_goal(ctx.session_id) is None:
+            ctx.console.print("[red]no goal set.[/red]")
+        else:
+            db.update_session_goal(ctx.session_id, active=False)
+            ctx.console.print("[yellow]goal paused.[/yellow]")
+        return SlashResult(handled=True)
+
+    if sub == "resume":
+        if db.get_session_goal(ctx.session_id) is None:
+            ctx.console.print("[red]no goal set.[/red]")
+        else:
+            db.update_session_goal(ctx.session_id, active=True, turns_used=0)
+            ctx.console.print("[green]goal resumed.[/green] (turn counter reset)")
+        return SlashResult(handled=True)
+
+    if sub == "clear":
+        if db.get_session_goal(ctx.session_id) is None:
+            ctx.console.print("[dim]no goal to clear.[/dim]")
+        else:
+            db.clear_session_goal(ctx.session_id)
+            ctx.console.print("[green]goal cleared.[/green]")
+        return SlashResult(handled=True)
+
+    # Otherwise, treat the full args as the new goal text
+    text = " ".join(args).strip()
+    if not text:
+        ctx.console.print("[red]/goal: empty text[/red]")
+        return SlashResult(handled=True)
+    db.set_session_goal(ctx.session_id, text=text)
+    preview = text if len(text) <= 80 else text[:77] + "..."
+    ctx.console.print(
+        f"[green]goal set:[/green] {preview}\n"
+        f"  [dim]budget=20 continuations · use /goal status to check progress[/dim]"
+    )
+    return SlashResult(handled=True)
+
+
 def _handle_snapshot(ctx: SlashContext, args: list[str]) -> SlashResult:
     """``/snapshot [create [<label>]|list|restore <id>|prune]``.
 
@@ -828,6 +899,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "rename": _handle_rename,
     "resume": _handle_resume,
     "queue": _handle_queue,
+    "goal": _handle_goal,
     "snapshot": _handle_snapshot,
     "reload": _handle_reload,
     "reload-mcp": _handle_reload_mcp,

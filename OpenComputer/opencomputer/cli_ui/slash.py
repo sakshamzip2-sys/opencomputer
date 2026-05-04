@@ -139,6 +139,12 @@ SLASH_REGISTRY: list[CommandDef] = [
         args_hint="[<prompt>|list|clear]",
     ),
     CommandDef(
+        name="goal",
+        description="Set/show/pause/resume/clear a persistent goal for this session.",
+        category="session",
+        args_hint="[<text>|status|pause|resume|clear]",
+    ),
+    CommandDef(
         name="snapshot",
         description="Archive critical state files (session db + config + .env + ...).",
         category="session",
