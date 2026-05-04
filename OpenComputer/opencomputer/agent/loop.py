@@ -1756,6 +1756,40 @@ class AgentLoop:
                     # indicator hides itself when no title is present,
                     # so fresh sessions show no clutter.
                     pass
+                    # Wave 5 T2 closure — Ralph-loop continuation gate. If
+                    # an active /goal exists and isn't satisfied, fold the
+                    # continuation prompt back into a recursive
+                    # ``run_conversation`` so the next turn proceeds with
+                    # all the existing turn machinery (compaction, hooks,
+                    # tool dispatch, runtime). Stack depth bounded by
+                    # ``goal.budget`` (default 20) — well below recursion
+                    # limit. Skipped entirely when no goal is active.
+                    _continuation_prompt: str | None = None
+                    try:
+                        _last_text = (
+                            final_assistant_msg.content
+                            if isinstance(final_assistant_msg.content, str)
+                            else ""
+                        )
+                        _continuation_prompt = await self._maybe_continue_goal(
+                            sid, _last_text,
+                        )
+                    except Exception:  # noqa: BLE001 — gate must never break the turn
+                        _continuation_prompt = None
+                    if _continuation_prompt:
+                        # Don't end_session; the continuation re-enters the
+                        # loop on the same sid and ConversationResult flows
+                        # from the eventual non-continuation END_TURN.
+                        return await self.run_conversation(
+                            user_message=_continuation_prompt,
+                            session_id=sid,
+                            system_override=system_override,
+                            runtime=runtime,
+                            stream_callback=stream_callback,
+                            thinking_callback=thinking_callback,
+                            tool_callback=tool_callback,
+                            system_prompt_override=system_prompt_override,
+                        )
                     self.db.end_session(sid)
                     return ConversationResult(
                         final_message=final_assistant_msg,
@@ -2555,6 +2589,45 @@ class AgentLoop:
             return ()
 
     # ─── T1 of auto-skill-evolution plan: SessionEndEvent emission ─
+
+    async def _maybe_continue_goal(
+        self, sid: str, last_assistant_text: str
+    ) -> str | None:
+        """Wave 5 T2 closure — Ralph-loop continuation gate.
+
+        Reads the active goal (if any), asks the auxiliary judge whether
+        it's satisfied, and returns a continuation user-prompt to feed
+        the next turn — or ``None`` to exit normally. The judge fails
+        OPEN (treated as NOT_SATISFIED) so a flaky aux model never
+        wedges progress; ``goal.budget`` is the real backstop.
+
+        Returns:
+            Continuation prompt string when the loop should re-enter;
+            None when the goal is unset, paused, satisfied, or
+            budget-exhausted.
+        """
+        goal = self.db.get_session_goal(sid)
+        if goal is None or not goal.should_continue():
+            return None
+        try:
+            from opencomputer.agent.goal import (
+                build_continuation_prompt,
+                judge_satisfied,
+            )
+
+            satisfied = await judge_satisfied(
+                goal_text=goal.text, last_response=last_assistant_text or "",
+            )
+        except Exception:  # noqa: BLE001 — fail-open
+            satisfied = False
+        if satisfied:
+            # Goal complete — clear it so we don't re-judge on the next user
+            # message. Keep the conversation around (don't end_session).
+            self.db.clear_session_goal(sid)
+            return None
+        # Not satisfied; bump turn counter and return a continuation prompt.
+        self.db.update_session_goal(sid, turns_used=goal.turns_used + 1)
+        return build_continuation_prompt(goal.text)
 
     def _ensure_session_persisted(self, sid: str) -> None:
         """Lazy-write the session row on first persistence demand.
