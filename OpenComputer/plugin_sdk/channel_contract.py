@@ -246,6 +246,45 @@ class BaseChannelAdapter(ABC):
         """
         raise NotImplementedError(f"{self.platform} adapter has no PHOTO_OUT capability")
 
+    async def send_multiple_images(
+        self,
+        chat_id: str,
+        image_paths: list[str | Path],
+        caption: str = "",
+        **kwargs: Any,
+    ) -> None:
+        """Send N images to ``chat_id``. Default loops :meth:`send_photo`.
+
+        Wave 5 T10 — Hermes-port (3de8e2168). Adapters with native batch
+        APIs (Telegram media_group, Discord ``files=[...]``,
+        Slack files_upload_v2, Mattermost ``file_ids``, etc.) should
+        override and fall back to ``super().send_multiple_images(...)``
+        on any platform-side failure so the user still gets *something*.
+
+        ``caption`` applies to the first image only; subsequent images
+        receive an empty caption (matches Telegram album semantics).
+        Empty ``image_paths`` is a no-op.
+        """
+        first = True
+        for path in image_paths:
+            try:
+                await self.send_photo(
+                    chat_id,
+                    path,
+                    caption=caption if first else "",
+                    **kwargs,
+                )
+            except NotImplementedError:
+                # Adapter has no PHOTO_OUT capability — try the URL path.
+                # Falls through to NotImplementedError again below if
+                # send_image is not overridden either.
+                await self.send_image(
+                    chat_id,
+                    str(path),
+                    caption=caption if first else "",
+                )
+            first = False
+
     async def send_document(
         self, chat_id: str, file_path: str | Path, caption: str = "", **kwargs: Any
     ) -> SendResult:
