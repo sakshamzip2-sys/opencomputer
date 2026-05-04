@@ -361,6 +361,40 @@ def _handle_queue(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_footer(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/footer`` — Wave 5 T4 — Hermes-port (e123f4ecf).
+
+    Status-only in this revision: print whether the runtime metadata
+    footer is currently enabled. Toggling on/off lives in
+    ``~/.opencomputer/<profile>/config.yaml`` under
+    ``display.runtime_footer.enabled``.
+    """
+    try:
+        import yaml
+
+        from opencomputer.agent.config import _home
+        from opencomputer.gateway.runtime_footer import resolve_footer_config
+
+        _cfg_path = _home() / "config.yaml"
+        if _cfg_path.exists():
+            try:
+                cfg_dict = yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
+            except Exception:  # noqa: BLE001 — partial yaml is fine; degrade
+                cfg_dict = {}
+        else:
+            cfg_dict = {}
+        fc = resolve_footer_config(cfg_dict)
+    except Exception as e:  # noqa: BLE001
+        ctx.console.print(f"[yellow]/footer status read failed: {e}[/yellow]")
+        return SlashResult(handled=True)
+    state = "[green]on[/green]" if fc.enabled else "[dim]off[/dim]"
+    ctx.console.print(
+        f"[bold]runtime footer:[/bold] {state}\n"
+        f"  [dim]edit display.runtime_footer.enabled in config.yaml to toggle.[/dim]"
+    )
+    return SlashResult(handled=True)
+
+
 def _handle_steer(ctx: SlashContext, args: list[str]) -> SlashResult:
     """``/steer <text>`` — Wave 5 T3 — Hermes-port (e27b0b765).
 
@@ -928,6 +962,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "resume": _handle_resume,
     "queue": _handle_queue,
     "steer": _handle_steer,
+    "footer": _handle_footer,
     "goal": _handle_goal,
     "snapshot": _handle_snapshot,
     "reload": _handle_reload,

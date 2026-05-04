@@ -19,6 +19,7 @@ import asyncio
 import dataclasses
 import hashlib
 import logging
+import os
 import time
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -367,6 +368,9 @@ class Dispatch:
         # absorbs the photo's attachments into the text event (the
         # text is the user's "go" signal).
         cfg = config or {}
+        # Wave 5 T4 — keep the raw display-config dict so the runtime
+        # footer + busy_ack helpers can be re-resolved per-platform.
+        self._display_cfg: dict[str, Any] = cfg
         self._burst_window_seconds: float = float(
             cfg.get("photo_burst_window", 0.8)
         )
@@ -747,7 +751,42 @@ class Dispatch:
                     task.add_done_callback(_pending_outcome_writes.discard)
                 except Exception as e:  # noqa: BLE001 — telemetry guard
                     logger.warning("outcome scheduling failed: %s", e)
-                return result.final_message.content or None
+                # Wave 5 T4 — append the runtime-metadata footer if the
+                # operator has opted in via display.runtime_footer.enabled
+                # (per-platform overrides honored). Default off so existing
+                # deployments see no UX change. Wrapped defensively — a
+                # footer-render failure must never replace the actual reply.
+                _final_text = result.final_message.content or None
+                try:
+                    from opencomputer.gateway.runtime_footer import (
+                        format_runtime_footer,
+                        resolve_footer_config,
+                    )
+
+                    _platform_name = (
+                        event.platform.value if event.platform else None
+                    )
+                    _fc = resolve_footer_config(
+                        self._display_cfg, platform=_platform_name,
+                    )
+                    if _fc.enabled and _final_text:
+                        _model_name = (
+                            getattr(getattr(loop, "config", None), "model", None)
+                        )
+                        _model_str = (
+                            getattr(_model_name, "model", "") if _model_name else ""
+                        )
+                        _line = format_runtime_footer(
+                            model=_model_str,
+                            tokens_used=getattr(result, "input_tokens", 0) or 0,
+                            context_length=None,  # provider-specific lookup TBD
+                            cwd=os.getcwd(),
+                        )
+                        if _line:
+                            _final_text = f"{_final_text}\n\n_{_line}_"
+                except Exception as _fe:  # noqa: BLE001
+                    logger.debug("runtime_footer render failed: %s", _fe)
+                return _final_text
             except Exception as e:  # noqa: BLE001
                 # Always log full traceback for debugging; user only
                 # sees the one-liner from _format_user_facing_error so

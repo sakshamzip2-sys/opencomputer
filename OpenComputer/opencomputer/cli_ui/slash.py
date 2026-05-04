@@ -153,6 +153,13 @@ SLASH_REGISTRY: list[CommandDef] = [
         category="session",
         args_hint="<text>",
     ),
+    # Wave 5 T4 — Hermes-port (e123f4ecf) — runtime metadata footer.
+    # Status-only in this revision; opt-in persistence via config.yaml.
+    CommandDef(
+        name="footer",
+        description="Show whether the runtime metadata footer is enabled.",
+        category="config",
+    ),
     CommandDef(
         name="snapshot",
         description="Archive critical state files (session db + config + .env + ...).",
