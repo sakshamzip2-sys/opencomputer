@@ -40,6 +40,7 @@ from .dispatcher import DispatchResult, dispatch_browser_control_request
 from .handlers import (
     BrowserHandlerError,
     BrowserRouteContext,
+    DriverUnsupportedError,
     ProfileMutationDeniedError,
     ensure_profile_can_mutate,
     resolve_profile_name,
@@ -67,6 +68,7 @@ __all__ = [
     "BrowserHandlerError",
     "BrowserRouteContext",
     "BrowserServerHandle",
+    "DriverUnsupportedError",
     "CSRFMiddleware",
     "DEFAULT_BODY_LIMIT_BYTES",
     "DispatchResult",

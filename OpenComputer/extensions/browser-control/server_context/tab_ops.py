@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import NoReturn
 
 from ..profiles.capabilities import get_browser_profile_capabilities
 from .selection import select_target_id
@@ -52,6 +53,27 @@ class TabOpsBackend:
 # ─── helpers ─────────────────────────────────────────────────────────
 
 
+def _driver_label(runtime: ProfileRuntimeState) -> str:
+    """Stable human-readable driver label for ``DriverUnsupportedError``."""
+    capabilities = get_browser_profile_capabilities(runtime.profile)
+    return capabilities.mode
+
+
+def _raise_driver_unsupported(
+    runtime: ProfileRuntimeState, *, action: str, message: str | None = None
+) -> NoReturn:
+    """Raise the typed 501 error so the agent sees ``driver_unsupported``."""
+    # Local import so server_context stays free of server.handlers cycle.
+    from ..server.handlers import DriverUnsupportedError
+
+    raise DriverUnsupportedError(
+        action=action,
+        driver=_driver_label(runtime),
+        profile=runtime.profile.name,
+        message=message,
+    )
+
+
 def _pick_open_callable(
     runtime: ProfileRuntimeState,
     backend: TabOpsBackend,
@@ -59,19 +81,29 @@ def _pick_open_callable(
     capabilities = get_browser_profile_capabilities(runtime.profile)
     if capabilities.uses_chrome_mcp:
         if backend.open_tab_via_mcp is None:
-            raise RuntimeError(
-                f"open_tab: no chrome-mcp opener for profile {runtime.profile.name!r}"
+            _raise_driver_unsupported(
+                runtime,
+                action="open_tab",
+                message=(
+                    f"open_tab: no chrome-mcp opener for profile {runtime.profile.name!r}"
+                ),
             )
         return backend.open_tab_via_mcp
     if capabilities.uses_persistent_playwright:
         if backend.open_tab_via_playwright is None:
-            raise RuntimeError(
-                f"open_tab: no playwright opener for profile {runtime.profile.name!r}"
+            _raise_driver_unsupported(
+                runtime,
+                action="open_tab",
+                message=(
+                    f"open_tab: no playwright opener for profile {runtime.profile.name!r}"
+                ),
             )
         return backend.open_tab_via_playwright
     if backend.open_tab_via_cdp is None:
-        raise RuntimeError(
-            f"open_tab: no CDP opener for profile {runtime.profile.name!r}"
+        _raise_driver_unsupported(
+            runtime,
+            action="open_tab",
+            message=f"open_tab: no CDP opener for profile {runtime.profile.name!r}",
         )
     return backend.open_tab_via_cdp
 
@@ -83,18 +115,30 @@ def _pick_focus_callable(
     capabilities = get_browser_profile_capabilities(runtime.profile)
     if capabilities.uses_chrome_mcp:
         if backend.focus_tab_via_mcp is None:
-            raise RuntimeError(
-                f"focus_tab: no chrome-mcp focuser for profile {runtime.profile.name!r}"
+            _raise_driver_unsupported(
+                runtime,
+                action="focus_tab",
+                message=(
+                    f"focus_tab: no chrome-mcp focuser for profile {runtime.profile.name!r}"
+                ),
             )
         return backend.focus_tab_via_mcp
     if capabilities.uses_persistent_playwright:
         if backend.focus_tab_via_playwright is None:
-            raise RuntimeError(
-                f"focus_tab: no playwright focuser for profile {runtime.profile.name!r}"
+            _raise_driver_unsupported(
+                runtime,
+                action="focus_tab",
+                message=(
+                    f"focus_tab: no playwright focuser for profile {runtime.profile.name!r}"
+                ),
             )
         return backend.focus_tab_via_playwright
     if backend.focus_tab_via_cdp is None:
-        raise RuntimeError(f"focus_tab: no CDP focuser for profile {runtime.profile.name!r}")
+        _raise_driver_unsupported(
+            runtime,
+            action="focus_tab",
+            message=f"focus_tab: no CDP focuser for profile {runtime.profile.name!r}",
+        )
     return backend.focus_tab_via_cdp
 
 
@@ -105,18 +149,30 @@ def _pick_close_callable(
     capabilities = get_browser_profile_capabilities(runtime.profile)
     if capabilities.uses_chrome_mcp:
         if backend.close_tab_via_mcp is None:
-            raise RuntimeError(
-                f"close_tab: no chrome-mcp closer for profile {runtime.profile.name!r}"
+            _raise_driver_unsupported(
+                runtime,
+                action="close_tab",
+                message=(
+                    f"close_tab: no chrome-mcp closer for profile {runtime.profile.name!r}"
+                ),
             )
         return backend.close_tab_via_mcp
     if capabilities.uses_persistent_playwright:
         if backend.close_tab_via_playwright is None:
-            raise RuntimeError(
-                f"close_tab: no playwright closer for profile {runtime.profile.name!r}"
+            _raise_driver_unsupported(
+                runtime,
+                action="close_tab",
+                message=(
+                    f"close_tab: no playwright closer for profile {runtime.profile.name!r}"
+                ),
             )
         return backend.close_tab_via_playwright
     if backend.close_tab_via_cdp is None:
-        raise RuntimeError(f"close_tab: no CDP closer for profile {runtime.profile.name!r}")
+        _raise_driver_unsupported(
+            runtime,
+            action="close_tab",
+            message=f"close_tab: no CDP closer for profile {runtime.profile.name!r}",
+        )
     return backend.close_tab_via_cdp
 
 

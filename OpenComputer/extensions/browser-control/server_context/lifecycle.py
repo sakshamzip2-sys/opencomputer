@@ -18,7 +18,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 
 from ..chrome.lifecycle import is_chrome_reachable
 from ..profiles.capabilities import (
@@ -164,31 +164,63 @@ async def _bring_up(
     profile = runtime.profile
     if capabilities.uses_chrome_mcp:
         if driver.spawn_chrome_mcp is None:
-            raise RuntimeError(
-                "ProfileDriver.spawn_chrome_mcp not provided for "
-                f"profile {profile.name!r} (driver=existing-session)"
+            _raise_driver_unsupported(
+                runtime,
+                action="start (chrome-mcp)",
+                message=(
+                    "ProfileDriver.spawn_chrome_mcp not provided for "
+                    f"profile {profile.name!r} (driver=existing-session)"
+                ),
             )
         runtime.chrome_mcp_client = await driver.spawn_chrome_mcp(profile)
         return
 
     if capabilities.is_remote:
         if driver.connect_remote is None:
-            raise RuntimeError(
-                "ProfileDriver.connect_remote not provided for "
-                f"profile {profile.name!r} (remote-cdp)"
+            _raise_driver_unsupported(
+                runtime,
+                action="start (remote-cdp)",
+                message=(
+                    "ProfileDriver.connect_remote not provided for "
+                    f"profile {profile.name!r} (remote-cdp)"
+                ),
             )
         runtime.playwright_session = await driver.connect_remote(profile)
         return
 
     # local-managed
     if driver.launch_managed is None:
-        raise RuntimeError(
-            "ProfileDriver.launch_managed not provided for "
-            f"profile {profile.name!r} (local-managed)"
+        _raise_driver_unsupported(
+            runtime,
+            action="start (local-managed)",
+            message=(
+                "ProfileDriver.launch_managed not provided for "
+                f"profile {profile.name!r} (local-managed)"
+            ),
         )
     runtime.running = await driver.launch_managed(profile)
     if driver.connect_managed is not None:
         runtime.playwright_session = await driver.connect_managed(profile, runtime.running)
+
+
+def _raise_driver_unsupported(
+    runtime: ProfileRuntimeState,
+    *,
+    action: str,
+    message: str | None = None,
+) -> NoReturn:
+    """Raise the typed 501 so missing-driver bring-up surfaces structured."""
+    # Local import to avoid a cycle with server.handlers (server depends
+    # on server_context).
+    from ..server.handlers import DriverUnsupportedError
+
+    capabilities = get_browser_profile_capabilities(runtime.profile)
+    raise DriverUnsupportedError(
+        action=action,
+        driver=capabilities.mode,
+        profile=runtime.profile.name,
+        message=message,
+    )
 
 
 # ─── teardown ────────────────────────────────────────────────────────

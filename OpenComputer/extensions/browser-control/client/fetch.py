@@ -127,6 +127,18 @@ async def fetch_browser_json(
             auth=auth,
         )
 
+    # Bug A — dispatcher transport wins. Lazy-bootstrap the in-process
+    # dispatcher app here (rather than only inside ``Browser.execute``)
+    # so EVERY caller — Browser tool, adapter ctx, future direct
+    # callers — gets the dispatcher wired transparently. Only fires when
+    # neither the call-site nor the module-level slot has an app
+    # already; ``ensure_dispatcher_app_ready`` is idempotent + single-
+    # flight so double-calling from ``Browser.execute`` is safe.
+    effective_app = dispatcher_app or _default_dispatcher_app
+    if effective_app is None:
+        await _maybe_bootstrap_default_dispatcher()
+        effective_app = dispatcher_app or _default_dispatcher_app
+
     return await _fetch_dispatcher(
         method,
         path_or_url,
@@ -134,8 +146,38 @@ async def fetch_browser_json(
         headers=headers,
         timeout=timeout,
         auth=auth,
-        dispatcher_app=dispatcher_app or _default_dispatcher_app,
+        dispatcher_app=effective_app,
     )
+
+
+async def _maybe_bootstrap_default_dispatcher() -> None:
+    """Lazy-import + invoke the dispatcher bootstrap helper.
+
+    Local import only — ``_dispatcher_bootstrap`` itself imports from
+    this module, so a top-level import would cycle. Any import or
+    bootstrap failure is swallowed; the caller will then surface a
+    clean ``BrowserServiceError`` from ``_fetch_dispatcher`` if the
+    slot is still empty (the legacy "dispatcher not registered"
+    message).
+    """
+    try:
+        from .._dispatcher_bootstrap import (  # type: ignore[import-not-found]
+            ensure_dispatcher_app_ready,
+        )
+    except ImportError:
+        # Bootstrap module unavailable (e.g. an embedder-stripped
+        # build); leave the slot empty and let the caller surface
+        # the legacy not-registered error.
+        return
+
+    try:
+        await ensure_dispatcher_app_ready()
+    except Exception as exc:  # noqa: BLE001
+        _log.debug(
+            "fetch_browser_json: dispatcher bootstrap raised; "
+            "dispatcher slot remains empty: %s",
+            exc,
+        )
 
 
 async def _fetch_http(
