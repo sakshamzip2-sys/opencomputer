@@ -89,6 +89,140 @@ def _conn():
 
 
 # ---------------------------------------------------------------------------
+# Wave 6.E.11 — Remote-board read proxy (Hermes 'multi-host coordination'
+# minimum). Other hosts can read this host's boards over HTTP for
+# monitoring purposes. WRITE operations are intentionally NOT exposed —
+# distributed claim coordination + clock-skew handling are multi-week
+# projects this PR does not attempt.
+# ---------------------------------------------------------------------------
+
+
+def _proxy_conn(slug: str | None):
+    """Open a read-only connection to the named board (or default).
+
+    Uses a short-lived sqlite3 connection so we don't pollute the
+    long-lived per-thread connection cache. Slug validation surfaces
+    a 400 to the caller.
+    """
+    import sqlite3
+
+    if slug is not None:
+        try:
+            kanban_db.validate_slug(slug)
+        except kanban_db.InvalidBoardSlugError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        path = kanban_db.board_db_path(slug)
+    else:
+        path = kanban_db.kanban_db_path()
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"board {slug or '(default)'!r} has no kanban.db at {path}",
+        )
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+@router.get("/proxy/health")
+def proxy_health():
+    """Cheap reachability probe for remote-read clients.
+
+    Returns the schema-version envelope + the list of known boards
+    so a remote client can show which slugs are accessible without
+    polling each individually.
+    """
+    return {
+        "schema_version": 1,
+        "default_board_path": str(kanban_db.kanban_db_path()),
+        "boards": kanban_db.list_boards(),
+        "active_board": kanban_db.active_board(),
+    }
+
+
+@router.get("/proxy/board")
+def proxy_board(
+    slug: str | None = Query(None, description="Board slug; default = active board"),
+    tenant: str | None = Query(None),
+    include_archived: bool = Query(False),
+):
+    """Read-only board snapshot for a remote viewer.
+
+    Wraps the response in a ``{schema_version, rows}`` envelope so
+    future schema additions are backward-compatible (audit lens A7).
+    """
+    conn = _proxy_conn(slug)
+    try:
+        tasks = kanban_db.list_tasks(
+            conn, tenant=tenant, include_archived=include_archived,
+        )
+        rows = []
+        for t in tasks:
+            rows.append({
+                "id": t.id,
+                "title": t.title,
+                "status": t.status,
+                "assignee": t.assignee,
+                "priority": t.priority,
+                "tenant": t.tenant,
+                "created_at": t.created_at,
+                "completed_at": t.completed_at,
+                "result": t.result,
+            })
+    finally:
+        conn.close()
+    return {
+        "schema_version": 1,
+        "slug": slug or kanban_db.active_board(),
+        "tasks": rows,
+    }
+
+
+@router.get("/proxy/task/{task_id}")
+def proxy_task(
+    task_id: str,
+    slug: str | None = Query(None),
+):
+    """Read-only single-task view for a remote viewer."""
+    conn = _proxy_conn(slug)
+    try:
+        task = kanban_db.get_task(conn, task_id)
+        if task is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"task {task_id!r} not found in board {slug or '(default)'!r}",
+            )
+        comments = [
+            {
+                "id": c["id"], "author": c["author"], "body": c["body"],
+                "created_at": c["created_at"],
+            }
+            for c in conn.execute(
+                "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at",
+                (task_id,),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    return {
+        "schema_version": 1,
+        "task": {
+            "id": task.id,
+            "title": task.title,
+            "body": task.body,
+            "status": task.status,
+            "assignee": task.assignee,
+            "priority": task.priority,
+            "tenant": task.tenant,
+            "created_at": task.created_at,
+            "completed_at": task.completed_at,
+            "result": task.result,
+        },
+        "comments": comments,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------------
 
