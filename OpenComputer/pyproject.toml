@@ -62,6 +62,11 @@ dependencies = [
 
 [project.optional-dependencies]
 bedrock = ["boto3>=1.35.0"]
+# Wave 6.D — pseudo-terminal bridge for the dashboard chat tab.
+#   pip install opencomputer[pty]
+# POSIX-only (Linux/macOS or Windows-via-WSL). Without this extra the
+# /api/pty WebSocket returns a friendly PtyUnavailableError banner.
+pty = ["ptyprocess>=0.7"]
 # Optional: Layer 3 deepening pipeline (BGE embeddings + Chroma vector
 # store + psutil resource probes). Install with
 #   pip install opencomputer[deepening]
