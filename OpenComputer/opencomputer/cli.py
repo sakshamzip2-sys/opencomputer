@@ -3088,6 +3088,11 @@ from opencomputer.cli_sandbox import sandbox_app  # noqa: E402
 
 app.add_typer(sandbox_app, name="sandbox")
 
+# PR #420 Wave 5 T5 deferral closure — cache-stats CLI surface
+from opencomputer.cli_usage import usage_app  # noqa: E402
+
+app.add_typer(usage_app, name="usage")
+
 # PR-1 — evolution self-improvement CLI
 from opencomputer.evolution.entrypoint import evolution_app  # noqa: E402
 
