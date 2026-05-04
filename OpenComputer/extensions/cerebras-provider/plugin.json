@@ -1,0 +1,26 @@
+{
+  "id": "cerebras-provider",
+  "name": "Cerebras Provider",
+  "version": "0.1.0",
+  "description": "Cerebras Inference — fast OpenAI-compatible inference for Llama, Qwen, GPT-OSS",
+  "author": "Saksham",
+  "license": "MIT",
+  "kind": "provider",
+  "entry": "plugin",
+  "tool_names": [],
+  "model_support": {
+    "model_prefixes": ["llama-", "llama3.", "qwen-", "gpt-oss"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "cerebras",
+        "auth_methods": ["api_key"],
+        "env_vars": ["CEREBRAS_API_KEY"],
+        "label": "Cerebras Inference",
+        "default_model": "llama-3.3-70b",
+        "signup_url": "https://cloud.cerebras.ai/"
+      }
+    ]
+  }
+}
