@@ -55,8 +55,8 @@ SILENT_MARKER = "[SILENT]"
 """Cron jobs can suppress delivery by responding exactly ``[SILENT]``."""
 
 DEFAULT_TICK_INTERVAL_S = 60
-DEFAULT_JOB_TIMEOUT_S = 600
-"""10 minutes per job; can be overridden via env var ``OPENCOMPUTER_CRON_TIMEOUT``."""
+DEFAULT_JOB_TIMEOUT_S = 1200
+"""20 minutes per job (2026-05-04: doubled from 600 → 1200); can be overridden via env var ``OPENCOMPUTER_CRON_TIMEOUT``."""
 
 DEFAULT_MAX_PARALLEL = 3
 """Match Hermes's default for concurrent cron job execution."""
