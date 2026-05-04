@@ -231,13 +231,14 @@ All tests mock external clients (httpx, discord.py, slack_sdk). No live network.
 
 ### Was anything missed from the deferral list?
 
-Re-checking against the Wave 5 PR #420 deferrals memory:
+Re-checking against the Wave 5 PR #420 deferrals memory (post-PR-#421):
 - ✓ T2 continuation loop — covered
 - ✓ T4 /footer persistence — covered (minimal)
 - ✓ T5 OpenRouter wiring — covered
-- ✓ T11 platform overrides — covered (Discord + Slack; Mattermost/Email/Signal explicit-skip)
+- ✗ T11 Telegram — already shipped in PR #421
+- ✗ T11 Discord/Slack/etc — DROPPED (PHOTO_OUT prerequisite not met)
 - ✓ T17 lazy session — covered
 
 ### Defensible? Yes.
 
-5 commits, 5 self-contained changes, all addressing real Wave 5 deferrals with no scope creep. Each ≤200 LOC. Total estimated time: 4-6 hours.
+4 commits, 4 self-contained changes, all addressing real Wave 5 deferrals. Each ≤200 LOC. Total estimated time: 3-4 hours. The dropped T11 is documented with rationale; the remaining 4 close the wiring deferrals from #420.
