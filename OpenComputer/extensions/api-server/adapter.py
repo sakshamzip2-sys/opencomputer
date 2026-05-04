@@ -45,20 +45,25 @@ from aiohttp import web
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import Platform, SendResult
 
-try:
-    from openai_format import (
-        oc_response_to_openai,
-        openai_to_oc_messages,
-        streaming_delta_chunk,
-        streaming_final_chunk,
-    )
-except ImportError:  # pragma: no cover - package mode
-    from extensions.api_server.openai_format import (
-        oc_response_to_openai,
-        openai_to_oc_messages,
-        streaming_delta_chunk,
-        streaming_final_chunk,
-    )
+
+def _load_openai_format():
+    """Load the sibling openai_format.py — robust to how adapter.py is
+    loaded (plugin-loader, package import, or `spec_from_file_location`
+    in tests)."""
+    import importlib.util as _ilu
+    from pathlib import Path as _Path
+    _path = _Path(__file__).resolve().parent / "openai_format.py"
+    _spec = _ilu.spec_from_file_location("api_server_openai_format", _path)
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    return _mod
+
+
+_of = _load_openai_format()
+oc_response_to_openai = _of.oc_response_to_openai
+openai_to_oc_messages = _of.openai_to_oc_messages
+streaming_delta_chunk = _of.streaming_delta_chunk
+streaming_final_chunk = _of.streaming_final_chunk
 
 logger = logging.getLogger("opencomputer.ext.api_server")
 
