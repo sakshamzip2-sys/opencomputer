@@ -383,14 +383,42 @@ def mcp_presets() -> None:
 
 
 @mcp_app.command("catalog")
-def mcp_catalog() -> None:
-    """List bundled MCP catalog entries (alias for ``mcp presets``).
+def mcp_catalog(
+    remote: bool = typer.Option(
+        False,
+        "--remote",
+        help="Fetch the community-curated remote catalog (24h local cache).",
+    ),
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        help="With --remote, bypass the local cache and force a re-fetch.",
+    ),
+) -> None:
+    """List MCP catalog entries.
 
-    ``catalog`` is the friendlier name for users coming from package
-    managers (pip, npm, brew). Functionally identical to ``presets``;
-    both stay so existing scripts keep working.
+    Default shows the bundled :mod:`opencomputer.mcp.presets` list — alias
+    for ``mcp presets``. With ``--remote``, fetches the community-curated
+    catalog (Phase 12m partial; 24h local cache, falls back to stale cache
+    on network failure with a warning).
     """
-    mcp_presets()
+    if not remote:
+        mcp_presets()
+        return
+
+    from opencomputer.mcp.remote_catalog import (
+        CatalogFetchError,
+        fetch_catalog,
+        format_catalog_for_display,
+    )
+
+    try:
+        data = fetch_catalog(refresh=refresh)
+    except CatalogFetchError as exc:
+        console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print("[bold]MCP remote catalog[/bold]")
+    console.print(format_catalog_for_display(data))
 
 
 @mcp_app.command("oauth-paste")
