@@ -661,6 +661,78 @@ def rename_cmd(
 # ─── path ────────────────────────────────────────────────────────────────
 
 
+@profile_app.command("env-template")
+def env_template_cmd(
+    write: bool = typer.Option(
+        False,
+        "--write",
+        help="Write to <profile_home>/.env.template instead of stdout.",
+    ),
+    include_disabled: bool = typer.Option(
+        False,
+        "--include-disabled",
+        help="Include env vars from installed-but-disabled plugins (commented).",
+    ),
+) -> None:
+    """Generate a .env template from plugin manifests (Phase 14.G).
+
+    Iterates installed plugin candidates, reads their declared
+    ``setup.providers[].env_vars`` and ``setup.channels[].env_vars``,
+    and renders a ``.env.template`` with helpful comments (label +
+    signup URL). Already-set env vars get a non-leaking length hint so
+    the user knows what's missing without exposing existing secrets.
+
+    User flow:
+      1. ``oc profile env-template --write`` writes the template
+      2. Edit the template, fill in values
+      3. ``cp <profile>/.env.template <profile>/.env``
+      4. Next ``oc`` start auto-loads the .env via Phase 14.F
+    """
+    from opencomputer.agent.config import _home as _profile_home_fn
+    from opencomputer.plugins.discovery import discover, standard_search_paths
+    from opencomputer.profile_env_template import render_env_template
+
+    active = read_active_profile()
+    profile_home = _profile_home_fn()
+
+    candidates = discover(standard_search_paths())
+
+    # Read enabled plugin ids from profile.yaml (best-effort — None
+    # means "include everything" if the file is absent or malformed).
+    enabled_ids: set[str] | None = None
+    profile_yaml = profile_home / "profile.yaml"
+    if profile_yaml.exists():
+        try:
+            import yaml as _yaml
+            data = _yaml.safe_load(profile_yaml.read_text()) or {}
+            plugins_block = data.get("plugins") or {}
+            enabled_list = plugins_block.get("enabled") or []
+            if isinstance(enabled_list, list):
+                enabled_ids = {str(p) for p in enabled_list}
+        except Exception:  # noqa: BLE001
+            enabled_ids = None
+
+    rendered = render_env_template(
+        candidates,
+        profile_name=active or "default",
+        enabled_ids=enabled_ids,
+        include_disabled=include_disabled,
+    )
+
+    if write:
+        target = profile_home / ".env.template"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(rendered)
+        try:
+            target.chmod(0o600)  # match secrets-file convention
+        except OSError:
+            pass
+        _console.print(f"[green]wrote[/green] {target}")
+        return
+
+    typer.echo(rendered)
+
+
 @profile_app.command("path")
 def path_cmd(
     name: str | None = typer.Argument(
