@@ -541,6 +541,10 @@ class MCPManager:
     def __init__(self, tool_registry: ToolRegistry) -> None:
         self.tool_registry = tool_registry
         self.connections: list[MCPConnection] = []
+        # T1 (mcp-deferrals-v2, 2026-05-04) — periodic background health probe.
+        # Started explicitly via :meth:`start_health_loop`; not implicit on
+        # construction so CLI one-shot mode skips it.
+        self._health_loop_task: asyncio.Task[None] | None = None
 
     async def connect_all(
         self,
@@ -598,6 +602,47 @@ class MCPManager:
             if conn.state != "connected":
                 continue
             await conn.health_check()
+
+    def start_health_loop(self, interval_seconds: float = 30.0) -> asyncio.Task[None]:
+        """Spawn a background task that calls :meth:`health_check_all`
+        every ``interval_seconds``.
+
+        T1 (mcp-deferrals-v2, 2026-05-04). Idempotent: returns the
+        existing task if already started. Exceptions inside the loop body
+        are caught + logged so one bad probe doesn't crash the loop.
+
+        Callers (typically the gateway daemon) should pair with
+        :meth:`stop_health_loop` on shutdown.
+        """
+        if self._health_loop_task is not None and not self._health_loop_task.done():
+            return self._health_loop_task
+
+        async def _loop() -> None:
+            while True:
+                try:
+                    await asyncio.sleep(interval_seconds)
+                    await self.health_check_all()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "MCP health-loop iteration raised: %s — continuing", exc
+                    )
+
+        self._health_loop_task = asyncio.create_task(_loop())
+        return self._health_loop_task
+
+    def stop_health_loop(self) -> None:
+        """Cancel the periodic health probe started by :meth:`start_health_loop`.
+
+        Idempotent — no-op if the loop was never started or already stopped.
+        """
+        task = self._health_loop_task
+        if task is None or task.done():
+            self._health_loop_task = None
+            return
+        task.cancel()
+        self._health_loop_task = None
 
     def schedule_deferred_connect(
         self,
