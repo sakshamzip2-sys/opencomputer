@@ -189,6 +189,72 @@ class EmailAdapter(BaseChannelAdapter):
             return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
         return SendResult(success=True)
 
+    async def send_multiple_images(
+        self,
+        chat_id: str,
+        image_paths: list[str],
+        caption: str = "",
+        **kwargs: Any,
+    ) -> None:
+        """Send N images as a single email with multiple MIME attachments.
+
+        Wave 5 T11 final closure (Hermes-port 3de8e2168). Builds one
+        ``EmailMessage`` whose body is ``caption`` (or the default
+        text) and attaches every image via
+        :meth:`EmailMessage.add_attachment`. One SMTP send for the
+        whole batch — N images = 1 server round-trip.
+
+        Missing files are logged + skipped; SMTP delivery failure of
+        the whole message is logged (no fallback because the alternate
+        is N separate emails which is uglier than one partial-image one).
+        """
+        if not image_paths:
+            return
+        if not chat_id or "@" not in chat_id:
+            logger.warning("email send_multiple_images: invalid recipient %r", chat_id)
+            return
+        from pathlib import Path as _Path
+
+        msg = EmailMessage()
+        msg["From"] = self._from_address
+        msg["To"] = chat_id
+        msg["Subject"] = str(kwargs.get("subject") or "Images")
+        if kwargs.get("in_reply_to"):
+            msg["In-Reply-To"] = str(kwargs["in_reply_to"])
+            msg["References"] = str(kwargs["in_reply_to"])
+        msg.set_content(caption or "(images attached)")
+
+        attached = 0
+        for raw in image_paths:
+            p = _Path(raw)
+            if not p.exists() or not p.is_file():
+                logger.warning("email send_multiple_images: missing file %s", p)
+                continue
+            try:
+                data = p.read_bytes()
+                # Best-effort MIME detection from extension; default
+                # octet-stream so the message still sends if extension
+                # is unknown.
+                ext = (p.suffix.lstrip(".") or "octet-stream").lower()
+                maintype = "image" if ext in {
+                    "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff",
+                } else "application"
+                subtype = "jpeg" if ext == "jpg" else ext
+                msg.add_attachment(
+                    data, maintype=maintype, subtype=subtype, filename=p.name,
+                )
+                attached += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("email attach(%s) raised: %s", p.name, exc)
+
+        if attached == 0:
+            logger.warning("email send_multiple_images: no attachments — skipping send")
+            return
+        try:
+            await asyncio.to_thread(self._smtp_send, msg)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("email SMTP send (with %d attachments) raised: %s", attached, exc)
+
     # ------------------------------------------------------------------
     # Inbound — IMAP polling loop
     # ------------------------------------------------------------------
