@@ -23,9 +23,28 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool] = {}
+        self._denylist: set[str] = set()
+
+    def set_denylist(self, names: list[str] | tuple[str, ...]) -> None:
+        """Replace the current denylist. Pass an empty iterable to clear.
+
+        Mirrors openclaw's ``tools.deny`` config. Tools whose
+        ``schema.name`` is in the denylist are silently skipped at
+        :meth:`register` time. Callers with expensive optional-tool
+        factories should call :meth:`is_denied` BEFORE constructing
+        the tool to short-circuit factory work.
+        """
+        self._denylist = set(names)
+
+    def is_denied(self, name: str) -> bool:
+        """True if the named tool would be skipped at :meth:`register` time."""
+        return name in self._denylist
 
     def register(self, tool: BaseTool) -> None:
         name = tool.schema.name
+        if name in self._denylist:
+            logger.debug("Tool %r skipped: in denylist", name)
+            return  # silent skip — caller can check is_denied() first
         if name in self._tools:
             raise ValueError(f"Tool '{name}' is already registered")
         self._tools[name] = tool

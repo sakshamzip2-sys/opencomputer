@@ -285,6 +285,16 @@ def _register_builtin_tools() -> None:
     """Register the core bundled tools. Only runs once per process."""
     if "Read" in registry.names():
         return
+    # Apply tools.deny from agent config (mirrors openclaw tools.deny).
+    # Idempotent — re-running set_denylist with the same list is fine.
+    try:
+        from opencomputer.agent.config_store import load_config
+
+        _cfg = load_config()
+        registry.set_denylist(list(getattr(_cfg.tools, "deny", ()) or ()))
+    except Exception:  # noqa: BLE001
+        # Best-effort — never let denylist wiring break tool registration.
+        pass
     registry.register(ReadTool())
     registry.register(WriteTool())
     registry.register(BashTool())
