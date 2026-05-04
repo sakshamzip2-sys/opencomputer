@@ -362,6 +362,52 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_nrm.add_argument("--chat-id", required=True)
     p_nrm.add_argument("--thread-id", default=None)
 
+    # --- boards (Wave 6.E.8 — multi-board support) ---
+    p_boards = sub.add_parser(
+        "boards",
+        help="Manage named kanban boards (create / list / switch / rename / rm / active)",
+    )
+    p_boards_sub = p_boards.add_subparsers(dest="boards_action")
+
+    p_b_create = p_boards_sub.add_parser(
+        "create",
+        help="Create a new board directory + kanban.db",
+    )
+    p_b_create.add_argument("slug")
+
+    p_boards_sub.add_parser(
+        "list",
+        help="List all known board slugs (with the active one marked)",
+    )
+
+    p_b_switch = p_boards_sub.add_parser(
+        "switch",
+        help="Set the active board (subsequent kanban CLI invocations use it)",
+    )
+    p_b_switch.add_argument("slug")
+
+    p_b_rename = p_boards_sub.add_parser(
+        "rename",
+        help="Rename a board's slug",
+    )
+    p_b_rename.add_argument("old_slug")
+    p_b_rename.add_argument("new_slug")
+
+    p_b_rm = p_boards_sub.add_parser(
+        "rm",
+        help="Delete a board's directory (irreversible)",
+    )
+    p_b_rm.add_argument("slug")
+    p_b_rm.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip the confirmation prompt",
+    )
+
+    p_boards_sub.add_parser(
+        "active",
+        help="Print the currently active board slug, or '(default)' if none",
+    )
+
     # --- log ---
     p_log = sub.add_parser(
         "log",
@@ -483,6 +529,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "notify-unsubscribe": _cmd_notify_unsubscribe,
         "context":  _cmd_context,
         "gc":       _cmd_gc,
+        "boards":   _cmd_boards,
     }
     handler = handlers.get(action)
     if not handler:
@@ -1337,6 +1384,142 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     )
     print(f"GC complete: {removed_ws} workspace(s), "
           f"{removed_events} event row(s), {removed_logs} log file(s) removed")
+    return 0
+
+
+def _cmd_boards(args: argparse.Namespace) -> int:
+    """Multi-board management subcommands (Wave 6.E.8 — Hermes parity).
+
+    Routes the second-level verb to the appropriate handler:
+    create, list, switch, rename, rm, active.
+    """
+    action = getattr(args, "boards_action", None)
+    if not action:
+        print(
+            "usage: oc kanban boards {create|list|switch|rename|rm|active} ...",
+            file=sys.stderr,
+        )
+        return 0
+
+    if action == "create":
+        return _cmd_boards_create(args)
+    if action == "list":
+        return _cmd_boards_list(args)
+    if action == "switch":
+        return _cmd_boards_switch(args)
+    if action == "rename":
+        return _cmd_boards_rename(args)
+    if action == "rm":
+        return _cmd_boards_rm(args)
+    if action == "active":
+        return _cmd_boards_active(args)
+    print(f"kanban boards: unknown action {action!r}", file=sys.stderr)
+    return 2
+
+
+def _cmd_boards_create(args: argparse.Namespace) -> int:
+    try:
+        kb.validate_slug(args.slug)
+    except kb.InvalidBoardSlugError as exc:
+        print(f"kanban boards: {exc}", file=sys.stderr)
+        return 1
+    target = kb.board_db_path(args.slug)
+    if target.exists():
+        print(f"kanban boards: '{args.slug}' already exists at {target}",
+              file=sys.stderr)
+        return 1
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Initialize the schema by directly opening + closing a connection.
+    kb.init_db(db_path=target)
+    print(f"created board '{args.slug}' at {target.parent}")
+    return 0
+
+
+def _cmd_boards_list(args: argparse.Namespace) -> int:
+    boards = kb.list_boards()
+    active = kb.active_board()
+    if not boards:
+        print("(no named boards — using legacy default kanban.db)")
+        return 0
+    for slug in boards:
+        marker = " *" if slug == active else "  "
+        print(f"{marker} {slug}")
+    if active is None:
+        print("\n(no active board — using legacy default kanban.db)")
+    return 0
+
+
+def _cmd_boards_switch(args: argparse.Namespace) -> int:
+    try:
+        kb.validate_slug(args.slug)
+    except kb.InvalidBoardSlugError as exc:
+        print(f"kanban boards: {exc}", file=sys.stderr)
+        return 1
+    if args.slug not in kb.list_boards():
+        print(
+            f"kanban boards: '{args.slug}' does not exist. "
+            f"Run `oc kanban boards create {args.slug}` first.",
+            file=sys.stderr,
+        )
+        return 1
+    kb.set_active_board(args.slug)
+    print(f"active board → {args.slug}")
+    return 0
+
+
+def _cmd_boards_rename(args: argparse.Namespace) -> int:
+    try:
+        kb.validate_slug(args.old_slug)
+        kb.validate_slug(args.new_slug)
+    except kb.InvalidBoardSlugError as exc:
+        print(f"kanban boards: {exc}", file=sys.stderr)
+        return 1
+    src = kb.boards_root() / args.old_slug
+    dst = kb.boards_root() / args.new_slug
+    if not src.exists():
+        print(f"kanban boards: '{args.old_slug}' does not exist", file=sys.stderr)
+        return 1
+    if dst.exists():
+        print(f"kanban boards: '{args.new_slug}' already exists", file=sys.stderr)
+        return 1
+    src.rename(dst)
+    if kb.active_board() == args.old_slug:
+        kb.set_active_board(args.new_slug)
+    print(f"renamed '{args.old_slug}' → '{args.new_slug}'")
+    return 0
+
+
+def _cmd_boards_rm(args: argparse.Namespace) -> int:
+    import shutil
+    try:
+        kb.validate_slug(args.slug)
+    except kb.InvalidBoardSlugError as exc:
+        print(f"kanban boards: {exc}", file=sys.stderr)
+        return 1
+    target = kb.boards_root() / args.slug
+    if not target.exists():
+        print(f"kanban boards: '{args.slug}' does not exist", file=sys.stderr)
+        return 1
+    if not args.yes:
+        confirm = input(f"Delete board '{args.slug}' at {target}? [y/N] ")
+        if confirm.strip().lower() not in {"y", "yes"}:
+            print("aborted.")
+            return 0
+    shutil.rmtree(target)
+    if kb.active_board() == args.slug:
+        kb.set_active_board(None)
+        print(f"removed board '{args.slug}' (was active — cleared active marker)")
+    else:
+        print(f"removed board '{args.slug}'")
+    return 0
+
+
+def _cmd_boards_active(args: argparse.Namespace) -> int:
+    slug = kb.active_board()
+    if slug is None:
+        print("(default — no named board active)")
+    else:
+        print(slug)
     return 0
 
 
