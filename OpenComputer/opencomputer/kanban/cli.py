@@ -21,10 +21,9 @@ import shlex
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from opencomputer.kanban import db as kb
-
 
 # ---------------------------------------------------------------------------
 # Small formatting helpers
@@ -40,7 +39,7 @@ _STATUS_ICONS = {
 }
 
 
-def _fmt_ts(ts: Optional[int]) -> str:
+def _fmt_ts(ts: int | None) -> str:
     if not ts:
         return ""
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
@@ -73,7 +72,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
     }
 
 
-def _parse_workspace_flag(value: str) -> tuple[str, Optional[str]]:
+def _parse_workspace_flag(value: str) -> tuple[str, str | None]:
     """Parse ``--workspace`` into ``(kind, path|None)``.
 
     Accepts: ``scratch``, ``worktree``, ``dir:<path>``.
@@ -513,7 +512,7 @@ def _profile_author() -> str:
         return "user"
 
 
-def _parse_duration(val) -> Optional[int]:
+def _parse_duration(val) -> int | None:
     """Parse ``30s`` / ``5m`` / ``2h`` / ``1d`` or a raw integer → seconds.
 
     Returns None for empty input. Raises ValueError on malformed input so
@@ -1352,14 +1351,14 @@ def run_slash(rest: str) -> str:
     both the interactive CLI (``self._handle_kanban_command``) and the
     gateway (``_handle_kanban_command``) so formatting is identical.
     """
-    import io
     import contextlib
+    import io
 
     tokens = shlex.split(rest) if rest and rest.strip() else []
 
     parser = argparse.ArgumentParser(prog="/kanban", add_help=False)
     parser.exit_on_error = False  # type: ignore[attr-defined]
-    sub = parser.add_subparsers(dest="kanban_action")
+    parser.add_subparsers(dest="kanban_action")
     # Reuse the argparse builder -- call it with a throwaway parent
     # subparsers via a wrapping top-level parser.
     wrap = argparse.ArgumentParser(prog="/", add_help=False)

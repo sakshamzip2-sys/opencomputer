@@ -46,10 +46,10 @@ import secrets
 import sqlite3
 import sys
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -144,40 +144,40 @@ class Task:
 
     id: str
     title: str
-    body: Optional[str]
-    assignee: Optional[str]
+    body: str | None
+    assignee: str | None
     status: str
     priority: int
-    created_by: Optional[str]
+    created_by: str | None
     created_at: int
-    started_at: Optional[int]
-    completed_at: Optional[int]
+    started_at: int | None
+    completed_at: int | None
     workspace_kind: str
-    workspace_path: Optional[str]
-    claim_lock: Optional[str]
-    claim_expires: Optional[int]
-    tenant: Optional[str]
-    result: Optional[str] = None
-    idempotency_key: Optional[str] = None
+    workspace_path: str | None
+    claim_lock: str | None
+    claim_expires: int | None
+    tenant: str | None
+    result: str | None = None
+    idempotency_key: str | None = None
     spawn_failures: int = 0
-    worker_pid: Optional[int] = None
-    last_spawn_error: Optional[str] = None
-    max_runtime_seconds: Optional[int] = None
-    last_heartbeat_at: Optional[int] = None
-    current_run_id: Optional[int] = None
-    workflow_template_id: Optional[str] = None
-    current_step_key: Optional[str] = None
+    worker_pid: int | None = None
+    last_spawn_error: str | None = None
+    max_runtime_seconds: int | None = None
+    last_heartbeat_at: int | None = None
+    current_run_id: int | None = None
+    workflow_template_id: str | None = None
+    current_step_key: str | None = None
     # Force-loaded skills for the worker on this task (appended to the
     # dispatcher's built-in `kanban-worker` via --skills). Stored as a
     # JSON array of skill names. None = use only the defaults; empty
     # list = explicitly no extra skills.
-    skills: Optional[list] = None
+    skills: list | None = None
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "Task":
+    def from_row(cls, row: sqlite3.Row) -> Task:
         keys = set(row.keys())
         # Parse skills JSON blob if present
-        skills_value: Optional[list] = None
+        skills_value: list | None = None
         if "skills" in keys and row["skills"]:
             try:
                 parsed = json.loads(row["skills"])
@@ -238,23 +238,23 @@ class Run:
 
     id: int
     task_id: str
-    profile: Optional[str]
-    step_key: Optional[str]
+    profile: str | None
+    step_key: str | None
     status: str
-    claim_lock: Optional[str]
-    claim_expires: Optional[int]
-    worker_pid: Optional[int]
-    max_runtime_seconds: Optional[int]
-    last_heartbeat_at: Optional[int]
+    claim_lock: str | None
+    claim_expires: int | None
+    worker_pid: int | None
+    max_runtime_seconds: int | None
+    last_heartbeat_at: int | None
     started_at: int
-    ended_at: Optional[int]
-    outcome: Optional[str]
-    summary: Optional[str]
-    metadata: Optional[dict]
-    error: Optional[str]
+    ended_at: int | None
+    outcome: str | None
+    summary: str | None
+    metadata: dict | None
+    error: str | None
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "Run":
+    def from_row(cls, row: sqlite3.Row) -> Run:
         try:
             meta = json.loads(row["metadata"]) if row["metadata"] else None
         except Exception:
@@ -293,9 +293,9 @@ class Event:
     id: int
     task_id: str
     kind: str
-    payload: Optional[dict]
+    payload: dict | None
     created_at: int
-    run_id: Optional[int] = None
+    run_id: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +429,7 @@ CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_
 _INITIALIZED_PATHS: set[str] = set()
 
 
-def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
+def connect(db_path: Path | None = None) -> sqlite3.Connection:
     """Open (and initialize if needed) the kanban DB.
 
     WAL mode is enabled on every connection; it's a no-op after the first
@@ -459,7 +459,7 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     return conn
 
 
-def init_db(db_path: Optional[Path] = None) -> Path:
+def init_db(db_path: Path | None = None) -> Path:
     """Create the schema if it doesn't exist; return the path used.
 
     Kept as a public entry point so CLI ``oc kanban init`` and the
@@ -655,18 +655,18 @@ def create_task(
     conn: sqlite3.Connection,
     *,
     title: str,
-    body: Optional[str] = None,
-    assignee: Optional[str] = None,
-    created_by: Optional[str] = None,
+    body: str | None = None,
+    assignee: str | None = None,
+    created_by: str | None = None,
     workspace_kind: str = "scratch",
-    workspace_path: Optional[str] = None,
-    tenant: Optional[str] = None,
+    workspace_path: str | None = None,
+    tenant: str | None = None,
     priority: int = 0,
     parents: Iterable[str] = (),
     triage: bool = False,
-    idempotency_key: Optional[str] = None,
-    max_runtime_seconds: Optional[int] = None,
-    skills: Optional[Iterable[str]] = None,
+    idempotency_key: str | None = None,
+    max_runtime_seconds: int | None = None,
+    skills: Iterable[str] | None = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -706,7 +706,7 @@ def create_task(
     # invisibly splatter a comma-joined string into one argv slot — the
     # `oc --skills X,Y` comma syntax is handled in the dispatcher,
     # not here.
-    skills_list: Optional[list[str]] = None
+    skills_list: list[str] | None = None
     if skills is not None:
         cleaned: list[str] = []
         seen: set[str] = set()
@@ -838,7 +838,7 @@ def _find_missing_parents(conn: sqlite3.Connection, parents: Iterable[str]) -> l
     return [p for p in parents if p not in present]
 
 
-def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
+def get_task(conn: sqlite3.Connection, task_id: str) -> Task | None:
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return Task.from_row(row) if row else None
 
@@ -846,11 +846,11 @@ def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
 def list_tasks(
     conn: sqlite3.Connection,
     *,
-    assignee: Optional[str] = None,
-    status: Optional[str] = None,
-    tenant: Optional[str] = None,
+    assignee: str | None = None,
+    status: str | None = None,
+    tenant: str | None = None,
     include_archived: bool = False,
-    limit: Optional[int] = None,
+    limit: int | None = None,
 ) -> list[Task]:
     query = "SELECT * FROM tasks WHERE 1=1"
     params: list[Any] = []
@@ -874,7 +874,7 @@ def list_tasks(
     return [Task.from_row(r) for r in rows]
 
 
-def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:
+def assign_task(conn: sqlite3.Connection, task_id: str, profile: str | None) -> bool:
     """Assign or reassign a task.  Returns True on success.
 
     Refuses to reassign a task that's currently running (claim_lock set).
@@ -983,7 +983,7 @@ def child_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
     return [r["child_id"] for r in rows]
 
 
-def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Optional[str]]]:
+def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, str | None]]:
     """Return ``(parent_id, result)`` for every done parent of ``task_id``."""
     rows = conn.execute(
         """
@@ -1059,7 +1059,7 @@ def list_events(conn: sqlite3.Connection, task_id: str) -> list[Event]:
                 kind=r["kind"],
                 payload=payload,
                 created_at=r["created_at"],
-                run_id=(int(r["run_id"]) if "run_id" in r.keys() and r["run_id"] is not None else None),
+                run_id=(int(r["run_id"]) if "run_id" in r and r["run_id"] is not None else None),
             )
         )
     return out
@@ -1069,9 +1069,9 @@ def _append_event(
     conn: sqlite3.Connection,
     task_id: str,
     kind: str,
-    payload: Optional[dict] = None,
+    payload: dict | None = None,
     *,
-    run_id: Optional[int] = None,
+    run_id: int | None = None,
 ) -> None:
     """Record an event row.  Called from within an already-open txn.
 
@@ -1094,11 +1094,11 @@ def _end_run(
     task_id: str,
     *,
     outcome: str,
-    summary: Optional[str] = None,
-    error: Optional[str] = None,
-    metadata: Optional[dict] = None,
-    status: Optional[str] = None,
-) -> Optional[int]:
+    summary: str | None = None,
+    error: str | None = None,
+    metadata: dict | None = None,
+    status: str | None = None,
+) -> int | None:
     """Close the currently-active run for ``task_id`` and clear the pointer.
 
     ``outcome`` is the semantic result (completed / blocked / crashed /
@@ -1146,7 +1146,7 @@ def _end_run(
     return run_id
 
 
-def _current_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
+def _current_run_id(conn: sqlite3.Connection, task_id: str) -> int | None:
     row = conn.execute(
         "SELECT current_run_id FROM tasks WHERE id = ?", (task_id,),
     ).fetchone()
@@ -1158,9 +1158,9 @@ def _synthesize_ended_run(
     task_id: str,
     *,
     outcome: str,
-    summary: Optional[str] = None,
-    error: Optional[str] = None,
-    metadata: Optional[dict] = None,
+    summary: str | None = None,
+    error: str | None = None,
+    metadata: dict | None = None,
 ) -> int:
     """Insert a zero-duration, already-closed run row.
 
@@ -1246,8 +1246,8 @@ def claim_task(
     task_id: str,
     *,
     ttl_seconds: int = DEFAULT_CLAIM_TTL_SECONDS,
-    claimer: Optional[str] = None,
-) -> Optional[Task]:
+    claimer: str | None = None,
+) -> Task | None:
     """Atomically transition ``ready -> running``.
 
     Returns the claimed ``Task`` on success, ``None`` if the task was
@@ -1335,7 +1335,7 @@ def heartbeat_claim(
     task_id: str,
     *,
     ttl_seconds: int = DEFAULT_CLAIM_TTL_SECONDS,
-    claimer: Optional[str] = None,
+    claimer: str | None = None,
 ) -> bool:
     """Extend a running claim.  Returns True if we still own it.
 
@@ -1399,9 +1399,9 @@ def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
     *,
-    result: Optional[str] = None,
-    summary: Optional[str] = None,
-    metadata: Optional[dict] = None,
+    result: str | None = None,
+    summary: str | None = None,
+    metadata: dict | None = None,
 ) -> bool:
     """Transition ``running|ready -> done`` and record ``result``.
 
@@ -1474,7 +1474,7 @@ def block_task(
     conn: sqlite3.Connection,
     task_id: str,
     *,
-    reason: Optional[str] = None,
+    reason: str | None = None,
 ) -> bool:
     """Transition ``running -> blocked``."""
     with write_txn(conn):
@@ -1680,7 +1680,7 @@ class DispatchResult:
     """Task ids whose workers exceeded ``max_runtime_seconds``."""
 
 
-def _pid_alive(pid: Optional[int]) -> bool:
+def _pid_alive(pid: int | None) -> bool:
     """Return True if ``pid`` is still running on this host.
 
     Cross-platform: uses ``os.kill(pid, 0)`` on POSIX and ``OpenProcess``
@@ -1712,7 +1712,7 @@ def _pid_alive(pid: Optional[int]) -> bool:
     # Still here → kill(0) succeeded. Check for zombie on Linux.
     if sys.platform == "linux":
         try:
-            with open(f"/proc/{int(pid)}/status", "r") as f:
+            with open(f"/proc/{int(pid)}/status") as f:
                 for line in f:
                     if line.startswith("State:"):
                         # "State:\tZ (zombie)" → dead
@@ -1731,7 +1731,7 @@ def heartbeat_worker(
     conn: sqlite3.Connection,
     task_id: str,
     *,
-    note: Optional[str] = None,
+    note: str | None = None,
 ) -> bool:
     """Record a ``heartbeat`` event + touch ``last_heartbeat_at``.
 
@@ -1859,7 +1859,7 @@ def enforce_max_runtime(
 def set_max_runtime(
     conn: sqlite3.Connection,
     task_id: str,
-    seconds: Optional[int],
+    seconds: int | None,
 ) -> bool:
     """Set or clear the per-task max_runtime_seconds. Returns True on
     success."""
@@ -2019,7 +2019,7 @@ def dispatch_once(
     spawn_fn=None,
     ttl_seconds: int = DEFAULT_CLAIM_TTL_SECONDS,
     dry_run: bool = False,
-    max_spawn: Optional[int] = None,
+    max_spawn: int | None = None,
     failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
 ) -> DispatchResult:
     """Run one dispatcher tick.
@@ -2116,7 +2116,7 @@ def _rotate_worker_log(log_path: Path, max_bytes: int) -> None:
         pass
 
 
-def _default_spawn(task: Task, workspace: str) -> Optional[int]:
+def _default_spawn(task: Task, workspace: str) -> int | None:
     """Fire-and-forget ``oc -p <profile> chat -q ...`` subprocess.
 
     Returns the spawned child's PID so the dispatcher can detect crashes
@@ -2185,7 +2185,7 @@ def _default_spawn(task: Task, workspace: str) -> Optional[int]:
     _rotate_worker_log(log_path, DEFAULT_LOG_ROTATE_BYTES)
 
     # Use 'a' so a re-run on unblock appends rather than overwrites.
-    log_f = open(log_path, "ab")
+    log_f = open(log_path, "ab")  # noqa: SIM115 — fd lifetime owned by Popen, not this fn
     try:
         proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above
             cmd,
@@ -2217,7 +2217,7 @@ def _default_spawn(task: Task, workspace: str) -> Optional[int]:
 def run_daemon(
     *,
     interval: float = 60.0,
-    max_spawn: Optional[int] = None,
+    max_spawn: int | None = None,
     failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
     stop_event=None,
     on_tick=None,
@@ -2300,7 +2300,7 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     if not task:
         raise ValueError(f"unknown task {task_id}")
 
-    def _cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
+    def _cap(s: str | None, limit: int = _CTX_MAX_FIELD_BYTES) -> str:
         """Truncate a string to `limit` chars with a visible ellipsis."""
         if not s:
             return ""
@@ -2525,8 +2525,8 @@ def add_notify_sub(
     task_id: str,
     platform: str,
     chat_id: str,
-    thread_id: Optional[str] = None,
-    user_id: Optional[str] = None,
+    thread_id: str | None = None,
+    user_id: str | None = None,
 ) -> None:
     """Register a gateway source that wants terminal-state notifications
     for ``task_id``. Idempotent on (task, platform, chat, thread)."""
@@ -2543,7 +2543,7 @@ def add_notify_sub(
 
 
 def list_notify_subs(
-    conn: sqlite3.Connection, task_id: Optional[str] = None,
+    conn: sqlite3.Connection, task_id: str | None = None,
 ) -> list[dict]:
     if task_id is not None:
         rows = conn.execute(
@@ -2560,7 +2560,7 @@ def remove_notify_sub(
     task_id: str,
     platform: str,
     chat_id: str,
-    thread_id: Optional[str] = None,
+    thread_id: str | None = None,
 ) -> bool:
     with write_txn(conn):
         cur = conn.execute(
@@ -2577,8 +2577,8 @@ def unseen_events_for_sub(
     task_id: str,
     platform: str,
     chat_id: str,
-    thread_id: Optional[str] = None,
-    kinds: Optional[Iterable[str]] = None,
+    thread_id: str | None = None,
+    kinds: Iterable[str] | None = None,
 ) -> tuple[int, list[Event]]:
     """Return ``(new_cursor, events)`` for a given subscription.
 
@@ -2614,7 +2614,7 @@ def unseen_events_for_sub(
         out.append(Event(
             id=r["id"], task_id=r["task_id"], kind=r["kind"],
             payload=payload, created_at=r["created_at"],
-            run_id=(int(r["run_id"]) if "run_id" in r.keys() and r["run_id"] is not None else None),
+            run_id=(int(r["run_id"]) if "run_id" in r and r["run_id"] is not None else None),
         ))
         max_id = max(max_id, int(r["id"]))
     return max_id, out
@@ -2626,7 +2626,7 @@ def advance_notify_cursor(
     task_id: str,
     platform: str,
     chat_id: str,
-    thread_id: Optional[str] = None,
+    thread_id: str | None = None,
     new_cursor: int,
 ) -> None:
     with write_txn(conn):
@@ -2690,8 +2690,8 @@ def worker_log_path(task_id: str) -> Path:
 
 
 def read_worker_log(
-    task_id: str, *, tail_bytes: Optional[int] = None,
-) -> Optional[str]:
+    task_id: str, *, tail_bytes: int | None = None,
+) -> str | None:
     """Read the worker log for ``task_id``. Returns None if the file
     doesn't exist. If ``tail_bytes`` is set, only the last N bytes are
     returned (useful for the dashboard drawer which shouldn't page megabytes)."""
@@ -2809,14 +2809,14 @@ def list_runs(
     return [Run.from_row(r) for r in rows]
 
 
-def get_run(conn: sqlite3.Connection, run_id: int) -> Optional[Run]:
+def get_run(conn: sqlite3.Connection, run_id: int) -> Run | None:
     row = conn.execute(
         "SELECT * FROM task_runs WHERE id = ?", (int(run_id),),
     ).fetchone()
     return Run.from_row(row) if row else None
 
 
-def active_run(conn: sqlite3.Connection, task_id: str) -> Optional[Run]:
+def active_run(conn: sqlite3.Connection, task_id: str) -> Run | None:
     """Return the currently-open run for ``task_id`` (``ended_at IS NULL``)."""
     row = conn.execute(
         "SELECT * FROM task_runs WHERE task_id = ? AND ended_at IS NULL "
@@ -2826,7 +2826,7 @@ def active_run(conn: sqlite3.Connection, task_id: str) -> Optional[Run]:
     return Run.from_row(row) if row else None
 
 
-def latest_run(conn: sqlite3.Connection, task_id: str) -> Optional[Run]:
+def latest_run(conn: sqlite3.Connection, task_id: str) -> Run | None:
     """Return the most recent run regardless of outcome (active or closed)."""
     row = conn.execute(
         "SELECT * FROM task_runs WHERE task_id = ? "
