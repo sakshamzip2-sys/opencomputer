@@ -498,8 +498,13 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
-    parent_id  TEXT NOT NULL,
-    child_id   TEXT NOT NULL,
+    parent_id    TEXT NOT NULL,
+    child_id     TEXT NOT NULL,
+    -- Wave 6.E.10 — cross-board dependencies. NULL = link is within
+    -- the current board (back-compat). Non-NULL = parent / child lives
+    -- in the named board (resolved via boards_root() / <slug> / kanban.db).
+    parent_board TEXT,
+    child_board  TEXT,
     PRIMARY KEY (parent_id, child_id)
 );
 
@@ -704,6 +709,14 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_events_run "
             "ON task_events(run_id, id)"
         )
+
+    # Wave 6.E.10 — task_links gained parent_board / child_board columns
+    # for cross-board dependencies. NULL = same-board (back-compat).
+    link_cols = {row["name"] for row in conn.execute("PRAGMA table_info(task_links)")}
+    if "parent_board" not in link_cols:
+        conn.execute("ALTER TABLE task_links ADD COLUMN parent_board TEXT")
+    if "child_board" not in link_cols:
+        conn.execute("ALTER TABLE task_links ADD COLUMN child_board TEXT")
 
     # One-shot backfill: any task that is 'running' before runs existed
     # had its claim_lock / claim_expires / worker_pid on the task row.
@@ -1074,33 +1087,101 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: str | None) -> 
 # Links
 # ---------------------------------------------------------------------------
 
-def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
-    if parent_id == child_id:
+def link_tasks(
+    conn: sqlite3.Connection,
+    parent_id: str,
+    child_id: str,
+    *,
+    parent_board: str | None = None,
+    child_board: str | None = None,
+) -> None:
+    """Add a parent → child dependency edge.
+
+    ``parent_board`` / ``child_board`` (Wave 6.E.10): NULL means the
+    end lives in the current board (back-compat). Non-NULL identifies
+    a sibling board by slug — used for cross-board dependencies. The
+    cycle check + parent-existence check still runs for same-board
+    edges; for cross-board edges we ATTACH the remote DB read-only and
+    verify only that the parent task exists there.
+
+    Raises ValueError on self-link, unknown task, or detected cycle.
+    Cross-board cycle detection currently only walks within-board —
+    documented limitation.
+    """
+    if parent_id == child_id and parent_board == child_board:
         raise ValueError("a task cannot depend on itself")
+    same_board = parent_board is None and child_board is None
     with write_txn(conn):
-        missing = _find_missing_parents(conn, [parent_id, child_id])
-        if missing:
-            raise ValueError(f"unknown task(s): {', '.join(missing)}")
-        if _would_cycle(conn, parent_id, child_id):
-            raise ValueError(
-                f"linking {parent_id} -> {child_id} would create a cycle"
-            )
+        if same_board:
+            missing = _find_missing_parents(conn, [parent_id, child_id])
+            if missing:
+                raise ValueError(f"unknown task(s): {', '.join(missing)}")
+            if _would_cycle(conn, parent_id, child_id):
+                raise ValueError(
+                    f"linking {parent_id} -> {child_id} would create a cycle"
+                )
+        else:
+            # Cross-board: child must exist locally; parent must exist
+            # in the named parent_board.
+            child_actual_board = child_board
+            if child_actual_board is None:
+                missing = _find_missing_parents(conn, [child_id])
+                if missing:
+                    raise ValueError(
+                        f"unknown child task(s): {', '.join(missing)}"
+                    )
+            if parent_board is not None:
+                parent_db = board_db_path(parent_board)
+                if not parent_db.exists():
+                    raise ValueError(
+                        f"parent_board {parent_board!r} has no kanban.db at {parent_db}"
+                    )
+                # ATTACH read-only to verify the parent exists there.
+                # Use a fresh connection so we don't leak the ATTACH on
+                # the long-lived dispatch connection (audit lens A4).
+                with sqlite3.connect(str(parent_db)) as parent_conn:
+                    parent_conn.row_factory = sqlite3.Row
+                    row = parent_conn.execute(
+                        "SELECT id FROM tasks WHERE id = ?", (parent_id,),
+                    ).fetchone()
+                    if row is None:
+                        raise ValueError(
+                            f"unknown parent task {parent_id!r} in board "
+                            f"{parent_board!r}"
+                        )
         conn.execute(
-            "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
-            (parent_id, child_id),
+            "INSERT OR IGNORE INTO task_links "
+            "(parent_id, child_id, parent_board, child_board) "
+            "VALUES (?, ?, ?, ?)",
+            (parent_id, child_id, parent_board, child_board),
         )
-        # If child was ready but parent is not yet done, demote child to todo.
-        parent_status = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?", (parent_id,)
-        ).fetchone()["status"]
-        if parent_status != "done":
+        # Demote child if same-board parent isn't done yet. For cross-
+        # board parents we conservatively assume not-done (the read is
+        # racy + we'd rather hold than promote-then-revert).
+        if same_board:
+            parent_status = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (parent_id,)
+            ).fetchone()["status"]
+            if parent_status != "done":
+                conn.execute(
+                    "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
+                    (child_id,),
+                )
+        else:
+            # Cross-board: always demote — promote happens via
+            # recompute_ready when the cross-board parent reaches done.
             conn.execute(
                 "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
                 (child_id,),
             )
         _append_event(
             conn, child_id, "linked",
-            {"parent": parent_id, "child": child_id},
+            {
+                "parent": parent_id,
+                "child": child_id,
+                **({"parent_board": parent_board} if parent_board else {}),
+                **({"child_board": child_board} if child_board else {}),
+            },
         )
 
 
@@ -1385,23 +1466,87 @@ def _synthesize_ended_run(
 def recompute_ready(conn: sqlite3.Connection) -> int:
     """Promote ``todo`` tasks to ``ready`` when all parents are ``done``.
 
-    Returns the number of tasks promoted.  Safe to call inside or outside
-    an existing transaction; it opens its own IMMEDIATE txn.
+    Wave 6.E.10 — supports cross-board parents. When a link has
+    ``parent_board`` set, we open a short-lived read-only connection
+    to that board's DB and check the parent's status there. Missing
+    or unreachable cross-board DBs hold the child in ``todo`` (we
+    fail-closed: never promote when we can't verify the dependency).
+
+    Returns the number of tasks promoted. Safe to call inside or
+    outside an existing transaction; it opens its own IMMEDIATE txn.
     """
     promoted = 0
+    # Cache cross-board reads within one tick to avoid re-opening the
+    # same parent_board for every child that depends on it.
+    cross_board_cache: dict[str, dict[str, str]] = {}
+
+    def _resolve_cross_board_status(parent_board: str, parent_id: str) -> str | None:
+        """Fetch ``parent_id`` status from ``parent_board``'s DB.
+
+        Returns the status string, or None if the DB or task is
+        unreachable. Uses the per-tick cache so a board is opened
+        at most once per recompute pass.
+        """
+        cached = cross_board_cache.get(parent_board)
+        if cached is None:
+            try:
+                parent_db = board_db_path(parent_board)
+            except InvalidBoardSlugError:
+                return None
+            if not parent_db.exists():
+                cross_board_cache[parent_board] = {}
+                return None
+            cached = {}
+            try:
+                with sqlite3.connect(str(parent_db)) as pconn:
+                    pconn.row_factory = sqlite3.Row
+                    rows = pconn.execute(
+                        "SELECT id, status FROM tasks"
+                    ).fetchall()
+                    for r in rows:
+                        cached[r["id"]] = r["status"]
+            except sqlite3.Error:
+                cross_board_cache[parent_board] = {}
+                return None
+            cross_board_cache[parent_board] = cached
+        return cached.get(parent_id)
+
     with write_txn(conn):
         todo_rows = conn.execute(
             "SELECT id FROM tasks WHERE status = 'todo'"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
-            parents = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?",
+            # Pull all parent edges including the cross-board info.
+            edges = conn.execute(
+                "SELECT parent_id, parent_board FROM task_links "
+                "WHERE child_id = ?",
                 (task_id,),
             ).fetchall()
-            if all(p["status"] == "done" for p in parents):
+            all_done = True
+            for edge in edges:
+                pid = edge["parent_id"]
+                pboard = edge["parent_board"]
+                if pboard is None:
+                    # Same-board parent — check local status
+                    prow = conn.execute(
+                        "SELECT status FROM tasks WHERE id = ?", (pid,),
+                    ).fetchone()
+                    status = prow["status"] if prow else None
+                else:
+                    status = _resolve_cross_board_status(pboard, pid)
+                if status != "done":
+                    all_done = False
+                    break
+            if all_done and edges:
+                conn.execute(
+                    "UPDATE tasks SET status = 'ready' WHERE id = ? AND status = 'todo'",
+                    (task_id,),
+                )
+                _append_event(conn, task_id, "promoted", None)
+                promoted += 1
+            elif all_done and not edges:
+                # No parents: orphan todo → ready (matches old behaviour).
                 conn.execute(
                     "UPDATE tasks SET status = 'ready' WHERE id = ? AND status = 'todo'",
                     (task_id,),

@@ -229,6 +229,14 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_link = sub.add_parser("link", help="Add a parent->child dependency")
     p_link.add_argument("parent_id")
     p_link.add_argument("child_id")
+    p_link.add_argument(
+        "--parent-board", default=None,
+        help="Wave 6.E.10: parent task lives in this named board (cross-board dep)",
+    )
+    p_link.add_argument(
+        "--child-board", default=None,
+        help="Wave 6.E.10: child task lives in this named board (cross-board dep)",
+    )
     p_unlink = sub.add_parser("unlink", help="Remove a parent->child dependency")
     p_unlink.add_argument("parent_id")
     p_unlink.add_argument("child_id")
@@ -874,9 +882,21 @@ def _cmd_assign(args: argparse.Namespace) -> int:
 
 
 def _cmd_link(args: argparse.Namespace) -> int:
+    parent_board = getattr(args, "parent_board", None)
+    child_board = getattr(args, "child_board", None)
     with kb.connect() as conn:
-        kb.link_tasks(conn, args.parent_id, args.child_id)
-    print(f"Linked {args.parent_id} -> {args.child_id}")
+        kb.link_tasks(
+            conn, args.parent_id, args.child_id,
+            parent_board=parent_board,
+            child_board=child_board,
+        )
+    desc = f"{args.parent_id}"
+    if parent_board:
+        desc += f"@{parent_board}"
+    desc += f" -> {args.child_id}"
+    if child_board:
+        desc += f"@{child_board}"
+    print(f"Linked {desc}")
     return 0
 
 
