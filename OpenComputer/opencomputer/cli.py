@@ -1918,6 +1918,32 @@ def chat(
     )
 
 
+@app.command(
+    name="kanban",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def kanban(ctx: typer.Context) -> None:
+    """Kanban board CLI — durable multi-profile task coordination.
+
+    Wave 6.B — Hermes-port (c86842546). Subcommands: init, list, show,
+    create, claim, complete, block, unblock, comment, link, unlink,
+    archive, tail, dispatch, context. See ``oc kanban --help``.
+    """
+    import argparse as _argparse
+
+    from opencomputer.kanban import cli as _kanban_cli
+
+    # Build a top-level parser whose only subcommand is 'kanban' (the
+    # hermes-style entrypoint), then prepend 'kanban' to the user's
+    # args so build_parser's internal action-subparsers see the verb.
+    parser = _argparse.ArgumentParser(prog="oc")
+    sub = parser.add_subparsers(dest="cmd")
+    _kanban_cli.build_parser(sub)
+    parsed = parser.parse_args(["kanban", *ctx.args])
+    rc = _kanban_cli.kanban_command(parsed)
+    raise typer.Exit(rc or 0)
+
+
 @app.command(name="oneshot")
 def oneshot(
     prompt: str = typer.Argument(
