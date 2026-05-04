@@ -735,6 +735,47 @@ class SessionDB:
 
     # ─── sessions ─────────────────────────────────────────────────
 
+    def allocate_session_id(self) -> str:
+        """Generate a fresh session id WITHOUT writing a DB row.
+
+        Wave 5 T17 — Hermes-port (c5b4c4816). The companion to lazy
+        session creation. Callers who want a session id immediately for
+        in-memory bookkeeping (TUI / web dashboard) but who don't want
+        a ghost ``sessions`` row written until the user actually sends
+        a message use this + :meth:`ensure_session` instead of the eager
+        :meth:`create_session`.
+        """
+        import uuid
+        return str(uuid.uuid4())
+
+    def ensure_session(
+        self,
+        session_id: str,
+        *,
+        platform: str = "cli",
+        model: str = "",
+        title: str = "",
+        cwd: str | None = None,
+    ) -> None:
+        """Idempotent session-row insert. Existing rows are left untouched.
+
+        Wave 5 T17 (Hermes c5b4c4816). Use after :meth:`allocate_session_id`
+        on the first user message of a session — by that point we know
+        the session is real, so a row should exist. Differs from
+        :meth:`create_session` in that this never overwrites existing
+        ``platform``/``model``/``cwd`` columns; it only inserts when no
+        row is present.
+        """
+        with self._txn() as conn:
+            conn.execute(
+                """
+                INSERT INTO sessions (id, started_at, platform, model, title, cwd)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING
+                """,
+                (session_id, time.time(), platform, model, title, cwd),
+            )
+
     def create_session(
         self,
         session_id: str,
@@ -781,6 +822,48 @@ class SessionDB:
             set_session_id(session_id)
         except Exception:  # noqa: BLE001 — never let logging glue break sessions
             pass
+
+    # ─── Wave 5 T17 — lazy session creation (Hermes c5b4c4816 port) ──
+
+    @staticmethod
+    def allocate_session_id() -> str:
+        """Generate a fresh UUID-based session id WITHOUT writing to the DB.
+
+        Wave 5 T17 — Hermes-port. Callers (TUI/web) that allocate an id
+        before they know whether the user will actually send anything
+        should use this + :meth:`ensure_session` so empty open-and-close
+        sessions don't leave ghost rows in the DB.
+        """
+        import uuid
+
+        return str(uuid.uuid4())
+
+    def ensure_session(
+        self,
+        session_id: str,
+        *,
+        platform: str = "cli",
+        model: str = "",
+        title: str = "",
+        cwd: str | None = None,
+    ) -> None:
+        """Idempotently create the row if absent — no-op if already there.
+
+        Used by the agent loop on the first user message to materialize
+        the row that :meth:`allocate_session_id` deferred. The
+        ``ON CONFLICT DO NOTHING`` semantic preserves any pre-existing
+        title / vibe / goal columns from prior writes (e.g. /rename
+        running before the first message).
+        """
+        with self._txn() as conn:
+            conn.execute(
+                """
+                INSERT INTO sessions (id, started_at, platform, model, title, cwd)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING
+                """,
+                (session_id, time.time(), platform, model, title, cwd),
+            )
 
     def count_sessions(self) -> int:
         """Total session count. Used by the learning-moments
