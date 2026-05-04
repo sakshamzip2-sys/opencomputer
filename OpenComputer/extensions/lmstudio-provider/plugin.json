@@ -1,0 +1,26 @@
+{
+  "id": "lmstudio-provider",
+  "name": "LM Studio Provider",
+  "version": "0.1.0",
+  "description": "LM Studio desktop app — local OpenAI-compatible inference (default http://localhost:1234/v1)",
+  "author": "Saksham",
+  "license": "MIT",
+  "kind": "provider",
+  "entry": "plugin",
+  "tool_names": [],
+  "model_support": {
+    "model_prefixes": ["local-", "llama-", "qwen-", "mistral-", "phi-", "gemma-"]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "lmstudio",
+        "auth_methods": ["api_key", "none"],
+        "env_vars": ["LMSTUDIO_API_KEY", "LMSTUDIO_BASE_URL", "LMSTUDIO_MODEL"],
+        "label": "LM Studio (local)",
+        "default_model": "local-model",
+        "signup_url": "https://lmstudio.ai"
+      }
+    ]
+  }
+}
