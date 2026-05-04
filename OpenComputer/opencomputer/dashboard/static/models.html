@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>OpenComputer · Models</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #111; color: #ddd;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    body { display: flex; flex-direction: column; }
+    header { padding: 12px 20px; border-bottom: 1px solid #333;
+      display: flex; gap: 1em; align-items: center; }
+    header h1 { font-size: 14px; margin: 0; color: #ddd; }
+    nav { display: flex; gap: 8px; margin-left: auto; }
+    .tab { padding: 6px 12px; border-radius: 4px; color: #888;
+      text-decoration: none; font-size: 13px; }
+    .tab:hover { background: #1a1a1a; color: #ddd; }
+    .tab.active { background: #2563eb; color: white; }
+    main { flex: 1; padding: 16px 20px; overflow-y: auto; min-height: 0; }
+    .controls { display: flex; gap: 12px; align-items: center; margin-bottom: 14px;
+      font-size: 13px; }
+    select { background: #1a1a1a; color: #ddd; border: 1px solid #333;
+      border-radius: 4px; padding: 4px 8px; font-family: inherit; font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 10px;
+      border-bottom: 1px solid #1f1f1f; vertical-align: top; }
+    th { font-size: 11px; text-transform: uppercase; color: #888;
+      letter-spacing: 0.05em; }
+    td.model { color: #93c5fd; font-weight: bold; }
+    td.num { font-variant-numeric: tabular-nums; color: #ddd; text-align: right; }
+    button.set { background: #2563eb; color: white; border: 0;
+      padding: 4px 10px; border-radius: 4px; font-family: inherit;
+      font-size: 12px; cursor: pointer; margin-right: 4px; }
+    button.set.aux { background: #475569; }
+    button.set:disabled { opacity: 0.5; cursor: wait; }
+    .toast { position: fixed; bottom: 20px; right: 20px; background: #1a1a1a;
+      border: 1px solid #333; padding: 10px 14px; border-radius: 4px;
+      font-size: 13px; max-width: 360px; }
+    .toast.error { border-color: #4c1d1d; color: #fca5a5; }
+    .toast.ok { border-color: #064e3b; color: #6ee7b7; }
+    .empty { color: #666; padding: 20px; text-align: center; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>OpenComputer · Models</h1>
+    <nav id="nav-tabs"></nav>
+  </header>
+  <main>
+    <div class="controls">
+      Window:
+      <select id="days">
+        <option value="7">7 days</option>
+        <option value="30" selected>30 days</option>
+        <option value="90">90 days</option>
+      </select>
+      <span style="color:#888">Per-model usage from local sessions.db.</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>model</th>
+          <th class="num">sessions</th>
+          <th class="num">in tokens</th>
+          <th class="num">out tokens</th>
+          <th class="num">cache R/W</th>
+          <th class="num">tool calls</th>
+          <th class="num">tool errs</th>
+          <th class="num">latency p50/p95</th>
+          <th>set</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="empty" class="empty" style="display: none">
+      No model usage in this window. Send a message to populate sessions.db.
+    </div>
+  </main>
+  <div id="toast"></div>
+
+  <script>
+    window.OC_TOKEN = '__SESSION_TOKEN__'.replace(/[<>]/g, '') || (
+      new URLSearchParams(location.search).get('token') || ''
+    );
+  </script>
+  <script src="/static/_dashboard.js"></script>
+  <script>
+    (async function () {
+      OCDash.renderNav('models');
+
+      async function load() {
+        const days = document.getElementById('days').value;
+        const data = await OCDash.ocGet('/api/plugins/models/usage?days=' + days);
+        render(data.models || []);
+      }
+
+      function render(models) {
+        const tbody = document.getElementById('rows');
+        const empty = document.getElementById('empty');
+        if (models.length === 0) {
+          tbody.innerHTML = '';
+          empty.style.display = '';
+          return;
+        }
+        empty.style.display = 'none';
+        tbody.innerHTML = models.map(m => `
+          <tr data-model="${m.model}">
+            <td class="model">${m.model}</td>
+            <td class="num">${OCDash.fmtNum(m.session_count)}</td>
+            <td class="num">${OCDash.fmtNum(m.input_tokens)}</td>
+            <td class="num">${OCDash.fmtNum(m.output_tokens)}</td>
+            <td class="num">${OCDash.fmtNum(m.cache_read_tokens)} / ${OCDash.fmtNum(m.cache_write_tokens)}</td>
+            <td class="num">${OCDash.fmtNum(m.tool_calls)}</td>
+            <td class="num">${OCDash.fmtNum(m.tool_errors)}</td>
+            <td class="num">${OCDash.fmtMs(m.tool_duration_ms_p50)} / ${OCDash.fmtMs(m.tool_duration_ms_p95)}</td>
+            <td>
+              <button class="set" data-action="main">Main</button>
+              <button class="set aux" data-action="aux">Aux</button>
+            </td>
+          </tr>
+        `).join('');
+      }
+
+      function toast(msg, kind) {
+        const el = document.getElementById('toast');
+        el.innerHTML = `<div class="toast ${kind}">${msg}</div>`;
+        setTimeout(() => { if (el.firstChild) el.removeChild(el.firstChild); }, 4000);
+      }
+
+      document.getElementById('rows').addEventListener('click', async (e) => {
+        const btn = e.target.closest('button.set');
+        if (!btn) return;
+        const tr = btn.closest('tr');
+        const model = tr.dataset.model;
+        const route = btn.dataset.action === 'aux' ? 'auxiliary' : 'main';
+        btn.disabled = true;
+        try {
+          await OCDash.ocPost('/api/plugins/models/' + route, { model });
+          toast(`set ${route} model → ${model}`, 'ok');
+        } catch (err) {
+          toast(err.message, 'error');
+        } finally {
+          btn.disabled = false;
+        }
+      });
+
+      document.getElementById('days').addEventListener('change', () => {
+        load().catch(err => toast(err.message, 'error'));
+      });
+
+      try { await load(); } catch (err) { toast('failed to load: ' + err.message, 'error'); }
+    })();
+  </script>
+</body>
+</html>

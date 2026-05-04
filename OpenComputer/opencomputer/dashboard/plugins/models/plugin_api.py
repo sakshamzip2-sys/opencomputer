@@ -1,18 +1,14 @@
-"""Models-analytics dashboard plugin — backend API routes (Wave 6.D).
+"""Models-analytics dashboard plugin — backend API routes (Wave 6.D + 6.D-α).
 
-Mounted by :mod:`opencomputer.dashboard.server` at
-``/api/plugins/models/``. Read-only: aggregates per-model stats from the
-``sessions`` and ``tool_usage`` tables already populated by the agent
-loop.
-
-Single endpoint: ``GET /usage?days=N`` — returns one row per model with
-cost-relevant token totals + latency stats over the trailing N days.
-Numbers are raw aggregates; the SPA does any cost calculation client-
-side from the user's pricing table (which OpenComputer does not maintain
-authoritative pricing for).
+Mounted at ``/api/plugins/models/``. Combines the read endpoints
+(``/usage``, ``/health``) with the Wave 6.D-α mutation endpoints
+``POST /main`` and ``POST /auxiliary`` that update the active profile's
+``config.yaml`` ``model.model`` (main) and ``model.cheap_model``
+(auxiliary) fields.
 
 Hermes ref: ``e6b05eaf6 feat: add Models dashboard tab with rich
-per-model analytics``.
+per-model analytics`` + ``3c27efbb9 feat(dashboard): configure main +
+auxiliary models from Models page``.
 """
 
 from __future__ import annotations
@@ -22,11 +18,19 @@ import sqlite3
 import time
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
+
+from opencomputer.agent.profile_yaml import modify_yaml_locked
+from opencomputer.dashboard._auth import require_session_token
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class _SetModelBody(BaseModel):
+    model: str
 
 
 def _session_db_path() -> str:
@@ -166,6 +170,53 @@ async def model_usage(
         reverse=True,
     )
     return {"since_ts": since, "models": out}
+
+
+# ---------------------------------------------------------------------------
+# Wave 6.D-α — mutation endpoints (token-gated). Both write to
+# ~/.opencomputer/<profile>/config.yaml under model.* keys, mirroring the
+# load_config + save_config layout. Atomic + filelock-guarded.
+# ---------------------------------------------------------------------------
+
+
+def _config_yaml_path():
+    from opencomputer.agent.config import _home
+
+    return _home() / "config.yaml"
+
+
+@router.post("/main", dependencies=[Depends(require_session_token)])
+async def set_main_model(body: _SetModelBody) -> dict[str, Any]:
+    """Set the main model in the active profile's config.yaml.
+
+    Equivalent to editing ``model.model`` and re-running ``oc``. The
+    next session reads the new value via ``load_config()``; running
+    sessions are unaffected (they hold their own copy).
+    """
+    path = _config_yaml_path()
+
+    def _mutate(data: dict[str, Any]) -> None:
+        data.setdefault("model", {})["model"] = body.model
+
+    modify_yaml_locked(path, _mutate)
+    return {"ok": True, "model": body.model, "field": "model.model"}
+
+
+@router.post("/auxiliary", dependencies=[Depends(require_session_token)])
+async def set_auxiliary_model(body: _SetModelBody) -> dict[str, Any]:
+    """Set the auxiliary (cheap-route) model in config.yaml.
+
+    Writes to ``model.cheap_model``. ``ModelConfig.cheap_model`` is the
+    model used for short/simple prompts via the cheap-route — passing
+    an empty string here disables cheap-route until next change.
+    """
+    path = _config_yaml_path()
+
+    def _mutate(data: dict[str, Any]) -> None:
+        data.setdefault("model", {})["cheap_model"] = body.model or None
+
+    modify_yaml_locked(path, _mutate)
+    return {"ok": True, "model": body.model, "field": "model.cheap_model"}
 
 
 @router.get("/health")
