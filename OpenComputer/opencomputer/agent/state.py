@@ -692,35 +692,37 @@ def _migrate_v11_to_v12(conn: sqlite3.Connection) -> None:
     we silently fall back to porter unicode61 so the migration doesn't
     wedge.
     """
-    try:
+    # Check if the messages table exists. Legacy fixture DBs (e.g. ones
+    # constructed by tests at v6 with sessions-only) don't have messages
+    # yet — for them we just create the empty FTS table; later migration
+    # steps add messages and the triggers keep it in sync.
+    has_messages = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages'",
+    ).fetchone() is not None
+
+    def _create_fts(tokenize: str) -> None:
         conn.executescript(
-            """
+            f"""
             DROP TABLE IF EXISTS messages_fts;
             CREATE VIRTUAL TABLE messages_fts USING fts5(
                 content,
                 content='messages',
                 content_rowid='id',
-                tokenize='trigram'
+                tokenize='{tokenize}'
             );
-            INSERT INTO messages_fts(rowid, content)
-                SELECT id, content FROM messages;
             """
         )
+        if has_messages:
+            conn.execute(
+                "INSERT INTO messages_fts(rowid, content) "
+                "SELECT id, content FROM messages",
+            )
+
+    try:
+        _create_fts("trigram")
     except sqlite3.OperationalError as exc:
         if "trigram" in str(exc).lower():
-            conn.executescript(
-                """
-                DROP TABLE IF EXISTS messages_fts;
-                CREATE VIRTUAL TABLE messages_fts USING fts5(
-                    content,
-                    content='messages',
-                    content_rowid='id',
-                    tokenize='porter unicode61'
-                );
-                INSERT INTO messages_fts(rowid, content)
-                    SELECT id, content FROM messages;
-                """
-            )
+            _create_fts("porter unicode61")
         else:
             raise
 
