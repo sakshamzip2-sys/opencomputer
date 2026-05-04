@@ -456,6 +456,24 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_r_test.add_argument("title")
     p_r_test.add_argument("--tenant", default=None)
 
+    # --- orgchart (Wave 6.E.14 — Hermes 'org-chart views') ---
+    p_org = sub.add_parser(
+        "orgchart",
+        help="Render assignment-rule + active-assignee tree (ASCII or JSON)",
+    )
+    p_org.add_argument(
+        "--json", action="store_true",
+        help="Emit machine-readable JSON instead of the ASCII tree",
+    )
+    p_org.add_argument(
+        "--depth", type=int, default=2,
+        help="0=rules-only, 1=add assignees, 2=add per-assignee counts (default 2)",
+    )
+    p_org.add_argument(
+        "--days", type=int, default=1,
+        help="Window for 'done last N days' counts (default: 1)",
+    )
+
     # --- remote (Wave 6.E.13 — multi-host write coordination) ---
     p_remote = sub.add_parser(
         "remote",
@@ -611,6 +629,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "gc":       _cmd_gc,
         "boards":   _cmd_boards,
         "rules":    _cmd_rules,
+        "orgchart": _cmd_orgchart,
         "remote":   _cmd_remote,
     }
     handler = handlers.get(action)
@@ -1695,6 +1714,102 @@ def _cmd_rules_test(args: argparse.Namespace) -> int:
         return 0
     print(f"matches → assignee={assignee}")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Wave 6.E.14 — orgchart (closes Hermes 'org-chart views')
+# ---------------------------------------------------------------------------
+
+
+def _cmd_orgchart(args: argparse.Namespace) -> int:
+    """Render the kanban routing graph: rules + active assignees + counts."""
+    data = _build_orgchart(depth=args.depth, days=args.days)
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+    _render_orgchart_ascii(data, depth=args.depth)
+    return 0
+
+
+def _build_orgchart(*, depth: int, days: int) -> dict[str, Any]:
+    """Aggregate rules + per-assignee active task stats."""
+    rules: list[dict[str, Any]] = []
+    assignees: dict[str, dict[str, int]] = {}
+    with kb.connect() as conn:
+        if depth >= 0:
+            for r in kb.list_assignment_rules(conn):
+                rules.append({
+                    "id": r["id"],
+                    "priority": r["priority"],
+                    "kind": r["pattern_kind"],
+                    "pattern": r["pattern"],
+                    "assignee": r["assignee"],
+                })
+        if depth >= 1:
+            cutoff = int(time.time()) - max(1, days) * 86400
+            rows = conn.execute(
+                "SELECT assignee, status, completed_at "
+                "FROM tasks WHERE assignee IS NOT NULL"
+            ).fetchall()
+            for row in rows:
+                bucket = assignees.setdefault(
+                    row["assignee"],
+                    {"running": 0, "done_recent": 0,
+                     "blocked": 0, "ready": 0, "todo": 0},
+                )
+                status = row["status"]
+                if status == "running":
+                    bucket["running"] += 1
+                elif status == "done":
+                    if row["completed_at"] and row["completed_at"] >= cutoff:
+                        bucket["done_recent"] += 1
+                elif status in ("blocked", "ready", "todo"):
+                    bucket[status] += 1
+    return {
+        "rules": rules,
+        "assignees": assignees,
+        "depth": depth,
+        "days_window": days,
+    }
+
+
+def _render_orgchart_ascii(data: dict[str, Any], *, depth: int) -> None:
+    """Render the orgchart with box-drawing tree chars."""
+    rules = data["rules"]
+    assignees = data["assignees"]
+
+    print("Auto-routing rules")
+    if not rules:
+        print("  (none — set with `oc kanban rules add`)")
+    else:
+        for i, rule in enumerate(rules):
+            connector = "└──" if i == len(rules) - 1 else "├──"
+            print(
+                f"  {connector} [priority {rule['priority']:>3}] "
+                f"{rule['kind']}: {rule['pattern']!r:<30} → {rule['assignee']}"
+            )
+
+    if depth < 1:
+        return
+
+    print()
+    print(f"Active workers (window: {data['days_window']}d)")
+    if not assignees:
+        print("  (no tasks with assignees)")
+        return
+    sorted_assignees = sorted(assignees.items(), key=lambda kv: kv[0])
+    for i, (name, counts) in enumerate(sorted_assignees):
+        connector = "└──" if i == len(sorted_assignees) - 1 else "├──"
+        if depth >= 2:
+            metrics = (
+                f"running={counts['running']} "
+                f"done_recent={counts['done_recent']} "
+                f"ready={counts['ready']} "
+                f"blocked={counts['blocked']}"
+            )
+            print(f"  {connector} {name:<24} {metrics}")
+        else:
+            print(f"  {connector} {name}")
 
 
 # ---------------------------------------------------------------------------
