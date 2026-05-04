@@ -35,7 +35,7 @@ import time
 from dataclasses import asdict
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi import status as http_status
 from pydantic import BaseModel, Field
 
@@ -978,3 +978,204 @@ async def stream_events(ws: WebSocket):
             await ws.close()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Wave 6.E.13 — Multi-host write coordination (inbound peer endpoints)
+# ---------------------------------------------------------------------------
+
+
+def _peer_slug_from_query(slug: str | None) -> str:
+    """The peer identifies itself via ``?slug=<our-name-for-them>``.
+    Both sides agreed on this slug at the ``oc kanban remote add`` time."""
+    if not slug:
+        raise HTTPException(
+            status_code=400, detail="missing ?slug=<peer-slug>",
+        )
+    return slug
+
+
+async def _read_body(request: Request) -> bytes:
+    return await request.body()
+
+
+@router.post("/proxy/spawn")
+async def proxy_spawn(
+    request: Request,
+    slug: str = Query(...),
+    x_oc_signature: str | None = Header(None, alias="X-OC-Signature"),
+):
+    """Inbound: a peer asks us to spawn a worker for a delegated task.
+
+    HMAC-verified. We claim the task locally + spawn (via the existing
+    dispatcher path). Returns ``{remote_task_id, lease_until}`` so the
+    sender can record the lease.
+    """
+    from opencomputer.kanban.remote_dispatch import (
+        DEFAULT_REMOTE_TTL_SECONDS,
+        verify_inbound_request,
+    )
+    from opencomputer.kanban.remote_hosts import HmacAuthError
+
+    body = await _read_body(request)
+    conn = _conn()
+    try:
+        try:
+            verify_inbound_request(
+                conn,
+                slug=slug,
+                header_value=x_oc_signature,
+                method="POST",
+                path="/api/plugins/kanban/proxy/spawn",
+                body=body,
+            )
+        except HmacAuthError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"bad JSON: {exc}",
+            ) from exc
+
+        task = payload.get("task") or {}
+        title = task.get("title")
+        assignee = task.get("assignee")
+        if not title or not assignee:
+            raise HTTPException(
+                status_code=422, detail="task.title and task.assignee required",
+            )
+        # Validate workspace_kind locally — `dir:<path>` paths must
+        # exist on this peer.
+        ws_kind = task.get("workspace_kind") or "scratch"
+        ws_path = task.get("workspace_path")
+        if ws_kind == "dir" and ws_path:
+            from pathlib import Path
+            if not Path(ws_path).exists():
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"dir:{ws_path} does not exist on this host",
+                )
+
+        # Create the local mirror task. We use the assignee from the
+        # payload (peer-side profile name) and a fresh local id.
+        local_task_id = kanban_db.create_task(
+            conn,
+            title=title,
+            body=task.get("body"),
+            assignee=assignee,
+            priority=int(task.get("priority") or 0),
+            tenant=task.get("tenant"),
+            workspace_kind=ws_kind,
+            workspace_path=ws_path,
+        )
+        lease_until = int(time.time()) + DEFAULT_REMOTE_TTL_SECONDS
+        return {
+            "remote_task_id": local_task_id,
+            "lease_until": lease_until,
+        }
+    finally:
+        conn.close()
+
+
+@router.post("/proxy/heartbeat")
+async def proxy_heartbeat(
+    request: Request,
+    slug: str = Query(...),
+    x_oc_signature: str | None = Header(None, alias="X-OC-Signature"),
+):
+    """Inbound: peer asks us to refresh a delegated task's lease.
+
+    Returns the new ``lease_until`` (server-time TTL — we set it, not
+    the caller).
+    """
+    from opencomputer.kanban.remote_dispatch import (
+        DEFAULT_REMOTE_TTL_SECONDS,
+        verify_inbound_request,
+    )
+    from opencomputer.kanban.remote_hosts import HmacAuthError
+
+    body = await _read_body(request)
+    conn = _conn()
+    try:
+        try:
+            verify_inbound_request(
+                conn,
+                slug=slug,
+                header_value=x_oc_signature,
+                method="POST",
+                path="/api/plugins/kanban/proxy/heartbeat",
+                body=body,
+            )
+        except HmacAuthError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"bad JSON: {exc}",
+            ) from exc
+
+        remote_task_id = payload.get("remote_task_id")
+        if not remote_task_id:
+            raise HTTPException(
+                status_code=422, detail="remote_task_id required",
+            )
+        if kanban_db.get_task(conn, remote_task_id) is None:
+            raise HTTPException(
+                status_code=404, detail=f"task {remote_task_id!r} not found",
+            )
+        lease_until = int(time.time()) + DEFAULT_REMOTE_TTL_SECONDS
+        return {"lease_until": lease_until}
+    finally:
+        conn.close()
+
+
+@router.post("/proxy/callback")
+async def proxy_callback(
+    request: Request,
+    slug: str = Query(...),
+    x_oc_signature: str | None = Header(None, alias="X-OC-Signature"),
+):
+    """Inbound: peer reports a delegated task's terminal state.
+
+    Verifies HMAC + reconciles the local ``kanban_remote_claims`` row
+    + transitions the underlying local task.
+    """
+    from opencomputer.kanban.remote_dispatch import (
+        reconcile_callback,
+        verify_inbound_request,
+    )
+    from opencomputer.kanban.remote_hosts import HmacAuthError
+
+    body = await _read_body(request)
+    conn = _conn()
+    try:
+        try:
+            verify_inbound_request(
+                conn,
+                slug=slug,
+                header_value=x_oc_signature,
+                method="POST",
+                path="/api/plugins/kanban/proxy/callback",
+                body=body,
+            )
+        except HmacAuthError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"bad JSON: {exc}",
+            ) from exc
+
+        try:
+            reconcile_callback(conn, remote_slug=slug, payload=payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"ok": True}
+    finally:
+        conn.close()

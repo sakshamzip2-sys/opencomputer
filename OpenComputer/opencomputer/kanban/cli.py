@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import shlex
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -455,6 +456,38 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_r_test.add_argument("title")
     p_r_test.add_argument("--tenant", default=None)
 
+    # --- remote (Wave 6.E.13 — multi-host write coordination) ---
+    p_remote = sub.add_parser(
+        "remote",
+        help="Manage registered peer hosts for multi-host kanban writes",
+    )
+    p_remote_sub = p_remote.add_subparsers(dest="remote_action")
+
+    p_rem_add = p_remote_sub.add_parser(
+        "add",
+        help="Register a peer host. Generates an HMAC secret unless --secret given.",
+    )
+    p_rem_add.add_argument("slug")
+    p_rem_add.add_argument("url", help="e.g. http://peer-host:9119")
+    p_rem_add.add_argument(
+        "--secret", default=None,
+        help="Pre-shared HMAC secret (omit to generate one + print it)",
+    )
+
+    p_remote_sub.add_parser(
+        "list",
+        help="Print registered peer hosts (slug → url, last-seen)",
+    )
+
+    p_rem_rm = p_remote_sub.add_parser("rm", help="Remove a peer host")
+    p_rem_rm.add_argument("slug")
+
+    p_rem_test = p_remote_sub.add_parser(
+        "test",
+        help="Round-trip a /proxy/health request against a registered peer",
+    )
+    p_rem_test.add_argument("slug")
+
     # --- log ---
     p_log = sub.add_parser(
         "log",
@@ -578,6 +611,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "gc":       _cmd_gc,
         "boards":   _cmd_boards,
         "rules":    _cmd_rules,
+        "remote":   _cmd_remote,
     }
     handler = handlers.get(action)
     if not handler:
@@ -1660,6 +1694,117 @@ def _cmd_rules_test(args: argparse.Namespace) -> int:
         print(f"(no rule matches '{args.title}' tenant={args.tenant})")
         return 0
     print(f"matches → assignee={assignee}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Wave 6.E.13 — Multi-host remote peer management
+# ---------------------------------------------------------------------------
+
+
+def _cmd_remote(args: argparse.Namespace) -> int:
+    action = getattr(args, "remote_action", None)
+    if not action:
+        print(
+            "usage: oc kanban remote {add|list|rm|test} ...",
+            file=sys.stderr,
+        )
+        return 0
+    if action == "add":
+        return _cmd_remote_add(args)
+    if action == "list":
+        return _cmd_remote_list(args)
+    if action == "rm":
+        return _cmd_remote_rm(args)
+    if action == "test":
+        return _cmd_remote_test(args)
+    print(f"kanban remote: unknown action {action!r}", file=sys.stderr)
+    return 2
+
+
+def _cmd_remote_add(args: argparse.Namespace) -> int:
+    from opencomputer.kanban import remote_hosts as rh
+
+    with kb.connect() as conn:
+        try:
+            host = rh.add_remote_host(
+                conn, slug=args.slug, url=args.url,
+                hmac_secret=args.secret,
+            )
+        except sqlite3.IntegrityError:
+            print(f"kanban remote: slug {args.slug!r} already registered",
+                  file=sys.stderr)
+            return 1
+        except ValueError as exc:
+            print(f"kanban remote: {exc}", file=sys.stderr)
+            return 1
+    print(f"registered peer {host.slug} → {host.url}")
+    if args.secret is None:
+        # Caller must copy this to the peer.
+        print(f"  HMAC secret: {host.hmac_secret}")
+        print(
+            "  Copy that secret to the peer's `oc kanban remote add ... --secret <value>` "
+            "so both sides hold the same value."
+        )
+    return 0
+
+
+def _cmd_remote_list(args: argparse.Namespace) -> int:
+    from opencomputer.kanban import remote_hosts as rh
+    with kb.connect() as conn:
+        hosts = rh.list_remote_hosts(conn)
+    if not hosts:
+        print("(no peers registered — set with `oc kanban remote add`)")
+        return 0
+    print(f"{'slug':<20} {'url':<40} last-seen")
+    for h in hosts:
+        last = (
+            time.strftime("%Y-%m-%d %H:%M", time.localtime(h.last_seen_at))
+            if h.last_seen_at else "(never)"
+        )
+        print(f"{h.slug:<20} {h.url:<40} {last}")
+    return 0
+
+
+def _cmd_remote_rm(args: argparse.Namespace) -> int:
+    from opencomputer.kanban import remote_hosts as rh
+    with kb.connect() as conn:
+        ok = rh.remove_remote_host(conn, args.slug)
+    if not ok:
+        print(f"kanban remote: no such peer {args.slug!r}", file=sys.stderr)
+        return 1
+    print(f"removed peer {args.slug}")
+    return 0
+
+
+def _cmd_remote_test(args: argparse.Namespace) -> int:
+    from opencomputer.kanban import remote_hosts as rh
+
+    with kb.connect() as conn:
+        host = rh.find_remote_host(conn, args.slug)
+        if host is None:
+            print(f"kanban remote: no such peer {args.slug!r}", file=sys.stderr)
+            return 1
+    import httpx
+    path = "/api/plugins/kanban/proxy/health"
+    headers = rh.signed_headers(
+        secret=host.hmac_secret, method="GET", path=path,
+    )
+    try:
+        resp = httpx.get(
+            f"{host.url.rstrip('/')}{path}", headers=headers, timeout=5.0,
+        )
+    except httpx.RequestError as exc:
+        print(f"kanban remote test: {host.slug} unreachable: {exc}",
+              file=sys.stderr)
+        return 1
+    if resp.status_code != 200:
+        print(f"kanban remote test: {host.slug} → HTTP {resp.status_code}",
+              file=sys.stderr)
+        return 1
+    data = resp.json()
+    print(f"{host.slug}: ok (boards={data.get('boards', [])}, "
+          f"active={data.get('active_board')})")
     return 0
 
 

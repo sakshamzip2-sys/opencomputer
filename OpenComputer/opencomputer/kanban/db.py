@@ -569,6 +569,31 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
+-- Wave 6.E.13 — Multi-host write coordination (registered peers).
+-- Each row is a peer this instance trusts. The HMAC secret is shared
+-- (used by both sides to sign + verify requests).
+CREATE TABLE IF NOT EXISTS kanban_remote_hosts (
+    slug          TEXT PRIMARY KEY,
+    url           TEXT NOT NULL,
+    hmac_secret   TEXT NOT NULL,
+    added_at      INTEGER NOT NULL,
+    last_seen_at  INTEGER
+);
+
+-- Wave 6.E.13 — Pending tasks delegated to a remote host. Server-time
+-- TTL leases (not client-time) defeat clock-skew attacks. Status
+-- transitions to done | failed when the remote sends a callback.
+CREATE TABLE IF NOT EXISTS kanban_remote_claims (
+    local_task_id   TEXT NOT NULL,
+    remote_slug     TEXT NOT NULL,
+    remote_task_id  TEXT NOT NULL,
+    leased_at       INTEGER NOT NULL,
+    lease_until     INTEGER NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    last_heartbeat  INTEGER,
+    PRIMARY KEY (local_task_id, remote_slug)
+);
+
 -- Wave 6.E.9 — Auto-assignment routing rules (Hermes 'out of scope'
 -- item). When a ready task has assignee IS NULL, the dispatcher walks
 -- this table in priority DESC, id ASC order; the first matching rule
@@ -598,6 +623,8 @@ CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, start
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
 CREATE INDEX IF NOT EXISTS idx_rules_priority        ON kanban_assignment_rules(priority DESC);
+CREATE INDEX IF NOT EXISTS idx_remote_claims_lease   ON kanban_remote_claims(lease_until);
+CREATE INDEX IF NOT EXISTS idx_remote_claims_status  ON kanban_remote_claims(status);
 """
 
 
