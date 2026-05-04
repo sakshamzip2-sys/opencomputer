@@ -142,29 +142,29 @@ class OpenRouterProvider(OpenAIProvider):
     @staticmethod
     def _load_or_cfg() -> dict:
         """Best-effort read of the OC config so build_or_headers can see
-        ``openrouter.response_cache`` / ``response_cache_ttl``. Falls back
-        to {} on any error so provider construction never breaks because
-        of a missing or malformed config file."""
-        try:
-            from opencomputer.agent.config_store import load_config
+        ``openrouter.response_cache`` / ``response_cache_ttl``.
 
-            cfg = load_config()
-            # Config is a typed dataclass; reconstruct the dict shape
-            # build_or_headers expects (it reads cfg["openrouter"]).
-            or_section = getattr(cfg, "openrouter", None)
-            if or_section is None:
-                return {}
-            return {
-                "openrouter": {
-                    "response_cache": getattr(or_section, "response_cache", True),
-                    "response_cache_ttl": getattr(
-                        or_section, "response_cache_ttl", _DEFAULT_RESPONSE_CACHE_TTL_S,
-                    ),
-                }
-            }
+        Plugin SDK boundary: plugins MUST NOT import from ``opencomputer.*``.
+        We read the config YAML directly from the standard location
+        (``~/.opencomputer/config.yaml`` or ``$OC_HOME/config.yaml``)
+        instead of via ``opencomputer.agent.config_store``. Falls back
+        to caching-enabled-with-default-TTL on any error so provider
+        construction never breaks because of a missing or malformed
+        config file.
+        """
+        try:
+            import yaml
+
+            home_env = os.environ.get("OC_HOME")
+            if home_env:
+                cfg_path = Path(home_env) / "config.yaml"
+            else:
+                cfg_path = Path.home() / ".opencomputer" / "config.yaml"
+            if not cfg_path.exists():
+                return {"openrouter": {"response_cache": True}}
+            data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            return data if isinstance(data, dict) else {}
         except Exception:  # noqa: BLE001
-            # config_store missing the openrouter section is normal pre-Wave-5;
-            # default to caching enabled at the spec's default TTL.
             return {"openrouter": {"response_cache": True}}
 
     @property
