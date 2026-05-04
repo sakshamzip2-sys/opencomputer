@@ -67,15 +67,26 @@ async def test_browser_bridge_rejects_missing_token():
 
 async def test_browser_bridge_handles_port_in_use():
     """If the port is already bound, raise a clean OSError with actionable msg."""
+    import socket
+
     from extensions.browser_bridge.adapter import BrowserBridgeAdapter
 
     from opencomputer.ingestion.bus import TypedEventBus
 
+    # Pick a free ephemeral port at runtime so the test isn't flaky if
+    # something else on the dev machine happens to be on a fixed port.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    finally:
+        sock.close()
+
     bus = TypedEventBus()
-    a = BrowserBridgeAdapter(bus=bus, port=18793, token="t")
+    a = BrowserBridgeAdapter(bus=bus, port=port, token="t")
     runner_a = await a.start()
     try:
-        b = BrowserBridgeAdapter(bus=bus, port=18793, token="t")
+        b = BrowserBridgeAdapter(bus=bus, port=port, token="t")
         # Second bind on same port must raise OSError; we don't want
         # the adapter to silently swallow the bind failure.
         with pytest.raises(OSError):
