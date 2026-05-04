@@ -1,4 +1,4 @@
-"""MatrixAdapter — Matrix channel via the Client-Server API (G.19 / Tier 3.x).
+"""MatrixAdapter — Matrix channel via the Client-Server API (G.19 + Wave 6.E.3).
 
 Outbound + reactions + edit (m.replace) + redaction (delete) via raw httpx
 calls to the Matrix Client-Server API ``/_matrix/client/v3/...``.
@@ -6,8 +6,10 @@ calls to the Matrix Client-Server API ``/_matrix/client/v3/...``.
 support would require ``matrix-nio`` + olm/megolm libs, deferred until
 demand.
 
-Inbound: not in this adapter. Use the webhook adapter (G.3) wired to a
-Matrix bridge, hookshot, or appservice that POSTs message events to OC.
+Wave 6.E.3 (2026-05-04): adds **inbound /sync long-poll** so the adapter
+sees ``m.reaction`` events on its own messages. Combined with
+:mod:`extensions.matrix.approval`, this gives OC a reaction-based
+approval primitive — post a "want to run X?" message, await a ✅/❌.
 
 Setup:
 
@@ -21,6 +23,7 @@ Capabilities: REACTIONS + EDIT_MESSAGE + DELETE_MESSAGE + THREADS.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -32,7 +35,22 @@ from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import Platform, SendResult
 from plugin_sdk.format_converters import matrix_html
 
+# Wave 6.E.3 — approval primitive lives next door. Imported lazily
+# inside ``__init__`` to avoid a synthetic-module-name resolution
+# failure when OC's plugin loader imports ``adapter`` directly without
+# the ``extensions.matrix`` package context.
+
 logger = logging.getLogger("opencomputer.ext.matrix")
+
+# Default /sync long-poll timeout (server holds open up to this long
+# waiting for new events). Matrix spec recommends 30s.
+_SYNC_TIMEOUT_MS = 30_000
+
+# Initial filter: timeline events only, not presence / typing / receipts.
+# Keeps the payload small + reduces server load.
+_INITIAL_FILTER = (
+    '{"room":{"timeline":{"types":["m.room.message","m.reaction"]}}}'
+)
 
 
 def _is_plain_markdown(text: str) -> bool:
@@ -67,6 +85,32 @@ class MatrixAdapter(BaseChannelAdapter):
         self._client: httpx.AsyncClient | None = None
         self._user_id: str | None = None
 
+        # Wave 6.E.3 — inbound /sync state.
+        self._sync_task: asyncio.Task[None] | None = None
+        self._sync_stop: asyncio.Event = asyncio.Event()
+        self._next_batch: str | None = None
+        # Approval primitive — lazy import (see comment above the class).
+        try:
+            from extensions.matrix.approval import ApprovalQueue
+        except ImportError:
+            # OC plugin loader path — fall back to importlib + the
+            # adapter's own __file__ to find the sibling.
+            import importlib.util as _ilu
+            from pathlib import Path as _Path
+            spec = _ilu.spec_from_file_location(
+                "_oc_matrix_approval",
+                _Path(__file__).parent / "approval.py",
+            )
+            mod = _ilu.module_from_spec(spec)  # type: ignore[arg-type]
+            spec.loader.exec_module(mod)  # type: ignore[union-attr]
+            ApprovalQueue = mod.ApprovalQueue
+        self.approval_queue = ApprovalQueue()
+        # Disable inbound polling unless explicitly enabled — back-compat
+        # for existing matrix users who only want outbound.
+        self._inbound_enabled: bool = bool(
+            config.get("inbound_sync", config.get("enable_sync", False)),
+        )
+
     async def connect(self) -> bool:
         """Verify the access token via ``GET /_matrix/client/v3/account/whoami``."""
         self._client = httpx.AsyncClient(
@@ -89,12 +133,32 @@ class MatrixAdapter(BaseChannelAdapter):
             data = resp.json()
             self._user_id = data.get("user_id")
             logger.info("matrix: connected as %s", self._user_id)
+            # Wave 6.E.3 — start /sync polling iff opted in.
+            if self._inbound_enabled:
+                self._sync_stop.clear()
+                self._sync_task = asyncio.create_task(
+                    self._poll_forever(),
+                    name="matrix-sync",
+                )
+                logger.info("matrix: inbound /sync polling started")
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("matrix connect failed: %s", exc)
             return False
 
     async def disconnect(self) -> None:
+        # Wave 6.E.3 — stop /sync first so it can't fire after the
+        # client closes.
+        if self._sync_task is not None:
+            self._sync_stop.set()
+            try:
+                await asyncio.wait_for(self._sync_task, timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError):
+                self._sync_task.cancel()
+            self._sync_task = None
+        # Resolve any still-pending approvals as cancelled so callers
+        # don't block forever during teardown.
+        self.approval_queue.cancel_all()
         if self._client is not None:
             await self._client.aclose()
             self._client = None
@@ -288,6 +352,130 @@ class MatrixAdapter(BaseChannelAdapter):
                 return SendResult(success=False, error=f"{type(exc).__name__}: {exc}")
 
         return await self._send_with_retry(_do_delete)
+
+    # ------------------------------------------------------------------
+    # Wave 6.E.3 — inbound /sync long-poll
+    # ------------------------------------------------------------------
+
+    async def _poll_forever(self) -> None:
+        """Long-poll ``/sync`` until ``self._sync_stop`` fires.
+
+        Behaviour:
+        - First tick uses an initial filter (timeline only) and no
+          ``since`` token — Matrix returns "current state" without a
+          full backfill, which is what we want.
+        - Subsequent ticks pass the previous ``next_batch`` to receive
+          only deltas.
+        - 401 from the server flips the adapter to fatal-non-retryable
+          (token revoked / mistyped) and exits.
+        - Other HTTP errors back off with exponential delay capped at
+          60s; this matches the pattern in the telegram adapter.
+
+        See https://spec.matrix.org/latest/client-server-api/#syncing
+        """
+        if self._client is None:
+            return
+        consecutive_errors = 0
+        backoff = 1.0
+        while not self._sync_stop.is_set():
+            params: dict[str, str] = {"timeout": str(_SYNC_TIMEOUT_MS)}
+            if self._next_batch:
+                params["since"] = self._next_batch
+            else:
+                params["filter"] = _INITIAL_FILTER
+
+            try:
+                resp = await self._client.get(
+                    f"{self._homeserver}/_matrix/client/v3/sync",
+                    params=params,
+                )
+            except (httpx.RequestError, asyncio.CancelledError) as exc:
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                consecutive_errors += 1
+                wait = min(60.0, backoff * (2 ** min(consecutive_errors, 5)))
+                logger.warning(
+                    "matrix /sync request error (#%d, sleeping %.1fs): %s",
+                    consecutive_errors, wait, exc,
+                )
+                try:
+                    await asyncio.wait_for(self._sync_stop.wait(), timeout=wait)
+                except TimeoutError:
+                    pass
+                continue
+
+            if resp.status_code == 401:
+                logger.error(
+                    "matrix /sync returned 401 — access token rejected. "
+                    "Stopping inbound polling. Set MATRIX_ACCESS_TOKEN to "
+                    "a valid value to recover."
+                )
+                # Reuse the OpenClaw fatal-error path if available.
+                if hasattr(self, "_set_fatal_error"):
+                    self._set_fatal_error(
+                        "matrix-auth",
+                        "MATRIX_ACCESS_TOKEN rejected by /sync",
+                        retryable=False,
+                    )
+                return
+            if resp.status_code != 200:
+                consecutive_errors += 1
+                wait = min(60.0, backoff * (2 ** min(consecutive_errors, 5)))
+                logger.warning(
+                    "matrix /sync HTTP %d (#%d, sleeping %.1fs): %s",
+                    resp.status_code, consecutive_errors, wait, resp.text[:200],
+                )
+                try:
+                    await asyncio.wait_for(self._sync_stop.wait(), timeout=wait)
+                except TimeoutError:
+                    pass
+                continue
+
+            consecutive_errors = 0
+            data = resp.json()
+            self._next_batch = data.get("next_batch") or self._next_batch
+            try:
+                self._handle_sync_response(data)
+            except Exception:  # noqa: BLE001 — never crash the loop
+                logger.exception("matrix /sync: handler error (ignored)")
+
+            # Reap expired approvals every tick.
+            self.approval_queue.reap_expired()
+
+    def _handle_sync_response(self, data: dict[str, Any]) -> None:
+        """Walk a sync response and dispatch reaction events.
+
+        We intentionally only look at ``rooms.join.<room>.timeline.events``
+        and only at type ``m.reaction``; everything else (presence,
+        m.room.message, account_data) is ignored. The whole point of
+        this polling loop is to drive the approval queue — message
+        receipt is the webhook adapter's job.
+        """
+        rooms = data.get("rooms", {}).get("join", {})
+        if not isinstance(rooms, dict):
+            return
+        for _room_id, room in rooms.items():
+            timeline = room.get("timeline", {})
+            for evt in timeline.get("events", []) or []:
+                if evt.get("type") != "m.reaction":
+                    continue
+                # Skip our own reactions so we don't accidentally
+                # resolve our own approvals.
+                if evt.get("sender") and evt["sender"] == self._user_id:
+                    continue
+                relates = evt.get("content", {}).get("m.relates_to", {})
+                if relates.get("rel_type") != "m.annotation":
+                    continue
+                target = relates.get("event_id")
+                emoji = relates.get("key")
+                if not target or not emoji:
+                    continue
+                resolved = self.approval_queue.on_reaction(target, emoji)
+                if resolved:
+                    logger.info(
+                        "matrix approval: %s reacted with %r → resolved %s",
+                        evt.get("sender", "?"), emoji, target,
+                    )
 
 
 __all__ = ["MatrixAdapter"]
