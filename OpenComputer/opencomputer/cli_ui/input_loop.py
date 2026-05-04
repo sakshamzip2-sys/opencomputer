@@ -864,37 +864,16 @@ async def read_user_input(
         wrap_lines=True,
     )
 
-    # Right-aligned session-title indicator above the input — mirrors the
-    # cyan corner tag in Claude Code (e.g. "UI-changes"). Hidden when the
-    # session has no manual title set.
     from prompt_toolkit.layout import WindowAlign
 
     def _title_text():
-        if not session_title:
+        if not session_title or not (1 <= len(session_title) <= 50):
             return []
         return [
             ("class:title.box", "┤ "),
             ("class:title.text", session_title),
             ("class:title.box", " ├"),
         ]
-
-    # Show the corner indicator only for sane-length titles (≤50 chars).
-    # Existing sessions may have a runaway auto-generated title (the now-
-    # disabled cheap-LLM titler sometimes returned the AI's greeting as
-    # a "title" — see Image #12). Filter those out at the UI layer so
-    # historical bad data doesn't surface.
-    def _title_is_displayable() -> bool:
-        return bool(session_title) and 1 <= len(session_title) <= 50
-
-    title_window = ConditionalContainer(
-        content=Window(
-            content=FormattedTextControl(_title_text),
-            height=1,
-            align=WindowAlign.RIGHT,
-            dont_extend_height=True,
-        ),
-        filter=Condition(_title_is_displayable),
-    )
 
     dropdown_window = ConditionalContainer(
         content=Window(
@@ -958,10 +937,15 @@ async def read_user_input(
         return _render_mode_badge(runtime)
 
     badge_window = ConditionalContainer(
-        content=Window(
-            content=FormattedTextControl(_badge_text),
-            height=1,
-        ),
+        content=VSplit([
+            Window(content=FormattedTextControl(_badge_text), height=1),
+            Window(
+                content=FormattedTextControl(_title_text),
+                height=1,
+                align=WindowAlign.RIGHT,
+                dont_extend_width=True,
+            ),
+        ]),
         filter=Condition(lambda: _badge_visible),
     )
 
@@ -971,7 +955,6 @@ async def read_user_input(
                 filler,
                 dropdown_window,
                 dropdown_divider,
-                title_window,
                 VSplit([prompt_window, input_window]),
                 paste_hint_window,
                 badge_window,
