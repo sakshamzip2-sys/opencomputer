@@ -1918,6 +1918,79 @@ def chat(
     )
 
 
+@app.command(name="oneshot")
+def oneshot(
+    prompt: str = typer.Argument(
+        ..., help="The single user message to send. Wrap in quotes for multi-word prompts.",
+    ),
+    model: str = typer.Option(
+        "", "--model", "-m",
+        help="Override the configured model for this run.",
+    ),
+    provider_name: str = typer.Option(
+        "", "--provider", "-p",
+        help="Override the configured provider (anthropic, openai, openrouter, ...).",
+    ),
+    plan: bool = typer.Option(
+        False, "--plan", help="Plan mode (read-only / refuses destructive tools).",
+    ),
+) -> None:
+    """Run a single agent turn non-interactively, print the response, exit.
+
+    Wave 6.A — Hermes-port (7c8c031f6 ``hermes -z``). Non-interactive
+    one-shot mode for shell scripts, CI hooks, and quick "ask the agent"
+    invocations. Differs from ``oc chat`` by NOT entering the REPL: one
+    user turn, full agent loop (compaction + tools + hooks), final
+    assistant text printed to stdout, exit.
+
+    Examples:
+        oc oneshot "what's in the README?"
+        oc oneshot "summarise this file" --model anthropic:claude-opus-4-7
+        oc oneshot "describe a kanban board" --plan
+    """
+    import asyncio as _asyncio
+
+    from opencomputer.agent.loop import AgentLoop as _AgentLoop
+    from opencomputer.tools.delegate import DelegateTool as _DelegateTool
+    from plugin_sdk.runtime_context import RuntimeContext as _RuntimeContext
+
+    _configure_logging_once()
+    cfg = load_config()
+    if model:
+        cfg.model.model = model
+    if provider_name:
+        cfg.model.provider = provider_name
+    _check_provider_key(cfg.model.provider)
+
+    _register_builtin_tools()
+    _discover_plugins()
+    _apply_model_overrides()
+    _discover_and_register_agents()
+    _register_settings_hooks(cfg)
+
+    provider = _resolve_provider(cfg.model.provider)
+    loop = _AgentLoop(provider=provider, config=cfg)
+    _DelegateTool.set_factory(lambda: _AgentLoop(provider=provider, config=cfg))
+
+    permission_mode = _derive_permission_mode(plan=plan, auto=False, accept_edits=False)
+    runtime = _RuntimeContext(plan_mode=plan, permission_mode=permission_mode)
+
+    async def _run() -> str:
+        result = await loop.run_conversation(prompt, runtime=runtime)
+        msg = getattr(result, "final_message", None)
+        if msg is None:
+            return ""
+        content = getattr(msg, "content", "")
+        return content if isinstance(content, str) else ""
+
+    try:
+        text = _asyncio.run(_run())
+    except KeyboardInterrupt:
+        raise typer.Exit(130) from None
+    if text:
+        typer.echo(text)
+
+
 @app.command()
 def code(
     path: str | None = typer.Argument(
