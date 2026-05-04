@@ -460,6 +460,52 @@ class DiscordAdapter(BaseChannelAdapter):
 
         return await self._send_with_retry(_do_send)
 
+    async def send_multiple_images(
+        self,
+        chat_id: str,
+        image_paths: list[str],
+        caption: str = "",
+        **kwargs: Any,
+    ) -> None:
+        """Send N images as a Discord multi-file message.
+
+        Wave 5 T11 closure (Hermes-port 3de8e2168). Discord's REST API
+        accepts up to 10 attachments per message; when ``image_paths`` is
+        longer we chunk and emit one message per chunk. Caption applies
+        to the FIRST chunk only (matches Discord UX where bulk uploads
+        carry one comment).
+
+        Falls back to per-image sends on platform-side errors so a single
+        bad image doesn't lose the rest of the batch.
+        """
+        if not image_paths:
+            return
+        channel = self._channel_cache.get(chat_id)
+        if channel is None:
+            try:
+                channel = await self._client.fetch_channel(int(chat_id))
+                self._channel_cache[chat_id] = channel
+            except Exception as e:  # noqa: BLE001
+                # No channel → nothing we can do; surface as best-effort no-op
+                logging.getLogger(__name__).warning(
+                    "discord send_multiple_images: channel lookup failed: %s", e,
+                )
+                return
+
+        allowed_mentions = self._build_allowed_mentions()
+        try:
+            for i in range(0, len(image_paths), 10):
+                chunk = image_paths[i:i + 10]
+                files = [discord.File(p) for p in chunk]
+                content = caption if i == 0 and caption else None
+                await channel.send(
+                    content=content, files=files, allowed_mentions=allowed_mentions,
+                )
+        except Exception:  # noqa: BLE001 — fall back to base per-image loop
+            await super().send_multiple_images(
+                chat_id, image_paths, caption=caption, **kwargs,
+            )
+
     async def send_typing(self, chat_id: str) -> None:
         channel = self._channel_cache.get(chat_id)
         if channel is None:
