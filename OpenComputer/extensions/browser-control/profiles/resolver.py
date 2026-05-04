@@ -4,7 +4,7 @@ Two stages, mirroring OpenClaw's config.ts:
 
   resolve_browser_config(raw, full_config) -> ResolvedBrowserConfig
       Stage 1. Parse the `browser:` section of `~/.opencomputer/<profile>/config.yaml`,
-      apply defaults, ensure default `openclaw` and `user` profiles exist.
+      apply defaults, ensure default `opencomputer` and `user` profiles exist.
 
   resolve_profile(resolved, profile_name) -> ResolvedBrowserProfile | None
       Stage 2. Compute per-profile cdp_url / cdp_host / cdp_port and capability flags.
@@ -20,6 +20,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -162,7 +163,7 @@ def _build_profile_config(raw: Any) -> BrowserProfileConfig | None:
     if not isinstance(raw, dict):
         return None
     driver = raw.get("driver")
-    if driver not in (None, "openclaw", "existing-session"):
+    if driver not in (None, "managed", "existing-session"):
         return None
     cdp_port = raw.get("cdp_port") if isinstance(raw.get("cdp_port"), int) else None
     cdp_url = raw.get("cdp_url") if isinstance(raw.get("cdp_url"), str) else None
@@ -214,7 +215,7 @@ def _ensure_default_profile(
         cdp_port=legacy_cdp_port if legacy_cdp_port is not None else cdp_range_start,
         cdp_url=legacy_cdp_url,
         color=color,
-        driver="openclaw",
+        driver="managed",
     )
 
 
@@ -227,6 +228,48 @@ def _ensure_default_user_profile(profiles: dict[str, BrowserProfileConfig]) -> N
     )
 
 
+# ─── one-time disk migration: openclaw → opencomputer ────────────────
+
+
+def migrate_legacy_profile_dir(
+    *,
+    base_dir: Path | None = None,
+) -> bool:
+    """Rename ``~/.opencomputer/browser/openclaw`` → ``.../opencomputer``.
+
+    Idempotent — safe to call repeatedly. Only renames when the legacy
+    directory exists AND the new directory does not. Existing users keep
+    their Chrome profile state (~191MB) across the rename.
+
+    Returns True if a rename happened, False otherwise. Errors are
+    logged and swallowed so a half-broken filesystem can't wedge
+    startup.
+
+    ``base_dir`` overrides the default ``~/.opencomputer/browser`` for
+    tests.
+    """
+    base = base_dir if base_dir is not None else Path.home() / ".opencomputer" / "browser"
+    old_dir = base / "openclaw"
+    new_dir = base / "opencomputer"
+    try:
+        if old_dir.exists() and not new_dir.exists():
+            old_dir.rename(new_dir)
+            _log.info(
+                "migrate_legacy_profile_dir: renamed %s → %s",
+                old_dir,
+                new_dir,
+            )
+            return True
+    except OSError as exc:
+        _log.warning(
+            "migrate_legacy_profile_dir: rename %s → %s failed: %s",
+            old_dir,
+            new_dir,
+            exc,
+        )
+    return False
+
+
 # ─── stage 1: resolve_browser_config ──────────────────────────────────
 
 
@@ -235,6 +278,10 @@ def resolve_browser_config(
     full_config: dict[str, Any] | None = None,
 ) -> ResolvedBrowserConfig:
     """Resolve the `browser:` section. Pull-based — call once per request."""
+    # One-time disk migration. Idempotent and best-effort — never raises
+    # so config resolution can proceed even on a borked filesystem.
+    migrate_legacy_profile_dir()
+
     raw = raw or {}
     full_config = full_config or {}
 
@@ -390,7 +437,7 @@ def resolve_profile(
         # Surface as None so callers raise a clear "must define" error upstream.
         return None
 
-    driver = profile.driver or "openclaw"
+    driver = profile.driver or "managed"
     attach_only = profile.attach_only if profile.attach_only is not None else resolved.attach_only
 
     return ResolvedBrowserProfile(

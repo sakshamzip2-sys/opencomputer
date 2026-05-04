@@ -53,7 +53,7 @@ async def test_csrf_blocks_cross_site_post() -> None:
         app,
         method="POST",
         path="/start",
-        body={"profile": "openclaw"},
+        body={"profile": "opencomputer"},
         auth=auth,
         extra_headers={"sec-fetch-site": "cross-site"},
     )
@@ -68,7 +68,7 @@ async def test_csrf_blocks_external_origin_post() -> None:
         app,
         method="POST",
         path="/start",
-        body={"profile": "openclaw"},
+        body={"profile": "opencomputer"},
         auth=auth,
         extra_headers={"origin": "https://evil.com", "sec-fetch-site": "same-origin"},
     )
@@ -169,14 +169,14 @@ async def test_existing_session_profile_denied_delete() -> None:
 
 @pytest.mark.asyncio
 async def test_openclaw_profile_can_create_returns_501_stub() -> None:
-    """openclaw (local-managed) passes the gate; the route is a 501 stub
+    """opencomputer (local-managed) passes the gate; the route is a 501 stub
     until W3 wires the service layer."""
     app, auth, _ = _build_app()
     r = await dispatch_browser_control_request(
         app,
         method="POST",
         path="/profiles/create",
-        body={"name": "newone", "profile": "openclaw"},
+        body={"name": "newone", "profile": "opencomputer"},
         auth=auth,
     )
     assert r.status == 501
@@ -189,11 +189,11 @@ async def test_openclaw_profile_can_create_returns_501_stub() -> None:
 async def test_root_status_returns_shape() -> None:
     app, auth, _ = _build_app()
     r = await dispatch_browser_control_request(
-        app, method="GET", path="/", auth=auth, query={"profile": "openclaw"}
+        app, method="GET", path="/", auth=auth, query={"profile": "opencomputer"}
     )
     assert r.status == 200
     assert isinstance(r.body, dict)
-    assert r.body["profile"] == "openclaw"
+    assert r.body["profile"] == "opencomputer"
     assert r.body["enabled"] is True
 
 
@@ -203,7 +203,7 @@ async def test_get_profiles_lists_declared() -> None:
     r = await dispatch_browser_control_request(app, method="GET", path="/profiles", auth=auth)
     assert r.status == 200
     names = {p["name"] for p in r.body["profiles"]}
-    assert "openclaw" in names
+    assert "opencomputer" in names
     assert "user" in names
 
 
@@ -212,14 +212,14 @@ async def test_known_profile_names_endpoint() -> None:
     app, auth, _ = _build_app()
     r = await dispatch_browser_control_request(app, method="GET", path="/profile-names", auth=auth)
     assert r.status == 200
-    assert "openclaw" in r.body["names"]
+    assert "opencomputer" in r.body["names"]
 
 
 @pytest.mark.asyncio
 async def test_open_tab_url_required() -> None:
     app, auth, _ = _build_app()
     r = await dispatch_browser_control_request(
-        app, method="POST", path="/tabs/open", body={"profile": "openclaw"}, auth=auth
+        app, method="POST", path="/tabs/open", body={"profile": "opencomputer"}, auth=auth
     )
     assert r.status == 400
 
@@ -228,7 +228,7 @@ async def test_open_tab_url_required() -> None:
 async def test_navigate_requires_url() -> None:
     app, auth, _ = _build_app()
     r = await dispatch_browser_control_request(
-        app, method="POST", path="/navigate", body={"profile": "openclaw"}, auth=auth
+        app, method="POST", path="/navigate", body={"profile": "opencomputer"}, auth=auth
     )
     assert r.status == 400
     assert r.body["error"]["code"] == "url_required"
@@ -238,7 +238,7 @@ async def test_navigate_requires_url() -> None:
 async def test_act_kind_required() -> None:
     app, auth, _ = _build_app()
     r = await dispatch_browser_control_request(
-        app, method="POST", path="/act", body={"profile": "openclaw"}, auth=auth
+        app, method="POST", path="/act", body={"profile": "opencomputer"}, auth=auth
     )
     assert r.status == 400
     assert r.body["error"]["code"] == "ACT_KIND_REQUIRED"
@@ -248,7 +248,7 @@ async def test_act_kind_required() -> None:
 async def test_dialog_accept_required() -> None:
     app, auth, _ = _build_app()
     r = await dispatch_browser_control_request(
-        app, method="POST", path="/hooks/dialog", body={"profile": "openclaw"}, auth=auth
+        app, method="POST", path="/hooks/dialog", body={"profile": "opencomputer"}, auth=auth
     )
     assert r.status == 400
 
@@ -267,7 +267,7 @@ async def test_storage_unknown_kind_returns_400() -> None:
 
     # Lazy-add a runtime so the page-resolver doesn't 503.
     state = app.state.browser_ctx.state
-    profile = resolve_profile(state.resolved, "openclaw")
+    profile = resolve_profile(state.resolved, "opencomputer")
     runtime = get_or_create_profile_state(state, profile)
     runtime.status = ProfileStatus.RUNNING
 
@@ -276,7 +276,7 @@ async def test_storage_unknown_kind_returns_400() -> None:
         method="GET",
         path="/storage/elsewhere",
         auth=auth,
-        query={"profile": "openclaw"},
+        query={"profile": "opencomputer"},
     )
     # The page-resolver runs first and 404s when no tabs exist (that's
     # the realistic shape; ``ensure_tab_available`` upstream opens
@@ -296,12 +296,12 @@ async def test_observe_console_returns_empty_list_without_session() -> None:
     )
 
     state = app.state.browser_ctx.state
-    profile = resolve_profile(state.resolved, "openclaw")
+    profile = resolve_profile(state.resolved, "opencomputer")
     runtime = get_or_create_profile_state(state, profile)
     runtime.status = ProfileStatus.RUNNING
 
     r = await dispatch_browser_control_request(
-        app, method="GET", path="/console", auth=auth, query={"profile": "openclaw"}
+        app, method="GET", path="/console", auth=auth, query={"profile": "opencomputer"}
     )
     # Page-resolver fails (no tabs / no session) → 404 / 503. When the
     # session and tabs are wired, the handler returns {messages: []}.

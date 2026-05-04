@@ -82,7 +82,7 @@ async def _ensure_dispatcher_ready_or_raise() -> None:
 _BROWSER_TOOL_DESCRIPTION = (
     "Control the browser via OpenComputer's browser control service "
     "(status/start/stop/profiles/tabs/open/snapshot/screenshot/navigate/"
-    "act/...). Profile defaults to 'openclaw' (isolated, agent-managed). "
+    "act/...). Profile defaults to 'opencomputer' (isolated, agent-managed). "
     "Use profile='user' for the user's logged-in Chrome (host-only; "
     "existing-session). When using refs returned by snapshot (e.g. "
     "'e12'), keep the same tab: pass targetId from the snapshot response "

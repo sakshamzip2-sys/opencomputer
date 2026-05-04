@@ -12,7 +12,7 @@ from typing import Literal
 
 # ─── type aliases ──────────────────────────────────────────────────────
 
-BrowserDriver = Literal["openclaw", "existing-session"]
+BrowserDriver = Literal["managed", "existing-session"]
 BrowserProfileMode = Literal["local-managed", "local-existing-session", "remote-cdp"]
 
 
@@ -21,8 +21,8 @@ BrowserProfileMode = Literal["local-managed", "local-existing-session", "remote-
 DEFAULT_OPENCLAW_BROWSER_ENABLED = True
 DEFAULT_BROWSER_EVALUATE_ENABLED = True
 DEFAULT_OPENCLAW_BROWSER_COLOR = "#FF4500"
-DEFAULT_OPENCLAW_BROWSER_PROFILE_NAME = "openclaw"
-DEFAULT_BROWSER_DEFAULT_PROFILE_NAME = "openclaw"
+DEFAULT_OPENCLAW_BROWSER_PROFILE_NAME = "opencomputer"
+DEFAULT_BROWSER_DEFAULT_PROFILE_NAME = "opencomputer"
 DEFAULT_USER_BROWSER_PROFILE_NAME = "user"
 DEFAULT_USER_BROWSER_PROFILE_COLOR = "#00AA00"
 

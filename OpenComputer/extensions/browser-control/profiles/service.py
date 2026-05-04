@@ -101,7 +101,7 @@ class CreateProfileParams:
     color: str | None = None
     cdp_url: str | None = None
     user_data_dir: str | None = None
-    driver: BrowserDriver | None = None  # default → "openclaw"
+    driver: BrowserDriver | None = None  # default → "managed"
 
 
 @dataclass(slots=True)
@@ -149,7 +149,7 @@ def create_profile(
         else allocate_color(get_used_colors(state.profiles))
     )
 
-    driver: BrowserDriver = params.driver or "openclaw"
+    driver: BrowserDriver = params.driver or "managed"
 
     user_data_dir = (params.user_data_dir or "").strip() or None
     cdp_url = (params.cdp_url or "").strip() or None
@@ -223,7 +223,7 @@ def delete_profile(
     write_config: Callable[[ResolvedBrowserConfig], None] | None = None,
     after_remove: Callable[[str, BrowserProfileConfig], None] | None = None,
 ) -> DeleteProfileResult:
-    """Remove a profile from state. Refuses to delete the default openclaw profile.
+    """Remove a profile from state. Refuses to delete the default opencomputer profile.
 
     `after_remove(name, removed_cfg)` runs after the in-memory state is updated
     and the config is persisted — wiring point for Chrome stop + user-data-dir
@@ -244,7 +244,7 @@ def delete_profile(
     return DeleteProfileResult(
         profile_name=name,
         user_data_dir=cfg.user_data_dir,
-        driver=cfg.driver or "openclaw",
+        driver=cfg.driver or "managed",
     )
 
 

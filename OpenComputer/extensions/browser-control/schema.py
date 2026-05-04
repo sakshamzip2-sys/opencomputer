@@ -185,7 +185,7 @@ def browser_params_json_schema() -> dict[str, Any]:
             "profile": {
                 "type": "string",
                 "description": (
-                    "Browser profile name. Defaults to 'openclaw' (isolated, "
+                    "Browser profile name. Defaults to 'opencomputer' (isolated, "
                     "agent-managed). Pass 'user' for the user's logged-in "
                     "Chrome (existing-session, host-only). Defer to the "
                     "operator on which to use."

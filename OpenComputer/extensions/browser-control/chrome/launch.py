@@ -200,7 +200,7 @@ async def launch_openclaw_chrome(
     """Spawn Chrome and return when CDP is reachable.
 
     Steps mirror chrome.ts:305-457:
-      1. Validate (loopback only, openclaw driver only).
+      1. Validate (loopback only, managed driver only).
       2. Resolve executable.
       3. Create user-data-dir.
       4. needs_bootstrap = !exists(Local State) || !exists(Default/Preferences).
@@ -217,7 +217,7 @@ async def launch_openclaw_chrome(
     if profile.driver == "existing-session":
         raise ChromeLaunchError(
             f"profile {profile.name!r} has driver='existing-session' — Chrome MCP attaches; "
-            "this routine only manages openclaw-driver profiles"
+            "this routine only manages managed-driver profiles"
         )
     if not profile.cdp_is_loopback:
         raise ChromeLaunchError(

@@ -4,7 +4,7 @@ Routes call ``ensure_profile_running(state, profile_name)`` before any
 action; if the profile isn't ready yet, this brings it up via the
 appropriate driver:
 
-  - ``local-managed`` (default `openclaw`): launch Chrome + connect CDP.
+  - ``local-managed`` (default `opencomputer`): launch Chrome + connect CDP.
   - ``local-existing-session`` (`user`): spawn Chrome MCP subprocess.
   - ``remote-cdp``: just resolve config + smoke-test reachability.
 
