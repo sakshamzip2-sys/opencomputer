@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>OpenComputer · Plugins</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #111; color: #ddd;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    body { display: flex; flex-direction: column; }
+    header { padding: 12px 20px; border-bottom: 1px solid #333;
+      display: flex; gap: 1em; align-items: center; }
+    header h1 { font-size: 14px; margin: 0; color: #ddd; }
+    nav { display: flex; gap: 8px; margin-left: auto; }
+    .tab { padding: 6px 12px; border-radius: 4px; color: #888;
+      text-decoration: none; font-size: 13px; }
+    .tab:hover { background: #1a1a1a; color: #ddd; }
+    .tab.active { background: #2563eb; color: white; }
+    main { flex: 1; padding: 16px 20px; overflow-y: auto; min-height: 0; }
+    .filter { width: 100%; max-width: 380px; margin-bottom: 12px;
+      background: #1a1a1a; color: #ddd; border: 1px solid #333;
+      border-radius: 4px; padding: 6px 10px; font-family: inherit;
+      font-size: 13px; }
+    .filter:focus { outline: none; border-color: #555; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 10px;
+      border-bottom: 1px solid #1f1f1f; vertical-align: top; }
+    th { font-size: 11px; text-transform: uppercase; color: #888;
+      letter-spacing: 0.05em; }
+    td.id { color: #93c5fd; }
+    td.desc { color: #aaa; max-width: 540px; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px;
+      font-size: 11px; background: #333; color: #ddd; }
+    .pill-on { background: #064e3b; color: #6ee7b7; }
+    .pill-off { background: #3b3b3b; color: #aaa; }
+    .pill-warn { background: #4c1d1d; color: #fca5a5; }
+    .pill-ok { background: #064e3b; color: #6ee7b7; }
+    .pill-na { background: #2a2a2a; color: #888; }
+    button.toggle { background: #2563eb; color: white; border: 0;
+      padding: 4px 10px; border-radius: 4px; font-family: inherit;
+      font-size: 12px; cursor: pointer; }
+    button.toggle.disable { background: #4c1d1d; }
+    button.toggle:disabled { opacity: 0.5; cursor: wait; }
+    .toast { position: fixed; bottom: 20px; right: 20px; background: #1a1a1a;
+      border: 1px solid #333; padding: 10px 14px; border-radius: 4px;
+      font-size: 13px; max-width: 360px; }
+    .toast.error { border-color: #4c1d1d; color: #fca5a5; }
+    .toast.ok { border-color: #064e3b; color: #6ee7b7; }
+    .empty { color: #666; padding: 20px; text-align: center; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>OpenComputer · Plugins</h1>
+    <nav id="nav-tabs"></nav>
+  </header>
+  <main>
+    <input id="filter" class="filter" type="text" placeholder="Filter by name/id…">
+    <p style="font-size: 12px; color: #888; margin: 0 0 12px;">
+      Active profile: <span id="profile">—</span>
+      · <span id="count">0</span> plugins discovered.
+      Toggling enable/disable rewrites <code>profile.yaml</code>;
+      restart the gateway for changes to take effect on running sessions.
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>id</th>
+          <th>name</th>
+          <th>kind</th>
+          <th>state</th>
+          <th>auth</th>
+          <th>action</th>
+          <th>description</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="empty" class="empty" style="display: none">No plugins match the filter.</div>
+  </main>
+  <div id="toast"></div>
+
+  <script>
+    // Token must be injected by the FastAPI host. Falls back to query param
+    // for direct-link sharing (acceptable on a single-user localhost host).
+    window.OC_TOKEN = '__SESSION_TOKEN__'.replace(/[<>]/g, '') || (
+      new URLSearchParams(location.search).get('token') || ''
+    );
+  </script>
+  <script src="/static/_dashboard.js"></script>
+  <script>
+    (async function () {
+      OCDash.renderNav('plugins');
+      let plugins = [];
+      let profile = '';
+
+      async function load() {
+        const data = await OCDash.ocGet('/api/plugins/management/list');
+        plugins = data.plugins || [];
+        profile = data.active_profile || 'default';
+        document.getElementById('profile').textContent = profile;
+        document.getElementById('count').textContent = String(plugins.length);
+        render();
+      }
+
+      function render() {
+        const q = (document.getElementById('filter').value || '').toLowerCase();
+        const tbody = document.getElementById('rows');
+        const empty = document.getElementById('empty');
+        const filtered = plugins.filter(p =>
+          !q || p.id.toLowerCase().includes(q) ||
+          (p.name || '').toLowerCase().includes(q));
+        if (filtered.length === 0) {
+          tbody.innerHTML = '';
+          empty.style.display = '';
+          return;
+        }
+        empty.style.display = 'none';
+        tbody.innerHTML = filtered.map(p => {
+          const stateKind = p.enabled ? 'on' : 'off';
+          const authKind = p.auth_status === 'configured' ? 'ok' :
+                           p.auth_status === 'missing' ? 'warn' : 'na';
+          const btnLabel = p.enabled ? 'Disable' : 'Enable';
+          const btnCls = p.enabled ? 'toggle disable' : 'toggle';
+          return `
+            <tr data-id="${p.id}">
+              <td class="id">${p.id}</td>
+              <td>${p.name || ''} <span style="color:#666;font-size:11px">v${p.version || '0'}</span></td>
+              <td>${p.kind || ''}</td>
+              <td>${OCDash.statusPill(p.enabled ? 'enabled' : 'disabled', stateKind)}</td>
+              <td>${OCDash.statusPill(p.auth_status, authKind)}</td>
+              <td><button class="${btnCls}" data-action="toggle">${btnLabel}</button></td>
+              <td class="desc">${p.description || ''}</td>
+            </tr>`;
+        }).join('');
+      }
+
+      function toast(msg, kind) {
+        const el = document.getElementById('toast');
+        el.innerHTML = `<div class="toast ${kind}">${msg}</div>`;
+        setTimeout(() => { if (el.firstChild) el.removeChild(el.firstChild); }, 4000);
+      }
+
+      document.getElementById('rows').addEventListener('click', async (e) => {
+        const btn = e.target.closest('button[data-action="toggle"]');
+        if (!btn) return;
+        const tr = btn.closest('tr');
+        const id = tr.dataset.id;
+        const plugin = plugins.find(p => p.id === id);
+        if (!plugin) return;
+        btn.disabled = true;
+        try {
+          const action = plugin.enabled ? 'disable' : 'enable';
+          const result = await OCDash.ocPost(`/api/plugins/management/${id}/${action}`);
+          let msg = `${id} ${action}d`;
+          if (result.preset_dropped) msg += ' (preset inlined)';
+          toast(msg, 'ok');
+          await load();
+        } catch (err) {
+          toast(err.message, 'error');
+        } finally {
+          btn.disabled = false;
+        }
+      });
+
+      document.getElementById('filter').addEventListener('input', render);
+
+      try { await load(); } catch (err) { toast('failed to load: ' + err.message, 'error'); }
+    })();
+  </script>
+</body>
+</html>

@@ -148,26 +148,31 @@ def _build_app(
     async def health() -> dict:
         return {"ok": True, "wire_url": wire_url}
 
-    # --- SPA shell ------------------------------------------------------
-    @app.get("/", response_class=HTMLResponse)
-    async def index() -> Response:
-        path = static_dir / "index.html"
+    # --- SPA shell + Wave 6.D-α static pages ---------------------------
+    def _render_html(path: Path) -> Response:
         if not path.exists():
             return HTMLResponse(
-                "<html><body><h1>OpenComputer Dashboard</h1>"
-                "<p>No SPA shell installed. Run "
-                "<code>oc dashboard build</code> or place "
-                "an <code>index.html</code> in "
-                f"<code>{static_dir}</code>.</p></body></html>",
-                status_code=200,
+                f"<html><body><h1>OpenComputer Dashboard</h1>"
+                f"<p>{path.name} not found in {path.parent}.</p></body></html>",
+                status_code=404,
             )
         body = path.read_text(encoding="utf-8").replace("__WIRE_URL__", wire_url)
-        # Inject the session token so the SPA can attach ?token=... to its
-        # WebSocket upgrades. Uses a placeholder identical to the wire-url
-        # one so the index.html author has a single substitution mental
-        # model.
+        # Inject the session token so the SPA can attach Bearer/?token to
+        # API calls and WebSocket upgrades.
         body = body.replace("__SESSION_TOKEN__", _SESSION_TOKEN)
         return HTMLResponse(body)
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index() -> Response:
+        return _render_html(static_dir / "index.html")
+
+    @app.get("/static/plugins.html", response_class=HTMLResponse)
+    async def plugins_page() -> Response:
+        return _render_html(static_dir / "plugins.html")
+
+    @app.get("/static/models.html", response_class=HTMLResponse)
+    async def models_page() -> Response:
+        return _render_html(static_dir / "models.html")
 
     if static_dir.exists():
         app.mount(

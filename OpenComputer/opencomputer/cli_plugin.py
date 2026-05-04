@@ -32,7 +32,6 @@ Commands:
 
 from __future__ import annotations
 
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -468,17 +467,10 @@ def _active_profile_yaml_path() -> tuple[Path, str]:
     return profile_dir / "profile.yaml", display
 
 
-def _atomic_write_yaml(path: Path, data: dict) -> None:
-    """Write `data` to `path` as YAML via tmp + os.replace.
+from opencomputer.agent.profile_yaml import atomic_write_yaml as _atomic_write_yaml  # noqa: E402
 
-    Crash-safe: a partial write lands in ``profile.yaml.tmp`` which is
-    never visible to readers. ``os.replace`` is atomic on POSIX and on
-    Windows for same-volume moves, which is always our case here.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(yaml.safe_dump(data, default_flow_style=False, sort_keys=False))
-    os.replace(tmp, path)
+# Re-exported so existing call sites keep working. New code should import
+# directly from ``opencomputer.agent.profile_yaml``.
 
 
 def _try_clear_demand_tracker(plugin_id: str) -> None:

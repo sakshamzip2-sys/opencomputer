@@ -40,6 +40,11 @@
       border-radius: 4px; font-family: inherit; cursor: pointer; }
     button:disabled { background: #444; cursor: not-allowed; }
     .hint { color: #666; font-size: 11px; padding: 0 20px 8px; }
+    nav.tabs { display: flex; gap: 8px; margin-left: auto; }
+    .tab { padding: 6px 12px; border-radius: 4px; color: #888;
+      text-decoration: none; font-size: 13px; }
+    .tab:hover { background: #1a1a1a; color: #ddd; }
+    .tab.active { background: #2563eb; color: white; }
   </style>
 </head>
 <body>
@@ -47,9 +52,7 @@
     <strong>OpenComputer</strong>
     <span class="dot" id="conn-dot"></span>
     <span id="conn-label">connecting…</span>
-    <span style="margin-left:auto;font-size:11px;color:#666">
-      Phase 8.A — minimal dashboard MVP
-    </span>
+    <nav class="tabs" id="nav-tabs"></nav>
   </header>
   <main>
     <aside>
@@ -68,6 +71,12 @@
   </main>
 
 <script>
+window.OC_TOKEN = '__SESSION_TOKEN__'.replace(/[<>]/g, '');
+</script>
+<script src="/static/_dashboard.js"></script>
+<script>
+OCDash.renderNav('chat');
+
 // Wire URL is injected at request time by DashboardServer.
 const WIRE_URL = "__WIRE_URL__";
 document.getElementById("wire-url-readout").textContent = WIRE_URL;
