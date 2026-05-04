@@ -42,6 +42,10 @@ from opencomputer.agent.reviewer import PostResponseReviewer
 from opencomputer.agent.state import SessionDB
 from opencomputer.agent.step import StepOutcome
 from opencomputer.agent.subdirectory_hints import SubdirectoryHintTracker
+from opencomputer.agent.tool_guardrails import (
+    ToolLoopGuard,
+    ToolLoopGuardrailError,
+)
 from opencomputer.agent.tool_ordering import sort_tools_for_request
 from opencomputer.tools.bash_safety import detect_destructive
 from opencomputer.tools.memory_tool import MemoryTool
@@ -577,6 +581,19 @@ class AgentLoop:
         # are permissive; healthy sessions never trip.
         self._loop_detector = LoopDetector()
 
+        # Wave-5 T1 — Hermes-port tool-loop guard. Detects identical
+        # tool-name+args repetition within a turn and either warns
+        # (default 10) or hard-stops (default 25). Distinct from
+        # LoopDetector above (which is sliding-window across recent calls);
+        # the guard catches deterministic tight loops the detector misses.
+        # Reset by ``run_conversation`` at the start of each user turn.
+        _guard_cfg = getattr(config.loop, "tool_guardrail", None)
+        self._tool_guard = ToolLoopGuard(
+            warn_at=getattr(_guard_cfg, "warn_at", 10) if _guard_cfg else 10,
+            stop_at=getattr(_guard_cfg, "stop_at", 25) if _guard_cfg else 25,
+            enabled=getattr(_guard_cfg, "enabled", True) if _guard_cfg else True,
+        )
+
         # Phase 3.F — when system-control is on at construction time,
         # attach the structured-logger bus listener so SignalEvents are
         # mirrored to ``agent.log``. Best-effort: a missing system_control
@@ -1098,6 +1115,10 @@ class AgentLoop:
         self._loop_started_at = time.monotonic()
         self._last_activity_at = self._loop_started_at
         self._tool_callback = tool_callback  # ACP depth: fire on tool start/complete
+
+        # Wave-5 T1 — clear the tool-loop guard's per-turn streak so a
+        # repeated call from the previous turn doesn't pre-poison this one.
+        self._tool_guard.reset()
 
         # T1 of auto-skill-evolution plan — wrap iteration loop +
         # budget-exhausted exit in try/except/finally so the agent
@@ -3151,6 +3172,33 @@ class AgentLoop:
             if decision is not None and decision.decision == "block":
                 blocked[c.id] = decision.reason or "blocked by hook"
 
+        # Wave-5 T1 — Hermes-port tool-loop guard. Observe each call after
+        # consent + PreToolUse hooks have spoken (so a tight loop the user
+        # is about to deny doesn't trip the guard) but before dispatch.
+        # On stop: mark every remaining call blocked with the guard's
+        # reason — the loop converts blocked tool_uses to error
+        # tool_results so the protocol invariant (every tool_use has a
+        # matching tool_result) survives. On warn: log the message
+        # (kept off the wire so the model isn't influenced mid-turn).
+        for c in calls:
+            if c.id in blocked:
+                continue
+            try:
+                verdict = self._tool_guard.observe(
+                    {"name": c.name, "arguments": c.arguments or {}},
+                )
+            except ToolLoopGuardrailError as exc:
+                _log.warning("tool guardrail stop: %s", exc)
+                # Block this call AND every subsequent unblocked call —
+                # we want one clean turn-end, not a cascade of stops.
+                _stop_reason = str(exc)
+                for _later in calls:
+                    if _later.id not in blocked:
+                        blocked[_later.id] = f"tool guardrail: {_stop_reason}"
+                break
+            if verdict.level == "warn":
+                _log.warning("%s", verdict.message)
+
         # III.1/III.2: gate dispatch on the allowlist too. Filtering only
         # the provider-facing schemas isn't enough — a model could still
         # emit a tool_use block for a disallowed name (e.g. recovered from
@@ -3245,6 +3293,33 @@ class AgentLoop:
                     session_id=session_id,
                     result=result if outcome == "failure" else None,
                 )
+                # Wave 5 T15 — Hermes-port duration_ms (59b56d445).
+                # Capture the dispatch latency once so both POST_TOOL_USE
+                # and TRANSFORM_TOOL_RESULT see the same value.
+                _duration_ms = max(
+                    0, int((_time.monotonic() - start) * 1000),
+                )
+                # Wave 5 T15 — fire POST_TOOL_USE with duration_ms so
+                # plugins can build per-tool latency dashboards.
+                # Wrapped defensively — a hook crash must never replace
+                # the tool result the model is about to see.
+                try:
+                    from opencomputer.hooks.engine import (
+                        engine as _post_hook_engine,
+                    )
+                    from plugin_sdk.hooks import HookContext as _HookContextPost
+                    from plugin_sdk.hooks import HookEvent as _HookEventPost
+
+                    _post_hook_engine.fire_and_forget(_HookContextPost(
+                        event=_HookEventPost.POST_TOOL_USE,
+                        session_id=session_id,
+                        tool_call=c,
+                        tool_result=result,
+                        runtime=self._runtime,
+                        duration_ms=_duration_ms,
+                    ))
+                except Exception:  # noqa: BLE001
+                    pass
                 # Round 2A P-1: TRANSFORM_TOOL_RESULT — handlers may rewrite
                 # the result text the model is about to see. This is a
                 # blocking hook because the rewrite must complete before the
@@ -3256,6 +3331,7 @@ class AgentLoop:
                     call=c,
                     session_id=session_id,
                     runtime=self._runtime,
+                    duration_ms=_duration_ms,
                 )
                 # Round 2A P-1: TRANSFORM_TERMINAL_OUTPUT — same shape but
                 # scoped to Bash-style tools. Streaming-bash hasn't landed
@@ -3619,6 +3695,7 @@ async def _maybe_transform_tool_result(
     call: ToolCall,
     session_id: str,
     runtime: RuntimeContext,
+    duration_ms: int | None = None,
 ) -> Any:
     """Round 2A P-1: invoke TRANSFORM_TOOL_RESULT and apply ``modified_message``.
 
@@ -3626,6 +3703,10 @@ async def _maybe_transform_tool_result(
     :class:`~plugin_sdk.core.ToolResult` whose ``content`` is the handler's
     rewrite. Failures are isolated — any exception in a handler leaves the
     original result untouched (the engine logs it).
+
+    Wave 5 T15 — ``duration_ms`` is the tool's dispatch latency, forwarded
+    to the hook context so plugins can build latency dashboards without
+    instrumenting every tool individually.
     """
     from opencomputer.hooks.engine import engine as _hook_engine
     from plugin_sdk.core import ToolResult as _ToolResult
@@ -3638,6 +3719,7 @@ async def _maybe_transform_tool_result(
         tool_call=call,
         tool_result=result,
         runtime=runtime,
+        duration_ms=duration_ms,
     )
     decision = await _hook_engine.fire_blocking(ctx)
     if decision is None or not decision.modified_message:

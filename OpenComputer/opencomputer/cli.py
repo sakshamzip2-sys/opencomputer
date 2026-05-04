@@ -346,9 +346,12 @@ def _register_builtin_tools() -> None:
     from opencomputer.tools.image_generate import ImageGenerateTool
     from opencomputer.tools.mixture_of_agents import MixtureOfAgentsTool
     from opencomputer.tools.send_message import SendMessageTool
+    from opencomputer.tools.video_analyze import VideoAnalyzeTool
     from opencomputer.tools.vision_analyze import VisionAnalyzeTool
     registry.register(SendMessageTool())
     registry.register(VisionAnalyzeTool())
+    # Wave 5 T7 — Hermes-port video analyzer (c9a3f36f5).
+    registry.register(VideoAnalyzeTool())
     registry.register(ImageGenerateTool())
     registry.register(MixtureOfAgentsTool())
     # Phase 2.1 + 2.2 of catch-up plan — GUI tools (macOS only).

@@ -44,8 +44,9 @@ def test_three_new_hook_events_exist_and_are_in_all_hook_events() -> None:
     assert HookEvent.PRE_COMPACT in ALL_HOOK_EVENTS
     assert HookEvent.SUBAGENT_STOP in ALL_HOOK_EVENTS
     assert HookEvent.NOTIFICATION in ALL_HOOK_EVENTS
-    # Phase 11b shipped 9 events; Round 2A P-1 adds 8 more for 17 total.
-    assert len(ALL_HOOK_EVENTS) == 17
+    # Phase 11b shipped 9 events; Round 2A P-1 adds 8 more for 17;
+    # Wave 5 T13/T14 adds 3 (PRE_GATEWAY_DISPATCH, PRE/POST_APPROVAL_*) for 20.
+    assert len(ALL_HOOK_EVENTS) == 20
 
 
 async def test_base_channel_adapter_send_notification_default_routes_to_send() -> None:

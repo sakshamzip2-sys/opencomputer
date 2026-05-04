@@ -139,6 +139,28 @@ SLASH_REGISTRY: list[CommandDef] = [
         args_hint="[<prompt>|list|clear]",
     ),
     CommandDef(
+        name="goal",
+        description="Set/show/pause/resume/clear a persistent goal for this session.",
+        category="session",
+        args_hint="[<text>|status|pause|resume|clear]",
+    ),
+    # Wave 5 T3 — Hermes-port /steer (e27b0b765). In the CLI this is an
+    # alias for "queue at head" since the CLI is never mid-turn when the
+    # slash dispatches; in ACP it interrupts a running turn.
+    CommandDef(
+        name="steer",
+        description="Inject text as the next user message (interrupts in ACP).",
+        category="session",
+        args_hint="<text>",
+    ),
+    # Wave 5 T4 — Hermes-port (e123f4ecf) — runtime metadata footer.
+    # Status-only in this revision; opt-in persistence via config.yaml.
+    CommandDef(
+        name="footer",
+        description="Show whether the runtime metadata footer is enabled.",
+        category="config",
+    ),
+    CommandDef(
         name="snapshot",
         description="Archive critical state files (session db + config + .env + ...).",
         category="session",

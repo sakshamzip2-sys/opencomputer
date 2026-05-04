@@ -361,6 +361,139 @@ def _handle_queue(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_footer(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/footer`` — Wave 5 T4 — Hermes-port (e123f4ecf).
+
+    Status-only in this revision: print whether the runtime metadata
+    footer is currently enabled. Toggling on/off lives in
+    ``~/.opencomputer/<profile>/config.yaml`` under
+    ``display.runtime_footer.enabled``.
+    """
+    try:
+        import yaml
+
+        from opencomputer.agent.config import _home
+        from opencomputer.gateway.runtime_footer import resolve_footer_config
+
+        _cfg_path = _home() / "config.yaml"
+        if _cfg_path.exists():
+            try:
+                cfg_dict = yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
+            except Exception:  # noqa: BLE001 — partial yaml is fine; degrade
+                cfg_dict = {}
+        else:
+            cfg_dict = {}
+        fc = resolve_footer_config(cfg_dict)
+    except Exception as e:  # noqa: BLE001
+        ctx.console.print(f"[yellow]/footer status read failed: {e}[/yellow]")
+        return SlashResult(handled=True)
+    state = "[green]on[/green]" if fc.enabled else "[dim]off[/dim]"
+    ctx.console.print(
+        f"[bold]runtime footer:[/bold] {state}\n"
+        f"  [dim]edit display.runtime_footer.enabled in config.yaml to toggle.[/dim]"
+    )
+    return SlashResult(handled=True)
+
+
+def _handle_steer(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/steer <text>`` — Wave 5 T3 — Hermes-port (e27b0b765).
+
+    In the CLI the chat loop is never mid-turn when the slash dispatcher
+    runs (the prompt is awaiting input), so this is a queue-at-head
+    convenience alias for ``/queue <text>``. In ACP/IDE clients the
+    same command actually interrupts an in-flight turn — see
+    ``opencomputer/acp/server.py::_handle_steer``.
+    """
+    text = " ".join(args).strip()
+    if not text:
+        ctx.console.print(
+            "[red]/steer needs text[/red] — e.g. `/steer change direction please`"
+        )
+        return SlashResult(handled=True)
+    ok = ctx.on_queue_add(text)
+    if ok:
+        preview = text if len(text) <= 80 else text[:77] + "..."
+        ctx.console.print(
+            f"[green]steered[/green] — next turn will use: [dim]{preview}[/dim]"
+        )
+    else:
+        ctx.console.print(
+            "[red]queue full[/red] — drain with [cyan]/queue clear[/cyan] first."
+        )
+    return SlashResult(handled=True)
+
+
+def _handle_goal(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/goal [<text>|status|pause|resume|clear]`` — manage persistent goal.
+
+    No args / ``status``: show current goal.
+    ``pause``: stop continuation loop.
+    ``resume``: resume + reset turn counter.
+    ``clear``: drop the goal.
+    Anything else: set ``args`` joined with spaces as the new goal text.
+
+    Persists in the ``sessions`` table (schema v11+ ``goal_*`` columns).
+    Direct DB access bypasses callback wiring — db_path comes from
+    ``ctx.config.session.db_path`` so this handler is self-contained.
+    """
+    from opencomputer.agent.state import SessionDB
+
+    db = SessionDB(ctx.config.session.db_path)
+    sub = (args[0].lower() if args else "status")
+
+    if sub == "status" or not args:
+        g = db.get_session_goal(ctx.session_id)
+        if g is None:
+            ctx.console.print(
+                "[dim]no goal set. "
+                "Use [cyan]/goal <text>[/cyan] to set one.[/dim]"
+            )
+            return SlashResult(handled=True)
+        state = "[green]active[/green]" if g.active else "[yellow]paused[/yellow]"
+        ctx.console.print(
+            f"[bold]goal:[/bold] {g.text}\n"
+            f"  status: {state}, turn {g.turns_used}/{g.budget}"
+        )
+        return SlashResult(handled=True)
+
+    if sub == "pause":
+        if db.get_session_goal(ctx.session_id) is None:
+            ctx.console.print("[red]no goal set.[/red]")
+        else:
+            db.update_session_goal(ctx.session_id, active=False)
+            ctx.console.print("[yellow]goal paused.[/yellow]")
+        return SlashResult(handled=True)
+
+    if sub == "resume":
+        if db.get_session_goal(ctx.session_id) is None:
+            ctx.console.print("[red]no goal set.[/red]")
+        else:
+            db.update_session_goal(ctx.session_id, active=True, turns_used=0)
+            ctx.console.print("[green]goal resumed.[/green] (turn counter reset)")
+        return SlashResult(handled=True)
+
+    if sub == "clear":
+        if db.get_session_goal(ctx.session_id) is None:
+            ctx.console.print("[dim]no goal to clear.[/dim]")
+        else:
+            db.clear_session_goal(ctx.session_id)
+            ctx.console.print("[green]goal cleared.[/green]")
+        return SlashResult(handled=True)
+
+    # Otherwise, treat the full args as the new goal text
+    text = " ".join(args).strip()
+    if not text:
+        ctx.console.print("[red]/goal: empty text[/red]")
+        return SlashResult(handled=True)
+    db.set_session_goal(ctx.session_id, text=text)
+    preview = text if len(text) <= 80 else text[:77] + "..."
+    ctx.console.print(
+        f"[green]goal set:[/green] {preview}\n"
+        f"  [dim]budget=20 continuations · use /goal status to check progress[/dim]"
+    )
+    return SlashResult(handled=True)
+
+
 def _handle_snapshot(ctx: SlashContext, args: list[str]) -> SlashResult:
     """``/snapshot [create [<label>]|list|restore <id>|prune]``.
 
@@ -828,6 +961,9 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "rename": _handle_rename,
     "resume": _handle_resume,
     "queue": _handle_queue,
+    "steer": _handle_steer,
+    "footer": _handle_footer,
+    "goal": _handle_goal,
     "snapshot": _handle_snapshot,
     "reload": _handle_reload,
     "reload-mcp": _handle_reload_mcp,
