@@ -44,10 +44,32 @@ class RemoteHost:
     hmac_secret: str
     added_at: int
     last_seen_at: int | None
+    # Wave 6.E.15 — both sides must have this true for cross-host
+    # ``dir:<path>`` workspace payload sync to fire. Default False
+    # (back-compat with PR #460).
+    workspace_sync_enabled: bool = False
 
 
 class HmacAuthError(RuntimeError):
     """Raised when an inbound HMAC-signed request fails verification."""
+
+
+def _row_to_host(row) -> RemoteHost:
+    """Build a RemoteHost from a sqlite3.Row, defaulting new columns
+    on legacy rows (back-compat for pre-migration installs)."""
+    keys = row.keys() if hasattr(row, "keys") else []
+    workspace_sync = (
+        bool(row["workspace_sync_enabled"])
+        if "workspace_sync_enabled" in keys else False
+    )
+    return RemoteHost(
+        slug=row["slug"],
+        url=row["url"],
+        hmac_secret=row["hmac_secret"],
+        added_at=row["added_at"],
+        last_seen_at=row["last_seen_at"],
+        workspace_sync_enabled=workspace_sync,
+    )
 
 
 def add_remote_host(
@@ -56,12 +78,17 @@ def add_remote_host(
     slug: str,
     url: str,
     hmac_secret: str | None = None,
+    workspace_sync_enabled: bool = False,
 ) -> RemoteHost:
     """Register a peer host. Returns the new RemoteHost (with its secret).
 
     If ``hmac_secret`` is omitted, a 32-byte random secret is
     generated and returned. The operator must copy this secret to
     the peer manually so both sides hold the same value.
+
+    ``workspace_sync_enabled`` opts this peer into cross-host
+    ``dir:<path>`` workspace payload sync (Wave 6.E.15). Both sides
+    must have it on; the sender checks before packing.
     """
     if not slug or not url:
         raise ValueError("slug and url required")
@@ -72,12 +99,14 @@ def add_remote_host(
     with write_txn(conn):
         conn.execute(
             "INSERT INTO kanban_remote_hosts "
-            "(slug, url, hmac_secret, added_at) VALUES (?, ?, ?, ?)",
-            (slug, url, hmac_secret, now),
+            "(slug, url, hmac_secret, added_at, workspace_sync_enabled) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (slug, url, hmac_secret, now, 1 if workspace_sync_enabled else 0),
         )
     return RemoteHost(
         slug=slug, url=url, hmac_secret=hmac_secret,
         added_at=now, last_seen_at=None,
+        workspace_sync_enabled=workspace_sync_enabled,
     )
 
 
@@ -85,13 +114,7 @@ def list_remote_hosts(conn: sqlite3.Connection) -> list[RemoteHost]:
     rows = conn.execute(
         "SELECT * FROM kanban_remote_hosts ORDER BY slug"
     ).fetchall()
-    return [
-        RemoteHost(
-            slug=r["slug"], url=r["url"], hmac_secret=r["hmac_secret"],
-            added_at=r["added_at"], last_seen_at=r["last_seen_at"],
-        )
-        for r in rows
-    ]
+    return [_row_to_host(r) for r in rows]
 
 
 def find_remote_host(conn: sqlite3.Connection, slug: str) -> RemoteHost | None:
@@ -100,10 +123,7 @@ def find_remote_host(conn: sqlite3.Connection, slug: str) -> RemoteHost | None:
     ).fetchone()
     if row is None:
         return None
-    return RemoteHost(
-        slug=row["slug"], url=row["url"], hmac_secret=row["hmac_secret"],
-        added_at=row["added_at"], last_seen_at=row["last_seen_at"],
-    )
+    return _row_to_host(row)
 
 
 def remove_remote_host(conn: sqlite3.Connection, slug: str) -> bool:
@@ -111,6 +131,23 @@ def remove_remote_host(conn: sqlite3.Connection, slug: str) -> bool:
     with write_txn(conn):
         cur = conn.execute(
             "DELETE FROM kanban_remote_hosts WHERE slug = ?", (slug,),
+        )
+    return cur.rowcount > 0
+
+
+def set_workspace_sync(
+    conn: sqlite3.Connection, slug: str, enabled: bool,
+) -> bool:
+    """Toggle ``workspace_sync_enabled`` on an existing peer.
+
+    Returns True if a row was updated, False if the slug is unknown.
+    """
+    from opencomputer.kanban.db import write_txn
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE kanban_remote_hosts SET workspace_sync_enabled = ? "
+            "WHERE slug = ?",
+            (1 if enabled else 0, slug),
         )
     return cur.rowcount > 0
 

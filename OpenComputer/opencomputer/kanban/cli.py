@@ -491,10 +491,18 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         "--secret", default=None,
         help="Pre-shared HMAC secret (omit to generate one + print it)",
     )
+    p_rem_add.add_argument(
+        "--enable-workspace-sync", action="store_true",
+        help=(
+            "Wave 6.E.15: opt this peer into cross-host dir:<path> workspace "
+            "payload sync (gzipped tarball over HTTP, capped at 50 MiB). "
+            "BOTH sides must enable it for sync to fire."
+        ),
+    )
 
     p_remote_sub.add_parser(
         "list",
-        help="Print registered peer hosts (slug → url, last-seen)",
+        help="Print registered peer hosts (slug → url, last-seen, sync flag)",
     )
 
     p_rem_rm = p_remote_sub.add_parser("rm", help="Remove a peer host")
@@ -505,6 +513,16 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Round-trip a /proxy/health request against a registered peer",
     )
     p_rem_test.add_argument("slug")
+
+    p_rem_sync = p_remote_sub.add_parser(
+        "set-workspace-sync",
+        help="Toggle cross-host workspace payload sync for an existing peer",
+    )
+    p_rem_sync.add_argument("slug")
+    p_rem_sync.add_argument(
+        "value", choices=("on", "off"),
+        help="Enable or disable workspace sync for this peer",
+    )
 
     # --- log ---
     p_log = sub.add_parser(
@@ -1833,6 +1851,8 @@ def _cmd_remote(args: argparse.Namespace) -> int:
         return _cmd_remote_rm(args)
     if action == "test":
         return _cmd_remote_test(args)
+    if action == "set-workspace-sync":
+        return _cmd_remote_set_workspace_sync(args)
     print(f"kanban remote: unknown action {action!r}", file=sys.stderr)
     return 2
 
@@ -1845,6 +1865,7 @@ def _cmd_remote_add(args: argparse.Namespace) -> int:
             host = rh.add_remote_host(
                 conn, slug=args.slug, url=args.url,
                 hmac_secret=args.secret,
+                workspace_sync_enabled=getattr(args, "enable_workspace_sync", False),
             )
         except sqlite3.IntegrityError:
             print(f"kanban remote: slug {args.slug!r} already registered",
@@ -1853,7 +1874,8 @@ def _cmd_remote_add(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(f"kanban remote: {exc}", file=sys.stderr)
             return 1
-    print(f"registered peer {host.slug} → {host.url}")
+    sync_marker = " (workspace_sync=on)" if host.workspace_sync_enabled else ""
+    print(f"registered peer {host.slug} → {host.url}{sync_marker}")
     if args.secret is None:
         # Caller must copy this to the peer.
         print(f"  HMAC secret: {host.hmac_secret}")
@@ -1871,13 +1893,14 @@ def _cmd_remote_list(args: argparse.Namespace) -> int:
     if not hosts:
         print("(no peers registered — set with `oc kanban remote add`)")
         return 0
-    print(f"{'slug':<20} {'url':<40} last-seen")
+    print(f"{'slug':<20} {'url':<40} {'sync':<6} last-seen")
     for h in hosts:
         last = (
             time.strftime("%Y-%m-%d %H:%M", time.localtime(h.last_seen_at))
             if h.last_seen_at else "(never)"
         )
-        print(f"{h.slug:<20} {h.url:<40} {last}")
+        sync = "on" if h.workspace_sync_enabled else "off"
+        print(f"{h.slug:<20} {h.url:<40} {sync:<6} {last}")
     return 0
 
 
@@ -1920,6 +1943,20 @@ def _cmd_remote_test(args: argparse.Namespace) -> int:
     data = resp.json()
     print(f"{host.slug}: ok (boards={data.get('boards', [])}, "
           f"active={data.get('active_board')})")
+    return 0
+
+
+def _cmd_remote_set_workspace_sync(args: argparse.Namespace) -> int:
+    """Toggle workspace sync flag on an already-registered peer."""
+    from opencomputer.kanban import remote_hosts as rh
+
+    enabled = args.value == "on"
+    with kb.connect() as conn:
+        ok = rh.set_workspace_sync(conn, args.slug, enabled)
+    if not ok:
+        print(f"kanban remote: no such peer {args.slug!r}", file=sys.stderr)
+        return 1
+    print(f"workspace sync for {args.slug} → {args.value}")
     return 0
 
 

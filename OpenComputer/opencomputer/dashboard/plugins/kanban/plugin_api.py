@@ -1046,11 +1046,53 @@ async def proxy_spawn(
             raise HTTPException(
                 status_code=422, detail="task.title and task.assignee required",
             )
-        # Validate workspace_kind locally — `dir:<path>` paths must
-        # exist on this peer.
         ws_kind = task.get("workspace_kind") or "scratch"
         ws_path = task.get("workspace_path")
-        if ws_kind == "dir" and ws_path:
+        ws_payload_b64 = payload.get("workspace_payload_b64")
+
+        # Wave 6.E.15 — when the sender included a workspace payload
+        # AND we have workspace_sync_enabled for this peer, unpack into
+        # a local sandbox. Otherwise, fall back to the existing
+        # PR #460 behaviour: dir:<path> must exist locally or 422.
+        if ws_payload_b64:
+            from opencomputer.kanban import remote_hosts as _rh
+            host = _rh.find_remote_host(conn, slug)
+            if host is None or not host.workspace_sync_enabled:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"peer {slug!r} sent workspace payload but this host "
+                        "has workspace_sync_enabled=0 — refuse"
+                    ),
+                )
+            try:
+                import base64
+
+                from opencomputer.kanban.workspace_payload import (
+                    WorkspacePayloadError,
+                    unpack_workspace,
+                )
+                tarball = base64.b64decode(ws_payload_b64, validate=True)
+                # Extract under <kanban-root>/remote-workspaces/<task-id>/
+                from pathlib import Path
+                remote_ws_root = (
+                    kanban_db.kanban_home() / "remote-workspaces"
+                )
+                remote_ws_root.mkdir(parents=True, exist_ok=True)
+                # Use the original payload's task id as a sandbox folder.
+                sandbox_parent = remote_ws_root / (
+                    str(task.get("id") or f"task-{int(time.time())}")
+                )
+                sandbox_parent.mkdir(parents=True, exist_ok=True)
+                extracted = unpack_workspace(tarball, dest=sandbox_parent)
+                ws_kind = "dir"
+                ws_path = str(extracted)
+            except (ValueError, WorkspacePayloadError) as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"workspace payload extract failed: {exc}",
+                ) from exc
+        elif ws_kind == "dir" and ws_path:
             from pathlib import Path
             if not Path(ws_path).exists():
                 raise HTTPException(
