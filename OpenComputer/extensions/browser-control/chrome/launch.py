@@ -92,6 +92,12 @@ def build_chrome_launch_args(
 ) -> list[str]:
     """Construct the Chrome CLI argv. Pure — re-export tested by unit tests."""
     is_headless = resolved.headless if headless is None else headless
+
+    # --disable-features list. Chrome only honors the last
+    # --disable-features flag, so we accumulate features here and emit
+    # a single flag below.
+    disable_features = ["Translate", "MediaRouter"]
+
     args: list[str] = [
         f"--remote-debugging-port={profile.cdp_port}",
         f"--user-data-dir={user_data_dir}",
@@ -100,7 +106,6 @@ def build_chrome_launch_args(
         "--disable-sync",
         "--disable-background-networking",
         "--disable-component-update",
-        "--disable-features=Translate,MediaRouter",
         "--disable-session-crashed-bubble",
         "--hide-crash-restore-bubble",
         "--password-store=basic",
@@ -111,6 +116,27 @@ def build_chrome_launch_args(
         args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
     if sys.platform.startswith("linux"):
         args.append("--disable-dev-shm-usage")
+
+    # Wave 6 — Track 1: auto-load the OpenComputer Browser Control
+    # extension into managed Chrome. Zero user action required.
+    #
+    # The extension lives at extensions/browser-control/extension/dist/.
+    # If `dist/` doesn't exist (extension not yet built — `bash
+    # extension/build.sh`), we silently skip adding the flag. This
+    # keeps managed-Chrome launches working for users who haven't
+    # built the extension yet (e.g. fresh checkout, no Node.js).
+    #
+    # Only baked into the `managed` driver — `existing-session` and
+    # `control-extension` profiles use a different attach path.
+    if profile.driver == "managed":
+        ext_dist = Path(__file__).resolve().parent.parent / "extension" / "dist"
+        if (ext_dist / "background.js").is_file():
+            args.append(f"--load-extension={ext_dist}")
+            # Chrome 137+ added an in-product warning for unpacked
+            # extensions loaded via --load-extension; this disables it.
+            disable_features.append("DisableLoadExtensionCommandLineSwitch")
+
+    args.append(f"--disable-features={','.join(disable_features)}")
     args.extend(resolved.extra_args)
     return args
 
