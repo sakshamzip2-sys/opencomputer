@@ -320,6 +320,11 @@ class MCPConfig:
     deferred: bool = True
     osv_check_enabled: bool = True
     osv_check_fail_closed: bool = False
+    # D.3 T2 (PR #437 deferral closure): override the remote catalog URL.
+    # Resolution chain handled in remote_catalog.resolve_catalog_url:
+    # explicit arg → OC_MCP_CATALOG_URL env → this field → bundled default.
+    # Empty string / None means "use the default".
+    catalog_url: str = ""
 
 
 @dataclass(frozen=True, slots=True)
