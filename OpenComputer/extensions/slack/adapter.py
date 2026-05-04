@@ -203,6 +203,65 @@ class SlackAdapter(BaseChannelAdapter):
             await self._client.aclose()
             self._client = None
 
+    async def send_multiple_images(
+        self,
+        chat_id: str,
+        image_paths: list[str],
+        caption: str = "",
+        **kwargs: Any,
+    ) -> None:
+        """Upload N images to a Slack channel with one comment.
+
+        Wave 5 T11 closure (Hermes-port 3de8e2168). Slack's native multi-file
+        UX is a sequence of ``files.upload`` calls where only the first
+        carries the ``initial_comment``; the others appear as a thread/burst
+        in the channel UI. Per-file uploads also keep a single failure from
+        losing the whole batch.
+
+        Each image is sent via the legacy ``files.upload`` endpoint (still
+        functional; the modern ``files.uploadV2`` two-step flow can replace
+        this when needed). On per-file errors, the failure is logged and
+        the loop continues to the next file — partial delivery beats none.
+        """
+        if not image_paths:
+            return
+        if self._client is None:
+            return
+        from pathlib import Path as _Path
+
+        for i, raw in enumerate(image_paths):
+            p = _Path(raw)
+            if not p.exists() or not p.is_file():
+                logger.warning("slack send_multiple_images: missing file %s", p)
+                continue
+            data: dict[str, Any] = {"channels": chat_id}
+            if i == 0 and caption:
+                data["initial_comment"] = caption
+            data["filename"] = p.name
+            try:
+                with p.open("rb") as fh:
+                    files = {"file": (p.name, fh, "application/octet-stream")}
+                    # files.upload is multipart; httpx-side that means
+                    # passing data + files separately.
+                    resp = await self._client.post(
+                        f"{_SLACK_API_BASE}/files.upload",
+                        data=data,
+                        files=files,
+                    )
+                if resp.status_code != 200:
+                    logger.warning(
+                        "slack files.upload(%s) HTTP %s", p.name, resp.status_code,
+                    )
+                    continue
+                body = resp.json()
+                if not body.get("ok"):
+                    logger.warning(
+                        "slack files.upload(%s) error: %s",
+                        p.name, body.get("error"),
+                    )
+            except Exception as exc:  # noqa: BLE001 — partial delivery beats none
+                logger.warning("slack files.upload(%s) raised: %s", p.name, exc)
+
     # ------------------------------------------------------------------
     # PR 4.6 — typing-status / pause-during-approval
     # ------------------------------------------------------------------

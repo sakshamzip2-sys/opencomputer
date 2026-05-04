@@ -362,35 +362,76 @@ def _handle_queue(ctx: SlashContext, args: list[str]) -> SlashResult:
 
 
 def _handle_footer(ctx: SlashContext, args: list[str]) -> SlashResult:
-    """``/footer`` — Wave 5 T4 — Hermes-port (e123f4ecf).
+    """``/footer [on|off|status]`` — Wave 5 T4 — Hermes-port (e123f4ecf).
 
-    Status-only in this revision: print whether the runtime metadata
-    footer is currently enabled. Toggling on/off lives in
+    Toggle or display the runtime metadata footer. Persists to
     ``~/.opencomputer/<profile>/config.yaml`` under
-    ``display.runtime_footer.enabled``.
+    ``display.runtime_footer.enabled``. Empty args / ``status`` shows
+    current state without writing.
+
+    Wave 5 deferral closure (Approach B-minimal): direct yaml read/write
+    instead of a SlashContext.persist_config ABC method, since only this
+    one slash command needs persistence today.
     """
-    try:
-        import yaml
+    import yaml
 
-        from opencomputer.agent.config import _home
-        from opencomputer.gateway.runtime_footer import resolve_footer_config
+    from opencomputer.agent.config import _home
+    from opencomputer.gateway.runtime_footer import resolve_footer_config
 
-        _cfg_path = _home() / "config.yaml"
-        if _cfg_path.exists():
+    cfg_path = _home() / "config.yaml"
+    sub = (args[0].lower() if args else "status")
+
+    def _read_cfg() -> dict:
+        if not cfg_path.exists():
+            return {}
+        try:
+            return yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _write_enabled(enabled: bool) -> bool:
+        cfg = _read_cfg()
+        display = cfg.setdefault("display", {})
+        rf = display.setdefault("runtime_footer", {})
+        rf["enabled"] = enabled
+        try:
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            cfg_path.write_text(
+                yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:  # noqa: BLE001
+            ctx.console.print(f"[red]/footer write failed: {exc}[/red]")
+            return False
+        return True
+
+    if sub in ("on", "off"):
+        target = sub == "on"
+        if _write_enabled(target):
+            # Reflect immediately in runtime context so the next turn sees it.
             try:
-                cfg_dict = yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
-            except Exception:  # noqa: BLE001 — partial yaml is fine; degrade
-                cfg_dict = {}
-        else:
-            cfg_dict = {}
-        fc = resolve_footer_config(cfg_dict)
+                runtime = getattr(ctx, "runtime", None)
+                if runtime is not None:
+                    runtime.custom = {**(runtime.custom or {}), "show_footer": target}
+            except Exception:  # noqa: BLE001 — runtime hint is best-effort
+                pass
+            ctx.console.print(
+                f"[green]runtime footer:[/green] "
+                f"{'[green]on[/green]' if target else '[dim]off[/dim]'} "
+                f"[dim]({cfg_path})[/dim]"
+            )
+        return SlashResult(handled=True)
+
+    # status / unknown subcommand
+    try:
+        fc = resolve_footer_config(_read_cfg())
     except Exception as e:  # noqa: BLE001
         ctx.console.print(f"[yellow]/footer status read failed: {e}[/yellow]")
         return SlashResult(handled=True)
     state = "[green]on[/green]" if fc.enabled else "[dim]off[/dim]"
     ctx.console.print(
         f"[bold]runtime footer:[/bold] {state}\n"
-        f"  [dim]edit display.runtime_footer.enabled in config.yaml to toggle.[/dim]"
+        f"  [dim]/footer on|off to toggle and persist to config.yaml.[/dim]"
     )
     return SlashResult(handled=True)
 
