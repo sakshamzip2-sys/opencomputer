@@ -140,3 +140,160 @@ def test_format_catalog_for_display():
 def test_format_catalog_handles_empty():
     out = remote_catalog.format_catalog_for_display({"version": "1", "servers": []})
     assert "no servers" in out.lower() or "empty" in out.lower()
+
+
+# ─── resolve_catalog_url — D.3 T2 closes PR #437 deferral ───
+
+
+def test_resolve_explicit_arg_wins(monkeypatch):
+    """Explicit url= takes precedence over env, config, and default."""
+    monkeypatch.setenv("OC_MCP_CATALOG_URL", "https://env-override.example/c.json")
+    out = remote_catalog.resolve_catalog_url("https://explicit.example/x.json")
+    assert out == "https://explicit.example/x.json"
+
+
+def test_resolve_env_var_wins_over_default(monkeypatch):
+    monkeypatch.setenv("OC_MCP_CATALOG_URL", "https://env.example/c.json")
+    # Force load_config to not provide a value
+    import opencomputer.agent.config_store as cs
+    monkeypatch.setattr(cs, "load_config", lambda *a, **kw: cs.default_config())
+    out = remote_catalog.resolve_catalog_url()
+    assert out == "https://env.example/c.json"
+
+
+def test_resolve_env_var_strips_nothing_special(monkeypatch):
+    """Env var is used as-is (no whitespace handling — that's the user's job)."""
+    monkeypatch.setenv("OC_MCP_CATALOG_URL", "https://env.example/c.json?v=2")
+    out = remote_catalog.resolve_catalog_url()
+    assert out == "https://env.example/c.json?v=2"
+
+
+def test_resolve_falls_back_to_default_when_env_unset(monkeypatch):
+    monkeypatch.delenv("OC_MCP_CATALOG_URL", raising=False)
+    # Force load_config to provide nothing
+    import opencomputer.agent.config_store as cs
+    monkeypatch.setattr(cs, "load_config", lambda *a, **kw: cs.default_config())
+    out = remote_catalog.resolve_catalog_url()
+    assert out == remote_catalog._DEFAULT_CATALOG_URL
+
+
+def test_resolve_uses_config_when_env_unset(monkeypatch):
+    """When neither explicit arg nor env is set, profile config wins."""
+    monkeypatch.delenv("OC_MCP_CATALOG_URL", raising=False)
+    from dataclasses import replace
+
+    import opencomputer.agent.config_store as cs
+
+    def _fake_load_config(*a, **kw):
+        base = cs.default_config()
+        return replace(base, mcp=replace(base.mcp, catalog_url="https://cfg.example/c.json"))
+
+    monkeypatch.setattr(cs, "load_config", _fake_load_config)
+    out = remote_catalog.resolve_catalog_url()
+    assert out == "https://cfg.example/c.json"
+
+
+def test_resolve_treats_empty_config_as_unset(monkeypatch):
+    """An empty-string catalog_url in config falls through to default."""
+    monkeypatch.delenv("OC_MCP_CATALOG_URL", raising=False)
+    from dataclasses import replace
+
+    import opencomputer.agent.config_store as cs
+
+    def _fake_load_config(*a, **kw):
+        base = cs.default_config()
+        return replace(base, mcp=replace(base.mcp, catalog_url=""))
+
+    monkeypatch.setattr(cs, "load_config", _fake_load_config)
+    out = remote_catalog.resolve_catalog_url()
+    assert out == remote_catalog._DEFAULT_CATALOG_URL
+
+
+def test_resolve_treats_whitespace_only_config_as_unset(monkeypatch):
+    monkeypatch.delenv("OC_MCP_CATALOG_URL", raising=False)
+    from dataclasses import replace
+
+    import opencomputer.agent.config_store as cs
+
+    def _fake_load_config(*a, **kw):
+        base = cs.default_config()
+        return replace(base, mcp=replace(base.mcp, catalog_url="   "))
+
+    monkeypatch.setattr(cs, "load_config", _fake_load_config)
+    out = remote_catalog.resolve_catalog_url()
+    assert out == remote_catalog._DEFAULT_CATALOG_URL
+
+
+def test_resolve_swallows_config_load_failure(monkeypatch):
+    """If load_config raises (corrupt YAML, missing file, etc), we fall
+    through to the default — never propagate a config error to a network
+    fetch site."""
+    monkeypatch.delenv("OC_MCP_CATALOG_URL", raising=False)
+    import opencomputer.agent.config_store as cs
+
+    def _broken_load_config(*a, **kw):
+        raise RuntimeError("YAML parse error")
+
+    monkeypatch.setattr(cs, "load_config", _broken_load_config)
+    out = remote_catalog.resolve_catalog_url()
+    assert out == remote_catalog._DEFAULT_CATALOG_URL
+
+
+def test_fetch_catalog_uses_resolved_url(tmp_path, monkeypatch):
+    """End-to-end: env override flows through fetch_catalog → httpx call."""
+    cache_path = tmp_path / "cache.json"
+    monkeypatch.setattr(remote_catalog, "_CACHE_PATH", cache_path)
+    monkeypatch.setenv("OC_MCP_CATALOG_URL", "https://override.example/c.json")
+
+    captured: dict = {}
+
+    class _MockResponse:
+        def json(self):
+            return SAMPLE_CATALOG
+        def raise_for_status(self):
+            return None
+
+    def _mock_get(url, **kwargs):
+        captured["url"] = url
+        return _MockResponse()
+
+    monkeypatch.setattr(remote_catalog.httpx, "get", _mock_get)
+
+    remote_catalog.fetch_catalog(refresh=True)
+    assert captured["url"] == "https://override.example/c.json"
+
+
+def test_explicit_url_param_still_works_after_refactor(tmp_path, monkeypatch):
+    """Backwards compat: callers passing url= continue to bypass the env+config chain."""
+    cache_path = tmp_path / "cache.json"
+    monkeypatch.setattr(remote_catalog, "_CACHE_PATH", cache_path)
+    monkeypatch.setenv("OC_MCP_CATALOG_URL", "https://env-should-lose.example/c.json")
+    _stub_httpx(monkeypatch, json_data=SAMPLE_CATALOG)
+
+    captured: dict = {}
+
+    class _MockResponse:
+        def json(self):
+            return SAMPLE_CATALOG
+        def raise_for_status(self):
+            return None
+
+    def _mock_get(url, **kwargs):
+        captured["url"] = url
+        return _MockResponse()
+
+    monkeypatch.setattr(remote_catalog.httpx, "get", _mock_get)
+
+    remote_catalog.fetch_catalog(refresh=True, url="https://explicit-arg.example/x.json")
+    assert captured["url"] == "https://explicit-arg.example/x.json"
+
+
+def test_mcp_config_dataclass_has_catalog_url_field():
+    """Schema check — load_config must round-trip a YAML mcp.catalog_url
+    value through MCPConfig.catalog_url. Defaults to empty string."""
+    from opencomputer.agent.config import MCPConfig
+    cfg = MCPConfig()
+    assert cfg.catalog_url == ""
+
+    custom = MCPConfig(catalog_url="https://my-fork.example/c.json")
+    assert custom.catalog_url == "https://my-fork.example/c.json"

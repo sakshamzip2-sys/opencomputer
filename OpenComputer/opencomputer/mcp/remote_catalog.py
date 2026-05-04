@@ -9,12 +9,24 @@ Install-from-remote (mapping a fetched entry into ``MCPServerConfig``
 without bundled :class:`~opencomputer.mcp.presets.Preset` plumbing) is
 intentionally out-of-scope for v1 — needs version pinning + checksum
 validation. This module ships the FETCH + CACHE + DISPLAY surface.
+
+The catalog source URL is configurable (D.3 T2, closes a deferral
+from PR #437). Resolution order:
+
+1. Explicit ``url=`` argument to :func:`fetch_catalog`
+2. ``OC_MCP_CATALOG_URL`` env var
+3. ``mcp.catalog_url`` key in the active profile's ``config.yaml``
+4. The hardcoded :data:`_DEFAULT_CATALOG_URL`
+
+This lets users point at a self-hosted mirror, an internal corporate
+catalog, or a forked community catalog without monkey-patching.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -23,11 +35,20 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-#: URL of the canonical machine-parseable catalog. Replaceable for tests.
-_CATALOG_URL = (
+#: Default URL of the canonical machine-parseable catalog.
+#: Use :func:`resolve_catalog_url` to honor user overrides.
+_DEFAULT_CATALOG_URL = (
     "https://raw.githubusercontent.com/sakshamzip2-sys/opencomputer/"
     "main/OpenComputer/data/mcp_catalog.json"
 )
+
+#: Backwards-compat alias — older imports of ``_CATALOG_URL`` still resolve.
+#: Tests that monkey-patch this attribute keep working unchanged. New code
+#: should call :func:`resolve_catalog_url` instead.
+_CATALOG_URL = _DEFAULT_CATALOG_URL
+
+#: Env var override for the catalog URL.
+_CATALOG_URL_ENV = "OC_MCP_CATALOG_URL"
 
 #: Local cache path. Default lives under the user's profile home;
 #: tests override via ``monkeypatch.setattr(remote_catalog, "_CACHE_PATH", ...)``.
@@ -66,13 +87,51 @@ def _write_cache(path: Path, data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def resolve_catalog_url(explicit: str | None = None) -> str:
+    """Return the catalog URL to fetch from, applying the override chain.
+
+    Order: ``explicit`` arg → ``OC_MCP_CATALOG_URL`` env →
+    ``mcp.catalog_url`` config key → :data:`_DEFAULT_CATALOG_URL`.
+
+    Configuration is queried lazily (only when no explicit / env override
+    is set) so we don't pay the YAML parse cost on every call.
+
+    Tests can pin behavior by setting ``OC_MCP_CATALOG_URL`` via
+    ``monkeypatch.setenv``, or by passing ``explicit=`` directly.
+    """
+    if explicit:
+        return explicit
+    env_override = os.environ.get(_CATALOG_URL_ENV)
+    if env_override:
+        return env_override
+
+    # Profile config (mcp.catalog_url). Failing to load the config is a
+    # soft error — we just fall through to the default.
+    try:
+        from opencomputer.agent.config_store import load_config
+
+        cfg = load_config()
+        cfg_url = getattr(cfg.mcp, "catalog_url", "") or ""
+        if cfg_url.strip():
+            return cfg_url.strip()
+    except Exception as exc:  # noqa: BLE001 — config is optional
+        logger.debug(
+            "MCP catalog: config-store override unavailable (%s) — using default",
+            exc,
+        )
+
+    return _DEFAULT_CATALOG_URL
+
+
 def fetch_catalog(*, refresh: bool = False, url: str | None = None) -> dict[str, Any]:
     """Return the catalog JSON. Hits cache first when fresh; fetches otherwise.
 
     Args:
         refresh: When True, bypass the cache and force a network fetch
             (still falls back to cache on network failure).
-        url: Override the fetch URL. Default :data:`_CATALOG_URL`.
+        url: Override the fetch URL. Resolution order otherwise:
+            ``OC_MCP_CATALOG_URL`` env → ``mcp.catalog_url`` config →
+            :data:`_DEFAULT_CATALOG_URL`. See :func:`resolve_catalog_url`.
 
     Returns:
         Parsed catalog dict.
@@ -81,7 +140,7 @@ def fetch_catalog(*, refresh: bool = False, url: str | None = None) -> dict[str,
         CatalogFetchError: When network fetch fails AND no cache is
             available (corrupted or missing).
     """
-    target_url = url or _CATALOG_URL
+    target_url = resolve_catalog_url(url)
 
     if not refresh and _cache_is_fresh(_CACHE_PATH):
         cached = _read_cache(_CACHE_PATH)
