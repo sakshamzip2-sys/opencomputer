@@ -19,6 +19,7 @@ Bot API limits applied here:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -1038,6 +1039,120 @@ class TelegramAdapter(BaseChannelAdapter):
             chat_id, audio_path, "sendVoice", "voice", caption,
             self._MAX_DOCUMENT_SEND_BYTES, "voice",
         )
+
+    async def send_multiple_images(
+        self,
+        chat_id: str,
+        image_paths: list[str | Path],
+        caption: str = "",
+        **kwargs: Any,
+    ) -> None:
+        """Send N images in one or more albums via Telegram's sendMediaGroup.
+
+        Wave 5 T11 (Hermes-port 3de8e2168). Override of the
+        :meth:`BaseChannelAdapter.send_multiple_images` default loop.
+
+        Behavior:
+        - Static images (.png/.jpg/.jpeg/.webp) are batched in groups of 10
+          via ``sendMediaGroup`` — Telegram's album cap.
+        - Animated formats (.gif/.webm) are not allowed in albums; they
+          are peeled off and sent individually via ``sendAnimation``.
+        - Caption applies to the first photo of the FIRST album only;
+          subsequent images carry no caption (Telegram album semantics).
+        - On ANY platform error, falls back to the base per-image
+          ``send_photo`` loop so a single bad image doesn't lose the
+          rest of the batch.
+        """
+        if not image_paths:
+            return
+
+        statics: list[Path] = []
+        animations: list[Path] = []
+        for raw in image_paths:
+            p = Path(raw)
+            if p.suffix.lower() in (".gif", ".webm"):
+                animations.append(p)
+            else:
+                statics.append(p)
+
+        try:
+            for i in range(0, len(statics), 10):
+                chunk = statics[i:i + 10]
+                first_album = (i == 0)
+                ok = await self._send_media_group(
+                    chat_id, chunk, caption if first_album else "",
+                )
+                if not ok:
+                    raise RuntimeError("sendMediaGroup returned non-OK")
+            for j, animated in enumerate(animations):
+                # First animation gets the caption ONLY if no static album
+                # already consumed it.
+                anim_caption = caption if (j == 0 and not statics) else ""
+                await self._send_media(
+                    chat_id, animated, "sendAnimation", "animation", anim_caption,
+                    self._MAX_DOCUMENT_SEND_BYTES, "animation",
+                )
+        except Exception:  # noqa: BLE001 — fall back to per-image loop on any failure
+            await super().send_multiple_images(
+                chat_id, [str(p) for p in image_paths], caption=caption, **kwargs,
+            )
+
+    async def _send_media_group(
+        self,
+        chat_id: str,
+        paths: list[Path],
+        caption: str,
+    ) -> bool:
+        """Multipart-upload ``paths`` (≤ 10) as one album.
+
+        Returns True on Telegram-OK, False otherwise. Raises only on
+        connection-layer / unexpected errors.
+        """
+        if self._client is None:
+            return False
+        if not paths:
+            return True
+        for p in paths:
+            if not p.exists() or not p.is_file():
+                return False
+            if p.stat().st_size > self._MAX_PHOTO_SEND_BYTES:
+                return False
+        # Build the InputMediaPhoto JSON array. The first item carries the
+        # caption (Telegram only renders the first caption of an album).
+        media: list[dict[str, Any]] = []
+        files: dict[str, tuple[str, Any, str]] = {}
+        opened: list[Any] = []
+        try:
+            for idx, p in enumerate(paths):
+                attach_name = f"file{idx}"
+                fh = p.open("rb")
+                opened.append(fh)
+                files[attach_name] = (p.name, fh, _guess_mime(p))
+                item: dict[str, Any] = {
+                    "type": "photo",
+                    "media": f"attach://{attach_name}",
+                }
+                if idx == 0 and caption:
+                    item["caption"] = caption[:1024]
+                media.append(item)
+            data = {"chat_id": chat_id, "media": json.dumps(media)}
+            resp = await self._post_with_retry(
+                f"{self.base_url}/sendMediaGroup",
+                data=data,
+                files=files,
+            )
+        finally:
+            for fh in opened:
+                try:
+                    fh.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        if isinstance(resp, SendResult):
+            return resp.success
+        if resp.status_code != 200:
+            return False
+        body = resp.json()
+        return bool(body.get("ok"))
 
     async def _send_media(
         self,
