@@ -163,7 +163,7 @@ def _build_profile_config(raw: Any) -> BrowserProfileConfig | None:
     if not isinstance(raw, dict):
         return None
     driver = raw.get("driver")
-    if driver not in (None, "managed", "existing-session"):
+    if driver not in (None, "managed", "existing-session", "control-extension"):
         return None
     cdp_port = raw.get("cdp_port") if isinstance(raw.get("cdp_port"), int) else None
     cdp_url = raw.get("cdp_url") if isinstance(raw.get("cdp_url"), str) else None
@@ -411,6 +411,23 @@ def resolve_profile(
             user_data_dir=profile.user_data_dir,
             color=profile.color,
             driver="existing-session",
+            attach_only=True,
+        )
+
+    if profile.driver == "control-extension":
+        # Wave 6: extension-hosted control. The extension lives inside
+        # Chrome (real or managed) and connects to our daemon WS at
+        # runtime — no CDP port the daemon needs to know about. Same
+        # "all-zero" pattern as existing-session.
+        return ResolvedBrowserProfile(
+            name=profile_name,
+            cdp_port=0,
+            cdp_url="",
+            cdp_host="",
+            cdp_is_loopback=True,
+            user_data_dir=profile.user_data_dir,
+            color=profile.color,
+            driver="control-extension",
             attach_only=True,
         )
 

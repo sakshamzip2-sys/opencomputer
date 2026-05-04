@@ -4,6 +4,20 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Wave 6: control-extension port (browser-port v0.6)
+
+Ports OpenCLI's Chrome extension (Apache 2.0) into OpenComputer at `extensions/browser-control/extension/` — the third transport for the browser-control plugin alongside `managed` (Playwright) and `existing-session` (chrome-devtools-mcp). Closes the chrome://inspect UX gap surfaced from real LearnX-flow testing.
+
+- **Extension** (~2300 LOC TS, verbatim port + brand renames): `protocol.ts`, `identity.ts`, `cdp.ts`, `background.ts`. Each ported file carries an Apache-2.0 attribution header pointing at the OpenCLI original. Lease lifecycle (owned/borrowed workspaces, 30s/10min idle timeouts), MV3 SW survival via `chrome.storage.local` + `chrome.alarms`, and `targetId↔tabId` resolver are preserved verbatim.
+- **Python daemon WS server** at `ws://127.0.0.1:18792/ext` (browser-control's existing daemon port). New modules: `control_protocol.py` (Command/Result types, snake_case ↔ camelCase), `control_daemon.py` (WS server + per-context routing + concurrent command demux by id), `control_driver.py` (lazy-singleton daemon + `ProfileDriver`-shaped entrypoints).
+- **`BrowserDriver` Literal expanded** to `"managed" | "existing-session" | "control-extension"`. New `uses_control_extension` capability flag in `BrowserProfileCapabilities`. New `control_extension_client` slot on `ProfileRuntimeState`. New `spawn_control_extension`/`close_control_extension` callables on `ProfileDriver`. Lifecycle bring-up + teardown branches added.
+- **Track 1 — managed Chrome auto-load**: `chrome/launch.py` now appends `--load-extension=extensions/browser-control/extension/dist` to the Chrome argv when `profile.driver == "managed"` and the extension's `dist/background.js` exists. Zero user action required. The `--disable-features` flag is consolidated into a single emission so Chrome honors all suppressions (the new `DisableLoadExtensionCommandLineSwitch` plus the existing `Translate,MediaRouter`).
+- **Track 2 — Web Store install** for the `user` profile is wire-ready but the actual Web Store submission is post-merge (async maintainer task; see `extensions/browser-control/extension/README.md` for the unpacked-load path until then).
+- **34 new tests** (`tests/test_browser_control_extension_*.py`): protocol round-trip, real-WebSocket daemon round-trip + concurrent demux + timeout + disconnect cancellation, Track 1 launch-arg wiring (driver gate + dist-exists fallback + single-`--disable-features` invariant). All 587 existing browser-port tests still pass; ruff clean.
+- **8 of 14 actions ship** in v0.6 (`exec`, `navigate`, `tabs`, `cookies`, `screenshot`, `network-capture-start`, `network-capture-read`, `cdp`). The other 6 (`set-file-input`, `insert-text`, `bind`, `frames`, `sessions`, `close-window`) come in v0.6.x as adapters demand them — daemon refuses them via `ActionNotSupportedError`.
+
+The existing `extensions/browser-bridge/` plugin (Layer 4 ambient awareness) is **untouched**.
+
 ### Added — OpenClaw-parity port (Sub-project G)
 
 Ports nine load-bearing pieces of openclaw's plugin/wire contract that the original openclaw-reference-import wave missed. Manifest schema bumped v3 → v4; every new field optional, so v3 manifests parse unchanged.

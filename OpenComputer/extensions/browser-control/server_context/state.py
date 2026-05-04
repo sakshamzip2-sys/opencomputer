@@ -77,6 +77,7 @@ class ProfileRuntimeState:
     last_target_id: str | None = None
     status: ProfileStatus = ProfileStatus.STOPPED
     chrome_mcp_client: Any | None = None  # ChromeMcpClient | None
+    control_extension_client: Any | None = None  # ControlExtensionClient | None (Wave 6)
     playwright_session: Any | None = None  # PlaywrightSession | None
     reconcile: ReconcileMarker | None = None
     last_error: str | None = None

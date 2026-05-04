@@ -162,13 +162,22 @@ def create_profile(
         raise ProfileValidationError(
             "cdp_url cannot be set on an existing-session profile (Chrome MCP discovers it at runtime)"
         )
+    if cdp_url and driver == "control-extension":
+        raise ProfileValidationError(
+            "cdp_url cannot be set on a control-extension profile "
+            "(extension connects via WebSocket, not CDP port)"
+        )
 
     cdp_port: int | None = None
-    transport: Literal["cdp", "chrome-mcp"] = "cdp"
+    transport: Literal["cdp", "chrome-mcp", "control-extension"] = "cdp"
     is_remote = False
 
     if driver == "existing-session":
         transport = "chrome-mcp"
+        cdp_url = None
+        cdp_port = None
+    elif driver == "control-extension":
+        transport = "control-extension"
         cdp_url = None
         cdp_port = None
     elif cdp_url:
@@ -196,7 +205,7 @@ def create_profile(
         cdp_url=cdp_url,
         color=color,
         driver=driver,
-        attach_only=True if driver == "existing-session" else None,
+        attach_only=True if driver in ("existing-session", "control-extension") else None,
         user_data_dir=user_data_dir,
     )
     if write_config is not None:
