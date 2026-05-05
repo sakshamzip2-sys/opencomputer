@@ -26,6 +26,7 @@ from pathlib import Path
 
 from plugin_sdk.hooks import HookEvent, HookSpec
 
+from . import state as st_state
 from .config import SocialTracesConfig, from_config_dict
 from .prefetch import on_before_task
 from .subscriber import TraceEmissionSubscriber
@@ -37,17 +38,11 @@ def _profile_home_factory() -> Path:
     """Lazy resolver for the active profile home.
 
     Resolved at event-arrival time (not at register-time) so
-    multi-profile dispatch sees the correct path. Mirrors how
-    ``cli_traces._profile_home`` works.
+    multi-profile dispatch sees the correct path. Uses the
+    ``state.resolve_profile_home`` helper which stays inside the
+    plugin_sdk + stdlib boundary.
     """
-    import os
-
-    env = os.environ.get("OPENCOMPUTER_PROFILE_HOME")
-    if env:
-        return Path(env)
-    from opencomputer.agent.config import _home as _home_fn
-
-    return _home_fn()
+    return st_state.resolve_profile_home()
 
 
 def _config_factory(profile_home: Path) -> SocialTracesConfig:

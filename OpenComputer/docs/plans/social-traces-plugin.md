@@ -523,13 +523,35 @@ Recommendation: **(a) for v1.0**, revisit (b) if the in-memory state proves frag
 - [x] CLI smoke test: `oc traces enable && oc traces status` round-
   trips and shows the new `tracked sessions` field
 
-### Phase 6 — Novelty judge (2-3 hours)
+### Phase 6 — Novelty judge (2-3 hours) — COMPLETE 2026-05-06
 
-- [ ] `novelty_judge.py:judge_novelty_async()` — Haiku call with prompt:
-  - inputs: user message, agent transcript, trace card that was used
-  - outputs: `is_novel: bool` + `reason: str`
-  - cost-guarded via existing `CostGuard` (see skill-evolution wiring)
-- [ ] Tests: mock provider returns is_novel=true → emission proceeds; is_novel=false → silent
+- [x] `novelty_judge.judge_session_novelty` — real Haiku call mirroring `extensions/skill-evolution/pattern_detector.py:judge_candidate_async`:
+  - System prompt with three-signal calibration (improvement / edge case / different route)
+  - Structured JSON output: `{novel, confidence, reason}`
+  - JSON parser tolerates markdown fences + surrounding prose
+  - Confidence clamped to [0, 100]
+  - Cost-guard pre-flight via `check_budget` (accepts both bool + BudgetDecision shapes); skips provider call on denial
+  - `record_usage` after successful response (signature-tolerant for test mocks)
+  - Transcript truncated to 4000 chars before sending (Haiku context budget)
+  - Provider raise / parse failure / no-provider all fall to `is_novel=False` (conservative default)
+- [x] `NoveltyVerdict` extended with `confidence` field
+- [x] `session_state` bridge extended to carry the full `TraceCard` body in `_SessionEntry.trace_card` — judge reads it without re-querying the network
+- [x] `prefetch.on_before_task` writes the chosen card to the bridge alongside its id
+- [x] `subscriber.TraceEmissionSubscriber` constructor accepts optional `provider` + `cost_guard`; threads them through `_judge_novelty`
+- [x] `subscriber._read_session_for_judge` pulls the user message + transcript from `SessionDB.get_messages(session_id)` at session-end time; filters out our own `<system-reminder>` injections so the judge sees the agent's work, not the trace we injected
+- [x] Boundary inventory refreshed for `opencomputer.agent.state.SessionDB` import (lazy, inside the read helper) — same pattern skill-evolution uses for its provider/db lookups
+- [x] Earlier `opencomputer.agent.config._home` import removed in favour of `state.resolve_profile_home` (plugin_sdk + stdlib only) — net inventory delta is one new entry, one removed
+- [x] **Production wiring deferred to Phase 9** — `plugin.register()` still passes `provider=None`/`cost_guard=None` so the judge degrades to `is_novel=False` until the gateway-side bootstrap (mirroring `_start_evolution_subscriber`) lands. CLI single-shot path (`opencomputer chat`) doesn't fit the long-lived subscriber model and intentionally never wires real LLM calls
+- [x] 21 new tests in `tests/test_social_traces_phase6.py`:
+  - parser: bare JSON, markdown fences, surrounding prose, malformed, empty, confidence clamping, missing-fields defaults
+  - judge API: no-provider degrades, novel/not-novel verdicts, cost-guard denial skips provider, record_usage after success, provider raises → not-novel, parse failure → not-novel, transcript truncation
+  - `_budget_allows` accepts both bool + dataclass shapes
+  - subscriber threads provider+cost_guard through to the judge
+  - subscriber reads SessionDB transcript at session-end (with system-reminder filtering)
+  - judge novel→continues to distill (Phase 5 stub returns None)
+  - no-provider in subscriber → degraded → silent (no distill call)
+  - prefetch writes the full TraceCard to the bridge (Phase 6 contract)
+- [x] 194/194 affected-file tests green (Phases 0-6 + SDK boundary + hook expansion + plugin manifest + extension boundary), 1 documented skip
 
 ### Phase 7 — Redactor + distiller (3-4 hours)
 

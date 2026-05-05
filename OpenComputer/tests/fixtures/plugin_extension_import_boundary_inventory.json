@@ -91,6 +91,13 @@
   "extensions/skill-evolution/subscriber.py": [
     "opencomputer.hooks.runner"
   ],
+  "extensions/social-traces/plugin.py": [
+    "opencomputer.ingestion.bus"
+  ],
+  "extensions/social-traces/subscriber.py": [
+    "opencomputer.agent.state",
+    "opencomputer.hooks.runner"
+  ],
   "extensions/telegram/adapter.py": [
     "opencomputer.agent.steer",
     "opencomputer.gateway.dispatch",

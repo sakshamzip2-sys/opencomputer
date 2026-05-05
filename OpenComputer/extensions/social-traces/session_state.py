@@ -72,12 +72,19 @@ class _SessionEntry:
     ``trace_used`` is the most recently injected trace_id (or None if
     a turn fired BEFORE_TASK with no inbox match). ``hit_count`` is
     how many turns in this session used a trace — useful for the
-    Phase 6 novelty judge to decide "did the agent actually rely on
-    network help?".
+    novelty judge to decide "did the agent actually rely on network
+    help?".
+
+    ``trace_card`` is the actual ``TraceCard`` that was injected (if
+    any) — added in Phase 6 so the novelty judge can compare what
+    the agent did to what the trace prescribed without re-querying
+    the network. Typed as ``Any`` to avoid a hard plugin_sdk import
+    in the bridge module's public surface.
     """
 
     trace_used: str | None
     hit_count: int
+    trace_card: object | None = None  # plugin_sdk.TraceCard or None
 
 
 # OrderedDict so the LRU eviction is cheap — pop the first key when
@@ -89,7 +96,12 @@ _lock = threading.RLock()
 # ─── public API ───────────────────────────────────────────────────────
 
 
-def set_trace_used(session_id: str, trace_id: str | None) -> None:
+def set_trace_used(
+    session_id: str,
+    trace_id: str | None,
+    *,
+    trace_card: object | None = None,
+) -> None:
     """Record what the BEFORE_TASK hook decided this turn.
 
     ``trace_id=None`` means "the hook fired but no trace cleared the
@@ -97,11 +109,15 @@ def set_trace_used(session_id: str, trace_id: str | None) -> None:
     leaves the session absent from the dict entirely). The subscriber
     uses that distinction.
 
+    ``trace_card`` is the actual TraceCard that was injected — Phase 6
+    novelty judge consumes it. Pass ``None`` when ``trace_id`` is None
+    (or omit; the default).
+
     When the same session_id is updated multiple times within a
     single conversation:
 
-    * The latest ``trace_id`` wins for the ``trace_used`` field
-      (subscribers care about the freshest signal).
+    * The latest ``trace_id`` and ``trace_card`` win (subscribers
+      care about the freshest signal).
     * ``hit_count`` increments only on non-None updates so it counts
       actual injections, not "checked, found nothing" noise.
     """
@@ -111,11 +127,13 @@ def set_trace_used(session_id: str, trace_id: str | None) -> None:
             entry = _SessionEntry(
                 trace_used=trace_id,
                 hit_count=1 if trace_id is not None else 0,
+                trace_card=trace_card,
             )
         else:
             entry = _SessionEntry(
                 trace_used=trace_id,
                 hit_count=existing.hit_count + (1 if trace_id is not None else 0),
+                trace_card=trace_card,
             )
         # Touch — move to MRU end of OrderedDict.
         _state.pop(session_id, None)

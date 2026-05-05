@@ -102,11 +102,20 @@ class TraceEmissionSubscriber:
         profile_home_factory: Callable[[], Path],
         client_factory: Callable[[Path, SocialTracesConfig], TraceNetworkClient],
         config_factory: Callable[[Path], SocialTracesConfig],
+        provider: Any | None = None,
+        cost_guard: Any | None = None,
     ) -> None:
         self._bus = bus
         self._profile_home_factory = profile_home_factory
         self._client_factory = client_factory
         self._config_factory = config_factory
+        # Phase 6: provider + cost_guard for the novelty judge. When
+        # either is None the judge degrades to ``is_novel=False`` —
+        # gateway production wiring (Phase 9) supplies real values
+        # by resolving from OC's configured provider + the per-profile
+        # default cost guard.
+        self._provider = provider
+        self._cost_guard = cost_guard
         self._subscription: Any = None
 
     # ─── lifecycle ─────────────────────────────────────────────────
@@ -208,7 +217,8 @@ class TraceEmissionSubscriber:
 
                 verdict = await self._judge_novelty(
                     session_id=session_id,
-                    trace_id=entry.trace_used,
+                    entry=entry,
+                    profile_home=profile_home,
                 )
                 if not verdict.is_novel:
                     _log.info(
@@ -312,23 +322,50 @@ class TraceEmissionSubscriber:
             )
 
     async def _judge_novelty(
-        self, *, session_id: str, trace_id: str
+        self,
+        *,
+        session_id: str,
+        entry: Any,  # session_state._SessionEntry
+        profile_home: Path,
     ) -> novelty_judge.NoveltyVerdict:
         """Wrap :func:`novelty_judge.judge_session_novelty` with a
         try/except envelope so a judge crash falls open to
         ``is_novel=False`` (the conservative default — silent emit
         rather than spam-emit on bad signal).
 
-        Phase 6 will pass the actual session transcript + used trace
-        body. For Phase 5 the stub returns False regardless of inputs,
-        so the call signature is intentionally minimal here.
+        Phase 6 reads:
+
+        * ``entry.trace_card`` — the TraceCard the prefetch hook
+          injected, stored in the bridge so we don't re-query the
+          network.
+        * The session's user message + transcript from
+          :class:`opencomputer.agent.state.SessionDB` (the same DB
+          the agent loop persists into).
+
+        If the SessionDB read fails we still call the judge with empty
+        strings — the judge will return ``is_novel=False`` (it can't
+        tell anything from no context), which is the conservative
+        default.
         """
+        used_intent = ""
+        used_insight = ""
+        if entry is not None and entry.trace_card is not None:
+            card = entry.trace_card
+            used_intent = getattr(card, "intent", "") or ""
+            used_insight = getattr(card, "distilled_insight", "") or ""
+
+        user_message, transcript = self._read_session_for_judge(
+            session_id=session_id, profile_home=profile_home,
+        )
+
         try:
             return await novelty_judge.judge_session_novelty(
-                user_message="",
-                transcript="",
-                used_trace_intent="",
-                used_trace_insight="",
+                user_message=user_message,
+                transcript=transcript,
+                used_trace_intent=used_intent,
+                used_trace_insight=used_insight,
+                provider=self._provider,
+                cost_guard=self._cost_guard,
             )
         except Exception:  # noqa: BLE001
             _log.warning(
@@ -340,6 +377,50 @@ class TraceEmissionSubscriber:
             return novelty_judge.NoveltyVerdict(
                 is_novel=False, reason="judge-raised",
             )
+
+    def _read_session_for_judge(
+        self, *, session_id: str, profile_home: Path
+    ) -> tuple[str, str]:
+        """Read the session's user message + transcript for the judge.
+
+        Returns ``("", "")`` on any failure — the judge handles empty
+        inputs by returning ``is_novel=False``, which is correct.
+
+        We use SessionDB directly rather than expecting the caller to
+        thread the messages in. Avoids leaking opencomputer.* import
+        surface to the public API of this method.
+        """
+        try:
+            from opencomputer.agent.state import SessionDB
+
+            db = SessionDB(profile_home / "sessions.db")
+            messages = db.get_messages(session_id)
+        except Exception:  # noqa: BLE001
+            _log.debug(
+                "social-traces: session %s — couldn't read SessionDB; "
+                "judge will run with empty transcript",
+                session_id,
+                exc_info=True,
+            )
+            return "", ""
+
+        # First user message = the task prompt. Everything else gets
+        # joined into the transcript with role labels.
+        user_message = ""
+        transcript_lines: list[str] = []
+        for msg in messages:
+            role = getattr(msg, "role", "") or ""
+            content = getattr(msg, "content", "") or ""
+            if role == "user" and not user_message:
+                user_message = content
+                continue
+            # Skip system-reminder injections from our own pre-task
+            # hook — they're not the agent's work.
+            if role == "user" and "<system-reminder>" in content:
+                continue
+            transcript_lines.append(f"[{role}] {content}")
+        transcript = "\n".join(transcript_lines)
+        return user_message, transcript
 
 
 __all__ = ["TraceEmissionSubscriber"]

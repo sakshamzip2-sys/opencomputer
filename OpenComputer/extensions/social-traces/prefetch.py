@@ -70,8 +70,9 @@ def _profile_home_from_runtime(ctx: HookContext) -> Path | None:
     """Best-effort profile-home resolver.
 
     Reads ``runtime.custom["profile_home"]`` first (explicit override
-    used in tests + the wider OC profile-context system). Falls back
-    to ``opencomputer.agent.config._home()`` if not set.
+    used in tests). Falls back to :func:`state.resolve_profile_home`
+    which only uses plugin_sdk + stdlib (env + ContextVar) — keeps
+    this extension inside the SDK boundary.
     """
     if ctx.runtime is None:
         return None
@@ -79,8 +80,7 @@ def _profile_home_from_runtime(ctx: HookContext) -> Path | None:
     if explicit:
         return Path(explicit)
     try:
-        from opencomputer.agent.config import _home as _profile_home_fn
-        return _profile_home_fn()
+        return state.resolve_profile_home()
     except Exception:  # noqa: BLE001 — never raise from a hook
         _log.debug("profile_home resolver failed", exc_info=True)
         return None
@@ -107,7 +107,12 @@ def _load_config(profile_home: Path) -> SocialTracesConfig:
     return from_config_dict(raw.get("social_traces", {}))
 
 
-def _set_trace_used(ctx: HookContext, trace_id: str | None) -> None:
+def _set_trace_used(
+    ctx: HookContext,
+    trace_id: str | None,
+    *,
+    trace_card: TraceCard | None = None,
+) -> None:
     """Stamp the trace_used signal so the post-task subscriber can read it.
 
     Two write paths, intentionally:
@@ -122,6 +127,10 @@ def _set_trace_used(ctx: HookContext, trace_id: str | None) -> None:
       receives a ``SessionEndEvent`` and has no access to the runtime,
       reads this via ``pop_session`` to learn what BEFORE_TASK did.
 
+    Phase 6: also passes the full ``trace_card`` to the bridge so the
+    novelty judge can compare what the agent did to what the trace
+    prescribed, without re-querying the network.
+
     Both writes happen on every call so a future architectural change
     (e.g. adding ``trace_used`` to ``SessionEndEvent`` directly) doesn't
     require touching this code.
@@ -133,7 +142,9 @@ def _set_trace_used(ctx: HookContext, trace_id: str | None) -> None:
     # production path; defensively guarded for tests calling the handler
     # directly with a sparse HookContext).
     if ctx.session_id:
-        session_state.set_trace_used(ctx.session_id, trace_id)
+        session_state.set_trace_used(
+            ctx.session_id, trace_id, trace_card=trace_card,
+        )
 
 
 # ─── query construction ──────────────────────────────────────────────
@@ -319,7 +330,7 @@ async def on_before_task(ctx: HookContext) -> HookDecision:
 
     # Inject
     body = format_injection(chosen)
-    _set_trace_used(ctx, chosen.id)
+    _set_trace_used(ctx, chosen.id, trace_card=chosen)
     _log.info(
         "social-traces: pre-task hit — trace=%s score=%.2f tags=%s",
         chosen.id,

@@ -1,4 +1,4 @@
-"""On-disk state for the social-traces plugin.
+"""On-disk state + shared helpers for the social-traces plugin.
 
 Mirrors the skill-evolution plugin's state model (see
 ``extensions/skill-evolution/subscriber.py``):
@@ -18,10 +18,51 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
 _log = logging.getLogger("opencomputer.social_traces.state")
+
+
+# ─── profile-home resolver ──────────────────────────────────────────
+#
+# We avoid importing ``opencomputer.agent.config._home()`` here so the
+# extension stays inside the plugin_sdk + stdlib boundary. Resolution
+# order mirrors ``_home``:
+#   1. OPENCOMPUTER_PROFILE_HOME env (test override)
+#   2. plugin_sdk.current_profile_home ContextVar (set by gateway
+#      dispatch in production)
+#   3. OPENCOMPUTER_HOME env (legacy single-profile path)
+#   4. ~/.opencomputer (final fallback)
+
+
+def resolve_profile_home() -> Path:
+    """Return the active profile's home dir without importing
+    from ``opencomputer.*``.
+
+    Production callers invoke this through ``plugin.py``'s
+    ``_profile_home_factory``; tests pass an explicit path via
+    ``runtime.custom['profile_home']`` and never hit this resolver.
+    """
+    env = os.environ.get("OPENCOMPUTER_PROFILE_HOME")
+    if env:
+        return Path(env)
+
+    try:
+        from plugin_sdk.profile_context import current_profile_home
+
+        ctx_val = current_profile_home.get()
+        if ctx_val is not None:
+            return ctx_val
+    except Exception:  # noqa: BLE001 — defensive for SDK-version mismatch
+        pass
+
+    env = os.environ.get("OPENCOMPUTER_HOME")
+    if env:
+        return Path(env)
+
+    return Path.home() / ".opencomputer"
 
 STATE_FILENAME = "state.json"
 HEARTBEAT_FILENAME = "heartbeat"
@@ -102,6 +143,7 @@ __all__ = [
     "is_enabled",
     "read_heartbeat",
     "read_state",
+    "resolve_profile_home",
     "set_enabled",
     "state_path",
     "traces_dir",
