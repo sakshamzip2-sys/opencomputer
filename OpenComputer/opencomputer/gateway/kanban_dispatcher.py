@@ -90,6 +90,10 @@ class KanbanDispatcherLoop:
                 # so newly-delegated claims (created in this tick) are
                 # included in the same pass.
                 self._tick_heartbeats()
+                # Wave 6.E.17 — drain the outbound callback queue so
+                # peer-side terminal events get reliably delivered to
+                # the sender even across network blips.
+                self._tick_callback_drainer()
                 consecutive_errors = 0
             except Exception as exc:  # noqa: BLE001 — fail-open per gateway pattern
                 consecutive_errors += 1
@@ -172,6 +176,117 @@ class KanbanDispatcherLoop:
                         )
         except Exception as exc:  # noqa: BLE001 — never wedge the tick
             logger.warning("heartbeat tick failed: %s", exc)
+
+    def _tick_callback_drainer(self) -> None:
+        """Deliver due callbacks from ``kanban_pending_callbacks``.
+
+        Walks rows whose ``next_attempt_at <= now`` and POSTs each one
+        to its sender, signed with the sender's HMAC secret looked up
+        in ``kanban_remote_hosts``. 2xx → mark_delivered; anything else
+        (network error, 4xx, 5xx) → mark_attempted with exponential
+        backoff. After ``DEFAULT_MAX_ATTEMPTS`` failures the row goes
+        to status='dead' for operator review.
+
+        Per audit lens A7: the sender's reconcile_callback is
+        idempotent against duplicates (claim already in 'done' status
+        means no-op), so aggressive retries are safe.
+        """
+        import json as _json
+        import time as _time
+
+        import httpx
+
+        from opencomputer.kanban import callback_queue as _cq
+        from opencomputer.kanban import db as kdb
+        from opencomputer.kanban.remote_hosts import find_remote_host, signed_headers
+
+        try:
+            with kdb.connect() as conn:
+                due = _cq.next_due(conn, now=int(_time.time()))
+                if not due:
+                    return
+                slug_failed: set[str] = set()
+                for cb in due:
+                    if cb.sender_slug in slug_failed:
+                        continue
+                    host = find_remote_host(conn, cb.sender_slug)
+                    if host is None:
+                        # Sender was deregistered. Mark this row dead
+                        # immediately — without the HMAC secret we
+                        # cannot retry, so backoff is pointless.
+                        slug_failed.add(cb.sender_slug)
+                        _cq.mark_attempted(
+                            conn, cb.id,
+                            error=f"sender slug {cb.sender_slug!r} no longer registered",
+                            max_attempts=1,  # bumps to attempt_count=1 ≥ 1 → dead
+                        )
+                        logger.warning(
+                            "callback dropped: sender %r no longer registered "
+                            "(callback row id=%d)",
+                            cb.sender_slug, cb.id,
+                        )
+                        continue
+                    body = cb.payload_json.encode("utf-8")
+                    # The callback URL is what the sender originally
+                    # provided in /proxy/spawn. The path component must
+                    # match what's signed; derive it from the URL.
+                    from urllib.parse import urlparse
+                    sig_path = urlparse(cb.callback_url).path or "/"
+                    # The dashboard endpoint expects ?slug=<peer-slug>
+                    # so it can lookup the secret to verify with. We
+                    # send our OWN slug — the host the sender knows us
+                    # by. ``host.slug`` is THEIR slug for us, which is
+                    # the same key both sides use. (Symmetric naming
+                    # is enforced at register time.)
+                    headers = signed_headers(
+                        secret=host.hmac_secret,
+                        method="POST",
+                        path=sig_path,
+                        body=body,
+                        extra={"Content-Type": "application/json"},
+                    )
+                    sep = "&" if "?" in cb.callback_url else "?"
+                    target = f"{cb.callback_url}{sep}slug={host.slug}"
+                    try:
+                        resp = httpx.post(
+                            target, content=body, headers=headers, timeout=10.0,
+                        )
+                    except httpx.RequestError as exc:
+                        slug_failed.add(cb.sender_slug)
+                        outcome = _cq.mark_attempted(
+                            conn, cb.id, error=f"network: {exc}",
+                        )
+                        logger.debug(
+                            "callback %d to %s failed (status=%s): %s",
+                            cb.id, cb.sender_slug, outcome, exc,
+                        )
+                        continue
+                    if 200 <= resp.status_code < 300:
+                        _cq.mark_delivered(conn, cb.id)
+                        try:
+                            _ = _json.loads(resp.text or "{}")
+                        except ValueError:
+                            pass
+                        logger.info(
+                            "callback %d delivered to %s (%d)",
+                            cb.id, cb.sender_slug, resp.status_code,
+                        )
+                    else:
+                        # 4xx + 5xx alike — back off and retry. Even
+                        # 401s are worth retrying since the operator
+                        # may rotate the secret on both sides.
+                        slug_failed.add(cb.sender_slug)
+                        outcome = _cq.mark_attempted(
+                            conn, cb.id,
+                            error=f"HTTP {resp.status_code}: {resp.text[:200]}",
+                        )
+                        logger.debug(
+                            "callback %d to %s HTTP %d (status=%s)",
+                            cb.id, cb.sender_slug,
+                            resp.status_code, outcome,
+                        )
+        except Exception as exc:  # noqa: BLE001 — never wedge the tick
+            logger.warning("callback drainer tick failed: %s", exc)
 
     async def stop(self) -> None:
         """Signal the loop to exit on the next iteration."""
