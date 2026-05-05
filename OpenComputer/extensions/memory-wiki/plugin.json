@@ -1,0 +1,13 @@
+{
+  "id": "memory-wiki",
+  "name": "Wiki Memory (markdown-files)",
+  "version": "0.1.0",
+  "description": "Personal knowledge wiki backed by markdown files on disk. Auto-extracts [[wikilinks]], maintains a backlinks index, and search via ripgrep when available.",
+  "kind": "provider",
+  "entry": "plugin",
+  "schema_version": 2,
+  "profiles": ["*"],
+  "enabled_by_default": false,
+  "tool_names": ["WikiMemoryAdd", "WikiMemoryRead", "WikiMemorySearch", "WikiMemoryBacklinks", "WikiMemoryDelete"],
+  "min_host_version": "0.1.0"
+}

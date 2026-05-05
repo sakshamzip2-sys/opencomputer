@@ -68,9 +68,25 @@ streaming_final_chunk = _of.streaming_final_chunk
 logger = logging.getLogger("opencomputer.ext.api_server")
 
 
+def _safe_json_str(s: str) -> str:
+    """JSON-encode a string for safe inclusion in an SSE error chunk."""
+    import json as _json
+
+    return _json.dumps(s)
+
+
 # Type alias for the handler the host injects. Takes (session_id, text)
 # and returns the agent's reply.
 ChatHandler = Callable[[str, str], Awaitable[str]]
+
+# E.2 (2026-05-05) — per-token streaming handler. Takes (session_id,
+# text, on_delta_async). Drives the agent loop; calls on_delta for each
+# emitted token/text chunk. Returns when generation is complete (no
+# return value — caller closes the SSE stream).
+StreamingChatHandler = Callable[
+    [str, str, Callable[[str], Awaitable[None]]],
+    Awaitable[None],
+]
 
 
 class APIServerAdapter(BaseChannelAdapter):
@@ -91,6 +107,10 @@ class APIServerAdapter(BaseChannelAdapter):
         self._port: int = int(config.get("port", 18791))
         self._token: str = config["token"]
         self._handler: ChatHandler | None = None
+        # E.2 — per-token streaming handler. When set AND request has
+        # stream=True, the OpenAI-compat endpoint emits one SSE chunk
+        # per delta. Falls back to single-chunk path when None.
+        self._streaming_handler: StreamingChatHandler | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         # Wave 6.A — Hermes-port (0a15dbdc4) — track in-flight chat runs
@@ -106,6 +126,16 @@ class APIServerAdapter(BaseChannelAdapter):
         after registration. Without a handler set, requests return 503.
         """
         self._handler = handler
+
+    def set_streaming_handler(self, handler: StreamingChatHandler) -> None:
+        """Inject the per-token streaming handler (E.2).
+
+        When set AND the OpenAI-compat endpoint receives ``stream=True``,
+        the response emits one SSE chunk per token (or text delta) the
+        agent produces. When unset, ``stream=True`` falls back to the
+        legacy single-chunk path so existing clients keep working.
+        """
+        self._streaming_handler = handler
 
     # ─── HTTP handler ───────────────────────────────────────────────
 
@@ -239,7 +269,14 @@ class APIServerAdapter(BaseChannelAdapter):
                 {"error": {"message": "messages required"}}, status=400
             )
 
-        if self._handler is None:
+        # E.2 — when streaming is requested, the streaming_handler is
+        # sufficient; otherwise we need the legacy handler. 503 only when
+        # neither path is viable for the requested mode.
+        if stream and self._streaming_handler is None and self._handler is None:
+            return web.json_response(
+                {"error": {"message": "handler not configured"}}, status=503
+            )
+        if not stream and self._handler is None:
             return web.json_response(
                 {"error": {"message": "handler not configured"}}, status=503
             )
@@ -252,13 +289,6 @@ class APIServerAdapter(BaseChannelAdapter):
 
         if stream:
             chunk_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-            try:
-                agent_text = await self._handler(session_id, user_text)
-            except Exception as e:  # noqa: BLE001
-                logger.exception("openai-compat handler raised")
-                return web.json_response(
-                    {"error": {"message": str(e)}}, status=500
-                )
             resp = web.StreamResponse(
                 status=200,
                 headers={
@@ -268,6 +298,51 @@ class APIServerAdapter(BaseChannelAdapter):
                 },
             )
             await resp.prepare(request)
+
+            # E.2 — per-token streaming path. When a streaming handler is
+            # registered, drive it with an on_delta callback that pushes
+            # one SSE chunk per text delta. Fall through to the legacy
+            # single-chunk path when only the synchronous handler exists.
+            if self._streaming_handler is not None:
+                async def _on_delta(text: str) -> None:
+                    if not text:
+                        return
+                    await resp.write(
+                        f"data: {streaming_delta_chunk(chunk_id, model, text)}\n\n".encode()
+                    )
+
+                try:
+                    await self._streaming_handler(session_id, user_text, _on_delta)
+                except Exception as e:  # noqa: BLE001
+                    logger.exception("openai-compat streaming handler raised")
+                    # We've already written the SSE headers; we can't
+                    # rewrite them as a 500. Emit an error chunk + DONE
+                    # so the client sees the failure cleanly.
+                    err_payload = (
+                        '{"error":{"message":'
+                        + _safe_json_str(str(e))
+                        + ',"type":"server_error"}}'
+                    )
+                    await resp.write(f"data: {err_payload}\n\n".encode())
+                    await resp.write(b"data: [DONE]\n\n")
+                    await resp.write_eof()
+                    return resp
+
+                await resp.write(
+                    f"data: {streaming_final_chunk(chunk_id, model)}\n\n".encode()
+                )
+                await resp.write(b"data: [DONE]\n\n")
+                await resp.write_eof()
+                return resp
+
+            # Legacy single-chunk fallback (back-compat).
+            try:
+                agent_text = await self._handler(session_id, user_text)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("openai-compat handler raised")
+                return web.json_response(
+                    {"error": {"message": str(e)}}, status=500
+                )
             await resp.write(
                 f"data: {streaming_delta_chunk(chunk_id, model, agent_text)}\n\n".encode()
             )

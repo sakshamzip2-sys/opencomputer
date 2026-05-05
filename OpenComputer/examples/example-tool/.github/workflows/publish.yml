@@ -1,0 +1,41 @@
+# Publish to PyPI on every v* tag via Trusted Publishers (OIDC).
+# No PyPI token required — configure a Trusted Publisher at
+# https://pypi.org/manage/account/publishing/ pointing at this repo.
+#
+# Uncomment + push a tag to publish:
+#
+#   git tag v0.1.0 && git push --tags
+
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write   # required for OIDC trusted-publisher
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/opencomputer-example-tool
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install --upgrade build
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # `with: password:` is intentionally omitted — OIDC handles auth.
