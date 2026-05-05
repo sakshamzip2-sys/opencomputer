@@ -400,14 +400,20 @@ In `extensions/social-traces/subscriber.py`, mirror `EvolutionSubscriber` exactl
 - [x] Test: handler that raises does NOT break the loop (fail-open contract)
 - [x] All 7 BEFORE_TASK integration tests pass; full hook+trace+loop+phase6a+phase11b sweep stays green (77 passed, 1 documented skip)
 
-### Phase 2 — Plugin scaffold (2-3 hours)
+### Phase 2 — Plugin scaffold (2-3 hours) — COMPLETE 2026-05-05
 
-- [ ] `opencomputer plugin new social-traces --kind mixed` (uses Sub-project B scaffolder)
-- [ ] Hand-edit `plugin.json` with correct fields (kind=mixed, enabled_by_default=false initially)
-- [ ] Create `config.py`, `identity.py` — boilerplate
-- [ ] Wire empty `prefetch.py` and `subscriber.py` so registration works
-- [ ] `plugin.py:register(api)` — register the BEFORE_TASK hook + subscriber lifecycle
-- [ ] Smoke test: `opencomputer plugins` lists `social-traces`; `oc social-traces enable` flips state file
+- [x] Create `extensions/social-traces/plugin.json` (kind=mixed, enabled_by_default=false)
+- [x] Create `config.py` — `SocialTracesConfig` frozen dataclass + `from_config_dict` parser with defaults
+- [x] Create `identity.py` — per-profile opaque `submitter_hash` (32-byte hex, regenerable by deleting the file)
+- [x] Create `state.py` — on-disk enabled flag + heartbeat under `<profile_home>/traces/`
+- [x] Stub `prefetch.py` — Phase 2 contract: returns `pass`, writes heartbeat when enabled, sets `runtime.custom["trace_used"] = None`
+- [x] Stub `subscriber.py` — `TraceEmissionSubscriber` shape with start/stop lifecycle (real pipeline pending Phase 5+)
+- [x] `plugin.py:register(api)` — registers BEFORE_TASK hook with priority=20, timeout_ms=1500
+- [x] Add `oc traces enable/disable/status` CLI surface — top-level namespace via `opencomputer/cli_traces.py`, mounted in `cli.py`
+- [x] Privacy-respecting status output — never includes session_id, intent, or distilled content
+- [x] `extensions/social-traces/README.md` — user-facing doc with two-layer opt-in instructions
+- [x] Smoke test: `opencomputer.plugins.discovery.discover()` lists `social-traces`; CLI verbs round-trip the on-disk flag
+- [x] 18 new tests in `tests/test_social_traces_phase2.py` — manifest, state, identity, config, prefetch stub semantics, plugin.register registration
 
 ### Phase 3 — Local-file backend (2-3 hours)
 

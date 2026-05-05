@@ -3198,6 +3198,14 @@ from opencomputer.cli_files import files_app  # noqa: E402
 
 app.add_typer(files_app, name="files")
 
+# Social-traces plugin — `oc traces {enable,disable,status}`. Lives at
+# the top level because the trace network is a peer feature, not a
+# skills-catalog sub-feature. See extensions/social-traces/README.md
+# and docs/plans/social-traces-plugin.md.
+from opencomputer.cli_traces import app as traces_app  # noqa: E402
+
+app.add_typer(traces_app, name="traces")
+
 
 @config_app.command("show")
 def config_show() -> None:

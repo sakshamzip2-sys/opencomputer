@@ -1,0 +1,12 @@
+{
+  "id": "social-traces",
+  "name": "social-traces",
+  "description": "Collective trace network — pre-task lookup of matching TraceCards from OpenHub, post-task emission of distilled TraceCards back to the network. Privacy-redacted client-side; admin-reviewed network-side. See docs/plans/social-traces-plugin.md.",
+  "version": "0.1.0",
+  "author": "OpenComputer",
+  "license": "MIT",
+  "kind": "mixed",
+  "entry": "plugin",
+  "enabled_by_default": false,
+  "tool_names": []
+}
