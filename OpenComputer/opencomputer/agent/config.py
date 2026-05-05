@@ -59,13 +59,14 @@ class ModelConfig:
 
     provider: str = "anthropic"  # maps to a provider plugin name
     model: str = "claude-opus-4-7"
-    # Default per-turn output cap. Doubled from 4096 → 8192 (2026-05-05)
-    # so longer responses (multi-paragraph synthesis, full file rewrites,
-    # detailed plans) don't truncate by default. Users who want even
-    # higher caps can override via config.yaml `model.max_tokens` or the
-    # turn-level `max_tokens_override` (max_tokens+tool_use retry path
-    # already lifts to 64k cap on retry).
-    max_tokens: int = 8192
+    # Default per-turn output cap. Quadrupled from 4096 → 16384 in two
+    # steps on 2026-05-05 (4096→8192, then 8192→16384) so even very long
+    # responses (full file rewrites, detailed multi-section plans,
+    # exhaustive analysis) don't truncate by default. Users who want
+    # even higher caps can override via config.yaml `model.max_tokens`
+    # or the turn-level `max_tokens_override` (max_tokens+tool_use retry
+    # path already lifts to 64k cap on retry).
+    max_tokens: int = 16384
     temperature: float = 1.0
     api_key_env: str = "ANTHROPIC_API_KEY"
     cheap_model: str | None = None

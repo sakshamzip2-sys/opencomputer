@@ -341,11 +341,11 @@ def test_loop_config_defaults() -> None:
     assert cfg.iteration_timeout_s == 3600
 
 
-def test_model_config_max_tokens_default_doubled() -> None:
-    """ModelConfig.max_tokens default doubled from 4096 → 8192 (2026-05-05)
-    so longer responses don't truncate. Lock the new default in a test so
-    nobody silently regresses it."""
+def test_model_config_max_tokens_default_quadrupled() -> None:
+    """ModelConfig.max_tokens default quadrupled from 4096 → 16384 in two
+    steps on 2026-05-05 (4096→8192→16384) so even long responses don't
+    truncate. Lock the new default in a test so nobody silently regresses it."""
     from opencomputer.agent.config import ModelConfig
 
     cfg = ModelConfig()
-    assert cfg.max_tokens == 8192
+    assert cfg.max_tokens == 16384
