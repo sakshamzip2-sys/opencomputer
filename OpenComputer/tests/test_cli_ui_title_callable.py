@@ -6,7 +6,7 @@ that the helper logic mirrors the production callable behaviour.
 from __future__ import annotations
 
 import inspect
-from typing import Callable
+from collections.abc import Callable
 
 
 def test_read_user_input_accepts_get_session_title() -> None:
@@ -27,7 +27,9 @@ def test_read_user_input_keeps_back_compat_session_title_param() -> None:
 def test_title_text_uses_callable_dynamically() -> None:
     """When the callable's return value changes, the rendered text follows."""
     title_holder = ["foo"]
-    get_title: Callable[[], str | None] = lambda: title_holder[0]
+
+    def get_title() -> str | None:
+        return title_holder[0]
 
     def _title_text():
         title = get_title() or ""

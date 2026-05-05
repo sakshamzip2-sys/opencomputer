@@ -19,7 +19,6 @@ from opencomputer.agent.prompt_caching import (
     apply_full_cache_control,
 )
 
-
 # ─── Token estimator (Bug 3) ──────────────────────────────────────────
 
 

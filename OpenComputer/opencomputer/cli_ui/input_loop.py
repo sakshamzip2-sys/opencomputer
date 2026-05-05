@@ -23,8 +23,8 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.filters import Condition
