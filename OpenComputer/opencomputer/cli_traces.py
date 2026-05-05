@@ -35,6 +35,26 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+# Inbox sub-app — `oc traces inbox {add,list,show,remove}`. Phase 3
+# helpers for the local-file backend dev stub. When the http backend
+# lands these verbs become "no-ops with a hint" — inbox lives on the
+# server side once OpenHub is real.
+inbox_app = typer.Typer(
+    name="inbox",
+    help="Manage the local-file inbox (Phase 3 dev stub).",
+    no_args_is_help=True,
+)
+app.add_typer(inbox_app, name="inbox")
+
+# Outbox sub-app — `oc traces outbox {list,show}`. Read-only inspection
+# of pending submissions queued by the local-file backend.
+outbox_app = typer.Typer(
+    name="outbox",
+    help="Inspect the local-file outbox (Phase 3 dev stub).",
+    no_args_is_help=True,
+)
+app.add_typer(outbox_app, name="outbox")
+
 
 # ── extensions.social_traces alias bootstrap ────────────────────────────────
 #
@@ -79,6 +99,45 @@ def _ensure_alias() -> None:
         sys.modules[full_name] = sub_mod
         spec.loader.exec_module(sub_mod)
         setattr(parent, sub, sub_mod)
+
+    # client/ subpackage — Phase 3 local_file backend.
+    client_dir = st_dir / "client"
+    if client_dir.exists():
+        client_init = client_dir / "__init__.py"
+        if (
+            "extensions.social_traces.client" not in sys.modules
+            and client_init.exists()
+        ):
+            client_pkg = types.ModuleType("extensions.social_traces.client")
+            client_pkg.__path__ = [str(client_dir)]
+            client_pkg.__package__ = "extensions.social_traces.client"
+            # Load __init__.py manually so the factory + re-exports are
+            # populated; this matches what a real ``import`` would do.
+            spec = importlib.util.spec_from_file_location(
+                "extensions.social_traces.client",
+                str(client_init),
+                submodule_search_locations=[str(client_dir)],
+            )
+            assert spec is not None and spec.loader is not None
+            client_pkg = importlib.util.module_from_spec(spec)
+            sys.modules["extensions.social_traces.client"] = client_pkg
+            client_pkg.__package__ = "extensions.social_traces.client"
+            spec.loader.exec_module(client_pkg)
+            setattr(parent, "client", client_pkg)
+        for sub in ("local_file",):
+            full_name = f"extensions.social_traces.client.{sub}"
+            if full_name in sys.modules:
+                continue
+            init = client_dir / f"{sub}.py"
+            if not init.exists():
+                continue
+            spec = importlib.util.spec_from_file_location(full_name, str(init))
+            if spec is None or spec.loader is None:
+                continue
+            sub_mod = importlib.util.module_from_spec(spec)
+            sub_mod.__package__ = "extensions.social_traces.client"
+            sys.modules[full_name] = sub_mod
+            spec.loader.exec_module(sub_mod)
 
 
 def _profile_home() -> Path:
@@ -203,6 +262,151 @@ def status() -> None:
     typer.echo(
         f"agent_id: {'present' if aid_path.exists() else 'not yet generated'}"
     )
+
+
+# ── ``traces inbox …`` ────────────────────────────────────────────────────
+
+
+def _make_local_client(profile_home: Path):
+    """Construct the local-file client. Helper kept here so the CLI
+    doesn't have to know the concrete class name (Phase 9 will add an
+    http path that goes through the same factory)."""
+    _ensure_alias()
+    from extensions.social_traces.client import make_client
+
+    return make_client(backend="local", profile_home=profile_home)
+
+
+@inbox_app.command("list")
+def inbox_list() -> None:
+    """List traces currently in the local inbox.
+
+    Output is aggregate-friendly: trace id, intent (truncated to 60
+    chars), and tags. Distilled insight is NOT shown — use ``show`` for
+    one trace at a time when you need the full body.
+    """
+    client = _make_local_client(_profile_home())
+    items = client.list_inbox()
+    if not items:
+        typer.echo("inbox: empty")
+        return
+    typer.echo(f"inbox: {len(items)} trace(s)")
+    for stem, card in items:
+        intent_short = card.intent if len(card.intent) <= 60 else card.intent[:57] + "..."
+        tags = ", ".join(card.meta.tags) or "(no tags)"
+        typer.echo(f"  - {stem}: {intent_short}  [{tags}]")
+
+
+@inbox_app.command("show")
+def inbox_show(
+    ident: str = typer.Argument(..., help="Trace id or filename stem to show."),
+) -> None:
+    """Print the full TraceCard JSON for one inbox entry."""
+    import json
+
+    client = _make_local_client(_profile_home())
+    card = client.show_inbox(ident)
+    if card is None:
+        typer.echo(f"error: no inbox trace matching {ident!r}", err=True)
+        raise typer.Exit(code=1)
+
+    from extensions.social_traces.client.local_file import trace_card_to_dict
+
+    typer.echo(json.dumps(trace_card_to_dict(card), indent=2))
+
+
+@inbox_app.command("add")
+def inbox_add(
+    source: Path = typer.Argument(
+        ...,
+        help="Path to a TraceCard JSON file to import into the inbox.",
+        exists=True,
+        readable=True,
+    ),
+) -> None:
+    """Import a TraceCard JSON file into the local inbox.
+
+    Validates the JSON parses as a TraceCard before copying — a
+    malformed file fails fast here rather than later at query time.
+
+    Used during dev to seed the inbox so Phase 4's pre-task lookup can
+    return matching traces. Once OpenHub is real, this verb becomes a
+    no-op with a hint pointing at the network's submission endpoint.
+    """
+    client = _make_local_client(_profile_home())
+    try:
+        dest = client.add_to_inbox(source)
+    except (ValueError, TypeError, KeyError) as exc:
+        typer.echo(
+            f"error: {source} is not a valid TraceCard JSON ({exc})", err=True
+        )
+        raise typer.Exit(code=1) from None
+    except OSError as exc:
+        typer.echo(f"error: failed to write inbox file: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+
+    typer.echo(f"added: {dest}")
+
+
+@inbox_app.command("remove")
+def inbox_remove(
+    ident: str = typer.Argument(
+        ..., help="Trace id or filename stem to remove."
+    ),
+) -> None:
+    """Delete a trace from the local inbox."""
+    client = _make_local_client(_profile_home())
+    if not client.remove_from_inbox(ident):
+        typer.echo(f"error: no inbox trace matching {ident!r}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"removed: {ident}")
+
+
+# ── ``traces outbox …`` ───────────────────────────────────────────────────
+
+
+@outbox_app.command("list")
+def outbox_list() -> None:
+    """List pending submissions in the local outbox."""
+    client = _make_local_client(_profile_home())
+    items = client.list_outbox()
+    if not items:
+        typer.echo("outbox: empty")
+        return
+    typer.echo(f"outbox: {len(items)} pending submission(s)")
+    for stem, card in items:
+        intent_short = card.intent if len(card.intent) <= 60 else card.intent[:57] + "..."
+        tags = ", ".join(card.meta.tags) or "(no tags)"
+        typer.echo(f"  - {stem}: {intent_short}  [{tags}]")
+
+
+@outbox_app.command("show")
+def outbox_show(
+    ident: str = typer.Argument(..., help="Submission id or filename stem."),
+) -> None:
+    """Print the full TraceCard JSON for one queued submission."""
+    import json
+
+    profile_home = _profile_home()
+    outbox = profile_home / "traces" / "outbox"
+    direct = outbox / f"{ident}.json"
+    if direct.exists():
+        typer.echo(direct.read_text(encoding="utf-8"))
+        return
+
+    # Fallback: scan + match by id field.
+    client = _make_local_client(profile_home)
+    for stem, card in client.list_outbox():
+        if card.id == ident or stem == ident:
+            from extensions.social_traces.client.local_file import (
+                trace_card_to_dict,
+            )
+
+            typer.echo(json.dumps(trace_card_to_dict(card), indent=2))
+            return
+
+    typer.echo(f"error: no outbox submission matching {ident!r}", err=True)
+    raise typer.Exit(code=1)
 
 
 __all__ = ["app"]

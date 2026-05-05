@@ -415,15 +415,22 @@ In `extensions/social-traces/subscriber.py`, mirror `EvolutionSubscriber` exactl
 - [x] Smoke test: `opencomputer.plugins.discovery.discover()` lists `social-traces`; CLI verbs round-trip the on-disk flag
 - [x] 18 new tests in `tests/test_social_traces_phase2.py` — manifest, state, identity, config, prefetch stub semantics, plugin.register registration
 
-### Phase 3 — Local-file backend (2-3 hours)
+### Phase 3 — Local-file backend (2-3 hours) — COMPLETE 2026-05-05
 
-- [ ] `client/local_file.py` — implements `TraceNetworkClient` over `<profile_home>/traces/{inbox,outbox}/` JSON files
-  - `query()`: scans `inbox/*.json`, filters by tag overlap, returns top-K
-  - `submit()`: writes to `outbox/<uuid>.json`
-  - `health()`: returns True if directory writable
-- [ ] CLI helper `oc traces inbox add <path>` to seed test traces
-- [ ] CLI helper `oc traces inbox list/show/remove`
-- [ ] Tests: query with tag overlap returns expected, submit appends file
+- [x] `client/__init__.py` + factory `make_client(backend, profile_home, endpoint)` — selects local/http; http path raises `NotImplementedError` until Phase 9
+- [x] `client/local_file.py` — implements `TraceNetworkClient` over `<profile_home>/traces/{inbox,outbox}/` JSON files
+  - `query()`: scans `inbox/*.json`, scores by tag-overlap + intent-word-overlap (with success-outcome tiebreaker), returns top-K
+  - `submit()`: writes `outbox/<queue_id>.json`, stamps id+status="pending" so the on-disk shape matches what OpenHub would return
+  - `health()`: returns True if directory writable; soft timeout via `asyncio.wait_for`
+- [x] Soft timeout (`timeout_s` kwarg) on query + health — slow IO surfaces as empty/False, never raised
+- [x] All filesystem I/O wrapped in `asyncio.to_thread` so the contract holds in a real running agent
+- [x] Inbox helpers used by CLI: `list_inbox`, `show_inbox`, `add_to_inbox`, `remove_from_inbox`, `list_outbox`
+- [x] `add_to_inbox` validates JSON parses as TraceCard before copying — fail-fast at CLI time
+- [x] CLI: `oc traces inbox {add,list,show,remove}` + `oc traces outbox {list,show}`
+- [x] Score formula: tag/word-overlap is the qualifier; outcome weight is a tiebreaker only — prevents every success trace from matching every query
+- [x] Smoke test: full add → list → show → remove → list cycle round-trips correctly with `OPENCOMPUTER_PROFILE_HOME` override
+- [x] 27 new tests in `tests/test_social_traces_phase3.py` — factory, query (top-K, malformed-skip, soft-timeout), submit (round-trip, failure receipt), health, inbox/outbox helpers, score_trace ordering
+- [x] 122/122 tests green across affected files (Phase 0/1/2/3 + SDK boundary + hook expansion + plugin manifest)
 
 ### Phase 4 — Pre-task hook (3-4 hours)
 
