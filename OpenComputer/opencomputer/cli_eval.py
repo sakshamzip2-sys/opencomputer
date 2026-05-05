@@ -59,11 +59,33 @@ def run_command(
     ),
 ):
     """Run evals for one or all sites."""
+    import os
+    import shutil
+
     target_sites = list(SITES) if site == "all" else [site]
     json_payloads: list[dict] = []
 
     for s in target_sites:
         eval_site = get_site(s)  # validates name; raises if unknown
+
+        # Pre-flight: skip sites whose declared external dependencies are
+        # missing. Distinguishes "actually red" from "env not configured".
+        missing_cmd = [c for c in eval_site.requires_command if shutil.which(c) is None]
+        if missing_cmd:
+            typer.echo(
+                f"Skipping site {s!r} — missing command(s) on PATH: "
+                f"{', '.join(missing_cmd)}",
+                err=True,
+            )
+            continue
+        missing_env = [v for v in eval_site.requires_env if not os.environ.get(v)]
+        if missing_env:
+            typer.echo(
+                f"Skipping site {s!r} — required env var(s) unset: "
+                f"{', '.join(missing_env)}",
+                err=True,
+            )
+            continue
 
         grader_provider = None
         if eval_site.grader == "rubric":
@@ -163,6 +185,9 @@ def regress_command(
     Each EvalSite carries its own ``regression_threshold`` (default 0.05).
     Rubric-graded sites are skipped if no grader provider is wired.
     """
+    import os
+    import shutil
+
     target_sites = list(SITES) if site == "all" else [site]
     regressed = []
     skipped: list[tuple[str, str]] = []
@@ -170,6 +195,15 @@ def regress_command(
     for s in target_sites:
         eval_site = get_site(s)
         threshold = eval_site.regression_threshold
+
+        missing_cmd = [c for c in eval_site.requires_command if shutil.which(c) is None]
+        if missing_cmd:
+            skipped.append((s, f"missing command(s) on PATH: {', '.join(missing_cmd)}"))
+            continue
+        missing_env = [v for v in eval_site.requires_env if not os.environ.get(v)]
+        if missing_env:
+            skipped.append((s, f"required env var(s) unset: {', '.join(missing_env)}"))
+            continue
 
         grader_provider = None
         if eval_site.grader == "rubric":

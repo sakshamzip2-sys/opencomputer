@@ -24,6 +24,12 @@ SITES: dict[str, EvalSite] = {
         name="llm_extractor",
         callable_path="opencomputer.evals.adapters:adapter_llm_extractor",
         grader="schema",
+        # Default extractor shells out to ``ollama`` (see
+        # opencomputer/profile_bootstrap/llm_extractor.py:181). Without
+        # ollama on PATH every case fails with OllamaUnavailableError —
+        # not a regression, just an unconfigured local extractor.
+        # ``oc eval run`` skips with a reason rather than reporting red.
+        requires_command=("ollama",),
     ),
     "job_change": EvalSite(
         name="job_change",

@@ -12,11 +12,60 @@ from typing import Any
 
 from plugin_sdk.hooks import HookDecision, HookEvent, HookSpec
 
-from .injection_provider import ScreenContextProvider
-from .recall_tool import RecallScreenTool
-from .ring_buffer import ScreenRingBuffer
-from .sensor import ScreenAwarenessSensor
-from .state import load_state
+# Plugin-loader puts this dir on sys.path but does NOT clear bare names
+# like ``state`` between plugin loads — and coding-harness has a
+# ``state/`` subpackage that registers itself as ``state`` in
+# ``sys.modules`` first, shadowing ours.
+#
+# Load this plugin's siblings via spec_from_file_location under unique
+# synthetic names + sys.modules registration before exec to side-step
+# the cache entirely. Module names must be registered BEFORE
+# exec_module — Python 3.13 ``@dataclass`` does
+# ``sys.modules.get(cls.__module__).__dict__`` during construction.
+import importlib.util as _importlib_util
+import sys as _sys
+from pathlib import Path as _Path
+
+_PLUGIN_DIR = _Path(__file__).resolve().parent
+
+
+def _load_sibling(stem: str) -> object:
+    """Load <plugin>/<stem>.py under unique synthetic name AND bare name.
+
+    Synthetic name keeps the module isolated from another plugin's
+    sibling with the same stem (e.g., coding-harness has ``state/``
+    that shadows our ``state.py``). Bare name lets OTHER siblings
+    inside screen-awareness use plain ``from <stem> import …`` without
+    each one needing its own spec_from_file_location dance.
+    """
+    name = f"_screen_awareness_{stem}"
+    if name in _sys.modules:
+        mod = _sys.modules[name]
+    else:
+        spec = _importlib_util.spec_from_file_location(name, _PLUGIN_DIR / f"{stem}.py")
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot locate {stem}.py in screen-awareness")
+        mod = _importlib_util.module_from_spec(spec)
+        _sys.modules[name] = mod
+        # Populate the bare name BEFORE exec — sibling files load before
+        # this loop completes if their own ``from <stem> import`` is
+        # encountered during exec_module (e.g., sensor.py imports
+        # ring_buffer at the top).
+        _sys.modules[stem] = mod
+        spec.loader.exec_module(mod)
+    return mod
+
+
+_ring_buffer = _load_sibling("ring_buffer")
+ScreenRingBuffer = _ring_buffer.ScreenRingBuffer
+_state = _load_sibling("state")
+load_state = _state.load_state
+_sensor = _load_sibling("sensor")
+ScreenAwarenessSensor = _sensor.ScreenAwarenessSensor
+_recall_tool = _load_sibling("recall_tool")
+RecallScreenTool = _recall_tool.RecallScreenTool
+_injection_provider = _load_sibling("injection_provider")
+ScreenContextProvider = _injection_provider.ScreenContextProvider
 
 _log = logging.getLogger("opencomputer.screen_awareness.plugin")
 

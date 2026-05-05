@@ -1,8 +1,9 @@
 {
+  "id": "screen-awareness",
   "name": "screen-awareness",
   "version": "0.1.0",
-  "kind": "sensor",
-  "description": "Event-driven screen OCR capture for agent self-understanding. Default OFF; opt-in.",
-  "entry": "plugin.py",
-  "platforms": ["darwin", "linux", "win32"]
+  "kind": "mixed",
+  "description": "Event-driven screen OCR capture for agent self-understanding. Default OFF; opt-in. Registers RecallScreen tool + ScreenContextProvider injection + 4 hooks when state.enabled=True. Multi-platform via mss + rapidocr-onnxruntime; runtime guards if those deps are missing.",
+  "entry": "plugin",
+  "enabled_by_default": false
 }
