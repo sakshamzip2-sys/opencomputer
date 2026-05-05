@@ -2647,10 +2647,53 @@ def _default_spawn(task: Task, workspace: str) -> int | None:
     before the claim TTL expires. The child's completion is still observed
     via the ``complete`` / ``block`` transitions the worker writes itself;
     the PID check is a safety net for crashes, OOM kills, and Ctrl+C.
+
+    Wave 6.E.17 — when ``task.assignee`` looks like ``"<slug>/<profile>"``
+    and that slug is registered in ``kanban_remote_hosts``, delegate to
+    the peer via :func:`opencomputer.kanban.remote_dispatch.delegate_task_to_remote`
+    instead of forking a local subprocess. Returns ``None`` for the PID
+    because the work runs on the peer; lease liveness is tracked via
+    ``kanban_remote_claims`` rows that the heartbeat tick refreshes.
     """
     import subprocess
     if not task.assignee:
         raise ValueError(f"task {task.id} has no assignee")
+
+    # Wave 6.E.17 — short-circuit to remote delegation when the assignee
+    # encodes a peer slug. Lazy import to keep the module-load cost down
+    # for single-host installs (httpx + remote_hosts only loaded when a
+    # task actually targets a peer).
+    from opencomputer.kanban import remote_dispatch as _rd
+    parsed = _rd.parse_remote_assignee(task.assignee)
+    if parsed is not None:
+        slug, profile = parsed
+        with contextlib.closing(connect()) as _rconn:
+            from opencomputer.kanban.remote_hosts import find_remote_host
+            host = find_remote_host(_rconn, slug)
+            if host is None:
+                # The assignee names a peer we don't know about. Raise
+                # so the existing spawn-failure counter records it; after
+                # ``failure_limit`` consecutive failures the task gets
+                # auto-blocked rather than thrashing forever.
+                raise ValueError(
+                    f"unknown peer slug {slug!r} (assignee={task.assignee!r}); "
+                    f"register via `oc kanban remote add {slug} <url>`"
+                )
+            callback_url = os.environ.get("OC_KANBAN_LOCAL_CALLBACK_URL", "").strip()
+            if not callback_url:
+                raise ValueError(
+                    "OC_KANBAN_LOCAL_CALLBACK_URL is not set; cannot delegate "
+                    f"task {task.id} to peer {slug!r}. Export the env var "
+                    "(e.g. http://<our-host>:9119/api/plugins/kanban/proxy/callback) "
+                    "before starting the dispatcher."
+                )
+            _rd.delegate_task_to_remote(
+                _rconn, task=task, host=host, profile=profile,
+                local_callback_url=callback_url,
+            )
+        # No local PID — the worker is on the peer. Lease liveness is
+        # tracked by the heartbeat tick + the kanban_remote_claims row.
+        return None
 
     prompt = f"work kanban task {task.id}"
     env = dict(os.environ)
@@ -2794,11 +2837,51 @@ def run_daemon(
                     on_tick(res)
                 except Exception:
                     pass
+            # Wave 6.E.17 — refresh leases on pending remote claims.
+            # Same logic as gateway/kanban_dispatcher.py::_tick_heartbeats
+            # but inline here for the standalone `oc kanban daemon` path.
+            try:
+                _heartbeat_pending_remote_claims()
+            except Exception:
+                import traceback
+                traceback.print_exc()
         except Exception:
             # Don't let any single tick kill the daemon.
             import traceback
             traceback.print_exc()
         stop_event.wait(timeout=interval)
+
+
+def _heartbeat_pending_remote_claims() -> None:
+    """Refresh leases on pending ``kanban_remote_claims`` near expiry.
+
+    Module-level helper shared by ``run_daemon`` (this file) and the
+    gateway's ``KanbanDispatcherLoop``. Suppresses per-claim error spam
+    by tracking which slugs have already failed in this pass.
+    """
+    from opencomputer.kanban import remote_dispatch as _rd
+    from opencomputer.kanban.remote_hosts import find_remote_host
+
+    with contextlib.closing(connect()) as conn:
+        pending = _rd.list_pending_remote_claims(conn)
+        if not pending:
+            return
+        now = int(time.time())
+        lead = _rd.HEARTBEAT_LEAD_SECONDS
+        slug_failed: set[str] = set()
+        for claim in pending:
+            if claim.lease_until - now > lead:
+                continue
+            if claim.remote_slug in slug_failed:
+                continue
+            host = find_remote_host(conn, claim.remote_slug)
+            if host is None:
+                slug_failed.add(claim.remote_slug)
+                continue
+            try:
+                _rd.heartbeat_remote_claim(conn, claim=claim, host=host)
+            except _rd.RemoteDispatchError:
+                slug_failed.add(claim.remote_slug)
 
 
 # ---------------------------------------------------------------------------

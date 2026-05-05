@@ -85,6 +85,11 @@ class KanbanDispatcherLoop:
                     )
                     for tid, who, ws in res.spawned:
                         logger.info("kanban spawned: %s -> %s @ %s", tid, who, ws or "-")
+                # Wave 6.E.17 — refresh leases on pending remote claims
+                # whose lease_until is approaching. Runs after dispatch
+                # so newly-delegated claims (created in this tick) are
+                # included in the same pass.
+                self._tick_heartbeats()
                 consecutive_errors = 0
             except Exception as exc:  # noqa: BLE001 — fail-open per gateway pattern
                 consecutive_errors += 1
@@ -108,6 +113,65 @@ class KanbanDispatcherLoop:
             except TimeoutError:
                 pass
         logger.info("kanban dispatcher loop stopped")
+
+    def _tick_heartbeats(self) -> None:
+        """Refresh leases on pending remote claims that expire soon.
+
+        Walks ``kanban_remote_claims`` for status='pending' rows whose
+        ``lease_until`` is within ``HEARTBEAT_LEAD_SECONDS`` of now and
+        POSTs ``/proxy/heartbeat`` to each peer. Network/HMAC failures
+        are logged + skipped — the next tick retries; if every retry
+        fails until the peer-side TTL expires, the peer reclaims and
+        the local task eventually times out the same way it would for a
+        local crashed worker.
+
+        Per the design audit (A4): each (task, slug) pair gets its own
+        POST since claims have distinct ``remote_task_id`` values; we
+        DON'T batch-by-slug because the peer endpoint expects one
+        ``remote_task_id`` per request.
+        """
+        import time as _time
+
+        from opencomputer.kanban import db as kdb
+        from opencomputer.kanban import remote_dispatch as _rd
+        from opencomputer.kanban.remote_hosts import find_remote_host
+
+        try:
+            with kdb.connect() as conn:
+                pending = _rd.list_pending_remote_claims(conn)
+                if not pending:
+                    return
+                now = int(_time.time())
+                lead = _rd.HEARTBEAT_LEAD_SECONDS
+                # Track per-slug failure to suppress repeat error spam
+                # within one tick (audit lens A4).
+                slug_failed: set[str] = set()
+                for claim in pending:
+                    if claim.lease_until - now > lead:
+                        continue
+                    if claim.remote_slug in slug_failed:
+                        continue
+                    host = find_remote_host(conn, claim.remote_slug)
+                    if host is None:
+                        # Host was removed from registry mid-flight.
+                        # Log once per tick so we don't spam.
+                        slug_failed.add(claim.remote_slug)
+                        logger.warning(
+                            "heartbeat skipped: remote host %r is no longer "
+                            "registered (claim local_task_id=%s)",
+                            claim.remote_slug, claim.local_task_id,
+                        )
+                        continue
+                    try:
+                        _rd.heartbeat_remote_claim(conn, claim=claim, host=host)
+                    except _rd.RemoteDispatchError as exc:
+                        slug_failed.add(claim.remote_slug)
+                        logger.debug(
+                            "heartbeat to %s failed (will retry next tick): %s",
+                            claim.remote_slug, exc,
+                        )
+        except Exception as exc:  # noqa: BLE001 — never wedge the tick
+            logger.warning("heartbeat tick failed: %s", exc)
 
     async def stop(self) -> None:
         """Signal the loop to exit on the next iteration."""
