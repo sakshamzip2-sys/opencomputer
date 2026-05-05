@@ -2852,6 +2852,16 @@ from opencomputer.cli_help import help_app  # noqa: E402
 
 app.add_typer(help_app, name="help")
 
+# 2026-05-05 — disaster-recovery backup CLI (foundation-honesty B1, RR-2)
+from opencomputer.cli_backup import backup_app  # noqa: E402
+
+app.add_typer(backup_app, name="backup")
+
+# 2026-05-05 — hook debug observability CLI (foundation-honesty B2, audit Tier 3.F)
+from opencomputer.cli_hooks import hooks_app  # noqa: E402
+
+app.add_typer(hooks_app, name="hooks")
+
 # Phase 14.M — named plugin-activation presets
 from opencomputer.cli_preset import preset_app  # noqa: E402
 

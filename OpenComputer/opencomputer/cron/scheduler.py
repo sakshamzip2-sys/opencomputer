@@ -200,14 +200,11 @@ def _build_run_prompt(job: dict[str, Any]) -> str:
         "DELIVERY: Your final response will be automatically delivered to the "
         "configured channel — do NOT call send_message yourself. "
         "SILENT: If there is genuinely nothing new to report, respond with "
-        "exactly \"[SILENT]\" (nothing else) to suppress delivery.]\n\n"
+        'exactly "[SILENT]" (nothing else) to suppress delivery.]\n\n'
     )
     upstream = _build_context_from_block(job)
     if job.get("skill"):
-        return (
-            f"{cron_hint}{upstream}"
-            f"Use the `{job['skill']}` skill and report your findings."
-        )
+        return f"{cron_hint}{upstream}Use the `{job['skill']}` skill and report your findings."
     return cron_hint + upstream + (job.get("prompt") or "")
 
 
@@ -247,7 +244,9 @@ async def _run_one_job(job: dict[str, Any]) -> tuple[bool, str, str, str | None]
         except OSError as exc:
             logger.warning(
                 "cron job %s workdir=%r unusable (%s); using process cwd",
-                job_id, workdir, exc,
+                job_id,
+                workdir,
+                exc,
             )
 
     try:
@@ -255,6 +254,7 @@ async def _run_one_job(job: dict[str, Any]) -> tuple[bool, str, str, str | None]
         runtime = RuntimeContext(
             plan_mode=bool(job.get("plan_mode", True)),
             yolo_mode=False,
+            agent_context="cron",
             custom={"cron_job_id": job_id, "cron_session": True},
         )
         timeout = _job_timeout_seconds()
@@ -396,6 +396,7 @@ async def tick(*, verbose: bool = True) -> int:
     # logged but doesn't abort the user-cron flow below.
     try:
         from opencomputer.cron.system_jobs import run_system_tick
+
         run_system_tick()
     except Exception:  # noqa: BLE001
         logger.exception("system_tick failed; continuing with user cron")

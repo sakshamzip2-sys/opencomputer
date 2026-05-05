@@ -33,9 +33,7 @@ class HookEngine:
         # ``HookSpec`` itself. ``seq`` is monotonically assigned at register
         # time; sorting by ``(priority, seq)`` gives lower-priority-first
         # with FIFO within the same priority bucket.
-        self._hooks: dict[HookEvent, list[tuple[int, int, HookSpec]]] = defaultdict(
-            list
-        )
+        self._hooks: dict[HookEvent, list[tuple[int, int, HookSpec]]] = defaultdict(list)
         self._next_seq: int = 0
 
     def register(self, spec: HookSpec) -> None:
@@ -82,9 +80,12 @@ class HookEngine:
         existing hook contract (CLAUDE.md §7: a wedged hook must never
         wedge the loop).
         """
+        from opencomputer.agent.hook_history import record_fire
+
         for _, _, spec in self._hooks.get(ctx.event, []):
             if not self._matches(spec, ctx):
                 continue
+            handler_id = getattr(spec.handler, "__qualname__", repr(spec.handler))
             try:
                 if spec.timeout_ms and spec.timeout_ms > 0:
                     decision = await asyncio.wait_for(
@@ -96,13 +97,32 @@ class HookEngine:
             except TimeoutError:
                 logger.warning(
                     "Hook %s timed out after %dms — failing open (pass)",
-                    getattr(spec.handler, "__qualname__", repr(spec.handler)),
+                    handler_id,
                     spec.timeout_ms,
                 )
+                record_fire(
+                    event=ctx.event.value,
+                    source_id=handler_id,
+                    ok=False,
+                    summary=f"timeout after {spec.timeout_ms}ms",
+                )
                 continue  # fail-open
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 logger.exception("blocking hook raised")
+                record_fire(
+                    event=ctx.event.value,
+                    source_id=handler_id,
+                    ok=False,
+                    summary=f"{type(exc).__name__}: {exc}",
+                )
                 continue
+            decision_str = decision.decision if decision is not None else "pass"
+            record_fire(
+                event=ctx.event.value,
+                source_id=handler_id,
+                ok=True,
+                summary=f"decision={decision_str}",
+            )
             if decision is None or decision.decision == "pass":
                 continue
             return decision
@@ -115,10 +135,31 @@ class HookEngine:
         tasks run concurrently the runtime order is not guaranteed; the
         ``priority`` field controls SCHEDULING order only.
         """
+        from opencomputer.agent.hook_history import record_fire as _record
+
+        async def _run_and_record(spec: HookSpec, ctx: HookContext) -> None:
+            handler_id = getattr(spec.handler, "__qualname__", repr(spec.handler))
+            try:
+                await spec.handler(ctx)
+            except Exception as exc:  # noqa: BLE001 — runner already logs
+                _record(
+                    event=ctx.event.value,
+                    source_id=handler_id,
+                    ok=False,
+                    summary=f"{type(exc).__name__}: {exc}",
+                )
+                raise
+            _record(
+                event=ctx.event.value,
+                source_id=handler_id,
+                ok=True,
+                summary="",
+            )
+
         for _, _, spec in self._hooks.get(ctx.event, []):
             if not self._matches(spec, ctx):
                 continue
-            fire_and_forget(spec.handler(ctx))
+            fire_and_forget(_run_and_record(spec, ctx))
 
 
 engine = HookEngine()

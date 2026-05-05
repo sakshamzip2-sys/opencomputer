@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import random as _random
@@ -25,6 +26,22 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_id(key: str, pool_index: int) -> str:
+    """Return a stable, non-secret identifier for ``key`` for log lines.
+
+    Replaces the old ``key[:8]`` fragment which leaked vendor format
+    + 1 byte of secret entropy (RR-4). The sha256 12-char prefix is
+    cryptographically irreversible; the pool index lets operators
+    correlate without ambiguity across multiple keys with similar
+    hashes.
+    """
+    if not key:
+        return f"cred_pool[{pool_index}]:empty"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+    return f"cred_pool[{pool_index}]:{digest}"
+
+
 ROTATE_COOLDOWN_SECONDS: float = 60.0
 EXHAUSTED_TTL_429_SECONDS: float = 3600.0
 _JWT_REFRESH_THRESHOLD_S: float = 60.0  # refresh if expiry within this many seconds
@@ -33,12 +50,14 @@ STRATEGY_FILL_FIRST = "fill_first"
 STRATEGY_ROUND_ROBIN = "round_robin"
 STRATEGY_RANDOM = "random"
 STRATEGY_LEAST_USED = "least_used"
-SUPPORTED_STRATEGIES = frozenset({
-    STRATEGY_FILL_FIRST,
-    STRATEGY_ROUND_ROBIN,
-    STRATEGY_RANDOM,
-    STRATEGY_LEAST_USED,
-})
+SUPPORTED_STRATEGIES = frozenset(
+    {
+        STRATEGY_FILL_FIRST,
+        STRATEGY_ROUND_ROBIN,
+        STRATEGY_RANDOM,
+        STRATEGY_LEAST_USED,
+    }
+)
 
 
 class CredentialPoolExhausted(RuntimeError):  # noqa: N818
@@ -126,8 +145,8 @@ class CredentialPool:
             eligible = [s for s in self._states if s.is_eligible(now)]
             if not eligible:
                 reasons = "; ".join(
-                    f"{s.key[:8]}...={s.last_failure_reason or 'unknown'}"
-                    for s in self._states
+                    f"{_safe_id(s.key, idx)}={s.last_failure_reason or 'unknown'}"
+                    for idx, s in enumerate(self._states)
                 )
                 raise CredentialPoolExhausted(
                     f"All {len(self._states)} keys quarantined: {reasons}"
@@ -157,7 +176,7 @@ class CredentialPool:
     ) -> None:
         async with self._lock:
             now = time.time()
-            for s in self._states:
+            for idx, s in enumerate(self._states):
                 if s.key == key:
                     if reset_at is not None and reset_at > now:
                         s.quarantined_until = reset_at
@@ -165,14 +184,15 @@ class CredentialPool:
                         s.quarantined_until = now + self._cooldown
                     s.last_failure_reason = reason
                     logger.warning(
-                        "credential_pool: quarantined key %s... for %.0fs (reason: %s)",
-                        key[:8],
+                        "credential_pool: quarantined key %s for %.0fs (reason: %s)",
+                        _safe_id(key, idx),
                         s.quarantined_until - now,
                         reason,
                     )
                     return
             logger.warning(
-                "credential_pool: report_auth_failure for unknown key %s...", key[:8]
+                "credential_pool: report_auth_failure for unknown key %s",
+                _safe_id(key, pool_index=-1),
             )
 
     async def with_retry(self, fn, *, is_auth_failure):
@@ -190,8 +210,7 @@ class CredentialPool:
                     continue
                 raise
         raise CredentialPoolExhausted(
-            f"Exhausted {self._max_rotation_attempts} rotation attempts; "
-            f"last failure: {last_exc!r}"
+            f"Exhausted {self._max_rotation_attempts} rotation attempts; last failure: {last_exc!r}"
         ) from last_exc
 
     def stats(self) -> dict[str, Any]:
@@ -200,14 +219,14 @@ class CredentialPool:
             "size": self.size,
             "keys": [
                 {
-                    "key_preview": s.key[:8] + "..." if len(s.key) > 8 else s.key,
+                    "key_preview": _safe_id(s.key, idx),
                     "use_count": s.use_count,
                     "last_used_at": s.last_used_at,
                     "quarantined": not s.is_eligible(now),
                     "quarantine_remaining_s": max(0.0, s.quarantined_until - now),
                     "last_failure_reason": s.last_failure_reason,
                 }
-                for s in self._states
+                for idx, s in enumerate(self._states)
             ],
         }
 

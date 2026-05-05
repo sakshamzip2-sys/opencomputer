@@ -183,7 +183,12 @@ async def test_concurrent_acquires_serialize_correctly():
 
 
 async def test_stats_returns_diagnostic_dict():
-    """stats() returns a dict with size + per-key info; full key is not exposed."""
+    """stats() returns a dict with size + per-key info; full key is not exposed.
+
+    RR-4 (May-5): key_preview is now ``cred_pool[N]:<sha256_12>`` rather
+    than ``key[:8]...`` — the previous format leaked the vendor key
+    prefix (sk-ant-X) plus 1 byte of secret entropy.
+    """
     pool = CredentialPool(keys=["sk-verylongkey1234567890", "sk-another"])
     await pool.acquire()
 
@@ -192,9 +197,10 @@ async def test_stats_returns_diagnostic_dict():
     assert len(s["keys"]) == 2
 
     first = s["keys"][0]
-    # key_preview must be truncated — never the full key
-    assert "..." in first["key_preview"]
-    assert "sk-verylo" not in first["key_preview"]  # not the full key
+    # key_preview must NEVER contain the raw key prefix (RR-4).
+    assert first["key_preview"].startswith("cred_pool[0]:")
+    assert "sk-" not in first["key_preview"]
+    assert "verylo" not in first["key_preview"]
     assert "use_count" in first
     assert "quarantined" in first
     assert "quarantine_remaining_s" in first
@@ -258,7 +264,8 @@ async def test_reset_at_overrides_flat_cooldown():
     future = time.time() + 9999
     await pool.report_auth_failure("k1", reason="429", reset_at=future)
     stats = pool.stats()
-    k1_stat = next(s for s in stats["keys"] if s["key_preview"].startswith("k1"))
+    # RR-4: key_preview is sha-based, not prefix-based — look up by index.
+    k1_stat = stats["keys"][0]
     assert k1_stat["quarantine_remaining_s"] > 9990
 
 
@@ -268,7 +275,7 @@ async def test_reset_at_in_past_uses_default_ttl():
     past = time.time() - 100
     await pool.report_auth_failure("k1", reason="429", reset_at=past)
     stats = pool.stats()
-    k1_stat = next(s for s in stats["keys"] if s["key_preview"].startswith("k1"))
+    k1_stat = stats["keys"][0]
     # Should use default cooldown of 60s, not a past reset_at
     assert k1_stat["quarantine_remaining_s"] <= ROTATE_COOLDOWN_SECONDS
 
