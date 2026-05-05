@@ -472,7 +472,7 @@ async def test_subscriber_trace_used_judge_novel_continues_to_distill(
 
     distill_calls: list[str] = []
 
-    async def _distill(*, session_id, profile_home, submitter_hash):
+    async def _distill(*, session_id, profile_home, submitter_hash, **_kw):
         distill_calls.append(session_id)
         return None  # Phase 5 stub behavior
 
@@ -503,7 +503,7 @@ async def test_subscriber_no_trace_used_skips_judge_and_distills(
 
     distill_calls: list[str] = []
 
-    async def _distill(*, session_id, profile_home, submitter_hash):
+    async def _distill(*, session_id, profile_home, submitter_hash, **_kw):
         distill_calls.append(session_id)
         return None
 
@@ -529,7 +529,7 @@ async def test_subscriber_distill_proposal_triggers_submit(
 
     proposal = _make_card(intent="distilled", trace_id="proposal-1")
 
-    async def _distill(*, session_id, profile_home, submitter_hash):
+    async def _distill(*, session_id, profile_home, submitter_hash, **_kw):
         return proposal
 
     monkeypatch.setattr(st_distiller, "distill_session", _distill)
@@ -551,7 +551,7 @@ async def test_subscriber_submit_rejected_doesnt_raise(
     st_state.set_enabled(tmp_path, True)
     bridge.set_trace_used("sid", None)
 
-    async def _distill(*, session_id, profile_home, submitter_hash):
+    async def _distill(*, session_id, profile_home, submitter_hash, **_kw):
         return _make_card(intent="rejected", trace_id="r-1")
 
     monkeypatch.setattr(st_distiller, "distill_session", _distill)

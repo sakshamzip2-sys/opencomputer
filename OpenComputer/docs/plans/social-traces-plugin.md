@@ -553,12 +553,36 @@ Recommendation: **(a) for v1.0**, revisit (b) if the in-memory state proves frag
   - prefetch writes the full TraceCard to the bridge (Phase 6 contract)
 - [x] 194/194 affected-file tests green (Phases 0-6 + SDK boundary + hook expansion + plugin manifest + extension boundary), 1 documented skip
 
-### Phase 7 — Redactor + distiller (3-4 hours)
+### Phase 7 — Redactor + distiller (3-4 hours) — COMPLETE 2026-05-06
 
-- [ ] `redactor.py` — port regex set from `skill_extractor.py` (PII, CC, SSN, paths)
-- [ ] `distiller.py` — three-Haiku flow (intent / steps / insight) cost-guarded; returns `TraceCard or None`
-- [ ] Apply redactor to BOTH input prompts AND output content (defense in depth)
-- [ ] Tests: redact known PII patterns; distill from synthetic transcript yields valid TraceCard
+- [x] `redactor.py` (new) — comprehensive privacy redaction with layered defence:
+  - Always-on PII layer: credit cards, SSNs, emails, US-shaped phone numbers
+  - Always-on secrets layer: OpenAI/Anthropic `sk-`, GitHub `ghp_`/`ghs_`/`gho_`/`ghu_`/`ghr_`, Google `AIza`, Slack `xox[abprs]-`, Bearer tokens, password=… assignments
+  - Opt-in path layer: POSIX abs paths (`/Users`, `/home`, `/var`…), tilde paths, Windows `C:\Users\…`. Relative paths (`src/foo.py`) NOT redacted to keep traces useful
+  - Opt-in hostname layer: URLs, internal-shaped hosts (`*.local`, `*.lan`, `*.home`, `*.internal`, `*.corp`, `*.test`, `*.dev`), IPv4 + IPv6. Public TLDs like `github.com` deliberately survive
+  - Caller filter: operator-supplied `sensitive_filter` callable; whole-body match → collapse to sentinel; raises also redact
+  - `is_useful_body()` rejects sentinel-only / too-short content so distiller drops cards where redaction nuked the substance
+- [x] `distiller.py` real implementation (replaces Phase 5 stub):
+  - Three Haiku calls: `_distill_intent` (≤80 tokens) → `_distill_steps` (≤600 tokens, JSON list) → `_distill_insight` (≤300 tokens)
+  - Each call cost-guarded via `cost_guard.check_budget`; budget denial short-circuits the pipeline
+  - Two-pass redaction per call: input prompt + LLM output. Defense-in-depth — model may emit a path even when prompt asks it not to
+  - Tolerant JSON parser for steps (handles markdown fences + surrounding prose)
+  - Tags derived via existing `tag_extractor.extract_tags_from_message`, then normalized to lowercase alphanumeric+hyphen with length 2-30, max 10 (matches `openhub-mvp.md` §8.3 server-side validation)
+  - Schema validation `_validate()` mirrors server validation rules; any failure → drop card
+  - Outcome sourced from caller (`SessionEndEvent.had_errors`), not from message content — `is_error` flag lives on `ToolResult` and is lost by the time messages persist to SessionDB
+  - Final `TraceCard` carries `schema_version=v1`, server-side fields (`id`, `status`, `score`) left None for OpenHub to stamp
+- [x] Subscriber updates:
+  - Constructor takes optional `sensitive_filter` + `harness_version` alongside `provider`/`cost_guard`
+  - Threads all four into `distill_session` plus `outcome` from `event.had_errors`
+- [x] Boundary inventory refreshed for `opencomputer.agent.state.SessionDB` lazy import in distiller
+- [x] 63 new tests in `tests/test_social_traces_phase7.py`:
+  - Redactor: every regex pattern (positive + negative), pipeline ordering, layer toggles, caller-filter precedence, sentinel handling, `is_useful_body` semantics
+  - Distiller helpers: `_normalize_tags` (length / lowercase / dedupe / cap), `_parse_steps_json` (bare / markdown / prose / invalid), `_validate` (intent length, insight length, empty tags, empty steps, short submitter_hash)
+  - Per-call: intent redacts output, intent skipped on filter-redacted input, steps parses JSON list, steps fails-soft on parse failure, insight redacts output
+  - Cost guard: pre-flight denies → no provider call, record_usage after success
+  - Orchestrator: no-provider → None, no-user-message → None, full happy-path round-trip with three canned LLM responses produces a valid TraceCard, intent failure aborts pipeline (no further calls), caller filter collapses whole input → None without LLM, validation failure drops card, outcome=failed when caller passes it, invalid outcome string defaults to success
+- [x] Phase 5 mocks updated to accept `**_kw` for the new distiller kwargs
+- [x] 257/257 affected-file tests green across Phases 0-7 + SDK + extension boundary; 1 documented skip
 
 ### Phase 8 — LLM tag extractor (2-3 hours)
 

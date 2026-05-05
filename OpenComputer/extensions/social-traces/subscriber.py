@@ -104,18 +104,26 @@ class TraceEmissionSubscriber:
         config_factory: Callable[[Path], SocialTracesConfig],
         provider: Any | None = None,
         cost_guard: Any | None = None,
+        sensitive_filter: Callable[[str], bool] | None = None,
+        harness_version: str = "",
     ) -> None:
         self._bus = bus
         self._profile_home_factory = profile_home_factory
         self._client_factory = client_factory
         self._config_factory = config_factory
-        # Phase 6: provider + cost_guard for the novelty judge. When
-        # either is None the judge degrades to ``is_novel=False`` —
+        # Phase 6: provider + cost_guard for the novelty judge + Phase 7
+        # distiller. When either is None the judge degrades to
+        # ``is_novel=False`` and the distiller returns ``None`` —
         # gateway production wiring (Phase 9) supplies real values
         # by resolving from OC's configured provider + the per-profile
         # default cost guard.
         self._provider = provider
         self._cost_guard = cost_guard
+        # Phase 7: caller-supplied filter that flags whole bodies as
+        # too sensitive to ship. Composes with the always-on PII /
+        # secret regex sweeps inside :mod:`redactor`.
+        self._sensitive_filter = sensitive_filter
+        self._harness_version = harness_version
         self._subscription: Any = None
 
     # ─── lifecycle ─────────────────────────────────────────────────
@@ -255,10 +263,22 @@ class TraceEmissionSubscriber:
                 return
 
             try:
+                # SessionEndEvent.had_errors drives outcome — by the
+                # time messages land in SessionDB the per-tool
+                # ``is_error`` flag is gone (it's on ToolResult, not
+                # Message), so the event itself is the source of truth.
+                outcome = "failed" if event.had_errors else "success"
                 proposal = await distiller.distill_session(
                     session_id=session_id,
                     profile_home=profile_home,
                     submitter_hash=submitter_hash,
+                    provider=self._provider,
+                    cost_guard=self._cost_guard,
+                    redact_paths_layer=cfg.privacy.redact_paths,
+                    redact_hostnames_layer=cfg.privacy.redact_hostnames,
+                    sensitive_filter=self._sensitive_filter,
+                    harness_version=self._harness_version,
+                    outcome=outcome,
                 )
             except Exception:  # noqa: BLE001
                 _log.warning(

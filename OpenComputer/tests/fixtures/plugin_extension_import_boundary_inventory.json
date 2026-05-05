@@ -91,6 +91,9 @@
   "extensions/skill-evolution/subscriber.py": [
     "opencomputer.hooks.runner"
   ],
+  "extensions/social-traces/distiller.py": [
+    "opencomputer.agent.state"
+  ],
   "extensions/social-traces/plugin.py": [
     "opencomputer.ingestion.bus"
   ],
