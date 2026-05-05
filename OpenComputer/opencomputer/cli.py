@@ -1488,26 +1488,29 @@ def _run_chat_session(
     # SlashContext (mid-turn) reference the same list.
     _image_queue: list[str] = []
 
-    while True:
-        # Fetch the session title each turn so a fresh /rename takes effect
-        # immediately (the title indicator updates on the very next prompt).
+    def _fetch_session_title() -> str | None:
+        """Fresh DB read so /rename mid-session is reflected on the next render frame.
+
+        Bug 7 fix (2026-05-05): the title source is now a callable
+        that re-reads from SessionDB on each render, instead of a
+        captured string. Combined with the title bar's now-independent
+        ConditionalContainer (separate from the permission-mode badge),
+        a fresh /rename takes effect on the very next prompt regardless
+        of badge visibility.
+        """
         try:
             from opencomputer.agent.state import SessionDB as _TitleDB
-
-            _title_db = _TitleDB(cfg.session.db_path)
-            _current_title = _title_db.get_session_title(session_id) or None
+            return _TitleDB(cfg.session.db_path).get_session_title(session_id) or None
         except Exception:  # noqa: BLE001 — never crash the prompt loop on a title fetch
-            _current_title = None
+            return None
 
-        # Bind ``_current_title`` via default arg so each loop iteration's
-        # closure captures *that* iteration's title, not the late-bound
-        # outer name (ruff B023).
-        async def _read_one(_title: str | None = _current_title) -> str:
+    while True:
+        async def _read_one() -> str:
             scope = TurnCancelScope()
             return await read_user_input(
                 profile_home=profile_home,
                 scope=scope,
-                session_title=_title,
+                get_session_title=_fetch_session_title,
                 paste_folder=paste_folder,
                 memory_manager=loop.memory if loop is not None else None,
                 runtime=loop._runtime if loop is not None else None,

@@ -24,6 +24,7 @@ from __future__ import annotations
 import re
 import time
 from pathlib import Path
+from typing import Callable
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.filters import Condition
@@ -493,6 +494,7 @@ async def read_user_input(
     profile_home: Path,
     scope: TurnCancelScope,
     session_title: str | None = None,
+    get_session_title: Callable[[], str | None] | None = None,
     paste_folder: PasteFolder | None = None,
     memory_manager: object | None = None,
     runtime: object | None = None,
@@ -530,6 +532,16 @@ async def read_user_input(
     ``build_prompt_session`` is preserved as the legacy entry point used
     by older callers and several test fixtures; new code should use this.
     """
+    # Bug 7 (2026-05-05): normalize the title source. A callable lets
+    # ``_title_text`` re-fetch on each render frame, so /rename-style
+    # mid-session updates surface on the next prompt without relying on
+    # the caller to recompute and re-pass a stale string.
+    if get_session_title is None:
+        _captured_title = session_title
+
+        def get_session_title() -> str | None:  # type: ignore[no-redef]
+            return _captured_title
+
     from prompt_toolkit.application import Application
     from prompt_toolkit.buffer import Buffer
     from prompt_toolkit.filters import Condition
@@ -867,13 +879,18 @@ async def read_user_input(
     from prompt_toolkit.layout import WindowAlign
 
     def _title_text():
-        if not session_title or not (1 <= len(session_title) <= 50):
+        title = get_session_title() or ""
+        if not (1 <= len(title) <= 50):
             return []
         return [
             ("class:title.box", "┤ "),
-            ("class:title.text", session_title),
+            ("class:title.text", title),
             ("class:title.box", " ├"),
         ]
+
+    def _title_visible() -> bool:
+        title = get_session_title() or ""
+        return 1 <= len(title) <= 50
 
     dropdown_window = ConditionalContainer(
         content=Window(
@@ -936,18 +953,25 @@ async def read_user_input(
     def _badge_text() -> list[tuple[str, str]]:
         return _render_mode_badge(runtime)
 
-    badge_window = ConditionalContainer(
-        content=VSplit([
-            Window(content=FormattedTextControl(_badge_text), height=1),
-            Window(
-                content=FormattedTextControl(_title_text),
-                height=1,
-                align=WindowAlign.RIGHT,
-                dont_extend_width=True,
-            ),
-        ]),
+    # Bug 7 (2026-05-05): split badge + title into two ConditionalContainers
+    # with independent visibility filters. Previously the title shared the
+    # badge's filter so any future change that hid the badge silently hid
+    # the title too. Now /rename gives a visible title even if no
+    # permission-mode badge is showing (and vice versa).
+    title_window = ConditionalContainer(
+        content=Window(
+            content=FormattedTextControl(_title_text),
+            height=1,
+            align=WindowAlign.RIGHT,
+            dont_extend_width=True,
+        ),
+        filter=Condition(_title_visible),
+    )
+    badge_text_window = ConditionalContainer(
+        content=Window(content=FormattedTextControl(_badge_text), height=1),
         filter=Condition(lambda: _badge_visible),
     )
+    badge_window = VSplit([badge_text_window, title_window])
 
     layout = Layout(
         HSplit(
