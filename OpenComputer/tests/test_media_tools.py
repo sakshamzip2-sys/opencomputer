@@ -44,7 +44,7 @@ def _write_sample_png(path: Path) -> Path:
 
 
 def test_image_info_returns_metadata(tmp_path: Path):
-    mod = _load_module("media_tools_image_info_test", "tools/image_info.py")
+    mod = _load_module("media_tools_image_info_test", "image_info.py")
     p = _write_sample_png(tmp_path / "red.png")
 
     meta = mod.inspect_image(p)
@@ -55,7 +55,7 @@ def test_image_info_returns_metadata(tmp_path: Path):
 
 
 def test_image_info_raises_on_missing_file(tmp_path: Path):
-    mod = _load_module("media_tools_image_info_test", "tools/image_info.py")
+    mod = _load_module("media_tools_image_info_test", "image_info.py")
     with pytest.raises(FileNotFoundError):
         mod.inspect_image(tmp_path / "ghost.png")
 
@@ -67,7 +67,7 @@ def test_tts_rejects_empty_text(tmp_path: Path):
     """TTSGenerate.synthesize raises ValueError for empty input."""
     import asyncio
 
-    mod = _load_module("media_tools_tts_test", "tools/tts_generate.py")
+    mod = _load_module("media_tools_tts_test", "tts_generate.py")
 
     async def runner():
         with pytest.raises(ValueError):
@@ -80,7 +80,7 @@ def test_tts_unavailable_error_when_module_missing(tmp_path: Path, monkeypatch):
     """When edge-tts can't be imported, raises EdgeTTSUnavailableError."""
     import asyncio
 
-    mod = _load_module("media_tools_tts_test", "tools/tts_generate.py")
+    mod = _load_module("media_tools_tts_test", "tts_generate.py")
 
     saved = sys.modules.get("edge_tts", "__missing__")
     sys.modules["edge_tts"] = None  # type: ignore[assignment]
@@ -103,7 +103,7 @@ def test_tts_unavailable_error_when_module_missing(tmp_path: Path, monkeypatch):
 
 def test_audio_transcribe_raises_when_no_backend(tmp_path: Path, monkeypatch):
     """When neither mlx-whisper nor pywhispercpp is installed, clear error."""
-    mod = _load_module("media_tools_stt_test", "tools/audio_transcribe.py")
+    mod = _load_module("media_tools_stt_test", "audio_transcribe.py")
 
     audio = tmp_path / "fake.wav"
     audio.write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")  # not a real wav
@@ -117,7 +117,7 @@ def test_audio_transcribe_raises_when_no_backend(tmp_path: Path, monkeypatch):
 
 def test_audio_transcribe_uses_mlx_when_available(tmp_path: Path, monkeypatch):
     """If mlx-whisper is importable, transcribe routes through it."""
-    mod = _load_module("media_tools_stt_test", "tools/audio_transcribe.py")
+    mod = _load_module("media_tools_stt_test", "audio_transcribe.py")
     audio = tmp_path / "stub.wav"
     audio.write_bytes(b"stub")
 
@@ -136,6 +136,6 @@ def test_audio_transcribe_uses_mlx_when_available(tmp_path: Path, monkeypatch):
 
 
 def test_audio_transcribe_raises_on_missing_file(tmp_path: Path):
-    mod = _load_module("media_tools_stt_test", "tools/audio_transcribe.py")
+    mod = _load_module("media_tools_stt_test", "audio_transcribe.py")
     with pytest.raises(FileNotFoundError):
         mod.transcribe(tmp_path / "ghost.wav")

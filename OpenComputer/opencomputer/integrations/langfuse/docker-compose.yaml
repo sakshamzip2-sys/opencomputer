@@ -1,0 +1,108 @@
+name: oc-langfuse
+
+# Local langfuse stack — Postgres + ClickHouse + Redis + langfuse server
+# + langfuse worker. Brought up by ``oc langfuse up``. Persists state in
+# ~/.opencomputer/langfuse/ via bind mounts so ``down`` then ``up`` keeps
+# your traces, datasets, and API keys.
+#
+# Default port: 3000 (langfuse-server). Visit http://localhost:3000 in
+# the browser; first-run flow creates the admin account.
+#
+# This template is intentionally simplified for personal-install scope.
+# Production users should use langfuse's official Helm chart.
+
+services:
+  langfuse-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${LANGFUSE_POSTGRES_PASSWORD:-langfuse-postgres-pw}
+      POSTGRES_DB: langfuse
+    volumes:
+      - ${OC_LANGFUSE_DATA:-~/.opencomputer/langfuse}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-langfuse-clickhouse-pw}
+    volumes:
+      - ${OC_LANGFUSE_DATA:-~/.opencomputer/langfuse}/clickhouse-data:/var/lib/clickhouse
+      - ${OC_LANGFUSE_DATA:-~/.opencomputer/langfuse}/clickhouse-logs:/var/log/clickhouse-server
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  langfuse-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --requirepass ${LANGFUSE_REDIS_PASSWORD:-langfuse-redis-pw}
+    volumes:
+      - ${OC_LANGFUSE_DATA:-~/.opencomputer/langfuse}/redis:/data
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_started
+      langfuse-redis:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://postgres:${LANGFUSE_POSTGRES_PASSWORD:-langfuse-postgres-pw}@langfuse-postgres:5432/langfuse
+      SALT: ${LANGFUSE_SALT:-mysalt}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-langfuse-clickhouse-pw}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: "false"
+      LANGFUSE_S3_MEDIA_UPLOAD_ENABLED: "false"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:-langfuse-redis-pw}
+      LANGFUSE_LOG_LEVEL: info
+
+  langfuse-server:
+    image: langfuse/langfuse:3
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_started
+      langfuse-redis:
+        condition: service_started
+    ports:
+      - "${OC_LANGFUSE_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:${LANGFUSE_POSTGRES_PASSWORD:-langfuse-postgres-pw}@langfuse-postgres:5432/langfuse
+      DIRECT_URL: postgresql://postgres:${LANGFUSE_POSTGRES_PASSWORD:-langfuse-postgres-pw}@langfuse-postgres:5432/langfuse
+      NEXTAUTH_URL: http://localhost:${OC_LANGFUSE_PORT:-3000}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-mysecret}
+      SALT: ${LANGFUSE_SALT:-mysalt}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-langfuse-clickhouse-pw}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: "false"
+      LANGFUSE_S3_MEDIA_UPLOAD_ENABLED: "false"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:-langfuse-redis-pw}
+      TELEMETRY_ENABLED: "true"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"

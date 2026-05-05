@@ -514,7 +514,24 @@ def _validate_runtime_contract(
         after.memory_provider_present and not before.memory_provider_present
     )
 
+    # Plugins with ``enabled_by_default=false`` may legitimately
+    # register nothing on a load — many channel/observability plugins
+    # are conditional on env vars or per-profile state files. Silence
+    # the kind-mismatch warning in that case to keep ``oc doctor``
+    # output focused on actual misconfiguration. The drift-guard tests
+    # on bundled plugins still run with explicit fixtures, so this
+    # downgrade doesn't hide real schema bugs.
+    enabled_by_default = bool(getattr(manifest, "enabled_by_default", False))
+
     def _warn(reason: str) -> None:
+        if not enabled_by_default:
+            logger.debug(
+                "Plugin %r (enabled_by_default=false) registered no %s — "
+                "treating as conditional/inert load, not a manifest error.",
+                plugin_id,
+                reason,
+            )
+            return
         # Wording deliberately matches the I.5 spec so downstream
         # log-scrapers can recognise the event. Don't change without
         # updating the I.5 tests.

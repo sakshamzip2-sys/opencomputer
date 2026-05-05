@@ -57,6 +57,14 @@ def run_command(
     history_db: Path | None = typer.Option(
         None, "--history-db", help="Override history DB path."
     ),
+    backend: str = typer.Option(
+        "local",
+        "--backend",
+        help=(
+            "Eval backend: 'local' (default — OC's runner with JSONL cases) "
+            "or 'langfuse' (route through langfuse datasets + run_experiment)."
+        ),
+    ),
 ):
     """Run evals for one or all sites."""
     import os
@@ -64,6 +72,36 @@ def run_command(
 
     target_sites = list(SITES) if site == "all" else [site]
     json_payloads: list[dict] = []
+
+    if backend == "langfuse":
+        from opencomputer.evals.langfuse_backend import (
+            LangfuseBackendUnavailableError,
+            run_site_via_langfuse,
+        )
+
+        for s in target_sites:
+            get_site(s)  # validates name
+            try:
+                summary = run_site_via_langfuse(
+                    site_name=s,
+                    cases_dir=cases_dir,
+                )
+            except LangfuseBackendUnavailableError as e:
+                typer.echo(f"langfuse backend unavailable: {e}", err=True)
+                raise typer.Exit(code=2) from None
+            if json_output:
+                json_payloads.append(summary)
+            else:
+                typer.echo(
+                    f"[langfuse] site={s!r} dataset={summary['dataset']} "
+                    f"run={summary['run_name']!r} → {summary['run_url']}"
+                )
+        if json_output:
+            typer.echo(_json.dumps(json_payloads, indent=2, default=str))
+        return
+    if backend != "local":
+        typer.echo(f"unknown --backend {backend!r}; use local or langfuse", err=True)
+        raise typer.Exit(code=2)
 
     for s in target_sites:
         eval_site = get_site(s)  # validates name; raises if unknown

@@ -16,13 +16,38 @@ pass `site` when calling the provider but do not call record_llm_call themselves
 from __future__ import annotations
 
 import json
+import logging
 import os
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
 LOG_ROTATE_MB = 100
 MAX_BAK_FILES = 5
+
+_logger = logging.getLogger("opencomputer.inference.observability")
+
+# Out-of-band subscribers (e.g. langfuse plugin). Each subscriber gets
+# called fire-and-forget on every event; exceptions are logged at WARN
+# but never propagate — telemetry must not break the agent loop.
+_subscribers: list[Callable[[LLMCallEvent], None]] = []
+
+
+def register_subscriber(callback: Callable[[LLMCallEvent], None]) -> None:
+    """Register an out-of-band subscriber for every recorded LLM call.
+
+    Plugins (e.g. langfuse observability bridge) call this at register
+    time. Idempotent — adding the same callback twice is a no-op.
+    """
+    if callback not in _subscribers:
+        _subscribers.append(callback)
+
+
+def unregister_subscriber(callback: Callable[[LLMCallEvent], None]) -> None:
+    """Remove a previously-registered subscriber. Tests use this."""
+    if callback in _subscribers:
+        _subscribers.remove(callback)
 
 
 @dataclass(frozen=True)
@@ -74,10 +99,16 @@ def _maybe_rotate(path: Path) -> None:
 
 
 def record_llm_call(event: LLMCallEvent) -> None:
-    """Append one event to the JSONL log."""
+    """Append one event to the JSONL log + fan out to subscribers."""
     path = _log_path()
     _maybe_rotate(path)
     with path.open("a") as f:
         d = asdict(event)
         d["ts"] = event.ts.isoformat()
         f.write(json.dumps(d) + "\n")
+
+    for sub in list(_subscribers):
+        try:
+            sub(event)
+        except Exception as exc:  # noqa: BLE001 — telemetry must not break the loop
+            _logger.warning("LLMCallEvent subscriber %r raised: %s", sub, exc)

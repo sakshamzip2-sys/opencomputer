@@ -138,6 +138,67 @@ def cost_set_limit(
     typer.echo(f"  monthly = {r.monthly_limit if r.monthly_limit is not None else 'unlimited'}")
 
 
+@cost_app.command("dashboard")
+def cost_dashboard(
+    period: Annotated[
+        str, typer.Option("--period", "-p", help="today | 7days | 30days | month | 6months")
+    ] = "7days",
+    no_codeburn: Annotated[
+        bool,
+        typer.Option(
+            "--no-codeburn",
+            help=(
+                "Force the native fallback table even if codeburn is on PATH. "
+                "Useful in CI where codeburn isn't installed."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Open a richer cost dashboard.
+
+    If `codeburn <https://github.com/getagentseal/codeburn>`_ is on PATH,
+    shells out to its TUI (`codeburn report --provider opencomputer`).
+    Otherwise prints an install hint and falls back to the
+    `oc cost show` table.
+
+    Codeburn is a separate MIT-licensed Node tool that reads OC's
+    SQLite + JSONL telemetry once Track A's provider is published; for
+    now (pre-publish) the call falls through to the native table.
+    """
+    import shutil
+    import subprocess
+
+    if not no_codeburn:
+        codeburn_bin = shutil.which("codeburn")
+        if codeburn_bin is not None:
+            typer.echo("Launching codeburn dashboard …")
+            try:
+                subprocess.run(
+                    [
+                        codeburn_bin,
+                        "report",
+                        "--provider",
+                        "opencomputer",
+                        "-p",
+                        period,
+                    ],
+                    check=False,
+                )
+            except KeyboardInterrupt:
+                pass
+            return
+        typer.echo(
+            "For a richer cost analytics dashboard, install codeburn:\n"
+            "  npm install -g codeburn\n"
+            "  # or: brew install codeburn\n"
+            "Then run: oc cost dashboard\n"
+            "Falling back to native table:\n",
+            err=True,
+        )
+
+    cost_show(provider=None)
+
+
 @cost_app.command("reset")
 def cost_reset(
     provider: Annotated[

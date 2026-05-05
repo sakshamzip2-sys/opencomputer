@@ -65,6 +65,9 @@
     "opencomputer.auth.google_code_assist",
     "opencomputer.auth.google_oauth"
   ],
+  "extensions/langfuse/plugin.py": [
+    "opencomputer.inference.observability"
+  ],
   "extensions/memory-honcho/bootstrap.py": [
     "opencomputer.profiles"
   ],

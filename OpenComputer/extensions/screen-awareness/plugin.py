@@ -6,66 +6,67 @@ Default OFF: a no-op register call leaves nothing wired.
 from __future__ import annotations
 
 import importlib
+
+# Plugin-loader puts this dir on sys.path but does NOT clear ``state``
+# from sys.modules between plugin loads. coding-harness has a
+# ``state/`` subpackage that registers itself as ``state`` first,
+# shadowing our ``state.py``. Load that one via spec_from_file_location
+# under a synthetic name AND register under ``state`` so subsequent
+# sibling imports inside this plugin resolve to ours, not theirs.
+#
+# Module-name registration MUST happen before ``exec_module`` —
+# Python 3.13 ``@dataclass`` does
+# ``sys.modules.get(cls.__module__).__dict__`` during class
+# construction and explodes on a missing entry.
+#
+# ALSO register under the namespace-package name
+# (``extensions.screen_awareness.state``) so test code that imports
+# via the package path gets the SAME module object — keeps
+# ``isinstance(...)`` checks honest across plugin-loader and tests.
+import importlib.util as _importlib_util
 import logging
+import sys as _sys
 from pathlib import Path
+from pathlib import Path as _Path
 from typing import Any
 
 from plugin_sdk.hooks import HookDecision, HookEvent, HookSpec
 
-# Plugin-loader puts this dir on sys.path but does NOT clear bare names
-# like ``state`` between plugin loads — and coding-harness has a
-# ``state/`` subpackage that registers itself as ``state`` in
-# ``sys.modules`` first, shadowing ours.
-#
-# Load this plugin's siblings via spec_from_file_location under unique
-# synthetic names + sys.modules registration before exec to side-step
-# the cache entirely. Module names must be registered BEFORE
-# exec_module — Python 3.13 ``@dataclass`` does
-# ``sys.modules.get(cls.__module__).__dict__`` during construction.
-import importlib.util as _importlib_util
-import sys as _sys
-from pathlib import Path as _Path
-
 _PLUGIN_DIR = _Path(__file__).resolve().parent
 
 
-def _load_sibling(stem: str) -> object:
-    """Load <plugin>/<stem>.py under unique synthetic name AND bare name.
-
-    Synthetic name keeps the module isolated from another plugin's
-    sibling with the same stem (e.g., coding-harness has ``state/``
-    that shadows our ``state.py``). Bare name lets OTHER siblings
-    inside screen-awareness use plain ``from <stem> import …`` without
-    each one needing its own spec_from_file_location dance.
-    """
-    name = f"_screen_awareness_{stem}"
+def _load_state_isolated():
+    name = "_screen_awareness_state"
     if name in _sys.modules:
-        mod = _sys.modules[name]
-    else:
-        spec = _importlib_util.spec_from_file_location(name, _PLUGIN_DIR / f"{stem}.py")
-        if spec is None or spec.loader is None:
-            raise ImportError(f"cannot locate {stem}.py in screen-awareness")
-        mod = _importlib_util.module_from_spec(spec)
-        _sys.modules[name] = mod
-        # Populate the bare name BEFORE exec — sibling files load before
-        # this loop completes if their own ``from <stem> import`` is
-        # encountered during exec_module (e.g., sensor.py imports
-        # ring_buffer at the top).
-        _sys.modules[stem] = mod
-        spec.loader.exec_module(mod)
+        return _sys.modules[name]
+    spec = _importlib_util.spec_from_file_location(name, _PLUGIN_DIR / "state.py")
+    if spec is None or spec.loader is None:
+        raise ImportError("cannot locate state.py in screen-awareness")
+    mod = _importlib_util.module_from_spec(spec)
+    _sys.modules[name] = mod
+    _sys.modules["state"] = mod  # win the bare-name race vs coding-harness
+    _sys.modules["extensions.screen_awareness.state"] = mod
+    spec.loader.exec_module(mod)
     return mod
 
 
-_ring_buffer = _load_sibling("ring_buffer")
-ScreenRingBuffer = _ring_buffer.ScreenRingBuffer
-_state = _load_sibling("state")
+_state = _load_state_isolated()
 load_state = _state.load_state
-_sensor = _load_sibling("sensor")
-ScreenAwarenessSensor = _sensor.ScreenAwarenessSensor
-_recall_tool = _load_sibling("recall_tool")
-RecallScreenTool = _recall_tool.RecallScreenTool
-_injection_provider = _load_sibling("injection_provider")
-ScreenContextProvider = _injection_provider.ScreenContextProvider
+
+# The remaining siblings have unique stems across all bundled plugins,
+# so plain absolute imports work — the loader puts our dir on sys.path
+# before exec'ing this file. Dual-import keeps test-runner package
+# imports happy.
+try:
+    from injection_provider import ScreenContextProvider  # type: ignore[import-not-found]
+    from recall_tool import RecallScreenTool  # type: ignore[import-not-found]
+    from ring_buffer import ScreenRingBuffer  # type: ignore[import-not-found]
+    from sensor import ScreenAwarenessSensor  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover
+    from extensions.screen_awareness.injection_provider import ScreenContextProvider
+    from extensions.screen_awareness.recall_tool import RecallScreenTool
+    from extensions.screen_awareness.ring_buffer import ScreenRingBuffer
+    from extensions.screen_awareness.sensor import ScreenAwarenessSensor
 
 _log = logging.getLogger("opencomputer.screen_awareness.plugin")
 

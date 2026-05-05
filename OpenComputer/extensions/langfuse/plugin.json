@@ -1,0 +1,12 @@
+{
+  "id": "langfuse",
+  "name": "Langfuse Observability",
+  "version": "0.1.0",
+  "description": "Send every LLM call as a langfuse trace when LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY are set. Default OFF — plugin loads inert without env vars. Self-host via `oc langfuse up` or use cloud.langfuse.com.",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "tool",
+  "entry": "plugin",
+  "enabled_by_default": false,
+  "min_host_version": "0.1.0"
+}
