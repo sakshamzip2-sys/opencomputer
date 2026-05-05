@@ -432,14 +432,36 @@ In `extensions/social-traces/subscriber.py`, mirror `EvolutionSubscriber` exactl
 - [x] 27 new tests in `tests/test_social_traces_phase3.py` — factory, query (top-K, malformed-skip, soft-timeout), submit (round-trip, failure receipt), health, inbox/outbox helpers, score_trace ordering
 - [x] 122/122 tests green across affected files (Phase 0/1/2/3 + SDK boundary + hook expansion + plugin manifest)
 
-### Phase 4 — Pre-task hook (3-4 hours)
+### Phase 4 — Pre-task hook (3-4 hours) — COMPLETE 2026-05-05
 
-- [ ] `tag_extractor.py:extract_tags_from_message()` — first cut: simple keyword extraction (LLM upgrade in Phase 8)
-- [ ] `prefetch.py:build_query()` — extract intent (use user message verbatim for v0) + tags
-- [ ] `prefetch.py:score_traces()` — relevance threshold gate
-- [ ] `prefetch.py:format_injection()` — `<trace intent="..." outcome="..." tags="...">...</trace>`
-- [ ] `prefetch.py:on_before_task()` — calls client.query() with 1s soft timeout, sets `runtime.custom["trace_used"]`, returns `HookDecision`
-- [ ] Integration test: seed trace in inbox, run agent, observe injection in messages
+- [x] `tag_extractor.py:extract_tags_from_message()` — v0 keyword extraction (lowercase + alphanumeric-only + stopword filter + min-length + dedupe + max cap; LLM upgrade in Phase 8)
+- [x] `prefetch.py:build_query()` — intent = user message verbatim (truncated to 500 chars) + tags from extractor
+- [x] `prefetch.py:select_best_trace()` — picks the top-scored trace iff its score clears `query.relevance_threshold`; returns None otherwise (caller treats identically to "empty result")
+- [x] `prefetch.py:format_injection()` — renders the trace as `<trace intent="..." outcome="..." tags="...">Insight: ...\nSteps used (reference only): 1. ToolName: args → result\n...</trace>` with explicit "do not auto-execute" framing
+- [x] `prefetch.py:on_before_task()` — full handler: read enabled flag → write heartbeat → build query → call `client.query()` with config-driven timeout → score gate → format → return `HookDecision(decision="rewrite", modified_message=...)` if injecting, `pass` otherwise
+- [x] `_load_config()` reads `social_traces:` from `<profile_home>/config.yaml` (defaults if missing/malformed)
+- [x] `runtime.custom["trace_used"]` stamped to trace_id-or-None — see Phase 5 note below for the cross-component bridge problem
+- [x] Local-file backend stamps `score` on returned cards (so prefetch's threshold gate has a server-supplied signal to read)
+- [x] Failure isolation: any exception in the handler logs at DEBUG/WARNING and falls through to `pass` — agent never paralysed by prefetch
+- [x] Integration test (load-bearing): seed inbox → run agent through `AgentLoop.run_conversation` → `<trace>` block lands as `<system-reminder>` user message + persists to SessionDB
+- [x] Mirror integration test: non-matching message produces no injection, no `<trace>` in messages
+- [x] 25 new tests in `tests/test_social_traces_phase4.py` — tag extractor, build_query, select_best_trace, format_injection, on_before_task variants, end-to-end seeded + no-match
+- [x] 147/147 affected-file tests green (Phases 0-4 + SDK boundary + hook expansion + plugin manifest); 1 documented skip
+
+#### Phase 5 design finding — `runtime.custom` won't bridge pre→post-task
+
+The plan §4 originally said "post-task code reads `runtime.custom['trace_used']`" set by the pre-task hook. **That doesn't work as written.** Two reasons surfaced in the Phase 4 end-to-end test:
+
+1. The agent loop calls `dataclasses.replace(self._runtime, custom={...})` on entry to `run_conversation` (loop.py:~775) to thread `session_id`/`session_db`. That creates a NEW custom dict — mutations from inside `BEFORE_TASK` go to the loop's internal dict, not back to the caller's `RuntimeContext`.
+2. `SessionEndEvent` (the typed-bus payload subscribers receive) carries only `session_id`, `end_reason`, `turn_count`, `duration_seconds`, `had_errors` — no runtime, no custom. The post-task subscriber has no way to see what the pre-task hook set.
+
+**Three options for Phase 5 to pick from:**
+
+- **(a) Module-level dict keyed by session_id.** `extensions/social-traces/session_state.py` — simplest, dev-fast. Lost on process restart (but so is `runtime.custom`).
+- **(b) SessionDB metadata column.** Add `social_trace_used: text | null` to the `sessions` table; pre-task writes, subscriber reads. Durable, survives restart.
+- **(c) Add a `trace_used` field to `SessionEndEvent`.** Cleanest signal flow but requires plugin_sdk schema change and a way for the agent loop to populate it from the per-task runtime — not lightweight.
+
+Recommendation: **(a) for v1.0**, revisit (b) if the in-memory state proves fragile under daemon-mode use. Decision deferred until Phase 5 implementation actually starts.
 
 ### Phase 5 — Post-task subscriber (3-4 hours)
 

@@ -376,10 +376,31 @@ class LocalFileTraceNetworkClient(TraceNetworkClient):
             scored.append((score, card))
 
         scored.sort(key=lambda pair: pair[0], reverse=True)
-        top = tuple(card for _, card in scored[:limit])
+
+        # Stamp the per-trace score onto the returned card. Mirrors what
+        # OpenHub does server-side — the prefetch path's relevance gate
+        # reads ``card.score`` to decide whether to inject. Without this
+        # stamp the gate has no signal and would have to re-score
+        # client-side (re-implementing the curation engine in two
+        # places).
+        top: list[TraceCard] = []
+        for score, card in scored[:limit]:
+            top.append(
+                TraceCard(
+                    schema_version=card.schema_version,
+                    intent=card.intent,
+                    meta=card.meta,
+                    steps=card.steps,
+                    distilled_insight=card.distilled_insight,
+                    created_at=card.created_at,
+                    id=card.id,
+                    status=card.status,
+                    score=score,
+                )
+            )
 
         return QueryResult(
-            traces=top,
+            traces=tuple(top),
             query_id=secrets.token_hex(8),
             served_from="network",  # consistent with HTTP backend response
         )
