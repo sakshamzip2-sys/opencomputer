@@ -1042,6 +1042,13 @@ class AgentLoop:
             turn_index=turn_index,
         )
         injected = await injection_engine.compose(inj_ctx)
+        # Bug 1 fix (2026-05-05): keep ``base_system`` (frozen, gets the
+        # cache marker) and ``injected`` (per-turn, never marked) as
+        # SEPARATE strings. Providers that accept the new kwargs
+        # (Anthropic) split into 2 system content blocks so the cached
+        # prefix matches turn-to-turn regardless of injection volatility.
+        # The concatenated form is preserved as ``system`` for legacy
+        # providers / call sites that only know about a single string.
         system = base_system + ("\n\n" + injected if injected else "")
 
         # Append user message + persist. ``images`` (TUI image-paste) is
@@ -1375,6 +1382,8 @@ class AgentLoop:
                 step = await self._run_one_step(
                     messages=messages,
                     system=system,
+                    base_system=base_system,
+                    injected_system=injected,
                     stream_callback=stream_callback,
                     thinking_callback=thinking_callback,
                     model=model_for_turn,
@@ -1418,6 +1427,8 @@ class AgentLoop:
                             step = await self._run_one_step(
                                 messages=messages,
                                 system=system,
+                                base_system=base_system,
+                                injected_system=injected,
                                 stream_callback=stream_callback,
                                 thinking_callback=thinking_callback,
                                 model=model_for_turn,
@@ -1447,6 +1458,8 @@ class AgentLoop:
                         step = await self._run_one_step(
                             messages=retry_messages,
                             system=system,
+                            base_system=base_system,
+                            injected_system=injected,
                             stream_callback=stream_callback,
                             thinking_callback=thinking_callback,
                             model=model_for_turn,
@@ -1474,6 +1487,8 @@ class AgentLoop:
                             step = await self._run_one_step(
                                 messages=messages,
                                 system=system,
+                                base_system=base_system,
+                                injected_system=injected,
                                 stream_callback=stream_callback,
                                 thinking_callback=thinking_callback,
                                 model=model_for_turn,
@@ -2969,6 +2984,8 @@ class AgentLoop:
         *,
         messages: list[Message],
         system: str,
+        base_system: str = "",
+        injected_system: str = "",
         stream_callback=None,
         thinking_callback=None,
         model: str | None = None,
@@ -3057,6 +3074,9 @@ class AgentLoop:
                 model=model_name,
                 messages=wire_messages,
                 system=system,
+                base_system=base_system,
+                injected_system=injected_system,
+                session_id=session_id,
                 tools=tool_schemas,
                 max_tokens=max_tokens_override or self.config.model.max_tokens,
                 temperature=self.config.model.temperature,
@@ -3106,6 +3126,9 @@ class AgentLoop:
                     model=active_model,
                     messages=wire_messages,
                     system=system,
+                    base_system=base_system,
+                    injected_system=injected_system,
+                    session_id=session_id,
                     tools=tool_schemas,
                     max_tokens=self.config.model.max_tokens,
                     temperature=self.config.model.temperature,
