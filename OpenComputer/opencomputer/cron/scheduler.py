@@ -255,6 +255,7 @@ async def _run_one_job(job: dict[str, Any]) -> tuple[bool, str, str, str | None]
         runtime = RuntimeContext(
             plan_mode=bool(job.get("plan_mode", True)),
             yolo_mode=False,
+            agent_context="cron",
             custom={"cron_job_id": job_id, "cron_session": True},
         )
         timeout = _job_timeout_seconds()
