@@ -645,6 +645,37 @@ CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_
 CREATE INDEX IF NOT EXISTS idx_rules_priority        ON kanban_assignment_rules(priority DESC);
 CREATE INDEX IF NOT EXISTS idx_remote_claims_lease   ON kanban_remote_claims(lease_until);
 CREATE INDEX IF NOT EXISTS idx_remote_claims_status  ON kanban_remote_claims(status);
+
+-- Wave 6.E.17 — Peer-side mirror of "this local task came from peer X
+-- via /proxy/spawn and the sender's callback URL is Y." Used by the
+-- callback queue (below) to find the right destination + signing key
+-- when a delegated task transitions to a terminal state.
+CREATE TABLE IF NOT EXISTS kanban_delegated_tasks (
+    local_task_id   TEXT PRIMARY KEY,
+    sender_slug     TEXT NOT NULL,
+    callback_url    TEXT NOT NULL,
+    created_at      INTEGER NOT NULL
+);
+
+-- Wave 6.E.17 — Outbound callback retry queue. When a peer's worker
+-- transitions a delegated task to done|blocked|failed, we enqueue a
+-- callback row instead of POSTing inline. The dispatcher's drainer
+-- tick walks status='pending' rows whose next_attempt_at <= now,
+-- POSTs each, and either marks delivered (2xx) or bumps attempt_count
+-- with exponential backoff. After max_attempts the row is marked
+-- 'dead' for operator review.
+CREATE TABLE IF NOT EXISTS kanban_pending_callbacks (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_slug     TEXT NOT NULL,
+    callback_url    TEXT NOT NULL,
+    payload_json    TEXT NOT NULL,
+    attempt_count   INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER NOT NULL,
+    last_error      TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pending_callbacks_due ON kanban_pending_callbacks(status, next_attempt_at);
 """
 
 
@@ -1971,9 +2002,72 @@ def complete_task(
             },
             run_id=run_id,
         )
+    # Wave 6.E.17 — if this task was delegated to us by a peer, enqueue
+    # a callback so the sender can reconcile their lease + mirror the
+    # terminal state on their side. Done OUTSIDE the write_txn so the
+    # callback_queue's own write_txn doesn't nest. Failures here MUST
+    # NOT roll back the local completion — the queue is best-effort.
+    _maybe_enqueue_delegated_callback(
+        conn, task_id, "done",
+        summary=summary if summary is not None else result,
+        result=result,
+        metadata=metadata,
+    )
     # Recompute ready status for dependents (separate txn so children see done).
     recompute_ready(conn)
     return True
+
+
+def _maybe_enqueue_delegated_callback(
+    conn: sqlite3.Connection,
+    task_id: str,
+    outcome: str,
+    *,
+    summary: str | None = None,
+    result: str | None = None,
+    error: str | None = None,
+    metadata: dict | None = None,
+) -> None:
+    """If ``task_id`` is a delegated task (peer-side mirror), enqueue a
+    terminal callback for the dispatcher's drainer to deliver.
+
+    Best-effort — exceptions are swallowed since the local transition
+    already committed. The queue retries on its own schedule.
+    """
+    try:
+        from opencomputer.kanban.callback_queue import (
+            enqueue_callback,
+            find_delegated_task,
+        )
+        delegated = find_delegated_task(conn, task_id)
+        if delegated is None:
+            return
+        sender_slug, callback_url = delegated
+        payload = {
+            "schema_version": 2,
+            "remote_task_id": task_id,
+            "outcome": outcome,
+        }
+        if summary is not None:
+            payload["summary"] = summary
+        if result is not None:
+            payload["result"] = result
+        if error is not None:
+            payload["error"] = error
+        if metadata is not None:
+            payload["metadata"] = metadata
+        enqueue_callback(
+            conn,
+            sender_slug=sender_slug,
+            callback_url=callback_url,
+            payload=payload,
+        )
+    except Exception:  # noqa: BLE001
+        # Local transition already committed; queue is best-effort.
+        # An operator inspecting kanban_pending_callbacks will see a
+        # missing row vs. a dead-lettered one — different signals.
+        import traceback
+        traceback.print_exc()
 
 
 def block_task(
@@ -2012,7 +2106,12 @@ def block_task(
                 summary=reason,
             )
         _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
-        return True
+    # Wave 6.E.17 — peer-side: blocked is a terminal state for the
+    # delegated task from the sender's perspective. Enqueue a callback.
+    _maybe_enqueue_delegated_callback(
+        conn, task_id, "blocked", error=reason,
+    )
+    return True
 
 
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -2485,6 +2584,15 @@ def _record_spawn_failure(
                 {"error": error[:500], "failures": failures},
                 run_id=run_id,
             )
+    # Wave 6.E.17 — peer-side: an auto-block on a delegated task is a
+    # terminal failure from the sender's perspective. Enqueue a
+    # "failed" callback so the sender can mirror the state. Outside
+    # the write_txn so the callback_queue's own txn doesn't nest.
+    if blocked:
+        _maybe_enqueue_delegated_callback(
+            conn, task_id, "failed", error=error[:500],
+            metadata={"failures": int(failures), "kind": "spawn_auto_blocked"},
+        )
     return blocked
 
 
@@ -2647,10 +2755,53 @@ def _default_spawn(task: Task, workspace: str) -> int | None:
     before the claim TTL expires. The child's completion is still observed
     via the ``complete`` / ``block`` transitions the worker writes itself;
     the PID check is a safety net for crashes, OOM kills, and Ctrl+C.
+
+    Wave 6.E.17 — when ``task.assignee`` looks like ``"<slug>/<profile>"``
+    and that slug is registered in ``kanban_remote_hosts``, delegate to
+    the peer via :func:`opencomputer.kanban.remote_dispatch.delegate_task_to_remote`
+    instead of forking a local subprocess. Returns ``None`` for the PID
+    because the work runs on the peer; lease liveness is tracked via
+    ``kanban_remote_claims`` rows that the heartbeat tick refreshes.
     """
     import subprocess
     if not task.assignee:
         raise ValueError(f"task {task.id} has no assignee")
+
+    # Wave 6.E.17 — short-circuit to remote delegation when the assignee
+    # encodes a peer slug. Lazy import to keep the module-load cost down
+    # for single-host installs (httpx + remote_hosts only loaded when a
+    # task actually targets a peer).
+    from opencomputer.kanban import remote_dispatch as _rd
+    parsed = _rd.parse_remote_assignee(task.assignee)
+    if parsed is not None:
+        slug, profile = parsed
+        with contextlib.closing(connect()) as _rconn:
+            from opencomputer.kanban.remote_hosts import find_remote_host
+            host = find_remote_host(_rconn, slug)
+            if host is None:
+                # The assignee names a peer we don't know about. Raise
+                # so the existing spawn-failure counter records it; after
+                # ``failure_limit`` consecutive failures the task gets
+                # auto-blocked rather than thrashing forever.
+                raise ValueError(
+                    f"unknown peer slug {slug!r} (assignee={task.assignee!r}); "
+                    f"register via `oc kanban remote add {slug} <url>`"
+                )
+            callback_url = os.environ.get("OC_KANBAN_LOCAL_CALLBACK_URL", "").strip()
+            if not callback_url:
+                raise ValueError(
+                    "OC_KANBAN_LOCAL_CALLBACK_URL is not set; cannot delegate "
+                    f"task {task.id} to peer {slug!r}. Export the env var "
+                    "(e.g. http://<our-host>:9119/api/plugins/kanban/proxy/callback) "
+                    "before starting the dispatcher."
+                )
+            _rd.delegate_task_to_remote(
+                _rconn, task=task, host=host, profile=profile,
+                local_callback_url=callback_url,
+            )
+        # No local PID — the worker is on the peer. Lease liveness is
+        # tracked by the heartbeat tick + the kanban_remote_claims row.
+        return None
 
     prompt = f"work kanban task {task.id}"
     env = dict(os.environ)
@@ -2794,11 +2945,115 @@ def run_daemon(
                     on_tick(res)
                 except Exception:
                     pass
+            # Wave 6.E.17 — refresh leases on pending remote claims.
+            # Same logic as gateway/kanban_dispatcher.py::_tick_heartbeats
+            # but inline here for the standalone `oc kanban daemon` path.
+            try:
+                _heartbeat_pending_remote_claims()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+            # Wave 6.E.17 — drain outbound callback queue (peer side).
+            try:
+                _drain_pending_callbacks()
+            except Exception:
+                import traceback
+                traceback.print_exc()
         except Exception:
             # Don't let any single tick kill the daemon.
             import traceback
             traceback.print_exc()
         stop_event.wait(timeout=interval)
+
+
+def _heartbeat_pending_remote_claims() -> None:
+    """Refresh leases on pending ``kanban_remote_claims`` near expiry.
+
+    Module-level helper shared by ``run_daemon`` (this file) and the
+    gateway's ``KanbanDispatcherLoop``. Suppresses per-claim error spam
+    by tracking which slugs have already failed in this pass.
+    """
+    from opencomputer.kanban import remote_dispatch as _rd
+    from opencomputer.kanban.remote_hosts import find_remote_host
+
+    with contextlib.closing(connect()) as conn:
+        pending = _rd.list_pending_remote_claims(conn)
+        if not pending:
+            return
+        now = int(time.time())
+        lead = _rd.HEARTBEAT_LEAD_SECONDS
+        slug_failed: set[str] = set()
+        for claim in pending:
+            if claim.lease_until - now > lead:
+                continue
+            if claim.remote_slug in slug_failed:
+                continue
+            host = find_remote_host(conn, claim.remote_slug)
+            if host is None:
+                slug_failed.add(claim.remote_slug)
+                continue
+            try:
+                _rd.heartbeat_remote_claim(conn, claim=claim, host=host)
+            except _rd.RemoteDispatchError:
+                slug_failed.add(claim.remote_slug)
+
+
+def _drain_pending_callbacks() -> None:
+    """Peer-side: deliver due callbacks from ``kanban_pending_callbacks``.
+
+    Helper for the standalone ``oc kanban daemon`` path. The gateway
+    loop has its own ``_tick_callback_drainer`` with logging; this is
+    the silent equivalent.
+    """
+    from urllib.parse import urlparse
+
+    import httpx
+
+    from opencomputer.kanban import callback_queue as _cq
+    from opencomputer.kanban.remote_hosts import find_remote_host, signed_headers
+
+    with contextlib.closing(connect()) as conn:
+        due = _cq.next_due(conn, now=int(time.time()))
+        if not due:
+            return
+        slug_failed: set[str] = set()
+        for cb in due:
+            if cb.sender_slug in slug_failed:
+                continue
+            host = find_remote_host(conn, cb.sender_slug)
+            if host is None:
+                slug_failed.add(cb.sender_slug)
+                _cq.mark_attempted(
+                    conn, cb.id,
+                    error=f"sender slug {cb.sender_slug!r} no longer registered",
+                    max_attempts=1,
+                )
+                continue
+            body = cb.payload_json.encode("utf-8")
+            sig_path = urlparse(cb.callback_url).path or "/"
+            headers = signed_headers(
+                secret=host.hmac_secret,
+                method="POST",
+                path=sig_path,
+                body=body,
+                extra={"Content-Type": "application/json"},
+            )
+            sep = "&" if "?" in cb.callback_url else "?"
+            target = f"{cb.callback_url}{sep}slug={host.slug}"
+            try:
+                resp = httpx.post(target, content=body, headers=headers, timeout=10.0)
+            except httpx.RequestError as exc:
+                slug_failed.add(cb.sender_slug)
+                _cq.mark_attempted(conn, cb.id, error=f"network: {exc}")
+                continue
+            if 200 <= resp.status_code < 300:
+                _cq.mark_delivered(conn, cb.id)
+            else:
+                slug_failed.add(cb.sender_slug)
+                _cq.mark_attempted(
+                    conn, cb.id,
+                    error=f"HTTP {resp.status_code}: {resp.text[:200]}",
+                )
 
 
 # ---------------------------------------------------------------------------

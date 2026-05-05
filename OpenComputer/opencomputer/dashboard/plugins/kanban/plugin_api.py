@@ -1112,6 +1112,20 @@ async def proxy_spawn(
             workspace_kind=ws_kind,
             workspace_path=ws_path,
         )
+        # Wave 6.E.17 — note that this task is delegated FROM the
+        # sender so when the local worker eventually completes/blocks/
+        # fails, the callback queue knows which peer to POST back to.
+        # If callback_url is missing the sender is opting out of
+        # callbacks (legacy peers); we still create the mirror task.
+        callback_url = (payload.get("callback_url") or "").strip()
+        if callback_url:
+            from opencomputer.kanban.callback_queue import record_delegated_task
+            record_delegated_task(
+                conn,
+                local_task_id=local_task_id,
+                sender_slug=slug,
+                callback_url=callback_url,
+            )
         lease_until = int(time.time()) + DEFAULT_REMOTE_TTL_SECONDS
         return {
             "remote_task_id": local_task_id,
