@@ -1,0 +1,13 @@
+{
+  "id": "memory-vector",
+  "name": "Vector Memory (ChromaDB-backed)",
+  "version": "0.1.0",
+  "description": "Local vector memory backend powered by ChromaDB. Stores text + metadata, supports semantic search via sentence-transformers embeddings (lazy-installed).",
+  "kind": "provider",
+  "entry": "plugin",
+  "schema_version": 2,
+  "profiles": ["*"],
+  "enabled_by_default": false,
+  "tool_names": ["VectorMemoryAdd", "VectorMemorySearch", "VectorMemoryDelete"],
+  "min_host_version": "0.1.0"
+}
