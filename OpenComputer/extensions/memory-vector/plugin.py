@@ -24,16 +24,28 @@ _BACKEND: VectorMemoryBackend | None = None
 
 
 def _get_backend() -> VectorMemoryBackend:
+    """Resolve the active-profile home via the SDK (no opencomputer.* import).
+
+    ``plugin_sdk.current_profile_home`` is a ContextVar set by the
+    gateway dispatcher; falls back to ``OPENCOMPUTER_HOME`` env var,
+    then ``~/.opencomputer``.
+    """
     global _BACKEND
     if _BACKEND is None:
+        import os
         from pathlib import Path
 
-        try:
-            from opencomputer.agent.config import _home
+        from plugin_sdk import current_profile_home
 
-            base = _home() / "memory-vector"
-        except ImportError:
-            base = Path.home() / ".opencomputer" / "memory-vector"
+        scope = current_profile_home.get()
+        if scope is not None:
+            base = Path(scope) / "memory-vector"
+        else:
+            env_home = os.environ.get("OPENCOMPUTER_HOME", "").strip()
+            home_root = (
+                Path(env_home) if env_home else Path.home() / ".opencomputer"
+            )
+            base = home_root / "memory-vector"
         _BACKEND = VectorMemoryBackend(persist_dir=base)
     return _BACKEND
 

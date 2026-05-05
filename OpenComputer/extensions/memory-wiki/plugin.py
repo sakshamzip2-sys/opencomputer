@@ -22,15 +22,23 @@ _BACKEND: WikiMemoryBackend | None = None
 
 
 def _get_backend() -> WikiMemoryBackend:
+    """Resolve the active-profile home via the SDK (no opencomputer.* import)."""
     global _BACKEND
     if _BACKEND is None:
+        import os
         from pathlib import Path
 
-        try:
-            from opencomputer.agent.config import _home
-            base = _home() / "wiki"
-        except ImportError:
-            base = Path.home() / ".opencomputer" / "wiki"
+        from plugin_sdk import current_profile_home
+
+        scope = current_profile_home.get()
+        if scope is not None:
+            base = Path(scope) / "wiki"
+        else:
+            env_home = os.environ.get("OPENCOMPUTER_HOME", "").strip()
+            home_root = (
+                Path(env_home) if env_home else Path.home() / ".opencomputer"
+            )
+            base = home_root / "wiki"
         _BACKEND = WikiMemoryBackend(root=base)
     return _BACKEND
 
