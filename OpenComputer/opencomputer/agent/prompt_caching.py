@@ -274,24 +274,50 @@ def apply_full_cache_control(
     if messages and messages[0].get("role") == "system":
         sys_msg = messages[0]
         sys_content = sys_msg.get("content")
-        if (
-            isinstance(sys_content, list)
-            and len(sys_content) > 1
-            and all(
-                isinstance(b, dict) and b.get("type") == "text"
-                for b in sys_content
-            )
-        ):
-            # Multi-block system content (Bug 1 fix, 2026-05-05): index 0
-            # is the FROZEN base, index 1+ is per-turn injection. Marker
-            # goes on index 0 so the cached prefix matches across turns
-            # regardless of injection volatility.
-            _mark_system_base_block(sys_msg, marker)
+        # Audit MAJOR 8 (post-PR review): apply the same threshold filter
+        # the messages tail uses. A small base-system (e.g. a 1KB
+        # channel-only prompt with Opus's 4096-token threshold) was
+        # previously marked unconditionally, wasting a breakpoint on a
+        # silent-no-op cache write. With the filter, the slot is freed
+        # for the messages tail.
+        # When ``min_cache_tokens == 0`` (legacy callers without
+        # threshold info), preserve today's "always mark" behavior.
+        if min_cache_tokens > 0:
+            # For multi-block system content, only count index 0 (the
+            # frozen base) — that's the slot that would receive the
+            # marker. For single-block, count the whole content.
+            sys_eligible_content: Any = sys_content
+            if (
+                isinstance(sys_content, list)
+                and len(sys_content) > 1
+                and all(
+                    isinstance(b, dict) and b.get("type") == "text"
+                    for b in sys_content
+                )
+            ):
+                sys_eligible_content = [sys_content[0]]
+            sys_size = _block_token_estimate(sys_eligible_content)
         else:
-            _apply_cache_marker(
-                sys_msg, marker, native_anthropic=native_anthropic
-            )
-        sys_used = 1
+            sys_size = min_cache_tokens + 1  # always passes
+        if sys_size >= min_cache_tokens:
+            if (
+                isinstance(sys_content, list)
+                and len(sys_content) > 1
+                and all(
+                    isinstance(b, dict) and b.get("type") == "text"
+                    for b in sys_content
+                )
+            ):
+                # Multi-block system content (Bug 1 fix, 2026-05-05): index 0
+                # is the FROZEN base, index 1+ is per-turn injection. Marker
+                # goes on index 0 so the cached prefix matches across turns
+                # regardless of injection volatility.
+                _mark_system_base_block(sys_msg, marker)
+            else:
+                _apply_cache_marker(
+                    sys_msg, marker, native_anthropic=native_anthropic
+                )
+            sys_used = 1
 
     remaining = 4 - tools_used - sys_used
     if remaining > 0 and messages:

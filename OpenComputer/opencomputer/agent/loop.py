@@ -1486,6 +1486,15 @@ class AgentLoop:
                             turn_index=turn_index,
                         )
                         injected = await injection_engine.compose(inj_ctx)
+                        # Audit MAJOR 6 (post-PR review): rebuild
+                        # ``system`` legacy string from the new engine
+                        # compose. ``injected_volatile`` carries the
+                        # memory + channel content from turn start
+                        # (those don't change per-retry), so it's still
+                        # correct to forward as ``injected_system`` to
+                        # split-aware providers. Legacy single-string
+                        # callers receive the new engine compose only —
+                        # this matches pre-PR behavior.
                         system = base_system + ("\n\n" + injected if injected else "")
 
                 step = await self._run_one_step(

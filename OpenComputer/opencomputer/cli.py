@@ -1488,6 +1488,14 @@ def _run_chat_session(
     # SlashContext (mid-turn) reference the same list.
     _image_queue: list[str] = []
 
+    # Cached DB handle so the title-fetch callable doesn't open a new
+    # connection (and run apply_migrations + _self_heal_columns) on
+    # every prompt-toolkit render frame. Audit MAJOR 4 (post-PR
+    # review): without this, every keystroke re-does the SessionDB
+    # __init__ work twice (once per _title_text + once per
+    # _title_visible call) which is wasteful and adds keystroke lag.
+    _title_db_cache: list[object] = [None]
+
     def _fetch_session_title() -> str | None:
         """Fresh DB read so /rename mid-session is reflected on the next render frame.
 
@@ -1497,10 +1505,20 @@ def _run_chat_session(
         ConditionalContainer (separate from the permission-mode badge),
         a fresh /rename takes effect on the very next prompt regardless
         of badge visibility.
+
+        SessionDB instance is cached across calls (one connection per
+        chat process) so per-keystroke render doesn't re-open sqlite
+        and re-run the migrations sweep. The ``get_session_title``
+        SELECT itself opens a transient connection on each call; that's
+        cheap enough at one-per-render (microseconds, fully OS-cached).
         """
         try:
-            from opencomputer.agent.state import SessionDB as _TitleDB
-            return _TitleDB(cfg.session.db_path).get_session_title(session_id) or None
+            db = _title_db_cache[0]
+            if db is None:
+                from opencomputer.agent.state import SessionDB as _TitleDB
+                db = _TitleDB(cfg.session.db_path)
+                _title_db_cache[0] = db
+            return db.get_session_title(session_id) or None
         except Exception:  # noqa: BLE001 — never crash the prompt loop on a title fetch
             return None
 

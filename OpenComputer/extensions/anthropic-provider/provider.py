@@ -831,6 +831,14 @@ class AnthropicProvider(BaseProvider):
     def _record_call_get_idle(self, session_id: str | None) -> float:
         """Update the per-session timestamp and return idle_seconds since
         this session's previous call (0.0 on first call or unknown session).
+
+        Thread safety: this method is **not** thread-safe — the
+        get/set/evict dance is unsynchronized. Safe under asyncio
+        (single-thread cooperative scheduling) which is how the agent
+        loop and every shipping channel adapter run. A multi-threaded
+        daemon embedding this provider would need to wrap calls in a
+        ``threading.Lock``; we don't ship one because every current
+        consumer is asyncio-only.
         """
         import time as _time
         _now = _time.monotonic()

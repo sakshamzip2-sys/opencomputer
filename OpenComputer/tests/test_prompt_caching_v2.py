@@ -196,16 +196,19 @@ def test_apply_cache_control_split_system_2blocks(monkeypatch) -> None:
     mod = _load_provider_module()
     provider = mod.AnthropicProvider()
 
+    # Base must clear the Opus 4096-token threshold (~16KB) so the
+    # threshold filter (Audit MAJOR 8) doesn't skip the marker.
+    big_base = "frozen base prompt content " * 800
     sys_for_sdk, _msgs, _tools = provider._apply_cache_control(
         [{"role": "user", "content": "x" * 20000}],
-        base_system="frozen base",
+        base_system=big_base,
         injected_system="per-turn reminder",
         model="claude-opus-4-7",
         idle_seconds=0.0,
     )
     assert isinstance(sys_for_sdk, list)
     assert len(sys_for_sdk) == 2
-    assert sys_for_sdk[0]["text"] == "frozen base"
+    assert sys_for_sdk[0]["text"] == big_base
     assert "cache_control" in sys_for_sdk[0]
     assert "cache_control" not in sys_for_sdk[1]
     assert sys_for_sdk[1]["text"].endswith("per-turn reminder")
@@ -218,16 +221,38 @@ def test_apply_cache_control_no_injection_keeps_single_block(monkeypatch) -> Non
     mod = _load_provider_module()
     provider = mod.AnthropicProvider()
 
+    big_base = "frozen base prompt content " * 800
     sys_for_sdk, _msgs, _tools = provider._apply_cache_control(
         [{"role": "user", "content": "x" * 20000}],
-        base_system="frozen base",
+        base_system=big_base,
         injected_system="",
         model="claude-opus-4-7",
     )
     assert isinstance(sys_for_sdk, list)
     assert len(sys_for_sdk) == 1
-    assert sys_for_sdk[0]["text"] == "frozen base"
+    assert sys_for_sdk[0]["text"] == big_base
     assert "cache_control" in sys_for_sdk[0]
+
+
+def test_apply_cache_control_small_base_below_threshold_no_marker(monkeypatch) -> None:
+    """Audit MAJOR 8 (post-PR review): a base_system below the model's
+    min_cache_tokens threshold should NOT receive a marker — the slot
+    is freed for the messages tail. Without this, a tiny channel-only
+    base prompt would burn a breakpoint on a server-side no-op."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    mod = _load_provider_module()
+    provider = mod.AnthropicProvider()
+
+    sys_for_sdk, _msgs, _tools = provider._apply_cache_control(
+        [{"role": "user", "content": "x" * 50000}],
+        base_system="small base",
+        injected_system="",
+        model="claude-opus-4-7",
+    )
+    # No marker should be present — the slot is freed for the tail.
+    if isinstance(sys_for_sdk, list):
+        assert all("cache_control" not in b for b in sys_for_sdk)
 
 
 def test_apply_cache_control_empty_base_with_injection(monkeypatch) -> None:
