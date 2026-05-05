@@ -6,14 +6,62 @@ C.2 MVP (2026-05-05). All-stdlib, no external deps. Lives at
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import logging
+import sys
+from pathlib import Path
 
-try:
-    from backend import WikiMemoryBackend  # plugin-loader mode
-except ImportError:  # pragma: no cover
-    from extensions.memory_wiki.backend import WikiMemoryBackend
-
+from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
+
+# Load this plugin's own backend.py via spec_from_file_location under a
+# unique synthetic module name. We can't rely on ``from backend
+# import`` because the plugin loader doesn't always evict sibling
+# ``backend`` entries from ``sys.modules`` between loads, so memory-
+# vector's backend can shadow ours. We also can't rely on
+# ``extensions.memory_wiki.backend`` — ``extensions/`` is not a Python
+# package.
+#
+# ``sys.modules`` registration MUST happen before ``exec_module`` —
+# Python 3.13 ``@dataclass`` does ``sys.modules.get(cls.__module__).__dict__``
+# during class construction and explodes on a missing entry.
+_BACKEND_NAME = "_memory_wiki_backend_isolated"
+if _BACKEND_NAME not in sys.modules:
+    _spec = importlib.util.spec_from_file_location(
+        _BACKEND_NAME,
+        Path(__file__).resolve().parent / "backend.py",
+    )
+    if _spec is None or _spec.loader is None:
+        raise ImportError(
+            "Cannot locate memory-wiki backend.py for spec_from_file_location"
+        )
+    _mod = importlib.util.module_from_spec(_spec)
+    sys.modules[_BACKEND_NAME] = _mod
+    _spec.loader.exec_module(_mod)
+WikiMemoryBackend = sys.modules[_BACKEND_NAME].WikiMemoryBackend
+
+
+class _RunToExecute:
+    """Bridge ``run(**kwargs) -> dict`` to ``execute(call) -> ToolResult``.
+
+    Mirrors the helper in extensions/memory-vector/plugin.py — see that
+    module for the rationale. Mixin must precede BaseTool in the MRO.
+    """
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        try:
+            result = await self.run(**call.arguments)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — must not raise from execute
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"Error: {exc}",
+                is_error=True,
+            )
+        return ToolResult(
+            tool_call_id=call.id,
+            content=json.dumps(result, default=str),
+        )
 
 logger = logging.getLogger("opencomputer.ext.memory_wiki")
 
@@ -43,16 +91,16 @@ def _get_backend() -> WikiMemoryBackend:
     return _BACKEND
 
 
-class WikiMemoryAdd(BaseTool):
-    @classmethod
-    def schema(cls) -> ToolSchema:
+class WikiMemoryAdd(_RunToExecute, BaseTool):
+    @property
+    def schema(self) -> ToolSchema:
         return ToolSchema(
             name="WikiMemoryAdd",
             description=(
                 "Create a new wiki note. Returns the assigned slug. Use "
                 "[[slug]] in the body to link to other notes."
             ),
-            input_schema={
+            parameters={
                 "type": "object",
                 "properties": {
                     "title": {"type": "string"},
@@ -74,13 +122,13 @@ class WikiMemoryAdd(BaseTool):
         return {"slug": chosen}
 
 
-class WikiMemoryRead(BaseTool):
-    @classmethod
-    def schema(cls) -> ToolSchema:
+class WikiMemoryRead(_RunToExecute, BaseTool):
+    @property
+    def schema(self) -> ToolSchema:
         return ToolSchema(
             name="WikiMemoryRead",
             description="Read a wiki note by slug.",
-            input_schema={
+            parameters={
                 "type": "object",
                 "properties": {"slug": {"type": "string"}},
                 "required": ["slug"],
@@ -102,16 +150,16 @@ class WikiMemoryRead(BaseTool):
         }
 
 
-class WikiMemorySearch(BaseTool):
-    @classmethod
-    def schema(cls) -> ToolSchema:
+class WikiMemorySearch(_RunToExecute, BaseTool):
+    @property
+    def schema(self) -> ToolSchema:
         return ToolSchema(
             name="WikiMemorySearch",
             description=(
                 "Substring-search across all wiki notes (title + body). "
                 "Returns matching slugs. Uses ripgrep when available."
             ),
-            input_schema={
+            parameters={
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
                 "required": ["query"],
@@ -123,16 +171,16 @@ class WikiMemorySearch(BaseTool):
         return {"slugs": slugs}
 
 
-class WikiMemoryBacklinks(BaseTool):
-    @classmethod
-    def schema(cls) -> ToolSchema:
+class WikiMemoryBacklinks(_RunToExecute, BaseTool):
+    @property
+    def schema(self) -> ToolSchema:
         return ToolSchema(
             name="WikiMemoryBacklinks",
             description=(
                 "List slugs that reference the given slug via [[slug]] "
                 "wikilink syntax."
             ),
-            input_schema={
+            parameters={
                 "type": "object",
                 "properties": {"slug": {"type": "string"}},
                 "required": ["slug"],
@@ -143,13 +191,13 @@ class WikiMemoryBacklinks(BaseTool):
         return {"backlinks": _get_backend().backlinks(slug)}
 
 
-class WikiMemoryDelete(BaseTool):
-    @classmethod
-    def schema(cls) -> ToolSchema:
+class WikiMemoryDelete(_RunToExecute, BaseTool):
+    @property
+    def schema(self) -> ToolSchema:
         return ToolSchema(
             name="WikiMemoryDelete",
             description="Delete a wiki note by slug.",
-            input_schema={
+            parameters={
                 "type": "object",
                 "properties": {"slug": {"type": "string"}},
                 "required": ["slug"],
@@ -161,9 +209,9 @@ class WikiMemoryDelete(BaseTool):
 
 
 def register(api) -> None:
-    api.register_tool(WikiMemoryAdd)
-    api.register_tool(WikiMemoryRead)
-    api.register_tool(WikiMemorySearch)
-    api.register_tool(WikiMemoryBacklinks)
-    api.register_tool(WikiMemoryDelete)
+    api.register_tool(WikiMemoryAdd())
+    api.register_tool(WikiMemoryRead())
+    api.register_tool(WikiMemorySearch())
+    api.register_tool(WikiMemoryBacklinks())
+    api.register_tool(WikiMemoryDelete())
     logger.info("memory-wiki plugin: 5 tools registered")

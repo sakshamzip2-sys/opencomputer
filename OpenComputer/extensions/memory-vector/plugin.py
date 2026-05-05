@@ -7,6 +7,7 @@ discovery stays fast and the chromadb dep stays optional.
 
 from __future__ import annotations
 
+import json
 import logging
 
 try:
@@ -14,7 +15,35 @@ try:
 except ImportError:  # pragma: no cover
     from extensions.memory_vector.backend import VectorMemoryBackend
 
+from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
+
+
+class _RunToExecute:
+    """Bridge ``run(**kwargs) -> dict`` to ``execute(call) -> ToolResult``.
+
+    The plugin authors implemented kwargs-style ``run`` methods, but
+    BaseTool's contract is ``execute(call: ToolCall) -> ToolResult``.
+    This mixin satisfies the abstract method by serializing the dict
+    result and trapping exceptions into ``is_error`` ToolResults.
+
+    Mixin must precede BaseTool in the MRO so its concrete ``execute``
+    resolves before BaseTool's ``@abstractmethod execute``.
+    """
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        try:
+            result = await self.run(**call.arguments)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — must not raise from execute
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"Error: {exc}",
+                is_error=True,
+            )
+        return ToolResult(
+            tool_call_id=call.id,
+            content=json.dumps(result, default=str),
+        )
 
 logger = logging.getLogger("opencomputer.ext.memory_vector")
 
@@ -50,18 +79,18 @@ def _get_backend() -> VectorMemoryBackend:
     return _BACKEND
 
 
-class VectorMemoryAdd(BaseTool):
+class VectorMemoryAdd(_RunToExecute, BaseTool):
     """Store a text chunk in the vector memory."""
 
-    @classmethod
-    def schema(cls) -> ToolSchema:
+    @property
+    def schema(self) -> ToolSchema:
         return ToolSchema(
             name="VectorMemoryAdd",
             description=(
                 "Store a text chunk in the local vector memory for later "
                 "semantic search. Returns the document id."
             ),
-            input_schema={
+            parameters={
                 "type": "object",
                 "properties": {
                     "text": {"type": "string", "description": "Text to store."},
@@ -81,18 +110,18 @@ class VectorMemoryAdd(BaseTool):
         return {"id": doc_id}
 
 
-class VectorMemorySearch(BaseTool):
+class VectorMemorySearch(_RunToExecute, BaseTool):
     """Semantic-search the vector memory."""
 
-    @classmethod
-    def schema(cls) -> ToolSchema:
+    @property
+    def schema(self) -> ToolSchema:
         return ToolSchema(
             name="VectorMemorySearch",
             description=(
                 "Semantic-search the local vector memory. Returns up to "
                 "top_k matching documents with their text + score + metadata."
             ),
-            input_schema={
+            parameters={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query."},
@@ -117,15 +146,15 @@ class VectorMemorySearch(BaseTool):
         }
 
 
-class VectorMemoryDelete(BaseTool):
+class VectorMemoryDelete(_RunToExecute, BaseTool):
     """Delete a document from the vector memory by id."""
 
-    @classmethod
-    def schema(cls) -> ToolSchema:
+    @property
+    def schema(self) -> ToolSchema:
         return ToolSchema(
             name="VectorMemoryDelete",
             description="Delete a document from the vector memory by id.",
-            input_schema={
+            parameters={
                 "type": "object",
                 "properties": {"id": {"type": "string"}},
                 "required": ["id"],
@@ -138,7 +167,7 @@ class VectorMemoryDelete(BaseTool):
 
 
 def register(api) -> None:  # PluginAPI duck-typed
-    api.register_tool(VectorMemoryAdd)
-    api.register_tool(VectorMemorySearch)
-    api.register_tool(VectorMemoryDelete)
+    api.register_tool(VectorMemoryAdd())
+    api.register_tool(VectorMemorySearch())
+    api.register_tool(VectorMemoryDelete())
     logger.info("memory-vector plugin: 3 tools registered")
