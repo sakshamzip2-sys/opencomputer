@@ -74,6 +74,44 @@ from .identity import get_or_create_agent_id
 _log = logging.getLogger("opencomputer.social_traces.subscriber")
 
 
+# ─── Stage-1 heuristic gate ──────────────────────────────────────────
+
+
+#: Minimum loop iterations for a session to be worth distilling.
+#: ``turn_count == 1`` means "user asked, agent answered without
+#: tools" — no procedure to share, skip.
+_MIN_TURN_COUNT = 2
+
+#: Minimum wall-clock duration (seconds). Filters out cancellations,
+#: tool guard aborts, and other near-instant exits.
+_MIN_DURATION_S = 3.0
+
+
+def is_session_worth_distilling(event: SessionEndEvent) -> bool:
+    """Cheap heuristic gate — runs before any LLM cost.
+
+    Returns ``False`` for trivial sessions: no tool turns, instant
+    exits, cancelled mid-prompt, etc. The distiller's own filters
+    (empty user message, sentinel-only output, schema validation)
+    catch the next layer; this gate just avoids paying ~3 Haiku calls
+    on a session that's obviously not worth sharing.
+
+    A session that hit errors (``had_errors=True``) IS worth
+    distilling — failure-mode traces are valuable per the HANDOVER
+    "edge case" rule. Don't filter on outcome here.
+
+    Tunable: thresholds live in module-level constants and are
+    intentionally NOT in :class:`SocialTracesConfig` for now —
+    they're heuristics, not policy. If real-world usage shows the
+    cap is wrong we can promote them.
+    """
+    if event.turn_count < _MIN_TURN_COUNT:
+        return False
+    if event.duration_seconds < _MIN_DURATION_S:
+        return False
+    return True
+
+
 class TraceEmissionSubscriber:
     """Subscribes to ``session_end`` on the F2 bus.
 
@@ -207,6 +245,20 @@ class TraceEmissionSubscriber:
                 return
 
             cfg = self._config_factory(profile_home)
+
+            # ── Stage-1 heuristic gate (Phase 9 production wiring) ─
+            # Skip trivial sessions before paying any LLM cost. The
+            # distiller's own filters catch the next layer; this gate
+            # just avoids 3 Haiku calls on sessions that are
+            # obviously not worth sharing (cancellations, one-shot
+            # chat with no tools, instant exits).
+            if not is_session_worth_distilling(event):
+                _log.debug(
+                    "social-traces: session=%s — too trivial "
+                    "(turns=%d duration=%.1fs), skipping emit",
+                    session_id, event.turn_count, event.duration_seconds,
+                )
+                return
 
             # ── Decision tree ───────────────────────────────────────
             if entry.trace_used is not None and entry.hit_count > 0:

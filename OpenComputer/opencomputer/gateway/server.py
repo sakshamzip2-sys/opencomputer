@@ -251,6 +251,12 @@ class Gateway:
         # contract as the ambient daemon — never crashes gateway boot.
         await self._start_evolution_subscriber()
 
+        # social-traces post-task subscriber (Phase 9 production
+        # wiring). Resolves provider + cost guard same way
+        # _start_evolution_subscriber does. Opt-in via
+        # ``oc traces enable``; failure isolated.
+        await self._start_traces_subscriber()
+
         # Wave 6.E.1 — kanban dispatcher loop. Reads
         # ``cfg.kanban.dispatch_in_gateway`` (default true) and starts
         # a periodic ``dispatch_once`` invoker that spawns sibling
@@ -514,6 +520,68 @@ class Gateway:
                 "failed to start skill-evolution subscriber — gateway continues without it"
             )
 
+    async def _start_traces_subscriber(self) -> None:
+        """Start the social-traces post-task subscriber iff the user opted in.
+
+        Mirrors :meth:`_start_evolution_subscriber`. Resolves the
+        configured provider against the live plugin registry and the
+        per-profile default cost guard, then calls the plugin's
+        ``wire_subscriber`` entry point. The plugin holds the
+        subscriber in a module-level singleton so :meth:`stop` can
+        find it via ``stop_subscriber``.
+
+        Opt-in via ``oc traces enable``. Failure isolated — the
+        gateway must keep working even if the plugin is broken or
+        absent. Only the LLM-driven post-task path needs this; the
+        pre-task BEFORE_TASK hook works regardless because
+        ``register()`` registers it unconditionally.
+        """
+        try:
+            from opencomputer.agent.config import _home, default_config
+            from opencomputer.cli_traces import _ensure_alias
+            from opencomputer.cost_guard import get_default_guard
+            from opencomputer.plugins.registry import registry as plugin_registry
+
+            _ensure_alias()
+            from extensions.social_traces.plugin import wire_subscriber  # type: ignore[import-not-found]
+            from extensions.social_traces.state import is_enabled  # type: ignore[import-not-found]
+
+            if not is_enabled(_home()):
+                logger.debug(
+                    "social-traces opt-out (state.enabled=False) — "
+                    "skipping subscriber"
+                )
+                return
+
+            cfg = default_config()
+            provider_cls = plugin_registry.providers.get(cfg.model.provider)
+            if provider_cls is None:
+                logger.warning(
+                    "social-traces: provider %r not registered — "
+                    "skipping subscriber",
+                    cfg.model.provider,
+                )
+                return
+            provider = (
+                provider_cls() if isinstance(provider_cls, type) else provider_cls
+            )
+
+            try:
+                from opencomputer import __version__ as _oc_version
+            except Exception:  # noqa: BLE001
+                _oc_version = ""
+
+            wire_subscriber(
+                provider=provider,
+                cost_guard=get_default_guard(),
+                harness_version=f"opencomputer/{_oc_version}",
+            )
+            logger.info("social-traces subscriber started (state.enabled=True)")
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "failed to start social-traces subscriber — gateway continues without it"
+            )
+
     async def _tick_fatal_error_supervisor(self) -> None:
         """One supervisor pass — public-ish so tests can drive a single tick.
 
@@ -590,6 +658,19 @@ class Gateway:
             except Exception:  # noqa: BLE001
                 logger.exception("skill-evolution subscriber stop failed (ignored)")
             self._evolution_subscriber = None
+        # social-traces subscriber (Phase 9). Held by the plugin's
+        # module-level singleton, not on Gateway directly, so we
+        # call ``stop_subscriber`` on the plugin module rather than
+        # mutating an attribute here. Failure-isolated.
+        try:
+            from opencomputer.cli_traces import _ensure_alias as _ensure_st_alias
+
+            _ensure_st_alias()
+            from extensions.social_traces.plugin import stop_subscriber as _stop_st
+
+            _stop_st()
+        except Exception:  # noqa: BLE001
+            logger.exception("social-traces subscriber stop failed (ignored)")
         if self._ambient_daemon is not None:
             try:
                 await self._ambient_daemon.stop()

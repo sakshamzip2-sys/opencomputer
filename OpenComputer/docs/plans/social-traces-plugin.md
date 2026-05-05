@@ -590,7 +590,34 @@ Recommendation: **(a) for v1.0**, revisit (b) if the in-memory state proves frag
 - [ ] Cache tag extraction per session (don't re-run mid-session)
 - [ ] Maintain `tag_profile` accumulator on disk so `prefetch.build_query()` can include profile-bias tags
 
-### Phase 9 — HTTP client + outbox (2-3 hours)
+### Phase 9.A — Production wiring for Phases 6/7 (1-2 hours) — COMPLETE 2026-05-06
+
+Promoted from a sub-bullet of Phase 9 to its own milestone — without this, the LLM judge + distiller never fire in real CLI / gateway use (they degrade to ``provider=None`` because ``plugin.register()`` had no way to resolve a real provider). After this commit the local single-machine flywheel actually works end-to-end.
+
+- [x] `plugin.register()` no longer auto-starts a degraded subscriber. It registers ONLY the BEFORE_TASK hook (mirrors `extensions/skill-evolution/plugin.py`'s lifecycle-free shape)
+- [x] `plugin.wire_subscriber(provider, cost_guard, sensitive_filter=None, harness_version="")` exported function — the canonical entry point gateway + CLI both call. Idempotent: stops a prior subscriber before constructing a new one
+- [x] `plugin.stop_subscriber()` and `plugin.get_active_subscriber()` for shutdown / diagnostic
+- [x] `opencomputer/gateway/server.py` — added `_start_traces_subscriber` mirroring `_start_evolution_subscriber`. Resolves `cfg.model.provider` against the live plugin registry, wraps it with the per-profile `get_default_guard()`, calls `wire_subscriber`. Failure-isolated. Mounted in `start()` after `_start_evolution_subscriber`. Stop hook in `Gateway.stop()` calls the plugin's `stop_subscriber`
+- [x] `opencomputer/cli.py` — `_run_chat_session` calls `wire_subscriber` after `AgentLoop` construction when `oc traces enable` flag is set. Same provider + cost_guard resolution; same failure isolation. Means single-shot `opencomputer chat` now emits traces too (not just gateway-mode)
+- [x] Stage-1 heuristic gate in `subscriber.is_session_worth_distilling`:
+  - `turn_count < 2` → skip (one-turn = user asked, agent answered, no tools to share)
+  - `duration_seconds < 3` → skip (cancellation, tool-guard abort, instant exit)
+  - Failure-mode sessions (`had_errors=True`) deliberately PASS the gate — edge-case traces are valuable per HANDOVER
+  - Thresholds in module constants, not config — heuristics, not policy. Promote to config when real-world data shows the cap is wrong
+- [x] Phase 5 + 6 tests updated — `SessionEndEvent` constructions now pass real `turn_count` + `duration_seconds` so the gate doesn't filter them
+- [x] 11 new tests in `tests/test_social_traces_phase9_wiring.py`:
+  - `register()` only attaches BEFORE_TASK; no auto-subscriber
+  - `wire_subscriber` constructs + stores singleton
+  - Idempotency: second `wire_subscriber` stops the first
+  - `stop_subscriber` no-op on empty state, idempotent
+  - Heuristic gate: passes real session, rejects zero-turn, one-turn, short-duration; passes failed sessions
+  - Pipeline applies the gate (trivial sessions don't reach distiller; normal sessions do)
+- [x] 268/268 affected-file tests green; 1 documented skip; extension boundary clean
+- [x] CLI smoke test confirms `oc traces enable && oc traces status` round-trips correctly
+
+### Phase 9.B — HTTP client + outbox (deferred to post-OpenHub)
+
+These tasks land AFTER the OpenHub MVP exists (we need a real network endpoint to talk to):
 
 - [ ] `client/http.py:HttpTraceNetworkClient` — httpx, async, talks to OpenHub
 - [ ] Implements all three ABC methods; 1s soft timeout on query/health

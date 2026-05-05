@@ -988,6 +988,37 @@ def _run_chat_session(
     )
     DelegateTool.set_runtime(runtime)
 
+    # social-traces post-task subscriber (Phase 9 production wiring).
+    # Opt-in via ``oc traces enable``; only wires when the on-disk
+    # flag is set. Failure-isolated — chat must work even if the
+    # plugin is broken or absent. The pre-task BEFORE_TASK hook is
+    # always live (registered at plugin load); only the LLM-driven
+    # post-task emit path needs this wiring.
+    try:
+        from opencomputer.agent.config import _home as _oc_home
+        from opencomputer.cli_traces import _ensure_alias as _ensure_st_alias
+        from opencomputer.cost_guard import get_default_guard
+
+        _ensure_st_alias()
+        from extensions.social_traces.plugin import wire_subscriber as _wire_st  # type: ignore[import-not-found]
+        from extensions.social_traces.state import is_enabled as _st_enabled  # type: ignore[import-not-found]
+
+        if _st_enabled(_oc_home()):
+            try:
+                from opencomputer import __version__ as _oc_v
+            except Exception:  # noqa: BLE001
+                _oc_v = ""
+            _wire_st(
+                provider=provider,
+                cost_guard=get_default_guard(),
+                harness_version=f"opencomputer/{_oc_v}",
+            )
+    except Exception:  # noqa: BLE001 — never break chat over plugin wiring
+        import logging as _log_mod
+        _log_mod.getLogger("opencomputer.cli").debug(
+            "social-traces wire failed (suppressed)", exc_info=True
+        )
+
     # Connect MCP servers synchronously in chat mode (simpler — no event loop yet)
     n_mcp_tools = 0
     if cfg.mcp.servers:

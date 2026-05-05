@@ -414,7 +414,7 @@ async def test_subscriber_disabled_flag_skips_pipeline(tmp_path: Path):
     # Bridge entry exists but pipeline must skip on disabled flag.
     bridge.set_trace_used("sid", None)
 
-    await sub._handle_event(SessionEndEvent(session_id="sid"))
+    await sub._handle_event(SessionEndEvent(session_id="sid", turn_count=3, duration_seconds=10.0))
     # Allow any inadvertent fire-and-forget tasks to settle.
     await asyncio.sleep(0.05)
 
@@ -431,7 +431,7 @@ async def test_subscriber_untracked_session_skips(tmp_path: Path):
     client = _RecordingClient()
     sub = _build_subscriber(bus=_StubBus(), profile_home=tmp_path, client=client)
 
-    await sub._run_pipeline(SessionEndEvent(session_id="ghost"), tmp_path)
+    await sub._run_pipeline(SessionEndEvent(session_id="ghost", turn_count=3, duration_seconds=10.0), tmp_path)
     assert client.submitted == []
 
 
@@ -453,7 +453,7 @@ async def test_subscriber_trace_used_judge_not_novel_silent(
 
     client = _RecordingClient()
     sub = _build_subscriber(bus=_StubBus(), profile_home=tmp_path, client=client)
-    await sub._run_pipeline(SessionEndEvent(session_id="sid"), tmp_path)
+    await sub._run_pipeline(SessionEndEvent(session_id="sid", turn_count=3, duration_seconds=10.0), tmp_path)
 
     assert client.submitted == []
 
@@ -481,7 +481,7 @@ async def test_subscriber_trace_used_judge_novel_continues_to_distill(
 
     client = _RecordingClient()
     sub = _build_subscriber(bus=_StubBus(), profile_home=tmp_path, client=client)
-    await sub._run_pipeline(SessionEndEvent(session_id="sid"), tmp_path)
+    await sub._run_pipeline(SessionEndEvent(session_id="sid", turn_count=3, duration_seconds=10.0), tmp_path)
 
     assert distill_calls == ["sid"]
     assert client.submitted == []  # distiller stub returned None
@@ -512,7 +512,7 @@ async def test_subscriber_no_trace_used_skips_judge_and_distills(
 
     client = _RecordingClient()
     sub = _build_subscriber(bus=_StubBus(), profile_home=tmp_path, client=client)
-    await sub._run_pipeline(SessionEndEvent(session_id="sid"), tmp_path)
+    await sub._run_pipeline(SessionEndEvent(session_id="sid", turn_count=3, duration_seconds=10.0), tmp_path)
 
     assert judge_calls == []  # judge never called on no-trace path
     assert distill_calls == ["sid"]
@@ -536,7 +536,7 @@ async def test_subscriber_distill_proposal_triggers_submit(
 
     client = _RecordingClient()
     sub = _build_subscriber(bus=_StubBus(), profile_home=tmp_path, client=client)
-    await sub._run_pipeline(SessionEndEvent(session_id="sid"), tmp_path)
+    await sub._run_pipeline(SessionEndEvent(session_id="sid", turn_count=3, duration_seconds=10.0), tmp_path)
 
     assert len(client.submitted) == 1
     assert client.submitted[0].intent == "distilled"
@@ -561,7 +561,7 @@ async def test_subscriber_submit_rejected_doesnt_raise(
 
     sub = _build_subscriber(bus=_StubBus(), profile_home=tmp_path, client=client)
     # Should not raise.
-    await sub._run_pipeline(SessionEndEvent(session_id="sid"), tmp_path)
+    await sub._run_pipeline(SessionEndEvent(session_id="sid", turn_count=3, duration_seconds=10.0), tmp_path)
     assert len(client.submitted) == 1
 
 
@@ -579,7 +579,7 @@ async def test_subscriber_distiller_raises_isolated(tmp_path: Path, monkeypatch)
     client = _RecordingClient()
     sub = _build_subscriber(bus=_StubBus(), profile_home=tmp_path, client=client)
     # Should not raise.
-    await sub._run_pipeline(SessionEndEvent(session_id="sid"), tmp_path)
+    await sub._run_pipeline(SessionEndEvent(session_id="sid", turn_count=3, duration_seconds=10.0), tmp_path)
     assert client.submitted == []
 
 
@@ -592,7 +592,7 @@ async def test_subscriber_pops_bridge_even_after_silent_emit(tmp_path: Path):
     assert bridge.session_known("sid") is True
 
     sub = _build_subscriber(bus=_StubBus(), profile_home=tmp_path)
-    await sub._run_pipeline(SessionEndEvent(session_id="sid"), tmp_path)
+    await sub._run_pipeline(SessionEndEvent(session_id="sid", turn_count=3, duration_seconds=10.0), tmp_path)
     # Whatever the path, the bridge must be empty afterward.
     assert bridge.session_known("sid") is False
 
@@ -624,7 +624,7 @@ async def test_subscriber_judge_disabled_via_config_silent(
     sub = _build_subscriber(
         bus=_StubBus(), profile_home=tmp_path, config=cfg, client=client
     )
-    await sub._run_pipeline(SessionEndEvent(session_id="sid"), tmp_path)
+    await sub._run_pipeline(SessionEndEvent(session_id="sid", turn_count=3, duration_seconds=10.0), tmp_path)
 
     assert judge_calls == []
     assert client.submitted == []

@@ -430,7 +430,7 @@ async def test_subscriber_passes_provider_to_judge(tmp_path: Path, monkeypatch):
     sub = _build_sub(
         profile_home=tmp_path, provider=provider, cost_guard=guard,
     )
-    await sub._run_pipeline(SessionEndEvent(session_id="sid"), tmp_path)
+    await sub._run_pipeline(SessionEndEvent(session_id="sid", turn_count=3, duration_seconds=10.0), tmp_path)
 
     # Judge was called with the trace card body + the constructor-
     # injected provider + cost_guard.
@@ -479,7 +479,7 @@ async def test_subscriber_reads_session_transcript_from_db(
     monkeypatch.setattr(nj, "judge_session_novelty", _fake_judge)
 
     sub = _build_sub(profile_home=tmp_path, provider=_FakeProvider())
-    await sub._run_pipeline(SessionEndEvent(session_id="sid-tx"), tmp_path)
+    await sub._run_pipeline(SessionEndEvent(session_id="sid-tx", turn_count=3, duration_seconds=10.0), tmp_path)
 
     assert captured["user_message"] == "please help me sync files"
     # Assistant message in transcript
@@ -513,7 +513,7 @@ async def test_subscriber_judge_novel_continues_to_distill(
     monkeypatch.setattr(st_distiller, "distill_session", _distill)
 
     sub = _build_sub(profile_home=tmp_path, provider=_FakeProvider())
-    await sub._run_pipeline(SessionEndEvent(session_id="sid"), tmp_path)
+    await sub._run_pipeline(SessionEndEvent(session_id="sid", turn_count=3, duration_seconds=10.0), tmp_path)
 
     assert distill_calls == ["sid"]
 
@@ -538,7 +538,7 @@ async def test_subscriber_no_provider_judge_short_circuits(
 
     # provider=None → degrades
     sub = _build_sub(profile_home=tmp_path, provider=None)
-    await sub._run_pipeline(SessionEndEvent(session_id="sid"), tmp_path)
+    await sub._run_pipeline(SessionEndEvent(session_id="sid", turn_count=3, duration_seconds=10.0), tmp_path)
 
     # Distiller never invoked because the trace-was-used branch went
     # silent (is_novel=False).
