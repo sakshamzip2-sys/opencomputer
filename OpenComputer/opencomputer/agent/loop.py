@@ -134,6 +134,61 @@ class ConversationResult:
 SKILL_TOOL_NAME = "Skill"
 
 
+#: Cache of provider-method signatures so we don't re-introspect on
+#: every turn. Keyed by ``id(method)`` since ``inspect.signature`` is
+#: relatively cheap but still adds up over thousands of turns.
+_PROVIDER_SIG_CACHE: dict[int, frozenset[str]] = {}
+
+
+def _maybe_split_system_kwargs(
+    method: Any,
+    *,
+    base_system: str,
+    injected_system: str,
+    session_id: str | None,
+) -> dict[str, Any]:
+    """Return only the split-system kwargs that ``method`` accepts.
+
+    The 2026-05-05 cache-correctness fix added ``base_system``,
+    ``injected_system``, and ``session_id`` as new kwargs on
+    ``BaseProvider.complete``/``stream_complete``. Stub providers in
+    tests and 3rd-party plugins that haven't adopted the new signature
+    would otherwise raise ``TypeError``. This helper introspects the
+    target method once (cached) and only passes kwargs the method
+    actually accepts. Non-Anthropic providers that ignore the kwargs
+    just don't see them.
+    """
+    import inspect as _inspect
+
+    cache_key = id(method)
+    accepted = _PROVIDER_SIG_CACHE.get(cache_key)
+    if accepted is None:
+        try:
+            sig = _inspect.signature(method)
+            accepted = frozenset(sig.parameters)
+            # Methods declared with **kwargs accept anything; treat as
+            # accepting all the new kwargs.
+            if any(
+                p.kind == _inspect.Parameter.VAR_KEYWORD
+                for p in sig.parameters.values()
+            ):
+                accepted = frozenset(
+                    list(accepted) + ["base_system", "injected_system", "session_id"]
+                )
+        except (ValueError, TypeError):
+            accepted = frozenset()
+        _PROVIDER_SIG_CACHE[cache_key] = accepted
+
+    out: dict[str, Any] = {}
+    if "base_system" in accepted:
+        out["base_system"] = base_system
+    if "injected_system" in accepted:
+        out["injected_system"] = injected_system
+    if "session_id" in accepted:
+        out["session_id"] = session_id
+    return out
+
+
 def _wrap_skill_result_as_tool_messages(
     *,
     skill_name: str,
@@ -3070,16 +3125,23 @@ class AgentLoop:
         )
         if stream_callback is not None:
             final_response = None
+            # Only pass split-system kwargs to providers that accept them.
+            # Stub providers in tests + 3rd-party plugins that haven't
+            # adopted the new signature would otherwise raise TypeError.
+            _split_kwargs = _maybe_split_system_kwargs(
+                self.provider.stream_complete,
+                base_system=base_system,
+                injected_system=injected_system,
+                session_id=session_id,
+            )
             stream_source = self.provider.stream_complete(
                 model=model_name,
                 messages=wire_messages,
                 system=system,
-                base_system=base_system,
-                injected_system=injected_system,
-                session_id=session_id,
                 tools=tool_schemas,
                 max_tokens=max_tokens_override or self.config.model.max_tokens,
                 temperature=self.config.model.temperature,
+                **_split_kwargs,
                 **_extra_kwargs,
             )
             # Phase B (model-agnostic thinking): when the provider does
@@ -3121,17 +3183,21 @@ class AgentLoop:
             # the configured ``fallback_models`` chain before raising.
             from opencomputer.agent.fallback import call_with_fallback
 
+            _split_kwargs = _maybe_split_system_kwargs(
+                self.provider.complete,
+                base_system=base_system,
+                injected_system=injected_system,
+                session_id=session_id,
+            )
             async def _do_call(active_model: str):
                 return await self.provider.complete(
                     model=active_model,
                     messages=wire_messages,
                     system=system,
-                    base_system=base_system,
-                    injected_system=injected_system,
-                    session_id=session_id,
                     tools=tool_schemas,
                     max_tokens=self.config.model.max_tokens,
                     temperature=self.config.model.temperature,
+                    **_split_kwargs,
                     **_extra_kwargs,
                 )
 
