@@ -83,7 +83,17 @@ def _ensure_alias() -> None:
         sys.modules["extensions.social_traces"] = mod
         sys.modules["extensions"].social_traces = mod  # type: ignore[attr-defined]
     parent = sys.modules["extensions.social_traces"]
-    for sub in ("state", "identity", "config", "prefetch", "subscriber"):
+    for sub in (
+        "state",
+        "identity",
+        "config",
+        "session_state",
+        "tag_extractor",
+        "novelty_judge",
+        "distiller",
+        "prefetch",
+        "subscriber",
+    ):
         full_name = f"extensions.social_traces.{sub}"
         if full_name in sys.modules:
             setattr(parent, sub, sys.modules[full_name])
@@ -262,6 +272,16 @@ def status() -> None:
     typer.echo(
         f"agent_id: {'present' if aid_path.exists() else 'not yet generated'}"
     )
+
+    # Phase 5: in-flight tracked sessions (pre→post-task bridge).
+    # Aggregate count only — the per-session ids would correlate
+    # with active conversations, which is privacy-sensitive.
+    try:
+        from extensions.social_traces.session_state import tracked_session_count
+
+        typer.echo(f"tracked sessions: {tracked_session_count()}")
+    except Exception:  # noqa: BLE001 — diagnostic only, never fail the status
+        pass
 
 
 # ── ``traces inbox …`` ────────────────────────────────────────────────────

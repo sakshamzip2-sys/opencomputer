@@ -463,15 +463,65 @@ The plan §4 originally said "post-task code reads `runtime.custom['trace_used']
 
 Recommendation: **(a) for v1.0**, revisit (b) if the in-memory state proves fragile under daemon-mode use. Decision deferred until Phase 5 implementation actually starts.
 
-### Phase 5 — Post-task subscriber (3-4 hours)
+### Phase 5 — Post-task subscriber (3-4 hours) — COMPLETE 2026-05-05
 
-- [ ] `subscriber.py:EmissionSubscriber` — port from `extensions/skill-evolution/subscriber.py` shape
-- [ ] State file: `<profile_home>/traces/state.json` with `{"enabled": bool}`
-- [ ] Heartbeat: `<profile_home>/traces/heartbeat`
-- [ ] Decision tree at top of `_run_pipeline`:
-  - if `trace_used is None`: continue to redact + distill + submit
-  - if `trace_used is set`: run novelty_judge first
-- [ ] CLI: `oc traces enable/disable/status`
+- [x] **Bridge mechanism (option a from §10 Phase 4 finding):**
+  `extensions/social-traces/session_state.py` — module-level dict
+  keyed by session_id with `set/peek/pop/known/hit_count` API,
+  `RLock`-guarded for thread safety, LRU eviction past a soft cap so
+  daemon-mode can't leak memory
+- [x] Prefetch hook now writes the bridge in addition to
+  `runtime.custom["trace_used"]` — closes the propagation gap from
+  Phase 4
+- [x] `novelty_judge.py` Phase 5 stub — returns `is_novel=False`
+  unconditionally (conservative default; Phase 6 swaps for the real
+  Haiku call)
+- [x] `distiller.py` Phase 5 stub — returns `None` unconditionally
+  (no submissions land in the outbox until Phase 7 implements the
+  three-Haiku flow)
+- [x] `subscriber.py` real `TraceEmissionSubscriber` (replaces Phase
+  2 stub):
+  - `start/stop` lifecycle subscribes to `session_end` on the typed
+    bus; idempotent on both ends
+  - `_handle_event` is bus-facing + fast: reads enabled flag, writes
+    heartbeat, fires the heavy pipeline as `fire_and_forget`
+  - `_run_pipeline` runs the rule (d) decision tree:
+    - flag off → pop bridge entry (no leak), return
+    - session unknown (BEFORE_TASK never fired) → return
+    - `trace_used set + novelty_judge.enabled=False` → silent
+    - `trace_used set + judge.is_novel=False` → silent
+    - `trace_used set + judge.is_novel=True` → distill + submit
+    - `trace_used None` (explored from scratch) → distill + submit
+    directly
+  - Bridge is ALWAYS popped by the end of the pipeline (memory-leak
+    guard tested)
+  - Every stage wrapped in try/except — fire-and-forget contract
+- [x] `plugin.py` updated to start the subscriber at register time;
+  uses `default_bus` from `opencomputer.ingestion.bus`. Lazy
+  factories (`profile_home_factory`, `client_factory`,
+  `config_factory`) so multi-profile dispatch and live config
+  reloads both work
+- [x] `oc traces status` extended to show `tracked sessions: N`
+  (aggregate count only — never individual session ids)
+- [x] CLI alias bootstrap extended to load all the new modules
+  (`session_state`, `tag_extractor`, `novelty_judge`, `distiller`)
+- [x] 22 new tests in `tests/test_social_traces_phase5.py`:
+  - bridge: known/unknown distinction, none-vs-unknown semantics,
+    pop clears, hit_count, LRU eviction past cap, thread-safety
+    smoke test
+  - prefetch writes the bridge on match + on no-match
+  - subscriber lifecycle: start subscribes, idempotent, stop
+    unsubscribes
+  - decision tree (paths a-h): disabled-skip, untracked-skip,
+    judge-not-novel-silent, judge-novel-continues-to-distill,
+    no-trace-skips-judge, distiller-None-no-submit, distiller-
+    proposal-triggers-submit, submit-rejected-isolated, distiller-
+    raises-isolated, judge-disabled-config-silent
+  - memory-leak guard: bridge always popped after pipeline
+- [x] 169/169 affected-file tests green across Phases 0-5; 1
+  documented skip
+- [x] CLI smoke test: `oc traces enable && oc traces status` round-
+  trips and shows the new `tracked sessions` field
 
 ### Phase 6 — Novelty judge (2-3 hours)
 

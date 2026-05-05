@@ -1,63 +1,136 @@
 """social-traces plugin — entry module.
 
-Registers the BEFORE_TASK hook (real query/inject path lands in Phase 4)
-and stands up the post-task SessionEndEvent subscriber (real
-distillation lands in Phase 5-7). Phase 2 wires the registration shape
-so the loop seam is exercised from day one and `oc traces enable`
-turns visible behaviour on without further code changes.
+Registers:
+
+* The BEFORE_TASK hook (Phase 4 — real query/score/inject path).
+* The post-task SessionEndEvent subscriber (Phase 5 — real decision
+  tree; Phase 6/7 stubs make the LLM calls no-ops until those phases
+  land).
 
 The plugin SHIPS DISABLED. Two layers of opt-in must align before any
 trace work happens:
 
-1. ``plugin.json: enabled_by_default = false`` — operator must explicitly
-   load the plugin via ``oc plugin enable social-traces``.
+1. ``plugin.json: enabled_by_default = false`` — operator must
+   explicitly load the plugin via ``opencomputer plugin enable``.
 2. ``<profile_home>/traces/state.json: {"enabled": true}`` — operator
    must explicitly turn the feature on via ``oc traces enable``.
 
-Both must be set. This is deliberate: the network is a privacy-sensitive
-egress surface. Default-off until the user has read the README.
+Both must be set. Privacy-sensitive egress surface; default-off until
+the user has read the README.
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from plugin_sdk.hooks import HookEvent, HookSpec
 
+from .config import SocialTracesConfig, from_config_dict
 from .prefetch import on_before_task
+from .subscriber import TraceEmissionSubscriber
 
 _log = logging.getLogger("opencomputer.social_traces.plugin")
 
 
-def register(api) -> None:  # noqa: ANN001 — duck-typed PluginAPI
-    """Plugin entry. Wire hooks + bus subscriber.
+def _profile_home_factory() -> Path:
+    """Lazy resolver for the active profile home.
 
-    Subscriber lifecycle is gateway-managed — the gateway boots the
-    typed event bus and keeps it alive across the daemon's lifetime.
-    For the CLI path (single-shot ``opencomputer chat``), the subscriber
-    is started lazily on first SessionEndEvent emission via the bus's
-    autoload hook (TBD in Phase 5; for Phase 2 the subscriber is just
-    importable + constructible, not auto-started).
+    Resolved at event-arrival time (not at register-time) so
+    multi-profile dispatch sees the correct path. Mirrors how
+    ``cli_traces._profile_home`` works.
+    """
+    import os
+
+    env = os.environ.get("OPENCOMPUTER_PROFILE_HOME")
+    if env:
+        return Path(env)
+    from opencomputer.agent.config import _home as _home_fn
+
+    return _home_fn()
+
+
+def _config_factory(profile_home: Path) -> SocialTracesConfig:
+    """Lazy resolver for the parsed ``social_traces:`` config section.
+
+    Re-reads ``config.yaml`` per call so the operator can edit knobs
+    (relevance threshold, cost guard, etc.) without restarting the
+    daemon. Cheap (~1ms for a small YAML); fine for the cadence here.
+    """
+    import yaml
+
+    cfg_path = profile_home / "config.yaml"
+    if not cfg_path.exists():
+        return SocialTracesConfig()
+    try:
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        return SocialTracesConfig()
+    return from_config_dict(raw.get("social_traces", {}))
+
+
+def _client_factory(profile_home: Path, cfg: SocialTracesConfig):
+    """Lazy resolver for the trace network client.
+
+    Defers the import + construction so the plugin can register
+    cleanly even if the http backend's deps are missing — only the
+    actual subscriber path that calls submit() reaches the client.
+    """
+    from .client import make_client
+
+    return make_client(
+        backend=cfg.backend,
+        profile_home=profile_home,
+        endpoint=cfg.endpoint,
+    )
+
+
+def register(api) -> None:  # noqa: ANN001 — duck-typed PluginAPI
+    """Plugin entry. Wire BEFORE_TASK hook + start the post-task
+    subscriber.
+
+    The subscriber is started here so it's live for the lifetime of
+    the plugin's load — gateway-mode daemons get full event coverage,
+    and CLI single-shot ``opencomputer chat`` gets one-pass coverage
+    since the bus persists for the duration of run_conversation.
+
+    If subscriber-start fails (bus unavailable in some test contexts)
+    the failure is logged but the BEFORE_TASK registration still
+    succeeds — the plugin degrades to "pre-task lookup works,
+    post-task emit doesn't" rather than failing entirely.
     """
     api.register_hook(
         HookSpec(
             event=HookEvent.BEFORE_TASK,
             handler=on_before_task,
             fire_and_forget=False,
-            # Run early so the trace injection lands before any
-            # other plugin's BEFORE_TASK handler can transform context.
             priority=20,
-            # Soft 1s timeout to match the network-query budget in
-            # ``SocialTracesConfig.query.soft_timeout_s``. If the hook
-            # ever exceeds this (Phase 4+), the engine treats it as
-            # ``pass`` (fail-open) and the agent proceeds to explore —
-            # CLAUDE.md §7 contract: a wedged hook must never wedge
-            # the loop.
             timeout_ms=1500,
         )
     )
 
-    _log.debug(
-        "social-traces plugin registered (Phase 2: BEFORE_TASK hook only; "
-        "subscriber pending Phase 5)"
-    )
+    try:
+        from opencomputer.ingestion.bus import default_bus
+
+        subscriber = TraceEmissionSubscriber(
+            bus=default_bus,
+            profile_home_factory=_profile_home_factory,
+            client_factory=_client_factory,
+            config_factory=_config_factory,
+        )
+        subscriber.start()
+        # Stash on the api so a future ``unregister`` could call
+        # subscriber.stop(). For Phase 5 OC has no formal plugin
+        # unload path; the reference is held by the subscription
+        # itself so GC won't collect the subscriber.
+        setattr(api, "_social_traces_subscriber", subscriber)
+        _log.info(
+            "social-traces plugin registered (BEFORE_TASK hook + "
+            "SessionEndEvent subscriber active)"
+        )
+    except Exception:  # noqa: BLE001
+        _log.warning(
+            "social-traces: subscriber start failed — pre-task lookup "
+            "still works, post-task emit disabled this session",
+            exc_info=True,
+        )

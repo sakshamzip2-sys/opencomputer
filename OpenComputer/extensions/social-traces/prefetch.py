@@ -56,7 +56,7 @@ import yaml
 from plugin_sdk.hooks import HookContext, HookDecision
 from plugin_sdk.traces import TraceCard
 
-from . import state
+from . import session_state, state
 from .config import SocialTracesConfig, from_config_dict
 from .tag_extractor import extract_tags_from_message
 
@@ -108,10 +108,32 @@ def _load_config(profile_home: Path) -> SocialTracesConfig:
 
 
 def _set_trace_used(ctx: HookContext, trace_id: str | None) -> None:
-    """Stamp ``runtime.custom["trace_used"]`` so the post-task subscriber
-    sees a uniform shape (always either a trace id string or ``None``)."""
+    """Stamp the trace_used signal so the post-task subscriber can read it.
+
+    Two write paths, intentionally:
+
+    * ``runtime.custom["trace_used"]`` — for any in-process consumer
+      that has access to the per-task RuntimeContext at the moment
+      BEFORE_TASK fires. The agent loop's ``replace(runtime, custom={...})``
+      means this dict is the loop's internal copy, NOT the caller's
+      original — see plan §10 Phase 4 architectural finding.
+    * :mod:`extensions.social_traces.session_state` — module-level
+      bridge keyed by session_id. The post-task subscriber, which only
+      receives a ``SessionEndEvent`` and has no access to the runtime,
+      reads this via ``pop_session`` to learn what BEFORE_TASK did.
+
+    Both writes happen on every call so a future architectural change
+    (e.g. adding ``trace_used`` to ``SessionEndEvent`` directly) doesn't
+    require touching this code.
+    """
     if ctx.runtime is not None and ctx.runtime.custom is not None:
         ctx.runtime.custom["trace_used"] = trace_id
+
+    # Bridge write — only if we know the session id (always true in the
+    # production path; defensively guarded for tests calling the handler
+    # directly with a sparse HookContext).
+    if ctx.session_id:
+        session_state.set_trace_used(ctx.session_id, trace_id)
 
 
 # ─── query construction ──────────────────────────────────────────────
