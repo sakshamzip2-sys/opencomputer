@@ -332,10 +332,43 @@ def test_timeout_exception_hierarchy() -> None:
 
 
 def test_loop_config_defaults() -> None:
-    """Default values: 300s inactivity, 3600s absolute cap (raised from 1800s in
-    fix/bump-loop-timeouts after the user hit IterationTimeout on a long run)."""
+    """Default values after the 2026-05-05 cap-doubling sweep:
+      - inactivity_timeout_s: 600s (was 300)
+      - iteration_timeout_s: 7200s (was 3600)
+      - max_iterations: 100 (was 50)
+      - delegation_max_iterations: 100 (was 50)
+      - max_delegation_depth: 4 (was 2)
+    """
     from opencomputer.agent.config import LoopConfig
 
     cfg = LoopConfig()
-    assert cfg.inactivity_timeout_s == 300
-    assert cfg.iteration_timeout_s == 3600
+    assert cfg.inactivity_timeout_s == 600
+    assert cfg.iteration_timeout_s == 7200
+    assert cfg.max_iterations == 100
+    assert cfg.delegation_max_iterations == 100
+    assert cfg.max_delegation_depth == 4
+
+
+def test_model_config_defaults_after_cap_sweep() -> None:
+    """ModelConfig defaults after 2026-05-05 cap-doubling sweep:
+      - max_tokens: 32768 (8x the original 4096)
+      - temperature: 2.0 (was 1.0)
+
+    Lock the new defaults so nobody silently regresses them."""
+    from opencomputer.agent.config import ModelConfig
+
+    cfg = ModelConfig()
+    assert cfg.max_tokens == 32768
+    assert cfg.temperature == 2.0
+
+
+def test_cron_default_job_timeout_doubled() -> None:
+    """cron DEFAULT_JOB_TIMEOUT_S doubled 1200 → 2400 (2026-05-05).
+    DEFAULT_MAX_PARALLEL doubled 3 → 6 (2026-05-05)."""
+    from opencomputer.cron.scheduler import (
+        DEFAULT_JOB_TIMEOUT_S,
+        DEFAULT_MAX_PARALLEL,
+    )
+
+    assert DEFAULT_JOB_TIMEOUT_S == 2400
+    assert DEFAULT_MAX_PARALLEL == 6

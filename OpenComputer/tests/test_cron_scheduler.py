@@ -79,7 +79,8 @@ class TestTickLock:
 class TestMaxParallelEnvVar:
     def test_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("OPENCOMPUTER_CRON_MAX_PARALLEL", raising=False)
-        assert _max_parallel() == 3
+        # 2026-05-05 cap-doubling sweep: DEFAULT_MAX_PARALLEL 3 → 6.
+        assert _max_parallel() == 6
 
     def test_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("OPENCOMPUTER_CRON_MAX_PARALLEL", "1")

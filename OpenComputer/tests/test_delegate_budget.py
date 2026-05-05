@@ -20,10 +20,11 @@ from opencomputer.tools.delegate import DelegateTool
 from plugin_sdk.core import ToolCall
 
 
-def test_loop_config_delegation_max_iterations_defaults_to_50() -> None:
-    """LoopConfig.delegation_max_iterations exists and defaults to 50."""
+def test_loop_config_delegation_max_iterations_default() -> None:
+    """LoopConfig.delegation_max_iterations exists and defaults to 100
+    (post 2026-05-05 cap-doubling sweep; was 50)."""
     cfg = LoopConfig()
-    assert cfg.delegation_max_iterations == 50
+    assert cfg.delegation_max_iterations == 100
 
 
 def test_loop_config_delegation_max_iterations_is_customizable() -> None:

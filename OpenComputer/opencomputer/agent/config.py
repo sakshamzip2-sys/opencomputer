@@ -59,8 +59,21 @@ class ModelConfig:
 
     provider: str = "anthropic"  # maps to a provider plugin name
     model: str = "claude-opus-4-7"
-    max_tokens: int = 4096
-    temperature: float = 1.0
+    # Default per-turn output cap. Bumped 8x on 2026-05-05 in three
+    # steps (4096→8192→16384→32768) so even very long responses (full
+    # file rewrites, detailed multi-section plans, exhaustive analysis)
+    # don't truncate by default. Users who want even higher caps can
+    # override via config.yaml `model.max_tokens` or the turn-level
+    # `max_tokens_override` (max_tokens+tool_use retry path lifts to
+    # 64k cap on retry).
+    max_tokens: int = 32768
+    # Default sampling temperature. Set to 2.0 (2026-05-05) per user
+    # request — the maximum value most OpenAI-compatible providers
+    # accept. Note: Anthropic Claude clamps temperature to [0, 1] and
+    # will reject 2.0 with a 400; users on Claude should override via
+    # config.yaml `model.temperature: 1.0`. The trade-off is a more
+    # creative/varied response style at the cost of less determinism.
+    temperature: float = 2.0
     api_key_env: str = "ANTHROPIC_API_KEY"
     cheap_model: str | None = None
     # G.31 — smart model fallback routing. Ordered list of model ids to
@@ -141,12 +154,12 @@ class LoopConfig:
     catch one or the other.
     """
 
-    max_iterations: int = 50
+    max_iterations: int = 100  # 2026-05-05: doubled 50 → 100
     parallel_tools: bool = True
-    inactivity_timeout_s: int = 300
-    iteration_timeout_s: int = 3600  # 2026-05-04: doubled from 1800 → 1h
-    delegation_max_iterations: int = 50
-    max_delegation_depth: int = 2
+    inactivity_timeout_s: int = 600  # 2026-05-05: doubled 300 → 600 (10 min)
+    iteration_timeout_s: int = 7200  # 2026-05-05: doubled 3600 → 7200 (2h)
+    delegation_max_iterations: int = 100  # 2026-05-05: doubled 50 → 100
+    max_delegation_depth: int = 4  # 2026-05-05: doubled 2 → 4
     """Cap on `DelegateTool` recursion. 2 = parent (depth 0) → child (depth 1) → grandchild (depth 2) rejected.
     Mirrors Hermes `MAX_DEPTH = 2` from `sources/hermes-agent/tools/delegate_tool.py`."""
     context_engine: str = "compressor"
