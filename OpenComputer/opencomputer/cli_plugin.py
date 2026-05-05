@@ -98,12 +98,12 @@ def _load_source_manifest(src: Path) -> dict:
 
 @plugin_app.command("install")
 def install(
-    source: Path = typer.Argument(
+    source: str = typer.Argument(
         ...,
-        help="Path to the plugin directory (must contain plugin.json).",
-        exists=True,
-        file_okay=False,
-        resolve_path=True,
+        help=(
+            "Path to a local plugin directory, OR a slug to resolve via "
+            "the remote catalog (use with --remote)."
+        ),
     ),
     profile: str | None = typer.Option(
         None,
@@ -121,9 +121,41 @@ def install(
         "-f",
         help="Overwrite if a plugin with the same id already exists.",
     ),
+    remote: bool = typer.Option(
+        False,
+        "--remote",
+        help=(
+            "Treat SOURCE as a slug; resolve via the remote plugin catalog. "
+            "Catalog URL comes from OC_PLUGIN_CATALOG_URL or "
+            "config.yaml plugins.catalog_url."
+        ),
+    ),
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        help="Bypass the 24h catalog cache (only with --remote).",
+    ),
 ) -> None:
-    """Install a plugin directory into the profile or global location."""
-    manifest = _load_source_manifest(source)
+    """Install a plugin from a local directory or the remote catalog."""
+    if remote:
+        _install_from_remote(
+            slug=source,
+            profile=profile,
+            is_global=is_global,
+            force=force,
+            refresh=refresh,
+        )
+        return
+
+    src_path = Path(source).expanduser().resolve()
+    if not src_path.exists() or not src_path.is_dir():
+        _console.print(
+            f"[red]error:[/red] {src_path} does not exist or is not a directory. "
+            "Use --remote to install from the remote catalog by slug."
+        )
+        raise typer.Exit(code=1)
+
+    manifest = _load_source_manifest(src_path)
     plugin_id = manifest.get("id")
     if not plugin_id:
         _console.print("[red]error:[/red] plugin.json missing required 'id' field")
@@ -142,8 +174,72 @@ def install(
         shutil.rmtree(dest)
 
     dest_root.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, dest)
+    shutil.copytree(src_path, dest)
     _console.print(f"[green]installed:[/green] '{plugin_id}' → {dest}")
+
+
+def _install_from_remote(
+    *,
+    slug: str,
+    profile: str | None,
+    is_global: bool,
+    force: bool,
+    refresh: bool,
+) -> None:
+    """D.3 T1 — install a plugin slug via the remote catalog."""
+    from opencomputer.plugins.remote_install import (
+        CatalogError,
+        install_from_catalog,
+    )
+
+    dest_root = _resolve_destination_root(profile, is_global)
+
+    try:
+        result = install_from_catalog(
+            slug,
+            dest_root=dest_root,
+            refresh=refresh,
+            force=force,
+            trusted_keys=_load_trusted_catalog_keys(),
+        )
+    except CatalogError as e:
+        _console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=1) from None
+
+    _console.print(
+        f"[green]installed:[/green] '{result.plugin_id}' "
+        f"v{result.version} → {result.install_path}"
+    )
+
+
+def _load_trusted_catalog_keys() -> dict[str, bytes] | None:
+    """Read ``~/.opencomputer/trusted_catalog_keys.json`` if present.
+
+    Returns ``{fingerprint: pem_bytes}`` or None when no keys are
+    configured (signature verification is then advisory).
+    """
+    import json
+
+    try:
+        from opencomputer.agent.config import _home
+    except ImportError:  # pragma: no cover
+        return None
+
+    p = _home() / "trusted_catalog_keys.json"
+    if not p.exists():
+        return None
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    out: dict[str, bytes] = {}
+    for fp, entry in (raw or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        pem = entry.get("public_key_pem", "")
+        if isinstance(pem, str) and pem:
+            out[fp] = pem.encode("utf-8")
+    return out or None
 
 
 @plugin_app.command("uninstall")
