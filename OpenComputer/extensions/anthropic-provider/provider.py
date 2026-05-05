@@ -101,6 +101,11 @@ def _format_tools_for_anthropic(
         if _DROP_STRICT_FLAG_FROM_ANTHROPIC_TOOLS:
             formatted.pop("strict", None)
         out.append(formatted)
+    # Bug 4 (2026-05-05): sort by name so dynamic plugin/MCP discovery
+    # order doesn't shift the array between turns. The cache_control
+    # marker on the last user-tool then lands on the alphabetically-
+    # last tool every turn — stable byte prefix for the cache.
+    out.sort(key=lambda d: d.get("name", ""))
     return out
 
 
