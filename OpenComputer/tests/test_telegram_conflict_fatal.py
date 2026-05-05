@@ -64,13 +64,21 @@ async def test_fourth_conflict_triggers_fatal_non_retryable(
     # The loop exited (broke) — adapter is now fatally errored.
     assert a.has_fatal_error()
     assert a._fatal_error_code == "telegram-conflict"
-    assert a._fatal_error_retryable is False
+    # Retryable=True: surface as recoverable so the supervisor backs
+    # off the single adapter rather than crashing the whole gateway —
+    # crashing under launchd KeepAlive=true caused a restart-storm
+    # because the prior 60s long-poll session hadn't timed out yet.
+    assert a._fatal_error_retryable is True
     assert "another process is polling" in (a._fatal_error_message or "")
 
-    # Three 10-second sleeps preceded the fatal break (the 4th 409 was
-    # not slept on — it tripped the cap and broke the loop).
-    assert sleeps == [10, 10, 10]
-    assert a._client.get.await_count == 4
+    # Six 15-second sleeps preceded the fatal break (the 7th 409 was
+    # not slept on — it tripped the cap and broke the loop). Sleep is
+    # 15s (was 10s) and cap is 6 (was 3) so the total budget (90s)
+    # outlasts Telegram's 60s long-poll TTL — prevents the launchd
+    # KeepAlive=true death spiral that fired before the prior poll
+    # session had timed out.
+    assert sleeps == [15, 15, 15, 15, 15, 15]
+    assert a._client.get.await_count == 7
 
 
 @pytest.mark.asyncio

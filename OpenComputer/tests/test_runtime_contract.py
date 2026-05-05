@@ -80,6 +80,13 @@ def _candidate(
         kind=kind,  # type: ignore[arg-type]
         entry=entry,
         tool_names=tool_names,
+        # The contract-violation warning only fires for plugins whose
+        # manifest claims enabled_by_default — opt-in/conditional
+        # plugins (channels waiting on env vars, etc.) legitimately
+        # register nothing on a clean load. The PR-477 doctor cleanup
+        # demoted those to debug. These tests want the WARN path, so
+        # set the flag explicitly.
+        enabled_by_default=True,
     )
     return PluginCandidate(
         manifest=manifest,
@@ -115,6 +122,55 @@ def test_provider_kind_without_any_provider_emits_warning(
         "prov-empty" in m and "provider" in m and "registered no" in m
         for m in msgs
     ), f"expected contract-violation warning; got: {msgs}"
+
+
+def test_inert_optin_plugin_does_not_emit_contract_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``enabled_by_default=False`` + plugin registers nothing → no WARN.
+
+    Pins the PR-477 doctor cleanup: opt-in / conditional plugins
+    (channel adapters waiting for env vars, observability bridges,
+    etc.) legitimately register nothing on a clean load. The
+    contract-violation warning would be noise in those cases — it's
+    demoted to debug. Bundled drift-guard tests still run with
+    explicit fixtures, so this doesn't hide real schema bugs.
+    """
+    root = tmp_path / "inert-channel"
+    _write_entry(
+        root,
+        "entry_mod",
+        "def register(api):\n    pass\n",
+    )
+    manifest = PluginManifest(
+        id="inert-channel",
+        name="inert-channel",
+        version="0.0.1",
+        kind="channel",
+        entry="entry_mod",
+        enabled_by_default=False,
+    )
+    cand = PluginCandidate(
+        manifest=manifest,
+        root_dir=root,
+        manifest_path=root / "plugin.json",
+    )
+
+    caplog.set_level(logging.DEBUG, logger="opencomputer.plugins.loader")
+    loaded = load_plugin(cand, _isolated_api(tmp_path))
+
+    assert loaded is not None
+    warns = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert not any("registered no" in m for m in warns), (
+        f"expected NO contract-violation warning for inert opt-in plugin; "
+        f"got warnings: {warns}"
+    )
+    # Confirm the demoted DEBUG line did fire — proves the heuristic
+    # actually ran (vs being silently skipped).
+    debug_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("inert-channel" in m and "conditional/inert" in m for m in debug_msgs), (
+        f"expected DEBUG-level demotion message; got debug lines: {debug_msgs}"
+    )
 
 
 def test_provider_kind_with_one_provider_registered_no_warning(

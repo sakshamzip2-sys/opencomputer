@@ -101,12 +101,35 @@ def _resolve_profile_home() -> Path:
 
 
 def _open_sessions_db(profile_home: Path) -> sqlite3.Connection | None:
-    candidates = [profile_home / "sessions.db", Path.home() / ".opencomputer" / "sessions.db"]
+    """Find a sessions.db with the expected schema.
+
+    Tries the profile-local path first, then the legacy single-DB
+    location at ``~/.opencomputer/sessions.db``. A candidate is
+    accepted only if it contains the ``messages`` table — empty DB
+    files (created by other tools or earlier broken init paths)
+    are skipped.
+    """
+    candidates = [
+        profile_home / "sessions.db",
+        Path.home() / ".opencomputer" / "sessions.db",
+    ]
+    seen: set[Path] = set()
     for path in candidates:
-        if path.is_file():
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        try:
             conn = sqlite3.connect(str(path))
             conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
+            ).fetchone()
+            if row is None:
+                conn.close()
+                continue
             return conn
+        except sqlite3.Error:
+            continue
     return None
 
 
