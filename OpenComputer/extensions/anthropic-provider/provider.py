@@ -1103,19 +1103,33 @@ class AnthropicProvider(BaseProvider):
             base_system = system
 
         # Build the system content list (base + optional injection).
+        # Audit BLOCKER 2 (post-PR review): when base is empty and only
+        # injection is present, ``apply_full_cache_control`` would mark
+        # the injection (the legacy single-block path stamps content[-1]).
+        # Each turn the injection bytes change → cache write with no
+        # corresponding read → 25% surcharge for nothing. Use a 2-element
+        # list with an empty placeholder base so the multi-block dispatch
+        # marks index 0 (the empty string, server-side ineligible by
+        # threshold filter) instead of the volatile injection at index 1.
+        # When threshold gating short-circuits the empty marker, we get
+        # zero waste; when it doesn't, the marker lands on stable empty
+        # bytes which is also benign.
         sys_blocks: list[dict[str, Any]] = []
         if base_system:
             sys_blocks.append({"type": "text", "text": base_system})
         if injected_system:
-            # When base is present the injection gets a leading "\n\n"
-            # so it visually separates from the base in the rendered
-            # prompt. When base is empty the injection is the entire
-            # content; no leading separator.
             sep = "\n\n" if base_system else ""
             sys_blocks.append({"type": "text", "text": sep + injected_system})
 
         unified: list[dict[str, Any]] = []
-        if sys_blocks:
+        # When the only content is a volatile injection (no frozen base),
+        # skip the system block entirely and pass the injection via the
+        # legacy ``system`` SDK path (no marker). This avoids stamping a
+        # cache_control on volatile bytes that can never produce a hit.
+        skip_system_marker_pass_through = (
+            not base_system and injected_system
+        )
+        if sys_blocks and not skip_system_marker_pass_through:
             unified.append({"role": "system", "content": sys_blocks})
         unified.extend(anthropic_messages)
 
@@ -1145,6 +1159,14 @@ class AnthropicProvider(BaseProvider):
                 )
             )
             messages_for_sdk = cached[1:]
+        elif skip_system_marker_pass_through:
+            # Audit BLOCKER 2 (post-PR review): injection-only path. Send
+            # the injection as a single text block with NO cache_control
+            # marker. Frees the breakpoint slot for the messages tail and
+            # avoids burning a 25%-surcharge cache write on volatile bytes
+            # that can never produce a hit.
+            sys_for_sdk = [{"type": "text", "text": injected_system}]
+            messages_for_sdk = cached
         else:
             sys_for_sdk = ""
             messages_for_sdk = cached

@@ -135,9 +135,15 @@ SKILL_TOOL_NAME = "Skill"
 
 
 #: Cache of provider-method signatures so we don't re-introspect on
-#: every turn. Keyed by ``id(method)`` since ``inspect.signature`` is
-#: relatively cheap but still adds up over thousands of turns.
-_PROVIDER_SIG_CACHE: dict[int, frozenset[str]] = {}
+#: every turn. Keyed by ``(class_qualname, method_name)`` (stable across
+#: bound-method ``id`` churn) and bounded at 64 entries to prevent any
+#: long-running daemon from leaking memory through the cache.
+#: Audit BLOCKER 3 (post-PR review): keying by ``id(method)`` was wrong
+#: because bound methods get a fresh ``id`` per attribute access; the
+#: cache leaked unboundedly AND ``id`` reuse after GC could return stale
+#: signatures from an entirely different method.
+_PROVIDER_SIG_CACHE: dict[tuple[str, str], frozenset[str]] = {}
+_PROVIDER_SIG_CACHE_MAX = 64
 
 
 def _maybe_split_system_kwargs(
@@ -154,13 +160,23 @@ def _maybe_split_system_kwargs(
     ``BaseProvider.complete``/``stream_complete``. Stub providers in
     tests and 3rd-party plugins that haven't adopted the new signature
     would otherwise raise ``TypeError``. This helper introspects the
-    target method once (cached) and only passes kwargs the method
-    actually accepts. Non-Anthropic providers that ignore the kwargs
-    just don't see them.
+    target method once (cached by class+name) and only passes kwargs
+    the method actually accepts.
     """
     import inspect as _inspect
+    import logging as _logging
 
-    cache_key = id(method)
+    # Stable key: ``(class_qualname, method_name)`` survives bound-method
+    # id churn. Falls back to ``("unknown", repr(method))`` for anything
+    # that isn't an attribute of a class (functools.partial, lambdas).
+    self_obj = getattr(method, "__self__", None)
+    func_name = getattr(method, "__name__", "")
+    if self_obj is not None and func_name:
+        cls = type(self_obj)
+        cache_key = (f"{cls.__module__}.{cls.__qualname__}", func_name)
+    else:
+        cache_key = ("unknown", repr(method))
+
     accepted = _PROVIDER_SIG_CACHE.get(cache_key)
     if accepted is None:
         try:
@@ -173,10 +189,23 @@ def _maybe_split_system_kwargs(
                 for p in sig.parameters.values()
             ):
                 accepted = frozenset(
-                    list(accepted) + ["base_system", "injected_system", "session_id"]
+                    list(accepted)
+                    + ["base_system", "injected_system", "session_id"]
                 )
         except (ValueError, TypeError):
+            # Rare — typically C-implemented callables. Log so a silently
+            # broken provider surfaces in logs rather than dropping
+            # session_id forever.
+            _logging.getLogger(__name__).warning(
+                "inspect.signature failed for %r; split-system kwargs "
+                "will not be forwarded for this provider.",
+                cache_key,
+            )
             accepted = frozenset()
+        # Bound size — drop oldest insertion order (Python 3.7+ dict
+        # iteration is insertion-ordered).
+        if len(_PROVIDER_SIG_CACHE) >= _PROVIDER_SIG_CACHE_MAX:
+            _PROVIDER_SIG_CACHE.pop(next(iter(_PROVIDER_SIG_CACHE)))
         _PROVIDER_SIG_CACHE[cache_key] = accepted
 
     out: dict[str, Any] = {}
@@ -1104,6 +1133,17 @@ class AgentLoop:
         # prefix matches turn-to-turn regardless of injection volatility.
         # The concatenated form is preserved as ``system`` for legacy
         # providers / call sites that only know about a single string.
+        #
+        # ``injected_volatile`` accumulates ALL per-turn content that
+        # gets appended below (memory prefetch, active memory, channel
+        # prompt, channel skill bodies). It joins the injection-engine
+        # output and is what we pass as ``injected_system`` to the
+        # provider — so split-aware providers see ALL the volatile
+        # content as un-marked tail, not just the engine compose result.
+        # Audit BLOCKER 1 (post-PR review): without this, prefetched +
+        # channel content that gets appended to ``system`` below was
+        # being silently dropped by Anthropic's split-system path.
+        injected_volatile = injected or ""
         system = base_system + ("\n\n" + injected if injected else "")
 
         # Append user message + persist. ``images`` (TUI image-paste) is
@@ -1147,7 +1187,11 @@ class AgentLoop:
             runtime=self._runtime,
         )
         if prefetched:
-            system = system + "\n\n## Relevant memory\n\n" + prefetched
+            block = "## Relevant memory\n\n" + prefetched
+            system = system + "\n\n" + block
+            injected_volatile = (
+                injected_volatile + "\n\n" + block if injected_volatile else block
+            )
 
         # OpenClaw 1.B-alt — local-FTS5 proactive recall prepend.
         # Composes with Honcho prefetch above; gated by config flag (default OFF).
@@ -1166,7 +1210,13 @@ class AgentLoop:
                 ),
             ).recall_block(user_message)
             if am_block:
-                system = system + "\n\n## Active memory\n\n" + am_block
+                block = "## Active memory\n\n" + am_block
+                system = system + "\n\n" + block
+                injected_volatile = (
+                    injected_volatile + "\n\n" + block
+                    if injected_volatile
+                    else block
+                )
 
         # Hermes channel-port (PR 5): per-channel ephemeral system
         # prompt + auto-loaded skills, threaded in via
@@ -1178,8 +1228,10 @@ class AgentLoop:
         # pre-PR-5 prompt.
         channel_prompt = self._runtime.custom.get("channel_prompt")
         if isinstance(channel_prompt, str) and channel_prompt.strip():
-            system = (
-                system + "\n\n## Channel prompt\n\n" + channel_prompt.strip()
+            block = "## Channel prompt\n\n" + channel_prompt.strip()
+            system = system + "\n\n" + block
+            injected_volatile = (
+                injected_volatile + "\n\n" + block if injected_volatile else block
             )
         channel_skill_bodies = self._runtime.custom.get("channel_skill_bodies")
         if channel_skill_bodies:
@@ -1196,10 +1248,12 @@ class AgentLoop:
                 elif isinstance(entry, str) and entry.strip():
                     blocks.append(entry)
             if blocks:
-                system = (
-                    system
-                    + "\n\n## Channel skills (auto-loaded)\n\n"
-                    + "\n\n".join(blocks)
+                block = "## Channel skills (auto-loaded)\n\n" + "\n\n".join(blocks)
+                system = system + "\n\n" + block
+                injected_volatile = (
+                    injected_volatile + "\n\n" + block
+                    if injected_volatile
+                    else block
                 )
 
         total_input = 0
@@ -1438,7 +1492,7 @@ class AgentLoop:
                     messages=messages,
                     system=system,
                     base_system=base_system,
-                    injected_system=injected,
+                    injected_system=injected_volatile,
                     stream_callback=stream_callback,
                     thinking_callback=thinking_callback,
                     model=model_for_turn,

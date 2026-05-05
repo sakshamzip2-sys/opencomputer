@@ -231,8 +231,15 @@ def test_apply_cache_control_no_injection_keeps_single_block(monkeypatch) -> Non
 
 
 def test_apply_cache_control_empty_base_with_injection(monkeypatch) -> None:
-    """Edge: base_system == "" but injected_system != "" — render only injection,
-    no marker (empty base means no stable prefix worth caching)."""
+    """Audit BLOCKER 2 (post-PR review): when only injection is present
+    (no frozen base), the volatile injection bytes must NOT receive a
+    cache_control marker. Marking volatile bytes burns a 25%-surcharge
+    cache write with zero hit potential.
+
+    The provider takes the injection-only path: passes the injection as
+    a single text block via SDK ``system=`` with NO marker, freeing the
+    breakpoint slot for the messages tail.
+    """
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     mod = _load_provider_module()
@@ -244,13 +251,8 @@ def test_apply_cache_control_empty_base_with_injection(monkeypatch) -> None:
         injected_system="just an injection",
         model="claude-opus-4-7",
     )
-    # Single-block list with the injection text.
     assert isinstance(sys_for_sdk, list)
     assert len(sys_for_sdk) == 1
     assert sys_for_sdk[0]["text"] == "just an injection"
-    # Marker is applied even on a single-block path because the
-    # apply_full_cache_control system-handling treats a single-block
-    # system content as legacy-marker-eligible. That's fine — the
-    # whole content is the only content, and treating it as cacheable
-    # is a sound default. Test asserts the shape (list/text), not
-    # whether the marker is present.
+    # The regression-lock: NO cache_control on the volatile injection.
+    assert "cache_control" not in sys_for_sdk[0]
