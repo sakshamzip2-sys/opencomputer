@@ -49,6 +49,13 @@ plugin_app = typer.Typer(
 )
 _console = Console()
 
+catalog_app = typer.Typer(
+    name="catalog",
+    help="Sign + verify the remote plugin catalog (Ed25519). D.3 T3.",
+    no_args_is_help=True,
+)
+plugin_app.add_typer(catalog_app, name="catalog")
+
 
 def _resolve_destination_root(profile: str | None, is_global: bool) -> Path:
     """Where does the install go? Based on --profile vs --global flags.
@@ -952,6 +959,150 @@ def plugin_inspect(plugin_id: str) -> None:
         for d in shape.drift:
             _console.print(f"  - {d}")
         raise typer.Exit(code=1)
+
+
+# ─── catalog sign / verify / keygen (D.3 T3) ──────────────────────────
+
+
+@catalog_app.command("keygen")
+def catalog_keygen(
+    out_dir: Path = typer.Option(
+        Path.cwd(),
+        "--out",
+        help="Directory to write catalog-signing.{key,pub} into.",
+    ),
+    name: str = typer.Option(
+        "catalog-signing",
+        "--name",
+        help="Filename prefix for the keypair (suffixes are .key + .pub).",
+    ),
+) -> None:
+    """Generate a fresh Ed25519 keypair for catalog signing.
+
+    Writes ``<name>.key`` (private, mode 0600) and ``<name>.pub`` (public).
+    The fingerprint is printed for adding to ``trusted_catalog_keys.json``.
+    """
+    from opencomputer.plugins.catalog_signing import generate_keypair
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    keypair = generate_keypair()
+    key_path = out_dir / f"{name}.key"
+    pub_path = out_dir / f"{name}.pub"
+    key_path.write_bytes(keypair.private_pem)
+    try:
+        key_path.chmod(0o600)
+    except OSError:
+        pass
+    pub_path.write_bytes(keypair.public_pem)
+    _console.print(f"[green]private key:[/green] {key_path}")
+    _console.print(f"[green]public key:[/green]  {pub_path}")
+    _console.print(f"[green]fingerprint:[/green] {keypair.fingerprint}")
+
+
+@catalog_app.command("sign")
+def catalog_sign(
+    catalog: Path = typer.Argument(
+        ..., help="Path to the unsigned catalog JSON file."
+    ),
+    key: Path = typer.Option(..., "--key", help="Path to PEM private key."),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Output path for signed catalog. Defaults to overwriting input.",
+    ),
+) -> None:
+    """Sign a catalog JSON with the given Ed25519 private key (in-place by default)."""
+    import json as _json
+
+    from opencomputer.plugins.catalog_signing import sign_catalog
+
+    if not catalog.exists():
+        _console.print(f"[red]error:[/red] {catalog} not found")
+        raise typer.Exit(code=1)
+    if not key.exists():
+        _console.print(f"[red]error:[/red] {key} not found")
+        raise typer.Exit(code=1)
+
+    body = _json.loads(catalog.read_text(encoding="utf-8"))
+    pem = key.read_bytes()
+    try:
+        signed = sign_catalog(body, pem)
+    except Exception as e:  # noqa: BLE001
+        _console.print(f"[red]error:[/red] signing failed: {e}")
+        raise typer.Exit(code=1) from None
+
+    out = output or catalog
+    out.write_text(
+        _json.dumps(signed.catalog, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    _console.print(f"[green]signed:[/green] {out}")
+    _console.print(f"[green]fingerprint:[/green] {signed.fingerprint}")
+
+
+@catalog_app.command("verify")
+def catalog_verify(
+    catalog: Path = typer.Argument(..., help="Path to the catalog JSON file."),
+    trusted_keys_path: Path | None = typer.Option(
+        None,
+        "--trusted-keys",
+        help="Override path to trusted_catalog_keys.json. "
+        "Defaults to ~/.opencomputer/trusted_catalog_keys.json.",
+    ),
+) -> None:
+    """Verify a catalog's Ed25519 signature against trusted keys.
+
+    Exit codes: 0 ok, 1 anything else (untrusted, tampered, missing).
+    """
+    import json as _json
+
+    from opencomputer.plugins.catalog_signing import VerifyResult, verify_catalog
+
+    if not catalog.exists():
+        _console.print(f"[red]error:[/red] {catalog} not found")
+        raise typer.Exit(code=1)
+
+    keys_path = trusted_keys_path or (_load_trusted_keys_path())
+    trusted = _read_trusted_keys(keys_path)
+    if not trusted:
+        _console.print(
+            f"[yellow]warn:[/yellow] no trusted keys at {keys_path} — "
+            "signature verification cannot proceed."
+        )
+        raise typer.Exit(code=1)
+
+    body = _json.loads(catalog.read_text(encoding="utf-8"))
+    result = verify_catalog(body, trusted)
+
+    if result is VerifyResult.OK:
+        _console.print(f"[green]verified:[/green] {catalog}")
+        return
+    _console.print(f"[red]verify failed:[/red] {result.name}")
+    raise typer.Exit(code=1)
+
+
+def _load_trusted_keys_path() -> Path:
+    from opencomputer.agent.config import _home
+    return _home() / "trusted_catalog_keys.json"
+
+
+def _read_trusted_keys(path: Path) -> dict[str, bytes]:
+    import json as _json
+
+    if not path.exists():
+        return {}
+    try:
+        raw = _json.loads(path.read_text(encoding="utf-8")) or {}
+    except (_json.JSONDecodeError, OSError):
+        return {}
+    out: dict[str, bytes] = {}
+    for fp, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        pem = entry.get("public_key_pem", "")
+        if isinstance(pem, str) and pem:
+            out[fp] = pem.encode("utf-8")
+    return out
 
 
 __all__ = ["plugin_app"]
