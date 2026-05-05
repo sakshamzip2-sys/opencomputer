@@ -615,6 +615,26 @@ Promoted from a sub-bullet of Phase 9 to its own milestone — without this, the
 - [x] 268/268 affected-file tests green; 1 documented skip; extension boundary clean
 - [x] CLI smoke test confirms `oc traces enable && oc traces status` round-trips correctly
 
+### Phase 9.A.1 — Dogfood ergonomics (1-2 hours) — COMPLETE 2026-05-06
+
+Pre-emptive fixes for the things that would bite during the "use it locally for a few days" plan, before they bit. Promoted from the post-9.A "missing" list:
+
+- [x] **Subscriber concurrency cap** — `_run_pipeline` body now sits behind an `asyncio.Semaphore(_MAX_CONCURRENT_PIPELINES=2)`. A burst of session_end events serializes at the semaphore instead of fanning out into 4×N concurrent Haiku calls. Lazy-constructed on first use so it binds to the loop that actually dispatches events
+- [x] `identity.rotate_agent_id(profile_home)` — force-regenerates the submitter_hash, returns `(old_id, new_id)` so callers can echo before/after. Existing `get_or_create_agent_id` is a no-op when the file is present, so rotation needs its own entrypoint
+- [x] `oc traces rotate-id` CLI verb — confirms before clobbering an existing id (`--yes`/`-y` skips); echoes truncated old + new
+- [x] `oc traces dry-run <session_id> [--no-llm]` — runs the distill pipeline against an existing session, prints the resulting TraceCard JSON, never submits. `--no-llm` stays in the structural path (transcript fetch + redaction sweep + summary stats), incurs no provider cost. Lets you eyeball "what would my redactor produce on this real session" before turning emission on
+- [x] `oc traces audit-redactor [--limit N] [--output PATH]` — sweeps the most-recent N sessions through the redactor, writes a before/after diff report file (default: `<profile_home>/traces/audit-<timestamp>.txt`). Output may contain raw user content; defaults to a profile-local file rather than stdout so it doesn't accidentally land in a chat paste-buffer
+- [x] `oc traces status` extended — surfaces the in-process subscriber wiring (`subscriber: wired (provider=...)` vs `subscriber: not wired in this process`) plus the configured-provider field from `config.yaml`. Catches "I enabled traces but my config has no provider" before the user wonders why nothing's emitted
+- [x] 12 new tests in `tests/test_social_traces_dogfood_fixes.py`:
+  - `rotate_agent_id` creates / replaces / round-trips with `get_or_create_agent_id`
+  - CLI `rotate-id` creates, replaces, aborts on no-confirm
+  - CLI `status` shows subscriber-not-wired when called outside a long-lived process
+  - CLI `dry-run --no-llm` reports redactions on a seeded session, handles missing session
+  - CLI `audit-redactor` writes a before/after report file with the redacted PII inline
+  - Subscriber semaphore: blocks past 2 concurrent pipelines (5 launched → peak ≤ 2)
+  - `_run_pipeline` direct-call still works (back-compat for prior phase tests)
+- [x] 280/280 affected-file tests green; 1 documented skip
+
 ### Phase 9.B — HTTP client + outbox (deferred to post-OpenHub)
 
 These tasks land AFTER the OpenHub MVP exists (we need a real network endpoint to talk to):

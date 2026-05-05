@@ -58,4 +58,32 @@ def get_or_create_agent_id(profile_home: Path) -> str:
     return agent_id
 
 
-__all__ = ["AGENT_ID_BYTES", "AGENT_ID_FILENAME", "agent_id_path", "get_or_create_agent_id"]
+def rotate_agent_id(profile_home: Path) -> tuple[str, str]:
+    """Force-regenerate the profile's submitter_hash.
+
+    Returns ``(old_id, new_id)``. ``old_id`` is empty if no prior id
+    existed. Used by ``oc traces rotate-id`` so the operator can
+    intentionally start fresh on the network without manually deleting
+    files. The network-side effect is that future submissions will
+    appear to come from a new agent — past submissions remain attributed
+    to the old id.
+    """
+    path = agent_id_path(profile_home)
+    try:
+        old_id = path.read_text(encoding="utf-8").strip()
+    except (OSError, FileNotFoundError):
+        old_id = ""
+
+    new_id = secrets.token_hex(AGENT_ID_BYTES)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_id + "\n", encoding="utf-8")
+    return old_id, new_id
+
+
+__all__ = [
+    "AGENT_ID_BYTES",
+    "AGENT_ID_FILENAME",
+    "agent_id_path",
+    "get_or_create_agent_id",
+    "rotate_agent_id",
+]

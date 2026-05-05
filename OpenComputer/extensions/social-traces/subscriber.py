@@ -58,6 +58,7 @@ events.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -85,6 +86,14 @@ _MIN_TURN_COUNT = 2
 #: Minimum wall-clock duration (seconds). Filters out cancellations,
 #: tool guard aborts, and other near-instant exits.
 _MIN_DURATION_S = 3.0
+
+#: Maximum number of distill pipelines that can be in-flight at once
+#: per subscriber. Caps the cost-spike when many sessions end in rapid
+#: succession (e.g. gateway burst). Each pipeline can fire up to four
+#: Haiku calls (1 novelty + 3 distill), so 2 in flight = 8 max
+#: concurrent provider calls — comfortable under typical Anthropic
+#: rate limits while still letting a real workload progress.
+_MAX_CONCURRENT_PIPELINES = 2
 
 
 def is_session_worth_distilling(event: SessionEndEvent) -> bool:
@@ -163,6 +172,13 @@ class TraceEmissionSubscriber:
         self._sensitive_filter = sensitive_filter
         self._harness_version = harness_version
         self._subscription: Any = None
+        # Backpressure: bounds in-flight pipelines so a session burst
+        # doesn't fan out into an unbounded swarm of LLM calls. The
+        # semaphore is created lazily on first acquire because
+        # asyncio.Semaphore() in __init__ would bind to whatever loop
+        # happens to be running at construction time (often "no loop"
+        # in tests), and the bus may dispatch on a different one.
+        self._pipeline_sem: asyncio.Semaphore | None = None
 
     # ─── lifecycle ─────────────────────────────────────────────────
 
@@ -219,6 +235,18 @@ class TraceEmissionSubscriber:
 
     # ─── the pipeline ──────────────────────────────────────────────
 
+    def _get_pipeline_semaphore(self) -> asyncio.Semaphore:
+        """Lazily construct the in-flight semaphore on the running loop.
+
+        Created on first use (not in ``__init__``) so the semaphore
+        binds to the loop that actually dispatches events, not the
+        loop that happened to be running at subscriber construction
+        time.
+        """
+        if self._pipeline_sem is None:
+            self._pipeline_sem = asyncio.Semaphore(_MAX_CONCURRENT_PIPELINES)
+        return self._pipeline_sem
+
     async def _run_pipeline(
         self, event: SessionEndEvent, profile_home: Path
     ) -> None:
@@ -228,8 +256,20 @@ class TraceEmissionSubscriber:
         short-circuits. The bridge entry is ALWAYS popped at the end
         so a daemon doesn't accumulate state for sessions whose
         pipeline crashed mid-flight.
+
+        Bounded by :attr:`_pipeline_sem` so a burst of session_end
+        events doesn't fan out into unbounded concurrent LLM calls.
+        Excess pipelines wait at the semaphore — they still execute,
+        just serialized.
         """
         session_id = event.session_id
+        sem = self._get_pipeline_semaphore()
+        async with sem:
+            await self._run_pipeline_body(event, profile_home, session_id)
+
+    async def _run_pipeline_body(
+        self, event: SessionEndEvent, profile_home: Path, session_id: str
+    ) -> None:
         try:
             # ── Read + clear the bridge ─────────────────────────────
             entry = session_state.pop_session(session_id)

@@ -241,11 +241,15 @@ def disable() -> None:
 
 @app.command("status")
 def status() -> None:
-    """Show aggregate-only state.
+    """Show aggregate-only state + wiring diagnostics.
 
     Privacy contract: this output never includes specific session ids,
     intents, distilled insights, or anything that could leak user
     content. Only aggregate state appears.
+
+    The "wired" line answers "would `opencomputer chat` actually emit
+    traces right now?" — if false, enabling the feature was incomplete
+    and you'll get pre-task lookup but no post-task submissions.
     """
     _ensure_alias()
     from extensions.social_traces.identity import agent_id_path
@@ -282,6 +286,418 @@ def status() -> None:
         typer.echo(f"tracked sessions: {tracked_session_count()}")
     except Exception:  # noqa: BLE001 — diagnostic only, never fail the status
         pass
+
+    # Subscriber-wired diagnostic: tells the operator whether the
+    # current process actually has the LLM pipeline plumbed. CLI
+    # status calls run in their own ephemeral process, so a `not
+    # wired` here means "no recent gateway/chat process was
+    # running" — NOT a configuration bug. Documented expectation.
+    try:
+        from extensions.social_traces.plugin import get_active_subscriber
+
+        sub = get_active_subscriber()
+        if sub is None:
+            typer.echo(
+                "subscriber: not wired in this process "
+                "(post-task emit only fires while `opencomputer chat` or "
+                "`opencomputer gateway` is running)"
+            )
+        else:
+            provider_name = type(sub._provider).__name__ if sub._provider else "<none>"
+            typer.echo(f"subscriber: wired (provider={provider_name})")
+    except Exception:  # noqa: BLE001 — diagnostic only
+        pass
+
+    # Configured-provider check: catches "I enabled traces but my
+    # config has no provider section" before the user wonders why
+    # nothing is being emitted.
+    try:
+        from opencomputer.agent.config_store import load_config
+
+        cfg = load_config(profile_home / "config.yaml")
+        configured = cfg.model.provider if cfg.model else None
+        typer.echo(
+            f"configured provider: {configured or '<unset — emit pipeline will degrade>'}"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# ── ``traces rotate-id`` ──────────────────────────────────────────────────
+
+
+@app.command("rotate-id")
+def rotate_id(
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt.",
+    ),
+) -> None:
+    """Force-regenerate this profile's submitter_hash.
+
+    Future submissions will appear to come from a new agent — past
+    submissions remain attributed to the old id (the network has no
+    way to retroactively re-key). Use this if you want to start fresh
+    on the network without bringing along whatever reputation
+    (positive or negative) the old id has accumulated.
+
+    Equivalent to ``rm <profile_home>/traces/agent_id`` followed by
+    the next pipeline call regenerating it, but ergonomic and
+    confirmable.
+    """
+    _ensure_alias()
+    from extensions.social_traces.identity import agent_id_path, rotate_agent_id
+
+    profile_home = _profile_home()
+    path = agent_id_path(profile_home)
+    if path.exists() and not yes:
+        typer.echo(
+            f"This will replace the agent_id at {path} with a new random "
+            "value. The network will treat future submissions as a new "
+            "agent."
+        )
+        if not typer.confirm("Rotate?", default=False):
+            typer.echo("aborted.")
+            raise typer.Exit(code=1)
+
+    old_id, new_id = rotate_agent_id(profile_home)
+    if old_id:
+        typer.echo(f"rotated. old: {old_id[:8]}…  new: {new_id[:8]}…")
+    else:
+        typer.echo(f"generated new agent_id: {new_id[:8]}…")
+
+
+# ── ``traces dry-run`` ────────────────────────────────────────────────────
+
+
+@app.command("dry-run")
+def dry_run(
+    session_id: str = typer.Argument(
+        ..., help="Session id to distill (see `opencomputer sessions list`)."
+    ),
+    no_llm: bool = typer.Option(
+        False,
+        "--no-llm",
+        help="Skip provider calls — only show pipeline structure (gates, "
+        "transcript length, redaction sweep). No cost incurred.",
+    ),
+) -> None:
+    """Run the distill pipeline for one session and print the result
+    without submitting to the network.
+
+    Useful before enabling traces for the first time: pick a known
+    session, see what the redactor + distiller would produce, and
+    decide whether you trust the redaction layer with your real data.
+
+    With ``--no-llm`` only the pre-LLM stages (transcript fetch +
+    redaction sweep) run, and we print before/after sample. With LLM
+    you'll incur ~3-4 Haiku calls (~$0.005-0.02 typical) but get the
+    actual TraceCard JSON the subscriber would have submitted.
+
+    Never writes to the outbox. Never calls ``client.submit()``.
+    """
+    import asyncio
+    import json as _json
+
+    _ensure_alias()
+
+    profile_home = _profile_home()
+
+    if no_llm:
+        _dry_run_no_llm(profile_home, session_id)
+        return
+
+    # Real LLM path. Resolve provider + cost_guard the same way
+    # ``opencomputer chat`` does so we exercise the production wiring.
+    try:
+        from opencomputer.agent.config_store import load_config
+        from opencomputer.cost_guard import get_default_guard
+        from opencomputer.plugins.registry import registry as _reg
+    except ImportError as exc:  # noqa: BLE001
+        typer.echo(f"error: cannot import OC core ({exc})", err=True)
+        raise typer.Exit(code=1) from None
+
+    cfg = load_config(profile_home / "config.yaml")
+    if not cfg.model or not cfg.model.provider:
+        typer.echo(
+            "error: no provider configured in config.yaml — set model.provider "
+            "or run with --no-llm to skip the LLM path.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        provider_factory = _reg.get_provider(cfg.model.provider)
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(
+            f"error: provider {cfg.model.provider!r} not registered ({exc})",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+    provider = provider_factory(cfg.model)
+
+    from extensions.social_traces import distiller as st_distiller
+    from extensions.social_traces.config import from_config_dict
+    from extensions.social_traces.identity import get_or_create_agent_id
+
+    raw = {}
+    try:
+        import yaml as _yaml
+
+        cfg_path = profile_home / "config.yaml"
+        if cfg_path.exists():
+            raw = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        pass
+    st_cfg = from_config_dict(raw.get("social_traces", {}))
+
+    submitter_hash = get_or_create_agent_id(profile_home)
+    cost_guard = get_default_guard()
+
+    typer.echo(f"dry-run: session={session_id}")
+    typer.echo(f"  provider: {type(provider).__name__}")
+    typer.echo(
+        f"  redact_paths={st_cfg.privacy.redact_paths} "
+        f"redact_hostnames={st_cfg.privacy.redact_hostnames}"
+    )
+    typer.echo("  running distiller (this incurs Haiku cost)…")
+
+    try:
+        proposal = asyncio.run(
+            st_distiller.distill_session(
+                session_id=session_id,
+                profile_home=profile_home,
+                submitter_hash=submitter_hash,
+                provider=provider,
+                cost_guard=cost_guard,
+                redact_paths_layer=st_cfg.privacy.redact_paths,
+                redact_hostnames_layer=st_cfg.privacy.redact_hostnames,
+                sensitive_filter=None,
+                harness_version="dry-run",
+                outcome="success",
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"distiller raised: {exc!r}", err=True)
+        raise typer.Exit(code=1) from None
+
+    if proposal is None:
+        typer.echo(
+            "result: distiller returned None (session filtered out, no user "
+            "message, validation failed, or sensitive_filter collapsed it)"
+        )
+        return
+
+    from extensions.social_traces.client.local_file import trace_card_to_dict
+
+    typer.echo("---")
+    typer.echo(_json.dumps(trace_card_to_dict(proposal), indent=2))
+    typer.echo("---")
+    typer.echo("(not submitted — dry-run)")
+
+
+def _dry_run_no_llm(profile_home: Path, session_id: str) -> None:
+    """Structure-only dry run: fetch transcript, run redactor, print
+    summary. No provider calls, no cost."""
+    try:
+        from opencomputer.agent.state import SessionDB
+    except ImportError as exc:  # noqa: BLE001
+        typer.echo(f"error: cannot import SessionDB ({exc})", err=True)
+        raise typer.Exit(code=1) from None
+
+    db = SessionDB(profile_home / "sessions.db")
+    try:
+        messages = db.get_messages(session_id)
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"error: cannot read session {session_id!r}: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+
+    if not messages:
+        typer.echo(f"session {session_id} has no messages.")
+        return
+
+    from extensions.social_traces.config import from_config_dict
+    from extensions.social_traces.redactor import is_useful_body, redact
+
+    raw = {}
+    try:
+        import yaml as _yaml
+
+        cfg_path = profile_home / "config.yaml"
+        if cfg_path.exists():
+            raw = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        pass
+    st_cfg = from_config_dict(raw.get("social_traces", {}))
+
+    n_redacted = 0
+    n_collapsed = 0
+    sample_before = ""
+    sample_after = ""
+    for m in messages:
+        text = ""
+        if isinstance(m.content, str):
+            text = m.content
+        if not text:
+            continue
+        after = redact(
+            text,
+            redact_paths_layer=st_cfg.privacy.redact_paths,
+            redact_hostnames_layer=st_cfg.privacy.redact_hostnames,
+        )
+        if after != text:
+            n_redacted += 1
+            if not sample_before:
+                sample_before = text[:200]
+                sample_after = after[:200]
+        if not is_useful_body(after):
+            n_collapsed += 1
+
+    typer.echo(f"dry-run (no-llm): session={session_id}")
+    typer.echo(f"  messages: {len(messages)}")
+    typer.echo(f"  messages with redactions: {n_redacted}")
+    typer.echo(f"  messages collapsed-as-useless after redact: {n_collapsed}")
+    typer.echo(
+        f"  redact_paths={st_cfg.privacy.redact_paths} "
+        f"redact_hostnames={st_cfg.privacy.redact_hostnames}"
+    )
+    if sample_before:
+        typer.echo("  sample (first redacted message):")
+        typer.echo(f"    before: {sample_before!r}")
+        typer.echo(f"    after:  {sample_after!r}")
+
+
+# ── ``traces audit-redactor`` ─────────────────────────────────────────────
+
+
+@app.command("audit-redactor")
+def audit_redactor(
+    limit: int = typer.Option(
+        50,
+        "--limit",
+        "-n",
+        help="Number of recent sessions to scan.",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help=(
+            "Write the audit to this file. Default: "
+            "<profile_home>/traces/audit-<timestamp>.txt. The file may "
+            "contain raw user content — do NOT paste it into a chat or "
+            "share without re-reading."
+        ),
+    ),
+) -> None:
+    """Sweep recent SessionDB messages through the redactor and write
+    a before/after diff report for human review.
+
+    Use this BEFORE enabling traces for real to verify the redactor
+    catches your codenames, internal hostnames, project paths, etc.
+    The output file may contain raw (unredacted) user content — it's
+    written under ``<profile_home>/traces/`` and not shipped anywhere.
+    Read it once and delete.
+    """
+    import datetime as _dt
+
+    _ensure_alias()
+
+    profile_home = _profile_home()
+
+    try:
+        from opencomputer.agent.state import SessionDB
+    except ImportError as exc:  # noqa: BLE001
+        typer.echo(f"error: cannot import SessionDB ({exc})", err=True)
+        raise typer.Exit(code=1) from None
+
+    db_path = profile_home / "sessions.db"
+    if not db_path.exists():
+        typer.echo(f"no SessionDB at {db_path} — nothing to audit.")
+        return
+
+    db = SessionDB(db_path)
+
+    # SessionDB.list_sessions returns dicts with `id` as the session
+    # primary key (sessions table) and started_at-DESC ordering.
+    sessions: list[str] = []
+    try:
+        for s in db.list_sessions(limit=limit):
+            sid = s.get("id") if isinstance(s, dict) else None
+            if sid:
+                sessions.append(sid)
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"error: cannot enumerate sessions ({exc})", err=True)
+        raise typer.Exit(code=1) from None
+
+    if not sessions:
+        typer.echo("no sessions found.")
+        return
+
+    from extensions.social_traces.config import from_config_dict
+    from extensions.social_traces.redactor import redact
+
+    raw = {}
+    try:
+        import yaml as _yaml
+
+        cfg_path = profile_home / "config.yaml"
+        if cfg_path.exists():
+            raw = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        pass
+    st_cfg = from_config_dict(raw.get("social_traces", {}))
+
+    if output is None:
+        ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        output = profile_home / "traces" / f"audit-{ts}.txt"
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    n_msgs = 0
+    n_changed = 0
+    with output.open("w", encoding="utf-8") as fh:
+        fh.write(f"# social-traces redactor audit — {_dt.datetime.now().isoformat()}\n")
+        fh.write(f"# profile_home: {profile_home}\n")
+        fh.write(f"# sessions scanned: {len(sessions)}\n")
+        fh.write(
+            f"# redact_paths={st_cfg.privacy.redact_paths} "
+            f"redact_hostnames={st_cfg.privacy.redact_hostnames}\n"
+        )
+        fh.write("# Each block shows BEFORE/AFTER for messages whose redacted text differs.\n")
+        fh.write("#" + "─" * 78 + "\n\n")
+        for sid in sessions:
+            try:
+                messages = db.get_messages(sid)
+            except Exception:  # noqa: BLE001
+                continue
+            for m in messages:
+                if not isinstance(m.content, str) or not m.content:
+                    continue
+                n_msgs += 1
+                after = redact(
+                    m.content,
+                    redact_paths_layer=st_cfg.privacy.redact_paths,
+                    redact_hostnames_layer=st_cfg.privacy.redact_hostnames,
+                )
+                if after == m.content:
+                    continue
+                n_changed += 1
+                fh.write(f"## session={sid} role={m.role}\n")
+                fh.write("BEFORE:\n")
+                fh.write(m.content[:2000])
+                fh.write("\n\nAFTER:\n")
+                fh.write(after[:2000])
+                fh.write("\n\n" + "─" * 80 + "\n\n")
+
+    typer.echo(f"audit written: {output}")
+    typer.echo(f"  messages scanned: {n_msgs}")
+    typer.echo(f"  messages with redactions: {n_changed}")
+    typer.echo(
+        "  review the file — anything you DON'T want emitted to the "
+        "network needs a sensitive_filter or extra regex."
+    )
 
 
 # ── ``traces inbox …`` ────────────────────────────────────────────────────
