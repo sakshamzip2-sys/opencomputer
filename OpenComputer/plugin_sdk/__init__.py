@@ -138,6 +138,17 @@ from plugin_sdk.sandbox import (
 from plugin_sdk.skill_source import SkillBundle, SkillMeta, SkillSource, TrustLevel
 from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
+from plugin_sdk.traces import (
+    TRACE_API_V1,
+    QueryResult,
+    SubmitReceipt,
+    TraceCard,
+    TraceMeta,
+    TraceNetworkClient,
+    TraceOutcome,
+    TraceStatus,
+    TraceStep,
+)
 from plugin_sdk.transports import NormalizedRequest, NormalizedResponse, TransportBase
 from plugin_sdk.user_model import (
     Edge,
@@ -299,4 +310,16 @@ __all__ = [
     # secret-ref so wire transports never serialize raw credentials.
     "SecretRef",
     "SecretResolver",
+    # Social-traces (docs/plans/social-traces-plugin.md) — TraceCard wire
+    # format + TraceNetworkClient ABC. Both the OC plugin and the OpenHub
+    # repo import these so the wire shape can't drift.
+    "TRACE_API_V1",
+    "QueryResult",
+    "SubmitReceipt",
+    "TraceCard",
+    "TraceMeta",
+    "TraceNetworkClient",
+    "TraceOutcome",
+    "TraceStatus",
+    "TraceStep",
 ]

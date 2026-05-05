@@ -382,13 +382,14 @@ In `extensions/social-traces/subscriber.py`, mirror `EvolutionSubscriber` exactl
 
 ## 10. Implementation phases
 
-### Phase 0 — SDK additions (1-2 hours)
+### Phase 0 — SDK additions (1-2 hours) — COMPLETE 2026-05-05
 
-- [ ] Add `BEFORE_TASK` to `plugin_sdk/hooks.py:HookEvent` and `ALL_HOOK_EVENTS`
-- [ ] Create `plugin_sdk/traces.py` with `TraceCard`, `TraceMeta`, `TraceStep`, `TraceNetworkClient` ABC, `SubmitReceipt`, `QueryResult`, `TRACE_API_V1`
-- [ ] Export all new names from `plugin_sdk/__init__.py`
-- [ ] Add `tests/test_plugin_sdk_traces.py` — schema serialization round-trip, ABC enforcement
-- [ ] Confirm SDK boundary test still passes (`tests/test_phase6a.py::test_plugin_sdk_does_not_import_opencomputer`)
+- [x] Add `BEFORE_TASK` to `plugin_sdk/hooks.py:HookEvent` and `ALL_HOOK_EVENTS`
+- [x] Create `plugin_sdk/traces.py` with `TraceCard`, `TraceMeta`, `TraceStep`, `TraceNetworkClient` ABC, `SubmitReceipt`, `QueryResult`, `TRACE_API_V1`
+- [x] Export all new names from `plugin_sdk/__init__.py`
+- [x] Add `tests/plugin_sdk/test_traces.py` — schema serialization round-trip, ABC enforcement (19 tests)
+- [x] Confirm SDK boundary test still passes (`tests/test_phase6a.py::test_plugin_sdk_does_not_import_opencomputer`)
+- [x] Update existing pinned-count tests (`test_hook_expansion.py`, `test_phase11b.py`) — bumped 20 → 21
 
 ### Phase 1 — Loop integration (1 hour)
 

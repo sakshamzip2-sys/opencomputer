@@ -31,9 +31,10 @@ def test_all_events_present_in_all_hook_events_tuple() -> None:
     """Every HookEvent value must appear in ALL_HOOK_EVENTS exactly once.
 
     Wave 5 T13/T14 added three more events (PRE_GATEWAY_DISPATCH,
-    PRE_APPROVAL_REQUEST, POST_APPROVAL_RESPONSE) for a total of 20.
+    PRE_APPROVAL_REQUEST, POST_APPROVAL_RESPONSE) for a subtotal of 20.
+    Social-traces plugin (Phase 0) adds BEFORE_TASK for a total of 21.
     """
-    assert len(ALL_HOOK_EVENTS) == 20
+    assert len(ALL_HOOK_EVENTS) == 21
     assert set(ALL_HOOK_EVENTS) == set(HookEvent)
     # No duplicates.
     assert len(set(ALL_HOOK_EVENTS)) == len(ALL_HOOK_EVENTS)

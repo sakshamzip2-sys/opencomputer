@@ -23,6 +23,8 @@ Available events:
     BeforeCompaction        — fires before compaction summarises (sees the message slice)
     AfterCompaction         — fires after compaction completes (sees the new message list)
     BeforeMessageWrite      — fires before SessionDB persists a message
+    BeforeTask              — fires after UserPromptSubmit, before first LLM
+                              call (blocking; lets handlers inject context)
 
 Hook ordering: handlers can declare ``priority`` on their HookSpec — lower
 priorities run first; FIFO within the same priority bucket. The default is 100,
@@ -66,6 +68,12 @@ class HookEvent(str, Enum):
     PRE_GATEWAY_DISPATCH = "PreGatewayDispatch"
     PRE_APPROVAL_REQUEST = "PreApprovalRequest"
     POST_APPROVAL_RESPONSE = "PostApprovalResponse"
+    # Social-traces plugin — fires after USER_PROMPT_SUBMIT and before the
+    # first LLM call. Blocking: handlers may return HookDecision with
+    # ``modified_message`` set to inject a <system-reminder> user message
+    # (used by the social-traces plugin to inject pre-fetched TraceCards
+    # into context). See docs/plans/social-traces-plugin.md §8.
+    BEFORE_TASK = "BeforeTask"
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,4 +199,6 @@ ALL_HOOK_EVENTS: tuple[HookEvent, ...] = (
     HookEvent.PRE_GATEWAY_DISPATCH,
     HookEvent.PRE_APPROVAL_REQUEST,
     HookEvent.POST_APPROVAL_RESPONSE,
+    # Social-traces plugin
+    HookEvent.BEFORE_TASK,
 )
