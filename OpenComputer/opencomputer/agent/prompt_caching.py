@@ -50,18 +50,52 @@ _CHARS_PER_TOKEN = 4
 #: safety buffer below the default 5-minute cache TTL.
 _LONG_TTL_THRESHOLD_SECONDS = 240.0
 
+#: Per-image / per-document token estimate. Anthropic charges roughly
+#: 1500 tokens per typical image and ~3000 per PDF page (rough). The
+#: estimator is used only to decide whether a block clears the cache-
+#: eligibility threshold, so order-of-magnitude is sufficient.
+_IMAGE_TOKENS_ESTIMATE = 1500
+_DOCUMENT_TOKENS_ESTIMATE = 3000
 
-def _block_token_estimate(content: Any) -> int:
-    """Cheap upper-bound token count for a message's content."""
+
+def _block_chars(content: Any) -> int:
+    """Estimate content size in CHARACTERS (recursion-safe).
+
+    Used internally by :func:`_block_token_estimate`; centralizing on
+    chars avoids the divide-then-multiply round-trip that a naive
+    token-recursion would produce. Counts text, tool_result (recursive),
+    tool_use (JSON-encoded input), image, and document blocks. Any
+    other or malformed block is silently skipped (no crash).
+    """
     if isinstance(content, str):
-        return len(content) // _CHARS_PER_TOKEN
+        return len(content)
     if isinstance(content, list):
         total = 0
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
+            if not isinstance(block, dict):
+                continue
+            t = block.get("type")
+            if t == "text":
                 total += len(block.get("text", ""))
-        return total // _CHARS_PER_TOKEN
+            elif t == "tool_result":
+                total += _block_chars(block.get("content", ""))
+            elif t == "tool_use":
+                import json as _json
+                try:
+                    total += len(_json.dumps(block.get("input", {})))
+                except (TypeError, ValueError):
+                    pass  # un-encodable input; treat as 0 chars
+            elif t == "image":
+                total += _IMAGE_TOKENS_ESTIMATE * _CHARS_PER_TOKEN
+            elif t == "document":
+                total += _DOCUMENT_TOKENS_ESTIMATE * _CHARS_PER_TOKEN
+        return total
     return 0
+
+
+def _block_token_estimate(content: Any) -> int:
+    """Cheap upper-bound token count for a message's content."""
+    return _block_chars(content) // _CHARS_PER_TOKEN
 
 
 def _build_marker(cache_ttl: str) -> dict[str, Any]:
@@ -95,6 +129,31 @@ def _apply_cache_marker(msg: dict, cache_marker: dict, native_anthropic: bool = 
         last = content[-1]
         if isinstance(last, dict):
             last["cache_control"] = cache_marker
+
+
+def _mark_system_base_block(
+    msg: dict[str, Any],
+    cache_marker: dict[str, Any],
+) -> None:
+    """Stamp ``cache_control`` on the FIRST text block of a system message.
+
+    Used when the system content list has the shape
+    ``[base, optional injected]``: the base is index 0 (frozen, cache-
+    eligible) and the injection (when present) is index 1 (volatile,
+    no marker). Distinct from :func:`_apply_cache_marker` which stamps
+    the LAST block — that's correct for non-system messages but would
+    stamp the volatile injection here, defeating the entire point of
+    the split.
+
+    No-op on string content or empty content list (the legacy single-
+    block-string-system path is handled by :func:`_apply_cache_marker`).
+    """
+    content = msg.get("content")
+    if not isinstance(content, list) or not content:
+        return
+    first = content[0]
+    if isinstance(first, dict):
+        first["cache_control"] = cache_marker
 
 
 def _cache_tail_messages(
@@ -213,7 +272,25 @@ def apply_full_cache_control(
 
     sys_used = 0
     if messages and messages[0].get("role") == "system":
-        _apply_cache_marker(messages[0], marker, native_anthropic=native_anthropic)
+        sys_msg = messages[0]
+        sys_content = sys_msg.get("content")
+        if (
+            isinstance(sys_content, list)
+            and len(sys_content) > 1
+            and all(
+                isinstance(b, dict) and b.get("type") == "text"
+                for b in sys_content
+            )
+        ):
+            # Multi-block system content (Bug 1 fix, 2026-05-05): index 0
+            # is the FROZEN base, index 1+ is per-turn injection. Marker
+            # goes on index 0 so the cached prefix matches across turns
+            # regardless of injection volatility.
+            _mark_system_base_block(sys_msg, marker)
+        else:
+            _apply_cache_marker(
+                sys_msg, marker, native_anthropic=native_anthropic
+            )
         sys_used = 1
 
     remaining = 4 - tools_used - sys_used
