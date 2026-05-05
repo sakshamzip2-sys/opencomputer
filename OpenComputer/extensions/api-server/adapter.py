@@ -77,10 +77,11 @@ class APIServerAdapter(BaseChannelAdapter):
     """REST API channel — exposes /v1/chat for external callers."""
 
     platform = Platform.WEB
-    max_message_length = 100_000
-    """Generous cap — REST callers may legitimately POST larger payloads
-    than chat platforms (e.g. a CI-system POSTing a build log). Still
-    bounded so a misbehaving caller can't OOM the process."""
+    max_message_length = 200_000
+    """Doubled from 100_000 (2026-05-05) in the cap-doubling sweep.
+    REST callers may legitimately POST larger payloads than chat
+    platforms (e.g. a CI-system POSTing a build log). Still bounded so
+    a misbehaving caller can't OOM the process."""
 
     capabilities = ChannelCapabilities(0)
     """No message-shaping capabilities — request/response surface only."""

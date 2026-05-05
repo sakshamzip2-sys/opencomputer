@@ -20,7 +20,20 @@ This release is the colloquial **v1.0**: the first cut from the post-2026.4.27 d
 - **`oc usage --cache-stats`** — token + cache-hit telemetry CLI (closes PR #420 T5 deferral, this release).
 - **MCP catalog URL configurability** — env var + config field (closes PR #437 D.3 T2 deferral, this release).
 - **YAML parse-path unification** — agent loop reader and CLI mutators now share the same validator (closes E.1 latent debt, this release).
-- **Token-limit quadrupling.** `ModelConfig.max_tokens` default lifted from 4096 → 16384 (in two steps on 2026-05-05) so even long responses don't truncate by default. Per-call override (`max_tokens_override`) and the existing max_tokens+tool_use retry path (lifts to 64k cap) unchanged.
+- **Cap-doubling sweep (2026-05-05).** Per user request, every numeric runtime cap doubled in a single sweep:
+  - `ModelConfig.max_tokens` 4096 → 8192 → 16384 → **32768** (8× the original).
+  - `ModelConfig.temperature` 1.0 → **2.0** (max for OpenAI-compatible providers; Anthropic Claude rejects > 1.0 so override per-profile if you target Claude).
+  - `LoopConfig.max_iterations` 50 → **100**.
+  - `LoopConfig.inactivity_timeout_s` 300 → **600** (10 min).
+  - `LoopConfig.iteration_timeout_s` 3600 → **7200** (2 h wall-clock cap).
+  - `LoopConfig.delegation_max_iterations` 50 → **100**.
+  - `LoopConfig.max_delegation_depth` 2 → **4**.
+  - `cron.scheduler.DEFAULT_JOB_TIMEOUT_S` 1200 → **2400** (40 min per job).
+  - `cron.scheduler.DEFAULT_MAX_PARALLEL` 3 → **6**.
+  - `APIServerAdapter.max_message_length` 100,000 → **200,000** bytes.
+  - `aux_llm.complete_text` / `complete_text_sync` `max_tokens` 1024 → **2048**.
+
+  Per-call overrides (`max_tokens_override`, env vars, `config.yaml`) and the existing max_tokens+tool_use retry path (lifts to 64k cap on hit) unchanged. plugin_sdk wire defaults stay at 4096 (SDK contract).
 - **Deferral-finale PR #471 — 8 of 10 prior-session deferrals closed.** D.3 T1 (`oc plugin install --remote <slug>` with 24h-cached signed catalog), D.3 T3 (Ed25519 catalog sign/verify + `oc plugin catalog {sign,verify,keygen}`), E.2 (per-token SSE streaming on the OpenAI-compat endpoint), C.1 (`memory-vector` MVP plugin — ChromaDB-backed), C.2 (`memory-wiki` MVP plugin — markdown-files + `[[wikilinks]]` + backlinks), C.3 (`media-tools` MVP plugin — PIL ImageInfo / edge-tts / mlx-whisper), C.5 (`docs/coding-harness-audit.md` per-subdir audit), B.2 prep (`examples/example-tool/` ready-to-publish template). 4,693 LOC, ~70 tests added.
 
 ### plugin_sdk stability commitment

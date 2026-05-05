@@ -12,7 +12,8 @@ def test_load_config_returns_defaults_when_no_file(tmp_path: Path) -> None:
 
     cfg = load_config(tmp_path / "does_not_exist.yaml")
     assert cfg.model.provider == "anthropic"
-    assert cfg.loop.max_iterations == 50
+    # 2026-05-05 cap-doubling sweep: max_iterations 50 → 100.
+    assert cfg.loop.max_iterations == 100
 
 
 def test_load_config_applies_yaml_overrides(tmp_path: Path) -> None:
@@ -26,7 +27,7 @@ model:
   model: gpt-5.4
   max_tokens: 2048
 loop:
-  max_iterations: 100
+  max_iterations: 200
 """,
         encoding="utf-8",
     )
@@ -34,7 +35,9 @@ loop:
     assert cfg.model.provider == "openai"
     assert cfg.model.model == "gpt-5.4"
     assert cfg.model.max_tokens == 2048
-    assert cfg.loop.max_iterations == 100
+    # 2026-05-05 cap-doubling sweep: default is 100, override here is 200
+    # to keep the test asserting "override actually changes the value".
+    assert cfg.loop.max_iterations == 200
     # Unchanged fields keep defaults
     assert cfg.loop.parallel_tools is True
 
@@ -67,7 +70,8 @@ def test_get_value_dotted_key() -> None:
 
     cfg = default_config()
     assert get_value(cfg, "model.provider") == "anthropic"
-    assert get_value(cfg, "loop.max_iterations") == 50
+    # 2026-05-05 cap-doubling sweep: 50 → 100.
+    assert get_value(cfg, "loop.max_iterations") == 100
 
 
 def test_get_value_unknown_key_raises() -> None:

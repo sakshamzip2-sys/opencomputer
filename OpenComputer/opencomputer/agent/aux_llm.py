@@ -63,8 +63,8 @@ async def complete_text(
     *,
     messages: list[dict[str, Any]],
     system: str = "",
-    max_tokens: int = 1024,
-    temperature: float = 1.0,
+    max_tokens: int = 2048,
+    temperature: float = 2.0,
     model: str | None = None,
 ) -> str:
     """Run a single text completion through the configured provider.
@@ -99,8 +99,8 @@ def complete_text_sync(
     *,
     messages: list[dict[str, Any]],
     system: str = "",
-    max_tokens: int = 1024,
-    temperature: float = 1.0,
+    max_tokens: int = 2048,
+    temperature: float = 2.0,
     model: str | None = None,
 ) -> str:
     """Sync wrapper for :func:`complete_text`.
@@ -125,7 +125,7 @@ async def complete_vision(
     image_base64: str,
     mime_type: str,
     prompt: str,
-    max_tokens: int = 1024,
+    max_tokens: int = 2048,
     model: str | None = None,
 ) -> str:
     """Run a vision completion (text + image) through the configured provider.
@@ -168,7 +168,7 @@ async def complete_video(
     video_base64: str,
     mime_type: str,
     prompt: str,
-    max_tokens: int = 1024,
+    max_tokens: int = 2048,
     model: str | None = None,
 ) -> str:
     """Run a video completion (text + base64 video) through the configured provider.
