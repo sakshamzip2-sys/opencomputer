@@ -733,6 +733,126 @@ def env_template_cmd(
     typer.echo(rendered)
 
 
+@profile_app.command("env-init")
+def env_init_cmd(
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help=(
+            "Re-prompt for values that are already set in <profile>/.env. "
+            "Default: skip already-set vars silently."
+        ),
+    ),
+    yes_assume_tty: bool = typer.Option(
+        False,
+        "--no-tty-check",
+        help="Skip the interactive-tty guard (for scripted use with piped input).",
+        hidden=True,
+    ),
+) -> None:
+    """Walk every plugin's declared env vars + interactively prompt for values.
+
+    Phase 14.G T2 (D.4 follow-up). Sister command to ``env-template``:
+    where the template writes a fillable file you edit, ``env-init``
+    prompts for each missing value (Rich password input) and writes
+    ``<profile>/.env`` atomically with mode 0600.
+
+    Re-runs are idempotent: already-set vars are skipped unless you
+    pass ``--overwrite``. Empty input skips a var. Ctrl-C aborts WITHOUT
+    a partial write — the existing .env stays intact.
+    """
+    import sys
+
+    from opencomputer.agent.config import _home as _profile_home_fn
+    from opencomputer.plugins.discovery import discover, standard_search_paths
+    from opencomputer.profile_env_init import (
+        EnvVarSpec,
+        collect_env_var_specs,
+        run_init,
+    )
+
+    if not yes_assume_tty and not sys.stdin.isatty():
+        _console.print(
+            "[red]error:[/red] env-init requires an interactive terminal. "
+            "Use `oc profile env-template --write` for non-interactive setups."
+        )
+        raise typer.Exit(code=1)
+
+    active = read_active_profile()
+    profile_home = _profile_home_fn()
+    target_path = profile_home / ".env"
+
+    candidates = discover(standard_search_paths())
+
+    enabled_ids: set[str] | None = None
+    profile_yaml = profile_home / "profile.yaml"
+    if profile_yaml.exists():
+        try:
+            import yaml as _yaml
+            data = _yaml.safe_load(profile_yaml.read_text()) or {}
+            plugins_block = data.get("plugins") or {}
+            enabled_list = plugins_block.get("enabled") or []
+            if isinstance(enabled_list, list):
+                enabled_ids = {str(p) for p in enabled_list}
+        except Exception:  # noqa: BLE001
+            enabled_ids = None
+
+    specs = collect_env_var_specs(candidates, enabled_ids=enabled_ids)
+    if not specs:
+        _console.print(
+            "[yellow]no plugin env vars to init[/yellow] — "
+            "all enabled plugins declare zero env vars."
+        )
+        return
+
+    _console.print(
+        f"[cyan]env-init[/cyan] — profile [bold]{active or 'default'}[/bold] "
+        f"({len(specs)} env vars across enabled plugins)"
+    )
+    _console.print(
+        "[dim]press Enter to skip a var; Ctrl-C aborts without writing.[/dim]\n"
+    )
+
+    def _prompter(spec: EnvVarSpec, current: str | None) -> str | None:
+        from rich.prompt import Prompt
+
+        if spec.signup_url:
+            _console.print(f"[dim]docs: {spec.signup_url}[/dim]")
+        prompt_label = spec.display
+        if current:
+            prompt_label += " [yellow](currently set)[/yellow]"
+
+        try:
+            return Prompt.ask(
+                prompt_label,
+                password=True,
+                default="",
+                show_default=False,
+                console=_console,
+            )
+        except (KeyboardInterrupt, EOFError):
+            return None
+
+    try:
+        result = run_init(
+            specs,
+            target_path=target_path,
+            profile_name=active or "default",
+            prompter=_prompter,
+            overwrite=overwrite,
+        )
+    except KeyboardInterrupt:
+        _console.print("\n[yellow]aborted[/yellow] — .env unchanged.")
+        raise typer.Exit(code=130)
+
+    _console.print(
+        f"\n[green]wrote[/green] {result.target_path}  "
+        f"[dim](written={result.written}, "
+        f"skipped_existing={result.skipped_existing}, "
+        f"skipped_empty={result.skipped_empty})[/dim]"
+    )
+
+
 @profile_app.command("export")
 def export_cmd(
     name: str | None = typer.Argument(
