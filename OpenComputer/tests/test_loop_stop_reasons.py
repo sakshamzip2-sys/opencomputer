@@ -153,8 +153,8 @@ async def test_max_tokens_with_tool_use_retries_with_doubled_max_tokens(tmp_path
 
     provider = _ScriptedProvider([truncated_resp, full_resp])
     loop = _make_loop(provider, tmp_path)
-    # ModelConfig default max_tokens is already 4096 — frozen dataclass
-    # so we can't mutate; use construction default.
+    # ModelConfig default max_tokens is 8192 (2026-05-05 doubling) —
+    # frozen dataclass so we can't mutate; use construction default.
 
     result = await loop.run_conversation("Read file", session_id="t6")
     # Retry happened (provider called twice).
