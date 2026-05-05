@@ -98,7 +98,56 @@ def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> 
     parts: list[str] = []
     for name, content in found:
         parts.append(f"## {name}\n\n{content.strip()}\n")
-    return "\n".join(parts)
+    raw = "\n".join(parts)
+    return _post_process_workspace_context(raw)
+
+
+def _post_process_workspace_context(raw: str) -> str:
+    """Apply runtime redaction + prompt-injection scan to workspace
+    context before it enters the system prompt.
+
+    RR-3 (May-5): secrets in CLAUDE.md / AGENTS.md / OPENCOMPUTER.md
+    must not ship to the LLM unredacted.
+    RR-3 buddy: a poisoned context file ("ignore previous
+    instructions...") gets wrapped in a quarantine envelope so the
+    model recognizes it as untrusted.
+    """
+    # Lazy imports — keep prompt_builder lightweight if redaction is
+    # off (snapshot env var) or if the detector loads heavier patterns.
+    import logging
+
+    from opencomputer.security.instruction_detector import default_detector
+    from opencomputer.security.redact import redact_runtime_text_with_counts
+
+    redacted, counts = redact_runtime_text_with_counts(raw)
+    total = sum(counts.values())
+    if total > 0:
+        logging.getLogger(__name__).info(
+            "workspace_context: redacted %d secret/PII occurrence(s) before LLM",
+            total,
+        )
+
+    verdict = default_detector().detect(redacted)
+    if verdict.quarantine_recommended:
+        logging.getLogger(__name__).warning(
+            "workspace_context: prompt-injection signature detected "
+            "(rules=%s, conf=%.2f)",
+            verdict.triggered_rules,
+            verdict.confidence,
+        )
+        warning_line = (
+            f"<!-- workspace-context-injection-warning rules="
+            f"{','.join(verdict.triggered_rules)} "
+            f"confidence={verdict.confidence:.2f} -->"
+        )
+        return (
+            f"{warning_line}\n"
+            "<quarantined-untrusted-content>\n"
+            f"{redacted}\n"
+            "</quarantined-untrusted-content>\n"
+        )
+
+    return redacted
 
 
 def _truncate_from_top(text: str, limit: int) -> str:
