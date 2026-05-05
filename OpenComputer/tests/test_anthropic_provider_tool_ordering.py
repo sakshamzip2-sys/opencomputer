@@ -55,6 +55,47 @@ def test_format_tools_empty_passthrough(fmt):
     assert fmt([]) == []
 
 
+def test_skills_augmentation_preserves_user_tool_marker_position():
+    """Audit Finding 3 (2026-05-05): when skills are enabled,
+    ``_augment_kwargs_for_skills`` appends ``code_execution_20250825``
+    AFTER ``_apply_cache_control`` has already placed the marker on the
+    alphabetically-last user tool. The cache_control then lives on
+    ``tools[-2]`` in the wire payload, not ``tools[-1]`` — but the
+    cached prefix region (the user tools) still matches byte-for-byte
+    across turns, which is what the cache actually requires.
+    """
+    mod = _load_provider_module()
+    augment = mod._augment_kwargs_for_skills
+
+    # Simulate the real flow: _apply_cache_control marked the last user
+    # tool's last block; then skills augmentation appends code_execution
+    # without a marker.
+    tools_with_marker = [
+        {"name": "apple", "description": "a", "input_schema": {"type": "object", "properties": {}}},
+        {
+            "name": "zebra",
+            "description": "z",
+            "input_schema": {"type": "object", "properties": {}},
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+    kwargs = {"tools": tools_with_marker}
+    out = augment(kwargs=kwargs, skill_ids=["my-skill"])
+    out_tools = out["tools"]
+
+    # 3 tools total: 2 user + 1 code_execution
+    assert len(out_tools) == 3
+    # cache_control STILL on the user-tool (now tools[-2])
+    assert out_tools[-2]["name"] == "zebra"
+    assert "cache_control" in out_tools[-2]
+    # code_execution is appended at the end with NO marker
+    assert out_tools[-1]["type"] == "code_execution_20250825"
+    assert "cache_control" not in out_tools[-1]
+    # Earlier user tool is unmarked
+    assert out_tools[0]["name"] == "apple"
+    assert "cache_control" not in out_tools[0]
+
+
 def test_format_tools_preserves_input_schema(fmt):
     """Sort doesn't mangle individual tool dicts."""
     t = ToolSchema(
