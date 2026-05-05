@@ -391,11 +391,14 @@ In `extensions/social-traces/subscriber.py`, mirror `EvolutionSubscriber` exactl
 - [x] Confirm SDK boundary test still passes (`tests/test_phase6a.py::test_plugin_sdk_does_not_import_opencomputer`)
 - [x] Update existing pinned-count tests (`test_hook_expansion.py`, `test_phase11b.py`) — bumped 20 → 21
 
-### Phase 1 — Loop integration (1 hour)
+### Phase 1 — Loop integration (1 hour) — COMPLETE 2026-05-05
 
-- [ ] Wire `BEFORE_TASK` fire in `opencomputer/agent/loop.py` (location: after USER_PROMPT_SUBMIT, before prompt build)
-- [ ] Test: a registered hook returning `decision="rewrite", modified_message="..."` causes a `<system-reminder>` user message to land in `messages`
-- [ ] Test: existing `run_conversation` flow unaffected when no `BEFORE_TASK` hook is registered
+- [x] Wire `BEFORE_TASK` fire in `opencomputer/agent/loop.py` (location: immediately after the user message is appended + persisted, around line 1058 — the seam is "before the agent starts a real task")
+- [x] Test: a registered hook returning `decision="approve", modified_message="..."` causes a `<system-reminder>` user message to land in `messages` and persist to the DB
+- [x] Test: existing `run_conversation` flow unaffected when no `BEFORE_TASK` hook is registered
+- [x] Test: `decision="pass"`, `None` return, empty `modified_message` all → no reminder
+- [x] Test: handler that raises does NOT break the loop (fail-open contract)
+- [x] All 7 BEFORE_TASK integration tests pass; full hook+trace+loop+phase6a+phase11b sweep stays green (77 passed, 1 documented skip)
 
 ### Phase 2 — Plugin scaffold (2-3 hours)
 

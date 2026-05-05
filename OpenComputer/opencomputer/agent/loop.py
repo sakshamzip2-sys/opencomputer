@@ -1168,6 +1168,54 @@ class AgentLoop:
         self._emit_before_message_write(session_id=sid, message=user_msg)
         self._persist_message(sid, user_msg)
 
+        # BEFORE_TASK — blocking hook fired after the user message lands and
+        # before any per-turn machinery starts. The social-traces plugin
+        # (docs/plans/social-traces-plugin.md) uses this seam to query the
+        # trace network and inject a matching <trace>...</trace> block as a
+        # <system-reminder> user message. Slash-command-only turns bail
+        # before reaching this point and skip the fire entirely — the seam
+        # is "before the agent starts a real task" by design.
+        #
+        # Contract: a handler returning a HookDecision with non-empty
+        # ``modified_message`` causes that text to be appended as a
+        # <system-reminder> user message. ``decision="block"`` follows the
+        # existing PreToolUse semantics — caller responsibility, but for
+        # BEFORE_TASK we treat block the same as a hard inject (the reason
+        # text becomes the reminder body) so a misuse can't wedge the loop.
+        # Any failure (import, handler crash, malformed decision) is logged
+        # and ignored — BEFORE_TASK must never break a normal turn.
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine_bt
+            from plugin_sdk.hooks import HookContext as _HookContextBT
+            from plugin_sdk.hooks import HookEvent as _HookEventBT
+
+            _bt_decision = await _hook_engine_bt.fire_blocking(
+                _HookContextBT(
+                    event=_HookEventBT.BEFORE_TASK,
+                    session_id=sid,
+                    runtime=self._runtime,
+                    message=user_msg,
+                )
+            )
+        except Exception:  # noqa: BLE001 — never let BEFORE_TASK break the loop
+            _log.debug("BEFORE_TASK fire failed (suppressed)", exc_info=True)
+            _bt_decision = None
+
+        if (
+            _bt_decision is not None
+            and _bt_decision.decision != "pass"
+            and _bt_decision.modified_message
+        ):
+            _bt_reminder = Message(
+                role="user",
+                content=f"<system-reminder>{_bt_decision.modified_message}</system-reminder>",
+            )
+            messages.append(_bt_reminder)
+            # Persist so a resumed session sees the same injected context;
+            # mirrors the loop-detector reminder path at lines ~1907-1920.
+            self._emit_before_message_write(session_id=sid, message=_bt_reminder)
+            self._persist_message(sid, _bt_reminder)
+
         # Persona-uplift (2026-04-29): per-turn re-classification with
         # stability gate + cooldown. Pass the in-memory ``messages`` list
         # so the helper doesn't re-read SQLite. On a confirmed flip the
