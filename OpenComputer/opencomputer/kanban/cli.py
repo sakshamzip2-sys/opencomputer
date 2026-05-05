@@ -524,6 +524,41 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Enable or disable workspace sync for this peer",
     )
 
+    # --- callback (Wave 6.E.17 — outbound callback retry queue) ---
+    p_cb = sub.add_parser(
+        "callback",
+        help="Inspect / requeue / drain peer-side outbound delegated-task callbacks",
+    )
+    p_cb_sub = p_cb.add_subparsers(dest="callback_action")
+
+    p_cb_list = p_cb_sub.add_parser(
+        "list",
+        help="List queued callbacks (default: pending only)",
+    )
+    p_cb_list.add_argument(
+        "--status", choices=("pending", "delivered", "dead", "all"),
+        default="pending",
+        help="Filter by status (default: pending)",
+    )
+    p_cb_list.add_argument("--json", action="store_true")
+
+    p_cb_dead = p_cb_sub.add_parser(
+        "list-dead",
+        help="List dead-letter callbacks (rows that exhausted retries)",
+    )
+    p_cb_dead.add_argument("--json", action="store_true")
+
+    p_cb_req = p_cb_sub.add_parser(
+        "requeue",
+        help="Reset a dead-letter row back to pending for one more try",
+    )
+    p_cb_req.add_argument("row_id", type=int)
+
+    p_cb_sub.add_parser(
+        "drain",
+        help="Run one drainer tick now (POST due callbacks). For ops triage.",
+    )
+
     # --- log ---
     p_log = sub.add_parser(
         "log",
@@ -649,6 +684,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "rules":    _cmd_rules,
         "orgchart": _cmd_orgchart,
         "remote":   _cmd_remote,
+        "callback": _cmd_callback,
     }
     handler = handlers.get(action)
     if not handler:
@@ -1957,6 +1993,140 @@ def _cmd_remote_set_workspace_sync(args: argparse.Namespace) -> int:
         print(f"kanban remote: no such peer {args.slug!r}", file=sys.stderr)
         return 1
     print(f"workspace sync for {args.slug} → {args.value}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Wave 6.E.17 — Outbound callback retry queue (peer-side)
+# ---------------------------------------------------------------------------
+
+
+def _cmd_callback(args: argparse.Namespace) -> int:
+    action = getattr(args, "callback_action", None)
+    if not action:
+        print(
+            "usage: oc kanban callback {list|list-dead|requeue|drain} ...",
+            file=sys.stderr,
+        )
+        return 0
+    if action == "list":
+        return _cmd_callback_list(args)
+    if action == "list-dead":
+        return _cmd_callback_list_dead(args)
+    if action == "requeue":
+        return _cmd_callback_requeue(args)
+    if action == "drain":
+        return _cmd_callback_drain(args)
+    print(f"kanban callback: unknown action {action!r}", file=sys.stderr)
+    return 2
+
+
+def _format_callback_row(row, *, with_error: bool = False) -> str:
+    """Single-line table row used by both `list` and `list-dead`."""
+    next_at = (
+        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["next_attempt_at"]))
+        if row["next_attempt_at"] else "-"
+    )
+    line = (
+        f"{row['id']:>4} {row['status']:<10} {row['sender_slug']:<16} "
+        f"attempts={row['attempt_count']:<3} next_at={next_at}"
+    )
+    if with_error and row["last_error"]:
+        line += f"\n     err: {row['last_error']}"
+    return line
+
+
+def _cmd_callback_list(args: argparse.Namespace) -> int:
+    """List queued callbacks, default to pending."""
+    where = ""
+    params: tuple = ()
+    if args.status != "all":
+        where = "WHERE status = ?"
+        params = (args.status,)
+    with kb.connect() as conn:
+        rows = conn.execute(
+            f"SELECT id, status, sender_slug, callback_url, "  # noqa: S608 (literal where)
+            f"attempt_count, next_attempt_at, last_error "
+            f"FROM kanban_pending_callbacks {where} "
+            f"ORDER BY id DESC",
+            params,
+        ).fetchall()
+    if args.json:
+        import json as _json
+        print(_json.dumps([dict(r) for r in rows], indent=2))
+        return 0
+    if not rows:
+        print(f"(no callbacks with status={args.status!r})")
+        return 0
+    print(f"{'id':>4} {'status':<10} {'sender':<16} attempts next_attempt_at")
+    for r in rows:
+        print(_format_callback_row(r))
+    print(f"\n({len(rows)} row{'s' if len(rows) != 1 else ''})")
+    return 0
+
+
+def _cmd_callback_list_dead(args: argparse.Namespace) -> int:
+    """Shortcut for `list --status dead` with errors expanded."""
+    from opencomputer.kanban import callback_queue as cq
+
+    with kb.connect() as conn:
+        deads = cq.list_dead_letters(conn)
+    if args.json:
+        import json as _json
+        print(_json.dumps([
+            {
+                "id": d.id, "sender_slug": d.sender_slug,
+                "callback_url": d.callback_url,
+                "attempt_count": d.attempt_count,
+                "last_error": d.last_error,
+                "created_at": d.created_at,
+            } for d in deads
+        ], indent=2))
+        return 0
+    if not deads:
+        print("(no dead-letter callbacks)")
+        return 0
+    print(f"{'id':>4} {'status':<10} {'sender':<16} attempts next_attempt_at")
+    with kb.connect() as conn:
+        for d in deads:
+            row = conn.execute(
+                "SELECT id, status, sender_slug, attempt_count, "
+                "next_attempt_at, last_error FROM kanban_pending_callbacks "
+                "WHERE id = ?", (d.id,),
+            ).fetchone()
+            print(_format_callback_row(row, with_error=True))
+    print(f"\n({len(deads)} dead row{'s' if len(deads) != 1 else ''})")
+    print("Reset one to pending with: oc kanban callback requeue <id>")
+    return 0
+
+
+def _cmd_callback_requeue(args: argparse.Namespace) -> int:
+    """Reset a dead-letter row back to pending."""
+    from opencomputer.kanban import callback_queue as cq
+
+    with kb.connect() as conn:
+        ok = cq.requeue_dead_letter(conn, args.row_id)
+    if not ok:
+        print(
+            f"kanban callback: row {args.row_id} not found or not "
+            f"in 'dead' status",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"requeued callback {args.row_id} → status=pending, attempts=0")
+    return 0
+
+
+def _cmd_callback_drain(_args: argparse.Namespace) -> int:
+    """Run one drainer tick now. For ops triage."""
+    from opencomputer.kanban import db as kdb
+
+    try:
+        kdb._drain_pending_callbacks()
+    except Exception as exc:  # noqa: BLE001
+        print(f"kanban callback: drain failed: {exc}", file=sys.stderr)
+        return 1
+    print("ok")
     return 0
 
 
