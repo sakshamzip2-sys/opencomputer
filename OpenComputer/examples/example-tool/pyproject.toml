@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "opencomputer-example-tool"
+version = "0.1.0"
+description = "Reference third-party plugin for OpenComputer (template + publishing demo)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [
+    { name = "Your Name", email = "you@example.com" },
+]
+keywords = ["opencomputer", "plugin", "example"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+# Plugins typically need only the SDK; OC's plugin loader provides
+# everything else at runtime. Install opencomputer in your dev env to
+# get the SDK; runtime users will already have OC installed.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/YOUR-USER/opencomputer-example-tool"
+Issues = "https://github.com/YOUR-USER/opencomputer-example-tool/issues"
+
+[tool.hatch.build]
+include = [
+    "example_tool/**/*.py",
+    "plugin.json",
+    "README.md",
+    "LICENSE",
+]
