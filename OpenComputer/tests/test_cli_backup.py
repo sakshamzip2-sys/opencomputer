@@ -51,9 +51,7 @@ def test_backup_creates_archive_with_manifest(tmp_path: Path) -> None:
         # cache/ is excluded by default
         assert not any("cache/transient.bin" in n for n in names)
 
-        manifest_member = next(
-            m for m in tar.getmembers() if m.name.endswith("MANIFEST.json")
-        )
+        manifest_member = next(m for m in tar.getmembers() if m.name.endswith("MANIFEST.json"))
         manifest = json.loads(tar.extractfile(manifest_member).read())
         assert manifest["schema"] == 1
         assert "created_utc" in manifest
@@ -88,9 +86,7 @@ def test_restore_aborts_on_non_empty_target_without_force(tmp_path: Path) -> Non
     profile = tmp_path / "src-profile"
     _seed_profile(profile)
     archive = tmp_path / "x.tar.gz"
-    runner.invoke(
-        backup_app, ["create", "--profile-dir", str(profile), "--out", str(archive)]
-    )
+    runner.invoke(backup_app, ["create", "--profile-dir", str(profile), "--out", str(archive)])
 
     target = tmp_path / "occupied"
     target.mkdir()
@@ -108,9 +104,7 @@ def test_restore_force_overwrites(tmp_path: Path) -> None:
     profile = tmp_path / "src-profile"
     _seed_profile(profile)
     archive = tmp_path / "y.tar.gz"
-    runner.invoke(
-        backup_app, ["create", "--profile-dir", str(profile), "--out", str(archive)]
-    )
+    runner.invoke(backup_app, ["create", "--profile-dir", str(profile), "--out", str(archive)])
 
     target = tmp_path / "occupied"
     target.mkdir()
@@ -129,9 +123,7 @@ def test_restore_aborts_on_unsupported_schema(tmp_path: Path) -> None:
     profile = tmp_path / "src-profile"
     _seed_profile(profile)
     archive = tmp_path / "schema.tar.gz"
-    runner.invoke(
-        backup_app, ["create", "--profile-dir", str(profile), "--out", str(archive)]
-    )
+    runner.invoke(backup_app, ["create", "--profile-dir", str(profile), "--out", str(archive)])
 
     # Tamper the manifest schema by rebuilding the tarball with schema=999.
     rebuilt = tmp_path / "tampered.tar.gz"
@@ -195,9 +187,7 @@ def test_includes_live_sessions_db_via_sqlite_backup_api(tmp_path: Path) -> None
     conn.close()
 
     archive = tmp_path / "live.tar.gz"
-    r = runner.invoke(
-        backup_app, ["create", "--profile-dir", str(profile), "--out", str(archive)]
-    )
+    r = runner.invoke(backup_app, ["create", "--profile-dir", str(profile), "--out", str(archive)])
     assert r.exit_code == 0, r.output
 
     with tarfile.open(archive, "r:gz") as tar:

@@ -41,6 +41,7 @@ def _safe_id(key: str, pool_index: int) -> str:
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
     return f"cred_pool[{pool_index}]:{digest}"
 
+
 ROTATE_COOLDOWN_SECONDS: float = 60.0
 EXHAUSTED_TTL_429_SECONDS: float = 3600.0
 _JWT_REFRESH_THRESHOLD_S: float = 60.0  # refresh if expiry within this many seconds
@@ -49,12 +50,14 @@ STRATEGY_FILL_FIRST = "fill_first"
 STRATEGY_ROUND_ROBIN = "round_robin"
 STRATEGY_RANDOM = "random"
 STRATEGY_LEAST_USED = "least_used"
-SUPPORTED_STRATEGIES = frozenset({
-    STRATEGY_FILL_FIRST,
-    STRATEGY_ROUND_ROBIN,
-    STRATEGY_RANDOM,
-    STRATEGY_LEAST_USED,
-})
+SUPPORTED_STRATEGIES = frozenset(
+    {
+        STRATEGY_FILL_FIRST,
+        STRATEGY_ROUND_ROBIN,
+        STRATEGY_RANDOM,
+        STRATEGY_LEAST_USED,
+    }
+)
 
 
 class CredentialPoolExhausted(RuntimeError):  # noqa: N818
@@ -207,8 +210,7 @@ class CredentialPool:
                     continue
                 raise
         raise CredentialPoolExhausted(
-            f"Exhausted {self._max_rotation_attempts} rotation attempts; "
-            f"last failure: {last_exc!r}"
+            f"Exhausted {self._max_rotation_attempts} rotation attempts; last failure: {last_exc!r}"
         ) from last_exc
 
     def stats(self) -> dict[str, Any]:

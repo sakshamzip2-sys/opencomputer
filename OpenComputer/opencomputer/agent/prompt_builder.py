@@ -130,8 +130,7 @@ def _post_process_workspace_context(raw: str) -> str:
     verdict = default_detector().detect(redacted)
     if verdict.quarantine_recommended:
         logging.getLogger(__name__).warning(
-            "workspace_context: prompt-injection signature detected "
-            "(rules=%s, conf=%.2f)",
+            "workspace_context: prompt-injection signature detected (rules=%s, conf=%.2f)",
             verdict.triggered_rules,
             verdict.confidence,
         )
@@ -403,7 +402,7 @@ class PromptBuilder:
             key=lambda n: (-n.confidence, -n.last_seen_at),
         )
         chosen = candidates[0]
-        return chosen.value[len(prefix):].strip()
+        return chosen.value[len(prefix) :].strip()
 
     async def build_with_memory(
         self,

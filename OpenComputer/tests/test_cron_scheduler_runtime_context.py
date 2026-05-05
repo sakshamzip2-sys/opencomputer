@@ -37,12 +37,11 @@ async def test_cron_run_passes_agent_context_cron_to_runtime() -> None:
 
     # Stub out the agent-loop builder + the cron-prompt scanner so the
     # test exercises only the RuntimeContext construction path.
-    with patch.object(
-        scheduler, "_build_agent_loop", AsyncMock(return_value=fake_loop)
-    ), patch.object(scheduler, "scan_cron_prompt", lambda _t: None):
-        await scheduler._run_one_job(
-            {"id": "test-job", "name": "test", "prompt": "hi"}
-        )
+    with (
+        patch.object(scheduler, "_build_agent_loop", AsyncMock(return_value=fake_loop)),
+        patch.object(scheduler, "scan_cron_prompt", lambda _t: None),
+    ):
+        await scheduler._run_one_job({"id": "test-job", "name": "test", "prompt": "hi"})
 
     runtime = captured["runtime"]
     assert runtime.agent_context == "cron"

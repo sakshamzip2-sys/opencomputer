@@ -33,9 +33,7 @@ class HookEngine:
         # ``HookSpec`` itself. ``seq`` is monotonically assigned at register
         # time; sorting by ``(priority, seq)`` gives lower-priority-first
         # with FIFO within the same priority bucket.
-        self._hooks: dict[HookEvent, list[tuple[int, int, HookSpec]]] = defaultdict(
-            list
-        )
+        self._hooks: dict[HookEvent, list[tuple[int, int, HookSpec]]] = defaultdict(list)
         self._next_seq: int = 0
 
     def register(self, spec: HookSpec) -> None:
@@ -87,9 +85,7 @@ class HookEngine:
         for _, _, spec in self._hooks.get(ctx.event, []):
             if not self._matches(spec, ctx):
                 continue
-            handler_id = getattr(
-                spec.handler, "__qualname__", repr(spec.handler)
-            )
+            handler_id = getattr(spec.handler, "__qualname__", repr(spec.handler))
             try:
                 if spec.timeout_ms and spec.timeout_ms > 0:
                     decision = await asyncio.wait_for(
@@ -120,9 +116,7 @@ class HookEngine:
                     summary=f"{type(exc).__name__}: {exc}",
                 )
                 continue
-            decision_str = (
-                decision.decision if decision is not None else "pass"
-            )
+            decision_str = decision.decision if decision is not None else "pass"
             record_fire(
                 event=ctx.event.value,
                 source_id=handler_id,
@@ -144,9 +138,7 @@ class HookEngine:
         from opencomputer.agent.hook_history import record_fire as _record
 
         async def _run_and_record(spec: HookSpec, ctx: HookContext) -> None:
-            handler_id = getattr(
-                spec.handler, "__qualname__", repr(spec.handler)
-            )
+            handler_id = getattr(spec.handler, "__qualname__", repr(spec.handler))
             try:
                 await spec.handler(ctx)
             except Exception as exc:  # noqa: BLE001 — runner already logs

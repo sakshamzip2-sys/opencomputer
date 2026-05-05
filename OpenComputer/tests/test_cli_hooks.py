@@ -69,9 +69,7 @@ def test_test_dry_run_default() -> None:
 
 
 def test_test_invalid_payload_exits_nonzero() -> None:
-    r = runner.invoke(
-        hooks_app, ["test", "UserPromptSubmit", "--payload", "{not json}"]
-    )
+    r = runner.invoke(hooks_app, ["test", "UserPromptSubmit", "--payload", "{not json}"])
     assert r.exit_code != 0
     assert "json" in r.output.lower()
 

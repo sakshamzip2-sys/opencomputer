@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -35,9 +35,7 @@ _console = Console()
 
 
 def _profile_dir() -> Path:
-    raw = os.environ.get("OC_PROFILE_DIR") or str(
-        Path.home() / ".opencomputer" / "default"
-    )
+    raw = os.environ.get("OC_PROFILE_DIR") or str(Path.home() / ".opencomputer" / "default")
     return Path(raw).expanduser()
 
 
@@ -66,9 +64,7 @@ def _last_fire(event: str) -> dict | None:
 
 @hooks_app.command("list")
 def cmd_list(
-    json_out: bool = typer.Option(
-        False, "--json", help="Machine-readable output."
-    ),
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
     """List all known hook events with last-fire metadata."""
     rows: list[dict] = []
@@ -78,16 +74,10 @@ def cmd_list(
             {
                 "event": event,
                 "last_fired_utc": (
-                    datetime.fromtimestamp(
-                        last["ts_utc"], tz=timezone.utc
-                    ).isoformat()
-                    if last
-                    else None
+                    datetime.fromtimestamp(last["ts_utc"], tz=UTC).isoformat() if last else None
                 ),
                 "last_source": last["source"] if last else None,
-                "last_result": (
-                    ("ok" if last["ok"] else "err") if last else None
-                ),
+                "last_result": (("ok" if last["ok"] else "err") if last else None),
                 "last_summary": last["summary"] if last else None,
             }
         )
@@ -115,15 +105,9 @@ def cmd_list(
 
 @hooks_app.command("test")
 def cmd_test(
-    event: str = typer.Argument(
-        ..., help="Hook event name (e.g. UserPromptSubmit)."
-    ),
-    payload: str = typer.Option(
-        "{}", "--payload", help="JSON-encoded synthetic payload."
-    ),
-    execute: bool = typer.Option(
-        False, "--execute", help="Actually dispatch (default: dry-run)."
-    ),
+    event: str = typer.Argument(..., help="Hook event name (e.g. UserPromptSubmit)."),
+    payload: str = typer.Option("{}", "--payload", help="JSON-encoded synthetic payload."),
+    execute: bool = typer.Option(False, "--execute", help="Actually dispatch (default: dry-run)."),
 ) -> None:
     """Fire a synthetic hook event. Default is dry-run."""
     try:
@@ -133,9 +117,7 @@ def cmd_test(
         raise typer.Exit(1)
 
     if not execute:
-        _console.print(
-            f"[yellow]dry-run:[/yellow] would fire {event} with {payload_obj!r}"
-        )
+        _console.print(f"[yellow]dry-run:[/yellow] would fire {event} with {payload_obj!r}")
         # Best-effort: surface registered handlers from the engine without
         # invoking them.
         try:
@@ -152,23 +134,15 @@ def cmd_test(
                 return
             specs = engine._ordered_specs(event_enum)  # noqa: SLF001
             if not specs:
-                _console.print(
-                    "  [dim](no handlers registered for this event)[/dim]"
-                )
+                _console.print("  [dim](no handlers registered for this event)[/dim]")
             for spec in specs:
-                handler_id = getattr(
-                    spec.handler, "__qualname__", repr(spec.handler)
-                )
+                handler_id = getattr(spec.handler, "__qualname__", repr(spec.handler))
                 _console.print(f"  would invoke: {handler_id}")
         except Exception as exc:  # noqa: BLE001
-            _console.print(
-                f"  [dim](handler enumeration unavailable: {exc})[/dim]"
-            )
+            _console.print(f"  [dim](handler enumeration unavailable: {exc})[/dim]")
         return
 
-    _console.print(
-        "[red]--execute is not yet implemented;[/red] use dry-run for now."
-    )
+    _console.print("[red]--execute is not yet implemented;[/red] use dry-run for now.")
     raise typer.Exit(2)
 
 

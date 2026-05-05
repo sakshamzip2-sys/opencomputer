@@ -17,7 +17,7 @@ import os
 import shutil
 import sqlite3
 import tarfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -43,7 +43,7 @@ def _oc_version() -> str:
 
 
 def _utc_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 @backup_app.command("create")
@@ -162,8 +162,7 @@ def cmd_restore(
         children = [c for c in staging.iterdir() if c.is_dir()]
         if len(children) != 1:
             _console.print(
-                f"[red]Archive must contain exactly one top-level dir, "
-                f"found {len(children)}.[/red]"
+                f"[red]Archive must contain exactly one top-level dir, found {len(children)}.[/red]"
             )
             raise typer.Exit(1)
         staged_profile = children[0]
@@ -182,9 +181,7 @@ def cmd_restore(
 
         # Resolve target.
         if profile_dir is None:
-            profile_dir = (
-                Path.home() / ".opencomputer" / manifest["profile"]
-            ).resolve()
+            profile_dir = (Path.home() / ".opencomputer" / manifest["profile"]).resolve()
         profile_dir = profile_dir.expanduser().resolve()
 
         if profile_dir.exists() and any(profile_dir.iterdir()):
@@ -211,9 +208,7 @@ def cmd_restore(
         profile_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(staged_profile), str(profile_dir))
         _console.print(f"[green]Restored to:[/green] {profile_dir}")
-        _console.print(
-            f"  profile: {manifest['profile']}, schema: {manifest['schema']}"
-        )
+        _console.print(f"  profile: {manifest['profile']}, schema: {manifest['schema']}")
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
