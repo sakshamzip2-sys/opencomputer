@@ -44,15 +44,23 @@ device files (CVE-2007-4559).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
+import shutil
 import tarfile
 import tempfile
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# Type alias used by install_from_catalog / install_from_git / install_from_url.
+# A BeforeInstallHook receives a HookContext (typed at callsite) and returns
+# an awaitable that resolves to a HookDecision (or None for "pass").
+BeforeInstallHook = Callable[[Any], Awaitable[Any]]
 
 # Hardcoded sane caps. These are deliberately not configurable to keep
 # the attack surface small; if you need a bigger plugin, you have a
@@ -396,12 +404,20 @@ def install_from_catalog(
     fetch_catalog_fn=fetch_catalog,
     download_fn=download_and_verify,
     extract_fn=extract_tarball,
+    # Phase 1 (2026-05-06) — optional kwargs; default behaviour preserved.
+    before_install_hook: BeforeInstallHook | None = None,
+    skip_scan: bool = False,
 ) -> InstallResult:
-    """End-to-end: fetch catalog → resolve slug → download → verify → extract.
+    """End-to-end: fetch catalog → resolve slug → download → verify → extract
+    → security-scan → fire BEFORE_INSTALL hook → record-in-index → finalize.
 
     ``dest_root`` is the parent directory where the plugin folder gets
     created (the new folder is named after the plugin id). Existing
     plugin dirs are refused unless ``force=True``.
+
+    ``before_install_hook`` is an awaitable callable that receives a
+    HookContext and may return a HookDecision with ``decision="block"`` to
+    veto the install. ``skip_scan=True`` is a test-only escape hatch.
     """
     catalog = fetch_catalog_fn(
         url=catalog_url, refresh=refresh, trusted_keys=trusted_keys
@@ -417,14 +433,91 @@ def install_from_catalog(
                 f"plugin '{entry.id}' already installed at {plugin_dir}. "
                 "Use --force to overwrite."
             )
-        import shutil
-
         shutil.rmtree(plugin_dir)
 
     extract_fn(raw, dest=plugin_dir)
+
+    # Post-extract gate — runs the security scan, fires BEFORE_INSTALL,
+    # and rolls back the dest dir on any failure so a vetoed install
+    # never lands.
+    try:
+        _post_extract_gate(
+            plugin_dir=plugin_dir,
+            install_source="catalog",
+            install_url=slug,
+            install_plugin_id=entry.id,
+            before_install_hook=before_install_hook,
+            skip_scan=skip_scan,
+        )
+    except Exception:
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        raise
+
+    # Record in installed-index for `oc plugin verify`.
+    from opencomputer.plugins.installed_index import (
+        InstalledRecord,
+        record_install,
+    )
+
+    record_install(
+        dest_root / ".installed_index.json",
+        InstalledRecord(
+            plugin_id=entry.id,
+            version=entry.version,
+            source="catalog",
+            source_url=slug,
+            source_ref=None,
+            tarball_sha256=entry.tarball_sha256.lower(),
+            installed_at=int(time.time()),
+        ),
+    )
+
     return InstallResult(
         plugin_id=entry.id, version=entry.version, install_path=plugin_dir
     )
+
+
+def _post_extract_gate(
+    *,
+    plugin_dir: Path,
+    install_source: str,
+    install_url: str,
+    install_plugin_id: str,
+    before_install_hook: BeforeInstallHook | None,
+    skip_scan: bool,
+) -> None:
+    """Run security scan + fire BEFORE_INSTALL hook. Raise on veto/scan-block.
+
+    Caller is responsible for rolling back ``plugin_dir`` on any exception.
+    """
+    from opencomputer.plugins.install_security_scan import scan_plugin_dir
+    from plugin_sdk.hooks import HookContext, HookEvent
+
+    report = None if skip_scan else scan_plugin_dir(plugin_dir)
+    if report is not None:
+        report.raise_for_blocks()  # raises InstallSecurityScanError on block
+
+    if before_install_hook is None:
+        return
+
+    ctx = HookContext(
+        event=HookEvent.BEFORE_INSTALL,
+        session_id=f"install:{install_plugin_id}",
+        install_source=install_source,
+        install_url=install_url,
+        install_plugin_id=install_plugin_id,
+        install_scan_report=report,
+    )
+    # CLI install is a sync typer command running outside an event loop, so
+    # asyncio.run() is the correct primitive. If a future caller invokes
+    # install_from_catalog from inside an async context, they should pass
+    # ``before_install_hook=None`` and call the hook themselves; we don't
+    # paper over that with run_until_complete fallback (deprecated on 3.12+).
+    decision = asyncio.run(before_install_hook(ctx))
+
+    if decision is not None and getattr(decision, "decision", "pass") == "block":
+        reason = getattr(decision, "reason", "") or "blocked by BEFORE_INSTALL hook"
+        raise RuntimeError(reason)
 
 
 __all__ = [
