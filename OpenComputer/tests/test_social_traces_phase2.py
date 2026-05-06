@@ -81,7 +81,6 @@ from extensions.social_traces import identity as st_identity  # noqa: E402
 from extensions.social_traces import prefetch as st_prefetch  # noqa: E402
 from extensions.social_traces import state as st_state  # noqa: E402
 
-
 # ─── manifest discovery ──────────────────────────────────────────────
 
 
@@ -296,10 +295,10 @@ async def test_prefetch_records_bridge_entry_when_enabled(tmp_path: Path):
     must record a session_state bridge entry with ``trace_used=None``
     so the post-task subscriber sees a uniform shape (BEFORE_TASK
     fired, no match) via ``pop_session``."""
+    from extensions.social_traces import session_state as bridge
+
     from plugin_sdk.hooks import HookContext, HookEvent
     from plugin_sdk.runtime_context import RuntimeContext
-
-    from extensions.social_traces import session_state as bridge
 
     bridge.reset_for_testing()
     st_state.set_enabled(tmp_path, True)

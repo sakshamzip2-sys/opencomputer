@@ -80,6 +80,7 @@ _ensure_alias()
 
 from extensions.social_traces import distiller as st_distiller  # noqa: E402
 from extensions.social_traces import redactor as r  # noqa: E402
+
 from plugin_sdk.core import Message  # noqa: E402
 from plugin_sdk.provider_contract import (  # noqa: E402
     BaseProvider,
@@ -87,7 +88,6 @@ from plugin_sdk.provider_contract import (  # noqa: E402
     Usage,
 )
 from plugin_sdk.traces import TRACE_API_V1, TraceCard, TraceMeta, TraceStep  # noqa: E402
-
 
 # ─── redactor: PII layer (always on) ─────────────────────────────────
 

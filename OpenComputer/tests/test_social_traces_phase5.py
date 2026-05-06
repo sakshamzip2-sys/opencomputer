@@ -104,7 +104,7 @@ def _ensure_alias() -> None:
         client_pkg = importlib.util.module_from_spec(spec)
         sys.modules["extensions.social_traces.client"] = client_pkg
         spec.loader.exec_module(client_pkg)
-        setattr(parent, "client", client_pkg)
+        parent.client = client_pkg
     for sub in ("local_file",):
         full_name = f"extensions.social_traces.client.{sub}"
         if full_name in sys.modules:
@@ -130,7 +130,6 @@ from extensions.social_traces import session_state as bridge  # noqa: E402
 from extensions.social_traces import state as st_state  # noqa: E402
 from extensions.social_traces import subscriber as st_sub  # noqa: E402
 from extensions.social_traces.config import SocialTracesConfig  # noqa: E402
-
 
 # ─── fixtures ──────────────────────────────────────────────────────────
 
@@ -255,7 +254,7 @@ def test_bridge_thread_safety_smoke():
 async def test_prefetch_match_writes_bridge(tmp_path: Path):
     """When the prefetch path injects a trace, the bridge entry must
     be set so the post-task subscriber can read it."""
-    from plugin_sdk.core import Message as _M
+    from plugin_sdk.core import Message as Msg
     from plugin_sdk.hooks import HookContext, HookEvent
     from plugin_sdk.runtime_context import RuntimeContext
 
@@ -281,7 +280,7 @@ async def test_prefetch_match_writes_bridge(tmp_path: Path):
         event=HookEvent.BEFORE_TASK,
         session_id="prefetch-sid",
         runtime=runtime,
-        message=_M(role="user", content="sync homelab files via filesync"),
+        message=Msg(role="user", content="sync homelab files via filesync"),
     )
 
     decision = await st_prefetch.on_before_task(ctx)
@@ -295,7 +294,7 @@ async def test_prefetch_match_writes_bridge(tmp_path: Path):
 async def test_prefetch_no_match_writes_bridge_with_none(tmp_path: Path):
     """No matching trace → bridge entry exists but trace_used is None.
     Subscriber's session_known()=True, hit_count()=0 — emit candidate."""
-    from plugin_sdk.core import Message as _M
+    from plugin_sdk.core import Message as Msg
     from plugin_sdk.hooks import HookContext, HookEvent
     from plugin_sdk.runtime_context import RuntimeContext
 
@@ -305,7 +304,7 @@ async def test_prefetch_no_match_writes_bridge_with_none(tmp_path: Path):
         event=HookEvent.BEFORE_TASK,
         session_id="empty-sid",
         runtime=runtime,
-        message=_M(role="user", content="something nobody has solved"),
+        message=Msg(role="user", content="something nobody has solved"),
     )
 
     await st_prefetch.on_before_task(ctx)

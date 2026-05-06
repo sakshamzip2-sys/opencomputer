@@ -116,9 +116,7 @@ def is_session_worth_distilling(event: SessionEndEvent) -> bool:
     """
     if event.turn_count < _MIN_TURN_COUNT:
         return False
-    if event.duration_seconds < _MIN_DURATION_S:
-        return False
-    return True
+    return event.duration_seconds >= _MIN_DURATION_S
 
 
 class TraceEmissionSubscriber:
@@ -353,10 +351,9 @@ class TraceEmissionSubscriber:
             # rejects every signed submission with "submitter_hash in
             # payload does not match X-Submitter-Hash header".
             try:
-                if cfg.submitter_hash:
-                    submitter_hash = cfg.submitter_hash
-                else:
-                    submitter_hash = get_or_create_agent_id(profile_home)
+                submitter_hash = cfg.submitter_hash or get_or_create_agent_id(
+                    profile_home
+                )
             except Exception:  # noqa: BLE001
                 _log.warning(
                     "social-traces: failed to resolve submitter_hash "

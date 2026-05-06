@@ -66,7 +66,7 @@ def _ensure_alias() -> None:
             sys.modules[full] = sub_mod
             sub_spec.loader.exec_module(sub_mod)
         spec.loader.exec_module(client_pkg)
-        setattr(parent, "client", client_pkg)
+        parent.client = client_pkg
 
 
 _ensure_alias()
@@ -77,6 +77,7 @@ from extensions.social_traces.client.http import (  # noqa: E402
     _trace_card_from_wire,
     _trace_card_to_wire,
 )
+
 from plugin_sdk.traces import (  # noqa: E402
     QueryResult,
     SubmitReceipt,

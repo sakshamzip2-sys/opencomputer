@@ -93,7 +93,7 @@ def _ensure_alias() -> None:
         client_pkg = importlib.util.module_from_spec(spec)
         sys.modules["extensions.social_traces.client"] = client_pkg
         spec.loader.exec_module(client_pkg)
-        setattr(parent, "client", client_pkg)
+        parent.client = client_pkg
     for sub in ("local_file",):
         full_name = f"extensions.social_traces.client.{sub}"
         if full_name in sys.modules:
@@ -121,7 +121,6 @@ from extensions.social_traces.client.local_file import (  # noqa: E402
     trace_card_from_dict,
     trace_card_to_dict,
 )
-
 
 # ─── helpers ──────────────────────────────────────────────────────────
 
