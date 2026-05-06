@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from plugin_sdk.core import Message as _Message
+from plugin_sdk.core import Message as MessageT
 from plugin_sdk.hooks import (
     HookContext,
     HookDecision,
@@ -95,7 +95,7 @@ def _ensure_alias() -> None:
         client_pkg = importlib.util.module_from_spec(spec)
         sys.modules["extensions.social_traces.client"] = client_pkg
         spec.loader.exec_module(client_pkg)
-        setattr(parent, "client", client_pkg)
+        parent.client = client_pkg
     for sub in ("local_file",):
         full_name = f"extensions.social_traces.client.{sub}"
         if full_name in sys.modules:
@@ -123,7 +123,6 @@ from extensions.social_traces.client.local_file import (  # noqa: E402
 from extensions.social_traces.tag_extractor import (  # noqa: E402
     extract_tags_from_message,
 )
-
 
 # ─── helpers ──────────────────────────────────────────────────────────
 
@@ -357,7 +356,7 @@ async def test_on_before_task_disabled_returns_pass(tmp_path: Path):
         event=HookEvent.BEFORE_TASK,
         session_id="sid",
         runtime=runtime,
-        message=_Message(role="user", content="anything"),
+        message=MessageT(role="user", content="anything"),
     )
     decision = await st_prefetch.on_before_task(ctx)
     assert decision.decision == "pass"
@@ -377,7 +376,7 @@ async def test_on_before_task_no_match_returns_pass(tmp_path: Path):
         event=HookEvent.BEFORE_TASK,
         session_id="sid",
         runtime=runtime,
-        message=_Message(role="user", content="some homelab task"),
+        message=MessageT(role="user", content="some homelab task"),
     )
     decision = await st_prefetch.on_before_task(ctx)
     assert decision.decision == "pass"
@@ -410,7 +409,7 @@ async def test_on_before_task_match_returns_rewrite_with_trace_block(tmp_path: P
         event=HookEvent.BEFORE_TASK,
         session_id="sid",
         runtime=runtime,
-        message=_Message(
+        message=MessageT(
             role="user", content="i need to sync homelab boxes for filesync"
         ),
     )
@@ -455,7 +454,7 @@ async def test_on_before_task_threshold_blocks_weak_match(tmp_path: Path):
         event=HookEvent.BEFORE_TASK,
         session_id="sid",
         runtime=runtime,
-        message=_Message(role="user", content="homelab work"),
+        message=MessageT(role="user", content="homelab work"),
     )
     decision = await st_prefetch.on_before_task(ctx)
 
@@ -472,7 +471,7 @@ async def test_on_before_task_empty_user_message_returns_pass(tmp_path: Path):
         event=HookEvent.BEFORE_TASK,
         session_id="sid",
         runtime=runtime,
-        message=_Message(role="user", content="   "),
+        message=MessageT(role="user", content="   "),
     )
     decision = await st_prefetch.on_before_task(ctx)
     assert decision.decision == "pass"
@@ -487,7 +486,7 @@ class _FakeProvider(BaseProvider):
         max_tokens=None, temperature=None, **kw,
     ):
         return ProviderResponse(
-            message=_Message(role="assistant", content="ok"),
+            message=MessageT(role="assistant", content="ok"),
             stop_reason="end_turn",
             usage=Usage(input_tokens=5, output_tokens=2),
         )
@@ -523,7 +522,7 @@ async def test_end_to_end_seeded_trace_lands_in_messages(tmp_path: Path):
     if this test ever fails, the headline feature is broken.
     """
     from opencomputer.hooks.engine import engine as global_engine
-    from plugin_sdk.runtime_context import RuntimeContext as _RC
+    from plugin_sdk.runtime_context import RuntimeContext as Rc
 
     profile_home = tmp_path / "profile"
     profile_home.mkdir()
@@ -550,7 +549,7 @@ async def test_end_to_end_seeded_trace_lands_in_messages(tmp_path: Path):
     )
 
     try:
-        runtime = _RC(custom={"profile_home": str(profile_home)})
+        runtime = Rc(custom={"profile_home": str(profile_home)})
         loop = _build_loop(tmp_path)
         result = await loop.run_conversation(
             "i want to sync files between my two homelab machines via rsync",
@@ -586,7 +585,7 @@ async def test_end_to_end_no_match_no_injection(tmp_path: Path):
     """Mirror test: when the inbox has no matching trace, the agent
     completes normally with no injection and trace_used stays None."""
     from opencomputer.hooks.engine import engine as global_engine
-    from plugin_sdk.runtime_context import RuntimeContext as _RC
+    from plugin_sdk.runtime_context import RuntimeContext as Rc
 
     profile_home = tmp_path / "profile"
     profile_home.mkdir()
@@ -611,7 +610,7 @@ async def test_end_to_end_no_match_no_injection(tmp_path: Path):
     )
 
     try:
-        runtime = _RC(custom={"profile_home": str(profile_home)})
+        runtime = Rc(custom={"profile_home": str(profile_home)})
         loop = _build_loop(tmp_path)
         result = await loop.run_conversation(
             "help me debug my homelab nas",

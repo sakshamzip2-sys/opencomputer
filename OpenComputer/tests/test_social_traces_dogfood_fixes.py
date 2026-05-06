@@ -79,6 +79,7 @@ from extensions.social_traces import plugin as st_plugin  # noqa: E402
 from extensions.social_traces import session_state as bridge  # noqa: E402
 from extensions.social_traces import state as st_state  # noqa: E402
 from extensions.social_traces import subscriber as st_sub  # noqa: E402
+
 from plugin_sdk.core import Message  # noqa: E402
 from plugin_sdk.ingestion import SessionEndEvent  # noqa: E402
 from plugin_sdk.provider_contract import (  # noqa: E402

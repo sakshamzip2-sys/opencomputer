@@ -1000,8 +1000,12 @@ def _run_chat_session(
         from opencomputer.cost_guard import get_default_guard
 
         _ensure_st_alias()
-        from extensions.social_traces.plugin import wire_subscriber as _wire_st  # type: ignore[import-not-found]
-        from extensions.social_traces.state import is_enabled as _st_enabled  # type: ignore[import-not-found]
+        from extensions.social_traces.plugin import (
+            wire_subscriber as _wire_st,  # type: ignore[import-not-found]
+        )
+        from extensions.social_traces.state import (
+            is_enabled as _st_enabled,  # type: ignore[import-not-found]
+        )
 
         if _st_enabled(_oc_home()):
             try:
@@ -2064,8 +2068,12 @@ def oneshot(
         from opencomputer.cost_guard import get_default_guard
 
         _ensure_st_alias()
-        from extensions.social_traces.plugin import wire_subscriber as _wire_st  # type: ignore[import-not-found]
-        from extensions.social_traces.state import is_enabled as _st_enabled  # type: ignore[import-not-found]
+        from extensions.social_traces.plugin import (
+            wire_subscriber as _wire_st,  # type: ignore[import-not-found]
+        )
+        from extensions.social_traces.state import (
+            is_enabled as _st_enabled,  # type: ignore[import-not-found]
+        )
 
         if _st_enabled(_oc_home()):
             try:

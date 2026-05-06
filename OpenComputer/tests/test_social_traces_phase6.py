@@ -83,6 +83,7 @@ from extensions.social_traces import session_state as bridge  # noqa: E402
 from extensions.social_traces import state as st_state  # noqa: E402
 from extensions.social_traces import subscriber as st_sub  # noqa: E402
 from extensions.social_traces.config import SocialTracesConfig  # noqa: E402
+
 from plugin_sdk.core import Message  # noqa: E402
 from plugin_sdk.ingestion import SessionEndEvent  # noqa: E402
 from plugin_sdk.provider_contract import (  # noqa: E402
@@ -98,7 +99,6 @@ from plugin_sdk.traces import (  # noqa: E402
     TraceNetworkClient,
     TraceStep,
 )
-
 
 # ─── helpers ──────────────────────────────────────────────────────────
 
@@ -551,11 +551,11 @@ async def test_subscriber_no_provider_judge_short_circuits(
 async def test_prefetch_match_writes_card_to_bridge(tmp_path: Path):
     """Phase 6 contract: prefetch writes the full TraceCard to the
     bridge so the post-task judge has access without re-querying."""
-    from plugin_sdk.hooks import HookContext, HookEvent
-    from plugin_sdk.runtime_context import RuntimeContext
-
     from extensions.social_traces import prefetch as st_prefetch
     from extensions.social_traces.client.local_file import trace_card_to_dict
+
+    from plugin_sdk.hooks import HookContext, HookEvent
+    from plugin_sdk.runtime_context import RuntimeContext
 
     st_state.set_enabled(tmp_path, True)
     inbox = tmp_path / "traces" / "inbox"

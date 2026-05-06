@@ -99,7 +99,7 @@ def _ensure_alias() -> None:
         sys.modules["extensions.social_traces.client"] = client_pkg
         client_pkg.__package__ = "extensions.social_traces.client"
         spec.loader.exec_module(client_pkg)
-        setattr(parent, "client", client_pkg)
+        parent.client = client_pkg
     for sub in ("local_file",):
         full_name = f"extensions.social_traces.client.{sub}"
         if full_name in sys.modules:
@@ -119,6 +119,7 @@ from extensions.social_traces import plugin as st_plugin  # noqa: E402
 from extensions.social_traces import session_state as bridge  # noqa: E402
 from extensions.social_traces import state as st_state  # noqa: E402
 from extensions.social_traces.client import make_client  # noqa: E402
+
 from plugin_sdk.core import Message  # noqa: E402
 from plugin_sdk.hooks import HookContext, HookEvent  # noqa: E402
 from plugin_sdk.ingestion import SessionEndEvent  # noqa: E402

@@ -543,7 +543,9 @@ class Gateway:
             from opencomputer.plugins.registry import registry as plugin_registry
 
             _ensure_alias()
-            from extensions.social_traces.plugin import wire_subscriber  # type: ignore[import-not-found]
+            from extensions.social_traces.plugin import (
+                wire_subscriber,  # type: ignore[import-not-found]
+            )
             from extensions.social_traces.state import is_enabled  # type: ignore[import-not-found]
 
             if not is_enabled(_home()):

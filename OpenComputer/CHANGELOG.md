@@ -8,6 +8,20 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 - **`social-traces` bundled extension — community trace network (Phases 1–9 + 12).** Opt-in, default-disabled plugin that queries a shared [OpenHub](https://github.com/sakshamzip2-sys/openhub) endpoint pre-task for matching TraceCards (admin-curated, redacted task summaries) and submits a distilled TraceCard post-task. Three-Haiku distillation flow (intent + steps + insight + LLM tag-extract), session-level cache, per-profile tag-bias accumulator, per-profile `state.json` gate, outbox-on-network-failure (in-memory drain at this revision; on-disk persistence deferred). HTTP backend (`HttpTraceNetworkClient`) with httpx soft timeouts. Wizard step asks once during full setup. `opencomputer traces {enable,disable,status,inbox,outbox,history,dry-run,audit-redactor,rotate-id}` CLI surface. README section + plan doc at `docs/plans/social-traces-plugin.md`. ~80 new tests across `test_social_traces_phase{1..9}*.py`, `test_social_traces_dogfood_fixes.py`, `test_social_traces_http_client.py`. Network-side server lives in a separate private repo at `~/Documents/GitHub/openhub/`.
 
+### Added — Trustworthy install completion (S2 + S3 leftovers from 2026-05-06 OpenClaw deep-comparison)
+
+- `oc plugin install git+https://...` and `oc plugin install https://...` install sources, complementing the existing catalog flow. Git installs use shallow `git clone --depth=1` (full clone + checkout when `--ref` is provided); url installs require an explicit `--sha256` pin.
+- `oc plugin verify <plugin-id>` — re-fetch the original source (catalog tarball, git ref, or url tarball) and report any on-disk drift versus the installed bytes. Exits non-zero on drift.
+- `install_security_scan` AST + regex guard runs after every extract. `eval`/`exec`/`compile` of network-fetch chains blocks the install; `rm -rf`, `os.system`, raw socket use, etc. emit warnings.
+- `HookEvent.BEFORE_INSTALL` lifecycle hook with 4 new optional `HookContext` fields (`install_source`, `install_url`, `install_plugin_id`, `install_scan_report`). Plugins can veto installs by returning `HookDecision(decision="block", ...)` from the registered handler. CLI install paths plumb the hook engine's `fire_blocking` through.
+- Per-profile `~/.opencomputer/<profile>/plugins/.installed_index.json` recording each install's source + verification metadata so `oc plugin verify` knows what to re-fetch.
+
+### Notes
+
+- Existing `oc plugin install <path>` and `oc plugin install <slug> --remote` flows are byte-identical when no new flags are supplied; 20 catalog regression tests stay green.
+- AST scan starts conservative: only `eval(network_fetch())` blocks. WARN patterns (rm -rf, os.system, raw socket) are observable but non-blocking; promote to block in your local policy via a `BEFORE_INSTALL` hook.
+- Submodules deliberately not recursed on git clone (supply-chain attack surface). Add a `--with-submodules` flag if a real user requests it.
+
 ## [2026.5.5] — v1.0 release: 8 days of dogfood-driven hardening
 
 This release is the colloquial **v1.0**: the first cut from the post-2026.4.27 dogfood window with all of the v1.0 ship-gate sub-projects merged AND the Wave 6 control-extension port + a long tail of Tier-2/4 deferral closures landed. The plugin SDK surface (`plugin_sdk/*`) reaches its v1.0 stability commitment with this tag.

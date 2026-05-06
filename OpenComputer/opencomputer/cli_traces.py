@@ -133,7 +133,7 @@ def _ensure_alias() -> None:
             sys.modules["extensions.social_traces.client"] = client_pkg
             client_pkg.__package__ = "extensions.social_traces.client"
             spec.loader.exec_module(client_pkg)
-            setattr(parent, "client", client_pkg)
+            parent.client = client_pkg
         for sub in ("local_file",):
             full_name = f"extensions.social_traces.client.{sub}"
             if full_name in sys.modules:

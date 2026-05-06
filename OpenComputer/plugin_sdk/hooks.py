@@ -25,6 +25,7 @@ Available events:
     BeforeMessageWrite      — fires before SessionDB persists a message
     BeforeTask              — fires after UserPromptSubmit, before first LLM
                               call (blocking; lets handlers inject context)
+    BeforeInstall           — fires after extract + scan, before plugin activates an install
 
 Hook ordering: handlers can declare ``priority`` on their HookSpec — lower
 priorities run first; FIFO within the same priority bucket. The default is 100,
@@ -74,6 +75,8 @@ class HookEvent(str, Enum):
     # (used by the social-traces plugin to inject pre-fetched TraceCards
     # into context). See docs/plans/social-traces-plugin.md §8.
     BEFORE_TASK = "BeforeTask"
+    # 2026-05-06 — install lifecycle (S3 leftover from OpenClaw deep-comparison).
+    BEFORE_INSTALL = "BeforeInstall"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +120,19 @@ class HookContext:
     #: Tool dispatch latency in ms — populated for POST_TOOL_USE +
     #: TRANSFORM_TOOL_RESULT (Wave 5 T15 — Hermes 59b56d445).
     duration_ms: int | None = None
+    # 2026-05-06 — install lifecycle context fields. Populated only for
+    # BEFORE_INSTALL; default None so existing HookContext callers across
+    # the loop / gateway / approval paths stay unchanged.
+    #:
+    #: Install source: "catalog" | "git" | "url" | "path".
+    install_source: str | None = None
+    #: Raw URL the user typed (or slug for catalog, abs path for path).
+    install_url: str | None = None
+    #: Resolved plugin id (post-extract, post-manifest-parse).
+    install_plugin_id: str | None = None
+    #: install_security_scan.ScanReport — typed loosely as object so the SDK
+    #: doesn't need to re-import it (the plugin loader is the only producer).
+    install_scan_report: object | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,4 +217,6 @@ ALL_HOOK_EVENTS: tuple[HookEvent, ...] = (
     HookEvent.POST_APPROVAL_RESPONSE,
     # Social-traces plugin
     HookEvent.BEFORE_TASK,
+    # 2026-05-06 — install lifecycle
+    HookEvent.BEFORE_INSTALL,
 )

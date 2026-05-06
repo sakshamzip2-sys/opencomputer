@@ -47,7 +47,8 @@ def test_three_new_hook_events_exist_and_are_in_all_hook_events() -> None:
     # Phase 11b shipped 9 events; Round 2A P-1 adds 8 more for 17;
     # Wave 5 T13/T14 adds 3 (PRE_GATEWAY_DISPATCH, PRE/POST_APPROVAL_*) for 20;
     # Social-traces Phase 0 adds BEFORE_TASK for 21.
-    assert len(ALL_HOOK_EVENTS) == 21
+    # 2026-05-06 OpenClaw deep-comparison adds BEFORE_INSTALL for 22.
+    assert len(ALL_HOOK_EVENTS) == 22
 
 
 async def test_base_channel_adapter_send_notification_default_routes_to_send() -> None:
