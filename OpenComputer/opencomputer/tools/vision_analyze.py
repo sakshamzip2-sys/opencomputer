@@ -57,30 +57,15 @@ def _make_async_client(timeout: float = DEFAULT_TIMEOUT_S) -> httpx.AsyncClient:
 def _is_safe_image_path(path: Path) -> bool:
     """True iff ``path`` resolves under ``<profile_home>/tool_result_storage/``.
 
-    This is the safe-set for ``image_path``: anything the agent's own
-    tools wrote to disk (screenshots, browser snapshots, persisted
-    oversize outputs) lives here, and it's the only directory we
-    allow this tool to read from. Arbitrary file reads via ``image_path``
-    would be a privilege escalation — the agent has no business reading
-    ``/etc/shadow`` or the user's home through this surface.
-
-    Resolved via ``Path.resolve()`` so symlink-traversal tricks
-    (``<storage>/../etc/passwd``) collapse to their real path before
-    the prefix check. ``relative_to`` raises ``ValueError`` when the
-    resolved path isn't under the safe root — caught and reported as
-    unsafe.
+    Delegates to :func:`opencomputer.security.path_safety.is_safe_path`
+    (Hermes-followup 2026-05-07) so symlink-traversal hardening is
+    centralised. Behaviour preserved exactly — covered by
+    ``test_vision_analyze_image_path`` regression-lock tests.
     """
-    try:
-        resolved = path.resolve()
-    except (OSError, RuntimeError):
-        # Resolve can raise on broken symlinks or permission errors.
-        return False
-    safe_root = (_home() / "tool_result_storage").resolve()
-    try:
-        resolved.relative_to(safe_root)
-    except ValueError:
-        return False
-    return True
+    from opencomputer.security.path_safety import is_safe_path
+
+    safe_root = _home() / "tool_result_storage"
+    return is_safe_path(path, roots=[safe_root])
 
 
 def _sniff_image_type(data: bytes) -> str | None:
