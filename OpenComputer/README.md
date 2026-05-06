@@ -324,6 +324,15 @@ opencomputer traces disable                     # turn it off
 
 The setup wizard's full flow asks once, with a no-default opt-in. You can also enable later via the two CLI commands above.
 
+End-to-end demo (alice → submit → admin approve → bob → trace returned) is a one-liner once postgres + the OpenHub repo are present:
+
+```bash
+./scripts/demo_social_traces.sh                # stubbed wire test, no API key, ~5s
+./scripts/demo_social_traces.sh --real         # full agent loop, picks up ANTHROPIC_API_KEY
+                                                # (or router proxy via ANTHROPIC_BASE_URL +
+                                                # ANTHROPIC_AUTH_MODE=bearer)
+```
+
 ## Profiles
 
 One user, many personas. A profile is a separate data dir with its own memory, config, and plugin selection. Switch with `-p`:

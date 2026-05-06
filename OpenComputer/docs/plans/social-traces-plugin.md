@@ -694,12 +694,23 @@ Lands now that OpenHub Phases 0-4 are merged in the sibling repo (`~/Documents/G
 - [ ] Outbox auto-drain on next successful `health()` check — kick off from the post-task subscriber when the bridge confirms reachability
 - [ ] Persistent `httpx.AsyncClient` across calls if profile-level metrics show real overhead
 
-### Phase 10 — End-to-end demo (1-2 hours)
+### Phase 10 — End-to-end demo ✅ (2026-05-07)
 
-- [ ] Local OpenHub running on Mac (Stage 1 — see openhub-mvp.md)
-- [ ] Two profiles: `oc -p alice`, `oc -p bob` against `http://localhost:8000`
-- [ ] Walk through: alice solves novel task → submission → admin approve → bob queries → trace returned → bob uses it silently
-- [ ] Document the demo flow in plugin's README
+Shipped as a one-click script: `OpenComputer/scripts/demo_social_traces.sh`.
+
+Two modes covered by a single orchestrator:
+
+* **`--stubbed`** (default) — wire-only test via `HttpTraceNetworkClient` directly (no agent loop, no LLM). Proves the full submit → approve → query roundtrip + HMAC enforcement + the privacy invariant that pending traces never appear in query results. Fast (~5s), reproducible, no API key needed. Verified passing locally.
+* **`--real`** — full agent loop via `opencomputer oneshot` with an alice profile and a bob profile in temp dirs. Reads `ANTHROPIC_API_KEY` from env (works with native Anthropic key OR with `ANTHROPIC_BASE_URL=https://claude-router.vercel.app` + `ANTHROPIC_AUTH_MODE=bearer` Claude Router proxy setup — `extensions/anthropic-provider/provider.py` already handles the bearer + x-api-key-strip). Setup paths smoke-validated locally (OH bring-up, submitter registration, profile-write, oneshot reaches Anthropic API).
+
+What the script does end-to-end:
+
+1. Brings up OpenHub fresh (alembic upgrade + truncate three demo tables + uvicorn bg + healthz wait), with `REQUIRE_HMAC=true` and a freshly-generated `ADMIN_TOKEN`.
+2. POSTs `/admin/submitters` twice → captures alice's + bob's `(submitter_hash, shared_key)`.
+3. Stubbed: drives `HttpTraceNetworkClient` directly. Real: writes per-profile `profile.yaml` (enables social-traces) + `config.yaml` (model + endpoint + HMAC creds + `max_tokens: 4096` to dodge the 32768 non-streaming cap), then runs `opencomputer oneshot` for alice with a "tag this conversation" prompt, polls `/admin/queue?status=pending` for the submitted trace, calls `/admin/traces/<id>/accept`, runs `oneshot` for bob with a related prompt, and verifies bob's heartbeat + the OH-side approved-traces count is non-zero (round trip closed).
+4. Tear-down trap kills uvicorn cleanly even on failure; temp dir kept so the operator can inspect logs.
+
+Exit code 0/1 + clear-reason stderr, so future CI can run the stubbed mode unattended.
 
 ### Phase 11 — Tests + CI ✅ (2026-05-07)
 
