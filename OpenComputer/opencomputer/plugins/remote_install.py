@@ -85,6 +85,22 @@ class CatalogParseError(CatalogError):
     """Catalog JSON couldn't be parsed."""
 
 
+class GitNotFoundError(CatalogError):
+    """git binary not found on PATH."""
+
+
+class GitCloneError(CatalogError):
+    """git clone failed (network, auth, or remote-not-found)."""
+
+
+class PluginIdMismatchError(CatalogError):
+    """Extracted plugin.json's `id` doesn't match what the user asked for."""
+
+
+class UnsupportedTarballFormat(CatalogError):
+    """Tarball is not .tar.gz / .tgz."""
+
+
 class CatalogSignatureError(CatalogError):
     """Catalog has trusted-keys configured but signature verify failed."""
 
@@ -477,6 +493,165 @@ def install_from_catalog(
     )
 
 
+def _git_path() -> str | None:
+    """shutil.which wrapped for test patching. Returns None if git not on PATH."""
+    return shutil.which("git")
+
+
+def _normalize_git_url(arg: str) -> str:
+    """Strip the leading 'git+' prefix if present; otherwise return unchanged."""
+    if arg.startswith("git+"):
+        return arg[len("git+"):]
+    return arg
+
+
+def install_from_git(
+    url: str,
+    *,
+    dest_root: Path,
+    plugin_id_hint: str,
+    ref: str | None = None,
+    force: bool = False,
+    before_install_hook: BeforeInstallHook | None = None,
+    skip_scan: bool = False,
+) -> InstallResult:
+    """Install a plugin via shallow `git clone`.
+
+    ``url`` accepts ``git+https://...``, ``git+ssh://...``, ``https://...``,
+    ``ssh://...``, ``file://...``. The ``git+`` prefix is stripped before
+    handing to git.
+
+    ``ref`` pins a specific sha/tag/branch. If None, the default branch's
+    HEAD is cloned and its resolved sha is recorded in the installed-index.
+    """
+    import subprocess
+
+    # Resolve at call-time (not via default arg) so monkeypatching
+    # the module-level _git_path symbol takes effect.
+    git = _git_path()
+    if git is None:
+        raise GitNotFoundError(
+            "git binary not found on PATH — install Git or use catalog/url install instead."
+        )
+
+    plugin_dir = dest_root / plugin_id_hint
+    if plugin_dir.exists():
+        if not force:
+            raise CatalogError(
+                f"plugin '{plugin_id_hint}' already installed at {plugin_dir}. "
+                "Use --force to overwrite."
+            )
+        shutil.rmtree(plugin_dir)
+
+    git_url = _normalize_git_url(url)
+    # Clone strategy:
+    # * No ref → shallow clone of the default branch (depth=1 saves bandwidth).
+    # * Explicit ref → full clone, then `git checkout <ref>`. We can't combine
+    #   `--depth=1` with an arbitrary sha because shallow clones only know
+    #   about the tip of the named branch/tag.
+    if ref is None:
+        clone_args = [git, "clone", "--depth=1", git_url, str(plugin_dir)]
+    else:
+        clone_args = [git, "clone", git_url, str(plugin_dir)]
+
+    try:
+        subprocess.run(clone_args, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        raise GitCloneError(
+            f"git clone failed: {e.stderr.strip() or e}"
+        ) from e
+
+    if ref is not None:
+        try:
+            subprocess.run(
+                [git, "checkout", "--quiet", ref],
+                cwd=plugin_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            shutil.rmtree(plugin_dir, ignore_errors=True)
+            raise GitCloneError(
+                f"git checkout {ref} failed: {e.stderr.strip()}"
+            ) from e
+
+    head_sha = subprocess.run(
+        [git, "rev-parse", "HEAD"],
+        cwd=plugin_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    # Verify the cloned tree's plugin.json matches plugin_id_hint
+    manifest_path = plugin_dir / "plugin.json"
+    if not manifest_path.exists():
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        raise CatalogParseError(
+            f"cloned repo at {git_url} has no plugin.json at the root"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as e:
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        raise CatalogParseError(
+            f"plugin.json is not valid JSON: {e}"
+        ) from e
+
+    actual_id = str(manifest.get("id", ""))
+    if actual_id != plugin_id_hint:
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        raise PluginIdMismatchError(
+            f"plugin.json says id={actual_id!r} but install argument was {plugin_id_hint!r}"
+        )
+
+    version = str(manifest.get("version", ""))
+
+    # Strip the .git directory to keep the installed tree clean and to avoid
+    # accidental git-related leakage at runtime.
+    git_dir = plugin_dir / ".git"
+    if git_dir.exists():
+        shutil.rmtree(git_dir)
+
+    # Post-extract gate: scan + BEFORE_INSTALL hook (rolls back on failure).
+    try:
+        _post_extract_gate(
+            plugin_dir=plugin_dir,
+            install_source="git",
+            install_url=url,
+            install_plugin_id=plugin_id_hint,
+            before_install_hook=before_install_hook,
+            skip_scan=skip_scan,
+        )
+    except Exception:
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        raise
+
+    # Record in installed-index
+    from opencomputer.plugins.installed_index import (
+        InstalledRecord,
+        record_install,
+    )
+
+    record_install(
+        dest_root / ".installed_index.json",
+        InstalledRecord(
+            plugin_id=plugin_id_hint,
+            version=version,
+            source="git",
+            source_url=url,
+            source_ref=head_sha,
+            tarball_sha256=None,
+            installed_at=int(time.time()),
+        ),
+    )
+
+    return InstallResult(
+        plugin_id=plugin_id_hint, version=version, install_path=plugin_dir
+    )
+
+
 def _post_extract_gate(
     *,
     plugin_dir: Path,
@@ -521,16 +696,21 @@ def _post_extract_gate(
 
 
 __all__ = [
+    "BeforeInstallHook",
     "CatalogEntry",
     "CatalogError",
     "CatalogFetchError",
     "CatalogNotConfiguredError",
     "CatalogParseError",
     "CatalogSignatureError",
+    "GitCloneError",
+    "GitNotFoundError",
     "InstallResult",
+    "PluginIdMismatchError",
     "PluginNotInCatalogError",
     "TarballChecksumError",
     "TarballTooLargeError",
+    "UnsupportedTarballFormat",
     "MAX_TARBALL_BYTES",
     "DEFAULT_CACHE_TTL_SECONDS",
     "cache_path",
@@ -539,6 +719,7 @@ __all__ = [
     "fetch_catalog",
     "find_entry",
     "install_from_catalog",
+    "install_from_git",
     "read_cache",
     "resolve_catalog_url",
     "write_cache",
