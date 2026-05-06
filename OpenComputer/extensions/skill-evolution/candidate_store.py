@@ -357,11 +357,206 @@ def prune_old_candidates(profile_home: Path, max_age_days: int = 90) -> int:
     return pruned
 
 
+# ─── quarantine — Phase 5 (Skill Workshop state machine completion) ───
+#
+# OpenClaw's Skill Workshop has a 4-state machine: pending → reviewed →
+# applied | quarantined. The pre-existing add/accept/reject path covers
+# pending+reviewed (in `_proposed/`) and applied (in `skills/`); reject
+# was destructive (tombstone + rmtree). Quarantined adds an explicit
+# "rejected but retained" bucket so candidates can be reviewed later.
+
+
+def _quarantine_dir(profile_home: Path) -> Path:
+    return _proposed_dir(profile_home) / ".quarantined"
+
+
+@dataclass(frozen=True, slots=True)
+class QuarantinedMeta:
+    """Lightweight summary of one quarantined candidate."""
+
+    name: str
+    reason: str
+    quarantined_at: float
+    age_days: float
+
+
+def quarantine_candidate(
+    profile_home: Path, name: str, reason: str
+) -> bool:
+    """Move ``_proposed/<name>/`` to ``_proposed/.quarantined/<name>/``.
+
+    Quarantined candidates retain their content + add a
+    ``quarantine_meta.json`` file recording the reason + timestamp.
+    Returns ``True`` if the candidate was found and moved, ``False`` if
+    the source didn't exist.
+    """
+    if _is_hidden(name):
+        return False
+
+    proposed_root = _proposed_dir(profile_home)
+    src = proposed_root / name
+    if not src.is_dir():
+        return False
+
+    quarantine_root = _quarantine_dir(profile_home)
+    quarantine_root.mkdir(parents=True, exist_ok=True)
+    _secure_dir_if_helper_exists(quarantine_root)
+
+    dest = quarantine_root / name
+    if dest.exists():
+        # Multiple quarantines of the same name → numeric suffix.
+        n = 2
+        while (quarantine_root / f"{name}-{n}").exists():
+            n += 1
+        dest = quarantine_root / f"{name}-{n}"
+
+    try:
+        os.rename(src, dest)
+    except OSError as e:
+        _log.warning(
+            "quarantine_candidate: rename %s → %s failed: %r",
+            src, dest, e,
+        )
+        return False
+
+    meta = {
+        "name": name,
+        "reason": reason,
+        "quarantined_at": time.time(),
+    }
+    try:
+        (dest / "quarantine_meta.json").write_text(
+            json.dumps(meta, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        _log.warning(
+            "quarantine_candidate: meta write failed for %s: %r", name, e,
+        )
+
+    return True
+
+
+def list_quarantined(profile_home: Path) -> list[QuarantinedMeta]:
+    """List all quarantined candidates with their reason + age."""
+    qdir = _quarantine_dir(profile_home)
+    if not qdir.is_dir():
+        return []
+
+    out: list[QuarantinedMeta] = []
+    now = time.time()
+    for entry in sorted(qdir.iterdir()):
+        if not entry.is_dir():
+            continue
+        meta_path = entry / "quarantine_meta.json"
+        reason = ""
+        ts: float = 0.0
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                reason = str(meta.get("reason", ""))
+                ts = float(meta.get("quarantined_at", 0.0))
+            except (OSError, json.JSONDecodeError):
+                pass
+        age_days = (now - ts) / 86400.0 if ts > 0 else 0.0
+        out.append(
+            QuarantinedMeta(
+                name=entry.name,
+                reason=reason,
+                quarantined_at=ts,
+                age_days=age_days,
+            )
+        )
+    return out
+
+
+def unquarantine_candidate(profile_home: Path, name: str) -> bool:
+    """Move ``_proposed/.quarantined/<name>/`` back to ``_proposed/<name>/``.
+
+    The quarantine_meta.json is removed during the move so the restored
+    candidate is identical to a freshly-staged one. Returns ``True`` on
+    success, ``False`` when the source isn't found.
+    """
+    qdir = _quarantine_dir(profile_home)
+    src = qdir / name
+    if not src.is_dir():
+        return False
+
+    proposed_root = _proposed_dir(profile_home)
+    proposed_root.mkdir(parents=True, exist_ok=True)
+    final_name = _resolve_collision_name(proposed_root, name)
+    dest = proposed_root / final_name
+
+    # Remove quarantine_meta.json before the move so the restored
+    # candidate looks like a fresh proposal.
+    meta_path = src / "quarantine_meta.json"
+    if meta_path.exists():
+        try:
+            meta_path.unlink()
+        except OSError:
+            pass
+
+    try:
+        os.rename(src, dest)
+    except OSError as e:
+        _log.warning(
+            "unquarantine_candidate: rename %s → %s failed: %r",
+            src, dest, e,
+        )
+        return False
+    return True
+
+
+def purge_quarantined(
+    profile_home: Path, max_age_days: int = 30
+) -> int:
+    """Permanently remove quarantined candidates older than ``max_age_days``.
+
+    Returns the count purged. Uses :func:`shutil.rmtree` directly since
+    the items are already in the ``.quarantined/`` bucket (no concurrent
+    listers see this directory — see filter rules in :func:`list_candidates`).
+    """
+    qdir = _quarantine_dir(profile_home)
+    if not qdir.is_dir():
+        return 0
+    cutoff = time.time() - max_age_days * 86400.0
+    purged = 0
+    for entry in list(qdir.iterdir()):
+        if not entry.is_dir():
+            continue
+        meta_path = entry / "quarantine_meta.json"
+        ts: float = 0.0
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                ts = float(meta.get("quarantined_at", 0.0))
+            except (OSError, json.JSONDecodeError):
+                continue
+        if ts > 0 and ts < cutoff:
+            shutil.rmtree(entry, ignore_errors=True)
+            if not entry.exists():
+                purged += 1
+    return purged
+
+
+def _secure_dir_if_helper_exists(_path: Path) -> None:
+    """Best-effort directory hardening — no-op when no helper is exposed."""
+    # Skill-evolution uses a profile-local file-permissions helper in some
+    # builds; this hook keeps the call site in the new code symmetric with
+    # other store methods even when the helper isn't reachable here.
+    return
+
+
 __all__ = [
     "CandidateMetadata",
+    "QuarantinedMeta",
     "accept_candidate",
     "add_candidate",
     "get_candidate",
+    "list_quarantined",
+    "purge_quarantined",
+    "quarantine_candidate",
+    "unquarantine_candidate",
     "list_candidates",
     "prune_old_candidates",
     "reject_candidate",
