@@ -134,6 +134,90 @@ class ConversationResult:
 SKILL_TOOL_NAME = "Skill"
 
 
+#: Cache of provider-method signatures so we don't re-introspect on
+#: every turn. Keyed by ``(class_qualname, method_name)`` (stable across
+#: bound-method ``id`` churn) and bounded at 64 entries to prevent any
+#: long-running daemon from leaking memory through the cache.
+#: Audit BLOCKER 3 (post-PR review): keying by ``id(method)`` was wrong
+#: because bound methods get a fresh ``id`` per attribute access; the
+#: cache leaked unboundedly AND ``id`` reuse after GC could return stale
+#: signatures from an entirely different method.
+_PROVIDER_SIG_CACHE: dict[tuple[str, str], frozenset[str]] = {}
+_PROVIDER_SIG_CACHE_MAX = 64
+
+
+def _maybe_split_system_kwargs(
+    method: Any,
+    *,
+    base_system: str,
+    injected_system: str,
+    session_id: str | None,
+) -> dict[str, Any]:
+    """Return only the split-system kwargs that ``method`` accepts.
+
+    The 2026-05-05 cache-correctness fix added ``base_system``,
+    ``injected_system``, and ``session_id`` as new kwargs on
+    ``BaseProvider.complete``/``stream_complete``. Stub providers in
+    tests and 3rd-party plugins that haven't adopted the new signature
+    would otherwise raise ``TypeError``. This helper introspects the
+    target method once (cached by class+name) and only passes kwargs
+    the method actually accepts.
+    """
+    import inspect as _inspect
+    import logging as _logging
+
+    # Stable key: ``(class_qualname, method_name)`` survives bound-method
+    # id churn. Falls back to ``("unknown", repr(method))`` for anything
+    # that isn't an attribute of a class (functools.partial, lambdas).
+    self_obj = getattr(method, "__self__", None)
+    func_name = getattr(method, "__name__", "")
+    if self_obj is not None and func_name:
+        cls = type(self_obj)
+        cache_key = (f"{cls.__module__}.{cls.__qualname__}", func_name)
+    else:
+        cache_key = ("unknown", repr(method))
+
+    accepted = _PROVIDER_SIG_CACHE.get(cache_key)
+    if accepted is None:
+        try:
+            sig = _inspect.signature(method)
+            accepted = frozenset(sig.parameters)
+            # Methods declared with **kwargs accept anything; treat as
+            # accepting all the new kwargs.
+            if any(
+                p.kind == _inspect.Parameter.VAR_KEYWORD
+                for p in sig.parameters.values()
+            ):
+                accepted = frozenset(
+                    list(accepted)
+                    + ["base_system", "injected_system", "session_id"]
+                )
+        except (ValueError, TypeError):
+            # Rare — typically C-implemented callables. Log so a silently
+            # broken provider surfaces in logs rather than dropping
+            # session_id forever.
+            _logging.getLogger(__name__).warning(
+                "inspect.signature failed for %r; split-system kwargs "
+                "will not be forwarded for this provider.",
+                cache_key,
+            )
+            accepted = frozenset()
+        # Bound size — drop oldest insertion order (Python 3.7+ dict
+        # iteration is insertion-ordered).
+        if len(_PROVIDER_SIG_CACHE) >= _PROVIDER_SIG_CACHE_MAX:
+            _PROVIDER_SIG_CACHE.pop(next(iter(_PROVIDER_SIG_CACHE)))
+        _PROVIDER_SIG_CACHE[cache_key] = accepted
+
+    out: dict[str, Any] = {}
+    if "base_system" in accepted:
+        out["base_system"] = base_system
+    if "injected_system" in accepted:
+        out["injected_system"] = injected_system
+    if "session_id" in accepted:
+        out["session_id"] = session_id
+    return out
+
+
 def _wrap_skill_result_as_tool_messages(
     *,
     skill_name: str,
@@ -1042,6 +1126,33 @@ class AgentLoop:
             turn_index=turn_index,
         )
         injected = await injection_engine.compose(inj_ctx)
+        # Bug 1 fix (2026-05-05): keep ``base_system`` (frozen, gets the
+        # cache marker) and ``injected`` (per-turn, never marked) as
+        # SEPARATE strings. Providers that accept the new kwargs
+        # (Anthropic) split into 2 system content blocks so the cached
+        # prefix matches turn-to-turn regardless of injection volatility.
+        # The concatenated form is preserved as ``system`` for legacy
+        # providers / call sites that only know about a single string.
+        #
+        # ``injected_volatile`` accumulates ALL per-turn content that
+        # gets appended below (memory prefetch, active memory, channel
+        # prompt, channel skill bodies). It joins the injection-engine
+        # output and is what we pass as ``injected_system`` to the
+        # provider — so split-aware providers see ALL the volatile
+        # content as un-marked tail, not just the engine compose result.
+        # Audit BLOCKER 1 (post-PR review): without this, prefetched +
+        # channel content that gets appended to ``system`` below was
+        # being silently dropped by Anthropic's split-system path.
+        # Track memory/channel content SEPARATELY from the engine-
+        # compose result so the post-compaction recompose path (line
+        # ~1500) can rebuild ``system`` + ``injected_volatile`` from
+        # the new engine compose without losing memory/channel content.
+        # Audit MAJOR 6 fix (post-PR review): pre-fix, the recompose
+        # rebuilt ``system = base_system + injected`` and silently
+        # dropped memory + channel content for legacy ``system=``
+        # callers on retries.
+        volatile_memory_blocks: list[str] = []
+        injected_volatile = injected or ""
         system = base_system + ("\n\n" + injected if injected else "")
 
         # Append user message + persist. ``images`` (TUI image-paste) is
@@ -1085,7 +1196,12 @@ class AgentLoop:
             runtime=self._runtime,
         )
         if prefetched:
-            system = system + "\n\n## Relevant memory\n\n" + prefetched
+            block = "## Relevant memory\n\n" + prefetched
+            volatile_memory_blocks.append(block)
+            system = system + "\n\n" + block
+            injected_volatile = (
+                injected_volatile + "\n\n" + block if injected_volatile else block
+            )
 
         # OpenClaw 1.B-alt — local-FTS5 proactive recall prepend.
         # Composes with Honcho prefetch above; gated by config flag (default OFF).
@@ -1104,7 +1220,14 @@ class AgentLoop:
                 ),
             ).recall_block(user_message)
             if am_block:
-                system = system + "\n\n## Active memory\n\n" + am_block
+                block = "## Active memory\n\n" + am_block
+                volatile_memory_blocks.append(block)
+                system = system + "\n\n" + block
+                injected_volatile = (
+                    injected_volatile + "\n\n" + block
+                    if injected_volatile
+                    else block
+                )
 
         # Hermes channel-port (PR 5): per-channel ephemeral system
         # prompt + auto-loaded skills, threaded in via
@@ -1116,8 +1239,11 @@ class AgentLoop:
         # pre-PR-5 prompt.
         channel_prompt = self._runtime.custom.get("channel_prompt")
         if isinstance(channel_prompt, str) and channel_prompt.strip():
-            system = (
-                system + "\n\n## Channel prompt\n\n" + channel_prompt.strip()
+            block = "## Channel prompt\n\n" + channel_prompt.strip()
+            volatile_memory_blocks.append(block)
+            system = system + "\n\n" + block
+            injected_volatile = (
+                injected_volatile + "\n\n" + block if injected_volatile else block
             )
         channel_skill_bodies = self._runtime.custom.get("channel_skill_bodies")
         if channel_skill_bodies:
@@ -1134,10 +1260,13 @@ class AgentLoop:
                 elif isinstance(entry, str) and entry.strip():
                     blocks.append(entry)
             if blocks:
-                system = (
-                    system
-                    + "\n\n## Channel skills (auto-loaded)\n\n"
-                    + "\n\n".join(blocks)
+                block = "## Channel skills (auto-loaded)\n\n" + "\n\n".join(blocks)
+                volatile_memory_blocks.append(block)
+                system = system + "\n\n" + block
+                injected_volatile = (
+                    injected_volatile + "\n\n" + block
+                    if injected_volatile
+                    else block
                 )
 
         total_input = 0
@@ -1370,11 +1499,28 @@ class AgentLoop:
                             turn_index=turn_index,
                         )
                         injected = await injection_engine.compose(inj_ctx)
-                        system = base_system + ("\n\n" + injected if injected else "")
+                        # Audit MAJOR 6 fix (post-PR review): rebuild
+                        # BOTH ``system`` and ``injected_volatile`` to
+                        # preserve memory + channel content
+                        # (``volatile_memory_blocks``) alongside the
+                        # newly-recomposed engine output. Pre-fix,
+                        # legacy ``system=`` callers retried after
+                        # compaction with memory + channel content
+                        # silently dropped.
+                        parts: list[str] = []
+                        if injected:
+                            parts.append(injected)
+                        parts.extend(volatile_memory_blocks)
+                        injected_volatile = "\n\n".join(parts) if parts else ""
+                        system = base_system + (
+                            "\n\n" + injected_volatile if injected_volatile else ""
+                        )
 
                 step = await self._run_one_step(
                     messages=messages,
                     system=system,
+                    base_system=base_system,
+                    injected_system=injected_volatile,
                     stream_callback=stream_callback,
                     thinking_callback=thinking_callback,
                     model=model_for_turn,
@@ -1418,6 +1564,8 @@ class AgentLoop:
                             step = await self._run_one_step(
                                 messages=messages,
                                 system=system,
+                                base_system=base_system,
+                                injected_system=injected,
                                 stream_callback=stream_callback,
                                 thinking_callback=thinking_callback,
                                 model=model_for_turn,
@@ -1447,6 +1595,8 @@ class AgentLoop:
                         step = await self._run_one_step(
                             messages=retry_messages,
                             system=system,
+                            base_system=base_system,
+                            injected_system=injected,
                             stream_callback=stream_callback,
                             thinking_callback=thinking_callback,
                             model=model_for_turn,
@@ -1474,6 +1624,8 @@ class AgentLoop:
                             step = await self._run_one_step(
                                 messages=messages,
                                 system=system,
+                                base_system=base_system,
+                                injected_system=injected,
                                 stream_callback=stream_callback,
                                 thinking_callback=thinking_callback,
                                 model=model_for_turn,
@@ -2969,6 +3121,8 @@ class AgentLoop:
         *,
         messages: list[Message],
         system: str,
+        base_system: str = "",
+        injected_system: str = "",
         stream_callback=None,
         thinking_callback=None,
         model: str | None = None,
@@ -3053,6 +3207,15 @@ class AgentLoop:
         )
         if stream_callback is not None:
             final_response = None
+            # Only pass split-system kwargs to providers that accept them.
+            # Stub providers in tests + 3rd-party plugins that haven't
+            # adopted the new signature would otherwise raise TypeError.
+            _split_kwargs = _maybe_split_system_kwargs(
+                self.provider.stream_complete,
+                base_system=base_system,
+                injected_system=injected_system,
+                session_id=session_id,
+            )
             stream_source = self.provider.stream_complete(
                 model=model_name,
                 messages=wire_messages,
@@ -3060,6 +3223,7 @@ class AgentLoop:
                 tools=tool_schemas,
                 max_tokens=max_tokens_override or self.config.model.max_tokens,
                 temperature=self.config.model.temperature,
+                **_split_kwargs,
                 **_extra_kwargs,
             )
             # Phase B (model-agnostic thinking): when the provider does
@@ -3101,6 +3265,12 @@ class AgentLoop:
             # the configured ``fallback_models`` chain before raising.
             from opencomputer.agent.fallback import call_with_fallback
 
+            _split_kwargs = _maybe_split_system_kwargs(
+                self.provider.complete,
+                base_system=base_system,
+                injected_system=injected_system,
+                session_id=session_id,
+            )
             async def _do_call(active_model: str):
                 return await self.provider.complete(
                     model=active_model,
@@ -3109,6 +3279,7 @@ class AgentLoop:
                     tools=tool_schemas,
                     max_tokens=self.config.model.max_tokens,
                     temperature=self.config.model.temperature,
+                    **_split_kwargs,
                     **_extra_kwargs,
                 )
 

@@ -57,7 +57,7 @@ def test_anthropic_provider_passes_long_ttl_when_idle(monkeypatch):
     big = "x" * (5 * 4096 * 4)
     anth_msgs = [{"role": "user", "content": big}]
     sys_for_sdk, msgs_for_sdk, _tools = provider._apply_cache_control(
-        anth_msgs, system="", model="claude-opus-4-7", idle_seconds=600.0
+        anth_msgs, base_system="", model="claude-opus-4-7", idle_seconds=600.0
     )
     payload = repr(msgs_for_sdk) + repr(sys_for_sdk)
     assert "'1h'" in payload or '"1h"' in payload, payload[:500]
@@ -86,7 +86,7 @@ def test_anthropic_provider_default_5m_when_short_gap(monkeypatch):
     big = "x" * (5 * 4096 * 4)
     anth_msgs = [{"role": "user", "content": big}]
     sys_for_sdk, msgs_for_sdk, _tools = provider._apply_cache_control(
-        anth_msgs, system="", model="claude-opus-4-7", idle_seconds=30.0
+        anth_msgs, base_system="", model="claude-opus-4-7", idle_seconds=30.0
     )
     payload = repr(msgs_for_sdk) + repr(sys_for_sdk)
     # No 1h marker should appear with a short gap.

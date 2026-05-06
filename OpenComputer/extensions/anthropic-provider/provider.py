@@ -101,6 +101,17 @@ def _format_tools_for_anthropic(
         if _DROP_STRICT_FLAG_FROM_ANTHROPIC_TOOLS:
             formatted.pop("strict", None)
         out.append(formatted)
+    # Bug 4 (2026-05-05): sort by (name, type) so dynamic plugin/MCP
+    # discovery order doesn't shift the array between turns. The
+    # cache_control marker on the last user-tool then lands on the
+    # alphabetically-last tool every turn — stable byte prefix for the
+    # cache.
+    # Audit MINOR 9 (post-PR review): tuple key with a ``type`` tiebreaker
+    # is defensive against a future change that mixes server-side tools
+    # (which have a ``type`` field but may lack ``name``) into the user-
+    # tool array — without the tiebreaker they'd all collide on the empty-
+    # string default and sort unpredictably.
+    out.sort(key=lambda d: (d.get("name", ""), d.get("type", "")))
     return out
 
 
@@ -814,8 +825,49 @@ class AnthropicProvider(BaseProvider):
         )
         # Idle-aware TTL switch — track wall-clock between calls so we can
         # bump cache TTL to 1h when a session has been idle long enough
-        # that the 5m cache would otherwise have expired.
-        self._last_call_ts: float = 0.0
+        # that the 5m cache would otherwise have expired. Per-session
+        # keying (Bug 2 fix, 2026-05-05) prevents cross-session
+        # contamination in long-running daemons (Telegram bot, ACP,
+        # batch) where one provider instance handles many sessions.
+        # Bound at ``_last_call_ts_max`` entries; eviction picks the
+        # entry with the oldest timestamp.
+        self._last_call_ts: dict[str, float] = {}
+        self._last_call_ts_max = 256
+
+    def _record_call_get_idle(self, session_id: str | None) -> float:
+        """Update the per-session timestamp and return idle_seconds since
+        this session's previous call (0.0 on first call or unknown session).
+
+        Defensive lazy-init: if ``__init__`` was skipped (rare —
+        happens in tests instantiating via ``__new__``), the dict +
+        cap default-initialize on first call so subsequent paths
+        always see a usable shape.
+
+        Thread safety: this method is **not** thread-safe — the
+        get/set/evict dance is unsynchronized. Safe under asyncio
+        (single-thread cooperative scheduling) which is how the agent
+        loop and every shipping channel adapter run. A multi-threaded
+        daemon embedding this provider would need to wrap calls in a
+        ``threading.Lock``; we don't ship one because every current
+        consumer is asyncio-only.
+        """
+        import time as _time
+        # Audit MINOR 10 (post-PR review): defensive lazy-init lives
+        # here so the 3 call sites stay one-line.
+        if not isinstance(getattr(self, "_last_call_ts", None), dict):
+            self._last_call_ts = {}
+            self._last_call_ts_max = 256
+        _now = _time.monotonic()
+        sid = session_id or "_default"
+        prev = self._last_call_ts.get(sid, 0.0)
+        idle = (_now - prev) if prev > 0 else 0.0
+        self._last_call_ts[sid] = _now
+        if len(self._last_call_ts) > self._last_call_ts_max:
+            oldest_key = min(
+                self._last_call_ts.items(), key=lambda kv: kv[1]
+            )[0]
+            self._last_call_ts.pop(oldest_key, None)
+        return idle
 
     # ─── capabilities ───────────────────────────────────────────────
 
@@ -1026,40 +1078,85 @@ class AnthropicProvider(BaseProvider):
     def _apply_cache_control(
         self,
         anthropic_messages: list[dict[str, Any]],
-        system: str,
+        base_system: str = "",
+        injected_system: str = "",
         api_tools: list[dict[str, Any]] | None = None,
         *,
         model: str = "",
         idle_seconds: float = 0.0,
+        session_id: str | None = None,
+        # Back-compat: callers (and tests) can still pass ``system=``;
+        # treated as ``base_system`` when ``base_system`` is empty.
+        # Sentinel matches BaseProvider.complete (default ""), not None,
+        # to keep type signatures aligned across the call chain.
+        system: str = "",
     ) -> tuple[Any, list[dict[str, Any]], list[dict[str, Any]]]:
         """Apply Anthropic prompt caching across system + messages + tools.
 
-        Prepends ``system`` to ``anthropic_messages`` as a synthetic system
-        message and routes through ``apply_full_cache_control`` (Item 1,
-        2026-05-02), which allocates 4 ephemeral cache_control breakpoints
-        as ``tools[-1] + system + last 2 non-system messages`` when tools
-        are present, or ``system + last 3 non-system messages`` when not.
+        ``base_system`` is the FROZEN per-session prompt (carries the
+        cache marker). ``injected_system`` is the per-turn dynamic
+        content (no marker — sits AFTER the marked block so its
+        volatility doesn't bust the cached prefix). When both are
+        non-empty, the system content is a 2-block list; when only
+        base_system is set, it stays a single block (back-compat).
 
-        Then extracts system back out as a list of content blocks so it can
-        be passed to the SDK's ``system=`` parameter with cache_control
-        preserved.
+        Routes through ``apply_full_cache_control`` (Item 1, 2026-05-02),
+        which allocates 4 ephemeral cache_control breakpoints as
+        ``tools[-1] + system + last 2 non-system messages`` when tools
+        are present, or ``system + last 3 non-system messages`` when
+        not. The system-content shape determines marker placement:
+        multi-block content marks index 0 (the frozen base); single-
+        block content marks index 0 (legacy path, same result).
 
-        ``model`` and ``idle_seconds`` drive the size-threshold filter and
-        the long-TTL switch via the provider's capabilities. Both default
-        safely so callers that haven't been updated still produce today's
-        cache layout.
+        ``model`` and ``idle_seconds`` drive the size-threshold filter
+        and the long-TTL switch via the provider's capabilities. Both
+        default safely. ``session_id`` is accepted for symmetry with
+        the call-site keyword set; the actual idle-tracker update
+        happens at the call site via :meth:`_record_call_get_idle`.
 
         Returns:
-            (system_for_sdk, messages_for_sdk, tools_for_sdk) — system is a
-            list of content blocks when there is a system prompt, or the
-            original string otherwise; tools is the (possibly empty) list of
-            tool dicts with cache_control on the last entry when non-empty.
+            (system_for_sdk, messages_for_sdk, tools_for_sdk) — system
+            is a list of content blocks when there is a system prompt,
+            or the empty string otherwise; tools is the (possibly empty)
+            list of tool dicts with cache_control on the last entry when
+            non-empty.
         """
         from opencomputer.agent.prompt_caching import select_cache_ttl
 
+        # Back-compat shim: callers passing ``system=`` (legacy single-
+        # string form) are treated as ``base_system`` with no injection.
+        if not base_system and system:
+            base_system = system
+
+        # Build the system content list (base + optional injection).
+        # Audit BLOCKER 2 (post-PR review): when base is empty and only
+        # injection is present, ``apply_full_cache_control`` would mark
+        # the injection (the legacy single-block path stamps content[-1]).
+        # Each turn the injection bytes change → cache write with no
+        # corresponding read → 25% surcharge for nothing. Use a 2-element
+        # list with an empty placeholder base so the multi-block dispatch
+        # marks index 0 (the empty string, server-side ineligible by
+        # threshold filter) instead of the volatile injection at index 1.
+        # When threshold gating short-circuits the empty marker, we get
+        # zero waste; when it doesn't, the marker lands on stable empty
+        # bytes which is also benign.
+        sys_blocks: list[dict[str, Any]] = []
+        if base_system:
+            sys_blocks.append({"type": "text", "text": base_system})
+        if injected_system:
+            sep = "\n\n" if base_system else ""
+            sys_blocks.append({"type": "text", "text": sep + injected_system})
+
         unified: list[dict[str, Any]] = []
-        if system:
-            unified.append({"role": "system", "content": system})
+        # When the only content is a volatile injection (no frozen base),
+        # skip the system block entirely and pass the injection via the
+        # legacy ``system`` SDK path (no marker). This avoids stamping a
+        # cache_control on volatile bytes that can never produce a hit.
+        skip_system_marker_pass_through = (
+            not base_system and injected_system
+        )
+        if sys_blocks and not skip_system_marker_pass_through:
+            unified.append({"role": "system", "content": sys_blocks})
         unified.extend(anthropic_messages)
 
         caps = self.capabilities
@@ -1077,13 +1174,33 @@ class AnthropicProvider(BaseProvider):
             min_cache_tokens=threshold,
         )
 
-        if system and cached and cached[0].get("role") == "system":
+        if sys_blocks and cached and cached[0].get("role") == "system":
             sys_content = cached[0].get("content")
-            sys_for_sdk: Any = sys_content if isinstance(sys_content, list) else system
+            sys_for_sdk: Any = (
+                sys_content
+                if isinstance(sys_content, list)
+                else (
+                    base_system
+                    + ("\n\n" + injected_system if injected_system else "")
+                )
+            )
             messages_for_sdk = cached[1:]
-        else:
-            sys_for_sdk = system
+        elif skip_system_marker_pass_through:
+            # Audit BLOCKER 2 (post-PR review): injection-only path. Send
+            # the injection as a single text block with NO cache_control
+            # marker. Frees the breakpoint slot for the messages tail and
+            # avoids burning a 25%-surcharge cache write on volatile bytes
+            # that can never produce a hit.
+            sys_for_sdk = [{"type": "text", "text": injected_system}]
             messages_for_sdk = cached
+        else:
+            sys_for_sdk = ""
+            messages_for_sdk = cached
+
+        # session_id is accepted for symmetry with the public call-site
+        # keyword set; the per-session idle tracker is updated at the
+        # call site itself via _record_call_get_idle.
+        _ = session_id  # silence "unused arg" lint; param is part of the contract.
 
         return sys_for_sdk, messages_for_sdk, cached_tools
 
@@ -1207,6 +1324,9 @@ class AnthropicProvider(BaseProvider):
         model: str,
         messages: list[Message],
         system: str = "",
+        base_system: str = "",
+        injected_system: str = "",
+        session_id: str | None = None,
         tools: list[ToolSchema] | None = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
@@ -1215,6 +1335,9 @@ class AnthropicProvider(BaseProvider):
         site: str = "agent_loop",
     ) -> ProviderResponse:
         """Low-level complete using the given API key (pool-rotation target)."""
+        # Back-compat: legacy callers pass ``system=`` only; treat as base.
+        if not base_system and system:
+            base_system = system
         # TS-T7 — short-circuit before the SDK so concurrent sessions
         # don't keep pinging while a 429 cools down.
         _check_rate_limit()
@@ -1234,24 +1357,25 @@ class AnthropicProvider(BaseProvider):
         # Up to 4 cache_control breakpoints (system + last 3 non-system
         # messages) for ~75% input-token cost reduction on multi-turn
         # conversations.
-        # Idle-aware TTL: if this provider's last call was > 4 minutes
+        # Idle-aware TTL: if this session's last call was > 4 minutes
         # ago, the 5m cache would have expired before we got back to it.
         # Bump to 1h on Anthropic; safe no-op for providers that don't
-        # support it. Time tracked per-provider-instance in monotonic
-        # seconds (see __init__). Read defensively because some test
-        # paths instantiate via ``__new__`` and skip __init__.
-        import time as _time
-        _now = _time.monotonic()
-        _last = getattr(self, "_last_call_ts", 0.0)
-        idle_s = (_now - _last) if _last > 0 else 0.0
-        self._last_call_ts = _now
+        # support it. Per-session keying (Bug 2 fix, 2026-05-05) prevents
+        # cross-session contamination in long-running daemons. Defensive
+        # lazy-init lives inside ``_record_call_get_idle``.
+        idle_s = self._record_call_get_idle(session_id)
         # Item 1 (2026-05-02): build tools list FIRST so cache_control
         # can be applied to tools[-1] together with the system+messages
         # breakpoints in a single call (no two-call coordination footgun).
         api_tools_pre = _format_tools_for_anthropic(tools)
         sys_for_sdk, api_messages, api_tools = self._apply_cache_control(
-            anthropic_messages, system, api_tools_pre,
-            model=model, idle_seconds=idle_s,
+            anthropic_messages,
+            base_system=base_system,
+            injected_system=injected_system,
+            api_tools=api_tools_pre,
+            model=model,
+            idle_seconds=idle_s,
+            session_id=session_id,
         )
         # Subsystem A — Effort-driven max_tokens floor lift: high-effort
         # calls on adaptive models need headroom for thinking + tool calls
@@ -1367,6 +1491,9 @@ class AnthropicProvider(BaseProvider):
         model: str,
         messages: list[Message],
         system: str = "",
+        base_system: str = "",
+        injected_system: str = "",
+        session_id: str | None = None,
         tools: list[ToolSchema] | None = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
@@ -1381,6 +1508,9 @@ class AnthropicProvider(BaseProvider):
                 model=model,
                 messages=messages,
                 system=system,
+                base_system=base_system,
+                injected_system=injected_system,
+                session_id=session_id,
                 tools=tools,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -1398,6 +1528,9 @@ class AnthropicProvider(BaseProvider):
                 model=model,
                 messages=messages,
                 system=system,
+                base_system=base_system,
+                injected_system=injected_system,
+                session_id=session_id,
                 tools=tools,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -1415,6 +1548,9 @@ class AnthropicProvider(BaseProvider):
         model: str,
         messages: list[Message],
         system: str = "",
+        base_system: str = "",
+        injected_system: str = "",
+        session_id: str | None = None,
         tools: list[ToolSchema] | None = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
@@ -1423,6 +1559,9 @@ class AnthropicProvider(BaseProvider):
         site: str = "agent_loop",
     ) -> ProviderResponse:
         """Low-level stream_complete that aggregates into a ProviderResponse (pool target)."""
+        # Back-compat: legacy callers pass ``system=`` only; treat as base.
+        if not base_system and system:
+            base_system = system
         # TS-T7 — same cross-session guard as the non-streaming path.
         _check_rate_limit()
 
@@ -1436,24 +1575,25 @@ class AnthropicProvider(BaseProvider):
         else:
             anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
-        # Idle-aware TTL: if this provider's last call was > 4 minutes
+        # Idle-aware TTL: if this session's last call was > 4 minutes
         # ago, the 5m cache would have expired before we got back to it.
         # Bump to 1h on Anthropic; safe no-op for providers that don't
-        # support it. Time tracked per-provider-instance in monotonic
-        # seconds (see __init__). Read defensively because some test
-        # paths instantiate via ``__new__`` and skip __init__.
-        import time as _time
-        _now = _time.monotonic()
-        _last = getattr(self, "_last_call_ts", 0.0)
-        idle_s = (_now - _last) if _last > 0 else 0.0
-        self._last_call_ts = _now
+        # support it. Per-session keying (Bug 2 fix, 2026-05-05) prevents
+        # cross-session contamination in long-running daemons. Defensive
+        # lazy-init lives inside ``_record_call_get_idle``.
+        idle_s = self._record_call_get_idle(session_id)
         # Item 1 (2026-05-02): build tools list FIRST so cache_control
         # can be applied to tools[-1] together with the system+messages
         # breakpoints in a single call (no two-call coordination footgun).
         api_tools_pre = _format_tools_for_anthropic(tools)
         sys_for_sdk, api_messages, api_tools = self._apply_cache_control(
-            anthropic_messages, system, api_tools_pre,
-            model=model, idle_seconds=idle_s,
+            anthropic_messages,
+            base_system=base_system,
+            injected_system=injected_system,
+            api_tools=api_tools_pre,
+            model=model,
+            idle_seconds=idle_s,
+            session_id=session_id,
         )
         # Subsystem A — Effort-driven max_tokens floor lift: high-effort
         # calls on adaptive models need headroom for thinking + tool calls
@@ -1525,6 +1665,9 @@ class AnthropicProvider(BaseProvider):
         model: str,
         messages: list[Message],
         system: str = "",
+        base_system: str = "",
+        injected_system: str = "",
+        session_id: str | None = None,
         tools: list[ToolSchema] | None = None,
         max_tokens: int = 4096,
         temperature: float = 1.0,
@@ -1537,6 +1680,9 @@ class AnthropicProvider(BaseProvider):
         Yields text_delta events as tokens arrive, then a single "done" event
         with the final ProviderResponse (including tool calls if any).
         """
+        # Back-compat: legacy callers pass ``system=`` only; treat as base.
+        if not base_system and system:
+            base_system = system
         # SP2+SP3 integration: opt-in PDF Files API cache.
         files_cache, files_api_client = self._build_files_cache_pair(runtime_extras)
         if files_cache is not None:
@@ -1546,24 +1692,25 @@ class AnthropicProvider(BaseProvider):
         else:
             anthropic_messages = self._to_anthropic_messages(messages)
         # TS-T1 — apply Anthropic prompt caching (system_and_3 strategy).
-        # Idle-aware TTL: if this provider's last call was > 4 minutes
+        # Idle-aware TTL: if this session's last call was > 4 minutes
         # ago, the 5m cache would have expired before we got back to it.
         # Bump to 1h on Anthropic; safe no-op for providers that don't
-        # support it. Time tracked per-provider-instance in monotonic
-        # seconds (see __init__). Read defensively because some test
-        # paths instantiate via ``__new__`` and skip __init__.
-        import time as _time
-        _now = _time.monotonic()
-        _last = getattr(self, "_last_call_ts", 0.0)
-        idle_s = (_now - _last) if _last > 0 else 0.0
-        self._last_call_ts = _now
+        # support it. Per-session keying (Bug 2 fix, 2026-05-05) prevents
+        # cross-session contamination in long-running daemons. Defensive
+        # lazy-init lives inside ``_record_call_get_idle``.
+        idle_s = self._record_call_get_idle(session_id)
         # Item 1 (2026-05-02): build tools list FIRST so cache_control
         # can be applied to tools[-1] together with the system+messages
         # breakpoints in a single call (no two-call coordination footgun).
         api_tools_pre = _format_tools_for_anthropic(tools)
         sys_for_sdk, api_messages, api_tools = self._apply_cache_control(
-            anthropic_messages, system, api_tools_pre,
-            model=model, idle_seconds=idle_s,
+            anthropic_messages,
+            base_system=base_system,
+            injected_system=injected_system,
+            api_tools=api_tools_pre,
+            model=model,
+            idle_seconds=idle_s,
+            session_id=session_id,
         )
         # Subsystem A — Effort-driven max_tokens floor lift: high-effort
         # calls on adaptive models need headroom for thinking + tool calls
