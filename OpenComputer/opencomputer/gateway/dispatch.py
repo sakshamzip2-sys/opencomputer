@@ -350,8 +350,22 @@ class Dispatch:
         # single-profile case. Multi-profile callers reading this
         # attribute should migrate to ``router.get_or_load(profile_id)``.
         self.loop = loop if loop is not None else router._loops.get("default")
-        # Per-(profile_id, session_id) lock map — multi-profile correct.
-        # Same chat across two profiles no longer interleaves.
+        # Phase 2 (S1 from 2026-05-06 brief) — inbound queue manager.
+        # Replaces the historical per-(profile,session) asyncio.Lock dict.
+        # Default mode = "followup" (preserves legacy serialize-and-wait
+        # behaviour); slash command can flip per-session to "interrupt".
+        from opencomputer.gateway.queue_manager import (
+            QueueManager,
+            set_active_manager,
+        )
+
+        self._queue_manager: QueueManager = QueueManager()
+        # Register so /queue-mode slash command can reach this manager.
+        # Last-Dispatch-wins is fine: tests construct multiple Dispatches
+        # and the most recent one is the relevant one for slash dispatch.
+        set_active_manager(self._queue_manager)
+        # Backwards compat: tests + callers that read ``dispatch._locks``
+        # see an empty dict; new code paths use ``self._queue_manager``.
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         # Adapter reference (set by Gateway) so we can send typing indicators
         self._adapters_by_platform: dict = {}
@@ -696,13 +710,12 @@ class Dispatch:
         if bypass_result is not None:
             return bypass_result
 
-        # Per-(profile_id, session_id) lock keys make multi-profile
-        # correct: same chat_id across two profiles no longer
-        # interleaves through the same lock.
-        lock_key = (profile_id, session_id)
-        lock = self._locks.setdefault(lock_key, asyncio.Lock())
+        # Phase 2 (S1) — queue manager replaces the legacy lock dict.
+        # ``acquire`` resolves the per-session mode (default ``followup``
+        # serializes; ``interrupt`` cancels any in-flight run before
+        # entering the body).
         outcome: ProcessingOutcome = ProcessingOutcome.SUCCESS
-        async with lock:
+        async with self._queue_manager.acquire(profile_id, session_id):
             # Start a typing heartbeat (Telegram's typing state expires after
             # ~5s, so we re-send every 4s until the turn completes).
             heartbeat = asyncio.create_task(

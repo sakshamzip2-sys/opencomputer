@@ -116,6 +116,12 @@ from plugin_sdk.provider_contract import (
     Usage,
     VisionUnsupportedError,
 )
+from plugin_sdk.queue import (
+    ALL_QUEUE_MODES,
+    DEFAULT_QUEUE_MODE,
+    QueueConfig,
+    QueueMode,
+)
 from plugin_sdk.realtime_voice import (
     BaseRealtimeVoiceBridge,
     RealtimeVoiceCloseReason,
@@ -247,6 +253,11 @@ __all__ = [
     # slash commands (Phase 12b.6, Task D8)
     "SlashCommand",
     "SlashCommandResult",
+    # inbound queue modes (Phase 2 — S1 from 2026-05-06 OpenClaw deep-comparison)
+    "ALL_QUEUE_MODES",
+    "DEFAULT_QUEUE_MODE",
+    "QueueConfig",
+    "QueueMode",
     # consent (F1)
     "ConsentTier",
     "CapabilityClaim",
