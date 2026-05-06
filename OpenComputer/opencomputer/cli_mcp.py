@@ -715,8 +715,11 @@ def mcp_scaffold(
     name: str = typer.Argument(
         ..., help="MCP server name (folder + module name; lowercase, hyphens or underscores).",
     ),
-    target_dir: Path = typer.Option(
-        Path.cwd(),
+    target_dir: Path | None = typer.Option(
+        # Lazy default — Path.cwd() at module-import time crashes the
+        # WHOLE CLI when the user's shell cwd has been deleted (e.g.
+        # they removed the dir they were in). Resolve at command-run.
+        None,
         "--dir",
         "-d",
         help="Parent directory where <name>/ will be created. Defaults to CWD.",
@@ -765,6 +768,8 @@ def mcp_scaffold(
         )
         raise typer.Exit(1)
 
+    if target_dir is None:
+        target_dir = Path.cwd()
     target = target_dir / folder_name
     if target.exists() and not force:
         console.print(

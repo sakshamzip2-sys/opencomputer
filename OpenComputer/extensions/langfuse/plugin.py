@@ -90,6 +90,8 @@ def _send_event(event: Any) -> None:
             model=event.model,
             usage_details=usage_details,
             cost_details=cost_details or None,
+            input=getattr(event, "input_preview", None),
+            output=getattr(event, "output_preview", None),
             metadata={
                 "provider": event.provider,
                 "site": event.site,

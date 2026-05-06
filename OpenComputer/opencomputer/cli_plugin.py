@@ -966,10 +966,12 @@ def plugin_inspect(plugin_id: str) -> None:
 
 @catalog_app.command("keygen")
 def catalog_keygen(
-    out_dir: Path = typer.Option(
-        Path.cwd(),
+    out_dir: Path | None = typer.Option(
+        # Lazy default — eager Path.cwd() at module-import time crashes
+        # the entire CLI when the shell's cwd has been removed.
+        None,
         "--out",
-        help="Directory to write catalog-signing.{key,pub} into.",
+        help="Directory to write catalog-signing.{key,pub} into. Defaults to CWD.",
     ),
     name: str = typer.Option(
         "catalog-signing",
@@ -984,6 +986,8 @@ def catalog_keygen(
     """
     from opencomputer.plugins.catalog_signing import generate_keypair
 
+    if out_dir is None:
+        out_dir = Path.cwd()
     out_dir.mkdir(parents=True, exist_ok=True)
     keypair = generate_keypair()
     key_path = out_dir / f"{name}.key"

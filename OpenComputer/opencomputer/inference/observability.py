@@ -62,6 +62,12 @@ class LLMCallEvent:
     latency_ms: int
     cost_usd: float | None
     site: str | None
+    # Optional truncated previews of the actual prompt + completion
+    # text. Subscribers (e.g. langfuse observability bridge) display
+    # these as the trace ``input`` / ``output``. Default None to keep
+    # the JSONL log compact for the cost-only consumers.
+    input_preview: str | None = None
+    output_preview: str | None = None
 
 
 def _profile_home() -> Path:
