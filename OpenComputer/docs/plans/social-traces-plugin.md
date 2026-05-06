@@ -20,6 +20,8 @@ If you're picking this up cold (new system, lost session, fresh Claude Code wind
 
 The companion doc [`openhub-mvp.md`](./openhub-mvp.md) describes the network this plugin talks to. The two are designed in lockstep but are separate repos and separate work streams. **Build this plugin first against the local-file backend** — it works end-to-end without OpenHub existing.
 
+**OpenHub repo location** (post-scaffold): `~/Documents/GitHub/openhub/` — sibling to this repo, private GitHub. The cold-start brief there is `openhub/CLAUDE.md`; the build plan is `openhub/docs/plans/openhub-build-plan.md`. If you arrived here looking for the network code, switch directories.
+
 ---
 
 ## 1. What this is
