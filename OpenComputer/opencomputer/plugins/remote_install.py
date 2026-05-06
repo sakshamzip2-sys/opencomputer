@@ -97,7 +97,7 @@ class PluginIdMismatchError(CatalogError):
     """Extracted plugin.json's `id` doesn't match what the user asked for."""
 
 
-class UnsupportedTarballFormat(CatalogError):
+class UnsupportedTarballFormatError(CatalogError):
     """Tarball is not .tar.gz / .tgz."""
 
 
@@ -710,7 +710,7 @@ __all__ = [
     "PluginNotInCatalogError",
     "TarballChecksumError",
     "TarballTooLargeError",
-    "UnsupportedTarballFormat",
+    "UnsupportedTarballFormatError",
     "MAX_TARBALL_BYTES",
     "DEFAULT_CACHE_TTL_SECONDS",
     "cache_path",
