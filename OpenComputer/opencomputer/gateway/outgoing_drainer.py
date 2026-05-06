@@ -117,6 +117,41 @@ class OutgoingDrainer:
             if cap and len(body) > cap:
                 from opencomputer.gateway._truncate import truncate_smart
                 body = truncate_smart(body, max_len=cap)
+            # Phase 3 (2026-05-06) — MESSAGE_SENDING fire-and-forget hook.
+            # Plugins observe outgoing traffic; "skip" decision drops without
+            # sending; "rewrite" replaces the body via modified_message.
+            try:
+                from opencomputer.hooks.engine import engine as _hook_engine_ms
+                from plugin_sdk.hooks import HookContext as _MsCtx
+                from plugin_sdk.hooks import HookEvent as _MsEvent
+
+                d = await _hook_engine_ms.fire_blocking(
+                    _MsCtx(
+                        event=_MsEvent.MESSAGE_SENDING,
+                        session_id=getattr(msg, "session_id", "") or "",
+                        outgoing_text=body,
+                        channel=msg.platform,
+                        outgoing_chat_id=msg.chat_id,
+                    )
+                )
+                if d is not None:
+                    if getattr(d, "decision", "pass") == "skip":
+                        logger.info(
+                            "outgoing drainer: skipped %s by hook (%s)",
+                            msg.id, getattr(d, "reason", ""),
+                        )
+                        self.queue.mark_sent(msg.id)
+                        continue
+                    if (
+                        getattr(d, "decision", "pass") == "rewrite"
+                        and getattr(d, "modified_message", "")
+                    ):
+                        body = d.modified_message
+            except Exception as _e:  # noqa: BLE001 — hook failure must not wedge send
+                logger.debug(
+                    "MESSAGE_SENDING hook raised, ignoring: %r", _e
+                )
+
             try:
                 result = await adapter.send(msg.chat_id, body)
             except Exception as e:  # noqa: BLE001 — capture for the user
@@ -132,6 +167,26 @@ class OutgoingDrainer:
             else:
                 err = getattr(result, "error", None) or "adapter returned success=False"
                 self.queue.mark_failed(msg.id, str(err))
+
+            # Phase 3 — MESSAGE_SENT fire-and-forget hook (post-send observability).
+            try:
+                from opencomputer.hooks.engine import engine as _hook_engine_ms2
+                from plugin_sdk.hooks import HookContext as _MsCtx2
+                from plugin_sdk.hooks import HookEvent as _MsEvent2
+
+                _hook_engine_ms2.fire_and_forget(
+                    _MsCtx2(
+                        event=_MsEvent2.MESSAGE_SENT,
+                        session_id=getattr(msg, "session_id", "") or "",
+                        outgoing_text=body,
+                        channel=msg.platform,
+                        outgoing_chat_id=msg.chat_id,
+                    )
+                )
+            except Exception as _e:  # noqa: BLE001 — observability must not wedge
+                logger.debug(
+                    "MESSAGE_SENT hook raised, ignoring: %r", _e
+                )
 
 
 __all__ = ["OutgoingDrainer"]

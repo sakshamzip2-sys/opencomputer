@@ -3198,6 +3198,34 @@ class AgentLoop:
         from opencomputer.agent.model_resolver import resolve_model
 
         raw_model = model if model is not None else self.config.model.model
+
+        # Phase 3 (2026-05-06 — S3 leftover from OpenClaw deep-comparison) —
+        # BEFORE_MODEL_RESOLVE fire-and-forget hook. Handlers see the raw
+        # alias text (pre-resolve) and may redirect the resolution by
+        # returning ``HookDecision(decision="rewrite", modified_message="<new-alias>")``.
+        # Distinct from PRE_LLM_CALL which fires post-resolve.
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine_bmr
+            from plugin_sdk.hooks import HookContext as _BmrCtx
+            from plugin_sdk.hooks import HookEvent as _BmrEvent
+
+            decision = await _hook_engine_bmr.fire_blocking(
+                _BmrCtx(
+                    event=_BmrEvent.BEFORE_MODEL_RESOLVE,
+                    session_id=self.session_id or "",
+                    pre_resolve_model=raw_model,
+                    model=raw_model,
+                )
+            )
+            if (
+                decision is not None
+                and getattr(decision, "decision", "pass") == "rewrite"
+                and getattr(decision, "modified_message", None)
+            ):
+                raw_model = decision.modified_message
+        except Exception as _e:  # noqa: BLE001 — hook failure must never wedge resolve
+            _log.debug("BEFORE_MODEL_RESOLVE hook raised, ignoring: %r", _e)
+
         model_name = resolve_model(
             raw_model, getattr(self.config.model, "model_aliases", None) or {}
         )

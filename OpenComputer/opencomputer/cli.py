@@ -2586,14 +2586,36 @@ def setup(
 
 @app.command()
 def doctor(
-    fix: bool = typer.Option(False, "--fix", help="Invoke plugin-contributed repairs in place."),
+    fix: bool = typer.Option(
+        False, "--fix", help="Invoke plugin-contributed repairs in place."
+    ),
+    auth: bool = typer.Option(
+        False,
+        "--auth",
+        help=(
+            "Print credential-pool health (quarantine state, JWT expiry, "
+            "last rotation) instead of the full doctor report. A3 leftover "
+            "from the 2026-05-06 OpenClaw deep-comparison."
+        ),
+    ),
 ) -> None:
     """Diagnose common config/env issues.
 
     With --fix, every plugin-registered HealthContribution is invoked with
     fix=True and is expected to repair state (e.g. migrate a legacy config
     shape, rewrite broken skill frontmatter) rather than merely report.
+
+    With --auth, surfaces the credential-pool stats for any provider that
+    has a multi-key pool configured. Read-only.
     """
+    if auth:
+        from opencomputer.doctor import run_doctor_auth
+
+        failures = run_doctor_auth()
+        if failures:
+            raise typer.Exit(1)
+        return
+
     from opencomputer.doctor import run_doctor
 
     failures = run_doctor(fix=fix)

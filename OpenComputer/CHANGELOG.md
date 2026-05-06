@@ -4,23 +4,21 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
-### Added
+### Added — social-traces
 
 - **`social-traces` bundled extension — community trace network (Phases 1–9 + 12).** Opt-in, default-disabled plugin that queries a shared [OpenHub](https://github.com/sakshamzip2-sys/openhub) endpoint pre-task for matching TraceCards (admin-curated, redacted task summaries) and submits a distilled TraceCard post-task. Three-Haiku distillation flow (intent + steps + insight + LLM tag-extract), session-level cache, per-profile tag-bias accumulator, per-profile `state.json` gate, outbox-on-network-failure (in-memory drain at this revision; on-disk persistence deferred). HTTP backend (`HttpTraceNetworkClient`) with httpx soft timeouts. Wizard step asks once during full setup. `opencomputer traces {enable,disable,status,inbox,outbox,history,dry-run,audit-redactor,rotate-id}` CLI surface. README section + plan doc at `docs/plans/social-traces-plugin.md`. ~80 new tests across `test_social_traces_phase{1..9}*.py`, `test_social_traces_dogfood_fixes.py`, `test_social_traces_http_client.py`. Network-side server lives in a separate private repo at `~/Documents/GitHub/openhub/`.
 
-### Added — Trustworthy install completion (S2 + S3 leftovers from 2026-05-06 OpenClaw deep-comparison)
+### Added — Phase 3: hook + doctor leftovers (S3 + A3 from 2026-05-06 OpenClaw deep-comparison)
 
-- `oc plugin install git+https://...` and `oc plugin install https://...` install sources, complementing the existing catalog flow. Git installs use shallow `git clone --depth=1` (full clone + checkout when `--ref` is provided); url installs require an explicit `--sha256` pin.
-- `oc plugin verify <plugin-id>` — re-fetch the original source (catalog tarball, git ref, or url tarball) and report any on-disk drift versus the installed bytes. Exits non-zero on drift.
-- `install_security_scan` AST + regex guard runs after every extract. `eval`/`exec`/`compile` of network-fetch chains blocks the install; `rm -rf`, `os.system`, raw socket use, etc. emit warnings.
-- `HookEvent.BEFORE_INSTALL` lifecycle hook with 4 new optional `HookContext` fields (`install_source`, `install_url`, `install_plugin_id`, `install_scan_report`). Plugins can veto installs by returning `HookDecision(decision="block", ...)` from the registered handler. CLI install paths plumb the hook engine's `fire_blocking` through.
-- Per-profile `~/.opencomputer/<profile>/plugins/.installed_index.json` recording each install's source + verification metadata so `oc plugin verify` knows what to re-fetch.
+- `HookEvent.BEFORE_MODEL_RESOLVE` — fires inside `model_resolver.resolve_model()` BEFORE alias resolution. Distinct from `PRE_LLM_CALL` (which fires post-resolve, after the model is chosen). A handler may return `HookDecision(decision="rewrite", modified_message="<new-alias>")` to redirect resolution.
+- `HookEvent.MESSAGE_SENDING` / `HookEvent.MESSAGE_SENT` — narrower than `PreGatewayDispatch`. `MESSAGE_SENDING` fires before each outgoing-queue send and supports `decision="skip"` (drop silently) and `decision="rewrite"` (replace body). `MESSAGE_SENT` is fire-and-forget post-send observability.
+- 4 new optional `HookContext` fields: `pre_resolve_model`, `outgoing_text`, `channel`, `outgoing_chat_id`. All default `None` so existing callers stay unchanged.
+- `oc doctor --auth` — credential-pool health surface (A3 leftover). Reports per-provider key inventory from env vars (single `*_API_KEY`, enumerated `*_API_KEY_N`, pool-style `*_KEYS`) without ever leaking values. Notes that live quarantine state requires a running gateway.
 
 ### Notes
 
-- Existing `oc plugin install <path>` and `oc plugin install <slug> --remote` flows are byte-identical when no new flags are supplied; 20 catalog regression tests stay green.
-- AST scan starts conservative: only `eval(network_fetch())` blocks. WARN patterns (rm -rf, os.system, raw socket) are observable but non-blocking; promote to block in your local policy via a `BEFORE_INSTALL` hook.
-- Submodules deliberately not recursed on git clone (supply-chain attack surface). Add a `--with-submodules` flag if a real user requests it.
+- All hook events are observability/policy hooks — they never break the loop on handler failure (try/except around the engine call, fail-open per CLAUDE.md §7).
+- 4 new tests for hook events + 4 new tests for doctor --auth + 2 hardcoded count assertions (22→25) updated.
 
 ## [2026.5.5] — v1.0 release: 8 days of dogfood-driven hardening
 
