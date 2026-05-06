@@ -419,6 +419,7 @@ See `RELEASE.md` — basically bump version in two places, tag `vX.Y.Z`, push. C
   - `/Users/saksham/Vscode/claude/sources/kimi-cli/` (dynamic injection, compaction, wire)
 - **Per-repo extraction notes:** `OpenComputer/docs/refs/<repo-name>/` — take notes
   about each reference project here as you study it.
+- **Storage map (every SQLite DB, table, owner module):** `OpenComputer/docs/databases.md` — single canonical reference for `sessions.db` + 7 sub-DBs.
 - **GitHub:** https://github.com/sakshamzip2-sys/opencomputer
 
 ---
