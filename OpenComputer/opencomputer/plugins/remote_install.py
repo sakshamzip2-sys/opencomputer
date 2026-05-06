@@ -652,6 +652,115 @@ def install_from_git(
     )
 
 
+_TARBALL_GZIP_MAGIC = b"\x1f\x8b"
+
+
+def install_from_url(
+    url: str,
+    *,
+    dest_root: Path,
+    plugin_id_hint: str,
+    sha256: str | None,
+    force: bool = False,
+    before_install_hook: BeforeInstallHook | None = None,
+    skip_scan: bool = False,
+    http_get_bytes_fn=_http_get_bytes,
+    max_bytes: int = MAX_TARBALL_BYTES,
+) -> InstallResult:
+    """Install a plugin from a raw https tarball URL.
+
+    Requires an explicit ``sha256`` pin — refuses to install otherwise.
+    Only ``.tar.gz`` / ``.tgz`` content is accepted (gzip magic bytes
+    enforced; the URL extension is informational only).
+    """
+    if sha256 is None:
+        raise TarballChecksumError(
+            "https:// install requires --sha256 pin (refusing without checksum)"
+        )
+
+    plugin_dir = dest_root / plugin_id_hint
+    if plugin_dir.exists():
+        if not force:
+            raise CatalogError(
+                f"plugin '{plugin_id_hint}' already installed at {plugin_dir}. "
+                "Use --force to overwrite."
+            )
+        shutil.rmtree(plugin_dir)
+
+    raw = http_get_bytes_fn(url, max_bytes=max_bytes)
+
+    actual_sha = hashlib.sha256(raw).hexdigest()
+    if actual_sha != sha256.lower():
+        raise TarballChecksumError(
+            f"sha256 mismatch: expected {sha256}, got {actual_sha}"
+        )
+
+    if not raw.startswith(_TARBALL_GZIP_MAGIC):
+        raise UnsupportedTarballFormatError(
+            f"only .tar.gz / .tgz tarballs are supported (url: {url})"
+        )
+
+    extract_tarball(raw, dest=plugin_dir)
+
+    # Verify plugin.json id matches hint.
+    manifest_path = plugin_dir / "plugin.json"
+    if not manifest_path.exists():
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        raise CatalogParseError(
+            f"tarball at {url} has no plugin.json at the root"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as e:
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        raise CatalogParseError(
+            f"plugin.json is not valid JSON: {e}"
+        ) from e
+
+    actual_id = str(manifest.get("id", ""))
+    if actual_id != plugin_id_hint:
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        raise PluginIdMismatchError(
+            f"plugin.json says id={actual_id!r} but install argument was {plugin_id_hint!r}"
+        )
+    version = str(manifest.get("version", ""))
+
+    try:
+        _post_extract_gate(
+            plugin_dir=plugin_dir,
+            install_source="url",
+            install_url=url,
+            install_plugin_id=plugin_id_hint,
+            before_install_hook=before_install_hook,
+            skip_scan=skip_scan,
+        )
+    except Exception:
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        raise
+
+    from opencomputer.plugins.installed_index import (
+        InstalledRecord,
+        record_install,
+    )
+
+    record_install(
+        dest_root / ".installed_index.json",
+        InstalledRecord(
+            plugin_id=plugin_id_hint,
+            version=version,
+            source="url",
+            source_url=url,
+            source_ref=None,
+            tarball_sha256=actual_sha,
+            installed_at=int(time.time()),
+        ),
+    )
+
+    return InstallResult(
+        plugin_id=plugin_id_hint, version=version, install_path=plugin_dir
+    )
+
+
 def _post_extract_gate(
     *,
     plugin_dir: Path,
@@ -720,6 +829,7 @@ __all__ = [
     "find_entry",
     "install_from_catalog",
     "install_from_git",
+    "install_from_url",
     "read_cache",
     "resolve_catalog_url",
     "write_cache",
