@@ -26,6 +26,9 @@ Available events:
     BeforeTask              — fires after UserPromptSubmit, before first LLM
                               call (blocking; lets handlers inject context)
     BeforeInstall           — fires after extract + scan, before plugin activates an install
+    BeforeModelResolve      — fires before model_resolver.resolve_model() runs
+    MessageSending          — fires before a channel adapter sends an outgoing message
+    MessageSent             — fires after a channel adapter sends an outgoing message
 
 Hook ordering: handlers can declare ``priority`` on their HookSpec — lower
 priorities run first; FIFO within the same priority bucket. The default is 100,
@@ -77,6 +80,10 @@ class HookEvent(str, Enum):
     BEFORE_TASK = "BeforeTask"
     # 2026-05-06 — install lifecycle (S3 leftover from OpenClaw deep-comparison).
     BEFORE_INSTALL = "BeforeInstall"
+    # 2026-05-06 — Phase 3 (S3 leftovers from OpenClaw deep-comparison).
+    BEFORE_MODEL_RESOLVE = "BeforeModelResolve"
+    MESSAGE_SENDING = "MessageSending"
+    MESSAGE_SENT = "MessageSent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +140,20 @@ class HookContext:
     #: install_security_scan.ScanReport — typed loosely as object so the SDK
     #: doesn't need to re-import it (the plugin loader is the only producer).
     install_scan_report: object | None = None
+    # 2026-05-06 — Phase 3 (S3 leftovers from OpenClaw deep-comparison).
+    #: Pre-resolve model alias text — populated for BEFORE_MODEL_RESOLVE.
+    #: Distinct from ``model`` (which carries the post-resolve canonical id
+    #: for PRE/POST_LLM_CALL). A handler may set ``modified_message`` on
+    #: HookDecision to redirect resolution to a different alias key.
+    pre_resolve_model: str | None = None
+    #: Outgoing channel message text — populated for MESSAGE_SENDING /
+    #: MESSAGE_SENT. Distinct from ``message`` (which carries inbound).
+    outgoing_text: str | None = None
+    #: Channel platform string ("telegram" | "discord" | "cli" | ...) —
+    #: populated for MESSAGE_SENDING / MESSAGE_SENT.
+    channel: str | None = None
+    #: Outgoing chat id (channel-specific) — populated for MESSAGE_SENDING / MESSAGE_SENT.
+    outgoing_chat_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,4 +240,8 @@ ALL_HOOK_EVENTS: tuple[HookEvent, ...] = (
     HookEvent.BEFORE_TASK,
     # 2026-05-06 — install lifecycle
     HookEvent.BEFORE_INSTALL,
+    # 2026-05-06 — Phase 3 (S3 leftovers from OpenClaw deep-comparison)
+    HookEvent.BEFORE_MODEL_RESOLVE,
+    HookEvent.MESSAGE_SENDING,
+    HookEvent.MESSAGE_SENT,
 )

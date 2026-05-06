@@ -45,10 +45,12 @@ def test_three_new_hook_events_exist_and_are_in_all_hook_events() -> None:
     assert HookEvent.SUBAGENT_STOP in ALL_HOOK_EVENTS
     assert HookEvent.NOTIFICATION in ALL_HOOK_EVENTS
     # Phase 11b shipped 9 events; Round 2A P-1 adds 8 more for 17;
-    # Wave 5 T13/T14 adds 3 (PRE_GATEWAY_DISPATCH, PRE/POST_APPROVAL_*) for 20;
+    # Wave 5 T13/T14 adds 3 (PRE_GATEWAY_DISPATCH, PRE/POST_APPROVAL_*) for 20.
     # Social-traces Phase 0 adds BEFORE_TASK for 21.
     # 2026-05-06 OpenClaw deep-comparison adds BEFORE_INSTALL for 22.
-    assert len(ALL_HOOK_EVENTS) == 22
+    # 2026-05-06 Phase 3 adds BEFORE_MODEL_RESOLVE / MESSAGE_SENDING /
+    # MESSAGE_SENT (S3 leftovers from OpenClaw deep-comparison) for 25.
+    assert len(ALL_HOOK_EVENTS) == 25
 
 
 async def test_base_channel_adapter_send_notification_default_routes_to_send() -> None:

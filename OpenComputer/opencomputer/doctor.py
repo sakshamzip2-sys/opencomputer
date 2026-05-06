@@ -1331,8 +1331,112 @@ def check_macos_screen_recording_permission() -> str:
     )
 
 
+def run_doctor_auth() -> int:
+    """Print credential-pool health for each provider.
+
+    A3 leftover from the 2026-05-06 OpenClaw deep-comparison brief.
+    Without an active gateway/loop the credential pool isn't instantiated,
+    so we surface what we *can* infer from the environment + config:
+
+    * Per-provider env-var key inventory (counts only — never the values).
+    * `config.yaml` ``providers.<name>.keys`` array length when present.
+    * A note that live quarantine state requires a running gateway.
+
+    Returns the number of warning/error rows (0 on a clean check).
+    """
+    import os
+    import re
+
+    from rich.table import Table
+
+    console.print("\n[bold cyan]OpenComputer — Doctor (--auth)[/bold cyan]\n")
+
+    failures = 0
+
+    # Provider env-var families. The patterns below cover the most common
+    # multi-key shapes — single var (FOO_API_KEY), enumerated suffixes
+    # (FOO_API_KEY_1, FOO_API_KEY_2), and pool-style (FOO_KEYS).
+    _env_patterns: list[tuple[str, list[re.Pattern[str]]]] = [
+        (
+            "anthropic",
+            [
+                re.compile(r"^ANTHROPIC_API_KEY$"),
+                re.compile(r"^ANTHROPIC_API_KEY_\d+$"),
+                re.compile(r"^ANTHROPIC_KEYS$"),
+            ],
+        ),
+        (
+            "openai",
+            [
+                re.compile(r"^OPENAI_API_KEY$"),
+                re.compile(r"^OPENAI_API_KEY_\d+$"),
+                re.compile(r"^OPENAI_KEYS$"),
+            ],
+        ),
+        (
+            "openrouter",
+            [
+                re.compile(r"^OPENROUTER_API_KEY$"),
+                re.compile(r"^OPENROUTER_API_KEY_\d+$"),
+                re.compile(r"^OPENROUTER_KEYS$"),
+            ],
+        ),
+    ]
+
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("provider")
+    table.add_column("keys (env)", justify="right")
+    table.add_column("source")
+    table.add_column("notes")
+
+    for provider, patterns in _env_patterns:
+        matching: list[str] = []
+        for var in os.environ:
+            for pat in patterns:
+                if pat.match(var):
+                    matching.append(var)
+                    break
+        # FOO_KEYS is a comma-separated pool — count its entries.
+        pool_count = 0
+        for var in matching:
+            if var.endswith("_KEYS"):
+                raw = os.environ.get(var, "")
+                pool_count += sum(1 for s in raw.split(",") if s.strip())
+        single_count = sum(1 for v in matching if not v.endswith("_KEYS"))
+        total = pool_count + single_count
+
+        if total == 0:
+            table.add_row(provider, "0", "(none)", "[dim]not configured[/dim]")
+            continue
+
+        notes_parts: list[str] = []
+        if pool_count > 0:
+            notes_parts.append(f"{pool_count} from *_KEYS")
+        if single_count > 0:
+            notes_parts.append(f"{single_count} single var(s)")
+        sources = ", ".join(matching)
+        table.add_row(
+            provider,
+            str(total),
+            sources,
+            "; ".join(notes_parts),
+        )
+
+    console.print(table)
+
+    console.print(
+        "\n[dim]Note:[/dim] live credential-pool quarantine state "
+        "(429/401 cooldowns, JWT expiry, last-rotation timestamps) is only "
+        "available when the gateway is running. Start `oc gateway` and "
+        "use `oc usage` for runtime telemetry.\n"
+    )
+
+    return failures
+
+
 __all__ = [
     "run_doctor",
+    "run_doctor_auth",
     "auth_monitor_once",
     "auth_monitor_loop",
     "check_macos_screen_recording_permission",
