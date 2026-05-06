@@ -1021,10 +1021,14 @@ def _run_chat_session(
 
     _banner_home_env = os.environ.get("OPENCOMPUTER_HOME")
     _banner_home = _Path(_banner_home_env) if _banner_home_env else _Path.home() / ".opencomputer"
+    try:
+        _cwd_str = str(_Path.cwd())
+    except (FileNotFoundError, OSError):
+        _cwd_str = "<cwd deleted>"
     build_welcome_banner(
         console,
         model=f"{cfg.model.model} ({cfg.model.provider})",
-        cwd=str(_Path.cwd()),
+        cwd=_cwd_str,
         session_id=session_id,
         home=_banner_home,
     )

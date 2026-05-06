@@ -66,7 +66,18 @@ def find_workspace_overlay(*, start: Path | None = None) -> WorkspaceOverlay | N
     ``$HOME`` would misparse the main config and fail on strict
     ``extra=forbid`` validation.
     """
-    cursor = (start if start is not None else Path.cwd()).resolve()
+    if start is not None:
+        cursor = start.resolve()
+    else:
+        # ``Path.cwd()`` raises FileNotFoundError when the shell's cwd
+        # has been deleted (e.g., a parent dir got rm-rf'd or a git
+        # checkout swapped inodes underneath the shell). Workspace
+        # overlay discovery is a non-critical optimization — fall back
+        # to ``Path.home()`` so chat sessions keep working.
+        try:
+            cursor = Path.cwd().resolve()
+        except (FileNotFoundError, OSError):
+            return None
     home = Path.home().resolve()
     while True:
         candidate = cursor / OVERLAY_DIRNAME / OVERLAY_FILENAME

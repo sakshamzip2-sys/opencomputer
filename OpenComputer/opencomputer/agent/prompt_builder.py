@@ -53,7 +53,14 @@ def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> 
     they reflect more-specific project conventions.
     """
     if start is None:
-        start = Path.cwd()
+        # Path.cwd() raises FileNotFoundError when the shell's cwd was
+        # removed underneath us. Project-context discovery is a
+        # quality-of-life feature; fall back to home so the chat loop
+        # doesn't hard-crash.
+        try:
+            start = Path.cwd()
+        except (FileNotFoundError, OSError):
+            start = Path.home()
     start = start.resolve()
 
     # Files to check, in priority order. We collect ALL that exist, not
