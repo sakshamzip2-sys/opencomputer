@@ -68,8 +68,13 @@ services:
       CLICKHOUSE_USER: clickhouse
       CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-langfuse-clickhouse-pw}
       CLICKHOUSE_CLUSTER_ENABLED: "false"
+      # Langfuse v3 validates these envs at boot via Zod even when
+      # uploads are disabled. Placeholders satisfy the schema; the
+      # ENABLED=false flag prevents any actual S3 traffic.
       LANGFUSE_S3_EVENT_UPLOAD_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: oc-disabled
       LANGFUSE_S3_MEDIA_UPLOAD_ENABLED: "false"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: oc-disabled
       REDIS_HOST: langfuse-redis
       REDIS_PORT: 6379
       REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:-langfuse-redis-pw}
@@ -99,8 +104,11 @@ services:
       CLICKHOUSE_USER: clickhouse
       CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-langfuse-clickhouse-pw}
       CLICKHOUSE_CLUSTER_ENABLED: "false"
+      # See worker block for rationale — same Zod schema enforcement.
       LANGFUSE_S3_EVENT_UPLOAD_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: oc-disabled
       LANGFUSE_S3_MEDIA_UPLOAD_ENABLED: "false"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: oc-disabled
       REDIS_HOST: langfuse-redis
       REDIS_PORT: 6379
       REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:-langfuse-redis-pw}
