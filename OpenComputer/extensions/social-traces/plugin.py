@@ -29,17 +29,92 @@ the user has read the README.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
+import sys
+import types
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from plugin_sdk.hooks import HookEvent, HookSpec
 
-from . import state as st_state
-from .config import SocialTracesConfig, from_config_dict
-from .prefetch import on_before_task
-from .subscriber import TraceEmissionSubscriber
+
+def _bootstrap_alias() -> None:
+    """Stand up ``extensions.social_traces.*`` as a real namespace
+    package before our siblings are imported.
+
+    The OC plugin loader uses ``importlib.util.spec_from_file_location``
+    with a synthetic module name like
+    ``_opencomputer_plugin_social_traces_plugin``, which has no parent
+    package. Plain ``from . import state`` then dies with "attempted
+    relative import with no known parent package" and the loader
+    silently skips the plugin — which means ``register()`` never
+    fires, the BEFORE_TASK hook never registers, and the post-task
+    pipeline aborts because the bridge has no session entry.
+
+    This bootstrap is idempotent: if ``cli_traces._ensure_alias`` (or
+    a prior load of this module) has already populated the namespace,
+    we no-op. Otherwise we recreate it inline so the absolute
+    ``from extensions.social_traces import ...`` imports below resolve
+    cleanly.
+    """
+    if "extensions.social_traces.state" in sys.modules:
+        return
+    this_dir = Path(__file__).resolve().parent
+    ext_dir = this_dir.parent
+    if "extensions" not in sys.modules:
+        ext_pkg = types.ModuleType("extensions")
+        ext_pkg.__path__ = [str(ext_dir)]
+        ext_pkg.__package__ = "extensions"
+        sys.modules["extensions"] = ext_pkg
+    if "extensions.social_traces" not in sys.modules:
+        mod = types.ModuleType("extensions.social_traces")
+        mod.__path__ = [str(this_dir)]
+        mod.__package__ = "extensions.social_traces"
+        sys.modules["extensions.social_traces"] = mod
+        sys.modules["extensions"].social_traces = mod  # type: ignore[attr-defined]
+    parent = sys.modules["extensions.social_traces"]
+    for sub in (
+        "state",
+        "identity",
+        "config",
+        "session_state",
+        "tag_extractor",
+        "redactor",
+        "novelty_judge",
+        "distiller",
+        "prefetch",
+        "subscriber",
+    ):
+        full = f"extensions.social_traces.{sub}"
+        if full in sys.modules:
+            setattr(parent, sub, sys.modules[full])
+            continue
+        init = this_dir / f"{sub}.py"
+        if not init.exists():
+            continue
+        spec = importlib.util.spec_from_file_location(full, str(init))
+        if spec is None or spec.loader is None:
+            continue
+        sub_mod = importlib.util.module_from_spec(spec)
+        sub_mod.__package__ = "extensions.social_traces"
+        sys.modules[full] = sub_mod
+        spec.loader.exec_module(sub_mod)
+        setattr(parent, sub, sub_mod)
+
+
+_bootstrap_alias()
+
+from extensions.social_traces import state as st_state  # noqa: E402
+from extensions.social_traces.config import (  # noqa: E402
+    SocialTracesConfig,
+    from_config_dict,
+)
+from extensions.social_traces.prefetch import on_before_task  # noqa: E402
+from extensions.social_traces.subscriber import (  # noqa: E402
+    TraceEmissionSubscriber,
+)
 
 _log = logging.getLogger("opencomputer.social_traces.plugin")
 

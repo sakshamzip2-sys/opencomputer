@@ -343,8 +343,20 @@ class TraceEmissionSubscriber:
                 )
 
             # ── Distill ─────────────────────────────────────────────
+            # Phase 6 / Stage 2 — when an OpenHub-issued submitter_hash
+            # is configured (env or config.yaml), use IT as the card's
+            # ``meta.submitter_hash``. The OH submit endpoint enforces
+            # ``X-Submitter-Hash`` (from HMAC creds) == body's
+            # submitter_hash so it can attribute submissions correctly.
+            # Without this override, the local ``get_or_create_agent_id``
+            # generates a different per-profile UUID and the server
+            # rejects every signed submission with "submitter_hash in
+            # payload does not match X-Submitter-Hash header".
             try:
-                submitter_hash = get_or_create_agent_id(profile_home)
+                if cfg.submitter_hash:
+                    submitter_hash = cfg.submitter_hash
+                else:
+                    submitter_hash = get_or_create_agent_id(profile_home)
             except Exception:  # noqa: BLE001
                 _log.warning(
                     "social-traces: failed to resolve submitter_hash "

@@ -2054,12 +2054,54 @@ def oneshot(
     loop = _AgentLoop(provider=provider, config=cfg)
     _DelegateTool.set_factory(lambda: _AgentLoop(provider=provider, config=cfg))
 
+    # Wire the social-traces subscriber so post-task distill+submit
+    # fires when this profile has the plugin enabled. Mirrors the
+    # ``_run_chat_session`` wiring at cli.py:997-1020 — needs the
+    # resolved provider + cost_guard, same as chat.
+    try:
+        from opencomputer.agent.config import _home as _oc_home
+        from opencomputer.cli_traces import _ensure_alias as _ensure_st_alias
+        from opencomputer.cost_guard import get_default_guard
+
+        _ensure_st_alias()
+        from extensions.social_traces.plugin import wire_subscriber as _wire_st  # type: ignore[import-not-found]
+        from extensions.social_traces.state import is_enabled as _st_enabled  # type: ignore[import-not-found]
+
+        if _st_enabled(_oc_home()):
+            try:
+                from opencomputer import __version__ as _oc_v
+            except Exception:  # noqa: BLE001
+                _oc_v = ""
+            _wire_st(
+                provider=provider,
+                cost_guard=get_default_guard(),
+                harness_version=f"opencomputer/{_oc_v}",
+            )
+    except Exception:  # noqa: BLE001 — never break oneshot over plugin wiring
+        import logging as _log_mod
+        _log_mod.getLogger("opencomputer.cli").debug(
+            "social-traces wire failed (suppressed)", exc_info=True
+        )
+
     permission_mode = _derive_permission_mode(plan=plan, auto=False, accept_edits=False)
     runtime = _RuntimeContext(plan_mode=plan, permission_mode=permission_mode)
 
     async def _run() -> str:
         result = await loop.run_conversation(prompt, runtime=runtime)
         msg = getattr(result, "final_message", None)
+        # Drain fire-and-forget tasks (e.g. social-traces post-task
+        # distill+submit) before this coroutine returns, otherwise
+        # ``asyncio.run`` cancels them when its event loop tears down.
+        # Chat mode keeps the loop alive via the REPL; oneshot is the
+        # one surface that exits immediately. 60s budget covers the
+        # 4 LLM calls in the distiller (intent + steps + insight +
+        # tag-extract) at typical Haiku latency.
+        try:
+            from opencomputer.hooks.runner import drain_pending
+
+            await drain_pending(timeout=60.0)
+        except Exception:  # noqa: BLE001
+            pass
         if msg is None:
             return ""
         content = getattr(msg, "content", "")

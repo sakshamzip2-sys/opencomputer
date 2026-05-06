@@ -37,10 +37,21 @@ for arg in "$@"; do
 done
 
 # ── pre-flight ───────────────────────────────────────────────────────
+# Auto-source ~/.opencomputer/.env when ANTHROPIC_API_KEY isn't already
+# in the shell. This is where ``opencomputer setup`` writes provider
+# credentials by convention, so a user who already configured OC for
+# normal use can run --real without re-exporting anything.
+if [ "$MODE" = "real" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -f "$HOME/.opencomputer/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$HOME/.opencomputer/.env"
+  set +a
+fi
+
 if [ "$MODE" = "real" ]; then
   if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
     cat >&2 <<'EOM'
-ERR: --real mode needs ANTHROPIC_API_KEY in env.
+ERR: --real mode needs ANTHROPIC_API_KEY in env (or in ~/.opencomputer/.env).
 
   # Native Anthropic key:
   export ANTHROPIC_API_KEY=sk-ant-...
@@ -78,7 +89,7 @@ ENDPOINT="http://127.0.0.1:8000"
 cleanup() {
   local rc=$?
   if [ -n "$OH_PID" ] && kill -0 "$OH_PID" 2>/dev/null; then
-    echo "── cleanup: stopping OpenHub (pid=$OH_PID)…"
+    echo "── cleanup: stopping OpenHub (pid=$OH_PID)..."
     kill "$OH_PID" 2>/dev/null || true
     wait "$OH_PID" 2>/dev/null || true
   fi
@@ -89,6 +100,14 @@ trap cleanup EXIT
 
 # ── 1. bring up OpenHub ──────────────────────────────────────────────
 echo "── 1/5 bringing up OpenHub at $ENDPOINT (HMAC + admin-token enforced)"
+
+# Refuse to start if port 8000 is already taken — the demo would
+# silently use the wrong server (different ADMIN_TOKEN, different
+# require_hmac state) and the failure mode would be confusing.
+if lsof -iTCP:8000 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "ERR: port 8000 is already in use. Run 'lsof -iTCP:8000 -sTCP:LISTEN' to find the process and kill it." >&2
+  exit 1
+fi
 pushd "$OPENHUB_REPO" >/dev/null
 if [ ! -d ".venv" ]; then
   echo "ERR: $OPENHUB_REPO/.venv missing. cd $OPENHUB_REPO && python3 -m venv .venv && pip install -e ." >&2
@@ -189,6 +208,10 @@ model:
   # operations that may take longer than 10 minutes". 4096 is plenty
   # for this demo's prompts.
   max_tokens: 4096
+  # Cap-doubling sweep set the global default to 2.0 (max for
+  # OpenAI-compat providers); Claude rejects > 1.0 with "temperature:
+  # range: 0..1". Per-profile override per CLAUDE.md guidance.
+  temperature: 0.7
 social_traces:
   backend: http
   endpoint: $ENDPOINT
@@ -203,34 +226,35 @@ YAML
     printf '{"enabled": true}\n' >"$HOMEDIR/traces/state.json"
   done
 
-  ALICE_PROMPT="Summarize the difference between TCP and UDP in two sentences. Tag this conversation as 'networking'."
-  BOB_PROMPT="What's the high-level difference between TCP and UDP, conceptually?"
+  # Alice's prompt forces a tool call so turn_count >= 2 — the
+  # social-traces subscriber's heuristic gate (subscriber.py:84
+  # `_MIN_TURN_COUNT = 2`) rejects 1-turn sessions as "no procedure
+  # to share". Reading a file fixes that.
+  ALICE_PROMPT="Read the README.md at $OC_REPO/README.md and tell me in two sentences what OpenComputer is."
+  BOB_PROMPT="What is OpenComputer? Two sentences only."
 
-  echo "    [alice] running oneshot…"
+  echo "    [alice] running oneshot..."
   OPENCOMPUTER_HOME="$ALICE_HOME" opencomputer oneshot "$ALICE_PROMPT" \
     >"$DEMO_TMP/alice.out" 2>"$DEMO_TMP/alice.err" || {
       echo "ERR: alice oneshot failed. stderr:" >&2; cat "$DEMO_TMP/alice.err" >&2; exit 1;
     }
 
-  # Wait briefly for the post-task subscriber to fire submit.
-  echo "    [alice] waiting up to 30s for post-task submit to land…"
+  # Wait for the post-task subscriber to fire submit. The subscriber
+  # makes 4 LLM calls (intent + steps + insight + tag-extract) before
+  # POSTing /v1/traces/submit, and ``opencomputer oneshot`` drains
+  # those via ``drain_pending(timeout=60s)`` BEFORE its asyncio.run
+  # exits. So this poll is essentially "did oneshot's drain succeed
+  # and the trace land in OH?" — typically <30s but we budget 90s.
+  echo "    [alice] waiting up to 90s for post-task submit to land..."
   PENDING_ID=""
-  for _ in $(seq 1 60); do
-    PENDING_RESP="$(curl -sf "$ENDPOINT/admin/queue?status=pending&limit=10" \
-      -H "Authorization: Bearer $ADMIN_TOKEN" || true)"
-    PENDING_ID="$(printf '%s' "$PENDING_RESP" | \
-      python3 -c '
-import json,sys
-try:
-    d=json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-ts=d.get("traces",[])
-if ts: print(ts[0].get("id",""))
-' || true)"
-    if [ -n "$PENDING_ID" ]; then
+  for _ in $(seq 1 180); do
+    PENDING_ID="$(curl -sf "$ENDPOINT/admin/queue?status=pending&limit=10" \
+      -H "Authorization: Bearer $ADMIN_TOKEN" 2>/dev/null \
+      | jq -r '.traces[0].id // empty' 2>/dev/null || true)"
+    if [ -n "$PENDING_ID" ] && [ "$PENDING_ID" != "null" ]; then
       break
     fi
+    PENDING_ID=""
     sleep 0.5
   done
   if [ -z "$PENDING_ID" ]; then
@@ -240,14 +264,14 @@ if ts: print(ts[0].get("id",""))
   fi
   echo "    [alice] submitted trace $PENDING_ID"
 
-  echo "    [admin] approving $PENDING_ID…"
+  echo "    [admin] approving $PENDING_ID..."
   curl -sfX POST "$ENDPOINT/admin/traces/$PENDING_ID/accept" \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"reason": "demo accept"}' >/dev/null
   echo "    [admin] approved"
 
-  echo "    [bob]   running oneshot with related prompt…"
+  echo "    [bob]   running oneshot with related prompt..."
   OPENCOMPUTER_HOME="$BOB_HOME" opencomputer oneshot "$BOB_PROMPT" \
     >"$DEMO_TMP/bob.out" 2>"$DEMO_TMP/bob.err" || {
       echo "ERR: bob oneshot failed. stderr:" >&2; cat "$DEMO_TMP/bob.err" >&2; exit 1;
@@ -258,7 +282,7 @@ if ts: print(ts[0].get("id",""))
   # on_before_task hitting an injected trace. We check by inspecting
   # the latest trace history in bob's profile (Phase 4 wrote a
   # per-session record on every prefetch hit).
-  echo "    [verify] checking bob's session for prefetch hit…"
+  echo "    [verify] checking bob's session for prefetch hit..."
   BOB_HEARTBEAT="$BOB_HOME/traces/heartbeat"
   if [ ! -f "$BOB_HEARTBEAT" ]; then
     echo "ERR: bob's traces/heartbeat is missing — the prefetch hook never fired." >&2
@@ -271,10 +295,9 @@ if ts: print(ts[0].get("id",""))
   # inbox/outbox layout for diagnostic parity). We also assert that
   # the OH-side approved-traces list is non-empty, proving the round
   # trip closed.
-  APPROVED_RESP="$(curl -sf "$ENDPOINT/admin/queue?status=approved&limit=10" \
-    -H "Authorization: Bearer $ADMIN_TOKEN")"
-  APPROVED_COUNT="$(printf '%s' "$APPROVED_RESP" | \
-    python3 -c 'import json,sys;print(len(json.load(sys.stdin).get("traces",[])))')"
+  APPROVED_COUNT="$(curl -sf "$ENDPOINT/admin/queue?status=approved&limit=10" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" 2>/dev/null \
+    | jq -r '.traces | length' 2>/dev/null || echo 0)"
   if [ "$APPROVED_COUNT" = "0" ]; then
     echo "ERR: no approved traces after admin accept — the flow broke." >&2
     exit 1
