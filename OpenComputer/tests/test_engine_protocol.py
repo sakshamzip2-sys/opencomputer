@@ -70,17 +70,24 @@ def test_hash_strategy_deterministic_per_knob_per_day():
 
 
 def test_hash_strategy_distributes_across_engines():
-    """Different knob_kinds get distributed; same day."""
+    """Different knob_kinds get distributed; same day.
+
+    Uses 100 knob kinds instead of 6 so PYTHONHASHSEED randomization
+    can't statistically bunch all values on a single engine. With 2
+    engines and 100 hash-randomized knobs, the probability of all
+    landing on one engine is ~2 / 2^100 — effectively zero. The
+    pre-fix 6-knob version had a non-trivial flake rate on CI.
+    """
     reg = EngineRegistry()
     reg.register(_FakeEngine("A/1"))
     reg.register(_FakeEngine("B/1"))
     reg.set_strategy("hash")
 
     picks = set()
-    for kk in ["k1", "k2", "k3", "k4", "k5", "k6"]:
-        pick = reg.choose(knob_kind=kk)
+    for i in range(100):
+        pick = reg.choose(knob_kind=f"k{i}")
         picks.add(pick.version)
-    # With 6 different knobs and 2 engines, both should appear
+    # With 100 different knobs and 2 engines, both should appear.
     assert len(picks) == 2
 
 

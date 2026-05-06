@@ -1143,6 +1143,15 @@ class AgentLoop:
         # Audit BLOCKER 1 (post-PR review): without this, prefetched +
         # channel content that gets appended to ``system`` below was
         # being silently dropped by Anthropic's split-system path.
+        # Track memory/channel content SEPARATELY from the engine-
+        # compose result so the post-compaction recompose path (line
+        # ~1500) can rebuild ``system`` + ``injected_volatile`` from
+        # the new engine compose without losing memory/channel content.
+        # Audit MAJOR 6 fix (post-PR review): pre-fix, the recompose
+        # rebuilt ``system = base_system + injected`` and silently
+        # dropped memory + channel content for legacy ``system=``
+        # callers on retries.
+        volatile_memory_blocks: list[str] = []
         injected_volatile = injected or ""
         system = base_system + ("\n\n" + injected if injected else "")
 
@@ -1188,6 +1197,7 @@ class AgentLoop:
         )
         if prefetched:
             block = "## Relevant memory\n\n" + prefetched
+            volatile_memory_blocks.append(block)
             system = system + "\n\n" + block
             injected_volatile = (
                 injected_volatile + "\n\n" + block if injected_volatile else block
@@ -1211,6 +1221,7 @@ class AgentLoop:
             ).recall_block(user_message)
             if am_block:
                 block = "## Active memory\n\n" + am_block
+                volatile_memory_blocks.append(block)
                 system = system + "\n\n" + block
                 injected_volatile = (
                     injected_volatile + "\n\n" + block
@@ -1229,6 +1240,7 @@ class AgentLoop:
         channel_prompt = self._runtime.custom.get("channel_prompt")
         if isinstance(channel_prompt, str) and channel_prompt.strip():
             block = "## Channel prompt\n\n" + channel_prompt.strip()
+            volatile_memory_blocks.append(block)
             system = system + "\n\n" + block
             injected_volatile = (
                 injected_volatile + "\n\n" + block if injected_volatile else block
@@ -1249,6 +1261,7 @@ class AgentLoop:
                     blocks.append(entry)
             if blocks:
                 block = "## Channel skills (auto-loaded)\n\n" + "\n\n".join(blocks)
+                volatile_memory_blocks.append(block)
                 system = system + "\n\n" + block
                 injected_volatile = (
                     injected_volatile + "\n\n" + block
@@ -1486,16 +1499,22 @@ class AgentLoop:
                             turn_index=turn_index,
                         )
                         injected = await injection_engine.compose(inj_ctx)
-                        # Audit MAJOR 6 (post-PR review): rebuild
-                        # ``system`` legacy string from the new engine
-                        # compose. ``injected_volatile`` carries the
-                        # memory + channel content from turn start
-                        # (those don't change per-retry), so it's still
-                        # correct to forward as ``injected_system`` to
-                        # split-aware providers. Legacy single-string
-                        # callers receive the new engine compose only —
-                        # this matches pre-PR behavior.
-                        system = base_system + ("\n\n" + injected if injected else "")
+                        # Audit MAJOR 6 fix (post-PR review): rebuild
+                        # BOTH ``system`` and ``injected_volatile`` to
+                        # preserve memory + channel content
+                        # (``volatile_memory_blocks``) alongside the
+                        # newly-recomposed engine output. Pre-fix,
+                        # legacy ``system=`` callers retried after
+                        # compaction with memory + channel content
+                        # silently dropped.
+                        parts: list[str] = []
+                        if injected:
+                            parts.append(injected)
+                        parts.extend(volatile_memory_blocks)
+                        injected_volatile = "\n\n".join(parts) if parts else ""
+                        system = base_system + (
+                            "\n\n" + injected_volatile if injected_volatile else ""
+                        )
 
                 step = await self._run_one_step(
                     messages=messages,
