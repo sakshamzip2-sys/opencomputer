@@ -16,7 +16,10 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from .ring_buffer import ScreenCapture
+try:
+    from ring_buffer import ScreenCapture  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover
+    from extensions.screen_awareness.ring_buffer import ScreenCapture
 
 _log = logging.getLogger("opencomputer.screen_awareness.persist")
 

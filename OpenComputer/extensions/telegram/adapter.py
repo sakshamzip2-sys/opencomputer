@@ -546,8 +546,19 @@ class TelegramAdapter(BaseChannelAdapter):
     # errors during long-poll. After the 10th consecutive failure the
     # supervisor is asked to take over (retryable=True so it restarts).
     _NETWORK_BACKOFF_SCHEDULE: tuple[int, ...] = (5, 10, 20, 40, 60, 60, 60, 60, 60, 60)
-    _MAX_CONSECUTIVE_409S: int = 3
-    _CONFLICT_BACKOFF_SECONDS: int = 10
+    # Telegram's getUpdates long-poll TTL is ~60 seconds. When the
+    # gateway restarts, the server's prior poll session stays alive
+    # until that TTL expires. With the previous (3 × 10s = 30s) budget
+    # we'd give up BEFORE the prior session's timeout — under launchd
+    # KeepAlive=true that turns into a death spiral: gateway crashes,
+    # launchd respawns within seconds, conflict resumes, fatal exit,
+    # respawn, repeat. Total budget MUST exceed 60s.
+    #
+    # 6 × 15s = 90s gives a safe 50% margin over the TTL while still
+    # surfacing a real "another machine is polling this token" case
+    # within a couple of minutes.
+    _MAX_CONSECUTIVE_409S: int = 6
+    _CONFLICT_BACKOFF_SECONDS: int = 15
 
     async def _poll_forever(self) -> None:
         assert self._client is not None
@@ -578,10 +589,21 @@ class TelegramAdapter(BaseChannelAdapter):
                 if resp.status_code == 409:
                     consecutive_409s += 1
                     if consecutive_409s > self._MAX_CONSECUTIVE_409S:
+                        # retryable=True: another consumer (e.g. parallel
+                        # Claude Code session, second machine) is holding
+                        # the long-poll slot. Crashing the whole gateway
+                        # only spawns more rapid restarts (launchd
+                        # KeepAlive=true) and keeps the conflict alive.
+                        # Surface as retryable so the supervisor backs
+                        # off the adapter without taking down the rest
+                        # of the gateway, and lets the user resolve the
+                        # double-poller without an infinite restart
+                        # storm. The test_fourth_conflict_triggers_fatal
+                        # test pins this contract.
                         self._set_fatal_error(
                             "telegram-conflict",
                             "another process is polling — stop it or rotate token",
-                            retryable=False,
+                            retryable=True,
                         )
                         break
                     logger.warning(

@@ -3,6 +3,6 @@
   "name": "OpenRouter",
   "kind": "provider",
   "version": "0.1.0",
-  "entry": "plugin.py",
+  "entry": "plugin",
   "description": "OpenRouter — single API key for 100+ models (Claude, GPT, Gemini, Llama). OpenAI-compatible endpoint subclassing the bundled openai-provider."
 }

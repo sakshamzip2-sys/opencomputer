@@ -3,7 +3,7 @@
   "name": "Vector Memory (ChromaDB-backed)",
   "version": "0.1.0",
   "description": "Local vector memory backend powered by ChromaDB. Stores text + metadata, supports semantic search via sentence-transformers embeddings (lazy-installed).",
-  "kind": "provider",
+  "kind": "tool",
   "entry": "plugin",
   "schema_version": 2,
   "profiles": ["*"],

@@ -3,7 +3,7 @@
   "name": "Wiki Memory (markdown-files)",
   "version": "0.1.0",
   "description": "Personal knowledge wiki backed by markdown files on disk. Auto-extracts [[wikilinks]], maintains a backlinks index, and search via ripgrep when available.",
-  "kind": "provider",
+  "kind": "tool",
   "entry": "plugin",
   "schema_version": 2,
   "profiles": ["*"],

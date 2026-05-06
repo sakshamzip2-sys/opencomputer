@@ -6,17 +6,67 @@ Default OFF: a no-op register call leaves nothing wired.
 from __future__ import annotations
 
 import importlib
+
+# Plugin-loader puts this dir on sys.path but does NOT clear ``state``
+# from sys.modules between plugin loads. coding-harness has a
+# ``state/`` subpackage that registers itself as ``state`` first,
+# shadowing our ``state.py``. Load that one via spec_from_file_location
+# under a synthetic name AND register under ``state`` so subsequent
+# sibling imports inside this plugin resolve to ours, not theirs.
+#
+# Module-name registration MUST happen before ``exec_module`` —
+# Python 3.13 ``@dataclass`` does
+# ``sys.modules.get(cls.__module__).__dict__`` during class
+# construction and explodes on a missing entry.
+#
+# ALSO register under the namespace-package name
+# (``extensions.screen_awareness.state``) so test code that imports
+# via the package path gets the SAME module object — keeps
+# ``isinstance(...)`` checks honest across plugin-loader and tests.
+import importlib.util as _importlib_util
 import logging
+import sys as _sys
 from pathlib import Path
+from pathlib import Path as _Path
 from typing import Any
 
 from plugin_sdk.hooks import HookDecision, HookEvent, HookSpec
 
-from .injection_provider import ScreenContextProvider
-from .recall_tool import RecallScreenTool
-from .ring_buffer import ScreenRingBuffer
-from .sensor import ScreenAwarenessSensor
-from .state import load_state
+_PLUGIN_DIR = _Path(__file__).resolve().parent
+
+
+def _load_state_isolated():
+    name = "_screen_awareness_state"
+    if name in _sys.modules:
+        return _sys.modules[name]
+    spec = _importlib_util.spec_from_file_location(name, _PLUGIN_DIR / "state.py")
+    if spec is None or spec.loader is None:
+        raise ImportError("cannot locate state.py in screen-awareness")
+    mod = _importlib_util.module_from_spec(spec)
+    _sys.modules[name] = mod
+    _sys.modules["state"] = mod  # win the bare-name race vs coding-harness
+    _sys.modules["extensions.screen_awareness.state"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_state = _load_state_isolated()
+load_state = _state.load_state
+
+# The remaining siblings have unique stems across all bundled plugins,
+# so plain absolute imports work — the loader puts our dir on sys.path
+# before exec'ing this file. Dual-import keeps test-runner package
+# imports happy.
+try:
+    from injection_provider import ScreenContextProvider  # type: ignore[import-not-found]
+    from recall_tool import RecallScreenTool  # type: ignore[import-not-found]
+    from ring_buffer import ScreenRingBuffer  # type: ignore[import-not-found]
+    from sensor import ScreenAwarenessSensor  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover
+    from extensions.screen_awareness.injection_provider import ScreenContextProvider
+    from extensions.screen_awareness.recall_tool import RecallScreenTool
+    from extensions.screen_awareness.ring_buffer import ScreenRingBuffer
+    from extensions.screen_awareness.sensor import ScreenAwarenessSensor
 
 _log = logging.getLogger("opencomputer.screen_awareness.plugin")
 

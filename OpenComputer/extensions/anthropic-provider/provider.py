@@ -1444,11 +1444,22 @@ class AnthropicProvider(BaseProvider):
             raise
         t1 = time.monotonic()
         result = self._parse_response(resp)
-        self._emit_llm_event(model=model, usage=result.usage, t0=t0, t1=t1, site=site)
+        self._emit_llm_event(
+            model=model, usage=result.usage, t0=t0, t1=t1, site=site,
+            messages=messages, response_text=getattr(result.message, "content", None),
+        )
         return result
 
     def _emit_llm_event(
-        self, *, model: str, usage: Usage, t0: float, t1: float, site: str = "agent_loop"
+        self,
+        *,
+        model: str,
+        usage: Usage,
+        t0: float,
+        t1: float,
+        site: str = "agent_loop",
+        messages: list[Message] | None = None,
+        response_text: str | None = None,
     ) -> None:
         """Emit one LLMCallEvent to the central observability sink.
 
@@ -1460,6 +1471,26 @@ class AnthropicProvider(BaseProvider):
         as a kwarg once the agent loop is no longer contended by
         parallel sessions.
         """
+        # Build optional previews — last user message + first chunk of
+        # the response. Capped to 1500 chars each to keep the JSONL log
+        # bounded and to avoid leaking large prompts to telemetry.
+        input_preview: str | None = None
+        if messages:
+            for m in reversed(messages):
+                if getattr(m, "role", "") == "user":
+                    text = getattr(m, "content", "")
+                    if isinstance(text, list):
+                        # Anthropic-style content blocks
+                        text = " ".join(
+                            b.get("text", "") if isinstance(b, dict) else str(b)
+                            for b in text
+                        )
+                    input_preview = str(text)[:1500] if text else None
+                    break
+        output_preview = (
+            str(response_text)[:1500] if response_text else None
+        )
+
         try:
             record_llm_call(
                 LLMCallEvent(
@@ -1480,6 +1511,8 @@ class AnthropicProvider(BaseProvider):
                         cache_read_tokens=usage.cache_read_tokens,
                     ),
                     site=site,
+                    input_preview=input_preview,
+                    output_preview=output_preview,
                 )
             )
         except Exception as exc:  # noqa: BLE001 — telemetry must not break the loop
@@ -1656,7 +1689,10 @@ class AnthropicProvider(BaseProvider):
             raise
         t1 = time.monotonic()
         result = self._parse_response(final)
-        self._emit_llm_event(model=model, usage=result.usage, t0=t0, t1=t1, site=site)
+        self._emit_llm_event(
+            model=model, usage=result.usage, t0=t0, t1=t1, site=site,
+            messages=messages, response_text=getattr(result.message, "content", None),
+        )
         return result
 
     async def stream_complete(
@@ -1793,6 +1829,7 @@ class AnthropicProvider(BaseProvider):
         )
         # TS-T7 — short-circuit if a previous 429 hasn't reset.
         _check_rate_limit()
+        t0 = time.monotonic()
         try:
             async with self.client.messages.stream(**kwargs) as stream:
                 # Drop down to the raw event iterator (NOT
@@ -1823,7 +1860,17 @@ class AnthropicProvider(BaseProvider):
             _record_429(exc)
             raise
 
-        yield StreamEvent(kind="done", response=self._parse_response(final))
+        t1 = time.monotonic()
+        result = self._parse_response(final)
+        # Emit observability event AFTER stream completes — without this
+        # the langfuse subscriber never sees streamed responses (which is
+        # how `oc chat` runs by default), and `oc usage` cache stats
+        # silently miss every chat turn.
+        self._emit_llm_event(
+            model=model, usage=result.usage, t0=t0, t1=t1, site=site,
+            messages=messages, response_text=getattr(result.message, "content", None),
+        )
+        yield StreamEvent(kind="done", response=result)
 
     async def complete_vision(
         self,

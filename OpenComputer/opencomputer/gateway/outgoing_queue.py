@@ -40,6 +40,7 @@ bump) so this composes with concurrent migrations from other PRs.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
@@ -118,7 +119,7 @@ class OutgoingQueue:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn:
             conn.executescript(_DDL)
 
     def _connect(self) -> sqlite3.Connection:
@@ -175,7 +176,7 @@ class OutgoingQueue:
 
     def list_queued(self, limit: int = 16) -> list[OutgoingMessage]:
         """Oldest-first FIFO drain order."""
-        with self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn:
             rows = conn.execute(
                 "SELECT * FROM outgoing_messages WHERE status = 'queued' "
                 "ORDER BY enqueued_at ASC LIMIT ?",
@@ -193,12 +194,12 @@ class OutgoingQueue:
             params.append(status)
         sql += " ORDER BY enqueued_at DESC LIMIT ?"
         params.append(limit)
-        with self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn:
             rows = conn.execute(sql, params).fetchall()
         return [OutgoingMessage.from_row(r) for r in rows]
 
     def get(self, msg_id: str) -> OutgoingMessage | None:
-        with self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT * FROM outgoing_messages WHERE id = ?", (msg_id,),
             ).fetchone()

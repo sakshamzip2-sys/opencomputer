@@ -19,7 +19,18 @@ import threading
 import time
 from collections.abc import Callable
 
-from .ring_buffer import ScreenCapture, ScreenRingBuffer, TriggerSource
+try:
+    from ring_buffer import (  # type: ignore[import-not-found]
+        ScreenCapture,
+        ScreenRingBuffer,
+        TriggerSource,
+    )
+except ImportError:  # pragma: no cover
+    from extensions.screen_awareness.ring_buffer import (
+        ScreenCapture,
+        ScreenRingBuffer,
+        TriggerSource,
+    )
 
 _log = logging.getLogger("opencomputer.screen_awareness.sensor")
 

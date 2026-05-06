@@ -11,7 +11,10 @@ import time
 
 from plugin_sdk.injection import DynamicInjectionProvider, InjectionContext
 
-from .ring_buffer import ScreenRingBuffer
+try:
+    from ring_buffer import ScreenRingBuffer  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover
+    from extensions.screen_awareness.ring_buffer import ScreenRingBuffer
 
 #: Default freshness window — emit only if latest capture is within 60s.
 DEFAULT_FRESHNESS_SECONDS = 60.0

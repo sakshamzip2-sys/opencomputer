@@ -458,22 +458,54 @@ class OpenAIProvider(BaseProvider):
             raise
         t1 = time.monotonic()
         result = self._parse_response(resp)
-        self._emit_llm_event(model=model, usage=result.usage, t0=t0, t1=t1, site=site)
+        self._emit_llm_event(
+            model=model,
+            usage=result.usage,
+            t0=t0,
+            t1=t1,
+            site=site,
+            messages=messages,
+            response_text=result.message.content,
+        )
         return result
 
     def _emit_llm_event(
-        self, *, model: str, usage: Usage, t0: float, t1: float, site: str = "agent_loop"
+        self,
+        *,
+        model: str,
+        usage: Usage,
+        t0: float,
+        t1: float,
+        site: str = "agent_loop",
+        messages: list[Message] | None = None,
+        response_text: str | None = None,
     ) -> None:
         """Emit one LLMCallEvent to the central observability sink.
 
         Best-effort: a sink failure (disk full, permission denied) must
         not crash the agent loop. Logs at WARNING and continues.
 
-        ``site`` defaults to ``"agent_loop"`` — Phase 4 follow-up will
-        thread the actual call-site through ``BaseProvider.complete()``
-        as a kwarg once the Anthropic provider's signature is no longer
-        contended by parallel sessions.
+        ``messages`` + ``response_text`` are optional but required for
+        Langfuse LLM-as-a-judge evaluators to have non-empty input /
+        output. Mirrors the Anthropic provider's preview-building logic
+        (last user message, capped at 1500 chars). When omitted,
+        previews stay None — back-compat for any caller that hasn't
+        been updated.
         """
+        input_preview: str | None = None
+        if messages:
+            for m in reversed(messages):
+                if getattr(m, "role", "") == "user":
+                    text = getattr(m, "content", "")
+                    if isinstance(text, list):
+                        text = " ".join(
+                            b.get("text", "") if isinstance(b, dict) else str(b)
+                            for b in text
+                        )
+                    input_preview = str(text)[:1500] if text else None
+                    break
+        output_preview = str(response_text)[:1500] if response_text else None
+
         try:
             record_llm_call(
                 LLMCallEvent(
@@ -494,6 +526,8 @@ class OpenAIProvider(BaseProvider):
                         cache_read_tokens=usage.cache_read_tokens,
                     ),
                     site=site,
+                    input_preview=input_preview,
+                    output_preview=output_preview,
                 )
             )
         except Exception as exc:  # noqa: BLE001 — telemetry must not break the loop
@@ -698,7 +732,15 @@ class OpenAIProvider(BaseProvider):
             "content_filter": "end_turn",
         }
         t1 = time.monotonic()
-        self._emit_llm_event(model=model, usage=usage, t0=t0, t1=t1, site=site)
+        self._emit_llm_event(
+            model=model,
+            usage=usage,
+            t0=t0,
+            t1=t1,
+            site=site,
+            messages=messages,
+            response_text=msg.content,
+        )
         return ProviderResponse(
             message=msg,
             stop_reason=stop_map.get(finish_reason, "end_turn"),

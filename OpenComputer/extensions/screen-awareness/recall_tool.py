@@ -15,7 +15,10 @@ from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
-from .ring_buffer import ScreenRingBuffer
+try:
+    from ring_buffer import ScreenRingBuffer  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover
+    from extensions.screen_awareness.ring_buffer import ScreenRingBuffer
 
 
 class RecallScreenTool(BaseTool):

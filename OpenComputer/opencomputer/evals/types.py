@@ -29,6 +29,21 @@ class EvalSite:
     regression_threshold: float = 0.05
     """Accuracy drop (as fraction, not %) that trips the regression gate."""
 
+    requires_command: tuple[str, ...] = ()
+    """External binaries that must be on PATH for the site to run.
+
+    The CLI's ``oc eval run`` skips the site (with a reason) when any
+    listed command is missing — distinguishes "actually red" from
+    "env not configured". Example: ``("ollama",)`` for sites whose
+    default extractor shells out to ollama.
+    """
+
+    requires_env: tuple[str, ...] = ()
+    """Environment variables that must each be set (non-empty) for the
+    site to run. The CLI's ``oc eval run`` skips the site when any
+    listed var is missing.
+    """
+
 
 @dataclass(frozen=True)
 class Case:

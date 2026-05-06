@@ -2,47 +2,91 @@
 
 C.3 MVP (2026-05-05). All-local, no paid APIs. Image generation
 (needs paid API + model weights) is explicitly out of scope.
+
+Layout note: sibling files are flat at the plugin root (audio_transcribe.py,
+image_info.py, tts_generate.py). Avoid the ``tools/`` subdir convention —
+CLAUDE.md gotcha #1 explains why (Python's sys.modules cache shadows
+sibling-named packages across plugins).
 """
 
 from __future__ import annotations
 
+import json
 import logging
-import sys
 from pathlib import Path
 
-# Plugin-loader gives us the parent dir on sys.path; package import is
-# the fallback for tests that do `from extensions.media_tools.plugin`.
+from plugin_sdk.core import ToolCall, ToolResult
+from plugin_sdk.tool_contract import BaseTool, ToolSchema
+
+# Dual-import: plugin-loader puts this dir on sys.path; tests that
+# import ``extensions.media_tools.plugin`` go through the package
+# fallback.
 try:
-    sys.path.insert(0, str(Path(__file__).parent))
-    from tools.audio_transcribe import (  # type: ignore
+    from audio_transcribe import (  # type: ignore[import-not-found]
         WhisperBackendUnavailableError,
         transcribe,
     )
-    from tools.image_info import (  # type: ignore
+    from image_info import (  # type: ignore[import-not-found]
         PILUnavailableError,
         inspect_image,
     )
-    from tools.tts_generate import EdgeTTSUnavailableError, synthesize  # type: ignore
-finally:
-    pass
-
-from plugin_sdk.tool_contract import BaseTool, ToolSchema
+    from tts_generate import (  # type: ignore[import-not-found]
+        EdgeTTSUnavailableError,
+        synthesize,
+    )
+except ImportError:  # pragma: no cover
+    from extensions.media_tools.audio_transcribe import (
+        WhisperBackendUnavailableError,
+        transcribe,
+    )
+    from extensions.media_tools.image_info import (
+        PILUnavailableError,
+        inspect_image,
+    )
+    from extensions.media_tools.tts_generate import (
+        EdgeTTSUnavailableError,
+        synthesize,
+    )
 
 logger = logging.getLogger("opencomputer.ext.media_tools")
 
 
-class ImageInfo(BaseTool):
+class _RunToExecute:
+    """Bridge ``run(**kwargs) -> dict`` to ``execute(call) -> ToolResult``.
+
+    Mirrors the helper in extensions/memory-vector/plugin.py.
+    """
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        try:
+            result = await self.run(**call.arguments)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — must not raise from execute
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"Error: {exc}",
+                is_error=True,
+            )
+        return ToolResult(
+            tool_call_id=call.id,
+            content=json.dumps(result, default=str),
+        )
+
+
+class ImageInfo(_RunToExecute, BaseTool):
     """Inspect an image file (dimensions, format, EXIF)."""
 
-    @classmethod
-    def schema(cls) -> ToolSchema:
+    @property
+    def schema(self) -> ToolSchema:
         return ToolSchema(
             name="ImageInfo",
             description=(
-                "Inspect a local image file. Returns dimensions, format, "
-                "color mode, and EXIF metadata."
+                "Inspect a local image file via Pillow. Use when the "
+                "user references an image on disk and you need to know "
+                "its dimensions, format, color mode, or EXIF metadata "
+                "before deciding how to process or describe it. "
+                "All-local; no network calls; no model inference."
             ),
-            input_schema={
+            parameters={
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
                 "required": ["path"],
@@ -66,18 +110,21 @@ class ImageInfo(BaseTool):
         }
 
 
-class TTSGenerate(BaseTool):
+class TTSGenerate(_RunToExecute, BaseTool):
     """Synthesize text to MP3 audio via edge-tts."""
 
-    @classmethod
-    def schema(cls) -> ToolSchema:
+    @property
+    def schema(self) -> ToolSchema:
         return ToolSchema(
             name="TTSGenerate",
             description=(
-                "Generate an MP3 from text using Microsoft Edge TTS. "
-                "All-local synthesis; no paid API."
+                "Generate an MP3 audio file from text using Microsoft "
+                "Edge TTS. Use when the user wants spoken-audio output "
+                "from a string — voice replies, narration, audio "
+                "summaries. All-local synthesis; no paid API. Pick a "
+                "voice id from the edge-tts catalog (default Ava)."
             ),
-            input_schema={
+            parameters={
                 "type": "object",
                 "properties": {
                     "text": {"type": "string"},
@@ -114,11 +161,11 @@ class TTSGenerate(BaseTool):
         return {"path": str(written), "voice": voice}
 
 
-class AudioTranscribe(BaseTool):
+class AudioTranscribe(_RunToExecute, BaseTool):
     """Transcribe local audio via mlx-whisper or pywhispercpp."""
 
-    @classmethod
-    def schema(cls) -> ToolSchema:
+    @property
+    def schema(self) -> ToolSchema:
         return ToolSchema(
             name="AudioTranscribe",
             description=(
@@ -126,7 +173,7 @@ class AudioTranscribe(BaseTool):
                 "Silicon when available; falls back to pywhispercpp on "
                 "other platforms. Returns the transcribed text + backend."
             ),
-            input_schema={
+            parameters={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
@@ -151,7 +198,7 @@ class AudioTranscribe(BaseTool):
 
 
 def register(api) -> None:
-    api.register_tool(ImageInfo)
-    api.register_tool(TTSGenerate)
-    api.register_tool(AudioTranscribe)
+    api.register_tool(ImageInfo())
+    api.register_tool(TTSGenerate())
+    api.register_tool(AudioTranscribe())
     logger.info("media-tools plugin: 3 tools registered")

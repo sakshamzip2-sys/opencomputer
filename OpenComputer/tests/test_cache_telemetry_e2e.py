@@ -215,5 +215,18 @@ def test_streaming_path_uses_same_parser(monkeypatch, tmp_path: Path):
     # streaming/non-streaming divergence the user worried about can't
     # silently re-emerge.
     assert "result = self._parse_response(final)" in src
-    # And it must call _emit_llm_event with that result.usage.
-    assert "self._emit_llm_event(model=model, usage=result.usage" in src
+    # And it must call _emit_llm_event with that result.usage. The
+    # call may now span multiple lines and carry extra kwargs (e.g.
+    # ``messages`` + ``response_text`` for langfuse input/output
+    # capture). The lock here is: ``model=model`` and ``usage=result.usage``
+    # both appear inside the same ``self._emit_llm_event(...)`` call.
+    import re
+
+    pattern = re.compile(
+        r"self\._emit_llm_event\([^)]*?model=model[^)]*?usage=result\.usage",
+        re.DOTALL,
+    )
+    assert pattern.search(src), (
+        "streaming path no longer threads model + result.usage into "
+        "_emit_llm_event — the cache-telemetry pipeline could regress"
+    )

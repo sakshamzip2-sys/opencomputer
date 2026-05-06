@@ -3,7 +3,7 @@
   "name": "Media Tools (image / TTS / STT)",
   "version": "0.1.0",
   "description": "Image inspection (PIL), TTS generation (edge-tts), and audio transcription (whisper). All-local, no paid APIs.",
-  "kind": "toolkit",
+  "kind": "tool",
   "entry": "plugin",
   "schema_version": 2,
   "profiles": ["*"],

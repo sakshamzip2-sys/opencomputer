@@ -1021,10 +1021,14 @@ def _run_chat_session(
 
     _banner_home_env = os.environ.get("OPENCOMPUTER_HOME")
     _banner_home = _Path(_banner_home_env) if _banner_home_env else _Path.home() / ".opencomputer"
+    try:
+        _cwd_str = str(_Path.cwd())
+    except (FileNotFoundError, OSError):
+        _cwd_str = "<cwd deleted>"
     build_welcome_banner(
         console,
         model=f"{cfg.model.model} ({cfg.model.provider})",
-        cwd=str(_Path.cwd()),
+        cwd=_cwd_str,
         session_id=session_id,
         home=_banner_home,
     )
@@ -2915,6 +2919,8 @@ from opencomputer.cli_adapter import adapter_app  # noqa: E402
 from opencomputer.cli_consent import consent_app  # noqa: E402
 from opencomputer.cli_cost import cost_app  # noqa: E402
 from opencomputer.cli_cron import cron_app  # noqa: E402
+from opencomputer.cli_langfuse import langfuse_app  # noqa: E402
+from opencomputer.cli_optimize import optimize_app  # noqa: E402
 from opencomputer.cli_pair import pair_app  # noqa: E402
 from opencomputer.cli_session import session_app  # noqa: E402
 from opencomputer.cli_voice import voice_app  # noqa: E402
@@ -3093,6 +3099,8 @@ def _executable_or_warn() -> str:
 
 
 app.add_typer(cost_app, name="cost")
+app.add_typer(optimize_app, name="optimize")
+app.add_typer(langfuse_app, name="langfuse")
 app.add_typer(cron_app, name="cron")
 app.add_typer(pair_app, name="pair")
 app.add_typer(session_app, name="session")
