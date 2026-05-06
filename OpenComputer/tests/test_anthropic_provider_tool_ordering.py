@@ -50,6 +50,27 @@ def test_format_tools_byte_stable_across_calls(fmt):
     assert json.dumps(out1, sort_keys=True) == json.dumps(out2, sort_keys=True)
 
 
+def test_format_tools_golden_byte_sequence(fmt):
+    """Audit MINOR 14 (post-PR review): pin the actual sort order
+    against a known-good byte sequence so a future change from
+    ``sorted(... key=name)`` to ``sorted(... key=name.lower())``
+    or ``sorted(... key=(name, type))`` surfaces as a regression."""
+    tools = [
+        _ts("Zebra", "z-desc"),  # capital Z — current key is case-sensitive
+        _ts("apple", "a-desc"),
+        _ts("mango", "m-desc"),
+        _ts("Banana", "b-desc"),  # capital B
+    ]
+    out = fmt(tools)
+    # Capitals sort before lowercase in default ASCII order — pin this
+    # explicitly so a switch to case-insensitive sort would fail.
+    assert [t["name"] for t in out] == ["Banana", "Zebra", "apple", "mango"]
+    # Pin the (name, type) tuple key from MINOR 9: tools without a
+    # ``type`` field default to "" and sort purely by name.
+    for t in out:
+        assert "type" not in t or t.get("type", "") == ""
+
+
 def test_format_tools_empty_passthrough(fmt):
     assert fmt(None) == []
     assert fmt([]) == []

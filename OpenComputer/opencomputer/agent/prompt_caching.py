@@ -32,6 +32,7 @@ Pure functions — no class state, no AIAgent dependency.
 """
 
 import copy
+import json
 from typing import Any
 
 #: Anthropic's server-side cache lookback window. We mirror this client-side
@@ -80,9 +81,8 @@ def _block_chars(content: Any) -> int:
             elif t == "tool_result":
                 total += _block_chars(block.get("content", ""))
             elif t == "tool_use":
-                import json as _json
                 try:
-                    total += len(_json.dumps(block.get("input", {})))
+                    total += len(json.dumps(block.get("input", {})))
                 except (TypeError, ValueError):
                     pass  # un-encodable input; treat as 0 chars
             elif t == "image":

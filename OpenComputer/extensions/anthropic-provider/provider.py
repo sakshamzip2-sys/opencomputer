@@ -101,11 +101,17 @@ def _format_tools_for_anthropic(
         if _DROP_STRICT_FLAG_FROM_ANTHROPIC_TOOLS:
             formatted.pop("strict", None)
         out.append(formatted)
-    # Bug 4 (2026-05-05): sort by name so dynamic plugin/MCP discovery
-    # order doesn't shift the array between turns. The cache_control
-    # marker on the last user-tool then lands on the alphabetically-
-    # last tool every turn — stable byte prefix for the cache.
-    out.sort(key=lambda d: d.get("name", ""))
+    # Bug 4 (2026-05-05): sort by (name, type) so dynamic plugin/MCP
+    # discovery order doesn't shift the array between turns. The
+    # cache_control marker on the last user-tool then lands on the
+    # alphabetically-last tool every turn — stable byte prefix for the
+    # cache.
+    # Audit MINOR 9 (post-PR review): tuple key with a ``type`` tiebreaker
+    # is defensive against a future change that mixes server-side tools
+    # (which have a ``type`` field but may lack ``name``) into the user-
+    # tool array — without the tiebreaker they'd all collide on the empty-
+    # string default and sort unpredictably.
+    out.sort(key=lambda d: (d.get("name", ""), d.get("type", "")))
     return out
 
 
@@ -832,6 +838,11 @@ class AnthropicProvider(BaseProvider):
         """Update the per-session timestamp and return idle_seconds since
         this session's previous call (0.0 on first call or unknown session).
 
+        Defensive lazy-init: if ``__init__`` was skipped (rare —
+        happens in tests instantiating via ``__new__``), the dict +
+        cap default-initialize on first call so subsequent paths
+        always see a usable shape.
+
         Thread safety: this method is **not** thread-safe — the
         get/set/evict dance is unsynchronized. Safe under asyncio
         (single-thread cooperative scheduling) which is how the agent
@@ -841,6 +852,11 @@ class AnthropicProvider(BaseProvider):
         consumer is asyncio-only.
         """
         import time as _time
+        # Audit MINOR 10 (post-PR review): defensive lazy-init lives
+        # here so the 3 call sites stay one-line.
+        if not isinstance(getattr(self, "_last_call_ts", None), dict):
+            self._last_call_ts = {}
+            self._last_call_ts_max = 256
         _now = _time.monotonic()
         sid = session_id or "_default"
         prev = self._last_call_ts.get(sid, 0.0)
@@ -1071,7 +1087,9 @@ class AnthropicProvider(BaseProvider):
         session_id: str | None = None,
         # Back-compat: callers (and tests) can still pass ``system=``;
         # treated as ``base_system`` when ``base_system`` is empty.
-        system: str | None = None,
+        # Sentinel matches BaseProvider.complete (default ""), not None,
+        # to keep type signatures aligned across the call chain.
+        system: str = "",
     ) -> tuple[Any, list[dict[str, Any]], list[dict[str, Any]]]:
         """Apply Anthropic prompt caching across system + messages + tools.
 
@@ -1343,12 +1361,8 @@ class AnthropicProvider(BaseProvider):
         # ago, the 5m cache would have expired before we got back to it.
         # Bump to 1h on Anthropic; safe no-op for providers that don't
         # support it. Per-session keying (Bug 2 fix, 2026-05-05) prevents
-        # cross-session contamination in long-running daemons.
-        # Read defensively — some test paths instantiate via ``__new__``
-        # and skip ``__init__``.
-        if not isinstance(getattr(self, "_last_call_ts", None), dict):
-            self._last_call_ts = {}
-            self._last_call_ts_max = 256
+        # cross-session contamination in long-running daemons. Defensive
+        # lazy-init lives inside ``_record_call_get_idle``.
         idle_s = self._record_call_get_idle(session_id)
         # Item 1 (2026-05-02): build tools list FIRST so cache_control
         # can be applied to tools[-1] together with the system+messages
@@ -1565,12 +1579,8 @@ class AnthropicProvider(BaseProvider):
         # ago, the 5m cache would have expired before we got back to it.
         # Bump to 1h on Anthropic; safe no-op for providers that don't
         # support it. Per-session keying (Bug 2 fix, 2026-05-05) prevents
-        # cross-session contamination in long-running daemons.
-        # Read defensively — some test paths instantiate via ``__new__``
-        # and skip ``__init__``.
-        if not isinstance(getattr(self, "_last_call_ts", None), dict):
-            self._last_call_ts = {}
-            self._last_call_ts_max = 256
+        # cross-session contamination in long-running daemons. Defensive
+        # lazy-init lives inside ``_record_call_get_idle``.
         idle_s = self._record_call_get_idle(session_id)
         # Item 1 (2026-05-02): build tools list FIRST so cache_control
         # can be applied to tools[-1] together with the system+messages
@@ -1686,12 +1696,8 @@ class AnthropicProvider(BaseProvider):
         # ago, the 5m cache would have expired before we got back to it.
         # Bump to 1h on Anthropic; safe no-op for providers that don't
         # support it. Per-session keying (Bug 2 fix, 2026-05-05) prevents
-        # cross-session contamination in long-running daemons.
-        # Read defensively — some test paths instantiate via ``__new__``
-        # and skip ``__init__``.
-        if not isinstance(getattr(self, "_last_call_ts", None), dict):
-            self._last_call_ts = {}
-            self._last_call_ts_max = 256
+        # cross-session contamination in long-running daemons. Defensive
+        # lazy-init lives inside ``_record_call_get_idle``.
         idle_s = self._record_call_get_idle(session_id)
         # Item 1 (2026-05-02): build tools list FIRST so cache_control
         # can be applied to tools[-1] together with the system+messages
