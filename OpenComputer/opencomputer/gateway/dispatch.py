@@ -308,6 +308,12 @@ class Dispatch:
         router: AgentRouter | None = None,
         resolver: BindingResolver | None = None,
     ) -> None:
+        # Phase 2 collect-mode leader registry. Only ONE arrival per
+        # session in collect mode runs the agent; subsequent arrivals
+        # buffer + return early. The leader's drain wait coalesces them.
+        # Map: session_id → asyncio.Lock acting as the leader claim.
+        self._collect_leaders: dict[str, bool] = {}
+
         # Phase 2 multi-routing: accept either ``loop=`` (legacy single
         # loop) or ``router=`` (per-profile cache). Exactly one of the
         # two must be set.
@@ -713,7 +719,47 @@ class Dispatch:
         # Phase 2 (S1) — queue manager replaces the legacy lock dict.
         # ``acquire`` resolves the per-session mode (default ``followup``
         # serializes; ``interrupt`` cancels any in-flight run before
-        # entering the body).
+        # entering the body; ``collect`` buffers + drains via the
+        # leader-of-debounce-window pattern below).
+        mode = self._queue_manager.get_session_mode(session_id)
+        if mode == "collect" and (event.text or "").strip():
+            # Always buffer this arrival's text + reset the debounce timer.
+            self._queue_manager.buffer_message(session_id, event.text or "")
+            await self._queue_manager.schedule_collect_drain(session_id)
+
+            # Determine leadership: first arrival per drain window runs the
+            # agent on the merged buffer; subsequent arrivals return early.
+            # The leader claim lives in self._collect_leaders[session_id].
+            if self._collect_leaders.get(session_id):
+                # A leader is already waiting for the drain; we just
+                # contributed to the buffer + reset its timer.
+                return None
+
+            self._collect_leaders[session_id] = True
+            try:
+                # Wait for the debounce window to close. Subsequent arrivals
+                # (above) reset the timer, extending our wait.
+                await self._queue_manager.wait_for_drain(session_id)
+                # Drain the merged buffer and replace event.text with it.
+                merged = self._queue_manager.drain_buffer(session_id)
+                if merged:
+                    event = MessageEvent(
+                        platform=event.platform,
+                        chat_id=event.chat_id,
+                        user_id=event.user_id,
+                        text=merged,
+                        timestamp=event.timestamp,
+                        attachments=list(event.attachments),
+                        metadata={**event.metadata, "collect_merged": True},
+                    )
+                # Fall through to the existing followup-style serialized
+                # acquire so the rest of the dispatch path is unchanged.
+            finally:
+                # Clear leadership BEFORE entering the agent run so the
+                # next arrival post-drain can start a fresh debounce window
+                # while this run is in flight.
+                self._collect_leaders.pop(session_id, None)
+
         outcome: ProcessingOutcome = ProcessingOutcome.SUCCESS
         async with self._queue_manager.acquire(profile_id, session_id):
             # Start a typing heartbeat (Telegram's typing state expires after
