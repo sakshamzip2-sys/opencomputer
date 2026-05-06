@@ -596,11 +596,29 @@ Recommendation: **(a) for v1.0**, revisit (b) if the in-memory state proves frag
 - [x] Phase 5 mocks updated to accept `**_kw` for the new distiller kwargs
 - [x] 257/257 affected-file tests green across Phases 0-7 + SDK + extension boundary; 1 documented skip
 
-### Phase 8 — LLM tag extractor (2-3 hours)
+### Phase 8 — LLM tag extractor (2-3 hours) — COMPLETE 2026-05-06
 
-- [ ] Replace keyword tag extraction with one Haiku call
-- [ ] Cache tag extraction per session (don't re-run mid-session)
-- [ ] Maintain `tag_profile` accumulator on disk so `prefetch.build_query()` can include profile-bias tags
+- [x] `tag_extractor.extract_tags_via_provider` — one Haiku call (`claude-haiku-4-5`, ≤64 tokens, temp=0). System prompt teaches tag format constraints (lowercase, alnum+hyphen, 2-30 chars, comma-separated, 3-5 abstract domain tags). Output parser scrubs each candidate against the wire-format regex; invalid entries dropped silently. `asyncio.wait_for` guards a 800ms soft timeout for the pre-task path; `timeout_s=None` removes the cap for distill (no latency budget there). Cost-guard pre-flight + record-usage on success
+- [x] Returns `None` on EVERY failure path (provider missing, cost-guard denial, exception, timeout, malformed response) so the caller can handle all errors uniformly via "fall through to keyword extraction"
+- [x] Session-level cache (`cache_tags_for_session` / `cached_tags_for_session`) — module-level `OrderedDict`, lock-guarded, LRU eviction at 256 sessions. First user message in a session pays the LLM cost; subsequent prompts in the same session reuse the cached tag set with zero LLM cost. Tags shouldn't drift mid-task (a session is one task)
+- [x] Per-profile lifetime tag accumulator (`append_to_tag_profile` / `tag_profile_top_n`) — disk-backed at `<profile_home>/traces/tag_profile.json`, `{tag: count}` shape. Tolerates corrupted/missing files (starts fresh on parse error). `top_n` returns the most-frequent tags ordered by count
+- [x] Top-level orchestrator `extract_tags(text, *, session_id, profile_home, provider, cost_guard, ...)`:
+  - Session cache hit → return verbatim (no provider call, no profile-bias remix)
+  - LLM extraction → keyword fallback on failure
+  - Mix in `profile_bias_n` (default 3) top tags from the accumulator, deduplicated, capped at `max_tags`
+  - Cache + accumulate after extraction (only the LLM/keyword output goes into the accumulator — profile-bias tags are NOT re-counted, so frequent tags don't accelerate exponentially)
+  - Never raises
+- [x] Prefetch wiring: new `build_query_async` uses the orchestrator. `on_before_task` resolves provider + cost_guard via `_resolve_provider_and_cost_guard()` which borrows from the wired post-task subscriber's `_provider`/`_cost_guard`. Sync `build_query` kept verbatim for back-compat with existing tests
+- [x] Distiller wiring: `distill_session` now uses the same orchestrator (with `timeout_s=None`). Same `session_id` passes through, so the post-task tag-extract hits the session cache populated at pre-task time (zero extra LLM cost). Submitted traces use the same LLM-derived tags the query path uses, so submit ↔ query tag agreement is automatic
+- [x] 32 new tests in `tests/test_social_traces_phase8.py`:
+  - 10 `extract_tags_via_provider` tests — happy path, markdown-fence stripping, invalid-tag scrubbing, no-provider degrade, empty-input degrade, exception → None, timeout → None, cost-guard denial → None, record_usage on success, unparseable response → None
+  - 4 session-cache tests — round-trip, miss returns None, empty session id is no-op, overwrite
+  - 5 profile-accumulator tests — round-trip, empty case, frequency ordering, disk persistence, corrupted-file tolerance
+  - 6 orchestrator tests — cache hit skips provider, fall-back-on-LLM-fail, no-provider keyword path, profile-bias layered on top, persistence on extraction, no-double-count from bias
+  - 4 prefetch tests — async builder uses provider, no-provider keyword path, intent truncation, sync builder unchanged
+  - 3 parser tests — dedupe, max-tags cap, empty input
+- [x] Phase 7 e2e test updated — distiller now makes 4 LLM calls (intent + steps + insight + tag-extract). Test fixture provides a 4th canned response and asserts "homelab" is in `card.meta.tags` to confirm the LLM path was taken (not keyword)
+- [x] 337/337 affected-file tests green
 
 ### Phase 9.A — Production wiring for Phases 6/7 (1-2 hours) — COMPLETE 2026-05-06
 

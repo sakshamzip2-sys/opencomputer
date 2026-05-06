@@ -655,13 +655,21 @@ async def test_distill_session_full_round_trip(tmp_path: Path):
         Message(role="tool", content="rsync ran with 0 errors"),
     )
 
-    # Three canned responses for intent / steps / insight.
+    # Four canned responses now: intent / steps / insight / tag-extract.
+    # Phase 8 added the tag-extract Haiku call to the distiller path so
+    # submitted traces use the same LLM-derived tags the pre-task
+    # query path uses. Order matches the call sequence inside
+    # ``distill_session``.
+    from extensions.social_traces import tag_extractor as st_tag_extractor
+
+    st_tag_extractor.reset_session_cache_for_testing()
     provider = _FakeProvider([
         "User wanted to sync files between two homelab machines via rsync.",
         '[{"tool": "Bash", "args_summary": "rsync -a src dst", '
         '"result_summary": "0 errors"}]',
         "Use rsync --checksum on LAN homelab setups to bypass clock-skew "
         "synchronisation problems entirely.",
+        "homelab, filesync, rsync",  # tag-extract
     ])
 
     card = await st_distiller.distill_session(
@@ -679,11 +687,12 @@ async def test_distill_session_full_round_trip(tmp_path: Path):
     assert card.steps[0].tool_name == "Bash"
     assert "rsync" in card.distilled_insight.lower()
     assert card.meta.outcome == "success"
-    assert card.meta.tags  # tags extracted from user message
+    assert card.meta.tags  # LLM-extracted, not keyword
+    assert "homelab" in card.meta.tags  # confirms LLM path was taken
     # Validates against schema.
     assert st_distiller._validate(card) is True
-    # All three LLM calls were made.
-    assert len(provider.calls) == 3
+    # Phase 8: 4 LLM calls — intent + steps + insight + tag-extract.
+    assert len(provider.calls) == 4
 
 
 async def test_distill_session_intent_failure_aborts_pipeline(tmp_path: Path):

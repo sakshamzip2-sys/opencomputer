@@ -638,10 +638,24 @@ async def distill_session(
     if insight is None:
         return None
 
-    # Tags — derive from the user message (free-form for v1; LLM
-    # tag-extractor upgrade lands in Phase 8). Normalize to the
-    # network's lowercase alphanumeric+hyphen shape.
-    raw_tags = extract_tags_from_message(inputs.user_message, max_tags=_MAX_TAGS)
+    # Tags — Phase 8 derives via the same LLM extractor the pre-task
+    # path uses, with the session cache reusing whatever was already
+    # computed at hook time (zero extra LLM cost for the submit
+    # path). Falls back to keyword extraction if provider is missing
+    # or LLM call fails. ``timeout_s=None`` removes the 800ms cap that
+    # the pre-task path uses; distill is post-task so latency
+    # pressure is absent.
+    from .tag_extractor import extract_tags
+
+    raw_tags = await extract_tags(
+        text=inputs.user_message,
+        session_id=session_id,
+        profile_home=profile_home,
+        provider=provider,
+        cost_guard=cost_guard,
+        max_tags=_MAX_TAGS,
+        timeout_s=None,
+    )
     tags = _normalize_tags(raw_tags)
     if not tags:
         # No tags is a hard fail on the server side; rather than

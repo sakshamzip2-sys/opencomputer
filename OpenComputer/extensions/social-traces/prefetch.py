@@ -58,7 +58,7 @@ from plugin_sdk.traces import TraceCard
 
 from . import session_state, state
 from .config import SocialTracesConfig, from_config_dict
-from .tag_extractor import extract_tags_from_message
+from .tag_extractor import extract_tags, extract_tags_from_message
 
 _log = logging.getLogger("opencomputer.social_traces.prefetch")
 
@@ -142,20 +142,81 @@ def _set_trace_used(
 
 
 def build_query(user_message: str, *, max_tags: int = 8) -> tuple[str, tuple[str, ...]]:
-    """Build the ``(intent, tags)`` pair the network query consumes.
+    """Synchronous keyword-only query builder. Kept for back-compat
+    with tests + callers that don't have an event loop.
 
-    For v0 the intent is the user message verbatim (truncated to a
-    reasonable length so a 10K-char prompt doesn't bloat the network
-    request). Tags come from :func:`extract_tags_from_message`.
-
-    Phase 8 replaces both with LLM-derived versions but the signature
-    stays the same.
+    The LLM-aware variant is :func:`build_query_async`; the on-hook
+    pre-task path uses that one (Phase 8). This sync function still
+    works exactly as before — keyword tag extraction, no LLM, no
+    cache, no profile bias.
     """
     intent = user_message.strip()
     if len(intent) > 500:
         intent = intent[:497] + "..."
     tags = extract_tags_from_message(user_message, max_tags=max_tags)
     return intent, tags
+
+
+async def build_query_async(
+    user_message: str,
+    *,
+    session_id: str | None = None,
+    profile_home: Path | None = None,
+    provider: Any | None = None,
+    cost_guard: Any | None = None,
+    max_tags: int = 8,
+) -> tuple[str, tuple[str, ...]]:
+    """Async variant — uses the LLM-aware tag orchestrator.
+
+    Same shape as :func:`build_query` but threads ``session_id``,
+    ``profile_home``, and the resolved ``provider`` through to
+    :func:`tag_extractor.extract_tags` so:
+
+    * First message in a session pays one Haiku call for cleaner tags.
+    * Subsequent messages in the same session reuse the cached tags
+      (zero LLM cost).
+    * Profile-bias top-N tags layer on top so sparse user messages
+      ("fix it") still pull relevant history.
+    * Provider missing / cost-guard denial / LLM timeout → silently
+      degrades to keyword extraction.
+
+    The function never raises — failures fall through to keyword.
+    """
+    intent = user_message.strip()
+    if len(intent) > 500:
+        intent = intent[:497] + "..."
+    tags = await extract_tags(
+        text=user_message,
+        session_id=session_id,
+        profile_home=profile_home,
+        provider=provider,
+        cost_guard=cost_guard,
+        max_tags=max_tags,
+    )
+    return intent, tags
+
+
+def _resolve_provider_and_cost_guard() -> tuple[Any | None, Any | None]:
+    """Borrow the wired subscriber's ``provider`` + ``cost_guard``.
+
+    The post-task subscriber (started by ``wire_subscriber`` in
+    gateway / cli) is the only place these are plumbed in. The
+    pre-task hook is registered separately at plugin load and has no
+    direct access. Reading from the singleton is the cleanest bridge
+    that doesn't require changing :class:`PluginAPI`.
+
+    Returns ``(None, None)`` when no subscriber is wired — common in
+    tests, also fine in production (LLM extraction degrades to
+    keyword fallback transparently).
+    """
+    try:
+        from . import plugin
+        sub = plugin.get_active_subscriber()
+    except Exception:  # noqa: BLE001 — never raise into hooks
+        return None, None
+    if sub is None:
+        return None, None
+    return getattr(sub, "_provider", None), getattr(sub, "_cost_guard", None)
 
 
 # ─── scoring (client-side relevance gate) ────────────────────────────
@@ -269,8 +330,19 @@ async def on_before_task(ctx: HookContext) -> HookDecision:
 
     cfg = _load_config(profile_home)
 
-    # Build query
-    intent, tags = build_query(user_message, max_tags=8)
+    # Build query — Phase 8 wires LLM tag extraction with session
+    # cache + profile-bias enrichment. Provider is borrowed from the
+    # wired subscriber when available; on miss we degrade silently
+    # to keyword extraction.
+    provider, cost_guard = _resolve_provider_and_cost_guard()
+    intent, tags = await build_query_async(
+        user_message,
+        session_id=ctx.session_id,
+        profile_home=profile_home,
+        provider=provider,
+        cost_guard=cost_guard,
+        max_tags=8,
+    )
     if not tags and not intent:
         return HookDecision(decision="pass")
 
@@ -333,6 +405,7 @@ async def on_before_task(ctx: HookContext) -> HookDecision:
 
 __all__ = [
     "build_query",
+    "build_query_async",
     "format_injection",
     "on_before_task",
     "select_best_trace",
