@@ -27,7 +27,9 @@ def test_default_mode_is_followup():
 def test_all_queue_modes_tuple():
     assert "followup" in ALL_QUEUE_MODES
     assert "interrupt" in ALL_QUEUE_MODES
-    assert len(ALL_QUEUE_MODES) == 2  # promote when adding more
+    assert "collect" in ALL_QUEUE_MODES
+    assert "steer" in ALL_QUEUE_MODES
+    assert len(ALL_QUEUE_MODES) == 4  # promote when adding more
 
 
 def test_queue_config_dataclass_default():
@@ -142,6 +144,163 @@ async def test_different_sessions_dont_block_each_other():
     assert order.index("s2-start") < order.index("s2-end")
     # s2 was faster so it finishes first.
     assert "s2-end" in order
+
+
+def test_collect_and_steer_modes_in_all_modes():
+    from plugin_sdk.queue import ALL_QUEUE_MODES
+
+    assert "collect" in ALL_QUEUE_MODES
+    assert "steer" in ALL_QUEUE_MODES
+    assert len(ALL_QUEUE_MODES) == 4
+
+
+def test_drop_policies_complete():
+    from plugin_sdk.queue import ALL_DROP_POLICIES
+
+    assert ALL_DROP_POLICIES == ("drop_old", "drop_new", "summarize")
+
+
+def test_buffer_message_and_drain():
+    qm = QueueManager()
+    qm.set_session_mode("s", "collect")
+
+    assert qm.buffer_message("s", "hello") is True
+    assert qm.buffer_message("s", "world") is True
+    assert qm.buffered("s") == ["hello", "world"]
+
+    drained = qm.drain_buffer("s")
+    assert drained == "hello\nworld"
+    assert qm.buffered("s") == []
+
+
+def test_drop_old_policy():
+    qm = QueueManager()
+    cfg = QueueConfig(
+        mode="collect",
+        collect_cap=2,
+        drop_policy="drop_old",
+    )
+    qm.set_session_config("s", cfg)
+
+    qm.buffer_message("s", "first")
+    qm.buffer_message("s", "second")
+    qm.buffer_message("s", "third")  # overflow → drop "first"
+
+    assert qm.buffered("s") == ["second", "third"]
+
+
+def test_drop_new_policy():
+    qm = QueueManager()
+    cfg = QueueConfig(
+        mode="collect",
+        collect_cap=2,
+        drop_policy="drop_new",
+    )
+    qm.set_session_config("s", cfg)
+
+    assert qm.buffer_message("s", "first") is True
+    assert qm.buffer_message("s", "second") is True
+    assert qm.buffer_message("s", "third") is False  # rejected, buffer full
+
+    assert qm.buffered("s") == ["first", "second"]
+
+
+def test_summarize_drop_policy():
+    qm = QueueManager()
+    cfg = QueueConfig(
+        mode="collect",
+        collect_cap=2,
+        drop_policy="summarize",
+    )
+    qm.set_session_config("s", cfg)
+
+    qm.buffer_message("s", "a")
+    qm.buffer_message("s", "b")
+    qm.buffer_message("s", "c")  # overflow → summarise + push c
+
+    assert len(qm.buffered("s")) == 2
+    assert "summarised" in qm.buffered("s")[0]
+    assert qm.buffered("s")[1] == "c"
+
+
+async def test_steer_mode_aliases_interrupt():
+    """Steer behaves like interrupt today (cancel + restart)."""
+    qm = QueueManager()
+    qm.set_session_mode("s", "steer")
+    cancelled: list[bool] = []
+
+    async def long_run():
+        try:
+            async with qm.acquire("p", "s"):
+                await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    a = asyncio.create_task(long_run())
+    await asyncio.sleep(0.05)
+
+    async with qm.acquire("p", "s"):
+        pass
+
+    with pytest.raises(asyncio.CancelledError):
+        await a
+
+    assert cancelled == [True]
+
+
+async def test_collect_debounce_drain():
+    """schedule_collect_drain → wait_for_drain fires after debounce."""
+    qm = QueueManager()
+    cfg = QueueConfig(mode="collect", collect_debounce_s=0.05)
+    qm.set_session_config("s", cfg)
+
+    qm.buffer_message("s", "hi")
+    await qm.schedule_collect_drain("s")
+
+    # wait_for_drain blocks until the timer fires.
+    await asyncio.wait_for(qm.wait_for_drain("s"), timeout=1.0)
+
+    # Buffer is still there until drain_buffer is called.
+    assert qm.buffered("s") == ["hi"]
+    assert qm.drain_buffer("s") == "hi"
+
+
+async def test_collect_debounce_resets_on_new_message():
+    """Each schedule_collect_drain call cancels the prior timer."""
+    qm = QueueManager()
+    cfg = QueueConfig(mode="collect", collect_debounce_s=0.1)
+    qm.set_session_config("s", cfg)
+
+    qm.buffer_message("s", "a")
+    await qm.schedule_collect_drain("s")
+
+    # 50ms in, second message arrives → reset timer.
+    await asyncio.sleep(0.05)
+    qm.buffer_message("s", "b")
+    await qm.schedule_collect_drain("s")
+
+    # Drain shouldn't have fired yet (timer just restarted).
+    state = qm._collect["s"]
+    assert state.drain_event.is_set() is False
+
+    # Wait for the new debounce.
+    await asyncio.wait_for(qm.wait_for_drain("s"), timeout=1.0)
+    assert qm.drain_buffer("s") == "a\nb"
+
+
+def test_invalid_drop_policy_in_init_raises():
+    with pytest.raises(ValueError, match="drop policy"):
+        QueueManager(default_drop_policy="bogus")  # type: ignore[arg-type]
+
+
+def test_invalid_drop_policy_in_session_config_raises():
+    qm = QueueManager()
+    with pytest.raises(ValueError):
+        qm.set_session_config(
+            "s",
+            QueueConfig(mode="collect", drop_policy="bogus"),  # type: ignore[arg-type]
+        )
 
 
 def test_set_active_manager_roundtrip():

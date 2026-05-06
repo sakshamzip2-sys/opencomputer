@@ -10,14 +10,21 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ### Added — Inbound queue modes (S1 from 2026-05-06 OpenClaw deep-comparison)
 
-- `QueueManager` (`opencomputer/gateway/queue_manager.py`) replaces the per-(profile, session) `asyncio.Lock` in `Dispatch`. Two modes shipped: `followup` (default, preserves legacy serialize-and-wait behaviour) and `interrupt` (cancels any in-flight run before starting the new one).
-- `/queue-mode [followup|interrupt|status]` slash command — set the inbound queue mode for the current session.
-- `plugin_sdk.QueueMode` literal + `plugin_sdk.QueueConfig` dataclass + `plugin_sdk.ALL_QUEUE_MODES` / `plugin_sdk.DEFAULT_QUEUE_MODE` exports.
+- `QueueManager` (`opencomputer/gateway/queue_manager.py`) replaces the per-(profile, session) `asyncio.Lock` in `Dispatch`. **Four modes** shipped:
+  - `followup` (default) — preserves legacy serialize-and-wait behaviour.
+  - `interrupt` — cancels any in-flight run before starting the new one.
+  - `collect` — buffers messages within a debounce window; consumers call `drain_buffer()` to get the merged text. Drop policy applies on overflow (`drop_old` / `drop_new` / `summarize`).
+  - `steer` — aliases `interrupt` today. Reserved for a future replan-with-context port.
+- `/queue-mode [followup|interrupt|collect|steer|status]` slash command — set the inbound queue mode for the current session.
+- `plugin_sdk` exports: `QueueMode`, `QueueConfig` (with `mode`/`collect_debounce_s`/`collect_cap`/`drop_policy` fields), `DropPolicy`, `ALL_QUEUE_MODES`, `ALL_DROP_POLICIES`, `DEFAULT_QUEUE_MODE`, `DEFAULT_COLLECT_DEBOUNCE_S`, `DEFAULT_COLLECT_CAP`, `DEFAULT_DROP_POLICY`.
+- Drop-policy buffer overflow handling: `drop_old` (discard oldest), `drop_new` (refuse new — `buffer_message` returns `False`), `summarize` (replace queued messages with one summary line + push the new message).
+- `QueueManager.schedule_collect_drain` + `wait_for_drain` — async-safe debounce primitives for the dispatcher to integrate.
 
 ### Notes
 
-- Existing dispatch behaviour unchanged when `mode=followup` (the default). All 31 existing dispatch regression tests stay green.
-- Modes deferred (`collect` / `steer` / drop policy) — designed-for-extension via the `QueueMode` literal so future additions are non-breaking.
+- Existing dispatch behaviour byte-identical when `mode=followup` (default). All 31 existing dispatch regression tests stay green.
+- `collect`-mode **API surface** ships in this PR; a future PR wires it into `Dispatch.handle_message` (leader-of-debounce-window pattern). The slash command exposes the mode immediately so a custom wrapper can use the API today.
+- `steer` aliases `interrupt`. Full replan-with-context (the brief's intent) needs agent-loop coordination — out of scope here.
 
 ## [2026.5.5] — v1.0 release: 8 days of dogfood-driven hardening
 

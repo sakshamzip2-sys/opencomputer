@@ -117,8 +117,13 @@ from plugin_sdk.provider_contract import (
     VisionUnsupportedError,
 )
 from plugin_sdk.queue import (
+    ALL_DROP_POLICIES,
     ALL_QUEUE_MODES,
+    DEFAULT_COLLECT_CAP,
+    DEFAULT_COLLECT_DEBOUNCE_S,
+    DEFAULT_DROP_POLICY,
     DEFAULT_QUEUE_MODE,
+    DropPolicy,
     QueueConfig,
     QueueMode,
 )
@@ -253,9 +258,14 @@ __all__ = [
     # slash commands (Phase 12b.6, Task D8)
     "SlashCommand",
     "SlashCommandResult",
-    # inbound queue modes (Phase 2 — S1 from 2026-05-06 OpenClaw deep-comparison)
+    # inbound queue modes (S1 from 2026-05-06 OpenClaw deep-comparison)
+    "ALL_DROP_POLICIES",
     "ALL_QUEUE_MODES",
+    "DEFAULT_COLLECT_CAP",
+    "DEFAULT_COLLECT_DEBOUNCE_S",
+    "DEFAULT_DROP_POLICY",
     "DEFAULT_QUEUE_MODE",
+    "DropPolicy",
     "QueueConfig",
     "QueueMode",
     # consent (F1)
