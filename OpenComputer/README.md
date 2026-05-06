@@ -412,6 +412,42 @@ opencomputer plugin where my-tool                            # print filesystem 
 
 Discovery order: **profile-local → global → bundled**. Profile-local shadows global shadows bundled on id collision.
 
+#### Install sources (2026-05-06)
+
+Three install sources are supported in addition to the local-directory form:
+
+```bash
+# Catalog (existing) — slug resolved through the configured catalog URL
+opencomputer plugin install example-plugin --remote
+
+# Git — shallow clone of any git url (HTTPS, SSH, file://). Requires --id
+# matching the cloned plugin.json's id. Optional --ref pins a sha/tag.
+opencomputer plugin install git+https://github.com/example/plugin.git --id example-plugin
+opencomputer plugin install git+ssh://git@host/x/y.git --id y --ref abc1234
+
+# URL — raw https tarball. Requires --id and --sha256.
+opencomputer plugin install https://example.com/plugin-0.1.0.tgz \
+  --id plugin --sha256 ${SHA256_HASH}
+```
+
+Every install runs an AST + regex security scan after extract. Patterns
+that match `eval(requests.get(...).text)` and similar remote-code-execution
+shapes block the install. `rm -rf`, `os.system`, raw `socket` usage, and
+similar destructive shell calls emit warnings (logged but not blocked) —
+promote to block in your local policy by registering a `BEFORE_INSTALL`
+hook that returns `HookDecision(decision="block", reason="...")` based on
+the scan report.
+
+#### Verifying installed bytes
+
+```bash
+opencomputer plugin verify <plugin-id>
+```
+
+Re-fetches the original source (catalog tarball, git ref, or url tarball)
+and compares bytes-for-bytes against the on-disk install. Reports any
+drift, exits non-zero on drift, exits zero when clean.
+
 Plugins can declare compatibility in their manifest:
 
 ```json
