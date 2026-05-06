@@ -3324,14 +3324,47 @@ class AgentLoop:
             if _eff != "none" and not _native:
                 from opencomputer.agent.thinking_parser import ThinkingTagsParser
                 stream_source = ThinkingTagsParser().wrap(stream_source)
-            async for event in stream_source:
-                if event.kind == "text_delta":
-                    stream_callback(event.text)
-                elif event.kind == "thinking_delta":
-                    if thinking_callback is not None:
-                        thinking_callback(event.text)
-                elif event.kind == "done":
-                    final_response = event.response
+            # Phase 5 (2026-05-07) — partial-message recovery wiring (A4).
+            # Accumulate the streamed text as it arrives so we can attempt
+            # recovery if the stream is interrupted (network drop, gateway
+            # restart, upstream timeout) before a 'done' event arrives.
+            _partial_buffer: list[str] = []
+            try:
+                async for event in stream_source:
+                    if event.kind == "text_delta":
+                        _partial_buffer.append(event.text)
+                        stream_callback(event.text)
+                    elif event.kind == "thinking_delta":
+                        if thinking_callback is not None:
+                            thinking_callback(event.text)
+                    elif event.kind == "done":
+                        final_response = event.response
+            except (asyncio.CancelledError, GeneratorExit):
+                # Stream was cancelled — propagate without recovery.
+                raise
+            except Exception as _stream_exc:  # noqa: BLE001 — recovery-only path
+                if final_response is None and _partial_buffer:
+                    from opencomputer.gateway.replay_sanitizer import (
+                        recover_partial_assistant,
+                    )
+
+                    partial = "".join(_partial_buffer)
+                    _result = recover_partial_assistant(partial)
+                    _log.warning(
+                        "stream interrupted (%s); partial-recovery=%s reason=%s",
+                        type(_stream_exc).__name__,
+                        _result.status,
+                        _result.reason,
+                    )
+                    # When recoverable AND nothing has been emitted yet that
+                    # would conflict with re-emitting the trimmed text,
+                    # the loop's caller (e.g. gateway dispatch) gets the
+                    # exception and decides whether to surface the partial.
+                    # We attach the recovery result to the exception for
+                    # callers who care; raise the original exception to
+                    # preserve existing semantics.
+                    _stream_exc.partial_recovery = _result  # type: ignore[attr-defined]
+                raise
             if final_response is None:
                 raise RuntimeError("stream ended without a 'done' event")
             resp = final_response
