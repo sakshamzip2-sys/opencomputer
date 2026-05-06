@@ -72,6 +72,39 @@ _MIN_TAG_LEN: int = 4
 _DEFAULT_MAX_TAGS: int = 8
 
 
+# ─── deny-list — system identifiers that are never meaningful tags ──
+#
+# Belt-and-suspenders second layer for the privacy redaction pipeline.
+# The pre-redact step (``extract_tags`` calls ``redact()`` before
+# either the LLM or keyword extractor sees the text) strips
+# user-specific tokens like ``architsakri`` or full paths like
+# ``/Users/<name>/...``. This list catches the common system-identifier
+# leftovers — words that *survive* redaction but are still useless as
+# tags because they only describe the filesystem layout, not the task.
+#
+# Kept tight on purpose: each token here is a real concept somewhere
+# (``documents`` is a document-management plugin's bread and butter),
+# but in the context of "tag a user task" they're almost always path
+# noise. If the LLM produces them, drop them. The cost is one false
+# negative per term per session; the win is cleaner network queries.
+_TAG_DENY_LIST: frozenset[str] = frozenset({
+    # Common path-segment leakers (Unix + macOS conventions).
+    "users", "user", "home", "var", "tmp", "etc", "usr", "opt",
+    "private", "library", "documents", "desktop", "downloads",
+    "applications", "system", "volumes",
+    # Hostname-shaped leftovers a path-redactor might miss.
+    "localhost", "local",
+    # Generic file/directory wrappers.
+    "folder", "directory", "file", "files", "path", "paths",
+    "subfolder", "subdirectory",
+    # Redaction sentinels themselves — when the LLM sees text like
+    # ``<redacted-path>`` it sometimes lifts ``redacted`` (or
+    # ``pii``, ``host``) as a "tag". Drop them all; they describe
+    # the privacy layer, not the task.
+    "redacted", "pii", "host", "key",
+})
+
+
 def extract_tags_from_message(
     text: str,
     *,
@@ -369,6 +402,18 @@ def tag_profile_top_n(profile_home: Path, *, n: int = 5) -> tuple[str, ...]:
 # ─── orchestrator ────────────────────────────────────────────────────
 
 
+def _filter_deny_list(tags: Iterable[str]) -> tuple[str, ...]:
+    """Drop any tag that's in :data:`_TAG_DENY_LIST` (case-insensitive).
+
+    Belt-and-suspenders second layer for tag-leak prevention. Pre-
+    redaction handles user-specific PII (paths-with-username); this
+    catches the system-identifier tokens that survive redaction
+    because they aren't PII per se but are still useless noise as
+    tags (``users``, ``documents``, ``localhost``, etc.).
+    """
+    return tuple(t for t in tags if t and t.lower() not in _TAG_DENY_LIST)
+
+
 async def extract_tags(
     *,
     text: str,
@@ -384,15 +429,27 @@ async def extract_tags(
 
     Order of operations:
 
+    0. **Privacy pre-redact** — run :func:`redactor.redact` over the
+       input text BEFORE either the LLM or keyword extractor sees it.
+       Strips path-with-username spans, hostnames, IPs, emails,
+       phones, API keys. This is what stops PII tokens like a
+       username (``architsakri``) or full paths from being lifted
+       wholesale into network-query tags. Span-based: ``.github``
+       in body text survives intact; ``/Users/<name>/.github`` does
+       not.
     1. Session cache lookup. Hit → return verbatim (no profile-bias
        remix; the cached tags already reflect what we decided).
     2. LLM extraction (if ``provider`` available).
     3. Keyword extraction as fallback when LLM fails / times out /
        returns nothing.
-    4. Mix in up to ``profile_bias_n`` top tags from the profile
+    4. **Deny-list post-filter** — drop any tag in
+       :data:`_TAG_DENY_LIST` (``users``, ``documents``, ``localhost``,
+       etc.). Catches system-identifier leftovers that survive
+       redaction.
+    5. Mix in up to ``profile_bias_n`` top tags from the profile
        accumulator (if ``profile_home`` provided + file exists),
        deduplicated, capped at ``max_tags`` total.
-    5. Cache + accumulate (so the next session message hits the cache
+    6. Cache + accumulate (so the next session message hits the cache
        and the profile gets richer).
 
     The LLM-or-keyword step always runs first. Profile bias is layered
@@ -400,6 +457,21 @@ async def extract_tags(
     so a sparse message like "fix it" still gets matched against the
     agent's typical work area.
     """
+    # Step 0 — pre-redact. Both layers (paths + hostnames) are
+    # forced ON for tags regardless of cfg.privacy because tag leaks
+    # are particularly bad: tags ride in network query keys and admin
+    # views. The cfg.privacy flags govern the richer steps/insight
+    # text, where an operator might reasonably trade off privacy for
+    # context. For tags, the policy is "always max-redact".
+    from .redactor import redact
+
+    redacted_text = redact(
+        text,
+        redact_paths_layer=True,
+        redact_hostnames_layer=True,
+        sensitive_filter=None,
+    )
+
     if session_id:
         cached = cached_tags_for_session(session_id)
         if cached is not None:
@@ -409,7 +481,7 @@ async def extract_tags(
     if provider is not None:
         try:
             llm_tags = await extract_tags_via_provider(
-                text,
+                redacted_text,
                 provider=provider,
                 cost_guard=cost_guard,
                 max_tags=max_tags,
@@ -425,7 +497,12 @@ async def extract_tags(
             primary = llm_tags
 
     if not primary:
-        primary = extract_tags_from_message(text, max_tags=max_tags)
+        primary = extract_tags_from_message(redacted_text, max_tags=max_tags)
+
+    # Step 4 — deny-list post-filter. Runs once on the merged primary
+    # tags before profile bias so a denied LLM tag can't push out a
+    # legitimate profile-bias tag for the cap budget.
+    primary = _filter_deny_list(primary)
 
     # Profile bias: pull top-N tags the agent typically deals with;
     # append any not already in `primary` until we hit max_tags.
