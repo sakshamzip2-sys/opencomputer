@@ -8,17 +8,16 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 - **`social-traces` bundled extension — community trace network (Phases 1–9 + 12).** Opt-in, default-disabled plugin that queries a shared [OpenHub](https://github.com/sakshamzip2-sys/openhub) endpoint pre-task for matching TraceCards (admin-curated, redacted task summaries) and submits a distilled TraceCard post-task. Three-Haiku distillation flow (intent + steps + insight + LLM tag-extract), session-level cache, per-profile tag-bias accumulator, per-profile `state.json` gate, outbox-on-network-failure (in-memory drain at this revision; on-disk persistence deferred). HTTP backend (`HttpTraceNetworkClient`) with httpx soft timeouts. Wizard step asks once during full setup. `opencomputer traces {enable,disable,status,inbox,outbox,history,dry-run,audit-redactor,rotate-id}` CLI surface. README section + plan doc at `docs/plans/social-traces-plugin.md`. ~80 new tests across `test_social_traces_phase{1..9}*.py`, `test_social_traces_dogfood_fixes.py`, `test_social_traces_http_client.py`. Network-side server lives in a separate private repo at `~/Documents/GitHub/openhub/`.
 
-### Added — Phase 3: hook + doctor leftovers (S3 + A3 from 2026-05-06 OpenClaw deep-comparison)
+### Added — Tier A bundle (A2 + A4 from 2026-05-06 OpenClaw deep-comparison)
 
-- `HookEvent.BEFORE_MODEL_RESOLVE` — fires inside `model_resolver.resolve_model()` BEFORE alias resolution. Distinct from `PRE_LLM_CALL` (which fires post-resolve, after the model is chosen). A handler may return `HookDecision(decision="rewrite", modified_message="<new-alias>")` to redirect resolution.
-- `HookEvent.MESSAGE_SENDING` / `HookEvent.MESSAGE_SENT` — narrower than `PreGatewayDispatch`. `MESSAGE_SENDING` fires before each outgoing-queue send and supports `decision="skip"` (drop silently) and `decision="rewrite"` (replace body). `MESSAGE_SENT` is fire-and-forget post-send observability.
-- 4 new optional `HookContext` fields: `pre_resolve_model`, `outgoing_text`, `channel`, `outgoing_chat_id`. All default `None` so existing callers stay unchanged.
-- `oc doctor --auth` — credential-pool health surface (A3 leftover). Reports per-provider key inventory from env vars (single `*_API_KEY`, enumerated `*_API_KEY_N`, pool-style `*_KEYS`) without ever leaking values. Notes that live quarantine state requires a running gateway.
+- **`oc heartbeat enable | disable | status | pause | resume`** — always-on agent tick, distinct lane from cron's calendared jobs (A2 from the brief). Backed by the existing cron storage + scheduler with a `lane="heartbeat"` tag so the daemon doesn't need a second engine.
+- **`opencomputer.heartbeat`** module exposing `enable_heartbeat / disable_heartbeat / heartbeat_status / pause_heartbeat / resume_heartbeat / is_heartbeat_enabled` plus `DEFAULT_HEARTBEAT_INTERVAL_MIN` (30) and `DEFAULT_HEARTBEAT_PROMPT`.
+- **`recover_partial_assistant`** in `opencomputer.gateway.replay_sanitizer` (A4 expansion). Salvages an interrupted assistant stream by trimming dangling tool-call XML (`<thinking>`, `<function_calls>`, `<tool_use>`) and detecting MiniMax-style `<|invoke|>` fragments. Returns `PartialRecoveryResult(status="recoverable"|"unrecoverable", text, reason)`. Wired into the streaming path: stream-interruption exceptions get `.partial_recovery` attached for callers.
 
 ### Notes
 
-- All hook events are observability/policy hooks — they never break the loop on handler failure (try/except around the engine call, fail-open per CLAUDE.md §7).
-- 4 new tests for hook events + 4 new tests for doctor --auth + 2 hardcoded count assertions (22→25) updated.
+- A1 (bindings system) was already shipped on `main` (`BindingResolver` exists in `opencomputer/gateway/binding_resolver.py`) — the brief was stale on this. Verified during the audit.
+- Heartbeat is a single recurring cron job tagged `lane="heartbeat"`. Enable is idempotent (no-op when already enabled). Pause/resume route through the existing cron job state machine (`enabled=False`, `state="paused"`).
 
 ## [2026.5.5] — v1.0 release: 8 days of dogfood-driven hardening
 
