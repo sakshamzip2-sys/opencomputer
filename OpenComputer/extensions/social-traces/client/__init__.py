@@ -31,6 +31,8 @@ def make_client(
     backend: str,
     profile_home: Path,
     endpoint: str | None = None,
+    submitter_hash: str | None = None,
+    shared_key: str | None = None,
 ) -> TraceNetworkClient:
     """Construct the configured backend.
 
@@ -48,6 +50,12 @@ def make_client(
         be a base URL like ``http://127.0.0.1:8000`` or
         ``https://openhub.example.com``; trailing slashes are
         normalized.
+    submitter_hash, shared_key:
+        Phase 6 / Stage 2 — when both are set, the http backend signs
+        every submit with HMAC-SHA256 keyed by ``shared_key`` and sends
+        ``X-Submitter-Hash`` + ``X-Signature`` headers. Ignored for
+        local. Either or neither is allowed for back-compat with
+        OpenHub deployments where ``REQUIRE_HMAC=false``.
     """
     if backend == "local":
         return LocalFileTraceNetworkClient(profile_home=profile_home)
@@ -57,7 +65,11 @@ def make_client(
                 "social-traces http backend requires an endpoint URL — "
                 "set ``social_traces.endpoint`` in config.yaml"
             )
-        return HttpTraceNetworkClient(endpoint=endpoint)
+        return HttpTraceNetworkClient(
+            endpoint=endpoint,
+            submitter_hash=submitter_hash,
+            shared_key=shared_key,
+        )
     raise ValueError(f"unknown social-traces backend: {backend!r}")
 
 

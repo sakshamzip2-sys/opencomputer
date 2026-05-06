@@ -32,6 +32,9 @@ profile-level metrics show real overhead.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import hmac
+import json
 import logging
 from typing import Any
 
@@ -122,9 +125,17 @@ class HttpTraceNetworkClient(TraceNetworkClient):
         *,
         endpoint: str,
         transport: httpx.AsyncBaseTransport | None = None,
+        submitter_hash: str | None = None,
+        shared_key: str | None = None,
     ) -> None:
         self._endpoint = endpoint.rstrip("/")
         self._transport = transport
+        # Phase 6 / Stage 2 — when both are set, every submit request is
+        # signed with HMAC-SHA256 keyed by ``shared_key`` over the JSON
+        # body. Either or neither is allowed for back-compat with
+        # Stage-1 OpenHub deployments that have ``REQUIRE_HMAC=false``.
+        self._submitter_hash = submitter_hash
+        self._shared_key = shared_key
 
     # ─── helpers ───────────────────────────────────────────────────
 
@@ -226,9 +237,28 @@ class HttpTraceNetworkClient(TraceNetworkClient):
         except Exception as exc:  # noqa: BLE001 — programmer error, surface
             raise ValueError(f"failed to serialize TraceCard: {exc}") from exc
 
+        # Sign with HMAC when configured. We serialize the body
+        # ourselves rather than letting httpx do it — the server
+        # verifies the signature against the bytes-on-wire, so both
+        # sides must agree on the JSON representation byte-for-byte.
+        body_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=False).encode(
+            "utf-8"
+        )
+        extra_headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self._submitter_hash and self._shared_key:
+            digest = hmac.new(
+                self._shared_key.encode("ascii"), body_bytes, hashlib.sha256
+            ).hexdigest()
+            extra_headers["X-Submitter-Hash"] = self._submitter_hash
+            extra_headers["X-Signature"] = f"sha256={digest}"
+
         try:
             async with self._client(timeout_s=DEFAULT_SUBMIT_TIMEOUT_S) as client:
-                resp = await client.post("/v1/traces/submit", json=payload)
+                resp = await client.post(
+                    "/v1/traces/submit",
+                    content=body_bytes,
+                    headers=extra_headers,
+                )
         except (httpx.TimeoutException, httpx.HTTPError) as exc:
             _log.warning(
                 "social-traces submit: network failure (%s) — caller can outbox",

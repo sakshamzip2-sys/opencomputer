@@ -82,13 +82,26 @@ def _client_factory(profile_home: Path, cfg: SocialTracesConfig):
     """Lazy resolver for the trace network client. Defers the import
     + construction so the plugin can register cleanly even if the
     http backend's deps are missing — only the actual subscriber path
-    that calls submit() reaches the client."""
+    that calls submit() reaches the client.
+
+    HMAC credentials precedence: env vars (``OPENHUB_SUBMITTER_HASH``,
+    ``OPENHUB_SHARED_KEY``) win over ``config.yaml`` so secrets stay
+    out of the YAML by default. Either-or-neither is fine — when
+    unset, the http client sends unsigned requests (Stage-1 mode).
+    """
+    import os
+
     from .client import make_client
+
+    submitter_hash = os.environ.get("OPENHUB_SUBMITTER_HASH") or cfg.submitter_hash
+    shared_key = os.environ.get("OPENHUB_SHARED_KEY") or cfg.shared_key
 
     return make_client(
         backend=cfg.backend,
         profile_home=profile_home,
         endpoint=cfg.endpoint,
+        submitter_hash=submitter_hash or None,
+        shared_key=shared_key or None,
     )
 
 

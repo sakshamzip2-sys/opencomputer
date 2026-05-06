@@ -100,6 +100,14 @@ class SocialTracesConfig:
     backend: Backend = "local"
     endpoint: str = "http://localhost:8000"
 
+    # Phase 6 / Stage 2 — per-submitter HMAC credentials. The
+    # ``shared_key`` is a secret; do not put it in config.yaml unless
+    # the file lives in a per-profile dir that isn't backed up. The
+    # canonical place is the env vars ``OPENHUB_SUBMITTER_HASH`` and
+    # ``OPENHUB_SHARED_KEY`` resolved by the plugin.py at wire time.
+    submitter_hash: str = ""
+    shared_key: str = ""
+
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
     novelty_judge: NoveltyJudgeConfig = field(default_factory=NoveltyJudgeConfig)
     query: QueryConfig = field(default_factory=QueryConfig)
@@ -156,6 +164,8 @@ def from_config_dict(raw: Any) -> SocialTracesConfig:
         enabled=_coerce_bool(raw.get("enabled"), False),
         backend=raw.get("backend", "local"),
         endpoint=str(raw.get("endpoint", "http://localhost:8000")),
+        submitter_hash=str(raw.get("submitter_hash") or ""),
+        shared_key=str(raw.get("shared_key") or ""),
         privacy=privacy,
         novelty_judge=novelty,
         query=query,
