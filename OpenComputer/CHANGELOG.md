@@ -8,16 +8,11 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 - **`social-traces` bundled extension — community trace network (Phases 1–9 + 12).** Opt-in, default-disabled plugin that queries a shared [OpenHub](https://github.com/sakshamzip2-sys/openhub) endpoint pre-task for matching TraceCards (admin-curated, redacted task summaries) and submits a distilled TraceCard post-task. Three-Haiku distillation flow (intent + steps + insight + LLM tag-extract), session-level cache, per-profile tag-bias accumulator, per-profile `state.json` gate, outbox-on-network-failure (in-memory drain at this revision; on-disk persistence deferred). HTTP backend (`HttpTraceNetworkClient`) with httpx soft timeouts. Wizard step asks once during full setup. `opencomputer traces {enable,disable,status,inbox,outbox,history,dry-run,audit-redactor,rotate-id}` CLI surface. README section + plan doc at `docs/plans/social-traces-plugin.md`. ~80 new tests across `test_social_traces_phase{1..9}*.py`, `test_social_traces_dogfood_fixes.py`, `test_social_traces_http_client.py`. Network-side server lives in a separate private repo at `~/Documents/GitHub/openhub/`.
 
-### Added — Tier A bundle (A2 + A4 from 2026-05-06 OpenClaw deep-comparison)
+### Added — Honest deferrals closure (2026-05-07)
 
-- **`oc heartbeat enable | disable | status | pause | resume`** — always-on agent tick, distinct lane from cron's calendared jobs (A2 from the brief). Backed by the existing cron storage + scheduler with a `lane="heartbeat"` tag so the daemon doesn't need a second engine.
-- **`opencomputer.heartbeat`** module exposing `enable_heartbeat / disable_heartbeat / heartbeat_status / pause_heartbeat / resume_heartbeat / is_heartbeat_enabled` plus `DEFAULT_HEARTBEAT_INTERVAL_MIN` (30) and `DEFAULT_HEARTBEAT_PROMPT`.
-- **`recover_partial_assistant`** in `opencomputer.gateway.replay_sanitizer` (A4 expansion). Salvages an interrupted assistant stream by trimming dangling tool-call XML (`<thinking>`, `<function_calls>`, `<tool_use>`) and detecting MiniMax-style `<|invoke|>` fragments. Returns `PartialRecoveryResult(status="recoverable"|"unrecoverable", text, reason)`. Wired into the streaming path: stream-interruption exceptions get `.partial_recovery` attached for callers.
-
-### Notes
-
-- A1 (bindings system) was already shipped on `main` (`BindingResolver` exists in `opencomputer/gateway/binding_resolver.py`) — the brief was stale on this. Verified during the audit.
-- Heartbeat is a single recurring cron job tagged `lane="heartbeat"`. Enable is idempotent (no-op when already enabled). Pause/resume route through the existing cron job state machine (`enabled=False`, `state="paused"`).
+- **Live credential-pool state file** (`opencomputer.agent.credential_pool`): `CredentialPool(state_file=..., provider_label=...)` writes a JSON snapshot of pool stats on every key acquire and rotation event. `read_all_pool_states(home_dir)` discovers/parses all `auth_pool_*.json` files. Closes the "live quarantine state only when gateway running" deferral.
+- **Skill Workshop quarantine state** (`extensions/skill-evolution/candidate_store`): `quarantine_candidate / list_quarantined / unquarantine_candidate / purge_quarantined`. Completes OpenClaw's 4-state machine: pending → reviewed → applied | quarantined (was 3-state with destructive reject).
+- 16 new tests (7 + 9); ruff clean.
 
 ## [2026.5.5] — v1.0 release: 8 days of dogfood-driven hardening
 

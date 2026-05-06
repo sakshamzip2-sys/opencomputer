@@ -111,6 +111,8 @@ class CredentialPool:
         rotate_cooldown_seconds: float = ROTATE_COOLDOWN_SECONDS,
         strategy: str = STRATEGY_LEAST_USED,
         refresher: Callable[[str], Awaitable[str]] | None = None,
+        state_file: str | None = None,
+        provider_label: str | None = None,
     ) -> None:
         if not keys:
             raise ValueError("CredentialPool requires at least one key")
@@ -123,6 +125,14 @@ class CredentialPool:
         self._strategy: str = strategy
         self._rr_index: int = 0
         self._refresher = refresher
+        # Phase 5 (2026-05-07) — live pool quarantine state. When ``state_file``
+        # is set, every quarantine event writes the current stats() snapshot
+        # to that path as JSON. ``oc doctor --auth`` reads these to surface
+        # live runtime state outside the gateway process.
+        self._state_file: str | None = state_file
+        self._provider_label: str = provider_label or "unknown"
+        if state_file:
+            self._write_state_file()
 
     @property
     def size(self) -> int:
@@ -165,7 +175,46 @@ class CredentialPool:
             await self._maybe_refresh_jwt(chosen)
             chosen.use_count += 1
             chosen.last_used_at = time.time()
+            self._write_state_file()
             return chosen.key
+
+    def _write_state_file(self) -> None:
+        """Atomically write current stats to the configured state file.
+
+        No-op when ``state_file`` was not configured. Failures are
+        swallowed (logged at WARNING) so a broken state-write never
+        prevents the actual credential acquire/rotate path from running.
+        """
+        if not self._state_file:
+            return
+        import json
+        import os
+        import tempfile
+        from pathlib import Path
+
+        try:
+            payload = {
+                "provider": self._provider_label,
+                "snapshot_at": time.time(),
+                **self.stats(),
+            }
+            path = Path(self._state_file)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".pool-", dir=str(path.parent))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh, indent=2, sort_keys=True)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, path)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except Exception as e:  # noqa: BLE001 — state-write must never block runtime
+            logger.warning("credential_pool: state-file write failed: %r", e)
 
     async def report_auth_failure(
         self,
@@ -189,6 +238,7 @@ class CredentialPool:
                         s.quarantined_until - now,
                         reason,
                     )
+                    self._write_state_file()
                     return
             logger.warning(
                 "credential_pool: report_auth_failure for unknown key %s",
@@ -231,6 +281,30 @@ class CredentialPool:
         }
 
 
+def read_all_pool_states(home_dir: str) -> list[dict[str, Any]]:
+    """Scan ``home_dir`` for ``auth_pool_*.json`` files and return their data.
+
+    Phase 5 (2026-05-07) — companion to ``CredentialPool._write_state_file``.
+    Used by ``oc doctor --auth`` to surface live pool quarantine state from
+    a running gateway/chat process. Bad/missing files are skipped silently.
+    """
+    import glob
+    import json
+    from pathlib import Path
+
+    out: list[dict[str, Any]] = []
+    pattern = str(Path(home_dir) / "auth_pool_*.json")
+    for raw_path in sorted(glob.glob(pattern)):
+        try:
+            data = json.loads(Path(raw_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict):
+            data["_source_file"] = raw_path
+            out.append(data)
+    return out
+
+
 __all__ = [
     "CredentialPool",
     "CredentialPoolExhausted",
@@ -241,4 +315,5 @@ __all__ = [
     "STRATEGY_RANDOM",
     "STRATEGY_LEAST_USED",
     "SUPPORTED_STRATEGIES",
+    "read_all_pool_states",
 ]
