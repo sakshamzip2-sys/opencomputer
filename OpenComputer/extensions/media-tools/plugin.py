@@ -80,8 +80,11 @@ class ImageInfo(_RunToExecute, BaseTool):
         return ToolSchema(
             name="ImageInfo",
             description=(
-                "Inspect a local image file. Returns dimensions, format, "
-                "color mode, and EXIF metadata."
+                "Inspect a local image file via Pillow. Use when the "
+                "user references an image on disk and you need to know "
+                "its dimensions, format, color mode, or EXIF metadata "
+                "before deciding how to process or describe it. "
+                "All-local; no network calls; no model inference."
             ),
             parameters={
                 "type": "object",
@@ -115,8 +118,11 @@ class TTSGenerate(_RunToExecute, BaseTool):
         return ToolSchema(
             name="TTSGenerate",
             description=(
-                "Generate an MP3 from text using Microsoft Edge TTS. "
-                "All-local synthesis; no paid API."
+                "Generate an MP3 audio file from text using Microsoft "
+                "Edge TTS. Use when the user wants spoken-audio output "
+                "from a string — voice replies, narration, audio "
+                "summaries. All-local synthesis; no paid API. Pick a "
+                "voice id from the edge-tts catalog (default Ava)."
             ),
             parameters={
                 "type": "object",

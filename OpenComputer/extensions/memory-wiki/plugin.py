@@ -97,8 +97,11 @@ class WikiMemoryAdd(_RunToExecute, BaseTool):
         return ToolSchema(
             name="WikiMemoryAdd",
             description=(
-                "Create a new wiki note. Returns the assigned slug. Use "
-                "[[slug]] in the body to link to other notes."
+                "Create a new markdown wiki note in <profile>/wiki/. "
+                "Use when you want a canonically-named, hand-edited note "
+                "(not a transient memory snippet). Body supports "
+                "[[other-slug]] wikilinks; backlinks index updates "
+                "automatically. Returns the assigned slug."
             ),
             parameters={
                 "type": "object",
@@ -127,7 +130,12 @@ class WikiMemoryRead(_RunToExecute, BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="WikiMemoryRead",
-            description="Read a wiki note by slug.",
+            description=(
+                "Read one wiki note by slug. Use when you remember the "
+                "exact slug of a note you've created (or seen referenced "
+                "via [[slug]]) and want its full body, title, tags, and "
+                "timestamps. Returns ``found: false`` if missing."
+            ),
             parameters={
                 "type": "object",
                 "properties": {"slug": {"type": "string"}},
@@ -177,8 +185,10 @@ class WikiMemoryBacklinks(_RunToExecute, BaseTool):
         return ToolSchema(
             name="WikiMemoryBacklinks",
             description=(
-                "List slugs that reference the given slug via [[slug]] "
-                "wikilink syntax."
+                "List the slugs of every wiki note that links TO the "
+                "given slug via [[slug]] wikilink syntax. Use to find "
+                "what depends on a note before renaming or deleting it, "
+                "or to navigate your knowledge graph backwards."
             ),
             parameters={
                 "type": "object",
@@ -196,7 +206,12 @@ class WikiMemoryDelete(_RunToExecute, BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="WikiMemoryDelete",
-            description="Delete a wiki note by slug.",
+            description=(
+                "Delete a wiki note by slug. Removes the .md file and "
+                "rebuilds the backlinks index so referrers no longer "
+                "show this slug as a target. Use sparingly — wiki notes "
+                "are typically meant to be amended, not deleted."
+            ),
             parameters={
                 "type": "object",
                 "properties": {"slug": {"type": "string"}},

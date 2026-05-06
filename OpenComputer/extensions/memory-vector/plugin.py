@@ -87,8 +87,11 @@ class VectorMemoryAdd(_RunToExecute, BaseTool):
         return ToolSchema(
             name="VectorMemoryAdd",
             description=(
-                "Store a text chunk in the local vector memory for later "
-                "semantic search. Returns the document id."
+                "Store a text chunk in the local ChromaDB-backed vector "
+                "memory for later semantic search. Use when you want to "
+                "remember a freeform note, observation, or transcript "
+                "snippet that should later be findable by meaning rather "
+                "than keyword. Returns the document id."
             ),
             parameters={
                 "type": "object",
@@ -118,8 +121,10 @@ class VectorMemorySearch(_RunToExecute, BaseTool):
         return ToolSchema(
             name="VectorMemorySearch",
             description=(
-                "Semantic-search the local vector memory. Returns up to "
-                "top_k matching documents with their text + score + metadata."
+                "Semantic-search the local vector memory by meaning rather "
+                "than exact keyword match. Use when you remember the gist "
+                "of something but not the wording. Returns up to top_k "
+                "matching documents with their text, score, and metadata."
             ),
             parameters={
                 "type": "object",
@@ -153,7 +158,12 @@ class VectorMemoryDelete(_RunToExecute, BaseTool):
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="VectorMemoryDelete",
-            description="Delete a document from the vector memory by id.",
+            description=(
+                "Delete a single document from the vector memory by its "
+                "id (returned at VectorMemoryAdd time). Use when a stored "
+                "note becomes wrong or sensitive and should no longer "
+                "appear in future semantic searches."
+            ),
             parameters={
                 "type": "object",
                 "properties": {"id": {"type": "string"}},
