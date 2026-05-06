@@ -103,13 +103,43 @@ def _load_source_manifest(src: Path) -> dict:
         raise typer.Exit(code=1) from None
 
 
+def _install_from_git(url: str, **kwargs):
+    """Indirection for install_from_git — patchable in tests."""
+    from opencomputer.plugins.remote_install import install_from_git
+
+    return install_from_git(url, **kwargs)
+
+
+def _install_from_url(url: str, **kwargs):
+    """Indirection for install_from_url — patchable in tests."""
+    from opencomputer.plugins.remote_install import install_from_url
+
+    return install_from_url(url, **kwargs)
+
+
+def _verify_plugin(*args, **kwargs):
+    """Indirection for verify_plugin — patchable in tests."""
+    from opencomputer.plugins.integrity import verify_plugin
+
+    return verify_plugin(*args, **kwargs)
+
+
+def _is_git_arg(arg: str) -> bool:
+    return arg.startswith(("git+http", "git+ssh", "git+file", "git+https"))
+
+
+def _is_url_arg(arg: str) -> bool:
+    return arg.startswith(("http://", "https://"))
+
+
 @plugin_app.command("install")
 def install(
     source: str = typer.Argument(
         ...,
         help=(
             "Path to a local plugin directory, OR a slug to resolve via "
-            "the remote catalog (use with --remote)."
+            "the remote catalog (use with --remote), OR a git+/https:// "
+            "URL for direct install."
         ),
     ),
     profile: str | None = typer.Option(
@@ -142,8 +172,83 @@ def install(
         "--refresh",
         help="Bypass the 24h catalog cache (only with --remote).",
     ),
+    plugin_id_hint: str | None = typer.Option(
+        None,
+        "--id",
+        help=(
+            "Plugin id to install as. Required for git/https URL installs; "
+            "must match the plugin.json id in the source."
+        ),
+    ),
+    sha256: str | None = typer.Option(
+        None,
+        "--sha256",
+        help="Required for https:// tarball installs — pin the source bytes.",
+    ),
+    ref: str | None = typer.Option(
+        None,
+        "--ref",
+        help="Pin a specific git sha/tag/branch (only with git+ source).",
+    ),
 ) -> None:
-    """Install a plugin from a local directory or the remote catalog."""
+    """Install a plugin from a local directory, remote catalog, git, or URL."""
+    # Phase 1 (2026-05-06) — URL-scheme-routed install paths.
+    if _is_git_arg(source):
+        if plugin_id_hint is None:
+            _console.print(
+                "[red]error:[/red] git installs require --id <plugin-id> "
+                "(must match the cloned repo's plugin.json id)"
+            )
+            raise typer.Exit(code=2)
+        from opencomputer.plugins.remote_install import CatalogError
+
+        dest_root = _resolve_destination_root(profile, is_global)
+        dest_root.mkdir(parents=True, exist_ok=True)
+        try:
+            result = _install_from_git(
+                source,
+                dest_root=dest_root,
+                plugin_id_hint=plugin_id_hint,
+                ref=ref,
+                force=force,
+            )
+        except CatalogError as e:
+            _console.print(f"[red]error:[/red] {e}")
+            raise typer.Exit(code=1) from None
+        _console.print(
+            f"[green]installed:[/green] '{result.plugin_id}' "
+            f"v{result.version} (git) → {result.install_path}"
+        )
+        return
+
+    if _is_url_arg(source):
+        if plugin_id_hint is None or sha256 is None:
+            _console.print(
+                "[red]error:[/red] https:// installs require both "
+                "--id <plugin-id> and --sha256 <hex>"
+            )
+            raise typer.Exit(code=2)
+        from opencomputer.plugins.remote_install import CatalogError
+
+        dest_root = _resolve_destination_root(profile, is_global)
+        dest_root.mkdir(parents=True, exist_ok=True)
+        try:
+            result = _install_from_url(
+                source,
+                dest_root=dest_root,
+                plugin_id_hint=plugin_id_hint,
+                sha256=sha256,
+                force=force,
+            )
+        except CatalogError as e:
+            _console.print(f"[red]error:[/red] {e}")
+            raise typer.Exit(code=1) from None
+        _console.print(
+            f"[green]installed:[/green] '{result.plugin_id}' "
+            f"v{result.version} (url) → {result.install_path}"
+        )
+        return
+
     if remote:
         _install_from_remote(
             slug=source,
@@ -1107,6 +1212,68 @@ def _read_trusted_keys(path: Path) -> dict[str, bytes]:
         if isinstance(pem, str) and pem:
             out[fp] = pem.encode("utf-8")
     return out
+
+
+@plugin_app.command("verify")
+def verify(
+    plugin_id: str = typer.Argument(..., help="Plugin id to verify."),
+    profile: str | None = typer.Option(None, "--profile"),
+    is_global: bool = typer.Option(False, "--global"),
+) -> None:
+    """Compare an installed plugin's bytes against its source.
+
+    Re-fetches the original source (catalog tarball or git ref or url
+    tarball) and reports any drift versus the on-disk install. Exits
+    non-zero on drift or unreachable source.
+    """
+    from opencomputer.plugins.installed_index import find_record
+
+    dest_root = _resolve_destination_root(profile, is_global)
+    rec = find_record(dest_root / ".installed_index.json", plugin_id)
+    if rec is None:
+        _console.print(f"[red]error:[/red] '{plugin_id}' is not installed")
+        raise typer.Exit(code=2)
+
+    # Catalog source needs a CLI-driven refetch_fn that goes through the
+    # catalog → tarball URL. Other sources use the integrity module's default.
+    refetch_fn = None
+    if rec.source == "catalog":
+        from opencomputer.plugins.remote_install import (
+            download_and_verify,
+            fetch_catalog,
+            find_entry,
+        )
+
+        def refetch_fn(record):  # noqa: ARG001 — record arg unused (slug from rec)
+            catalog = fetch_catalog(trusted_keys=_load_trusted_catalog_keys())
+            entry = find_entry(catalog, record.plugin_id)
+            return download_and_verify(entry)
+
+    try:
+        if refetch_fn is not None:
+            report = _verify_plugin(
+                plugin_id, dest_root=dest_root, refetch_fn=refetch_fn
+            )
+        else:
+            report = _verify_plugin(plugin_id, dest_root=dest_root)
+    except Exception as e:  # NotInstalledError / SourceUnreachableError
+        _console.print(f"[red]error:[/red] {e}")
+        raise typer.Exit(code=2) from None
+
+    if not report.has_drift:
+        _console.print(
+            f"[green]ok:[/green] '{report.plugin_id}' has no drift "
+            f"(source={report.source}, url={report.source_url})"
+        )
+        return
+
+    _console.print(
+        f"[yellow]drift detected:[/yellow] '{report.plugin_id}' "
+        f"(source={report.source})"
+    )
+    for diff in report.differences:
+        _console.print(f"  - {diff.kind}: {diff.path}")
+    raise typer.Exit(code=1)
 
 
 __all__ = ["plugin_app"]
