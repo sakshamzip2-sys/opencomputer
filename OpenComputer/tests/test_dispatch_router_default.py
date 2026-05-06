@@ -102,9 +102,12 @@ async def test_dispatch_lock_key_is_tuple(tmp_path: Path) -> None:
     )
     await dispatch.handle_message(event)
 
-    # After one dispatch, the lock map should hold a tuple key.
-    assert len(dispatch._locks) == 1
-    only_key = next(iter(dispatch._locks))
+    # After one dispatch, the queue manager's slot map should hold a tuple key.
+    # (Phase 2 — S1: dispatch._locks is preserved as an empty dict for back-
+    # compat; the live state moved to dispatch._queue_manager._slots.)
+    slots = dispatch._queue_manager._slots
+    assert len(slots) == 1
+    only_key = next(iter(slots))
     assert isinstance(only_key, tuple)
     assert only_key[0] == "default"
     # session id is a 32-char hex (sha256 truncated)

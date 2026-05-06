@@ -54,6 +54,9 @@ from opencomputer.agent.slash_commands_impl.policy import (
 from opencomputer.agent.slash_commands_impl.profile_suggest_cmd import (
     ProfileSuggestCommand,
 )
+from opencomputer.agent.slash_commands_impl.queue_mode_cmd import (
+    QueueModeCommand,
+)
 from opencomputer.agent.slash_commands_impl.reasoning_cmd import ReasoningCommand
 from opencomputer.agent.slash_commands_impl.save_cmd import SaveCommand
 from opencomputer.agent.slash_commands_impl.scrape import ScrapeCommand
@@ -110,6 +113,9 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # 2026-04-30 — profile-suggest analyzes recent persona usage and
     # recommends create/switch actions. User-pull only.
     ProfileSuggestCommand,
+    # 2026-05-06 — Phase 2 (S1 from OpenClaw deep-comparison) — inbound
+    # queue mode override. /queue-mode [followup|interrupt|status].
+    QueueModeCommand,
     # 2026-05-03 — Phase 2 v0 outcome-aware learning policy commands.
     PolicyChangesCommand,
     PolicyApproveCommand,

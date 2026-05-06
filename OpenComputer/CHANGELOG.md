@@ -8,11 +8,23 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 - **`social-traces` bundled extension — community trace network (Phases 1–9 + 12).** Opt-in, default-disabled plugin that queries a shared [OpenHub](https://github.com/sakshamzip2-sys/openhub) endpoint pre-task for matching TraceCards (admin-curated, redacted task summaries) and submits a distilled TraceCard post-task. Three-Haiku distillation flow (intent + steps + insight + LLM tag-extract), session-level cache, per-profile tag-bias accumulator, per-profile `state.json` gate, outbox-on-network-failure (in-memory drain at this revision; on-disk persistence deferred). HTTP backend (`HttpTraceNetworkClient`) with httpx soft timeouts. Wizard step asks once during full setup. `opencomputer traces {enable,disable,status,inbox,outbox,history,dry-run,audit-redactor,rotate-id}` CLI surface. README section + plan doc at `docs/plans/social-traces-plugin.md`. ~80 new tests across `test_social_traces_phase{1..9}*.py`, `test_social_traces_dogfood_fixes.py`, `test_social_traces_http_client.py`. Network-side server lives in a separate private repo at `~/Documents/GitHub/openhub/`.
 
-### Added — Honest deferrals closure (2026-05-07)
+### Added — Inbound queue modes (S1 from 2026-05-06 OpenClaw deep-comparison)
 
-- **Live credential-pool state file** (`opencomputer.agent.credential_pool`): `CredentialPool(state_file=..., provider_label=...)` writes a JSON snapshot of pool stats on every key acquire and rotation event. `read_all_pool_states(home_dir)` discovers/parses all `auth_pool_*.json` files. Closes the "live quarantine state only when gateway running" deferral.
-- **Skill Workshop quarantine state** (`extensions/skill-evolution/candidate_store`): `quarantine_candidate / list_quarantined / unquarantine_candidate / purge_quarantined`. Completes OpenClaw's 4-state machine: pending → reviewed → applied | quarantined (was 3-state with destructive reject).
-- 16 new tests (7 + 9); ruff clean.
+- `QueueManager` (`opencomputer/gateway/queue_manager.py`) replaces the per-(profile, session) `asyncio.Lock` in `Dispatch`. **Four modes** shipped:
+  - `followup` (default) — preserves legacy serialize-and-wait behaviour.
+  - `interrupt` — cancels any in-flight run before starting the new one.
+  - `collect` — buffers messages within a debounce window; consumers call `drain_buffer()` to get the merged text. Drop policy applies on overflow (`drop_old` / `drop_new` / `summarize`).
+  - `steer` — aliases `interrupt` today. Reserved for a future replan-with-context port.
+- `/queue-mode [followup|interrupt|collect|steer|status]` slash command — set the inbound queue mode for the current session.
+- `plugin_sdk` exports: `QueueMode`, `QueueConfig` (with `mode`/`collect_debounce_s`/`collect_cap`/`drop_policy` fields), `DropPolicy`, `ALL_QUEUE_MODES`, `ALL_DROP_POLICIES`, `DEFAULT_QUEUE_MODE`, `DEFAULT_COLLECT_DEBOUNCE_S`, `DEFAULT_COLLECT_CAP`, `DEFAULT_DROP_POLICY`.
+- Drop-policy buffer overflow handling: `drop_old` (discard oldest), `drop_new` (refuse new — `buffer_message` returns `False`), `summarize` (replace queued messages with one summary line + push the new message).
+- `QueueManager.schedule_collect_drain` + `wait_for_drain` — async-safe debounce primitives for the dispatcher to integrate.
+
+### Notes
+
+- Existing dispatch behaviour byte-identical when `mode=followup` (default). All 31 existing dispatch regression tests stay green.
+- `collect`-mode **API surface** ships in this PR; a future PR wires it into `Dispatch.handle_message` (leader-of-debounce-window pattern). The slash command exposes the mode immediately so a custom wrapper can use the API today.
+- `steer` aliases `interrupt`. Full replan-with-context (the brief's intent) needs agent-loop coordination — out of scope here.
 
 ## [2026.5.5] — v1.0 release: 8 days of dogfood-driven hardening
 
