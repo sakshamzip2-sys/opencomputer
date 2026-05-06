@@ -33,6 +33,33 @@ def _load_provider():
     return mod
 
 
+async def _call_with_retry(coro_factory, *, max_attempts: int = 5):
+    """Call ``coro_factory()`` and retry on Anthropic 429s with backoff.
+
+    Concurrent Claude Code sessions sharing the same API key commonly
+    trigger transient 429s on the very first call. Backoff: 5s, 15s,
+    45s, 90s.
+    """
+    import asyncio as _asyncio
+
+    delays = [5, 15, 45, 90]
+    last_exc: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return await coro_factory()
+        except Exception as exc:  # noqa: BLE001
+            name = type(exc).__name__
+            is_429 = name in ("RateLimitError", "APIStatusError") or "429" in str(exc)
+            if not is_429 or attempt == max_attempts - 1:
+                raise
+            wait = delays[min(attempt, len(delays) - 1)]
+            print(f"  [429 received — backing off {wait}s, attempt {attempt + 2}/{max_attempts}]")
+            await _asyncio.sleep(wait)
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+
+
 async def main() -> int:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("ERROR: ANTHROPIC_API_KEY not set in environment.", file=sys.stderr)
@@ -44,25 +71,33 @@ async def main() -> int:
     from plugin_sdk import Message
 
     # Big base prompt to clear Opus's 4096-token cache threshold.
+    # Bumped large enough to definitively pass the threshold (Opus
+    # min_cache_tokens=4096, ~16KB at 4 chars/token).
     big_base = (
-        "You are a careful assistant. " * 50
-        + "Always answer briefly. "
-        + "Reference: " + "x" * 5000
+        "You are a careful assistant who answers briefly. " * 30
+        + "Reference data: " + "x" * 18000
     )
 
     print(f"Base prompt: {len(big_base)} chars (~{len(big_base) // 4} tokens)")
     print()
 
+    # Allow overriding the model via env var. Default to Sonnet 4.6 because
+    # Opus rate limits are tight when Claude Code shares the same key.
+    # Sonnet 4.6 cache threshold is 2048 tokens — our 18KB base clears it.
+    model = os.environ.get("OC_VERIFY_MODEL", "claude-sonnet-4-6")
+    print(f"Model: {model}")
+    print()
+
     # Turn 1: prime the cache.
     print("Turn 1: priming the cache...")
-    resp1 = await provider.complete(
-        model="claude-opus-4-7",
+    resp1 = await _call_with_retry(lambda: provider.complete(
+        model=model,
         messages=[Message(role="user", content="Say 'hi' once.")],
         base_system=big_base,
         injected_system="",
         session_id="verify-cache-live",
         max_tokens=20,
-    )
+    ))
     u1 = resp1.usage
     cache_write_1 = getattr(u1, "cache_creation_input_tokens", 0) or 0
     cache_read_1 = getattr(u1, "cache_read_input_tokens", 0) or 0
@@ -74,8 +109,8 @@ async def main() -> int:
     # Turn 2: same base, DIFFERENT injection (the volatile content that
     # used to bust the cache pre-fix).
     print("Turn 2: same base, NEW injection — verifying cache hit...")
-    resp2 = await provider.complete(
-        model="claude-opus-4-7",
+    resp2 = await _call_with_retry(lambda: provider.complete(
+        model=model,
         messages=[
             Message(role="user", content="Say 'hi' once."),
             Message(role="assistant", content=resp1.message.content),
@@ -85,7 +120,7 @@ async def main() -> int:
         injected_system="Per-turn reminder that varies between calls.",
         session_id="verify-cache-live",
         max_tokens=20,
-    )
+    ))
     u2 = resp2.usage
     cache_write_2 = getattr(u2, "cache_creation_input_tokens", 0) or 0
     cache_read_2 = getattr(u2, "cache_read_input_tokens", 0) or 0
