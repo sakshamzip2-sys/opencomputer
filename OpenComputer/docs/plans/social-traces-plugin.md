@@ -707,12 +707,12 @@ Lands now that OpenHub Phases 0-4 are merged in the sibling repo (`~/Documents/G
 - [ ] Integration test: plugin loaded, hooks registered, full prefetch+emission cycle against local-file backend
 - [ ] Boundary test: nothing in `extensions/social-traces/*.py` imports from `opencomputer.*` except where existing extensions already do (frozen inventory pattern from `tests/test_plugin_extension_boundary.py`)
 
-### Phase 12 — Bundle + ship
+### Phase 12 — Bundle + ship ✅ (2026-05-07)
 
-- [ ] Add `social-traces` to default-disabled bundled extensions list
-- [ ] Add `oc setup` wizard step asking the user to opt in
-- [ ] Document in main `README.md` under "Bundled extensions"
-- [ ] CHANGELOG entry
+- [x] Add `social-traces` to default-disabled bundled extensions list — `extensions/social-traces/plugin.json` ships with `"enabled_by_default": false`.
+- [x] Add `oc setup` wizard step asking the user to opt in — `setup_wizard._optional_social_traces` (Step 6 in `_run_full_setup`), default-no Confirm, flips both `profile.yaml` (via `cli_plugin.plugin_enable("social-traces")`) and `<profile_home>/traces/state.json` (via `set_enabled`). Tested in `tests/test_social_traces_wizard_step.py` (3 tests: default-no no-op, yes flips both layers, swallows `plugin_enable` SystemExit).
+- [x] Document in main `README.md` — new "Community trace network (optional, opt-in)" section between Memory and Profiles, with the redaction posture, the OpenHub repo link, and the `oc traces {enable,disable,status,inbox,outbox,history,dry-run,audit-redactor}` surface.
+- [x] CHANGELOG entry — `[Unreleased]` block summarising Phases 1–9 + 12 with phase fan-out, dogfood-fixes, and HTTP-client test counts.
 
 ### Phase 13 — Morning feed (DEFERRED to v1.1)
 

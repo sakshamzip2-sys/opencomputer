@@ -307,6 +307,23 @@ The agent loop passes `RuntimeContext.agent_context` through to the provider. Co
 
 Alternative providers (Mem0, Cognee, etc.) can be selected by editing `~/.opencomputer/config.yaml` field `memory.provider`. Only one provider is active at a time. See `docs/plugin-authors.md` when present.
 
+## Community trace network (optional, opt-in)
+
+The `social-traces` bundled extension lets your agent learn from a shared, admin-curated network of redacted task summaries — pre-task it queries the network for **TraceCards** matching the current task's tags and injects a hint, post-task it distills your session into a TraceCard and submits it back. **Disabled by default.** Becomes useful only once you point it at a running [OpenHub](https://github.com/sakshamzip2-sys/openhub) endpoint (your own, or a shared one).
+
+Privacy posture is "redacted client-side, admin-reviewed network-side": file paths, hostnames, API keys, emails, IPs, and phone numbers go through `redactor.py` before anything leaves your machine, and every submission goes into the OpenHub admin queue (no public access until an admin approves). See `docs/plans/social-traces-plugin.md` for the full design.
+
+```bash
+opencomputer plugin enable social-traces        # bundled, default-disabled
+opencomputer traces enable                      # flip the per-profile state.json
+opencomputer traces status                      # enabled flag + outbox depth + heartbeat
+opencomputer traces dry-run <session_id>        # see what would be submitted (no network)
+opencomputer traces audit-redactor              # confirm PII redaction on real sessions
+opencomputer traces disable                     # turn it off
+```
+
+The setup wizard's full flow asks once, with a no-default opt-in. You can also enable later via the two CLI commands above.
+
 ## Profiles
 
 One user, many personas. A profile is a separate data dir with its own memory, config, and plugin selection. Switch with `-p`:

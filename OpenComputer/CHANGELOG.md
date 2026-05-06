@@ -2,6 +2,12 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
+## [Unreleased]
+
+### Added
+
+- **`social-traces` bundled extension — community trace network (Phases 1–9 + 12).** Opt-in, default-disabled plugin that queries a shared [OpenHub](https://github.com/sakshamzip2-sys/openhub) endpoint pre-task for matching TraceCards (admin-curated, redacted task summaries) and submits a distilled TraceCard post-task. Three-Haiku distillation flow (intent + steps + insight + LLM tag-extract), session-level cache, per-profile tag-bias accumulator, per-profile `state.json` gate, outbox-on-network-failure (in-memory drain at this revision; on-disk persistence deferred). HTTP backend (`HttpTraceNetworkClient`) with httpx soft timeouts. Wizard step asks once during full setup. `opencomputer traces {enable,disable,status,inbox,outbox,history,dry-run,audit-redactor,rotate-id}` CLI surface. README section + plan doc at `docs/plans/social-traces-plugin.md`. ~80 new tests across `test_social_traces_phase{1..9}*.py`, `test_social_traces_dogfood_fixes.py`, `test_social_traces_http_client.py`. Network-side server lives in a separate private repo at `~/Documents/GitHub/openhub/`.
+
 ## [2026.5.5] — v1.0 release: 8 days of dogfood-driven hardening
 
 This release is the colloquial **v1.0**: the first cut from the post-2026.4.27 dogfood window with all of the v1.0 ship-gate sub-projects merged AND the Wave 6 control-extension port + a long tail of Tier-2/4 deferral closures landed. The plugin SDK surface (`plugin_sdk/*`) reaches its v1.0 stability commitment with this tag.

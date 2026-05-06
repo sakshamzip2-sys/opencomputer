@@ -490,7 +490,9 @@ def _run_full_setup(cfg: Config) -> None:
 
     _optional_honcho()
 
-    console.print("\n[bold]Step 6 — test the provider connection[/bold]")
+    _optional_social_traces()
+
+    console.print("\n[bold]Step 7 — test the provider connection[/bold]")
     if Confirm.ask("Send a tiny test request now?", default=True):
         asyncio.run(_test_provider(provider_id, meta["env_key"]))
 
@@ -673,8 +675,69 @@ def _optional_honcho() -> None:
     _downgrade_memory_provider_to_empty()
 
 
+def _optional_social_traces() -> None:
+    """Phase 12 — opt in to the social-traces community network.
+
+    Strictly opt-in (default no): the plugin sends redacted task
+    summaries to a remote OpenHub endpoint and only becomes useful
+    once one is configured. We perform the two flips a manual user
+    would do — ``opencomputer plugin enable social-traces``
+    (``profile.yaml``) and ``opencomputer traces enable``
+    (``<profile_home>/traces/state.json``). Endpoint configuration is
+    left for the user via the ``opencomputer traces`` commands.
+    """
+    console.print(
+        "\n[bold]Step 6 — community trace network (optional, opt-in)[/bold]"
+    )
+    console.print(
+        "[dim]social-traces lets your agent learn from a shared, "
+        "admin-curated network of redacted task summaries.\n"
+        "Disabled by default. Requires a running OpenHub endpoint "
+        "to be useful — see docs/plans/social-traces-plugin.md.[/dim]"
+    )
+    if not Confirm.ask("Enable social-traces?", default=False):
+        return
+
+    from opencomputer import cli_plugin
+
+    try:
+        cli_plugin.plugin_enable("social-traces")
+    except SystemExit:
+        # ``plugin_enable`` raises typer.Exit (a SystemExit subclass)
+        # for both the benign "already enabled" path and the unknown-id
+        # path. Treat both as non-fatal here — we still attempt the
+        # state flip and the user will see any real failure below.
+        pass
+    except Exception as exc:  # noqa: BLE001
+        console.print(
+            f"[yellow]![/yellow] could not enable plugin 'social-traces': "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    try:
+        from opencomputer.cli_traces import _ensure_alias, _profile_home
+
+        _ensure_alias()
+        from extensions.social_traces.state import set_enabled
+
+        set_enabled(_profile_home(), True)
+    except Exception as exc:  # noqa: BLE001
+        console.print(
+            f"[yellow]![/yellow] plugin enabled but state flip failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return
+
+    console.print(
+        "[green]✓[/green] social-traces enabled. "
+        "Configure an OpenHub endpoint with [cyan]opencomputer traces[/cyan]."
+    )
+
+
 __all__ = [
     "_auto_enable_plugins_for_channels",
+    "_optional_social_traces",
     "_required_plugins_for_channels",
     "run_setup",
 ]
