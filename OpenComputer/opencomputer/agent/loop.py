@@ -3430,6 +3430,27 @@ class AgentLoop:
             )
         )
 
+        # Hermes B4: per-call cost recording. Best-effort — telemetry must
+        # not wedge the loop, so swallow any exception. Idempotency is
+        # guaranteed by placement: we land here only on successful provider
+        # response; retries raise before this point.
+        try:
+            from opencomputer.agent.usage_pricing import record_call_from_usage
+
+            provider_name = getattr(self.provider, "name", "") or type(
+                self.provider
+            ).__name__.lower().replace("provider", "")
+            record_call_from_usage(
+                db=self.db,
+                session_id=session_id or "",
+                provider=provider_name,
+                model=model_name,
+                usage=resp.usage,
+                batch=False,
+            )
+        except Exception:  # noqa: BLE001
+            _log.debug("usage_pricing.record_call_from_usage swallowed", exc_info=True)
+
         return StepOutcome(
             stop_reason=stop,
             assistant_message=msg,

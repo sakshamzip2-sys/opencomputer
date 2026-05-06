@@ -34,7 +34,7 @@ from plugin_sdk.core import Message, ToolCall
 #: to NULL. v5 = Tier-A item 11 ``tool_usage`` table — per-tool-call
 #: telemetry for ``opencomputer insights`` (tool, duration_ms, error,
 #: model, ts). Existing data unaffected; the table starts empty.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -225,6 +225,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (9, 10): "_migrate_v9_to_v10",
     (10, 11): "_migrate_v10_to_v11",
     (11, 12): "_migrate_v11_to_v12",
+    (12, 13): "_migrate_v12_to_v13",
 }
 
 
@@ -725,6 +726,51 @@ def _migrate_v11_to_v12(conn: sqlite3.Connection) -> None:
             _create_fts("porter unicode61")
         else:
             raise
+
+
+def _migrate_v12_to_v13(conn: sqlite3.Connection) -> None:
+    """Hermes B4 (2026-05-06) — per-LLM-call usage + cost recording.
+
+    Adds a new ``llm_calls`` table that records one row per provider
+    completion request. Distinct from ``tool_usage`` (which records tool
+    dispatches): an LLM call is the agent talking to its model, a tool
+    call is the agent talking to its environment.
+
+    Schema:
+
+    - ``provider`` / ``model`` — duplicated so cost rollups don't need
+      to join messages.
+    - ``input_tokens`` / ``output_tokens`` — raw counts as reported by
+      the provider's usage block.
+    - ``cost_usd`` — nullable: the cost-guard pricing table doesn't have
+      every model, and we'd rather record None than fake zero.
+    - ``batch`` — 0/1; batch API discounts factor into cost_usd.
+
+    Indexes mirror ``tool_usage`` for symmetry.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS llm_calls (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL,
+            ts              REAL NOT NULL,
+            provider        TEXT NOT NULL,
+            model           TEXT NOT NULL,
+            input_tokens    INTEGER NOT NULL DEFAULT 0,
+            output_tokens   INTEGER NOT NULL DEFAULT 0,
+            cost_usd        REAL,
+            batch           INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_llm_calls_session
+            ON llm_calls(session_id);
+        CREATE INDEX IF NOT EXISTS idx_llm_calls_ts
+            ON llm_calls(ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_llm_calls_model
+            ON llm_calls(model);
+        """
+    )
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -1810,6 +1856,105 @@ class SessionDB:
             out.append(d)
         return out
 
+
+    # ─── Hermes B4: per-LLM-call usage + cost recording ──────────────
+
+    def record_llm_call(
+        self,
+        *,
+        session_id: str,
+        provider: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float | None = None,
+        batch: bool = False,
+        ts: float | None = None,
+    ) -> None:
+        """Record one provider completion call into ``llm_calls``.
+
+        Caller is the agent loop's post-LLM-call site, after
+        ``resp.usage`` is populated. ``cost_usd`` should be computed via
+        :func:`opencomputer.agent.usage_pricing.compute_call_cost` (or
+        omitted, in which case it is recorded as NULL).
+
+        Failures swallowed silently: telemetry must never wedge the loop.
+        """
+        try:
+            with self._txn() as conn:
+                conn.execute(
+                    "INSERT INTO llm_calls "
+                    "(session_id, ts, provider, model, input_tokens, "
+                    " output_tokens, cost_usd, batch) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        ts if ts is not None else time.time(),
+                        provider,
+                        model,
+                        int(input_tokens or 0),
+                        int(output_tokens or 0),
+                        cost_usd,
+                        1 if batch else 0,
+                    ),
+                )
+        except sqlite3.OperationalError:
+            # Pre-v13 DB or transient lock. Drop the row rather than wedge
+            # the loop. ``apply_migrations`` will catch up next session.
+            pass
+
+    def query_llm_calls(
+        self,
+        *,
+        days: int | None = 7,
+        group_by: str = "model",
+    ) -> list[dict[str, Any]]:
+        """Aggregate ``llm_calls`` rows for ``oc insights cost``.
+
+        Returns rows shaped like
+        ``{"key": ..., "calls": N, "input_tokens": ..., "output_tokens":
+        ..., "cost_usd": Optional[float]}``.
+
+        ``cost_usd`` is ``None`` when no row had pricing data; ``0.0``
+        only when every row had pricing data summing to zero. The CLI
+        renders ``None`` as ``—`` (not ``$0.00``) to keep totals honest.
+        """
+        col = (
+            group_by
+            if group_by in ("model", "provider", "session_id")
+            else "model"
+        )
+        params: list[Any] = []
+        sql = (
+            f"SELECT {col} as key, "
+            "COUNT(*) as calls, "
+            "SUM(input_tokens) as input_tokens, "
+            "SUM(output_tokens) as output_tokens, "
+            "SUM(cost_usd) as cost_usd, "
+            "SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) as missing_cost "
+            "FROM llm_calls "
+        )
+        if days is not None:
+            sql += "WHERE ts >= ? "
+            params.append(time.time() - days * 86400)
+        sql += f"GROUP BY {col} ORDER BY calls DESC"
+
+        with self._connect() as conn:
+            try:
+                rows = conn.execute(sql, params).fetchall()
+            except sqlite3.OperationalError:
+                # Pre-v13 DB; return empty.
+                return []
+
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            # Promote missing_cost into a friendlier flag for callers.
+            missing = int(d.pop("missing_cost") or 0)
+            d["has_partial_cost"] = bool(missing) and bool(d.get("cost_usd"))
+            d["all_cost_missing"] = missing == int(d.get("calls") or 0)
+            out.append(d)
+        return out
 
     # ─── Phase 0 outcome-aware learning helpers ─────────────────────
 
