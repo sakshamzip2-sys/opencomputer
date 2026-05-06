@@ -124,6 +124,18 @@ def _verify_plugin(*args, **kwargs):
     return verify_plugin(*args, **kwargs)
 
 
+async def _composed_before_install_hook(ctx):
+    """Fan-out to every registered BEFORE_INSTALL hook; first 'block' wins.
+
+    No-op (returns None) when no handlers are registered, which is the
+    typical case for a fresh `oc plugin install` invocation that hasn't
+    loaded any plugins yet.
+    """
+    from opencomputer.hooks.engine import engine as _hook_engine
+
+    return await _hook_engine.fire_blocking(ctx)
+
+
 def _is_git_arg(arg: str) -> bool:
     return arg.startswith(("git+http", "git+ssh", "git+file", "git+https"))
 
@@ -211,6 +223,7 @@ def install(
                 plugin_id_hint=plugin_id_hint,
                 ref=ref,
                 force=force,
+                before_install_hook=_composed_before_install_hook,
             )
         except CatalogError as e:
             _console.print(f"[red]error:[/red] {e}")
@@ -239,6 +252,7 @@ def install(
                 plugin_id_hint=plugin_id_hint,
                 sha256=sha256,
                 force=force,
+                before_install_hook=_composed_before_install_hook,
             )
         except CatalogError as e:
             _console.print(f"[red]error:[/red] {e}")
@@ -313,6 +327,7 @@ def _install_from_remote(
             refresh=refresh,
             force=force,
             trusted_keys=_load_trusted_catalog_keys(),
+            before_install_hook=_composed_before_install_hook,
         )
     except CatalogError as e:
         _console.print(f"[red]error:[/red] {e}")

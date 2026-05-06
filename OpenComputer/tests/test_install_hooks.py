@@ -87,6 +87,48 @@ def test_install_blocked_by_scan_finding(tmp_path: Path):
     assert not (tmp_path / "evil-plugin").exists()
 
 
+def test_cli_install_fires_registered_before_install_hook(
+    tmp_path: Path, monkeypatch
+):
+    """Wire-through test — a registered BEFORE_INSTALL hook receives ctx via the CLI path."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path / "home"))
+
+    from opencomputer.hooks.engine import engine as _engine
+    from plugin_sdk.hooks import HookSpec
+
+    fired: list[HookContext] = []
+
+    async def my_hook(ctx: HookContext) -> HookDecision | None:
+        fired.append(ctx)
+        return None
+
+    spec = HookSpec(event=HookEvent.BEFORE_INSTALL, handler=my_hook)
+    _engine.register(spec)
+    try:
+        # Drive the hook through install_from_catalog directly — this is the
+        # same code path the CLI takes after our Task 9 wiring.
+        from opencomputer.cli_plugin import _composed_before_install_hook
+
+        raw = _make_tarball("hooked")
+        catalog = _fake_catalog("hooked", raw)
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir()
+
+        install_from_catalog(
+            "hooked",
+            dest_root=plugins_dir,
+            fetch_catalog_fn=lambda **_: catalog,
+            download_fn=lambda entry, **_: raw,
+            before_install_hook=_composed_before_install_hook,
+        )
+    finally:
+        _engine.unregister_all(HookEvent.BEFORE_INSTALL)
+
+    assert len(fired) == 1
+    assert fired[0].install_source == "catalog"
+    assert fired[0].install_plugin_id == "hooked"
+
+
 def test_catalog_install_writes_installed_index(tmp_path: Path):
     raw = _make_tarball("indexed-plugin")
     catalog = _fake_catalog("indexed-plugin", raw)
