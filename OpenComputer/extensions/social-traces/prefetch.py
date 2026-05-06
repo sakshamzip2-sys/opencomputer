@@ -19,14 +19,14 @@ Replaces the Phase 2 stub. Flow:
     client.query(intent, tags, soft_timeout) ──── timeout/empty ──→
         │                                                            │
         ▼                                                             ▼
-    top trace cleared the relevance threshold?                  trace_used = None
+    top trace cleared the relevance threshold?                  bridge: trace_used=None
         │                                                       return pass
         ├── yes ──→ format <trace>...</trace> block
-        │           runtime.custom["trace_used"] = trace.id
+        │           bridge: set_trace_used(sid, trace.id, card)
         │           return HookDecision(decision="rewrite",
         │                               modified_message=block)
         │
-        └── no ───→ trace_used = None
+        └── no ───→ bridge: trace_used = None
                     return pass
 
 Failure isolation: any exception inside the handler logs at WARNING
@@ -115,32 +115,23 @@ def _set_trace_used(
 ) -> None:
     """Stamp the trace_used signal so the post-task subscriber can read it.
 
-    Two write paths, intentionally:
+    Writes to :mod:`extensions.social_traces.session_state` — the
+    module-level bridge keyed by session_id. The post-task subscriber
+    receives only a ``SessionEndEvent`` (no runtime) and reads this via
+    ``pop_session`` to learn what BEFORE_TASK did.
 
-    * ``runtime.custom["trace_used"]`` — for any in-process consumer
-      that has access to the per-task RuntimeContext at the moment
-      BEFORE_TASK fires. The agent loop's ``replace(runtime, custom={...})``
-      means this dict is the loop's internal copy, NOT the caller's
-      original — see plan §10 Phase 4 architectural finding.
-    * :mod:`extensions.social_traces.session_state` — module-level
-      bridge keyed by session_id. The post-task subscriber, which only
-      receives a ``SessionEndEvent`` and has no access to the runtime,
-      reads this via ``pop_session`` to learn what BEFORE_TASK did.
+    Phase 6: also passes the full ``trace_card`` so the novelty judge
+    can compare what the agent did to what the trace prescribed,
+    without re-querying the network.
 
-    Phase 6: also passes the full ``trace_card`` to the bridge so the
-    novelty judge can compare what the agent did to what the trace
-    prescribed, without re-querying the network.
-
-    Both writes happen on every call so a future architectural change
-    (e.g. adding ``trace_used`` to ``SessionEndEvent`` directly) doesn't
-    require touching this code.
+    Why the bridge and not ``runtime.custom``: the agent loop swaps
+    runtime via ``dataclasses.replace`` so per-hook writes don't survive,
+    and ``SessionEndEvent`` strips runtime entirely before publishing.
+    The bridge is the only mechanism that crosses pre-task → post-task.
     """
-    if ctx.runtime is not None and ctx.runtime.custom is not None:
-        ctx.runtime.custom["trace_used"] = trace_id
-
-    # Bridge write — only if we know the session id (always true in the
-    # production path; defensively guarded for tests calling the handler
-    # directly with a sparse HookContext).
+    # Only if we know the session id (always true in the production
+    # path; defensively guarded for tests calling the handler directly
+    # with a sparse HookContext).
     if ctx.session_id:
         session_state.set_trace_used(
             ctx.session_id, trace_id, trace_card=trace_card,

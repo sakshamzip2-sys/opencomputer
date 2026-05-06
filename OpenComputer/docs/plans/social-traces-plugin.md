@@ -69,7 +69,7 @@ They meet at a typed HTTP boundary (`TraceNetworkClient` ABC + `TraceCard` datac
    END OF TASK    END OF TASK
        │               │
        ▼               ▼
-  Post-task hook reads runtime.custom["trace_used"]
+  Post-task subscriber reads session_state bridge (pop_session)
        │               │
        ▼               ▼
    trace_used      trace_used
@@ -292,16 +292,26 @@ class TraceCard:
     score: float | None = None
 ```
 
-### 7.2 Runtime flag (pre→post signal)
+### 7.2 Pre→post-task bridge
+
+The natural-looking option (write to `runtime.custom["trace_used"]` in the pre-task hook, read in the post-task subscriber) does not work: the agent loop swaps `runtime` via `dataclasses.replace` so per-hook writes don't survive, and `SessionEndEvent` strips `runtime` entirely before publishing. There is no path from `runtime.custom` at pre-task time to the subscriber at post-task time — they're in different worlds.
+
+Solution (Phase 5, option a — see Appendix A): a process-wide module-level dict in `extensions/social-traces/session_state.py`, keyed by `session_id`, lock-guarded with LRU eviction.
 
 Set by `prefetch.on_before_task()`:
 
 ```python
-runtime.custom["trace_used"] = "<trace_id>"  # or None if no trace was used
-runtime.custom["trace_used_card"] = trace_card  # full card, for novelty judge
+session_state.set_trace_used(session_id, trace_id_or_None, trace_card=card)
 ```
 
-Read by `subscriber._run_pipeline()` to decide which path to take.
+Read + cleared atomically by `subscriber._run_pipeline_body()`:
+
+```python
+entry = session_state.pop_session(session_id)
+# entry.trace_used, entry.trace_card, entry.hit_count
+```
+
+The `runtime.custom["trace_used"]` write was tried in Phase 4, found inert in Phase 9.A.2, and removed.
 
 ### 7.3 OpenHub query/response shapes
 
@@ -406,7 +416,7 @@ In `extensions/social-traces/subscriber.py`, mirror `EvolutionSubscriber` exactl
 - [x] Create `config.py` — `SocialTracesConfig` frozen dataclass + `from_config_dict` parser with defaults
 - [x] Create `identity.py` — per-profile opaque `submitter_hash` (32-byte hex, regenerable by deleting the file)
 - [x] Create `state.py` — on-disk enabled flag + heartbeat under `<profile_home>/traces/`
-- [x] Stub `prefetch.py` — Phase 2 contract: returns `pass`, writes heartbeat when enabled, sets `runtime.custom["trace_used"] = None`
+- [x] Stub `prefetch.py` — Phase 2 contract: returns `pass`, writes heartbeat when enabled, records the session_state bridge entry with `trace_used=None`
 - [x] Stub `subscriber.py` — `TraceEmissionSubscriber` shape with start/stop lifecycle (real pipeline pending Phase 5+)
 - [x] `plugin.py:register(api)` — registers BEFORE_TASK hook with priority=20, timeout_ms=1500
 - [x] Add `oc traces enable/disable/status` CLI surface — top-level namespace via `opencomputer/cli_traces.py`, mounted in `cli.py`
@@ -440,7 +450,7 @@ In `extensions/social-traces/subscriber.py`, mirror `EvolutionSubscriber` exactl
 - [x] `prefetch.py:format_injection()` — renders the trace as `<trace intent="..." outcome="..." tags="...">Insight: ...\nSteps used (reference only): 1. ToolName: args → result\n...</trace>` with explicit "do not auto-execute" framing
 - [x] `prefetch.py:on_before_task()` — full handler: read enabled flag → write heartbeat → build query → call `client.query()` with config-driven timeout → score gate → format → return `HookDecision(decision="rewrite", modified_message=...)` if injecting, `pass` otherwise
 - [x] `_load_config()` reads `social_traces:` from `<profile_home>/config.yaml` (defaults if missing/malformed)
-- [x] `runtime.custom["trace_used"]` stamped to trace_id-or-None — see Phase 5 note below for the cross-component bridge problem
+- [x] `session_state` bridge stamped with `trace_id`-or-`None` for every fire — see Phase 5 note below for why the runtime.custom path was a dead end
 - [x] Local-file backend stamps `score` on returned cards (so prefetch's threshold gate has a server-supplied signal to read)
 - [x] Failure isolation: any exception in the handler logs at DEBUG/WARNING and falls through to `pass` — agent never paralysed by prefetch
 - [x] Integration test (load-bearing): seed inbox → run agent through `AgentLoop.run_conversation` → `<trace>` block lands as `<system-reminder>` user message + persists to SessionDB

@@ -13,7 +13,7 @@ Phase 4 acceptance):
   ``<trace>`` block we want the model to see.
 * ``prefetch.on_before_task`` integration: with a seeded inbox, a
   matching user message produces a HookDecision that injects the
-  trace AND sets ``runtime.custom["trace_used"]``. With a
+  trace AND records the session_state bridge entry. With a
   non-matching message, no injection.
 * End-to-end through ``AgentLoop.run_conversation``: seed inbox, run
   agent with a fake provider, verify the ``<trace>`` block lands as
@@ -365,7 +365,11 @@ async def test_on_before_task_disabled_returns_pass(tmp_path: Path):
 
 
 async def test_on_before_task_no_match_returns_pass(tmp_path: Path):
-    """Enabled but inbox empty → pass, trace_used=None, heartbeat written."""
+    """Enabled but inbox empty → pass, bridge entry with trace_used=None,
+    heartbeat written."""
+    from extensions.social_traces import session_state as _bridge
+    _bridge.reset_for_testing()
+
     st_state.set_enabled(tmp_path, True)
     custom: dict = {"profile_home": str(tmp_path)}
     runtime = RuntimeContext(custom=custom)
@@ -377,15 +381,19 @@ async def test_on_before_task_no_match_returns_pass(tmp_path: Path):
     )
     decision = await st_prefetch.on_before_task(ctx)
     assert decision.decision == "pass"
-    assert custom["trace_used"] is None
+    assert _bridge.session_known("sid")
+    assert _bridge.peek_trace_used("sid") is None
     assert st_state.read_heartbeat(tmp_path) > 0.0
 
 
 async def test_on_before_task_match_returns_rewrite_with_trace_block(tmp_path: Path):
     """Seed a trace whose tags overlap with the user message — the
     handler must return decision=rewrite with the trace formatted as
-    modified_message AND set runtime.custom['trace_used'] to the
-    trace id."""
+    modified_message AND record the trace id in the session_state
+    bridge."""
+    from extensions.social_traces import session_state as _bridge
+    _bridge.reset_for_testing()
+
     st_state.set_enabled(tmp_path, True)
     _seed_inbox(
         tmp_path,
@@ -412,7 +420,7 @@ async def test_on_before_task_match_returns_rewrite_with_trace_block(tmp_path: P
     assert "<trace " in decision.modified_message
     assert "homelab" in decision.modified_message
     assert "rsync" in decision.modified_message  # from the seeded steps
-    assert custom["trace_used"] == "seeded-1"
+    assert _bridge.peek_trace_used("sid") == "seeded-1"
 
 
 async def test_on_before_task_threshold_blocks_weak_match(tmp_path: Path):
@@ -438,6 +446,9 @@ async def test_on_before_task_threshold_blocks_weak_match(tmp_path: Path):
         ),
     )
 
+    from extensions.social_traces import session_state as _bridge
+    _bridge.reset_for_testing()
+
     custom: dict = {"profile_home": str(tmp_path)}
     runtime = RuntimeContext(custom=custom)
     ctx = HookContext(
@@ -449,7 +460,7 @@ async def test_on_before_task_threshold_blocks_weak_match(tmp_path: Path):
     decision = await st_prefetch.on_before_task(ctx)
 
     assert decision.decision == "pass"
-    assert custom["trace_used"] is None
+    assert _bridge.peek_trace_used("sid") is None
 
 
 async def test_on_before_task_empty_user_message_returns_pass(tmp_path: Path):
@@ -558,22 +569,10 @@ async def test_end_to_end_seeded_trace_lands_in_messages(tmp_path: Path):
         assert "rsync --checksum" in reminder  # from distilled_insight
         assert "end-to-end-1" not in reminder  # internal id never echoed
 
-        # NOTE on trace_used: the prefetch handler sets
-        # runtime.custom["trace_used"] = "end-to-end-1" on the loop's
-        # INTERNAL RuntimeContext (the one created by the loop's
-        # ``replace(self._runtime, custom={...})`` at loop.py:~775).
-        # That mutation does NOT propagate back to the test's local
-        # ``runtime`` variable above — they're different dicts after
-        # the loop's replace() call. The unit test
-        # test_on_before_task_match_returns_rewrite_with_trace_block
-        # verifies the flag is set correctly via a direct call.
-        #
-        # This is a real architectural finding for Phase 5 — the
-        # SessionEndEvent published at session-end strips the runtime
-        # entirely, so the post-task subscriber can't read trace_used
-        # from runtime.custom. Phase 5 will need a different bridge:
-        # module-level dict keyed by session_id, SessionDB metadata
-        # column, or a new trace_used field on SessionEndEvent.
+        # NOTE: trace_used is recorded in the session_state bridge
+        # (module-level dict keyed by session_id), not on the runtime.
+        # Verified directly by Phase 5 tests; the runtime.custom path
+        # was a dead end (see plan §7.2).
 
         # Persist check — resumed session sees the same context.
         from_db = loop.db.get_messages("end-to-end-sid")
@@ -624,6 +623,9 @@ async def test_end_to_end_no_match_no_injection(tmp_path: Path):
         # Only the original message — no system-reminder injected.
         assert len(user_messages) == 1
         assert not any("<trace " in (m.content or "") for m in result.messages)
-        assert runtime.custom.get("trace_used") is None
+        # Bridge records BEFORE_TASK fired but no trace was injected.
+        from extensions.social_traces import session_state as _bridge
+        assert _bridge.session_known("no-match-sid")
+        assert _bridge.peek_trace_used("no-match-sid") is None
     finally:
         global_engine.unregister_all(HookEvent.BEFORE_TASK)

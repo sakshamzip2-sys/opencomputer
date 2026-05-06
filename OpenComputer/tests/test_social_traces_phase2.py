@@ -13,8 +13,9 @@ Phase 2 acceptance):
 * The BEFORE_TASK hook handler is a no-op when the on-disk flag is
   off, and emits a heartbeat (still ``pass``) when the flag is on —
   the behaviour Phase 4 will swap for real query/inject logic.
-* ``runtime.custom["trace_used"] = None`` invariant holds when the
-  flag is on (so post-task subscriber sees a uniform shape).
+* ``session_state`` bridge entry is created with ``trace_used=None``
+  when the flag is on but no match is found (so post-task subscriber
+  sees a uniform shape via ``pop_session``).
 
 These all run without OpenHub existing — the local profile filesystem
 is the only state.
@@ -290,16 +291,19 @@ async def test_prefetch_returns_pass_when_enabled_and_writes_heartbeat(tmp_path:
     assert st_state.read_heartbeat(tmp_path) > 0.0
 
 
-async def test_prefetch_sets_trace_used_flag_to_none_when_enabled(tmp_path: Path):
-    """Even though Phase 2 doesn't fetch a real trace, it must set
-    ``runtime.custom['trace_used'] = None`` so the post-task
-    subscriber sees a uniform shape."""
+async def test_prefetch_records_bridge_entry_when_enabled(tmp_path: Path):
+    """Even though Phase 2 doesn't fetch a real trace, the handler
+    must record a session_state bridge entry with ``trace_used=None``
+    so the post-task subscriber sees a uniform shape (BEFORE_TASK
+    fired, no match) via ``pop_session``."""
     from plugin_sdk.hooks import HookContext, HookEvent
     from plugin_sdk.runtime_context import RuntimeContext
 
+    from extensions.social_traces import session_state as bridge
+
+    bridge.reset_for_testing()
     st_state.set_enabled(tmp_path, True)
-    custom: dict = {"profile_home": str(tmp_path)}
-    runtime = RuntimeContext(custom=custom)
+    runtime = RuntimeContext(custom={"profile_home": str(tmp_path)})
     ctx = HookContext(
         event=HookEvent.BEFORE_TASK,
         session_id="sid",
@@ -307,8 +311,8 @@ async def test_prefetch_sets_trace_used_flag_to_none_when_enabled(tmp_path: Path
     )
 
     await st_prefetch.on_before_task(ctx)
-    assert "trace_used" in custom
-    assert custom["trace_used"] is None
+    assert bridge.session_known("sid")
+    assert bridge.peek_trace_used("sid") is None
 
 
 async def test_prefetch_no_runtime_returns_pass(tmp_path: Path):
