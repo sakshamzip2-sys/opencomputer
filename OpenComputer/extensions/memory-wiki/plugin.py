@@ -164,8 +164,9 @@ class WikiMemorySearch(_RunToExecute, BaseTool):
         return ToolSchema(
             name="WikiMemorySearch",
             description=(
-                "Substring-search across all wiki notes (title + body). "
-                "Returns matching slugs. Uses ripgrep when available."
+                "Substring-search across all wiki notes (titles and body content). "
+                "Returns matching note slugs. Uses ripgrep when available, "
+                "falls back to in-memory regex."
             ),
             parameters={
                 "type": "object",
