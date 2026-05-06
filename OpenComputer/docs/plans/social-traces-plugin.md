@@ -647,14 +647,34 @@ Pre-emptive fixes for the things that would bite during the "use it locally for 
   - `_run_pipeline` direct-call still works (back-compat for prior phase tests)
 - [x] 280/280 affected-file tests green; 1 documented skip
 
-### Phase 9.B — HTTP client + outbox (deferred to post-OpenHub)
+### Phase 9.B — HTTP client (2 hours) — COMPLETE 2026-05-06
 
-These tasks land AFTER the OpenHub MVP exists (we need a real network endpoint to talk to):
+Lands now that OpenHub Phases 0-4 are merged in the sibling repo (`~/Documents/GitHub/openhub`, all four phases pushed to `origin/main`).
 
-- [ ] `client/http.py:HttpTraceNetworkClient` — httpx, async, talks to OpenHub
-- [ ] Implements all three ABC methods; 1s soft timeout on query/health
-- [ ] `outbox.py` — local queue when submit fails or network unreachable
-- [ ] Outbox drain on next successful health() check (kick off from subscriber on each event arrival)
+- [x] `extensions/social-traces/client/http.py` — `HttpTraceNetworkClient` using `httpx.AsyncClient`. Implements all three ABC methods:
+  - `query(intent, tags, *, limit, timeout_s)` — POST `/v1/traces/query`. 1s soft timeout default; on any transport failure, non-2xx, malformed body, or per-trace deserialization error, returns `QueryResult()` and logs at WARNING. One bad trace in a multi-result response is skipped, not fatal.
+  - `submit(card)` — POST `/v1/traces/submit`. Strips server-assigned fields (`id`, `status`, `score`) before sending. 5s timeout default (writes can be legitimately slower than reads). Transient failures return `SubmitReceipt(accepted=False, reason=...)`. 413 explicitly returns `accepted=False` without queue retry (real protocol error). Programmer errors (malformed card on serialization) DO raise.
+  - `health(*, timeout_s)` — GET `/healthz`. 1s soft timeout; never raises; True only on a clean 200.
+- [x] Sends `User-Agent: opencomputer-social-traces/0.1` so OpenHub admins can spot client versions in logs
+- [x] Per-call `httpx.AsyncClient` lifecycle (open + close around each method) — connection-pool overhead irrelevant at our request rate (per session boundary, not per token)
+- [x] `client/__init__.py` factory: `make_client(backend="http", ...)` returns `HttpTraceNetworkClient`. Endpoint required (raises `ValueError` if missing). Replaced the Phase 3 `NotImplementedError`
+- [x] 24 new tests in `tests/test_social_traces_http_client.py` driving the client via `httpx.MockTransport`:
+  - factory: returns http client, requires endpoint, strips trailing slash, rejects unknown backend
+  - serialization: strips server-assigned fields, round-trips via wire format
+  - query: happy path with body assertion, network error, 5xx, malformed JSON, partial-malformed-trace skip, empty traces array, body shape (intent / tags / limit)
+  - submit: happy path, 413 dropped, 5xx queued for retry, network error, server validation soft-fail forwarded, malformed response
+  - health: 200 = True, 5xx = False, network error = False, timeout = False
+  - User-Agent header present on every request
+- [x] Phase 3 test (`test_factory_raises_not_implemented_for_http`) replaced with `test_factory_http_returns_http_client` + `test_factory_http_requires_endpoint`
+- [x] Frozen-inventory boundary stays clean — http client only imports `plugin_sdk.traces` + `httpx`; no `from opencomputer.*` imports
+- [x] **Real-server smoke verified**: started OpenHub on :8001 (sibling repo's `bc1e44a`), drove `HttpTraceNetworkClient` from a Python one-liner against it. Health → True; submit → `accepted=True queue_id=<uuid>`; query before approval → 0 traces; admin accept via curl → 200; query after approval → 1 trace with `id=<same uuid>` `status='approved'` `score=3.116`. Full wire loop closes
+- [x] 264/264 affected-file tests green
+
+#### What's still deferred to a later sub-phase
+
+- [ ] `outbox.py` — local persistence queue when submit returns `accepted=False`. Currently those receipts are logged and dropped; the plugin's existing local-file-backend "outbox/" dir does NOT participate in the http path. Promote when traffic + transient-failure rate make this matter
+- [ ] Outbox auto-drain on next successful `health()` check — kick off from the post-task subscriber when the bridge confirms reachability
+- [ ] Persistent `httpx.AsyncClient` across calls if profile-level metrics show real overhead
 
 ### Phase 10 — End-to-end demo (1-2 hours)
 

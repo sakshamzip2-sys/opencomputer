@@ -177,12 +177,26 @@ def test_factory_returns_local_for_local_backend(tmp_path: Path):
     assert isinstance(client, TraceNetworkClient)
 
 
-def test_factory_raises_not_implemented_for_http(tmp_path: Path):
-    """Phase 9 wires the http path. Until then the factory must raise
-    so dev work can't accidentally reach for a backend that doesn't
-    exist yet."""
-    with pytest.raises(NotImplementedError):
-        make_client(backend="http", profile_home=tmp_path, endpoint="x")
+def test_factory_http_returns_http_client(tmp_path: Path):
+    """Phase 9.B wired the http path. The factory now returns an
+    ``HttpTraceNetworkClient`` when called with ``backend='http'``;
+    Phase 3's NotImplementedError is gone."""
+    from extensions.social_traces.client.http import HttpTraceNetworkClient
+
+    client = make_client(
+        backend="http",
+        profile_home=tmp_path,
+        endpoint="http://localhost:8000",
+    )
+    assert isinstance(client, HttpTraceNetworkClient)
+    assert isinstance(client, TraceNetworkClient)
+
+
+def test_factory_http_requires_endpoint(tmp_path: Path):
+    """``backend=http`` without an endpoint is a config error — fail
+    loudly rather than silently fall back to localhost."""
+    with pytest.raises(ValueError):
+        make_client(backend="http", profile_home=tmp_path, endpoint="")
 
 
 def test_factory_rejects_unknown_backend(tmp_path: Path):

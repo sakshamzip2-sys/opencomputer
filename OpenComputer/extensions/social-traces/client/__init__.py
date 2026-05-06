@@ -7,8 +7,9 @@ Two implementations live alongside this module:
   end-to-end without OpenHub being deployed (and lets a single dev
   machine simulate multiple agents by seeding the inbox with
   hand-curated traces).
-* ``HttpTraceNetworkClient`` — landing in Phase 9. Talks to OpenHub
-  over HTTPS via :mod:`httpx`.
+* :class:`HttpTraceNetworkClient` — production path. Talks to OpenHub
+  (``~/Documents/GitHub/openhub`` sibling repo) over HTTP via
+  :mod:`httpx`.
 
 Plugins should not import the concrete classes directly. Use
 :func:`make_client` so the choice is config-driven and can be flipped
@@ -21,6 +22,7 @@ from pathlib import Path
 
 from plugin_sdk.traces import TraceNetworkClient
 
+from .http import HttpTraceNetworkClient
 from .local_file import LocalFileTraceNetworkClient
 
 
@@ -40,17 +42,23 @@ def make_client(
     profile_home:
         Path to ``<profile_home>``. The local-file backend stores
         inbox / outbox JSON beneath ``<profile_home>/traces/``.
+        Ignored for ``"http"``.
     endpoint:
-        Required when ``backend="http"``. Ignored for local.
+        Required when ``backend="http"``. Ignored for local. Should
+        be a base URL like ``http://127.0.0.1:8000`` or
+        ``https://openhub.example.com``; trailing slashes are
+        normalized.
     """
     if backend == "local":
         return LocalFileTraceNetworkClient(profile_home=profile_home)
     if backend == "http":
-        raise NotImplementedError(
-            "HttpTraceNetworkClient lands in Phase 9. "
-            "Use backend: local in social_traces config for now."
-        )
+        if not endpoint:
+            raise ValueError(
+                "social-traces http backend requires an endpoint URL — "
+                "set ``social_traces.endpoint`` in config.yaml"
+            )
+        return HttpTraceNetworkClient(endpoint=endpoint)
     raise ValueError(f"unknown social-traces backend: {backend!r}")
 
 
-__all__ = ["LocalFileTraceNetworkClient", "make_client"]
+__all__ = ["HttpTraceNetworkClient", "LocalFileTraceNetworkClient", "make_client"]
