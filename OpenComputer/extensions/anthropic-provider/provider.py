@@ -1682,6 +1682,7 @@ class AnthropicProvider(BaseProvider):
         )
         # TS-T7 — short-circuit if a previous 429 hasn't reset.
         _check_rate_limit()
+        t0 = time.monotonic()
         try:
             async with self.client.messages.stream(**kwargs) as stream:
                 # Drop down to the raw event iterator (NOT
@@ -1712,7 +1713,17 @@ class AnthropicProvider(BaseProvider):
             _record_429(exc)
             raise
 
-        yield StreamEvent(kind="done", response=self._parse_response(final))
+        t1 = time.monotonic()
+        result = self._parse_response(final)
+        # Emit observability event AFTER stream completes — without this
+        # the langfuse subscriber never sees streamed responses (which is
+        # how `oc chat` runs by default), and `oc usage` cache stats
+        # silently miss every chat turn.
+        self._emit_llm_event(
+            model=model, usage=result.usage, t0=t0, t1=t1, site=site,
+            messages=messages, response_text=getattr(result.message, "content", None),
+        )
+        yield StreamEvent(kind="done", response=result)
 
     async def complete_vision(
         self,
