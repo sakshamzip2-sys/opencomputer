@@ -6,8 +6,7 @@ import subprocess
 import zipfile
 from pathlib import Path
 
-import pytest
-
+import pytest  # noqa: I001  (alphabetized order is unstable across ruff versions; this layout matches the rest of tests/)
 
 SPA_INDEX = Path("opencomputer/dashboard/static/spa/index.html")
 
