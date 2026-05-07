@@ -4,6 +4,19 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Dashboard + TUI full port (2026-05-07, branch `feat/dashboard-polish-2026-05-07`)
+
+Closes the Hermes Tier-A1 dashboard polish gap from the 2026-05-06
+deep-comparison doc, plus a vendored Ink+React TUI port.
+
+- `OpenComputer/ui-web/` — Vite + React 19 + Tailwind v4 + `@nous-research/ui@0.12.0` (matches Hermes's visual stack). Builds into `opencomputer/dashboard/static/spa/`, force-included in the wheel.
+- 17 domain-split routers in `opencomputer/dashboard/routes/` under `/api/v1/`: status / sessions (5) / logs (SSE) / models (4) / providers_oauth (5) / profiles (7) / skills (3) / plugins (3) / cron (8) / config (6) / env (4) / analytics (3) / tools (1) / dashboard_meta (4) / oc_update (2) / actions (1) / events (SSE multiplex over TypedEventBus). Shared `_common.py` ships clamp_limit / get_session_db / structured `audit_log`.
+- 12 pages: Chat (live wire WS w/ reconnect), Sessions (search + drill-in), Skills (toggle + hub browse), Plugins (loaded + discovered + install), Cron (CRUD + pause/resume/trigger), Logs (SSE + level filter), Models (set-default), Profiles (create/delete/active), Env (redacted; reveal requires `X-OC-Confirm: yes` + audit + 30s auto-clear), Config (raw YAML editor with `.bak` rollback), Analytics (30-day cards + tables), Docs (sidebar + render).
+- Two new wire methods: `slash.list` + `slash.dispatch` (single source of truth for slash semantics across dashboard ChatPage and the Ink TUI).
+- TUI: `OpenComputer/ui-tui/` vendored from `hermes-agent/ui-tui` under MIT (Nous Research). All 21 components + the `hermes-ink` workspace fork ship verbatim, renamed `oc-tui` / `@oc/ink`. `gatewayClient.ts` rewritten to speak OC's `protocol_v2` over WS @ `ws://127.0.0.1:18789`. `oc tui` subcommand spawns it via execvpe.
+- `i18n/{en,zh}.ts` bilingual stubs (Hermes parity).
+- 98 dashboard tests pass, 0 regressions. CI gains a Node 20 setup + dashboard build step.
+
 ### Added — Custom wake-word training (2026-05-07)
 
 - **`oc voice train-wake`** — produces a `hey_open_computer.onnx` (or any

@@ -1,0 +1,30 @@
+{
+  "name": "oc-tui",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "OpenComputer Ink+React TUI — Hermes shell, OC backend.",
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/entry.js",
+    "dev": "tsx --watch src/entry.tsx",
+    "start": "node dist/entry.js",
+    "test": "vitest run",
+    "type-check": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "ink": "^6.8.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^19.2.4",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.2.14",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8"
+  }
+}

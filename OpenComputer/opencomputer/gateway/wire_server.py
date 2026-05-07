@@ -37,6 +37,8 @@ from opencomputer.gateway.protocol import (
     METHOD_SEARCH,
     METHOD_SESSION_LIST,
     METHOD_SKILLS_LIST,
+    METHOD_SLASH_DISPATCH,
+    METHOD_SLASH_LIST,
     METHOD_STEER_SUBMIT,
     WireEvent,
     WireRequest,
@@ -172,6 +174,8 @@ class WireServer:
                         METHOD_SEARCH,
                         METHOD_SKILLS_LIST,
                         METHOD_STEER_SUBMIT,
+                        METHOD_SLASH_LIST,
+                        METHOD_SLASH_DISPATCH,
                     ],
                     "events": [
                         EVENT_TURN_BEGIN,
@@ -245,6 +249,53 @@ class WireServer:
                     "queued_chars": len(prompt),
                 },
             )
+        elif req.method == METHOD_SLASH_LIST:
+            # 2026-05-07 (PR6): enumerate registered slash commands so
+            # the dashboard ChatPage and the (future) Ink TUI share a
+            # single source of truth for the slash palette.
+            try:
+                from opencomputer.agent.slash_commands import (
+                    get_registered_commands,
+                )
+
+                cmds = get_registered_commands()
+                payload = {
+                    "commands": [
+                        {
+                            "name": getattr(c, "name", str(c)),
+                            "description": getattr(c, "description", ""),
+                            "aliases": list(getattr(c, "aliases", [])),
+                        }
+                        for c in cmds
+                    ]
+                }
+                await self._send_response(ws, req.id, True, payload=payload)
+            except Exception as exc:  # noqa: BLE001
+                await self._send_response(
+                    ws, req.id, False, error=f"slash.list: {exc}"
+                )
+        elif req.method == METHOD_SLASH_DISPATCH:
+            # 2026-05-07 (PR6): invoke a slash command via OC's dispatcher.
+            try:
+                from opencomputer.agent.slash_commands import dispatch_slash
+
+                name = str(req.params.get("name", "")).strip()
+                args = str(req.params.get("args", ""))
+                if not name:
+                    await self._send_response(
+                        ws, req.id, False, error="slash.dispatch: name required"
+                    )
+                    return
+                # dispatch_slash expects a full message string starting with /
+                msg = "/" + name + (" " + args if args else "")
+                output = dispatch_slash(msg)
+                await self._send_response(
+                    ws, req.id, True, payload={"output": output, "side_effects": {}}
+                )
+            except Exception as exc:  # noqa: BLE001
+                await self._send_response(
+                    ws, req.id, False, error=f"slash.dispatch: {exc}"
+                )
         else:
             await self._send_response(
                 ws, req.id, False, error=f"unknown method: {req.method}"

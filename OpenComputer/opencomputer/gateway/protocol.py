@@ -60,6 +60,8 @@ METHOD_SESSION_LIST = "sessions.list"
 METHOD_SEARCH = "search"
 METHOD_SKILLS_LIST = "skills.list"
 METHOD_STEER_SUBMIT = "steer.submit"  # P-2 round 2a: mid-run /steer nudge
+METHOD_SLASH_LIST = "slash.list"  # 2026-05-07: enumerate slash commands
+METHOD_SLASH_DISPATCH = "slash.dispatch"  # 2026-05-07: invoke a slash command
 
 
 # ─── Event names (gateway → client) ─────────────────────────────

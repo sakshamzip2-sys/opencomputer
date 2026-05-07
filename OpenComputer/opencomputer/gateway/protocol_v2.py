@@ -44,6 +44,8 @@ from opencomputer.gateway.protocol import (
     METHOD_SEARCH,
     METHOD_SESSION_LIST,
     METHOD_SKILLS_LIST,
+    METHOD_SLASH_DISPATCH,
+    METHOD_SLASH_LIST,
     METHOD_STEER_SUBMIT,
     WireEvent,
     WireRequest,
@@ -141,6 +143,35 @@ class SteerSubmitResult(_StrictModel):
     queued_chars: int
 
 
+# 2026-05-07 PR6 — slash commands routed via wire (single source of truth
+# for the dashboard ChatPage palette and the Ink TUI).
+
+
+class SlashListParams(_StrictModel):
+    pass
+
+
+class SlashCommandInfo(_StrictModel):
+    name: str
+    description: str
+    aliases: tuple[str, ...] = ()
+
+
+class SlashListResult(_StrictModel):
+    commands: tuple[SlashCommandInfo, ...]
+
+
+class SlashDispatchParams(_StrictModel):
+    name: str
+    args: str = ""
+    session_id: str | None = None
+
+
+class SlashDispatchResult(_StrictModel):
+    output: str
+    side_effects: dict[str, Any] = Field(default_factory=dict)
+
+
 # Map method name → (params schema, result schema). Wire dispatchers can
 # look this up to validate both directions of any RPC call.
 METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
@@ -150,6 +181,8 @@ METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
     METHOD_SEARCH: (SearchParams, SearchResult),
     METHOD_SKILLS_LIST: (SkillsListParams, SkillsListResult),
     METHOD_STEER_SUBMIT: (SteerSubmitParams, SteerSubmitResult),
+    METHOD_SLASH_LIST: (SlashListParams, SlashListResult),
+    METHOD_SLASH_DISPATCH: (SlashDispatchParams, SlashDispatchResult),
 }
 
 
@@ -214,6 +247,13 @@ __all__ = [
     "METHOD_SEARCH",
     "METHOD_SKILLS_LIST",
     "METHOD_STEER_SUBMIT",
+    "METHOD_SLASH_LIST",
+    "METHOD_SLASH_DISPATCH",
+    "SlashListParams",
+    "SlashListResult",
+    "SlashCommandInfo",
+    "SlashDispatchParams",
+    "SlashDispatchResult",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",

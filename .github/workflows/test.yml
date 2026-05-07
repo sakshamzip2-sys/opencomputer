@@ -38,6 +38,28 @@ jobs:
         # libsndfile1 = soundfile runtime (voice-mode tests).
         run: sudo apt-get update && sudo apt-get install -y libportaudio2 libsndfile1
 
+      # Frontend builds run BEFORE pip install — pyproject's hatch
+      # force-include is strict and `pip install -e` evaluates package_data
+      # at install time, so the SPA + TUI artifact dirs must exist before
+      # pip install or hatchling fails the editable build.
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            OpenComputer/ui-web/package-lock.json
+            OpenComputer/ui-tui/package-lock.json
+      - name: Build dashboard SPA
+        run: ./scripts/build-dashboard.sh
+      - name: Build Ink TUI
+        run: ./scripts/build-tui.sh
+      - name: Verify frontend artifacts
+        run: |
+          test -f opencomputer/dashboard/static/spa/index.html
+          test -d opencomputer/dashboard/static/spa/assets
+          test -f opencomputer/ui-tui/dist/entry.js
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -87,6 +109,20 @@ jobs:
       - name: Install Linux PortAudio (for voice-mode sounddevice)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get install -y libportaudio2
+
+      # Frontend artifact dirs must exist before pip install due to hatch
+      # force-include strictness (same reason as the main pytest job).
+      # We don't need to RUN the builds here — empty placeholder dirs
+      # suffice because the cross-platform job doesn't import the SPA/TUI
+      # modules; hatchling just needs the paths to exist for the wheel
+      # metadata.
+      - name: Stub frontend artifact dirs (cross-platform)
+        shell: bash
+        run: |
+          mkdir -p opencomputer/dashboard/static/spa/assets
+          touch opencomputer/dashboard/static/spa/index.html
+          mkdir -p opencomputer/ui-tui/dist
+          touch opencomputer/ui-tui/dist/entry.js
 
       - name: Install dependencies
         # Voice extras are needed for tests/test_voice_mode_*.py (the VAD

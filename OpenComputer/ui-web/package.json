@@ -1,0 +1,43 @@
+{
+  "name": "oc-dashboard-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "OpenComputer dashboard SPA — Vite + React 19 + @nous-research/ui (Hermes look, OC functionality).",
+  "scripts": {
+    "sync-assets": "node scripts/sync-assets.mjs",
+    "predev": "npm run sync-assets",
+    "prebuild": "npm run sync-assets",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@nous-research/ui": "0.12.0",
+    "@observablehq/plot": "0.6.17",
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/addon-unicode11": "0.8.0",
+    "@xterm/addon-web-links": "0.11.0",
+    "@xterm/addon-webgl": "0.18.0",
+    "@xterm/xterm": "5.5.0",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "0.470.0",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "react-router-dom": "7.1.1",
+    "tailwind-merge": "2.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.2.4",
+    "@types/node": "22.10.5",
+    "@types/react": "19.0.2",
+    "@types/react-dom": "19.0.2",
+    "@vitejs/plugin-react": "4.3.4",
+    "tailwindcss": "4.2.4",
+    "typescript": "5.6.3",
+    "vite": "5.4.11"
+  }
+}

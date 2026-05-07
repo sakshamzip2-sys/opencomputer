@@ -14,6 +14,26 @@ lib/
 lib64/
 parts/
 sdist/
+
+# Exception: the dashboard SPA's `lib/` is TypeScript source, not the
+# Python packaging build artifact above. Without this re-include,
+# git silently ignores ui-web/src/lib/api.ts + wire.ts + events.ts
+# (caught 2026-05-07 when CI failed loading "@/lib/api").
+!ui-web/src/lib/
+!ui-web/src/lib/**
+
+# Frontend build artifacts (produced by `cd ui-web && npm run build` /
+# `cd ui-tui && npm run build`). Excluded from git but force-included
+# in the wheel via pyproject.toml [tool.hatch.build.targets.wheel.force-include].
+opencomputer/dashboard/static/spa/
+opencomputer/ui-tui/dist/
+ui-tui/dist/
+ui-tui/packages/*/dist/
+
+# Node ecosystem
+**/node_modules/
+ui-web/public/fonts/
+ui-web/public/ds-assets/
 var/
 wheels/
 *.egg-info/

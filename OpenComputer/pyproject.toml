@@ -44,6 +44,11 @@ dependencies = [
   "pyperclip>=1.8",
   "rapidocr-onnxruntime>=1.2.3",
   "filelock>=3.16",
+  # Dashboard (`oc dashboard`) is a first-class CLI surface as of 2026-05-07.
+  # cli.py imports cli_dashboard unconditionally (so `oc --help` lists it),
+  # which transitively requires FastAPI. Promoted from the [browser] extra.
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
   # JSON5 manifest tolerance — comments + trailing commas in plugin.json
   # (Sub-project G openclaw-parity Task 4). Two-tier parse: json.loads
   # first, json5.loads only on JSONDecodeError. ~30KB pure-Python lib.
@@ -179,8 +184,8 @@ browser = [
   # Browser-port subsystems:
   "send2trash>=1.8",   # cross-platform trash for profile reset/delete (W0a)
   "websockets>=12",    # CDP WS handshake check (W0c lifecycle.is_chrome_cdp_ready)
-  "fastapi>=0.110",    # HTTP control surface (W2b)
-  "uvicorn>=0.27",     # ASGI runner for FastAPI (W2b)
+  # fastapi + uvicorn are now base deps (2026-05-07 — `oc dashboard` is
+  # core). Kept commented here for reference; do not re-add.
 ]
 
 [project.scripts]
@@ -202,6 +207,16 @@ packages = ["opencomputer", "plugin_sdk"]
 # systemd unit template — shipped alongside opencomputer.service so
 # `opencomputer service install` can read it from the installed wheel.
 "opencomputer/service/templates/opencomputer.service" = "opencomputer/service/templates/opencomputer.service"
+# Dashboard SPA build artifact (Vite output). Built by
+# `scripts/build-dashboard.sh` before packaging; excluded from git via
+# .gitignore. The dashboard server.py auto-detects the SPA at
+# ``opencomputer/dashboard/static/spa/`` and falls back to the legacy
+# static pages when absent (so source-installs without a frontend
+# build still get a usable dashboard).
+"opencomputer/dashboard/static/spa" = "opencomputer/dashboard/static/spa"
+# TUI build artifact (Ink+React, vendored from hermes-agent/ui-tui under
+# MIT). Built by `scripts/build-tui.sh`, used by `oc tui`.
+"opencomputer/ui-tui/dist" = "opencomputer/ui-tui/dist"
 
 [tool.ruff]
 line-length = 100

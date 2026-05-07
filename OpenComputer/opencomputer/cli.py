@@ -3022,16 +3022,22 @@ from opencomputer.cli_adapter import adapter_app  # noqa: E402
 from opencomputer.cli_consent import consent_app  # noqa: E402
 from opencomputer.cli_cost import cost_app  # noqa: E402
 from opencomputer.cli_cron import cron_app  # noqa: E402
+from opencomputer.cli_dashboard import dashboard_app  # noqa: E402
 from opencomputer.cli_heartbeat import heartbeat_app  # noqa: E402
 from opencomputer.cli_langfuse import langfuse_app  # noqa: E402
 from opencomputer.cli_optimize import optimize_app  # noqa: E402
 from opencomputer.cli_pair import pair_app  # noqa: E402
 from opencomputer.cli_session import session_app  # noqa: E402
+from opencomputer.cli_tui import tui_app  # noqa: E402
 from opencomputer.cli_voice import voice_app  # noqa: E402
 from opencomputer.cli_webhook import webhook_app  # noqa: E402
 
 app.add_typer(adapter_app, name="adapter")
 app.add_typer(consent_app, name="consent")
+# 2026-05-07 PR7+11: dashboard + TUI both mounted at top-level so the
+# user-facing surface matches the docs (`oc dashboard`, `oc tui`).
+app.add_typer(dashboard_app, name="dashboard")
+app.add_typer(tui_app, name="tui")
 
 # ─── service (cross-platform always-on daemon) ────────────────────────
 service_app = typer.Typer(

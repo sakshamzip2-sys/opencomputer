@@ -143,6 +143,15 @@ def _build_app(
                 name=f"plugin-{name}-dist",
             )
 
+    # --- v1 domain-split routers ---------------------------------------
+    # 17 routers under /api/v1/* — see opencomputer/dashboard/routes/.
+    # Stub modules are registered alongside the populated ones so the
+    # SPA's first-load `/api/v1/status` works before later PRs land.
+    from opencomputer.dashboard.routes import ALL_ROUTERS
+
+    for v1_router in ALL_ROUTERS:
+        app.include_router(v1_router)
+
     # --- /api/health (always public) -----------------------------------
     @app.get("/api/health")
     async def health() -> dict:
@@ -162,9 +171,41 @@ def _build_app(
         body = body.replace("__SESSION_TOKEN__", _SESSION_TOKEN)
         return HTMLResponse(body)
 
-    @app.get("/", response_class=HTMLResponse)
-    async def index() -> Response:
-        return _render_html(static_dir / "index.html")
+    # --- SPA at / (post-2026-05-07 — Vite-built dashboard) -------------
+    # Built by `cd OpenComputer/ui-web && npm run build`; outputs to
+    # `static/spa/`. When present, `/` serves the SPA's index.html and
+    # any non-/api, non-/static, non-/assets path falls through to it
+    # so React Router handles the route on hard refresh.
+    _SPA_DIR = static_dir / "spa"
+
+    if _SPA_DIR.exists() and (_SPA_DIR / "index.html").exists():
+        # Hashed assets — Vite emits content-hashed filenames so cache
+        # control is safe. _render_html only handles the index shell.
+        _ASSETS_DIR = _SPA_DIR / "assets"
+        if _ASSETS_DIR.exists():
+            app.mount(
+                "/assets",
+                StaticFiles(directory=str(_ASSETS_DIR), html=False),
+                name="spa-assets",
+            )
+        # Synced @nous-research/ui fonts + ds-assets (sync-assets script).
+        for sub in ("fonts", "ds-assets"):
+            d = _SPA_DIR / sub
+            if d.exists():
+                app.mount(
+                    f"/{sub}",
+                    StaticFiles(directory=str(d), html=False),
+                    name=f"spa-{sub}",
+                )
+
+        @app.get("/", response_class=HTMLResponse)
+        async def index() -> Response:
+            return _render_html(_SPA_DIR / "index.html")
+    else:
+        # No SPA build artifact — fall back to the legacy `static/index.html`.
+        @app.get("/", response_class=HTMLResponse)
+        async def index() -> Response:  # type: ignore[no-redef]
+            return _render_html(static_dir / "index.html")
 
     @app.get("/static/plugins.html", response_class=HTMLResponse)
     async def plugins_page() -> Response:
@@ -273,6 +314,20 @@ def _build_app(
     # --- /api/pty WebSocket --------------------------------------------
     if enable_pty:
         _attach_pty(app)
+
+    # --- SPA route fallback (must come AFTER /api/* + /static/* + /assets/*) ---
+    # React Router renders client-side routes like /sessions, /logs.
+    # Hard-refreshing one of those would 404 without a fallback that
+    # serves index.html and lets the client-side router resolve.
+    # Unknown /api/* + /static/* paths are explicitly 404'd so the SPA
+    # only catches genuine SPA navigations.
+    if _SPA_DIR.exists() and (_SPA_DIR / "index.html").exists():
+
+        @app.get("/{spa_path:path}", response_class=HTMLResponse)
+        async def spa_fallback(spa_path: str) -> Response:
+            if spa_path.startswith(("api/", "static/", "assets/", "fonts/", "ds-assets/")):
+                return Response(status_code=404)
+            return _render_html(_SPA_DIR / "index.html")
 
     return app
 
