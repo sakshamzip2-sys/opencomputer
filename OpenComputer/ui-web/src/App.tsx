@@ -7,6 +7,9 @@ import { ModelsPage } from "@/pages/ModelsPage";
 import { PluginsPage } from "@/pages/PluginsPage";
 import { ProfilesPage } from "@/pages/ProfilesPage";
 import { SkillsPage } from "@/pages/SkillsPage";
+import { CronPage } from "@/pages/CronPage";
+import { ConfigPage } from "@/pages/ConfigPage";
+import { EnvPage } from "@/pages/EnvPage";
 
 const Placeholder = ({ name }: { name: string }) => (
   <div className="p-6">
@@ -95,9 +98,22 @@ export default function App() {
           <Route path="/plugins" element={<PluginsPage />} />
           <Route path="/profiles" element={<ProfilesPage />} />
           <Route path="/skills" element={<SkillsPage />} />
+          <Route path="/cron" element={<CronPage />} />
+          <Route path="/config" element={<ConfigPage />} />
+          <Route path="/env" element={<EnvPage />} />
           {NAV.filter(
             ({ path }) =>
-              !["/sessions", "/logs", "/models", "/plugins", "/profiles", "/skills"].includes(path),
+              ![
+                "/sessions",
+                "/logs",
+                "/models",
+                "/plugins",
+                "/profiles",
+                "/skills",
+                "/cron",
+                "/config",
+                "/env",
+              ].includes(path),
           ).map(({ path, label }) => (
             <Route key={path} path={path} element={<Placeholder name={label} />} />
           ))}
