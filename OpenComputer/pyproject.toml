@@ -61,6 +61,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# PR-A Feature 2 (2026-05-07): wake-word detection via openWakeWord.
+#   pip install opencomputer[wake]
+# Apache 2.0; ONNX-based; CPU-only; no API key. Default model bundled
+# with openwakeword (hey_jarvis). onnxruntime>=1.17 for Apple Silicon
+# stability. Verify install with: oc doctor wake.
+wake = [
+  "openwakeword>=0.6.0",
+  "onnxruntime>=1.17",
+]
 bedrock = ["boto3>=1.35.0"]
 # Wave 6.D — pseudo-terminal bridge for the dashboard chat tab.
 #   pip install opencomputer[pty]
