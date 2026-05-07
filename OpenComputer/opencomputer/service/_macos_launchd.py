@@ -17,24 +17,44 @@ from pathlib import Path
 from typing import ClassVar
 
 from . import _common
+from ._naming import _CANONICAL_LABEL, service_label
 from .base import InstallResult, StatusResult, UninstallResult
 
 NAME: ClassVar[str] = "launchd"
-_LABEL = "com.opencomputer.gateway"
-_PLIST_FILENAME = f"{_LABEL}.plist"
-_TEMPLATE = (Path(__file__).parent / "templates" / _PLIST_FILENAME).read_text()
+_LEGACY_LABEL = "com.opencomputer.gateway"
+_LEGACY_PLIST_FILENAME = f"{_LEGACY_LABEL}.plist"
+_TEMPLATE = (Path(__file__).parent / "templates" / _LEGACY_PLIST_FILENAME).read_text()
 
 
 def supported() -> bool:
     return sys.platform == "darwin"
 
 
+def _label(profile: str = "default") -> str:
+    """Return the launchd label for ``profile``.
+
+    Default + canonical home preserves the historical
+    ``com.opencomputer.gateway`` label so existing plists keep working.
+    Multi-install (non-canonical home OR named profile) appends the
+    sha256[:8] hash from ``service_label`` so two daemons can coexist.
+    """
+    label = service_label(profile)
+    if label == _CANONICAL_LABEL:
+        return _LEGACY_LABEL
+    suffix = label.removeprefix(f"{_CANONICAL_LABEL}-")
+    return f"{_LEGACY_LABEL}.{suffix}"
+
+
+def _plist_filename(profile: str = "default") -> str:
+    return f"{_label(profile)}.plist"
+
+
 def _launch_agents_dir() -> Path:
     return Path.home() / "Library" / "LaunchAgents"
 
 
-def _plist_path() -> Path:
-    return _launch_agents_dir() / _PLIST_FILENAME
+def _plist_path(profile: str = "default") -> Path:
+    return _launch_agents_dir() / _plist_filename(profile)
 
 
 def _resolve_executable() -> str:
@@ -67,7 +87,7 @@ def _render_plist(
     stderr_log: Path,
 ) -> str:
     return _TEMPLATE.format(
-        label=_LABEL,
+        label=_label(profile),
         executable=executable,
         workdir=str(workdir),
         profile=profile,
@@ -84,10 +104,11 @@ def install(*, profile: str, extra_args: str, restart: bool = True) -> InstallRe
         executable=executable, workdir=wd, profile=profile,
         stdout_log=out_log, stderr_log=err_log,
     )
-    path = _plist_path()
+    label = _label(profile)
+    path = _plist_path(profile)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        _launchctl("bootout", f"gui/{_uid()}/{_LABEL}")
+        _launchctl("bootout", f"gui/{_uid()}/{label}")
     path.write_text(body)
     started = False
     enabled = False
@@ -108,7 +129,7 @@ def uninstall() -> UninstallResult:
         return UninstallResult(
             backend=NAME, file_removed=False, config_path=None, notes=[],
         )
-    _launchctl("bootout", f"gui/{_uid()}/{_LABEL}")
+    _launchctl("bootout", f"gui/{_uid()}/{_label()}")
     path.unlink()
     return UninstallResult(
         backend=NAME, file_removed=True, config_path=path, notes=[],
@@ -118,7 +139,7 @@ def uninstall() -> UninstallResult:
 def status() -> StatusResult:
     path = _plist_path()
     file_present = path.exists()
-    rc, out, _ = _launchctl("print", f"gui/{_uid()}/{_LABEL}")
+    rc, out, _ = _launchctl("print", f"gui/{_uid()}/{_label()}")
     enabled = rc == 0
     running = False
     pid: int | None = None
@@ -145,12 +166,12 @@ def status() -> StatusResult:
 
 
 def start() -> bool:
-    rc, _, _ = _launchctl("kickstart", "-k", f"gui/{_uid()}/{_LABEL}")
+    rc, _, _ = _launchctl("kickstart", "-k", f"gui/{_uid()}/{_label()}")
     return rc == 0
 
 
 def stop() -> bool:
-    rc, _, _ = _launchctl("kill", "SIGTERM", f"gui/{_uid()}/{_LABEL}")
+    rc, _, _ = _launchctl("kill", "SIGTERM", f"gui/{_uid()}/{_label()}")
     return rc == 0
 
 

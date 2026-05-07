@@ -15,20 +15,36 @@ from pathlib import Path
 from typing import ClassVar
 
 from . import _common
+from ._naming import _CANONICAL_LABEL, service_label
 from .base import InstallResult, StatusResult, UninstallResult
 
 NAME: ClassVar[str] = "systemd"
-_UNIT_FILENAME = "opencomputer.service"
-_TEMPLATE = (Path(__file__).parent / "templates" / _UNIT_FILENAME).read_text()
+_LEGACY_UNIT_FILENAME = "opencomputer.service"
+_TEMPLATE = (Path(__file__).parent / "templates" / _LEGACY_UNIT_FILENAME).read_text()
 
 
 def supported() -> bool:
     return sys.platform.startswith("linux")
 
 
-def _user_unit_path() -> Path:
+def _unit_filename(profile: str = "default") -> str:
+    """Return the systemd unit filename for ``profile``.
+
+    Default + canonical home preserves the historical
+    ``opencomputer.service`` filename so existing units keep working.
+    Multi-install (non-canonical home OR named profile) appends the
+    sha256[:8] hash from ``service_label`` so two daemons can coexist.
+    """
+    label = service_label(profile)
+    if label == _CANONICAL_LABEL:
+        return _LEGACY_UNIT_FILENAME
+    suffix = label.removeprefix(f"{_CANONICAL_LABEL}-")
+    return f"opencomputer-{suffix}.service"
+
+
+def _user_unit_path(profile: str = "default") -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(base) / "systemd" / "user" / _UNIT_FILENAME
+    return Path(base) / "systemd" / "user" / _unit_filename(profile)
 
 
 def _systemctl(*args: str) -> tuple[int, str, str]:
@@ -70,12 +86,12 @@ def _is_lingering() -> bool:
         return False
 
 
-def _journalctl_tail(n: int) -> list[str]:
+def _journalctl_tail(n: int, profile: str = "default") -> list[str]:
     if shutil.which("journalctl") is None:
         return []
     try:
         proc = subprocess.run(
-            ["journalctl", "--user", "-u", _UNIT_FILENAME,
+            ["journalctl", "--user", "-u", _unit_filename(profile),
              "-n", str(n), "--no-pager"],
             capture_output=True, text=True, timeout=5,
         )
@@ -88,7 +104,8 @@ def install(*, profile: str, extra_args: str, restart: bool = True) -> InstallRe
     executable = _resolve_executable()
     wd = _common.workdir(profile)
     body = _render_unit(executable, wd, profile, extra_args)
-    path = _user_unit_path()
+    unit = _unit_filename(profile)
+    path = _user_unit_path(profile)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
     _systemctl("daemon-reload")
@@ -96,10 +113,10 @@ def install(*, profile: str, extra_args: str, restart: bool = True) -> InstallRe
     enabled = False
     started = False
     if restart:
-        rc_en, _, _ = _systemctl("enable", "--now", _UNIT_FILENAME)
+        rc_en, _, _ = _systemctl("enable", "--now", unit)
         enabled = rc_en == 0
         if enabled:
-            rc_act, out, _ = _systemctl("is-active", _UNIT_FILENAME)
+            rc_act, out, _ = _systemctl("is-active", unit)
             started = rc_act == 0 and out.strip() == "active"
     if not _is_lingering():
         notes.append(
@@ -115,12 +132,13 @@ def install(*, profile: str, extra_args: str, restart: bool = True) -> InstallRe
 
 def uninstall() -> UninstallResult:
     path = _user_unit_path()
+    unit = _unit_filename()
     if not path.exists():
         return UninstallResult(
             backend=NAME, file_removed=False, config_path=None, notes=[],
         )
-    _systemctl("stop", _UNIT_FILENAME)
-    _systemctl("disable", _UNIT_FILENAME)
+    _systemctl("stop", unit)
+    _systemctl("disable", unit)
     path.unlink()
     _systemctl("daemon-reload")
     return UninstallResult(
@@ -130,15 +148,16 @@ def uninstall() -> UninstallResult:
 
 def status() -> StatusResult:
     path = _user_unit_path()
+    unit = _unit_filename()
     file_present = path.exists()
-    rc_en, out_en, _ = _systemctl("is-enabled", _UNIT_FILENAME)
+    rc_en, out_en, _ = _systemctl("is-enabled", unit)
     enabled = rc_en == 0 and out_en.strip() == "enabled"
-    rc_ac, out_ac, _ = _systemctl("is-active", _UNIT_FILENAME)
+    rc_ac, out_ac, _ = _systemctl("is-active", unit)
     running = rc_ac == 0 and out_ac.strip() == "active"
     pid: int | None = None
     if running:
         rc_sh, out_sh, _ = _systemctl(
-            "show", _UNIT_FILENAME,
+            "show", unit,
             "-p", "MainPID,ActiveEnterTimestampMonotonic",
         )
         if rc_sh == 0:
@@ -162,12 +181,12 @@ def status() -> StatusResult:
 
 
 def start() -> bool:
-    rc, _, _ = _systemctl("start", _UNIT_FILENAME)
+    rc, _, _ = _systemctl("start", _unit_filename())
     return rc == 0
 
 
 def stop() -> bool:
-    rc, _, _ = _systemctl("stop", _UNIT_FILENAME)
+    rc, _, _ = _systemctl("stop", _unit_filename())
     return rc == 0
 
 
@@ -179,7 +198,7 @@ def follow_logs(*, lines: int = 100, follow: bool = False) -> Iterator[str]:
         return
     try:
         proc = subprocess.Popen(
-            ["journalctl", "--user", "-u", _UNIT_FILENAME, "-f", "-n", str(lines)],
+            ["journalctl", "--user", "-u", _unit_filename(), "-f", "-n", str(lines)],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         )
     except OSError:
