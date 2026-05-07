@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import secrets
 import time
-from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, HTTPException

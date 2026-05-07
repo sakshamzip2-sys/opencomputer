@@ -62,7 +62,7 @@ async def events(
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=10.0)
                     yield encode_sse("event", item)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
                 now = time.monotonic()
                 if now - last_keepalive >= 15.0:

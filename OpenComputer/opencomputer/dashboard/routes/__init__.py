@@ -16,7 +16,6 @@ from fastapi import APIRouter
 from opencomputer.dashboard.routes import (  # noqa: F401  (re-exports)
     actions,
     analytics,
-    config as config_routes,
     cron,
     dashboard_meta,
     env,
@@ -31,6 +30,9 @@ from opencomputer.dashboard.routes import (  # noqa: F401  (re-exports)
     skills,
     status,
     tools,
+)
+from opencomputer.dashboard.routes import (
+    config as config_routes,
 )
 
 ALL_ROUTERS: list[APIRouter] = [

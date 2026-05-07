@@ -13,10 +13,12 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator  # noqa: F401  (used in stringified return type)
 from contextlib import contextmanager
+from typing import Any  # noqa: F401  (used in stringified return type)
 
-from fastapi import HTTPException, status as http_status
+from fastapi import HTTPException
+from fastapi import status as http_status
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
@@ -37,7 +39,7 @@ def clamp_limit(
 
 
 @contextmanager
-def get_session_db() -> Iterator["SessionDB"]:  # type: ignore[name-defined]
+def get_session_db() -> Iterator[Any]:
     """Yield a ``SessionDB`` for the active profile.
 
     Lazy-imports to avoid pulling agent.state into module-import time
