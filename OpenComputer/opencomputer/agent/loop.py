@@ -218,6 +218,36 @@ def _maybe_split_system_kwargs(
     return out
 
 
+def _make_cancelled_result(call: ToolCall, partial_stdout: str = "") -> Any:
+    """Build a ToolResult marking a tool as cancelled mid-flight by /steer.
+
+    PR-A Feature 1 helper. For Bash with non-empty captured stdout, the
+    partial output is included so the model can use it on replan; for
+    every other tool, a bare cancellation marker is emitted.
+
+    Imported lazily from plugin_sdk inside the body to avoid widening
+    the module-level import set (ToolResult is already imported within
+    ``_dispatch_tool_calls`` for the same reason).
+    """
+    from plugin_sdk.core import ToolResult
+
+    if call.name == "Bash" and partial_stdout:
+        content = (
+            f"<INTERRUPTED-BY-STEER> partial stdout:\n{partial_stdout}\n"
+            "(remaining work cancelled by user steer)"
+        )
+    else:
+        content = (
+            f"<INTERRUPTED-BY-STEER> tool '{call.name}' cancelled by "
+            "user steer; no partial output captured"
+        )
+    return ToolResult(
+        call_id=call.id or "",
+        content=content,
+        is_error=False,
+    )
+
+
 def _wrap_skill_result_as_tool_messages(
     *,
     skill_name: str,
@@ -3839,10 +3869,89 @@ class AgentLoop:
                         pass
                 return result
 
+        # PR-A Feature 1: cancel-aware dispatch. The SteerRegistry's
+        # per-session cancel event lets /steer interrupt async-yielding
+        # tools mid-flight; the agent loop emits <INTERRUPTED-BY-STEER>
+        # placeholders in their slots so the model sees the interruption
+        # and the next-iteration consume injects the steer text as a
+        # <USER-INTERRUPT> nudge.
+        from opencomputer.agent.steer import (
+            default_registry as _steer_registry_for_dispatch,
+        )
+
+        _cancel_event = (
+            _steer_registry_for_dispatch.cancel_event(session_id)
+            if session_id
+            else None
+        )
+        # Stale-event clear: if a previous turn ended without consuming,
+        # the event may still be set. Clear before this dispatch so we
+        # only react to mid-dispatch fires.
+        if _cancel_event is not None and _cancel_event.is_set():
+            _cancel_event.clear()
+
         if self.config.loop.parallel_tools and self._all_parallel_safe(calls):
-            results = await asyncio.gather(*(_run_one(c) for c in calls))
+            _tasks = [asyncio.create_task(_run_one(c)) for c in calls]
+            _watchers: list[asyncio.Task] = list(_tasks)
+            _cancel_watcher: asyncio.Task | None = None
+            if _cancel_event is not None:
+                _cancel_watcher = asyncio.create_task(_cancel_event.wait())
+                _watchers.append(_cancel_watcher)
+
+            await asyncio.wait(
+                _watchers,
+                return_when=(
+                    asyncio.ALL_COMPLETED
+                    if _cancel_event is None
+                    else asyncio.FIRST_COMPLETED
+                ),
+            )
+
+            if _cancel_event is not None and _cancel_event.is_set():
+                # Steer fired mid-dispatch — cancel pending tools cooperatively.
+                _pending_count = sum(1 for t in _tasks if not t.done())
+                _log.info(
+                    "steer cancel fired mid-dispatch: cancelling "
+                    "%d pending tool(s)",
+                    _pending_count,
+                )
+                for _t in _tasks:
+                    if not _t.done():
+                        _t.cancel()
+                # Brief wait so cooperative cancel can produce partial
+                # output (Bash captured stdout, etc.).
+                try:
+                    await asyncio.wait(_tasks, timeout=2.0)
+                except Exception:  # noqa: BLE001
+                    pass
+                results = []
+                for _c, _t in zip(calls, _tasks):
+                    if _t.done() and not _t.cancelled():
+                        try:
+                            results.append(_t.result())
+                        except Exception:  # noqa: BLE001
+                            results.append(_make_cancelled_result(_c))
+                    else:
+                        results.append(_make_cancelled_result(_c))
+                # NOTE: don't reset_cancel here — between-turn consume
+                # peeks the flag to decide <USER-INTERRUPT> vs <USER-NUDGE>.
+            else:
+                # Normal completion — cancel the watcher, await any tasks
+                # still pending (FIRST_COMPLETED may have left some).
+                if _cancel_watcher is not None and not _cancel_watcher.done():
+                    _cancel_watcher.cancel()
+                _still_pending = [t for t in _tasks if not t.done()]
+                if _still_pending:
+                    await asyncio.gather(*_still_pending, return_exceptions=False)
+                results = [t.result() for t in _tasks]
         else:
-            results = [await _run_one(c) for c in calls]
+            # Serial path: check cancel event between calls.
+            results = []
+            for _c in calls:
+                if _cancel_event is not None and _cancel_event.is_set():
+                    results.append(_make_cancelled_result(_c))
+                    continue
+                results.append(await _run_one(_c))
 
         # TS-T5: subdirectory hint discovery. Append project context files
         # (OPENCOMPUTER.md / AGENTS.md / CLAUDE.md) to the matching tool's
