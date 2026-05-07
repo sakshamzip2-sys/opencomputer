@@ -2,6 +2,8 @@ import { Routes, Route, NavLink } from "react-router-dom";
 import { useApi } from "@/hooks/useApi";
 import type { StatusResponse } from "@/lib/api";
 import { SessionsPage, SessionDetailPage } from "@/pages/SessionsPage";
+import { LogsPage } from "@/pages/LogsPage";
+import { ModelsPage } from "@/pages/ModelsPage";
 
 const Placeholder = ({ name }: { name: string }) => (
   <div className="p-6">
@@ -85,9 +87,13 @@ export default function App() {
           <Route path="/" element={<Placeholder name="Welcome to OpenComputer" />} />
           <Route path="/sessions" element={<SessionsPage />} />
           <Route path="/sessions/:id" element={<SessionDetailPage />} />
-          {NAV.filter(({ path }) => path !== "/sessions").map(({ path, label }) => (
-            <Route key={path} path={path} element={<Placeholder name={label} />} />
-          ))}
+          <Route path="/logs" element={<LogsPage />} />
+          <Route path="/models" element={<ModelsPage />} />
+          {NAV.filter(({ path }) => !["/sessions", "/logs", "/models"].includes(path)).map(
+            ({ path, label }) => (
+              <Route key={path} path={path} element={<Placeholder name={label} />} />
+            ),
+          )}
           <Route
             path="*"
             element={<div className="p-6 text-zinc-400">Not found</div>}
