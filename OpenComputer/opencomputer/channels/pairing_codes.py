@@ -39,7 +39,6 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
 from urllib.parse import quote
 
 logger = logging.getLogger("opencomputer.channels.pairing_codes")
@@ -193,7 +192,7 @@ class PairingCodeStore:
             return {}
         try:
             return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, json.JSONDecodeError):
             backup = path.with_suffix(f"{path.suffix}.corrupt.{int(time.time())}")
             with contextlib.suppress(OSError):
                 shutil.copy2(path, backup)
@@ -213,7 +212,7 @@ class PairingCodeStore:
         with self._rlock, _flock(self._flock_path):
             return user_id in self._load_json(self._approved_path(platform))
 
-    def list_approved(self, platform: Optional[str] = None) -> list[dict]:
+    def list_approved(self, platform: str | None = None) -> list[dict]:
         results: list[dict] = []
         with self._rlock, _flock(self._flock_path):
             platforms = [platform] if platform else self._all_platforms("approved")
@@ -247,7 +246,7 @@ class PairingCodeStore:
 
     def generate_code(
         self, platform: str, user_id: str, user_name: str = ""
-    ) -> Optional[str]:
+    ) -> str | None:
         """Mint a one-time pairing code or return ``None`` on rate-limit /
         lockout / max-pending."""
         with self._rlock, _flock(self._flock_path):
@@ -271,7 +270,7 @@ class PairingCodeStore:
 
     def regenerate_code(
         self, platform: str, user_id: str, user_name: str = ""
-    ) -> Optional[str]:
+    ) -> str | None:
         """Force-mint a fresh code, bypassing the rate limit but honoring
         lockout. Used by ``oc gateway pairing regen`` for admin UX when a
         user lost their original code."""
@@ -297,7 +296,7 @@ class PairingCodeStore:
             self._record_rate_limit(platform, user_id)
             return code
 
-    def approve_code(self, platform: str, code: str) -> Optional[dict]:
+    def approve_code(self, platform: str, code: str) -> dict | None:
         """Approve a pending code. Returns ``{user_id, user_name}`` on
         success, ``None`` if invalid/expired (and records a failure that
         contributes to the lockout counter)."""
@@ -318,7 +317,7 @@ class PairingCodeStore:
                 "user_name": entry.get("user_name", ""),
             }
 
-    def list_pending(self, platform: Optional[str] = None) -> list[dict]:
+    def list_pending(self, platform: str | None = None) -> list[dict]:
         """List pending requests with ``age_minutes`` for table rendering."""
         results: list[dict] = []
         with self._rlock, _flock(self._flock_path):
@@ -339,7 +338,7 @@ class PairingCodeStore:
                     )
         return results
 
-    def clear_pending(self, platform: Optional[str] = None) -> int:
+    def clear_pending(self, platform: str | None = None) -> int:
         """Drop all pending requests. Returns count removed."""
         with self._rlock, _flock(self._flock_path):
             count = 0
@@ -429,8 +428,8 @@ class PairingCodeStore:
         platform: str,
         code: str,
         *,
-        bot_username: Optional[str] = None,
-    ) -> Optional[str]:
+        bot_username: str | None = None,
+    ) -> str | None:
         """Return a one-click admin-approval URL when supported.
 
         Telegram supports ``?start=<payload>`` deep links — if

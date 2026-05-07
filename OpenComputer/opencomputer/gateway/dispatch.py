@@ -22,6 +22,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 from opencomputer.agent.loop import AgentLoop
@@ -702,9 +703,9 @@ class Dispatch:
                 # so the new session_id is stable within the post-reset
                 # window (later messages on the same day reach the same
                 # token; the next reset advances to a new token).
-                from datetime import datetime, timezone as _tz
+                from datetime import datetime
 
-                stamp = datetime.now(tz=_tz.utc).strftime("%Y%m%dT%H%M%S")
+                stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%S")
                 self._chat_reset_tokens[key] = f"{reason}-{stamp}"
                 logger.info(
                     "reset-policy: fresh session for %s:%s (reason=%s)",

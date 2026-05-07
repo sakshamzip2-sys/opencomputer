@@ -26,7 +26,6 @@ from opencomputer.channels.pairing_codes import (
     PairingCodeStore,
 )
 
-
 # ── Code minting ────────────────────────────────────────────────────────────
 
 

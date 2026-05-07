@@ -22,9 +22,10 @@ Spec: docs/superpowers/specs/2026-05-08-messaging-gateway-parity-design.md (§5.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import Callable, Literal
+from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 ResetMode = Literal["off", "daily", "idle", "both"]
 
@@ -105,10 +106,9 @@ class ResetPolicyChecker:
         boundary semantics aligned to their own clock should set
         ``daily_at_hour`` to their preferred UTC hour offset.
         """
-        from datetime import timezone
 
-        last_dt = datetime.fromtimestamp(last_seen, tz=timezone.utc)
-        now_dt = datetime.fromtimestamp(now, tz=timezone.utc)
+        last_dt = datetime.fromtimestamp(last_seen, tz=UTC)
+        now_dt = datetime.fromtimestamp(now, tz=UTC)
         boundary = now_dt.replace(hour=hour, minute=0, second=0, microsecond=0)
         if now_dt < boundary:
             # Today's boundary is in the future — use yesterday's.

@@ -14,7 +14,7 @@ Per-platform overrides via ``ResetPolicyConfig.by_platform``.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -24,13 +24,12 @@ from opencomputer.gateway.reset_policy import (
     ResetPolicyConfig,
 )
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
 def _at(year: int, month: int, day: int, hour: int = 0, minute: int = 0) -> float:
     """Return a stable POSIX timestamp for tests (UTC, ignores DST)."""
-    return datetime(year, month, day, hour, minute, tzinfo=timezone.utc).timestamp()
+    return datetime(year, month, day, hour, minute, tzinfo=UTC).timestamp()
 
 
 # ── Mode: off ──────────────────────────────────────────────────────────────

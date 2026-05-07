@@ -22,7 +22,6 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from opencomputer.channels.pairing_codes import PairingCodeStore
 
@@ -73,7 +72,7 @@ class AllowlistDecision:
     source: str
     """One of: ``allow-all``, ``env-platform``, ``env-global``, ``file``,
     ``pairing-approved``, ``denied``."""
-    pairing_code: Optional[str] = None
+    pairing_code: str | None = None
     user_id: str = ""
 
 

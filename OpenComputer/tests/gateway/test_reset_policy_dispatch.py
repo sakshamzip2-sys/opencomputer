@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -26,7 +26,6 @@ from opencomputer.gateway.reset_policy import (
     ResetPolicyConfig,
 )
 from plugin_sdk.core import MessageEvent, Platform
-
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -177,9 +176,9 @@ async def test_reset_policy_idle_creates_new_session_id(mock_loop, tmp_path):
     )
     assert do_reset is True
     # Use reason + timestamp like dispatch does.
-    from datetime import datetime, timezone as _tz
+    from datetime import timezone as _tz
 
-    stamp = datetime.now(tz=_tz.utc).strftime("%Y%m%dT%H%M%S")
+    stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%S")
     d._chat_reset_tokens[("telegram", "chat-1")] = f"{reason}-{stamp}"
 
     sid_after = d._session_id_for(event1)
