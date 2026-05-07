@@ -279,7 +279,7 @@ class WakeWordDetector:
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=2.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._task.cancel()
                 try:
                     await self._task
@@ -333,10 +333,10 @@ class WakeWordDetector:
                 await asyncio.wait_for(
                     self._stop_event.wait(), timeout=0.08,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
-    async def __aenter__(self) -> "WakeWordDetector":
+    async def __aenter__(self) -> WakeWordDetector:
         await self.start()
         return self
 

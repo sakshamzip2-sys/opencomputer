@@ -7,7 +7,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # RuntimeContext.acp_denied_tools — typed field
 # ---------------------------------------------------------------------------

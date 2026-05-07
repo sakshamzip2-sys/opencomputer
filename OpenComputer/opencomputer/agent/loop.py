@@ -3976,7 +3976,7 @@ class AgentLoop:
                 except Exception:  # noqa: BLE001
                     pass
                 results = []
-                for _c, _t in zip(calls, _tasks):
+                for _c, _t in zip(calls, _tasks, strict=True):
                     if _t.done() and not _t.cancelled():
                         try:
                             results.append(_t.result())
