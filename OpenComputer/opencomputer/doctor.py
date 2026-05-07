@@ -778,6 +778,110 @@ def _check_voice_mode_capable() -> CheckResult:
     )
 
 
+def _check_wake_word_capable() -> CheckResult:
+    """PR-A Feature 2 — verify openwakeword + onnxruntime install.
+
+    Wake-word is opt-in (default off; ships in the ``[wake]`` extra).
+    The check only verifies that ``openwakeword`` and ``onnxruntime``
+    are importable; it does NOT load all bundled models because that
+    would download weights on first run.
+
+    Returns ``info`` when not installed (opt-in feature; doctor
+    exit-code stays clean), ``ok`` when both are importable, ``warning``
+    when one is half-installed (likely environment corruption).
+    """
+    try:
+        import openwakeword  # noqa: F401
+    except ImportError:
+        return CheckResult(
+            ok=True,
+            level="info",
+            message=(
+                "openwakeword not installed (opt-in via "
+                "`pip install opencomputer[wake]`)"
+            ),
+        )
+    try:
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                "openwakeword installed but onnxruntime missing — "
+                "reinstall with `pip install opencomputer[wake]`"
+            ),
+        )
+    # PR-A Feature 2: actually instantiate the Model. This is the
+    # check that surfaces aarch64 / Apple Silicon ONNX runtime issues
+    # at install time rather than at first wake — the deferred-import
+    # path inside ``opencomputer/voice/wake_word.py::_run_loop`` would
+    # otherwise wait until the user runs ``oc voice wake`` to discover
+    # an environment problem. Failure to init reports as ``warning``
+    # rather than ``error`` because wake-word is opt-in and the user
+    # may never run it.
+    try:
+        from openwakeword.model import Model  # type: ignore[import-untyped]
+        Model()
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                f"openwakeword.Model() init failed on this platform: "
+                f"{type(exc).__name__}: {exc}. "
+                "Wake-word will not work; consider re-installing or "
+                "opening a `oc doctor` issue with the message above."
+            ),
+        )
+    return CheckResult(
+        ok=True,
+        level="info",
+        message=(
+            "openwakeword + onnxruntime + Model() init successful"
+        ),
+    )
+
+
+def _check_wake_train_capable() -> CheckResult:
+    """Verify the [wake-train] extra is installable on this platform.
+
+    Imports each training-time dep (torch, openwakeword.train,
+    huggingface_hub, soundfile, piper) and reports info-level if any are
+    missing — training is opt-in like wake-word itself, so a missing
+    dep keeps the doctor exit code clean.
+    """
+    missing: list[str] = []
+    for module_name, hint in (
+        ("torch", "pip install torch>=2.1"),
+        ("openwakeword.train", "pip install 'openwakeword[train]>=0.6'"),
+        ("huggingface_hub", "pip install huggingface_hub>=0.20"),
+        ("soundfile", "pip install soundfile>=0.12"),
+        ("piper", "pip install piper-tts>=1.2"),
+    ):
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append(f"{module_name} ({hint})")
+    if missing:
+        return CheckResult(
+            ok=True,
+            level="info",
+            message=(
+                "wake-train deps missing: "
+                + ", ".join(missing)
+                + " — opt in via `pip install opencomputer[wake-train]`"
+            ),
+        )
+    return CheckResult(
+        ok=True,
+        level="info",
+        message=(
+            "wake-train deps available — `oc voice train-wake` is ready"
+        ),
+    )
+
+
 def _check_browser_control_capable() -> CheckResult:
     """T1.C (browser-control) — verify Playwright is installed.
 
@@ -1173,6 +1277,18 @@ def run_doctor(fix: bool = False) -> int:
     # stays clean for users who haven't pulled the [browser] extra.
     checks.append(
         _result_to_check("browser-control", _check_browser_control_capable())
+    )
+
+    # PR-A Feature 2 (wake-word) — openwakeword + onnxruntime preflight.
+    # Opt-in via [wake] extra; returns info-level when not installed.
+    checks.append(
+        _result_to_check("wake-word", _check_wake_word_capable())
+    )
+
+    # Custom wake-word training preflight — opt-in via [wake-train] extra.
+    # Returns info-level when the user hasn't installed the heavy deps.
+    checks.append(
+        _result_to_check("wake-train", _check_wake_train_capable())
     )
 
     # Plugin-contributed checks + repairs (run last so plugins see a fully-

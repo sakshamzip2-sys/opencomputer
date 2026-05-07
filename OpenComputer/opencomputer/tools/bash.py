@@ -77,6 +77,7 @@ class BashTool(BaseTool):
             # be brittle to profile lookup edge cases.
             env = None
 
+        proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_shell(
                 cmd,
@@ -87,11 +88,67 @@ class BashTool(BaseTool):
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             exit_code = proc.returncode or 0
         except TimeoutError:
+            # PR-A Feature 1: terminate the proc so partial output can
+            # be captured; the call site treats timeout same as cancel.
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.terminate()
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except (TimeoutError, ProcessLookupError):
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
             return ToolResult(
                 tool_call_id=call.id,
                 content=f"Error: command timed out after {timeout}s",
                 is_error=True,
             )
+        except asyncio.CancelledError:
+            # PR-A Feature 1 — Steer Replan-with-Context. The agent
+            # loop's cancel-aware dispatch fires CancelledError on the
+            # _run_one task; we terminate the subprocess and pre-build
+            # a result with whatever stdout was captured before re-
+            # raising so the loop's _make_cancelled_result helper can
+            # surface partial output to the model on replan.
+            partial_stdout = ""
+            if proc is not None:
+                try:
+                    if proc.returncode is None:
+                        proc.terminate()
+                        try:
+                            await asyncio.wait_for(proc.wait(), timeout=1.0)
+                        except (TimeoutError, ProcessLookupError):
+                            try:
+                                proc.kill()
+                            except ProcessLookupError:
+                                pass
+                    # Drain whatever already buffered. communicate() may
+                    # have queued data on the pipe even though the await
+                    # was cancelled.
+                    try:
+                        if proc.stdout is not None:
+                            buf = await asyncio.wait_for(
+                                proc.stdout.read(), timeout=0.5,
+                            )
+                            partial_stdout = buf.decode("utf-8", errors="replace")
+                    except (TimeoutError, Exception):  # noqa: BLE001
+                        pass
+                except Exception:  # noqa: BLE001
+                    pass
+            # Stash the partial output on the cancelled task so the
+            # dispatcher's _make_cancelled_result can pick it up.
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                # Attach as an attribute on the task object — read by
+                # _make_cancelled_result via getattr fallback.
+                try:
+                    object.__setattr__(
+                        current_task, "_pr_a_partial_stdout", partial_stdout,
+                    )
+                except (AttributeError, TypeError):
+                    pass
+            raise
         except Exception as e:
             return ToolResult(
                 tool_call_id=call.id,

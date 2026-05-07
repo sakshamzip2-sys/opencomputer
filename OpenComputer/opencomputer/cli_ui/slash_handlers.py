@@ -437,13 +437,24 @@ def _handle_footer(ctx: SlashContext, args: list[str]) -> SlashResult:
 
 
 def _handle_steer(ctx: SlashContext, args: list[str]) -> SlashResult:
-    """``/steer <text>`` — Wave 5 T3 — Hermes-port (e27b0b765).
+    """``/steer <text>`` — Wave 5 T3 — Hermes-port (e27b0b765) + PR-A.
 
-    In the CLI the chat loop is never mid-turn when the slash dispatcher
-    runs (the prompt is awaiting input), so this is a queue-at-head
-    convenience alias for ``/queue <text>``. In ACP/IDE clients the
-    same command actually interrupts an in-flight turn — see
-    ``opencomputer/acp/server.py::_handle_steer``.
+    Two integration paths:
+
+    1. **Queue-at-head** (legacy, always fires): ``ctx.on_queue_add``
+       drains as the next turn's user message via the existing wave-5
+       T3 mechanism. Keeps the long-standing CLI behaviour where /steer
+       on an idle prompt simply schedules the next message.
+    2. **PR-A cancel-event** (2026-05-07): also calls
+       ``SteerRegistry.submit`` so if a tool is mid-flight (e.g. a
+       long Bash) the agent loop's cancel-aware dispatcher reacts and
+       interrupts. The ack distinguishes "interrupted" (a dispatch was
+       in flight and got cancelled) vs "steered" (queue-only path).
+
+    Cross-references:
+        ``opencomputer/acp/server.py::_handle_steer`` — same contract
+        for IDE clients (also calls SteerRegistry.submit via
+        ``ACPSession.steer``).
     """
     text = " ".join(args).strip()
     if not text:
@@ -451,11 +462,33 @@ def _handle_steer(ctx: SlashContext, args: list[str]) -> SlashResult:
             "[red]/steer needs text[/red] — e.g. `/steer change direction please`"
         )
         return SlashResult(handled=True)
+
+    # PR-A — figure out whether a dispatch was mid-flight BEFORE submit.
+    sid = getattr(ctx, "session_id", "") or ""
+    was_mid_dispatch = False
+    try:
+        from opencomputer.agent.steer import default_registry as _steer_reg
+        if sid and _steer_reg.has_cancel_listener(sid):
+            ev = _steer_reg.cancel_event(sid)
+            # If the event is unset and the listener exists, the agent
+            # loop allocated it for an active dispatch (the loop clears
+            # stale events at the top of each dispatch, so an unset
+            # event means "actively listening").
+            was_mid_dispatch = not ev.is_set()
+        # Always submit so the cancel signal reaches the dispatcher.
+        if sid:
+            _steer_reg.submit(sid, text)
+    except Exception:  # noqa: BLE001 — never break the slash path
+        pass
+
+    # Queue-add for legacy compat (drains as next-turn user message).
     ok = ctx.on_queue_add(text)
+
     if ok:
         preview = text if len(text) <= 80 else text[:77] + "..."
+        status = "interrupted" if was_mid_dispatch else "steered"
         ctx.console.print(
-            f"[green]steered[/green] — next turn will use: [dim]{preview}[/dim]"
+            f"[green]{status}[/green] — next turn will use: [dim]{preview}[/dim]"
         )
     else:
         ctx.console.print(

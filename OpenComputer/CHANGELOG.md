@@ -4,6 +4,67 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Custom wake-word training (2026-05-07)
+
+- **`oc voice train-wake`** — produces a `hey_open_computer.onnx` (or any
+  custom phrase) on the user's CPU in ~30 minutes. Cross-platform
+  (macOS + Linux primary; Windows best-effort); no GPU. Behind the new
+  `[wake-train]` extra (`pip install opencomputer[wake-train]` — pulls
+  torch, openwakeword[train], huggingface_hub, soundfile, piper-tts).
+  The trained ONNX lands at `<profile_home>/wake_models/<word>.onnx`.
+  Verify install with `oc doctor wake-train`.
+- **Wake-word auto-discovery** — `WakeWordDetector` now checks
+  `<profile_home>/wake_models/<word>.onnx` before falling back to
+  `hey_jarvis`. Closes the loop opened by PR-A's `hey_open_computer`
+  default — the trained model is picked up automatically by
+  `oc voice wake` on subsequent runs without `--model`.
+- **Honest budget surfaced in `--help`** — 30 min on CPU is the training
+  step alone. First run downloads ~50 MB of negative audio (~1 min);
+  sample synthesis takes ~3 min. Total: ~35 min cold, ~30 min cache-hit.
+  `--samples 1500` (~60-70 min) generally improves recall by ~5-10 ppts.
+  `--quick` (~2 min) verifies the pipeline but the model is NOT usable.
+- **Cross-platform sample synthesis** — replaces the Linux-only
+  `piper-sample-generator` with a direct piper-tts driver
+  (`opencomputer.voice.tts_piper.synthesize_to_path`) + per-call prosody
+  jitter (length_scale, noise_scale, noise_w_scale) across 4 default
+  voices (2 US, 2 UK; mix male/female). Works on macOS arm64.
+- **Phase-tagged exit codes** — 0 success, 2 user-cancelled,
+  3 missing-deps, 4 upstream openwakeword crash, 5 sanity-check
+  failure (ONNX written but corrupt). Tempdir at
+  `<profile_home>/cache/wake_train/<word>-<ts>/` is preserved on any
+  failure for debugging; cleaned on success unless `--keep-cache`.
+- **Atomic write semantics** — trained ONNX is written via tmp-name +
+  `Path.replace`, so a crashed training run can never corrupt a
+  previously-good model at the destination.
+- **`oc doctor wake-train`** — opt-in feature preflight. Info-level
+  when training deps aren't installed (so `oc doctor` exit code stays
+  clean for users who don't want training).
+
+### Added — PR-A 2026-05-07 (Steer Replan + Voice Wake + ACP Expansion)
+
+- **Steer Replan-with-Context** — `/steer` now interrupts mid-tool-call. `SteerRegistry` gains a per-session `asyncio.Event` (allocate-if-missing semantics so signals are never lost) plus `cancel_event()`, `has_cancel_listener()`, and `reset_cancel()` API. `_dispatch_tool_calls` wraps the existing `asyncio.gather` with `asyncio.wait(FIRST_COMPLETED)` watching the event; on fire, pending tasks are cancelled cooperatively (2s grace window) and `_make_cancelled_result()` emits an `<INTERRUPTED-BY-STEER>` ToolResult in their slot. Bash captures partial stdout; other tools emit a bare marker. Cancellation only fires at `await` boundaries — synchronous tools (Read/Glob/Grep) finish their current syscall before honoring it; documented honestly. Between-turn consume now drives `<USER-INTERRUPT>` vs `<USER-NUDGE>` prefix decision via `format_nudge_message(was_interrupted=...)`.
+- **`SteerBuffer`** — per-session inbound-message buffer for replan merge. Cap=5; drop-oldest; logged. Gateway dispatch routes inbound messages to it during the cancel-pending window so they get merged into the next-turn replan rather than queuing up as separate sequential turns.
+- **Voice Wake** (default OFF, opt-in via `[wake]` extras) — `oc voice wake` listens for a wake-word via openWakeWord (Apache 2.0, ONNX, CPU). The conceptual default is `hey_open_computer`; this is NOT bundled with openwakeword (no ONNX ships for it) so the detector auto-falls-back to `hey_jarvis` (bundled) and logs a hint pointing at the openWakeWord training pipeline (~30 min on CPU). Bundled wake-words available without training: `hey_jarvis`, `alexa`, `hey_mycroft`, `hey_rhasspy`, `ok_google`. State machine: `IDLE → DETECTED → SPEAKING → IDLE`. PID-file singleton at `<profile_home>/voice_wake.pid` blocks concurrent instances; stale pids auto-cleared.
+- **`oc doctor wake-word`** — opt-in feature preflight; info-level when not installed (doctor exit-code stays clean), warning when half-installed, info-level OK when both `openwakeword` + `onnxruntime` importable.
+- **ACP per-session permissions** — new `setSessionPermissions(sessionId, allowedTools?, deniedTools?)` JSON-RPC method on `ACPServer`. Race-safe: applies to future tool dispatches only; in-flight tools complete unaffected. Omitted fields preserved; empty list clears.
+- **Typed `RuntimeContext.acp_denied_tools: frozenset[str]`** — promoted from `runtime.custom` dict to a typed field because (a) it's a load-bearing security gate, (b) free-form dicts get stomped silently. Consulted in `_dispatch_tool_calls` just after the consent gate and before PreToolUse hooks; denied tools get blocked-marker ToolResults.
+- **Tier-aware ACP approvals** — `requestPermission` and `make_approval_callback` accept a `tier` / `default_tier` parameter (`IMPLICIT` / `EXPLICIT` / `PER_ACTION` / `DELEGATED` — mirrors `plugin_sdk.consent.ConsentTier` exactly). Validated at construction; bad value raises `ValueError` so the IDE can surface it.
+
+### Added — PR-A depth pass (no shortcuts, end-to-end wiring)
+
+- **CLI + ACP /steer integration with SteerRegistry** — `cli_ui/slash_handlers.py::_handle_steer` and `acp/session.py::ACPSession.steer` both now call `SteerRegistry.submit`, so /steer fires the cancel event mechanism uniformly across CLI / Telegram / wire / ACP. CLI ack distinguishes "interrupted" (a dispatch was mid-flight) vs "steered" (queue-only).
+- **ACP /cancel bridges to steer cancel event** — `ACPSession.cancel()` now also signals `SteerRegistry.cancel_event` so the agent loop's cancel-aware tool dispatcher interrupts in-flight async-yielding tools when an IDE issues `cancel`. Pending nudge text is cleared (cancel ≠ replan-with-X).
+- **Production wake-word audio capture** — `_run_loop` now spawns a sounddevice `InputStream` at 16 kHz mono int16 with 1280-sample (80ms) blocks, feeds frames through an asyncio.Queue to `openwakeword.Model.predict`, and fires the user callback when the active word's score crosses the threshold. Cooldown of 1.5s after each fire suppresses repeated triggers from a single utterance. Audio thread → asyncio bridge via `call_soon_threadsafe` + drop-on-backpressure (no audio-thread blocks).
+- **Wake-word pause/resume API** — `WakeWordDetector.pause()` closes the InputStream so a downstream consumer (voice-mode) can claim the mic; `resume()` reopens. The CLI's on-detect callback uses this to hand off to the existing voice-mode push-to-talk pipeline (`run_single_turn`) for one turn after each wake fire, then resumes wake detection.
+- **CLI wake hand-off** — `oc voice wake --handoff` (default ON) opens a 8-second post-wake recording window, runs VAD/STT/agent/TTS, then resumes wake. `--no-handoff` keeps the print-only behaviour for threshold tuning.
+- **Bash partial-stdout capture on cancel** — `BashTool.execute()` catches `CancelledError`, terminates the subprocess gracefully (with kill fallback), drains buffered stdout from the pipe, and stashes it on the asyncio.Task as `_pr_a_partial_stdout` before re-raising. The dispatcher's `_make_cancelled_result` reads the stash and includes the partial output in the `<INTERRUPTED-BY-STEER>` ToolResult so the model sees what got done before the interrupt.
+- **`oc doctor wake` actually inits Model** — beyond importing openwakeword + onnxruntime, the check now constructs `Model()` so platform-specific ONNX runtime failures (Apple Silicon aarch64 corner cases, manylinux drift) surface at install time rather than at first wake.
+- **ACP lifecycle hooks bridged** — `ACPServer._handle_new_session` fires `HookEvent.SESSION_START`; `serve_stdio` fires `SESSION_END` for every active session on transport close. Plugins observing the agent lifecycle (analytics, audit log, awareness) now see ACP-driven sessions on the same event channel as CLI / gateway-driven ones.
+
+### Notes
+
+- All deferrals from the design doc (`docs/superpowers/specs/2026-05-07-pr-a-steer-wake-acp-design.md`) are explicitly listed in the spec's "Out of scope" section.
+
 ### Added — social-traces
 
 - **`social-traces` bundled extension — community trace network (Phases 1–9 + 12).** Opt-in, default-disabled plugin that queries a shared [OpenHub](https://github.com/sakshamzip2-sys/openhub) endpoint pre-task for matching TraceCards (admin-curated, redacted task summaries) and submits a distilled TraceCard post-task. Three-Haiku distillation flow (intent + steps + insight + LLM tag-extract), session-level cache, per-profile tag-bias accumulator, per-profile `state.json` gate, outbox-on-network-failure (in-memory drain at this revision; on-disk persistence deferred). HTTP backend (`HttpTraceNetworkClient`) with httpx soft timeouts. Wizard step asks once during full setup. `opencomputer traces {enable,disable,status,inbox,outbox,history,dry-run,audit-redactor,rotate-id}` CLI surface. README section + plan doc at `docs/plans/social-traces-plugin.md`. ~80 new tests across `test_social_traces_phase{1..9}*.py`, `test_social_traces_dogfood_fixes.py`, `test_social_traces_http_client.py`. Network-side server lives in a separate private repo at `~/Documents/GitHub/openhub/`.

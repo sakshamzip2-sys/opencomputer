@@ -75,6 +75,14 @@ class ACPSession:
         self.pending_user_text: str | None = None
         self.queued: list[QueuedMessage] = []
 
+        # PR-A Feature 3 (2026-05-07) — per-session tool gates set by
+        # ACP ``setSessionPermissions``. ``denied_tools`` is consulted
+        # by the agent loop's ``_dispatch_tool_calls``; ``allowed_tools``
+        # is descriptive metadata for the IDE display (not currently
+        # enforced — denylist is the security gate).
+        self.allowed_tools: frozenset[str] = frozenset()
+        self.denied_tools: frozenset[str] = frozenset()
+
     def emit_event(self, method: str, params: Any) -> None:
         """Send a JSON-RPC notification to the ACP client and buffer in event_queue."""
         self._send(method, params)
@@ -195,9 +203,40 @@ class ACPSession:
         return final_content
 
     async def cancel(self) -> bool:
-        """Signal cancellation. Returns True if a prompt was in flight."""
+        """Signal cancellation. Returns True if a prompt was in flight.
+
+        PR-A Feature 1 (2026-05-07) bridge: ACP /cancel and /steer have
+        distinct *intents* (cancel = abandon the prompt entirely; steer
+        = stop tools and replan with new context) but they share the
+        *mechanism* — both should signal the SteerRegistry's per-session
+        cancel event so the agent loop's cancel-aware tool dispatcher
+        interrupts in-flight async-yielding tools.
+
+        ACP cancel additionally clears any pending steer text so the
+        next-turn consume doesn't mistake "cancel" for "replan with X".
+        """
         was_running = not self._cancel_event.is_set()
         self._cancel_event.set()
+        # PR-A bridge — also signal the steer cancel mechanism so
+        # async-yielding tools (Bash, WebFetch, browser, MCP) interrupt
+        # mid-flight. Clear pending steer text + reset the registry's
+        # cancel flag after firing so the next turn starts fresh.
+        try:
+            from opencomputer.agent.steer import (
+                default_registry as _steer_registry,
+            )
+            # submit() with a sentinel-empty string is a no-op (drops
+            # whitespace nudges), so we set the event directly via the
+            # public API.
+            _steer_registry.cancel_event(self.session_id).set()
+            # Clear pending nudge — ACP cancel != steer-replan.
+            _steer_registry.clear(self.session_id)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "acp: SteerRegistry cancel-event signal failed for "
+                "session %s — agent loop may not interrupt mid-tool",
+                self.session_id, exc_info=True,
+            )
         return was_running
 
     # ─── Wave 5 T3 — /steer + /queue (Hermes e27b0b765 port) ─────────
@@ -220,6 +259,28 @@ class ACPSession:
         self.is_running = False
         self.is_interrupted = False
 
+    def update_permissions(
+        self,
+        *,
+        allowed: frozenset[str] | None = None,
+        denied: frozenset[str] | None = None,
+    ) -> None:
+        """Update per-session allow/deny tool lists.
+
+        PR-A Feature 3 (2026-05-07): IDE clients call this via the
+        ``setSessionPermissions`` ACP method. Race-safe by design —
+        the agent loop reads ``denied_tools`` only at dispatch entry,
+        so in-flight tool calls always complete; updates take effect
+        on the next dispatch.
+
+        ``None`` for either argument means "leave unchanged"; pass an
+        empty frozenset to clear.
+        """
+        if allowed is not None:
+            self.allowed_tools = allowed
+        if denied is not None:
+            self.denied_tools = denied
+
     async def steer(self, text: str) -> None:
         """Interrupt the current turn with new user text.
 
@@ -228,9 +289,29 @@ class ACPSession:
         it consumes ``pending_user_text`` and treats it as the next user
         message. On idle sessions, the steered text simply queues as
         the next user message.
+
+        PR-A Feature 1 (2026-05-07): also signals the SteerRegistry's
+        per-session cancel event so the agent loop's cancel-aware tool
+        dispatcher interrupts in-flight async-yielding tools mid-call.
+        Without this bridge, ACP /steer would still rely on the legacy
+        ``is_interrupted`` flag (consumed only at next-turn entry) and
+        would NOT interrupt mid-tool-call work — which is the whole
+        point of replan-with-context.
         """
         self.is_interrupted = True
         self.pending_user_text = text
+        # PR-A Feature 1 bridge — ensure the agent loop reacts mid-flight.
+        try:
+            from opencomputer.agent.steer import (
+                default_registry as _steer_registry,
+            )
+            _steer_registry.submit(self.session_id, text)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "acp: SteerRegistry.submit failed for session %s — "
+                "legacy is_interrupted flag still applies",
+                self.session_id, exc_info=True,
+            )
 
     async def queue(self, text: str) -> None:
         """Append text to drain after the current turn finishes.
