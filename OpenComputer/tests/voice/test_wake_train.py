@@ -188,7 +188,7 @@ def test_synthesize_positives_renders_word_with_spaces(tmp_path, monkeypatch):
         word="hey_open_computer",
         out_path=tmp_path / "out.onnx",
         profile_home=tmp_path,
-        num_positives=4,
+        num_positives=12,
         num_voices=1,
     )
     wake_train.synthesize_positives(
@@ -196,6 +196,7 @@ def test_synthesize_positives_renders_word_with_spaces(tmp_path, monkeypatch):
         rng_seed=42,
     )
     assert all(t == "hey open computer" for t in seen_text)
+    assert len(seen_text) == 12
 
 
 # ---------------------------------------------------------------------------
