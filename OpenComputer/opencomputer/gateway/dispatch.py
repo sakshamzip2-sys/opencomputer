@@ -485,8 +485,13 @@ class Dispatch:
             if isinstance(raw, str) and raw.strip():
                 thread_hint = raw.strip()
         platform_value = event.platform.value if event.platform else ""
+        # Defensive: callers that bypass __init__ (e.g.,
+        # Dispatch.__new__(Dispatch) in tests) won't have _chat_reset_tokens.
+        # The reset path is opt-in; falling back to no token preserves the
+        # legacy behavior for those callers.
+        reset_tokens = getattr(self, "_chat_reset_tokens", {})
         token_key = (platform_value, event.chat_id)
-        reset_token = self._chat_reset_tokens.get(token_key)
+        reset_token = reset_tokens.get(token_key)
         if reset_token:
             # Compose with thread_hint so explicit cron threads still
             # partition cleanly inside the reset boundary.
