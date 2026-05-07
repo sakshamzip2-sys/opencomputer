@@ -461,6 +461,26 @@ class GatewayConfig:
     startup_ping_chats: tuple[tuple[str, str], ...] = ()
     startup_ping_message: str = "OpenComputer back online"
 
+    # ─── Per-platform session reset (PR-1, 2026-05-08) ────────────────
+    # Hermes-spec parity: drop a chat's session_id under inactivity / daily
+    # crossings so a "fresh chat each morning" UX is the default. Per-platform
+    # overrides via ``reset_by_platform`` carry tuned thresholds (e.g., Slack
+    # channels reset more aggressively than 1:1 Telegram chats).
+    #
+    # Configure via ~/.opencomputer/<profile>/config.yaml:
+    #
+    #   gateway:
+    #     reset_mode: both          # off | daily | idle | both
+    #     reset_daily_at_hour: 4    # UTC hour 0–23
+    #     reset_idle_minutes: 1440  # 24h
+    #     reset_by_platform:
+    #       telegram: { mode: idle, idle_minutes: 240 }
+    #       discord:  { mode: idle, idle_minutes: 60 }
+    reset_mode: str = "both"
+    reset_daily_at_hour: int = 4
+    reset_idle_minutes: int = 1440
+    reset_by_platform: dict = field(default_factory=dict)
+
 
 @dataclass(frozen=True, slots=True)
 class DeepeningConfig:
