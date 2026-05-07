@@ -109,6 +109,13 @@ async def parse_structured[T: BaseModel](
         max_tokens=max_tokens,
         response_schema=spec,
     )
+    # Hermes-followup 2026-05-07 — record cost into active session.
+    try:
+        from opencomputer.agent.usage_pricing import record_response_for_provider
+
+        record_response_for_provider(provider=provider, model=model, response=response)
+    except Exception:  # noqa: BLE001
+        pass
 
     text = (response.message.content or "").strip()
     if not text:

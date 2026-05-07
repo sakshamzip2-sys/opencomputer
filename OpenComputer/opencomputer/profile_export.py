@@ -481,9 +481,15 @@ def import_profile(
                 continue
             # Path-traversal safety
             target = (target_profile_dir / rel).resolve()
+            # Path-traversal safety — Hermes-followup 2026-05-07
+            # delegates to the canonical helper.
+            from opencomputer.security.path_safety import (
+                UnsafePathError,
+                assert_safe_path,
+            )
             try:
-                target.relative_to(target_profile_dir.resolve())
-            except ValueError as exc:
+                assert_safe_path(target, roots=[target_profile_dir])
+            except UnsafePathError as exc:
                 raise ValueError(
                     f"archive contains unsafe path: {member.name}"
                 ) from exc

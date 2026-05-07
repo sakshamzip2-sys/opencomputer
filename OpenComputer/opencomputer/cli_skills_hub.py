@@ -201,6 +201,138 @@ def do_update(identifier: str, yes: bool = False) -> bool:
     return do_install(identifier, yes=True)
 
 
+def do_publish(
+    skill_dir: str,
+    *,
+    tap: str | None = None,
+    strict: bool = True,
+) -> bool:
+    """Validate a skill dir and (optionally) stage it into a tap clone.
+
+    Hermes-followup 2026-05-07 — closes the doc-flagged "publish" gap
+    in the skills hub. Two modes:
+
+    - **Default (no ``--tap``):** validate + print copy-paste instructions
+      so the user can either commit to a tap repo or re-run with
+      ``--tap user/repo``.
+    - **--tap user/repo:** the tap MUST already be registered via
+      ``oc skill tap-add``. Locates a local clone of the tap, copies
+      the skill dir into it, and prints the ``git add && git commit
+      && git push`` command for the user to execute. We deliberately
+      DO NOT auto-push — authorship + signing + commit-message belong
+      to the user.
+
+    Returns ``True`` on success, ``False`` on validation failure or
+    user-facing error. Caller (the CLI command) raises ``typer.Exit``
+    on False.
+    """
+    from opencomputer.skills_hub.agentskills_validator import (
+        validate_skill_dir,
+    )
+
+    src = Path(skill_dir).expanduser().resolve()
+    if not src.is_dir():
+        console.print(f"[red]not a directory:[/] {src}")
+        return False
+    if not (src / "SKILL.md").exists():
+        console.print(f"[red]SKILL.md not found in:[/] {src}")
+        console.print(
+            "[dim]Every skill needs a SKILL.md with the agentskills.io "
+            "frontmatter (name, description, type, …).[/]"
+        )
+        return False
+
+    report = validate_skill_dir(src, strict=strict)
+    if report.errors:
+        console.print("[red]validation failed:[/]")
+        for err in report.errors:
+            console.print(f"  [red]✗[/] {err.rule}: {err.message}")
+        return False
+    if report.warnings:
+        console.print("[yellow]validation warnings (not blocking):[/]")
+        for w in report.warnings:
+            console.print(f"  [yellow]⚠[/] {w.rule}: {w.message}")
+
+    skill_name = src.name
+
+    if tap is None:
+        # No tap target — just print instructions.
+        console.print(f"[green]✓ skill {skill_name!r} validated.[/]")
+        console.print()
+        console.print("Next steps to publish:")
+        console.print(
+            "  1. Tap a GitHub repo you control:  "
+            "[cyan]oc skill tap add <user>/<repo>[/]"
+        )
+        console.print(
+            "  2. Re-run:  "
+            f"[cyan]oc skill publish {src} --tap <user>/<repo>[/]"
+        )
+        console.print()
+        console.print(
+            "[dim]Or commit your skill directly to any of your registered "
+            "taps; the hub will pick it up on next browse.[/]"
+        )
+        return True
+
+    # --tap mode: stage into a local tap clone.
+    tap_clone = _resolve_tap_clone(tap)
+    if tap_clone is None:
+        console.print(f"[red]could not locate local clone for tap:[/] {tap}")
+        console.print(
+            "[dim]Expected a git checkout under "
+            "~/.opencomputer/<profile>/skills/.taps/<repo>/. Clone the "
+            "tap repo there, then re-run.[/]"
+        )
+        return False
+    target = tap_clone / "skills" / skill_name
+    if target.exists():
+        console.print(
+            f"[yellow]target already exists:[/] {target}"
+        )
+        console.print(
+            "[dim]Remove or rename the existing copy and re-run, or "
+            "manually merge your changes.[/]"
+        )
+        return False
+
+    import shutil
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, target)
+    console.print(f"[green]✓ staged[/] {skill_name} → {target}")
+    console.print()
+    console.print("Now commit + push:")
+    console.print(f"  cd {tap_clone}")
+    console.print(f"  git add skills/{skill_name}")
+    console.print(f"  git commit -m 'Add skill: {skill_name}'")
+    console.print("  git push")
+    console.print()
+    console.print(
+        "[dim]After push, anyone with the tap registered will see the "
+        "skill via [bold]oc skill search[/bold].[/]"
+    )
+    return True
+
+
+def _resolve_tap_clone(tap: str) -> Path | None:
+    """Find the local checkout for a registered tap, or None.
+
+    Conventions: ``~/.opencomputer/<profile>/skills/.taps/<repo-name>/``.
+    Returns ``None`` if the tap isn't registered or the clone is missing.
+    """
+    mgr = TapsManager(_hub_root() / "taps.json")
+    if tap not in mgr.list():
+        return None
+    repo_name = tap.split("/", 1)[1]
+    candidate = _hub_root() / ".taps" / repo_name
+    if not candidate.is_dir():
+        return None
+    if not (candidate / ".git").exists():
+        return None
+    return candidate
+
+
 # --- attach_hub_commands: plumb commands into the existing skills_app ---
 
 
@@ -279,6 +411,22 @@ def attach_hub_commands(app: typer.Typer) -> None:
         yes: bool = typer.Option(False, "--yes", "-y"),
     ) -> None:
         do_update(identifier, yes=yes)
+
+    @app.command("publish")
+    def cmd_publish(
+        skill_dir: str = typer.Argument(
+            ..., help="Path to the skill directory (contains SKILL.md)"
+        ),
+        tap: str | None = typer.Option(
+            None, "--tap",
+            help="Stage into a registered tap (user/repo). "
+                 "Omit to just validate + print instructions.",
+        ),
+    ) -> None:
+        """Validate a local skill, optionally stage it for publishing via a tap."""
+        ok = do_publish(skill_dir, tap=tap)
+        if not ok:
+            raise typer.Exit(code=1)
 
     # Tap subgroup — manage GitHub repos as additional skill sources.
     tap_app = typer.Typer(

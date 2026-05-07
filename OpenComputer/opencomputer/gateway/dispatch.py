@@ -218,41 +218,48 @@ def _format_user_facing_error(exc: Exception) -> str:
 
     The full traceback is logged via ``logger.exception`` at the call
     site — this only shapes what the *user* sees on Telegram / Discord
-    / etc. Keying off ``status_code`` works for Anthropic, OpenAI, and
-    httpx exceptions uniformly; class-name fallback handles network-
-    layer errors that never produced an HTTP response.
+    / etc. Categorisation flows through
+    :func:`opencomputer.agent.error_classifier.classify` so all retry/
+    rotation/render paths agree on what counts as which kind of error.
 
     Pure function (no Dispatch state) so unit tests + downstream
     error-presentation code can call it directly.
     """
+    from opencomputer.agent.error_classifier import ErrorCategory, classify
+
     name = type(exc).__name__
+    category = classify(exc)
     status = getattr(exc, "status_code", None)
 
-    # Network-layer — connection refused, DNS failure, TCP timeout. No HTTP
-    # status was ever produced. Class-name match because httpx + the SDKs
-    # use these names without a shared base class we can isinstance-check.
-    if name in {
-        "APIConnectionError", "APITimeoutError", "ConnectError",
-        "ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout",
-    }:
+    if category is ErrorCategory.NETWORK or category is ErrorCategory.TIMEOUT:
         return ("Can't reach the model server right now (network issue). "
                 "Try again in a moment.")
 
-    if status == 429 or name == "RateLimitError":
+    if category is ErrorCategory.RATE_LIMITED:
         return ("Rate-limited by the model provider. "
                 "Try again in a few seconds.")
 
-    if status in (401, 403) or name in {
-        "AuthenticationError", "PermissionDeniedError",
-    }:
+    if category is ErrorCategory.AUTH:
         return ("Authentication failed — your API key may be invalid or "
                 "your provider proxy is misconfigured.")
 
-    if isinstance(status, int) and 500 <= status < 600:
-        return (f"The model service returned an error ({status}). "
+    if category is ErrorCategory.QUOTA:
+        return ("Plan/quota exceeded — top up the provider account "
+                "or switch to a different key.")
+
+    if category is ErrorCategory.SERVER:
+        if isinstance(status, int):
+            return (f"The model service returned an error ({status}). "
+                    "This is usually transient — try again in a moment.")
+        return ("The model service returned an error. "
                 "This is usually transient — try again in a moment.")
 
-    # Unknown / unmapped — keep the class name so logs can be grepped,
+    if category is ErrorCategory.BAD_REQUEST:
+        return ("The request was rejected as invalid — this is usually a "
+                "bug in the agent or an unsupported model feature. "
+                "Check the gateway logs.")
+
+    # UNKNOWN / unmapped — keep the class name so logs can be grepped,
     # but don't dump the raw exception args (those often contain the
     # offending prompt or an SDK-internal kwarg dump).
     return (f"Sorry, something went wrong ({name}). "

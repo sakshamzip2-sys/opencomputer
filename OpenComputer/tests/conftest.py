@@ -327,6 +327,16 @@ def _register_groq_provider_alias() -> None:
     )
 
 
+def _register_memory_mem0_alias() -> None:
+    """Hermes A3 — Mem0 memory backend extension. Eager-exec so tests can
+    ``from extensions.memory_mem0.provider import Mem0Provider``.
+    """
+    _register_extension_alias(
+        "memory_mem0", _EXT_DIR / "memory-mem0",
+        submodules=("provider", "plugin"),
+    )
+
+
 _register_coding_harness_alias()
 _register_aws_bedrock_provider_alias()
 _register_browser_bridge_alias()
@@ -353,3 +363,4 @@ _register_affect_injection_alias()
 _register_screen_awareness_alias()
 _register_ollama_provider_alias()
 _register_groq_provider_alias()
+_register_memory_mem0_alias()

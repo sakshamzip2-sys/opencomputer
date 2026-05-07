@@ -585,6 +585,29 @@ class AgentLoop:
         # logs a warning in that case).
         from opencomputer.agent import context_engine_registry as _ctx_registry
 
+        # Hermes B4 follow-up — record compaction LLM calls into ``llm_calls``
+        # so insights reflects the *full* conversation cost, not just the
+        # user-visible reply. Closure reads ``self._current_session_id``
+        # at call-time so it picks up the active session even though
+        # CompactionEngine is constructed once.
+        def _record_compaction_usage(usage: Any) -> None:
+            try:
+                from opencomputer.agent.usage_pricing import record_call_from_usage
+
+                provider_name = getattr(provider, "name", "") or type(
+                    provider
+                ).__name__.lower().replace("provider", "")
+                record_call_from_usage(
+                    db=self.db,
+                    session_id=self._current_session_id or "",
+                    provider=provider_name,
+                    model=config.model.model,
+                    usage=usage,
+                    batch=False,
+                )
+            except Exception:  # noqa: BLE001
+                pass  # best-effort telemetry
+
         engine_name = getattr(config.loop, "context_engine", "compressor")
         self.compaction = _ctx_registry.build(
             engine_name,
@@ -592,11 +615,13 @@ class AgentLoop:
             model=config.model.model,
             disabled=compaction_disabled,
             memory_bridge=self.memory_bridge,
+            usage_recorder=_record_compaction_usage,
         ) or CompactionEngine(
             provider=provider,
             model=config.model.model,
             disabled=compaction_disabled,
             memory_bridge=self.memory_bridge,
+            usage_recorder=_record_compaction_usage,
         )
         # Phase 11d: third-pillar episodic memory. Records one event per
         # completed turn for cross-session "remind me" queries via FTS5.
@@ -749,6 +774,18 @@ class AgentLoop:
         self._runtime = runtime or DEFAULT_RUNTIME_CONTEXT
         # Expose current session id to memory tools via the context provider.
         self._current_session_id = sid
+        # Hermes-followup 2026-05-07 — publish (session_id, db) on
+        # ContextVars so auxiliary callers (title-gen daemon thread,
+        # judge-reviewer, dreaming, recall-synthesizer, aux_llm)
+        # can record their LLM cost into ``llm_calls`` without
+        # signature changes. Daemon threads spawned via copy_context()
+        # inherit these.
+        try:
+            from opencomputer.agent.usage_pricing import set_active_session
+
+            set_active_session(sid, self.db)
+        except Exception:  # noqa: BLE001
+            pass
         # Item 2 fix (2026-05-02): reset pause_turn counter per conversation.
         # Without this, a long-lived AgentLoop (gateway/daemon mode) handling
         # multiple sequential conversations would leak the counter — session B
@@ -3490,6 +3527,27 @@ class AgentLoop:
                 model=model_name,
             )
         )
+
+        # Hermes B4: per-call cost recording. Best-effort — telemetry must
+        # not wedge the loop, so swallow any exception. Idempotency is
+        # guaranteed by placement: we land here only on successful provider
+        # response; retries raise before this point.
+        try:
+            from opencomputer.agent.usage_pricing import record_call_from_usage
+
+            provider_name = getattr(self.provider, "name", "") or type(
+                self.provider
+            ).__name__.lower().replace("provider", "")
+            record_call_from_usage(
+                db=self.db,
+                session_id=session_id or "",
+                provider=provider_name,
+                model=model_name,
+                usage=resp.usage,
+                batch=False,
+            )
+        except Exception:  # noqa: BLE001
+            _log.debug("usage_pricing.record_call_from_usage swallowed", exc_info=True)
 
         return StepOutcome(
             stop_reason=stop,

@@ -1,0 +1,16 @@
+{
+  "id": "memory-mem0",
+  "name": "Mem0 Memory (cloud or self-hosted)",
+  "version": "0.1.0",
+  "description": "Vector-ranked fact memory backed by Mem0 (mem0.ai). Provides semantic recall across sessions; complements Honcho.",
+  "kind": "provider",
+  "entry": "plugin",
+  "schema_version": 4,
+  "min_host_version": "2026.5.5",
+  "profiles": ["*"],
+  "enabled_by_default": false,
+  "tool_names": ["mem0_search", "mem0_remember", "mem0_forget"],
+  "activation": {
+    "on_tools": ["mem0_search", "mem0_remember", "mem0_forget"]
+  }
+}

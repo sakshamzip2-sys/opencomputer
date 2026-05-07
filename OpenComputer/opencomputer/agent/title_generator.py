@@ -102,6 +102,13 @@ def call_llm(
             temperature=temperature,
         )
     )
+    # Hermes-followup 2026-05-07 — record cost into active session.
+    try:
+        from opencomputer.agent.usage_pricing import record_response_for_provider
+
+        record_response_for_provider(provider=provider, model=model, response=response)
+    except Exception:  # noqa: BLE001
+        pass
     text = response.message.content if response and response.message else ""
     return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=text))]

@@ -7,12 +7,13 @@ tool dispatch. Answers questions like:
 - "Which tool errors out most often?"
 - "Is web_search costing me 60% of my time?"
 
-Cost attribution requires per-call provider/cost data which the loop
-doesn't yet record (one pricing model per provider lives in
-``opencomputer/cost_guard/`` but it's per-day-aggregate). This CLI
-ships the *time-and-count* slice now; cost columns join on a follow-up
-once the loop also records per-call ``cost_usd`` (deferred so this PR
-stays small).
+Subcommands:
+
+- ``insights llm`` — recent LLM call activity from ``llm_events.jsonl``
+  (file-based sink; cache-hit ratio + cost roll-up).
+- ``insights cost`` — provider-level cost roll-up from the queryable
+  ``llm_calls`` SQLite table (Hermes B4, schema v13). Renders ``—`` for
+  rows where pricing is unknown rather than fake-zero.
 """
 
 from __future__ import annotations
@@ -219,6 +220,119 @@ def insights_llm_command(
     for site, events in sorted_sites:
         cost = sum(d.get("cost_usd") or 0 for d in events)
         typer.echo(f"    {site:24} {len(events):>5}  ${cost:>5.2f}")
+
+
+@insights_app.command("cost")
+def insights_cost_command(
+    days: Annotated[
+        int,
+        typer.Option(
+            "--days", "-d",
+            help="Time window in days. Default 7. Use 0 for all-time.",
+        ),
+    ] = 7,
+    by: Annotated[
+        str,
+        typer.Option(
+            "--by", "-b",
+            help="Group by 'model' (default), 'provider', or 'session'.",
+        ),
+    ] = "model",
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit", "-l",
+            help="Max rows to display.",
+        ),
+    ] = 25,
+) -> None:
+    """Show per-call LLM cost roll-up from the ``llm_calls`` SQLite table.
+
+    The agent loop writes one row per provider completion call (Hermes B4,
+    schema v13). Rows where pricing is unknown render as ``—`` so totals
+    stay honest — a $0.00 in the rendered output means "we have pricing
+    data and the cost is genuinely zero", not "we don't know".
+
+    Use ``--by provider`` to roll up across model variants for the same
+    provider, or ``--by session`` to find which conversation was most
+    expensive.
+    """
+    group = "session_id" if by == "session" else by
+
+    db_path = default_config().home / "sessions.db"
+    if not db_path.exists():
+        _console.print(
+            "[dim]No sessions.db yet. Run "
+            "[bold]opencomputer chat[/bold] once to create it.[/dim]"
+        )
+        raise typer.Exit(0)
+
+    db = SessionDB(db_path)
+    rows = db.query_llm_calls(
+        days=None if days <= 0 else days,
+        group_by=group,
+    )
+
+    if not rows:
+        window = "all-time" if days <= 0 else f"last {days} day{'s' if days != 1 else ''}"
+        _console.print(
+            f"[dim]No llm_calls rows in the {window} window. "
+            "Run a chat session, then try again.[/dim]"
+        )
+        raise typer.Exit(0)
+
+    title_window = "all-time" if days <= 0 else f"last {days}d"
+    table = Table(
+        title=f"LLM cost by {by} ({title_window}, top {min(limit, len(rows))} rows)",
+        show_lines=False,
+    )
+    column_label = "Session" if by == "session" else by.capitalize()
+    table.add_column(column_label, style="cyan")
+    table.add_column("Calls", justify="right")
+    table.add_column("Tokens In", justify="right")
+    table.add_column("Tokens Out", justify="right")
+    table.add_column("Cost (USD)", justify="right")
+    table.add_column("Cost note", style="dim")
+
+    total_cost = 0.0
+    total_cost_known = False
+    for r in rows[:limit]:
+        key = r.get("key") or "(none)"
+        calls = int(r.get("calls") or 0)
+        toks_in = int(r.get("input_tokens") or 0)
+        toks_out = int(r.get("output_tokens") or 0)
+        cost = r.get("cost_usd")
+        all_missing = bool(r.get("all_cost_missing"))
+        partial = bool(r.get("has_partial_cost"))
+
+        if cost is None or all_missing:
+            cost_str = "—"
+            note = "no pricing data"
+        else:
+            cost_str = f"${cost:.4f}"
+            total_cost += float(cost)
+            total_cost_known = True
+            note = "partial — some rows missing" if partial else ""
+
+        table.add_row(
+            str(key),
+            f"{calls:,}",
+            f"{toks_in:,}",
+            f"{toks_out:,}",
+            cost_str,
+            note,
+        )
+
+    _console.print(table)
+    if total_cost_known:
+        partial_warn = (
+            " [yellow](some rows had no pricing — total is a lower bound)[/yellow]"
+            if any(r.get("has_partial_cost") or r.get("all_cost_missing") for r in rows[:limit])
+            else ""
+        )
+        _console.print(
+            f"[bold]Total: ${total_cost:.4f}[/bold]{partial_warn}"
+        )
 
 
 __all__ = ["insights_app"]

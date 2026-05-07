@@ -174,6 +174,95 @@ def _build_app(
     async def models_page() -> Response:
         return _render_html(static_dir / "models.html")
 
+    # Hermes-followup A1 (2026-05-07) — LLM calls real-time tracker.
+    @app.get("/static/llm-calls.html", response_class=HTMLResponse)
+    async def llm_calls_page() -> Response:
+        return _render_html(static_dir / "llm-calls.html")
+
+    @app.get("/api/llm-calls/recent")
+    async def llm_calls_recent(limit: int = 50) -> dict:
+        """Return the most recent ``llm_calls`` rows for the live tracker.
+
+        Reads the active profile's ``sessions.db``. Hardens against:
+        - missing DB / pre-v13 schema (returns empty list).
+        - bad ``limit`` (clamped to 1..500).
+        """
+        from opencomputer.agent.config import default_config
+        from opencomputer.agent.state import SessionDB
+
+        clamped = max(1, min(int(limit or 50), 500))
+        db_path = default_config().home / "sessions.db"
+        if not db_path.exists():
+            return {"rows": [], "limit": clamped}
+        db = SessionDB(db_path)
+        try:
+            with db._connect() as conn:  # noqa: SLF001 — internal helper, dashboard read-only
+                rows = conn.execute(
+                    "SELECT id, session_id, ts, provider, model, "
+                    "input_tokens, output_tokens, cost_usd, batch "
+                    "FROM llm_calls ORDER BY ts DESC LIMIT ?",
+                    (clamped,),
+                ).fetchall()
+        except Exception:
+            return {"rows": [], "limit": clamped}
+        return {
+            "rows": [dict(r) for r in rows],
+            "limit": clamped,
+        }
+
+    # Hermes-followup A1 — gateway-restart endpoint. Token-gated by
+    # the existing /api/* auth guard. Reads the gateway daemon's PID
+    # from a pidfile and signals SIGUSR1; the daemon's signal handler
+    # is responsible for re-exec. Refuses to signal if no pidfile is
+    # found — we MUST NOT kill the dashboard process itself, which
+    # may be the same Python process when ``oc gateway`` and the
+    # dashboard are co-hosted.
+    @app.post("/api/gateway/restart")
+    async def gateway_restart() -> dict:
+        import os
+        import signal
+        from pathlib import Path as _Path
+
+        pidfile_candidates = [
+            _Path.home() / ".opencomputer" / "default" / "gateway.pid",
+            _Path.home() / ".opencomputer" / "gateway.pid",
+        ]
+        target_pid: int | None = None
+        for cand in pidfile_candidates:
+            try:
+                if cand.exists():
+                    target_pid = int(cand.read_text().strip())
+                    break
+            except Exception:
+                continue
+
+        if target_pid is None:
+            return {
+                "ok": False,
+                "error": (
+                    "no gateway pidfile found at "
+                    "~/.opencomputer/[<profile>/]gateway.pid"
+                ),
+            }
+        # Belt-and-braces: never signal our own process — even if a stale
+        # pidfile somehow contains our PID, we'd kill the dashboard.
+        if target_pid == os.getpid():
+            return {
+                "ok": False,
+                "pid": target_pid,
+                "error": (
+                    "pidfile points at the dashboard process itself; "
+                    "refusing to signal (would kill the UI)"
+                ),
+            }
+        try:
+            os.kill(target_pid, signal.SIGUSR1)
+            return {"ok": True, "pid": target_pid, "signal": "SIGUSR1"}
+        except (ProcessLookupError, PermissionError) as exc:
+            return {"ok": False, "pid": target_pid, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
     if static_dir.exists():
         app.mount(
             "/static",

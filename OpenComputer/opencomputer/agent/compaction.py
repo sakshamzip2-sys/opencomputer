@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from opencomputer.agent.context_engine import ContextEngine, ContextEngineResult
 from plugin_sdk.core import Message
@@ -217,6 +219,7 @@ class CompactionEngine(ContextEngine):
         config: CompactionConfig | None = None,
         disabled: bool = False,
         memory_bridge: object | None = None,
+        usage_recorder: Callable[[Any], None] | None = None,
     ) -> None:
         self.provider = provider
         self.model = model
@@ -224,6 +227,12 @@ class CompactionEngine(ContextEngine):
         self.disabled = disabled
         #: PR-6 T2.2 — optional MemoryBridge for on_pre_compress key-fact extraction.
         self._memory_bridge = memory_bridge
+        #: Hermes B4 follow-up — optional callback fired with the
+        #: ``ProviderResponse.usage`` after each compaction LLM call.
+        #: Caller (typically AgentLoop) supplies this to route compaction
+        #: cost into ``llm_calls`` so insights reflects the *full*
+        #: conversation cost, not just the user-visible reply.
+        self._usage_recorder = usage_recorder
         #: Flag the loop checks to suppress hook firing while compaction runs.
         self._in_progress = False
 
@@ -420,6 +429,14 @@ class CompactionEngine(ContextEngine):
                 max_tokens=self.config.summarize_max_tokens,
                 temperature=0.3,
             )
+            # Hermes B4 follow-up — emit usage so AgentLoop can record
+            # the compaction call into ``llm_calls``. Best-effort:
+            # telemetry must never wedge compaction.
+            if self._usage_recorder is not None:
+                try:
+                    self._usage_recorder(resp.usage)
+                except Exception:  # noqa: BLE001
+                    logger.debug("compaction usage_recorder swallowed", exc_info=True)
             return resp.message.content or "[compaction returned empty]"
         finally:
             self._in_progress = False

@@ -92,6 +92,7 @@ async def complete_text(
         max_tokens=max_tokens,
         temperature=temperature,
     )
+    _record_aux_cost(provider, resolved_model, resp)
     return resp.message.content if resp and resp.message else ""
 
 
@@ -160,6 +161,7 @@ async def complete_vision(
         messages=[Message(role="user", content=content)],
         max_tokens=max_tokens,
     )
+    _record_aux_cost(provider, resolved_model, resp)
     return resp.message.content if resp and resp.message else ""
 
 
@@ -193,7 +195,22 @@ async def complete_video(
         messages=[Message(role="user", content=content)],
         max_tokens=max_tokens,
     )
+    _record_aux_cost(provider, resolved_model, resp)
     return resp.message.content if resp and resp.message else ""
+
+
+def _record_aux_cost(provider: Any, model: str, resp: Any) -> None:
+    """Hermes-followup 2026-05-07 — record aux LLM call into active session.
+
+    Best-effort. No-op when no session is active. Centralised so the
+    three aux_llm callers stay one-liners.
+    """
+    try:
+        from opencomputer.agent.usage_pricing import record_response_for_provider
+
+        record_response_for_provider(provider=provider, model=model, response=resp)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 __all__ = [
