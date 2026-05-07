@@ -32,6 +32,24 @@ voice_app = typer.Typer(
 )
 
 
+def _resolve_profile_home() -> Path:
+    """Resolve the active profile's home directory (CLI-side).
+
+    Same logic the wake CLI uses; pulled out as a module-level helper
+    so the new ``train-wake`` command can share it (and tests can
+    monkeypatch a single symbol).
+    """
+    try:
+        from opencomputer.profiles import (  # noqa: PLC0415
+            profile_home_dir,
+            read_active_profile,
+        )
+        active = read_active_profile() or "default"
+        return profile_home_dir(active)
+    except Exception:  # noqa: BLE001
+        return Path.home() / ".opencomputer" / "default"
+
+
 @voice_app.command("synthesize")
 def voice_synthesize(
     text: Annotated[str, typer.Argument(help="Text to speak.")],
@@ -518,12 +536,7 @@ def voice_wake(
         raise typer.Exit(code=4) from exc
 
     # Resolve PID file under the active profile home for singleton.
-    try:
-        from opencomputer.profiles import profile_home_dir, read_active_profile
-        active = read_active_profile() or "default"
-        profile_home = profile_home_dir(active)
-    except Exception:
-        profile_home = Path.home() / ".opencomputer" / "default"
+    profile_home = _resolve_profile_home()
 
     pid_file = profile_home / "voice_wake.pid"
 
@@ -654,6 +667,138 @@ async def _run_voice_turn_after_wake(*, profile_home: Path) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         typer.secho(f"[voice turn failed: {exc}]", fg="red")
+
+
+@voice_app.command("train-wake")
+def voice_train_wake(
+    word: Annotated[
+        str,
+        typer.Option(
+            "--word",
+            help="Wake-word phrase. Lowercase, underscores instead of spaces "
+                 "(default: hey_open_computer).",
+        ),
+    ] = "hey_open_computer",
+    out: Annotated[
+        Path | None,
+        typer.Option(
+            "--out",
+            help="Output ONNX path (default: <profile_home>/wake_models/"
+                 "<word>.onnx).",
+        ),
+    ] = None,
+    samples: Annotated[
+        int,
+        typer.Option(
+            "--samples", min=100, max=5000,
+            help="Synthesized positive sample budget (default 600 ≈ 30 min "
+                 "CPU; 1500 ≈ 60 min CPU; bigger generally improves recall).",
+        ),
+    ] = 600,
+    keep_cache: Annotated[
+        bool,
+        typer.Option(
+            "--keep-cache/--no-keep-cache",
+            help="Keep the per-run cache after success (debugging).",
+        ),
+    ] = False,
+    quick: Annotated[
+        bool,
+        typer.Option(
+            "--quick",
+            help="Smoke run (50 samples, 2 epochs, ~2 min). The output ONNX "
+                 "is NOT usable for real wake — use it to verify the pipeline.",
+        ),
+    ] = False,
+) -> None:
+    """Train a custom wake-word ONNX model on this CPU (~30 min).
+
+    Cross-platform; CPU-only; on-demand. Behind the [wake-train] extra
+    (`pip install opencomputer[wake-train]`). Output lands at
+    <profile_home>/wake_models/<word>.onnx and is auto-discovered by
+    `oc voice wake` on subsequent runs.
+
+    Honest budget:
+      *  --quick               : ~2 min (smoke; not usable)
+      *  --samples 600 (default): ~30 min cache-hit; ~35 min cold
+      *  --samples 1500         : ~60-70 min; better recall
+    """
+    try:
+        from opencomputer.voice.wake_train import (
+            TrainConfig,
+            WakeTrainError,
+            run_training,
+        )
+    except ImportError as exc:
+        typer.secho(
+            f"wake-train support not importable: {exc}\n"
+            "install with: pip install opencomputer[wake-train]",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=3) from exc
+
+    profile_home = _resolve_profile_home()
+    out_path = out if out is not None else (
+        profile_home / "wake_models" / f"{word}.onnx"
+    )
+
+    try:
+        cfg = TrainConfig(
+            word=word,
+            out_path=out_path,
+            profile_home=profile_home,
+            num_positives=samples,
+            quick=quick,
+            keep_cache=keep_cache,
+        )
+    except WakeTrainError as exc:
+        typer.secho(f"config error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.secho(
+        f"training '{word}' → {out_path}\n"
+        f"  positives: {50 if quick else samples}, "
+        f"voices: {cfg.num_voices}, quick: {quick}",
+        fg="cyan",
+    )
+
+    def _progress(msg: str) -> None:
+        typer.echo(f"  {msg}")
+
+    try:
+        result = run_training(cfg, progress=_progress)
+    except KeyboardInterrupt:
+        typer.secho("\ntraining cancelled by user", fg="yellow")
+        raise typer.Exit(code=2)  # noqa: B904
+    except WakeTrainError as exc:
+        # Phase-tagged exit codes mirror the spec:
+        #   ensure_deps → 3 (missing deps)
+        #   train (subprocess) → 4 (upstream crash)
+        #   sanity → 5 (model trained but corrupt)
+        #   anything else → 1 (unknown)
+        code = {
+            "ensure_deps": 3,
+            "train": 4,
+            "sanity": 5,
+        }.get(exc.phase, 1)
+        typer.secho(
+            f"training failed in phase '{exc.phase}': {exc}",
+            fg="red", err=True,
+        )
+        raise typer.Exit(code=code) from exc
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"unexpected error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.secho(
+        f"\n✓ wrote {result.out_path}\n"
+        f"  duration: {result.duration_seconds:.0f}s\n"
+        f"  positives: {result.num_positives}, "
+        f"negatives: {result.num_negatives}\n"
+        f"  sanity check: {'ok' if result.sanity_ok else 'FAILED'}\n"
+        f"  next: `oc voice wake` will auto-discover this model",
+        fg="green",
+    )
 
 
 __all__ = ["voice_app"]
