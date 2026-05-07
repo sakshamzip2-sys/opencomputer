@@ -812,10 +812,34 @@ def _check_wake_word_capable() -> CheckResult:
                 "reinstall with `pip install opencomputer[wake]`"
             ),
         )
+    # PR-A Feature 2: actually instantiate the Model. This is the
+    # check that surfaces aarch64 / Apple Silicon ONNX runtime issues
+    # at install time rather than at first wake — the deferred-import
+    # path inside ``opencomputer/voice/wake_word.py::_run_loop`` would
+    # otherwise wait until the user runs ``oc voice wake`` to discover
+    # an environment problem. Failure to init reports as ``warning``
+    # rather than ``error`` because wake-word is opt-in and the user
+    # may never run it.
+    try:
+        from openwakeword.model import Model  # type: ignore[import-untyped]
+        Model()
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                f"openwakeword.Model() init failed on this platform: "
+                f"{type(exc).__name__}: {exc}. "
+                "Wake-word will not work; consider re-installing or "
+                "opening a `oc doctor` issue with the message above."
+            ),
+        )
     return CheckResult(
         ok=True,
         level="info",
-        message="openwakeword + onnxruntime ready",
+        message=(
+            "openwakeword + onnxruntime + Model() init successful"
+        ),
     )
 
 

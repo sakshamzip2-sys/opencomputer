@@ -220,3 +220,75 @@ def test_empty_acp_denylist_does_not_block():
             if c.name in denied:
                 blocked[c.id] = "denied"
     assert blocked == {}
+
+
+# ---------------------------------------------------------------------------
+# Integration: ACPSession.steer signals SteerRegistry (PR-A bridge)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_acp_session_steer_signals_steer_registry():
+    """Calling ACPSession.steer must signal SteerRegistry.cancel_event."""
+    from opencomputer.acp.session import ACPSession
+    from opencomputer.agent.steer import default_registry
+
+    sid = "acp-steer-bridge-test"
+    session = ACPSession(session_id=sid, send=lambda *a, **kw: None)
+
+    # Pre-allocate the cancel event so we can verify it gets set.
+    ev = default_registry.cancel_event(sid)
+    default_registry.reset_cancel(sid)
+    assert not ev.is_set()
+
+    await session.steer("redirect")
+    assert ev.is_set()
+    # Cleanup so other tests don't see leaked state.
+    default_registry.reset_cancel(sid)
+    default_registry.clear(sid)
+
+
+@pytest.mark.asyncio
+async def test_acp_session_cancel_signals_steer_registry():
+    """ACP /cancel must also signal the steer cancel event so the agent
+    loop's cancel-aware tool dispatcher reacts."""
+    from opencomputer.acp.session import ACPSession
+    from opencomputer.agent.steer import default_registry
+
+    sid = "acp-cancel-bridge-test"
+    session = ACPSession(session_id=sid, send=lambda *a, **kw: None)
+    ev = default_registry.cancel_event(sid)
+    default_registry.reset_cancel(sid)
+    assert not ev.is_set()
+
+    was_running = await session.cancel()
+    # First cancel reports True (was_running before flip)
+    assert was_running is True
+    assert ev.is_set()
+    default_registry.reset_cancel(sid)
+
+
+@pytest.mark.asyncio
+async def test_acp_new_session_fires_session_start_hook():
+    """ACPServer.newSession must fire SESSION_START hook event."""
+    from unittest.mock import patch
+
+    from opencomputer.acp.server import ACPServer
+
+    server = ACPServer()
+    server._initialized = True
+    handler = server._handlers["newSession"]
+
+    fired: list[str] = []
+
+    def _fake_fire_and_forget(ctx):
+        if ctx.event.value == "SessionStart":
+            fired.append(ctx.session_id or "")
+
+    with patch(
+        "opencomputer.hooks.engine.engine.fire_and_forget",
+        side_effect=_fake_fire_and_forget,
+    ):
+        result = await handler({})
+        sid = result["sessionId"]
+        assert sid in fired

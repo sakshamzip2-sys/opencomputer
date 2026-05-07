@@ -82,21 +82,43 @@ class ACPServer:
         await loop.connect_read_pipe(lambda: protocol, sys.stdin)
 
         # stdout writer is sync — wrap in to_thread for non-blocking writes
-        while True:
-            line_bytes = await reader.readline()
-            if not line_bytes:
-                # EOF
-                logger.info("acp: stdin closed; shutting down")
-                break
-            line = line_bytes.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
+        try:
+            while True:
+                line_bytes = await reader.readline()
+                if not line_bytes:
+                    # EOF
+                    logger.info("acp: stdin closed; shutting down")
+                    break
+                line = line_bytes.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    self._send_error(None, ERR_PARSE, f"parse error: {exc}")
+                    continue
+                asyncio.create_task(self._dispatch(msg))
+        finally:
+            # PR-A Feature 3: on ACP transport close, fire SESSION_END
+            # for every active session so audit / analytics plugins see
+            # the disconnect. Best-effort — a hook crash must not block
+            # process shutdown.
             try:
-                msg = json.loads(line)
-            except json.JSONDecodeError as exc:
-                self._send_error(None, ERR_PARSE, f"parse error: {exc}")
-                continue
-            asyncio.create_task(self._dispatch(msg))
+                from opencomputer.hooks.engine import engine as _hook_engine
+                from plugin_sdk.hooks import HookContext, HookEvent
+
+                for sid in list(self._sessions.keys()):
+                    try:
+                        _hook_engine.fire_and_forget(HookContext(
+                            event=HookEvent.SESSION_END,
+                            session_id=sid,
+                        ))
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "acp: SESSION_END hook fan-out failed", exc_info=True,
+                )
 
     async def _dispatch(self, msg: dict[str, Any]) -> None:
         """Route an incoming JSON-RPC message to its handler."""
@@ -153,6 +175,21 @@ class ACPServer:
         if session_id in self._sessions:
             raise ValueError(f"session {session_id} already exists")
         self._sessions[session_id] = ACPSession(session_id=session_id, send=self._send_notification)
+        # PR-A Feature 3: bridge ACP newSession to SESSION_START hook so
+        # plugins observing the lifecycle (analytics, audit log, etc.)
+        # see ACP-driven sessions on the same event channel as CLI/
+        # gateway-driven ones. Fire-and-forget — a hook crash must not
+        # block the session creation.
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine
+            from plugin_sdk.hooks import HookContext, HookEvent
+
+            _hook_engine.fire_and_forget(HookContext(
+                event=HookEvent.SESSION_START,
+                session_id=session_id,
+            ))
+        except Exception:  # noqa: BLE001
+            logger.debug("acp: SESSION_START hook fire failed", exc_info=True)
         return {"sessionId": session_id}
 
     async def _handle_load_session(self, params: dict[str, Any]) -> dict[str, Any]:

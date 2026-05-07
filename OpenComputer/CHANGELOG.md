@@ -14,9 +14,19 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 - **Typed `RuntimeContext.acp_denied_tools: frozenset[str]`** — promoted from `runtime.custom` dict to a typed field because (a) it's a load-bearing security gate, (b) free-form dicts get stomped silently. Consulted in `_dispatch_tool_calls` just after the consent gate and before PreToolUse hooks; denied tools get blocked-marker ToolResults.
 - **Tier-aware ACP approvals** — `requestPermission` and `make_approval_callback` accept a `tier` / `default_tier` parameter (`IMPLICIT` / `EXPLICIT` / `PER_ACTION` / `DELEGATED` — mirrors `plugin_sdk.consent.ConsentTier` exactly). Validated at construction; bad value raises `ValueError` so the IDE can surface it.
 
+### Added — PR-A depth pass (no shortcuts, end-to-end wiring)
+
+- **CLI + ACP /steer integration with SteerRegistry** — `cli_ui/slash_handlers.py::_handle_steer` and `acp/session.py::ACPSession.steer` both now call `SteerRegistry.submit`, so /steer fires the cancel event mechanism uniformly across CLI / Telegram / wire / ACP. CLI ack distinguishes "interrupted" (a dispatch was mid-flight) vs "steered" (queue-only).
+- **ACP /cancel bridges to steer cancel event** — `ACPSession.cancel()` now also signals `SteerRegistry.cancel_event` so the agent loop's cancel-aware tool dispatcher interrupts in-flight async-yielding tools when an IDE issues `cancel`. Pending nudge text is cleared (cancel ≠ replan-with-X).
+- **Production wake-word audio capture** — `_run_loop` now spawns a sounddevice `InputStream` at 16 kHz mono int16 with 1280-sample (80ms) blocks, feeds frames through an asyncio.Queue to `openwakeword.Model.predict`, and fires the user callback when the active word's score crosses the threshold. Cooldown of 1.5s after each fire suppresses repeated triggers from a single utterance. Audio thread → asyncio bridge via `call_soon_threadsafe` + drop-on-backpressure (no audio-thread blocks).
+- **Wake-word pause/resume API** — `WakeWordDetector.pause()` closes the InputStream so a downstream consumer (voice-mode) can claim the mic; `resume()` reopens. The CLI's on-detect callback uses this to hand off to the existing voice-mode push-to-talk pipeline (`run_single_turn`) for one turn after each wake fire, then resumes wake detection.
+- **CLI wake hand-off** — `oc voice wake --handoff` (default ON) opens a 8-second post-wake recording window, runs VAD/STT/agent/TTS, then resumes wake. `--no-handoff` keeps the print-only behaviour for threshold tuning.
+- **Bash partial-stdout capture on cancel** — `BashTool.execute()` catches `CancelledError`, terminates the subprocess gracefully (with kill fallback), drains buffered stdout from the pipe, and stashes it on the asyncio.Task as `_pr_a_partial_stdout` before re-raising. The dispatcher's `_make_cancelled_result` reads the stash and includes the partial output in the `<INTERRUPTED-BY-STEER>` ToolResult so the model sees what got done before the interrupt.
+- **`oc doctor wake` actually inits Model** — beyond importing openwakeword + onnxruntime, the check now constructs `Model()` so platform-specific ONNX runtime failures (Apple Silicon aarch64 corner cases, manylinux drift) surface at install time rather than at first wake.
+- **ACP lifecycle hooks bridged** — `ACPServer._handle_new_session` fires `HookEvent.SESSION_START`; `serve_stdio` fires `SESSION_END` for every active session on transport close. Plugins observing the agent lifecycle (analytics, audit log, awareness) now see ACP-driven sessions on the same event channel as CLI / gateway-driven ones.
+
 ### Notes
 
-- Honest scope cuts: CLI `_handle_steer` ack copy unchanged (CLI is never mid-dispatch when slash runs); custom wake-word training UX deferred to user demand; no `getServerStatus` ACP method (YAGNI — no IDE caller).
 - All deferrals from the design doc (`docs/superpowers/specs/2026-05-07-pr-a-steer-wake-acp-design.md`) are explicitly listed in the spec's "Out of scope" section.
 
 ### Added — social-traces

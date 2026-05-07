@@ -3981,9 +3981,18 @@ class AgentLoop:
                         try:
                             results.append(_t.result())
                         except Exception:  # noqa: BLE001
-                            results.append(_make_cancelled_result(_c))
+                            # Pull any stashed partial-output off the task
+                            # (Bash sets _pr_a_partial_stdout on its
+                            # CancelledError handler).
+                            partial = getattr(_t, "_pr_a_partial_stdout", "")
+                            results.append(
+                                _make_cancelled_result(_c, partial_stdout=partial)
+                            )
                     else:
-                        results.append(_make_cancelled_result(_c))
+                        partial = getattr(_t, "_pr_a_partial_stdout", "")
+                        results.append(
+                            _make_cancelled_result(_c, partial_stdout=partial)
+                        )
                 # NOTE: don't reset_cancel here — between-turn consume
                 # peeks the flag to decide <USER-INTERRUPT> vs <USER-NUDGE>.
             else:

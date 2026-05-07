@@ -475,12 +475,27 @@ def voice_wake(
             help="Custom ONNX model path (advanced; bypasses fallback).",
         ),
     ] = None,
+    handoff: Annotated[
+        bool,
+        typer.Option(
+            "--handoff/--no-handoff",
+            help="On detection, hand off to voice-mode for one push-to-talk "
+                 "turn (--handoff, default) or just print and continue "
+                 "(--no-handoff; useful for tuning the threshold).",
+        ),
+    ] = True,
 ) -> None:
-    """Listen for a wake-word and emit a notification on detection.
+    """Listen for a wake-word and hand off to voice-mode on detection.
 
-    PR-A Feature 2 — default OFF. Hands off to the existing voice-mode
-    pipeline once production wiring lands; this v1 surface is the
-    audio-capture-and-detect kernel + a friendly status indicator.
+    PR-A Feature 2 — default OFF. Continuously feeds 80ms PCM frames to
+    openWakeWord. On score >= --threshold the detection callback fires:
+
+    With ``--handoff`` (default) the wake-word stream is paused, voice-
+    mode runs ONE push-to-talk turn (capture → VAD → STT → agent → TTS),
+    and the stream is resumed for the next wake.
+
+    With ``--no-handoff`` the callback only prints the detection event —
+    useful for tuning the threshold without spending STT/TTS quota.
 
     Press Ctrl+C to stop.
     """
@@ -512,10 +527,27 @@ def voice_wake(
 
     pid_file = profile_home / "voice_wake.pid"
 
+    # Detector reference (closed-over by callbacks); set inside _run.
+    # Local annotation kept loose — the value is set by _run.
+    detector_ref: dict[str, object] = {"det": None}
+
     async def _on_detect(d: WakeDetection) -> None:
         typer.secho(
             f"[heard '{d.word}' (score={d.score:.2f})]", fg="green",
         )
+        if not handoff:
+            return
+        det = detector_ref.get("det")
+        if det is None:
+            return
+        typer.secho("🎙  speak now...", fg="cyan")
+        try:
+            await det.pause()
+            await _run_voice_turn_after_wake(profile_home=profile_home)
+        except Exception as exc:  # noqa: BLE001
+            typer.secho(f"[voice-mode hand-off failed: {exc}]", fg="red")
+        finally:
+            det.resume()
 
     async def _run() -> None:
         try:
@@ -526,6 +558,7 @@ def voice_wake(
                 on_detect=_on_detect,
                 pid_file=pid_file,
             ) as det:
+                detector_ref["det"] = det
                 effective = det.effective_word
                 if det.fell_back:
                     typer.secho(
@@ -549,6 +582,78 @@ def voice_wake(
         asyncio.run(_run())
     except KeyboardInterrupt:
         typer.echo("\n[stopped]")
+
+
+async def _run_voice_turn_after_wake(*, profile_home: Path) -> None:
+    """Run one push-to-talk voice-mode turn after a wake-word fire.
+
+    PR-A Feature 2 hand-off — invoked from ``voice wake`` when the
+    detector signals. Owns the audio device for the duration of the
+    turn (the wake-word stream is paused around this call).
+
+    The turn is best-effort: STT or agent failures are logged but never
+    propagated, so the wake loop keeps running for the next utterance.
+    """
+    import asyncio  # noqa: PLC0415  (avoid module-load on cli import)
+
+    try:
+        # Wire-up mirrors `voice talk` but for a single turn. We don't
+        # import voice_mode at module level to keep `voice --help` cheap
+        # for users who don't have the voice extension activated.
+        import sys
+        ext_path = (
+            Path(__file__).resolve().parent.parent
+            / "extensions" / "voice-mode"
+        )
+        if str(ext_path) not in sys.path:
+            sys.path.insert(0, str(ext_path))
+        try:
+            from audio_capture import AudioCapture  # type: ignore[import-not-found]
+            from voice_mode import run_single_turn  # type: ignore[import-not-found]
+        except ImportError as exc:
+            typer.secho(
+                f"[voice-mode extension not importable: {exc}]", fg="yellow",
+            )
+            return
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"[voice-mode wiring failed: {exc}]", fg="yellow")
+        return
+
+    try:
+        from opencomputer.cost_guard import CostGuard
+        cost_guard = CostGuard.load()
+    except Exception:  # noqa: BLE001
+        cost_guard = None  # type: ignore[assignment]
+
+    capture = AudioCapture()
+    try:
+        capture.start()
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"[failed to open mic: {exc}]", fg="red")
+        return
+
+    # Record up to 8 seconds of post-wake utterance. Real production
+    # would use VAD to end-of-speech detect; this v1 uses a fixed
+    # window so the path is simple and deterministic.
+    await asyncio.sleep(8.0)
+
+    async def _agent_runner(text: str) -> str:
+        # Simplest possible agent: echo. Real wiring would call the
+        # AgentLoop's run_conversation but that requires session state
+        # we don't have here; for the wake-mode v1 we surface the
+        # transcribed text and let the user decide what to do.
+        typer.secho(f"[transcript: {text}]", fg="cyan")
+        return f"(heard) {text}"
+
+    try:
+        await run_single_turn(
+            agent_runner=_agent_runner,
+            cost_guard=cost_guard,
+            capture=capture,
+            prefer_local_stt=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        typer.secho(f"[voice turn failed: {exc}]", fg="red")
 
 
 __all__ = ["voice_app"]

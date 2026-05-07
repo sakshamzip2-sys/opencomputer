@@ -42,6 +42,7 @@ import asyncio
 import importlib
 import logging
 import os
+import time as _time_module
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +67,17 @@ FALLBACK_BUNDLED_WORD: str = "hey_jarvis"
 
 #: User-facing hint surfaced when fallback fires.
 TRAINING_URL: str = "https://github.com/dscripka/openWakeWord"
+
+#: Audio frame size openWakeWord expects: 1280 samples at 16 kHz = 80 ms.
+WAKE_FRAME_SAMPLES: int = 1280
+
+#: Sample rate openWakeWord expects.
+WAKE_SAMPLE_RATE: int = 16000
+
+#: Suppress further detections for this many seconds after a fire so
+#: a single utterance doesn't trigger 5 callbacks. Also gives downstream
+#: voice-mode hand-off time to claim the mic.
+_DETECTION_COOLDOWN_S: float = 1.5
 
 
 class WakeWordError(RuntimeError):
@@ -175,6 +187,11 @@ class WakeWordDetector:
         # one or a fallback (so the CLI can show an honest indicator).
         self._effective_word: str = word
         self._fell_back: bool = False
+        # PR-A Feature 2 (production): pause/resume support so the
+        # detection callback can hand the mic over to voice-mode for
+        # one turn without contending for the audio device.
+        self._pause_event: asyncio.Event | None = None
+        self._resume_event: asyncio.Event | None = None
 
         # Lazy import + graceful degrade. We don't actually USE the
         # imported module here — just verify importability so the error
@@ -270,7 +287,37 @@ class WakeWordDetector:
         if self._pid_file is not None:
             self._pid_release = _acquire_pid_lock(self._pid_file)
         self._stop_event = asyncio.Event()
+        self._pause_event = asyncio.Event()
+        self._resume_event = asyncio.Event()
         self._task = asyncio.create_task(self._run_loop())
+
+    async def pause(self) -> None:
+        """Close the audio input stream and wait until ``resume()``.
+
+        The detection loop releases the mic so another consumer
+        (voice-mode capture, push-to-talk) can take it. Returns once the
+        stream has been confirmed closed.
+        """
+        if self._pause_event is None or self._resume_event is None:
+            return
+        self._resume_event.clear()
+        self._pause_event.set()
+        # Best-effort: small wait so the loop has time to close the
+        # stream before pause() returns. Tests that don't need the
+        # actual stream pass through quickly.
+        for _ in range(20):
+            await asyncio.sleep(0.05)
+            if not self._pause_event.is_set():
+                break
+
+    def resume(self) -> None:
+        """Resume the detection loop after ``pause()``.
+
+        Synchronous because the asyncio.Event.set is thread-safe and
+        callers (voice-mode loop) are mid-cleanup.
+        """
+        if self._resume_event is not None:
+            self._resume_event.set()
 
     async def stop(self) -> None:
         """Stop the capture loop gracefully and release the singleton."""
@@ -290,51 +337,202 @@ class WakeWordDetector:
             self._pid_release = None
 
     async def _run_loop(self) -> None:
-        """Inner capture-and-score loop.
+        """Production capture-and-score loop.
 
-        The model is loaded here (not in ``__init__``) so platform ONNX
-        issues surface only when the user actually starts wake mode.
-        Audio capture is intentionally minimal — production deployment
-        chains the existing ``extensions/voice-mode/audio_capture.py``
-        pipeline via the CLI driver. This loop only sleeps; the CLI
-        ticks the model with PCM frames captured externally.
+        Spawns a sounddevice InputStream at 16 kHz mono int16, accumulates
+        1280-sample (80 ms) frames into an asyncio.Queue, and on each
+        full frame calls openwakeword.Model.predict(). When the active
+        word's score crosses :attr:`threshold`, fires the user callback
+        via :meth:`_fire_callback`.
+
+        Cooldown: after a fire, suppresses further detections for
+        :data:`_DETECTION_COOLDOWN_S` seconds so a single utterance
+        doesn't trigger multiple callbacks. The cooldown also gives
+        the downstream voice-mode hand-off time to claim the mic.
+
+        Audio thread → asyncio bridge: sounddevice's callback runs on
+        its own thread; we marshal frames via ``call_soon_threadsafe``
+        + ``Queue.put_nowait``. Backpressure (model fell behind) drops
+        the oldest frames rather than blocking the audio thread —
+        better to skip a frame than glitch the input stream.
+
+        Lifecycle:
+            ``start()`` schedules this coroutine; ``stop()`` sets the
+            stop event and waits up to 2 s; the InputStream is always
+            closed in the finally block.
         """
         try:
+            import numpy as np  # type: ignore[import-untyped]
             ow_model_module = importlib.import_module("openwakeword.model")
             Model = ow_model_module.Model  # type: ignore[attr-defined]
         except ImportError as exc:
             raise WakeWordError(
-                "openwakeword.model not importable — verify install"
+                f"openwakeword.model / numpy not importable: {exc}"
             ) from exc
 
-        # Resolve word (may set _effective_word to fallback if custom
-        # word requested without a model_path).
+        try:
+            import sounddevice as sd  # type: ignore[import-untyped]
+        except (ImportError, OSError) as exc:
+            raise WakeWordError(
+                f"sounddevice not available for wake capture: {exc}. "
+                "Install: pip install sounddevice "
+                "(Linux: also `apt install libportaudio2`)"
+            ) from exc
+
+        # Resolve word (may set _effective_word to fallback when a
+        # custom word is requested without a model_path).
         active_word = self._resolve_word()
         try:
             if self.model_path is not None:
-                _model = Model(wakeword_models=[str(self.model_path)])
-            elif active_word in BUNDLED_WAKE_WORDS:
-                _model = Model()
+                model = Model(wakeword_models=[str(self.model_path)])
             else:
-                # Should be unreachable thanks to _resolve_word, but
-                # defend against unexpected paths.
-                _model = Model()
+                # Bundled-only path — pretrained ONNX models bundled
+                # with openwakeword. ``predict()`` returns a dict keyed
+                # by model name; we filter on ``active_word`` below.
+                model = Model()
         except Exception as exc:  # noqa: BLE001
             raise WakeWordError(
                 f"failed to load openwakeword model: {exc}"
             ) from exc
 
         assert self._stop_event is not None
-        # The CLI driver owns audio capture; this loop's job is only to
-        # cooperate with stop() in a cancel-safe way. Each tick checks
-        # the stop event; CLI calls into the model out-of-band.
-        while not self._stop_event.is_set():
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=32)
+
+        def _audio_callback(indata, frames, time_info, status):  # noqa: ARG001
+            if status:
+                _log.debug("wake audio status: %s", status)
             try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=0.08,
-                )
-            except TimeoutError:
-                continue
+                pcm_bytes = bytes(indata)
+            except Exception:  # noqa: BLE001
+                return
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, pcm_bytes)
+            except asyncio.QueueFull:
+                _log.debug("wake: audio queue full — dropping frame")
+            except RuntimeError:
+                # Loop closed (shutdown race) — ignore.
+                pass
+
+        last_fire_at: float = 0.0
+
+        def _open_stream():
+            return sd.InputStream(
+                samplerate=WAKE_SAMPLE_RATE,
+                channels=1,
+                dtype="int16",
+                blocksize=WAKE_FRAME_SAMPLES,
+                callback=_audio_callback,
+            )
+
+        try:
+            stream = _open_stream()
+            stream.start()
+        except Exception as exc:  # noqa: BLE001
+            raise WakeWordError(
+                f"failed to start audio input stream: {exc}"
+            ) from exc
+
+        try:
+            while not self._stop_event.is_set():
+                # PR-A: honor pause/resume so voice-mode hand-off can
+                # claim the mic. We close the stream during pause and
+                # reopen on resume; this is the only reliable cross-
+                # platform way to share a single mic device.
+                if (
+                    self._pause_event is not None
+                    and self._pause_event.is_set()
+                ):
+                    try:
+                        stream.stop()
+                        stream.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    # Drain any frames queued before the pause so the
+                    # post-resume detector starts from fresh audio.
+                    while not queue.empty():
+                        try:
+                            queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                    # Signal pause-acknowledged + wait for resume.
+                    self._pause_event.clear()
+                    assert self._resume_event is not None
+                    while (
+                        not self._stop_event.is_set()
+                        and not self._resume_event.is_set()
+                    ):
+                        try:
+                            await asyncio.wait_for(
+                                self._resume_event.wait(), timeout=0.5,
+                            )
+                        except TimeoutError:
+                            continue
+                    if self._stop_event.is_set():
+                        break
+                    self._resume_event.clear()
+                    # Reopen the stream so the next iteration has audio.
+                    try:
+                        stream = _open_stream()
+                        stream.start()
+                    except Exception as exc:  # noqa: BLE001
+                        _log.warning(
+                            "wake: failed to reopen stream after resume: %s",
+                            exc,
+                        )
+                        # Bail; can't continue without audio.
+                        break
+                    continue
+                # Pull next frame with a short timeout so stop_event
+                # remains responsive even when the mic is silent.
+                try:
+                    pcm_bytes = await asyncio.wait_for(
+                        queue.get(), timeout=0.5,
+                    )
+                except TimeoutError:
+                    continue
+
+                # Cooldown: keep draining the queue (so it doesn't fill
+                # while the user speaks post-wake) but skip prediction.
+                now = _time_module.monotonic()
+                if now - last_fire_at < _DETECTION_COOLDOWN_S:
+                    continue
+
+                samples = np.frombuffer(pcm_bytes, dtype=np.int16)
+                if samples.size != WAKE_FRAME_SAMPLES:
+                    # Partial frame from a flushing stream — skip.
+                    continue
+                try:
+                    scores = model.predict(samples)
+                except Exception:  # noqa: BLE001
+                    _log.warning("wake: model.predict raised", exc_info=True)
+                    continue
+
+                # ``scores`` is a dict keyed by model name. Accept an
+                # exact match on active_word, OR — when the user asked
+                # for a custom word but is on fallback — look up the
+                # fallback name in the scores dict.
+                lookup_word = active_word
+                if lookup_word not in scores and self._fell_back:
+                    lookup_word = FALLBACK_BUNDLED_WORD
+                score = float(scores.get(lookup_word, 0.0))
+                if score >= self.threshold:
+                    last_fire_at = now
+                    detection = WakeDetection(
+                        word=self.word,
+                        score=score,
+                        timestamp=now,
+                    )
+                    # Schedule the callback so the audio queue keeps
+                    # draining. The callback may take seconds (voice-
+                    # mode hand-off) and we don't want to block here.
+                    asyncio.create_task(self._fire_callback(detection))
+        finally:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     async def __aenter__(self) -> WakeWordDetector:
         await self.start()
@@ -348,6 +546,8 @@ __all__ = [
     "BUNDLED_WAKE_WORDS",
     "FALLBACK_BUNDLED_WORD",
     "TRAINING_URL",
+    "WAKE_FRAME_SAMPLES",
+    "WAKE_SAMPLE_RATE",
     "WakeDetection",
     "WakeState",
     "WakeWordDetector",
