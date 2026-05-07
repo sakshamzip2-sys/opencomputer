@@ -1,6 +1,7 @@
 import { Routes, Route, NavLink } from "react-router-dom";
 import { useApi } from "@/hooks/useApi";
 import type { StatusResponse } from "@/lib/api";
+import { SessionsPage, SessionDetailPage } from "@/pages/SessionsPage";
 
 const Placeholder = ({ name }: { name: string }) => (
   <div className="p-6">
@@ -82,7 +83,9 @@ export default function App() {
       <main className="flex-1 overflow-auto">
         <Routes>
           <Route path="/" element={<Placeholder name="Welcome to OpenComputer" />} />
-          {NAV.map(({ path, label }) => (
+          <Route path="/sessions" element={<SessionsPage />} />
+          <Route path="/sessions/:id" element={<SessionDetailPage />} />
+          {NAV.filter(({ path }) => path !== "/sessions").map(({ path, label }) => (
             <Route key={path} path={path} element={<Placeholder name={label} />} />
           ))}
           <Route
