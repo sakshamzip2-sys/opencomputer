@@ -34,7 +34,7 @@ def _resolved_home() -> str:
 
 def _hash_label_suffix(home: str, profile: str) -> str:
     """Deterministic 8-char hex digest of ``<home>|<profile>``."""
-    digest = hashlib.sha256(f"{home}|{profile}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(f"{home}|{profile}".encode()).hexdigest()
     return digest[:8]
 
 
