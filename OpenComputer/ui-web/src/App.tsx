@@ -10,6 +10,9 @@ import { SkillsPage } from "@/pages/SkillsPage";
 import { CronPage } from "@/pages/CronPage";
 import { ConfigPage } from "@/pages/ConfigPage";
 import { EnvPage } from "@/pages/EnvPage";
+import { ChatPage } from "@/pages/ChatPage";
+import { AnalyticsPage } from "@/pages/AnalyticsPage";
+import { DocsPage } from "@/pages/DocsPage";
 
 const Placeholder = ({ name }: { name: string }) => (
   <div className="p-6">
@@ -101,22 +104,9 @@ export default function App() {
           <Route path="/cron" element={<CronPage />} />
           <Route path="/config" element={<ConfigPage />} />
           <Route path="/env" element={<EnvPage />} />
-          {NAV.filter(
-            ({ path }) =>
-              ![
-                "/sessions",
-                "/logs",
-                "/models",
-                "/plugins",
-                "/profiles",
-                "/skills",
-                "/cron",
-                "/config",
-                "/env",
-              ].includes(path),
-          ).map(({ path, label }) => (
-            <Route key={path} path={path} element={<Placeholder name={label} />} />
-          ))}
+          <Route path="/chat" element={<ChatPage />} />
+          <Route path="/analytics" element={<AnalyticsPage />} />
+          <Route path="/docs" element={<DocsPage />} />
           <Route
             path="*"
             element={<div className="p-6 text-zinc-400">Not found</div>}
