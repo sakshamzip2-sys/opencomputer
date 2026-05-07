@@ -774,6 +774,18 @@ class AgentLoop:
         self._runtime = runtime or DEFAULT_RUNTIME_CONTEXT
         # Expose current session id to memory tools via the context provider.
         self._current_session_id = sid
+        # Hermes-followup 2026-05-07 — publish (session_id, db) on
+        # ContextVars so auxiliary callers (title-gen daemon thread,
+        # judge-reviewer, dreaming, recall-synthesizer, aux_llm)
+        # can record their LLM cost into ``llm_calls`` without
+        # signature changes. Daemon threads spawned via copy_context()
+        # inherit these.
+        try:
+            from opencomputer.agent.usage_pricing import set_active_session
+
+            set_active_session(sid, self.db)
+        except Exception:  # noqa: BLE001
+            pass
         # Item 2 fix (2026-05-02): reset pause_turn counter per conversation.
         # Without this, a long-lived AgentLoop (gateway/daemon mode) handling
         # multiple sequential conversations would leak the counter — session B

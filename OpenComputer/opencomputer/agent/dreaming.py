@@ -417,6 +417,17 @@ class DreamRunner:
                     temperature=0.2,
                     stream=False,
                 )
+                # Hermes-followup 2026-05-07 — record cost into active session.
+                try:
+                    from opencomputer.agent.usage_pricing import (
+                        record_response_for_provider,
+                    )
+
+                    record_response_for_provider(
+                        provider=self.provider, model=model, response=resp
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 text = (resp.message.content or "").strip()
                 if not text:
                     raise RuntimeError("provider returned empty content")

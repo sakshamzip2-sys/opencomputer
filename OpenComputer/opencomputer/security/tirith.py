@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -80,6 +81,75 @@ def is_available(*, path: str = "tirith") -> bool:
     return _resolve_binary(path) is not None
 
 
+# ─── local pre-flight ──────────────────────────────────────────────────
+#
+# Hermes-followup 2026-05-07. Two cheap pattern classes that fire BEFORE
+# the external binary spawn so we don't pay subprocess latency on
+# obvious cases AND we still catch them when ``tirith`` is uninstalled
+# or unreachable. Each returns a list of finding dicts (same shape as
+# ``check_command`` returns) — empty list = pass.
+
+
+#: Sudo / privilege escalation patterns. Catches ``sudo``, ``doas``,
+#: ``su -``, and the common ``su root`` form. Conservative — does NOT
+#: flag ``sudo -V`` (version) or ``sudo -h`` (help) on the assumption
+#: that an attacker who needs to escalate isn't asking for help text.
+_SUDO_RE = re.compile(
+    r"(?<![A-Za-z_])(?:sudo(?:\s|$)|doas(?:\s|$)|su\s+(?:-\s|root))",
+    re.IGNORECASE,
+)
+
+#: Known-bad standalone binaries — running these from a chat-driven
+#: command is almost always a mistake or an attack. ``mkfs.*`` formats
+#: filesystems, ``dd`` is the classic disk-wiper, ``shred`` zeros
+#: free space, ``fdisk``/``parted`` repartitions. The list is small +
+#: high-confidence; bigger lists go in the external Tirith binary
+#: where catalogued patterns live.
+_BAD_BINARY_RE = re.compile(
+    r"(?<![A-Za-z_])(mkfs(?:\.[a-z0-9]+)?|dd\s+if=|shred\s+|fdisk\s+|parted\s+)",
+    re.IGNORECASE,
+)
+
+
+def local_preflight(command: str) -> list[dict[str, Any]]:
+    """Cheap local scan run before the external binary spawn.
+
+    Two pattern classes:
+    - ``preflight.sudo_escalation`` — sudo/doas/su patterns.
+    - ``preflight.dangerous_binary`` — mkfs/dd/shred/fdisk/parted.
+
+    Returns a list of finding dicts with ``rule`` + ``severity`` +
+    ``message`` keys (same shape ``check_command`` produces). Empty
+    list = pass. The caller decides verdict; this function is pure.
+    """
+    findings: list[dict[str, Any]] = []
+    if _SUDO_RE.search(command):
+        findings.append(
+            {
+                "rule": "preflight.sudo_escalation",
+                "severity": "block",
+                "message": (
+                    "command requests privilege escalation (sudo/doas/su) — "
+                    "agent commands should run with the user's normal "
+                    "privileges, never elevated"
+                ),
+            }
+        )
+    if _BAD_BINARY_RE.search(command):
+        findings.append(
+            {
+                "rule": "preflight.dangerous_binary",
+                "severity": "block",
+                "message": (
+                    "command invokes a destructive disk-management binary "
+                    "(mkfs / dd / shred / fdisk / parted) — refused at "
+                    "pre-flight"
+                ),
+            }
+        )
+    return findings
+
+
 def check_command(
     command: str,
     *,
@@ -98,6 +168,19 @@ def check_command(
     Tirith never bricks the agent loop. Set ``fail_open=False`` only when
     you want strict-deny on uncertainty (e.g., regulated environments).
     """
+    # Hermes-followup 2026-05-07 — local pre-flight runs before the
+    # binary spawn. If we catch something here, we BLOCK regardless of
+    # tirith availability. Defence-in-depth: even when the upstream
+    # binary is uninstalled, sudo escalation + disk-wipers don't slip
+    # through.
+    pre = local_preflight(command)
+    if pre:
+        return TirithResult(
+            action="block",
+            findings=pre,
+            summary=f"blocked by local pre-flight: {pre[0]['rule']}",
+        )
+
     bin_path = _resolve_binary(path)
     if bin_path is None:
         action: Verdict = "allow" if fail_open else "block"

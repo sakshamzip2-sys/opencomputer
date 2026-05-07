@@ -79,6 +79,14 @@ async def score_turn_via_judge(
         _logger.warning("judge LLM call failed: %s", e)
         return None
 
+    # Hermes-followup 2026-05-07 — record cost into active session.
+    try:
+        from opencomputer.agent.usage_pricing import record_response_for_provider
+
+        record_response_for_provider(provider=provider, model=model, response=response)
+    except Exception:  # noqa: BLE001
+        pass
+
     text = getattr(response, "text", "") or ""
     score_match = _SCORE_RE.search(text)
     if not score_match:
