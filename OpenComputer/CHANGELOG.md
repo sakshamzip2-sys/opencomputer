@@ -4,6 +4,42 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Custom wake-word training (2026-05-07)
+
+- **`oc voice train-wake`** — produces a `hey_open_computer.onnx` (or any
+  custom phrase) on the user's CPU in ~30 minutes. Cross-platform
+  (macOS + Linux primary; Windows best-effort); no GPU. Behind the new
+  `[wake-train]` extra (`pip install opencomputer[wake-train]` — pulls
+  torch, openwakeword[train], huggingface_hub, soundfile, piper-tts).
+  The trained ONNX lands at `<profile_home>/wake_models/<word>.onnx`.
+  Verify install with `oc doctor wake-train`.
+- **Wake-word auto-discovery** — `WakeWordDetector` now checks
+  `<profile_home>/wake_models/<word>.onnx` before falling back to
+  `hey_jarvis`. Closes the loop opened by PR-A's `hey_open_computer`
+  default — the trained model is picked up automatically by
+  `oc voice wake` on subsequent runs without `--model`.
+- **Honest budget surfaced in `--help`** — 30 min on CPU is the training
+  step alone. First run downloads ~50 MB of negative audio (~1 min);
+  sample synthesis takes ~3 min. Total: ~35 min cold, ~30 min cache-hit.
+  `--samples 1500` (~60-70 min) generally improves recall by ~5-10 ppts.
+  `--quick` (~2 min) verifies the pipeline but the model is NOT usable.
+- **Cross-platform sample synthesis** — replaces the Linux-only
+  `piper-sample-generator` with a direct piper-tts driver
+  (`opencomputer.voice.tts_piper.synthesize_to_path`) + per-call prosody
+  jitter (length_scale, noise_scale, noise_w_scale) across 4 default
+  voices (2 US, 2 UK; mix male/female). Works on macOS arm64.
+- **Phase-tagged exit codes** — 0 success, 2 user-cancelled,
+  3 missing-deps, 4 upstream openwakeword crash, 5 sanity-check
+  failure (ONNX written but corrupt). Tempdir at
+  `<profile_home>/cache/wake_train/<word>-<ts>/` is preserved on any
+  failure for debugging; cleaned on success unless `--keep-cache`.
+- **Atomic write semantics** — trained ONNX is written via tmp-name +
+  `Path.replace`, so a crashed training run can never corrupt a
+  previously-good model at the destination.
+- **`oc doctor wake-train`** — opt-in feature preflight. Info-level
+  when training deps aren't installed (so `oc doctor` exit code stays
+  clean for users who don't want training).
+
 ### Added — PR-A 2026-05-07 (Steer Replan + Voice Wake + ACP Expansion)
 
 - **Steer Replan-with-Context** — `/steer` now interrupts mid-tool-call. `SteerRegistry` gains a per-session `asyncio.Event` (allocate-if-missing semantics so signals are never lost) plus `cancel_event()`, `has_cancel_listener()`, and `reset_cancel()` API. `_dispatch_tool_calls` wraps the existing `asyncio.gather` with `asyncio.wait(FIRST_COMPLETED)` watching the event; on fire, pending tasks are cancelled cooperatively (2s grace window) and `_make_cancelled_result()` emits an `<INTERRUPTED-BY-STEER>` ToolResult in their slot. Bash captures partial stdout; other tools emit a bare marker. Cancellation only fires at `await` boundaries — synchronous tools (Read/Glob/Grep) finish their current syscall before honoring it; documented honestly. Between-turn consume now drives `<USER-INTERRUPT>` vs `<USER-NUDGE>` prefix decision via `format_nudge_message(was_interrupted=...)`.
