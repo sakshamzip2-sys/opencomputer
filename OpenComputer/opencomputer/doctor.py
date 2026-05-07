@@ -843,6 +843,45 @@ def _check_wake_word_capable() -> CheckResult:
     )
 
 
+def _check_wake_train_capable() -> CheckResult:
+    """Verify the [wake-train] extra is installable on this platform.
+
+    Imports each training-time dep (torch, openwakeword.train,
+    huggingface_hub, soundfile, piper) and reports info-level if any are
+    missing — training is opt-in like wake-word itself, so a missing
+    dep keeps the doctor exit code clean.
+    """
+    missing: list[str] = []
+    for module_name, hint in (
+        ("torch", "pip install torch>=2.1"),
+        ("openwakeword.train", "pip install 'openwakeword[train]>=0.6'"),
+        ("huggingface_hub", "pip install huggingface_hub>=0.20"),
+        ("soundfile", "pip install soundfile>=0.12"),
+        ("piper", "pip install piper-tts>=1.2"),
+    ):
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append(f"{module_name} ({hint})")
+    if missing:
+        return CheckResult(
+            ok=True,
+            level="info",
+            message=(
+                "wake-train deps missing: "
+                + ", ".join(missing)
+                + " — opt in via `pip install opencomputer[wake-train]`"
+            ),
+        )
+    return CheckResult(
+        ok=True,
+        level="info",
+        message=(
+            "wake-train deps available — `oc voice train-wake` is ready"
+        ),
+    )
+
+
 def _check_browser_control_capable() -> CheckResult:
     """T1.C (browser-control) — verify Playwright is installed.
 
@@ -1244,6 +1283,12 @@ def run_doctor(fix: bool = False) -> int:
     # Opt-in via [wake] extra; returns info-level when not installed.
     checks.append(
         _result_to_check("wake-word", _check_wake_word_capable())
+    )
+
+    # Custom wake-word training preflight — opt-in via [wake-train] extra.
+    # Returns info-level when the user hasn't installed the heavy deps.
+    checks.append(
+        _result_to_check("wake-train", _check_wake_train_capable())
     )
 
     # Plugin-contributed checks + repairs (run last so plugins see a fully-
