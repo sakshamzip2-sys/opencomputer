@@ -9,7 +9,7 @@
     "predev": "npm run sync-assets",
     "prebuild": "npm run sync-assets",
     "dev": "vite",
-    "build": "tsc -b --noEmit && vite build",
+    "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
