@@ -57,18 +57,30 @@
   }
 
   // Build the shared nav. Pages call this to render the top bar.
+  // Hermes-followup A1: i18n keys + theme/locale pickers appended to right.
   function renderNav(active) {
     const tabs = [
-      { id: 'chat', label: 'Chat', href: '/' },
-      { id: 'plugins', label: 'Plugins', href: '/static/plugins.html' },
-      { id: 'models', label: 'Models', href: '/static/models.html' },
+      { id: 'chat',    i18n: 'tabs.chat',    label: 'Chat',      href: '/' },
+      { id: 'plugins', i18n: 'tabs.plugins', label: 'Plugins',   href: '/static/plugins.html' },
+      { id: 'models',  i18n: 'tabs.models',  label: 'Models',    href: '/static/models.html' },
+      { id: 'calls',   i18n: 'tabs.calls',   label: 'LLM Calls', href: '/static/llm-calls.html' },
     ];
-    const html = tabs.map(t => {
+    const tr = (k, fallback) => (window.OCi18n ? window.OCi18n.t(k) : fallback);
+    const tabsHtml = tabs.map(t => {
       const cls = t.id === active ? 'tab active' : 'tab';
-      return `<a class="${cls}" href="${t.href}">${t.label}</a>`;
+      return `<a class="${cls}" href="${t.href}" data-i18n="${t.i18n}">${tr(t.i18n, t.label)}</a>`;
     }).join('');
     const slot = document.getElementById('nav-tabs');
-    if (slot) slot.innerHTML = html;
+    if (slot) {
+      slot.innerHTML = (
+        tabsHtml +
+        '<span class="nav-divider"></span>' +
+        '<span id="theme-picker-slot"></span>' +
+        '<span id="locale-picker-slot"></span>'
+      );
+    }
+    if (window.OCThemes) window.OCThemes.renderThemePicker('theme-picker-slot');
+    if (window.OCi18n) window.OCi18n.renderLocalePicker('locale-picker-slot');
   }
 
   // Status pill helper — colour-codes by category.

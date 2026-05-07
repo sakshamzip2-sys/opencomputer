@@ -110,6 +110,44 @@ _BAD_BINARY_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Network-exfiltration patterns. Catches ``curl --upload-file``,
+#: ``curl -F`` (multipart with filename source), ``curl … --data-binary
+#: @file``, and ``wget --post-file`` — all of which read a local file
+#: and POST it to a remote endpoint. A chat-driven shell command that
+#: uploads disk content to a URL is almost never legitimate; if it is,
+#: the user can confirm via the tool-result-middleware route.
+_EXFIL_RE = re.compile(
+    r"(?:"
+    r"\bcurl\b[^;|]*?(?:--upload-file|-F\s+\w+=@|--data-binary\s*@)"
+    r"|\bwget\b[^;|]*?--post-file"
+    r"|\bnc\b[^;|]*?<\s*/(?:etc|home|var)/"
+    r")",
+    re.IGNORECASE,
+)
+
+#: Crypto-mining indicators. The keys are well-known mining-binary
+#: names + canonical pool URLs. A user who actually wants xmrig can
+#: run it outside the agent; the agent should never spawn it.
+_CRYPTO_MINER_RE = re.compile(
+    r"(?<![A-Za-z_])(?:xmrig|minerd|cgminer|sgminer|t-rex|ethminer|nbminer)\b"
+    r"|stratum\+(?:tcp|ssl)://"
+    r"|(?:pool\.minexmr\.com|nanopool\.org|ethermine\.org|f2pool\.com)",
+    re.IGNORECASE,
+)
+
+#: Shell-history clearing — common cover-tracks pattern. ``history -c``,
+#: ``rm`` against ``~/.bash_history`` / ``~/.zsh_history``, ``unset
+#: HISTFILE`` to disable the next session's logging.
+_HIST_TAMPER_RE = re.compile(
+    r"(?:"
+    r"\bhistory\s+-c\b"
+    r"|\brm\b[^;|]*?\.(?:bash|zsh|fish)_history"
+    r"|\bunset\s+HISTFILE\b"
+    r"|>\s*~/\.(?:bash|zsh|fish)_history\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def local_preflight(command: str) -> list[dict[str, Any]]:
     """Cheap local scan run before the external binary spawn.
@@ -144,6 +182,41 @@ def local_preflight(command: str) -> list[dict[str, Any]]:
                     "command invokes a destructive disk-management binary "
                     "(mkfs / dd / shred / fdisk / parted) — refused at "
                     "pre-flight"
+                ),
+            }
+        )
+    if _EXFIL_RE.search(command):
+        findings.append(
+            {
+                "rule": "preflight.network_exfiltration",
+                "severity": "block",
+                "message": (
+                    "command uploads local file content to a remote endpoint "
+                    "(curl/wget/nc with file source) — refused at pre-flight; "
+                    "if intentional, run outside the agent"
+                ),
+            }
+        )
+    if _CRYPTO_MINER_RE.search(command):
+        findings.append(
+            {
+                "rule": "preflight.crypto_miner",
+                "severity": "block",
+                "message": (
+                    "command invokes a crypto-mining binary or pool URL — "
+                    "refused at pre-flight"
+                ),
+            }
+        )
+    if _HIST_TAMPER_RE.search(command):
+        findings.append(
+            {
+                "rule": "preflight.history_tamper",
+                "severity": "block",
+                "message": (
+                    "command tampers with shell history (clear / unset "
+                    "HISTFILE / overwrite history file) — refused at "
+                    "pre-flight as a cover-tracks signal"
                 ),
             }
         )

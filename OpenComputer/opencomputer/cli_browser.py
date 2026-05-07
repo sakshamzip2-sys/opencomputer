@@ -217,6 +217,55 @@ def disconnect_command():
     )
 
 
+@browser_app.command("tabs")
+def tabs_command(
+    port: int = typer.Option(9222, "--port", help="CDP port."),
+    cdp_url: str | None = typer.Option(
+        None, "--cdp-url",
+        help="Full CDP URL override; takes precedence over --port.",
+    ),
+):
+    """List the open tabs in the attached Chrome.
+
+    Hermes B1 next-tier — when CDP-attached, the agent can target
+    specific tabs by URL/title. This command shows what's available.
+
+    Reads ``http://<host>/json`` (the standard CDP discovery endpoint)
+    and prints a numbered table of open tabs with their URL + title.
+    """
+    import json
+    import urllib.request
+
+    base = (cdp_url or f"http://localhost:{port}").rstrip("/")
+    url = f"{base}/json"
+    try:
+        with urllib.request.urlopen(url, timeout=2.0) as resp:
+            tabs = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"Could not list tabs at {url}.", err=True)
+        typer.echo(f"  reason: {type(exc).__name__}: {exc}", err=True)
+        typer.echo(
+            "\nIs Chrome running with CDP?  oc browser status",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    pages = [t for t in tabs if t.get("type") == "page"]
+    if not pages:
+        typer.echo("No open page tabs.")
+        return
+    typer.echo(f"{len(pages)} tab(s) open at {base}:")
+    for i, t in enumerate(pages):
+        title = (t.get("title") or "(untitled)")[:60]
+        url_str = (t.get("url") or "")[:80]
+        typer.echo(f"  [{i}]  {title}")
+        typer.echo(f"       {url_str}")
+        if t.get("webSocketDebuggerUrl"):
+            typer.echo(
+                f"       targetId={t.get('id', '?')}"
+            )
+
+
 @browser_app.command("chrome")
 def chrome_command():
     """Print the Chrome launch command for CDP attach mode."""
@@ -257,6 +306,11 @@ def run(
     limit: int = typer.Option(10, "--limit", "-n"),
     fmt: str = typer.Option("json", "--format", "-f"),
     llm_fallback: bool = typer.Option(False, "--llm-fallback"),
+    cdp_url: str | None = typer.Option(
+        None, "--cdp-url",
+        help="Override OPENCOMPUTER_BROWSER_CDP_URL for this invocation.",
+        envvar="OPENCOMPUTER_BROWSER_CDP_URL",
+    ),
 ):
     """Run a recipe: 'oc browser run <site> <verb>'.
 
@@ -264,9 +318,21 @@ def run(
     with a "not yet implemented" message. Phase 5 (next-session) wires
     the real LLM-fallback path. Default behaviour (no flag, missing
     recipe) is exit 1 with helpful options.
+
+    Hermes B1 next-tier — ``--cdp-url`` overrides the env var for a
+    one-off run, useful when you have multiple Chrome profiles on
+    different ports (e.g. a debug profile on 9223 + your everyday
+    profile on 9222).
     """
+    import os as _os
+
     from opencomputer.recipes import run_recipe
     from opencomputer.recipes.fetcher import httpx_fetcher
+
+    # Apply --cdp-url for the lifetime of this command. The recipe
+    # runner picks up the env var at recipe-execution time.
+    if cdp_url:
+        _os.environ["OPENCOMPUTER_BROWSER_CDP_URL"] = cdp_url
 
     try:
         out = run_recipe(

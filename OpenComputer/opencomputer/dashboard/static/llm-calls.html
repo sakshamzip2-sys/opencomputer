@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>OpenComputer dashboard — LLM Calls</title>
+  <style>
+    /* CSS-var-driven; defaults match dark theme. */
+    html, body { margin: 0; padding: 0; height: 100%; background: var(--bg, #111); color: var(--fg, #ddd);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    body { display: flex; flex-direction: column; }
+    header { padding: 12px 20px; border-bottom: 1px solid var(--border, #333); display: flex;
+      gap: 1em; align-items: center; }
+    header .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--fg-muted, #888); }
+    header .dot.up { background: var(--ok, #4ade80); }
+    main { flex: 1; overflow-y: auto; padding: 20px; }
+    h1 { font-size: 14px; text-transform: uppercase; color: var(--fg-muted, #888);
+      letter-spacing: 0.05em; margin: 0 0 16px; }
+    nav.tabs { display: flex; gap: 8px; margin-left: auto; align-items: center; }
+    .tab { padding: 6px 12px; border-radius: 4px; color: var(--fg-muted, #888);
+      text-decoration: none; font-size: 13px; }
+    .tab:hover { background: var(--bg-elev, #1a1a1a); color: var(--fg, #ddd); }
+    .tab.active { background: var(--accent, #2563eb); color: white; }
+    .nav-divider { width: 1px; height: 16px; background: var(--border, #333); margin: 0 4px; }
+    .theme-picker, .locale-picker {
+      background: var(--bg-elev, #1a1a1a); color: var(--fg, #ddd);
+      border: 1px solid var(--border, #333); border-radius: 4px;
+      padding: 4px 6px; font-family: inherit; font-size: 12px;
+    }
+    table.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    table.data-table th { text-align: left; padding: 8px 10px;
+      border-bottom: 1px solid var(--border, #333); color: var(--fg-muted, #888);
+      font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-size: 11px; }
+    table.data-table td { padding: 8px 10px; border-bottom: 1px solid var(--border, #222); }
+    table.data-table tr:hover td { background: var(--bg-hover, #1a1a1a); }
+    table.data-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .empty-state { color: var(--fg-muted, #888); padding: 40px; text-align: center;
+      font-size: 14px; }
+    .totals { padding: 12px 0; color: var(--fg-muted, #888); font-size: 13px; }
+    .totals strong { color: var(--fg, #ddd); }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>OpenComputer</strong>
+    <nav class="tabs" id="nav-tabs"></nav>
+  </header>
+  <main>
+    <h1 data-i18n="calls.title">Recent LLM Calls</h1>
+    <div class="totals" id="totals"></div>
+    <div id="content">
+      <div class="empty-state" data-i18n="calls.empty">No LLM calls recorded yet. Start a chat to populate.</div>
+    </div>
+  </main>
+
+<script>
+window.OC_TOKEN = '__SESSION_TOKEN__'.replace(/[<>]/g, '');
+</script>
+<script src="/static/_themes.js"></script>
+<script src="/static/_i18n.js"></script>
+<script src="/static/_dashboard.js"></script>
+<script>
+OCDash.renderNav('calls');
+
+const REFRESH_MS = 3000;
+const content = document.getElementById('content');
+const totals = document.getElementById('totals');
+
+const tr = (k, fb) => (window.OCi18n ? window.OCi18n.t(k) : fb);
+
+function fmtCost(c) {
+  if (c === null || c === undefined) return tr('calls.unknown_cost', '—');
+  return '$' + Number(c).toFixed(4);
+}
+
+function fmtTime(ts) {
+  if (!ts) return '—';
+  try {
+    const d = new Date(Number(ts) * 1000);
+    return d.toLocaleTimeString();
+  } catch {
+    return String(ts);
+  }
+}
+
+async function refresh() {
+  let data;
+  try {
+    data = await OCDash.ocGet('/api/llm-calls/recent?limit=50');
+  } catch (err) {
+    content.innerHTML = '<div class="empty-state">Could not load LLM calls: ' +
+      (err.message || 'unknown error') + '</div>';
+    totals.textContent = '';
+    return;
+  }
+  const rows = (data && data.rows) || [];
+  if (!rows.length) {
+    content.innerHTML = '<div class="empty-state">' +
+      tr('calls.empty', 'No LLM calls recorded yet. Start a chat to populate.') +
+      '</div>';
+    totals.textContent = '';
+    return;
+  }
+  // Render table.
+  const headers = [
+    ['calls.col.when', 'When'],
+    ['calls.col.model', 'Model'],
+    ['calls.col.provider', 'Provider'],
+    ['calls.col.tokens_in', 'Tokens In'],
+    ['calls.col.tokens_out', 'Tokens Out'],
+    ['calls.col.cost', 'Cost'],
+  ];
+  const html = [
+    '<table class="data-table"><thead><tr>',
+    ...headers.map(([k, fb]) =>
+      '<th>' + tr(k, fb) + '</th>'),
+    '</tr></thead><tbody>',
+    ...rows.map(r => (
+      '<tr>' +
+      '<td>' + fmtTime(r.ts) + '</td>' +
+      '<td>' + (r.model || '—') + '</td>' +
+      '<td>' + (r.provider || '—') + '</td>' +
+      '<td class="num">' + OCDash.fmtNum(r.input_tokens) + '</td>' +
+      '<td class="num">' + OCDash.fmtNum(r.output_tokens) + '</td>' +
+      '<td class="num">' + fmtCost(r.cost_usd) + '</td>' +
+      '</tr>'
+    )),
+    '</tbody></table>',
+  ].join('');
+  content.innerHTML = html;
+  // Compute totals.
+  const totCalls = rows.length;
+  const totIn = rows.reduce((s, r) => s + (r.input_tokens || 0), 0);
+  const totOut = rows.reduce((s, r) => s + (r.output_tokens || 0), 0);
+  const known = rows.filter(r => r.cost_usd != null);
+  const totCost = known.reduce((s, r) => s + r.cost_usd, 0);
+  const partial = known.length < rows.length;
+  totals.innerHTML = (
+    '<strong>' + totCalls + '</strong> calls — ' +
+    '<strong>' + OCDash.fmtNum(totIn) + '</strong> tokens in, ' +
+    '<strong>' + OCDash.fmtNum(totOut) + '</strong> tokens out — ' +
+    'total cost: <strong>' + fmtCost(known.length ? totCost : null) + '</strong>' +
+    (partial ? ' <em>(some calls had no pricing data — total is a lower bound)</em>' : '')
+  );
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>

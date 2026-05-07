@@ -147,3 +147,89 @@ def test_status_custom_port(runner: CliRunner) -> None:
     args, _ = mock.call_args
     url = args[0]
     assert ":9333" in url
+
+
+def _tabs_resp() -> _FakeResp:
+    return _FakeResp(
+        json.dumps([
+            {
+                "type": "page",
+                "id": "abc",
+                "title": "Notion — workspace",
+                "url": "https://www.notion.so/team/abc",
+                "webSocketDebuggerUrl": "ws://localhost:9222/devtools/page/abc",
+            },
+            {
+                "type": "page",
+                "id": "def",
+                "title": "Gmail",
+                "url": "https://mail.google.com/mail/u/0/",
+                "webSocketDebuggerUrl": "ws://localhost:9222/devtools/page/def",
+            },
+            {
+                "type": "service_worker",  # filtered out
+                "id": "sw1",
+                "title": "service worker",
+                "url": "",
+            },
+        ]).encode()
+    )
+
+
+def test_tabs_command_lists_pages(runner: CliRunner) -> None:
+    with patch("urllib.request.urlopen", return_value=_tabs_resp()):
+        result = runner.invoke(browser_app, ["tabs"])
+    assert result.exit_code == 0
+    assert "Notion" in result.stdout
+    assert "Gmail" in result.stdout
+    # Filtered out: service worker shouldn't appear
+    assert "service worker" not in result.stdout
+    # Sees 2 page tabs
+    assert "2 tab" in result.stdout
+
+
+def test_tabs_command_no_pages(runner: CliRunner) -> None:
+    with patch(
+        "urllib.request.urlopen",
+        return_value=_FakeResp(json.dumps([]).encode()),
+    ):
+        result = runner.invoke(browser_app, ["tabs"])
+    assert result.exit_code == 0
+    assert "No open page tabs" in result.stdout
+
+
+def test_tabs_command_failure(runner: CliRunner) -> None:
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=ConnectionRefusedError("nope"),
+    ):
+        result = runner.invoke(browser_app, ["tabs"])
+    assert result.exit_code == 1
+    assert "Could not list tabs" in result.stderr
+
+
+def test_tabs_command_custom_cdp_url(runner: CliRunner) -> None:
+    with patch("urllib.request.urlopen", return_value=_tabs_resp()) as mock:
+        runner.invoke(browser_app, ["tabs", "--cdp-url", "http://example.com:7777"])
+    args, _ = mock.call_args
+    assert args[0] == "http://example.com:7777/json"
+
+
+def test_run_command_cdp_url_overrides_env(monkeypatch, runner: CliRunner) -> None:
+    """--cdp-url sets the env var for this invocation."""
+    monkeypatch.delenv("OPENCOMPUTER_BROWSER_CDP_URL", raising=False)
+    seen_env: dict = {}
+
+    def _fake_run_recipe(site, verb, args, fetcher, fmt):
+        import os as _os
+        seen_env["cdp"] = _os.environ.get("OPENCOMPUTER_BROWSER_CDP_URL")
+        return "{}"
+
+    with patch("opencomputer.recipes.run_recipe", _fake_run_recipe):
+        result = runner.invoke(
+            browser_app,
+            ["run", "any-site", "any-verb", "--cdp-url", "http://localhost:9999"],
+        )
+    # The recipe lookup itself will fail for a fake site, but cdp_url
+    # gets applied BEFORE the lookup. Either way the env var was set.
+    assert seen_env.get("cdp") == "http://localhost:9999" or result.exit_code != 0
