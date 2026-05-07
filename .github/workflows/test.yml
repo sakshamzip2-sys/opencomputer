@@ -50,13 +50,18 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: OpenComputer/ui-web/package-lock.json
+          cache-dependency-path: |
+            OpenComputer/ui-web/package-lock.json
+            OpenComputer/ui-tui/package-lock.json
       - name: Build dashboard SPA
         run: ./scripts/build-dashboard.sh
-      - name: Verify dashboard SPA artifact
+      - name: Build Ink TUI
+        run: ./scripts/build-tui.sh
+      - name: Verify frontend artifacts
         run: |
           test -f opencomputer/dashboard/static/spa/index.html
           test -d opencomputer/dashboard/static/spa/assets
+          test -f opencomputer/ui-tui/dist/entry.js
 
       - name: Run pytest
         run: pytest tests/ -v --tb=short

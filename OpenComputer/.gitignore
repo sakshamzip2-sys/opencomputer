@@ -19,6 +19,7 @@ sdist/
 # `cd ui-tui && npm run build`). Excluded from git but force-included
 # in the wheel via pyproject.toml [tool.hatch.build.targets.wheel.force-include].
 opencomputer/dashboard/static/spa/
+opencomputer/ui-tui/dist/
 ui-tui/dist/
 ui-tui/packages/*/dist/
 

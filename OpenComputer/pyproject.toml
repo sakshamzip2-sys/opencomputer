@@ -185,6 +185,9 @@ packages = ["opencomputer", "plugin_sdk"]
 # static pages when absent (so source-installs without a frontend
 # build still get a usable dashboard).
 "opencomputer/dashboard/static/spa" = "opencomputer/dashboard/static/spa"
+# TUI build artifact (Ink+React, vendored from hermes-agent/ui-tui under
+# MIT). Built by `scripts/build-tui.sh`, used by `oc tui`.
+"opencomputer/ui-tui/dist" = "opencomputer/ui-tui/dist"
 
 [tool.ruff]
 line-length = 100
