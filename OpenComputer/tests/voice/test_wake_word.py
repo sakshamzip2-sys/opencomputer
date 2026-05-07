@@ -222,3 +222,107 @@ def test_bundled_words_constant_includes_hey_jarvis():
 
     assert "hey_jarvis" in BUNDLED_WAKE_WORDS
     assert "alexa" in BUNDLED_WAKE_WORDS
+
+
+# ---------------------------------------------------------------------------
+# Auto-discovery from <profile_home>/wake_models/<word>.onnx
+# ---------------------------------------------------------------------------
+
+
+def test_wake_models_dir_uses_profile_home(tmp_path, monkeypatch):
+    """wake_models_dir resolves to <profile_home>/wake_models/."""
+    monkeypatch.setattr(
+        "opencomputer.voice.wake_word._resolve_profile_home",
+        lambda: tmp_path,
+    )
+    from opencomputer.voice.wake_word import wake_models_dir
+
+    result = wake_models_dir()
+    assert result == tmp_path / "wake_models"
+
+
+def test_auto_discover_model_returns_path_when_present(tmp_path, monkeypatch):
+    """_auto_discover_model returns the ONNX path when present on disk."""
+    monkeypatch.setattr(
+        "opencomputer.voice.wake_word._resolve_profile_home",
+        lambda: tmp_path,
+    )
+    models_dir = tmp_path / "wake_models"
+    models_dir.mkdir()
+    onnx = models_dir / "hey_open_computer.onnx"
+    onnx.write_bytes(b"fake")
+    from opencomputer.voice.wake_word import _auto_discover_model
+
+    found = _auto_discover_model("hey_open_computer")
+    assert found == onnx
+
+
+def test_auto_discover_model_returns_none_when_missing(tmp_path, monkeypatch):
+    """_auto_discover_model returns None when no ONNX is at the path."""
+    monkeypatch.setattr(
+        "opencomputer.voice.wake_word._resolve_profile_home",
+        lambda: tmp_path,
+    )
+    from opencomputer.voice.wake_word import _auto_discover_model
+
+    assert _auto_discover_model("hey_open_computer") is None
+
+
+def test_auto_discover_model_returns_none_when_empty(tmp_path, monkeypatch):
+    """An empty ONNX file is treated as missing — never returned as a hit."""
+    monkeypatch.setattr(
+        "opencomputer.voice.wake_word._resolve_profile_home",
+        lambda: tmp_path,
+    )
+    models_dir = tmp_path / "wake_models"
+    models_dir.mkdir()
+    (models_dir / "hey_open_computer.onnx").write_bytes(b"")
+    from opencomputer.voice.wake_word import _auto_discover_model
+
+    assert _auto_discover_model("hey_open_computer") is None
+
+
+def test_resolve_word_uses_auto_discovered_model(tmp_path, monkeypatch):
+    """When custom word + no model_path + ONNX on disk, _resolve_word uses it."""
+    from unittest.mock import MagicMock
+
+    fake_ow = MagicMock()
+    monkeypatch.setitem(sys.modules, "openwakeword", fake_ow)
+    monkeypatch.setattr(
+        "opencomputer.voice.wake_word._resolve_profile_home",
+        lambda: tmp_path,
+    )
+    models_dir = tmp_path / "wake_models"
+    models_dir.mkdir()
+    (models_dir / "hey_open_computer.onnx").write_bytes(b"fake")
+
+    from opencomputer.voice.wake_word import WakeWordDetector
+
+    det = WakeWordDetector(word="hey_open_computer")
+    active = det._resolve_word()
+    assert active == "hey_open_computer"
+    assert det.fell_back is False
+    assert det.model_path == models_dir / "hey_open_computer.onnx"
+
+
+def test_resolve_word_still_falls_back_when_no_trained_model(
+    tmp_path, monkeypatch,
+):
+    """No trained ONNX → fallback to hey_jarvis still fires."""
+    from unittest.mock import MagicMock
+
+    fake_ow = MagicMock()
+    monkeypatch.setitem(sys.modules, "openwakeword", fake_ow)
+    monkeypatch.setattr(
+        "opencomputer.voice.wake_word._resolve_profile_home",
+        lambda: tmp_path,
+    )
+    from opencomputer.voice.wake_word import (
+        FALLBACK_BUNDLED_WORD,
+        WakeWordDetector,
+    )
+
+    det = WakeWordDetector(word="hey_open_computer")
+    active = det._resolve_word()
+    assert active == FALLBACK_BUNDLED_WORD
+    assert det.fell_back is True

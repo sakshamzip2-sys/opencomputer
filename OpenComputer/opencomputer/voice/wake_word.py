@@ -80,6 +80,44 @@ WAKE_SAMPLE_RATE: int = 16000
 _DETECTION_COOLDOWN_S: float = 1.5
 
 
+def _resolve_profile_home() -> Path:
+    """Return the active profile's home directory.
+
+    Mirrors the logic the CLI uses (active profile via
+    ``read_active_profile``, falling back to ``~/.opencomputer/default``).
+    Lives in the detector module so :func:`_auto_discover_model` can
+    use it without pulling Typer into the import path.
+    """
+    try:
+        from opencomputer.profiles import (  # noqa: PLC0415
+            profile_home_dir,
+            read_active_profile,
+        )
+        active = read_active_profile() or "default"
+        return profile_home_dir(active)
+    except Exception:  # noqa: BLE001
+        return Path.home() / ".opencomputer" / "default"
+
+
+def wake_models_dir() -> Path:
+    """Return ``<profile_home>/wake_models/`` (caller creates on demand)."""
+    return _resolve_profile_home() / "wake_models"
+
+
+def _auto_discover_model(word: str) -> Path | None:
+    """Look for ``<profile_home>/wake_models/<word>.onnx``.
+
+    Returns the path when present and non-empty; ``None`` otherwise.
+    Used by :meth:`WakeWordDetector._resolve_word` to pick up a model
+    that the user trained via ``oc voice train-wake`` without requiring
+    them to pass ``--model`` on every wake invocation.
+    """
+    candidate = wake_models_dir() / f"{word}.onnx"
+    if candidate.is_file() and candidate.stat().st_size > 0:
+        return candidate
+    return None
+
+
 class WakeWordError(RuntimeError):
     """Raised on wake-word setup or runtime errors."""
 
@@ -230,8 +268,10 @@ class WakeWordDetector:
           1. ``model_path`` set → use ``self.word`` as the label, model
              loaded from path (caller is responsible for the file).
           2. ``self.word`` is in ``BUNDLED_WAKE_WORDS`` → use as-is.
-          3. Otherwise → fall back to ``FALLBACK_BUNDLED_WORD`` and log
-             a hint pointing at TRAINING_URL.
+          3. Auto-discovered model at ``<profile_home>/wake_models/<word>.onnx``
+             → use it (sets ``self.model_path`` for downstream loaders).
+          4. Otherwise → fall back to ``FALLBACK_BUNDLED_WORD`` and log
+             a hint pointing at the training URL / CLI.
         """
         if self.model_path is not None:
             self._effective_word = self.word
@@ -241,12 +281,25 @@ class WakeWordDetector:
             self._effective_word = self.word
             self._fell_back = False
             return self.word
+        # Auto-discover a trained ONNX before falling back. This closes
+        # the loop opened by PR-A's hey_open_computer default — a user
+        # who trained via `oc voice train-wake` doesn't need to pass
+        # --model on every wake invocation.
+        auto_path = _auto_discover_model(self.word)
+        if auto_path is not None:
+            _log.info(
+                "wake: auto-discovered trained model at %s", auto_path,
+            )
+            self.model_path = auto_path
+            self._effective_word = self.word
+            self._fell_back = False
+            return self.word
         # Custom word requested but no model_path → fall back.
         _log.warning(
             "wake: custom wake-word '%s' is not bundled and no model_path "
-            "provided; falling back to '%s'. Train a custom model at %s "
-            "to use '%s' for real.",
-            self.word, FALLBACK_BUNDLED_WORD, TRAINING_URL, self.word,
+            "provided; falling back to '%s'. Train a custom model with "
+            "`oc voice train-wake` (~30 min on CPU). Reference: %s",
+            self.word, FALLBACK_BUNDLED_WORD, TRAINING_URL,
         )
         self._effective_word = FALLBACK_BUNDLED_WORD
         self._fell_back = True
@@ -553,4 +606,7 @@ __all__ = [
     "WakeWordDetector",
     "WakeWordError",
     "_acquire_pid_lock",
+    "_auto_discover_model",
+    "_resolve_profile_home",
+    "wake_models_dir",
 ]
