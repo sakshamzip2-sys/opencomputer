@@ -1477,17 +1477,46 @@ class AgentLoop:
                 if _iter > 0:
                     try:
                         from opencomputer.agent.steer import (
+                            default_buffer as _steer_buffer,
+                        )
+                        from opencomputer.agent.steer import (
                             default_registry as _steer_registry,
                         )
                         from opencomputer.agent.steer import (
                             format_nudge_message as _format_nudge,
                         )
 
+                        # PR-A Feature 1: peek cancel flag BEFORE consuming
+                        # any state — drives the <USER-INTERRUPT> vs
+                        # <USER-NUDGE> prefix decision.
+                        _cancel_was_set = (
+                            _steer_registry.has_cancel_listener(sid)
+                            and _steer_registry.cancel_event(sid).is_set()
+                        )
                         nudge = _steer_registry.consume(sid)
-                        if nudge:
+                        # Drain any inbound messages buffered during the
+                        # cancel-pending window. Merge with the explicit
+                        # nudge — explicit text wins position, buffered
+                        # follow with '---' separator.
+                        buffered = _steer_buffer.drain(sid)
+                        if nudge and buffered:
+                            merged: str | None = f"{nudge}\n---\n{buffered}"
+                        elif nudge:
+                            merged = nudge
+                        elif buffered:
+                            merged = buffered
+                        else:
+                            merged = None
+
+                        if merged:
+                            if _cancel_was_set:
+                                _steer_registry.reset_cancel(sid)
                             nudge_msg = Message(
                                 role="user",
-                                content=_format_nudge(nudge),
+                                content=_format_nudge(
+                                    merged,
+                                    was_interrupted=_cancel_was_set,
+                                ),
                             )
                             messages.append(nudge_msg)
                             # Persist so a resumed session sees the same
@@ -1496,10 +1525,12 @@ class AgentLoop:
                             # change the next turn's semantics).
                             self._persist_message(sid, nudge_msg)
                             _log.debug(
-                                "steer: applied pending nudge for session %s "
-                                "(len=%d)",
+                                "steer: applied %s nudge for session %s "
+                                "(len=%d, buffered_extras=%s)",
+                                "interrupt" if _cancel_was_set else "pending",
                                 sid,
-                                len(nudge),
+                                len(merged),
+                                "yes" if buffered else "no",
                             )
                     except Exception:  # noqa: BLE001 — never break the loop
                         _log.warning(
