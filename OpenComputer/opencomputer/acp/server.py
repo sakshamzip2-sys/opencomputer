@@ -70,6 +70,8 @@ class ACPServer:
             # Wave 5 T3 — Hermes-port /steer + /queue
             "steer": self._handle_steer,
             "queue": self._handle_queue,
+            # PR-A Feature 3 (2026-05-07) — per-session tool gating
+            "setSessionPermissions": self._handle_set_session_permissions,
         }
 
     async def serve_stdio(self) -> None:
@@ -223,10 +225,18 @@ class ACPServer:
         return {"status": "queued", "text": text, "pending": len(sess.queued)}
 
     async def _handle_request_permission(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Handle IDE-side permission request. Auto-deny if no session/gate."""
+        """Handle IDE-side permission request. Auto-deny if no session/gate.
+
+        PR-A Feature 3: accepts an optional ``tier`` parameter
+        (``IMPLICIT`` / ``EXPLICIT`` / ``PER_ACTION`` / ``DELEGATED`` —
+        mirrors ``plugin_sdk.consent.ConsentTier`` exactly) that the IDE
+        can pass through to drive the consent gate's tier directly.
+        Defaults to ``PER_ACTION`` for backwards compat.
+        """
         session_id = params.get("sessionId", "")
         command = params.get("command", "unknown")
         description = params.get("description", "")
+        tier = params.get("tier", "PER_ACTION")
         session = self._sessions.get(session_id)
         if session is None:
             return {"outcome": "deny", "reason": "session not found"}
@@ -239,9 +249,47 @@ class ACPServer:
         from opencomputer.acp.permissions import make_approval_callback
 
         loop = asyncio.get_event_loop()
-        cb = make_approval_callback(session_id, gate, loop)
+        try:
+            cb = make_approval_callback(
+                session_id, gate, loop, default_tier=tier,
+            )
+        except ValueError as exc:
+            return {"outcome": "deny", "reason": f"invalid tier: {exc}"}
         outcome = cb(command, description)
         return {"outcome": outcome}
+
+    async def _handle_set_session_permissions(
+        self, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """PR-A Feature 3: update per-session allowed/denied tools.
+
+        Race-safe: applies to *future* tool dispatches only; in-flight
+        tools complete unaffected. ``allowedTools`` is descriptive
+        metadata; ``deniedTools`` is the security gate (consulted in
+        ``_dispatch_tool_calls`` via ``RuntimeContext.acp_denied_tools``).
+
+        Either ``allowedTools`` or ``deniedTools`` may be omitted or
+        ``None`` — those fields are left unchanged. Pass an empty list
+        to explicitly clear.
+        """
+        session_id = params.get("sessionId")
+        if not session_id or session_id not in self._sessions:
+            raise KeyError(f"session not found: {session_id}")
+        session = self._sessions[session_id]
+        allowed_raw = params.get("allowedTools")
+        denied_raw = params.get("deniedTools")
+        allowed = (
+            frozenset(allowed_raw) if allowed_raw is not None else None
+        )
+        denied = (
+            frozenset(denied_raw) if denied_raw is not None else None
+        )
+        session.update_permissions(allowed=allowed, denied=denied)
+        return {
+            "sessionId": session_id,
+            "allowedTools": list(session.allowed_tools),
+            "deniedTools": list(session.denied_tools),
+        }
 
     # --- transport ---
 

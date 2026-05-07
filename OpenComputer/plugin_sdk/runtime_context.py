@@ -57,6 +57,18 @@ class RuntimeContext:
     #: forcing an SDK version bump.
     custom: dict[str, Any] = field(default_factory=dict)
 
+    #: PR-A Feature 3 (2026-05-07) — typed denylist for ACP per-session
+    #: tool gating. The ACP server's ``setSessionPermissions`` method
+    #: writes here; the agent loop's ``_dispatch_tool_calls`` consults
+    #: it before invoking each tool. Race-safe: applies to *future*
+    #: dispatches only; in-flight tools complete unaffected.
+    #:
+    #: This is a typed field (not in ``custom``) because (a) it's a
+    #: load-bearing security gate, (b) it must be type-checked, and
+    #: (c) free-form dicts get stomped silently by other plugins.
+    #: Empty frozenset = no ACP-side restrictions in effect.
+    acp_denied_tools: frozenset[str] = field(default_factory=frozenset)
+
     delegation_depth: int = 0
     """How deep we are in the delegation chain. 0 = parent (top of stack).
     1 = child of a delegated call. Each `DelegateTool.execute` increments this

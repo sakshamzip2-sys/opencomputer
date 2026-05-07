@@ -75,6 +75,14 @@ class ACPSession:
         self.pending_user_text: str | None = None
         self.queued: list[QueuedMessage] = []
 
+        # PR-A Feature 3 (2026-05-07) — per-session tool gates set by
+        # ACP ``setSessionPermissions``. ``denied_tools`` is consulted
+        # by the agent loop's ``_dispatch_tool_calls``; ``allowed_tools``
+        # is descriptive metadata for the IDE display (not currently
+        # enforced — denylist is the security gate).
+        self.allowed_tools: frozenset[str] = frozenset()
+        self.denied_tools: frozenset[str] = frozenset()
+
     def emit_event(self, method: str, params: Any) -> None:
         """Send a JSON-RPC notification to the ACP client and buffer in event_queue."""
         self._send(method, params)
@@ -219,6 +227,28 @@ class ACPSession:
         """
         self.is_running = False
         self.is_interrupted = False
+
+    def update_permissions(
+        self,
+        *,
+        allowed: frozenset[str] | None = None,
+        denied: frozenset[str] | None = None,
+    ) -> None:
+        """Update per-session allow/deny tool lists.
+
+        PR-A Feature 3 (2026-05-07): IDE clients call this via the
+        ``setSessionPermissions`` ACP method. Race-safe by design —
+        the agent loop reads ``denied_tools`` only at dispatch entry,
+        so in-flight tool calls always complete; updates take effect
+        on the next dispatch.
+
+        ``None`` for either argument means "leave unchanged"; pass an
+        empty frozenset to clear.
+        """
+        if allowed is not None:
+            self.allowed_tools = allowed
+        if denied is not None:
+            self.denied_tools = denied
 
     async def steer(self, text: str) -> None:
         """Interrupt the current turn with new user text.

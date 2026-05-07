@@ -3701,6 +3701,26 @@ class AgentLoop:
                             blocked[c.id] = f"consent denied: {decision.reason}"
                             break
 
+        # PR-A Feature 3: ACP per-session denylist gate. Fires AFTER
+        # consent-gate (which is non-bypassable security) and BEFORE
+        # PreToolUse hooks (which are application policy). A tool that
+        # is denied by the IDE-side ``setSessionPermissions`` is short-
+        # circuited just like a consent-denied tool — the model sees the
+        # denied marker as a tool result and can replan without invoking
+        # the tool again. Race-safe: this check runs once per dispatch
+        # entry; any update to ``acp_denied_tools`` affects only the
+        # next dispatch.
+        _acp_denied = getattr(self._runtime, "acp_denied_tools", frozenset())
+        if _acp_denied:
+            for c in calls:
+                if c.id in blocked:
+                    continue
+                if c.name in _acp_denied:
+                    blocked[c.id] = (
+                        f"ACP denylist: tool '{c.name}' is denied for "
+                        "this session"
+                    )
+
         # Fire PreToolUse hooks next (blocking). Determine which calls are blocked.
         for c in calls:
             if c.id in blocked:
