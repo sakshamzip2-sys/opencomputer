@@ -456,6 +456,14 @@ class Dispatch:
         self._last_seen_dirty_count = 0
         self._last_seen_persist_every = 10
         self._load_last_seen()
+        # PR-1 follow-up — drain coordination. ``_drain_active`` is set by
+        # ``Gateway.serve_forever`` when ``oc gateway restart`` writes the
+        # drain flag; new arrivals while drain is active return None
+        # immediately without entering the agent loop. ``_inflight_count``
+        # tracks how many handle_message calls are mid-flight so the
+        # serve loop can wait until 0 before exiting.
+        self._drain_active = False
+        self._inflight_count = 0
 
     def register_adapter(self, platform: str, adapter) -> None:
         self._adapters_by_platform[platform] = adapter
@@ -642,6 +650,19 @@ class Dispatch:
         text_present = bool(event.text and event.text.strip())
         attach_present = bool(event.attachments)
         if not text_present and not attach_present:
+            return None
+
+        # PR-1 follow-up — drain mode: refuse new arrivals while
+        # ``oc gateway restart`` is waiting for in-flight runs to drain.
+        # Existing in-flight runs continue (they're tracked in
+        # ``_inflight_count``); the gateway's serve_forever waits for
+        # the count to reach 0 before exiting.
+        if getattr(self, "_drain_active", False):
+            logger.info(
+                "dispatch: drain active — skipping new arrival on %s:%s",
+                event.platform.value if event.platform else "?",
+                event.chat_id,
+            )
             return None
 
         # ── PR-1 (Task 1.6) — AllowlistGate check ───────────────────────
@@ -884,7 +905,30 @@ class Dispatch:
         ``set_profile(profile_home)`` so ``_home()`` and PluginAPI
         lazy properties resolve to the right profile inside the
         request scope.
+
+        PR-1 follow-up — inflight bookkeeping. Increments
+        ``self._inflight_count`` for the duration of this call so the
+        gateway's drain-aware ``serve_forever`` can wait for active
+        dispatches to finish before exiting.
         """
+        # Inflight tracking — guarded so legacy callers that bypass
+        # __init__ (Dispatch.__new__(Dispatch) in tests) keep working.
+        try:
+            self._inflight_count = getattr(self, "_inflight_count", 0) + 1
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            return await self.__do_dispatch_inner(event, session_id)
+        finally:
+            try:
+                self._inflight_count = max(0, getattr(self, "_inflight_count", 0) - 1)
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def __do_dispatch_inner(
+        self, event: MessageEvent, session_id: str
+    ) -> str | None:
+        """Inner dispatch — wrapped by ``_do_dispatch`` for inflight bookkeeping."""
         # Phase 3 Task 3.3: per-event profile resolution via the
         # BindingResolver. Falls back to "default" when no resolver
         # was wired — preserves the legacy behaviour for callers /
