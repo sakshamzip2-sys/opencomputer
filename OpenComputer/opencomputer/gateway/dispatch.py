@@ -516,6 +516,35 @@ class Dispatch:
 
         session_id = self._session_id_for(event)
 
+        # PR-A Feature 1: if /steer just fired for this session and the
+        # agent loop hasn't yet consumed the cancel state, route this
+        # inbound message to SteerBuffer instead of triggering a fresh
+        # turn. The next-turn between-turn consume drains the buffer and
+        # merges it into the replan as <USER-INTERRUPT>. This is a narrow
+        # window — typically microseconds — but during a long-running
+        # cancelled tool, multiple messages can pile up.
+        try:
+            from opencomputer.agent.steer import (
+                default_buffer as _steer_buffer,
+            )
+            from opencomputer.agent.steer import (
+                default_registry as _steer_reg,
+            )
+
+            if (
+                _steer_reg.has_cancel_listener(session_id)
+                and _steer_reg.cancel_event(session_id).is_set()
+            ):
+                _steer_buffer.append(session_id, event.text or "")
+                logger.debug(
+                    "gateway: buffered inbound during cancel-pending window "
+                    "for session %s",
+                    session_id,
+                )
+                return None
+        except Exception:  # noqa: BLE001 — never block dispatch on this
+            pass
+
         # Wave 5 T13 — Hermes-port pre_gateway_dispatch hook (1ef1e4c66).
         # Fires once per inbound message before any auth check. Plugins
         # can drop, rewrite, or allow. Plugin crashes are swallowed by

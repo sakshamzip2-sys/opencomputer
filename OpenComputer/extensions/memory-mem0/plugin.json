@@ -9,7 +9,8 @@
   "min_host_version": "2026.5.5",
   "profiles": ["*"],
   "enabled_by_default": false,
-  "tool_names": ["mem0_search", "mem0_remember", "mem0_forget"],
+  "tool_names": [],
+  "optional_tool_names": ["mem0_search", "mem0_remember", "mem0_forget"],
   "activation": {
     "on_tools": ["mem0_search", "mem0_remember", "mem0_forget"]
   }

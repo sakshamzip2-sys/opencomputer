@@ -150,8 +150,33 @@ class PiperTTS:
         return out_path
 
 
+def synthesize_to_path(*, text: str, dest: Path, cfg: PiperConfig) -> None:
+    """Synthesize ``text`` to a WAV file at ``dest`` (synchronous).
+
+    Thin sync wrapper for callers that aren't on an event loop — used
+    by ``wake_train.synthesize_positives`` to generate the positive
+    sample set. Reuses the same voice cache as :class:`PiperTTS`.
+    """
+    voice_path = _resolve_voice_path(cfg.voice)
+    voice = _load_voice(str(voice_path), cfg.use_cuda)
+    synth_kwargs: dict[str, object] = {}
+    if cfg.length_scale is not None:
+        synth_kwargs["length_scale"] = cfg.length_scale
+    if cfg.noise_scale is not None:
+        synth_kwargs["noise_scale"] = cfg.noise_scale
+    if cfg.noise_w_scale is not None:
+        synth_kwargs["noise_w_scale"] = cfg.noise_w_scale
+    if cfg.volume is not None:
+        synth_kwargs["volume"] = cfg.volume
+    if cfg.normalize_audio is not None:
+        synth_kwargs["normalize_audio"] = cfg.normalize_audio
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    voice.synthesize_wav(text, str(dest), **synth_kwargs)
+
+
 __all__ = [
     "DEFAULT_VOICE",
     "PiperConfig",
     "PiperTTS",
+    "synthesize_to_path",
 ]

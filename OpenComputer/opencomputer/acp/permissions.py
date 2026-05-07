@@ -30,11 +30,22 @@ _GRANT_TYPE_MAP: dict[str, str] = {
 }
 
 
+#: Valid ConsentTier names accepted by ``make_approval_callback``.
+#: Mirrors plugin_sdk.consent.ConsentTier exactly — kept as a frozenset
+#: of strings so the caller doesn't need to import ConsentTier just to
+#: validate the parameter.
+_VALID_TIERS: frozenset[str] = frozenset({
+    "IMPLICIT", "EXPLICIT", "PER_ACTION", "DELEGATED",
+})
+
+
 def make_approval_callback(
     session_id: str,
     gate: Any,
     loop: asyncio.AbstractEventLoop,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    *,
+    default_tier: str = "PER_ACTION",
 ):
     """Return a sync approval_callback(command, description) -> str.
 
@@ -43,15 +54,34 @@ def make_approval_callback(
         gate: ConsentGate instance (from opencomputer.agent.consent.gate).
         loop: The event loop where gate coroutines must run.
         timeout: Seconds before auto-deny.
+        default_tier: PR-A Feature 3 — the ``ConsentTier`` name used
+            when building the ``CapabilityClaim``. Acceptable values
+            mirror ``plugin_sdk.consent.ConsentTier``:
+            ``IMPLICIT`` / ``EXPLICIT`` / ``PER_ACTION`` / ``DELEGATED``.
+            Validated at construction; a bad value raises ``ValueError``
+            so the caller can surface it to the IDE.
+
+    Raises:
+        ValueError: ``default_tier`` is not a valid ConsentTier name.
     """
     from plugin_sdk.consent import CapabilityClaim, ConsentTier
+
+    if default_tier not in _VALID_TIERS:
+        raise ValueError(
+            f"default_tier must be one of {sorted(_VALID_TIERS)}, "
+            f"got {default_tier!r}"
+        )
+
+    # Resolve once at construction so the inner callback doesn't repeat
+    # the lookup on every invocation.
+    _tier = getattr(ConsentTier, default_tier)
 
     def approval_callback(command: str, description: str) -> str:
         """Synchronous approval bridge for the agent loop."""
         try:
             claim = CapabilityClaim(
                 capability_id=f"acp.dynamic.{command[:32]}",
-                tier_required=ConsentTier.PER_ACTION,
+                tier_required=_tier,
                 human_description=description or command,
             )
         except Exception:

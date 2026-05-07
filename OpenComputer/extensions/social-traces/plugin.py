@@ -239,6 +239,24 @@ def wire_subscriber(
                 "social-traces: prior subscriber.stop() raised — continuing",
                 exc_info=True,
             )
+            # Defensive: if stop() raised before unsubscribing, the prior
+            # subscriber is still attached to default_bus and will keep
+            # popping bridge entries on every SessionEndEvent — silently
+            # corrupting unrelated test/runtime state. Force-unsubscribe
+            # via the raw subscription handle as a fallback.
+            sub_handle = getattr(_active_subscriber, "_subscription", None)
+            if sub_handle is not None:
+                try:
+                    sub_handle.unsubscribe()
+                except Exception:  # noqa: BLE001 — best-effort cleanup
+                    _log.warning(
+                        "social-traces: prior subscription.unsubscribe() "
+                        "raised during fallback — continuing",
+                        exc_info=True,
+                    )
+                # Clear the handle so a later stop_subscriber() call
+                # treats this subscriber as already-stopped (idempotent).
+                _active_subscriber._subscription = None
 
     from opencomputer.ingestion.bus import default_bus
 
@@ -279,6 +297,22 @@ def stop_subscriber() -> None:
             "social-traces: subscriber.stop() raised on shutdown",
             exc_info=True,
         )
+        # Defensive: if stop() raised before unsubscribing, the
+        # subscriber is still attached to default_bus and will keep
+        # popping bridge entries on every SessionEndEvent. Force-
+        # unsubscribe via the raw subscription handle as a fallback
+        # so a crash here cannot leak a zombie subscriber.
+        sub_handle = getattr(_active_subscriber, "_subscription", None)
+        if sub_handle is not None:
+            try:
+                sub_handle.unsubscribe()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                _log.warning(
+                    "social-traces: subscription.unsubscribe() raised "
+                    "during shutdown fallback — continuing",
+                    exc_info=True,
+                )
+            _active_subscriber._subscription = None
     _active_subscriber = None
 
 

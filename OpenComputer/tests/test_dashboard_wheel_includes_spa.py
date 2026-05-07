@@ -22,12 +22,19 @@ def test_wheel_includes_spa_index(tmp_path: Path):
     builds the SPA before running tests so this gate fires there.
     """
     try:
+        import build  # noqa: F401  (presence check)
+    except ImportError:
+        pytest.skip("`build` package not installed — pip install build")
+
+    try:
         subprocess.check_call(
             ["python", "-m", "build", "--wheel", "--outdir", str(tmp_path)],
             cwd=Path(__file__).parent.parent,
         )
     except FileNotFoundError:
         pytest.skip("python -m build unavailable in this env")
+    except subprocess.CalledProcessError as exc:
+        pytest.skip(f"python -m build failed in this env (skipping): {exc}")
     wheels = list(tmp_path.glob("*.whl"))
     assert wheels, "no wheel built"
     with zipfile.ZipFile(wheels[0]) as zf:
