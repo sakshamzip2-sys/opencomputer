@@ -1449,6 +1449,165 @@ wire methods that carry credentials. Migrating existing
 
 ---
 
+## Inbound queue primitives (S1, 2026-05-06)
+
+Public types describing per-channel inbound-message queue policy. Used
+by gateway adapters that buffer incoming messages while a session is
+mid-dispatch (steer cancel-pending window, slow agent, plugin
+quarantine). Plugins reference these to declare their preferred queue
+mode in a manifest or at runtime.
+
+### `QueueMode`
+
+Enum literal for top-level queue behaviour. Members:
+
+- `"REJECT"` — refuse new messages while busy; surface a friendly
+  bounce to the channel.
+- `"COLLECT"` — append into a per-session buffer up to `cap`, then
+  apply `DropPolicy`.
+- `"COALESCE"` — keep only the latest message; older buffered
+  messages are silently discarded.
+- `"REPLACE"` — same as `COALESCE` but the new message replaces the
+  in-flight prompt (no buffering).
+
+### `DropPolicy`
+
+What to do when a `COLLECT` queue hits its cap.
+
+- `"DROP_OLDEST"` (default) — evict the head, append at tail.
+- `"DROP_NEWEST"` — refuse the incoming message; head/tail unchanged.
+
+### `QueueConfig`
+
+```python
+@dataclass(frozen=True, slots=True)
+class QueueConfig:
+    mode: QueueMode = "COLLECT"
+    cap: int = DEFAULT_COLLECT_CAP            # 5
+    debounce_s: float = DEFAULT_COLLECT_DEBOUNCE_S  # 0.5
+    drop_policy: DropPolicy = "DROP_OLDEST"
+```
+
+Per-channel queue tuning. `debounce_s` is the minimum quiet interval
+before flushing a `COLLECT` buffer to the agent loop.
+
+### Module-level constants
+
+- `ALL_QUEUE_MODES: tuple[QueueMode, ...]` — every literal value of
+  `QueueMode`. Useful for CLI flag validation.
+- `ALL_DROP_POLICIES: tuple[DropPolicy, ...]` — every literal value of
+  `DropPolicy`.
+- `DEFAULT_QUEUE_MODE: QueueMode` — `"COLLECT"`.
+- `DEFAULT_COLLECT_CAP: int` — `5`.
+- `DEFAULT_COLLECT_DEBOUNCE_S: float` — `0.5`.
+- `DEFAULT_DROP_POLICY: DropPolicy` — `"DROP_OLDEST"`.
+
+---
+
+## Social-traces wire primitives (Phases 1-9)
+
+Wire-format types for the `social-traces` opt-in plugin (community
+trace network). These appear in the SDK so a plugin author building
+their own `TraceNetworkClient` (e.g. against a private OpenHub
+endpoint) gets a typed contract without copying types from the bundled
+plugin.
+
+### `TraceCard`
+
+```python
+@dataclass(frozen=True, slots=True)
+class TraceCard:
+    trace_id: str
+    intent: str           # short imperative; "provision EC2 instance"
+    steps: tuple[TraceStep, ...]
+    insight: str          # one-line takeaway distilled by an LLM
+    tags: tuple[str, ...] # ranked, redacted
+    meta: TraceMeta
+```
+
+Admin-curated, redacted summary of one task. Wire format = JSON
+matching the dataclass shape; field order is **stable** (this is the
+public API the OC client and the OpenHub server share).
+
+### `TraceStep`
+
+```python
+@dataclass(frozen=True, slots=True)
+class TraceStep:
+    role: str          # "user" / "agent" / "tool"
+    summary: str       # one-line LLM-distilled summary; no raw content
+    tool: str | None   # tool name when role=="tool"
+```
+
+One step inside a `TraceCard`. Per-step content is the LLM-distilled
+summary, **not** the raw user prompt or tool output — the privacy
+contract.
+
+### `TraceMeta`
+
+```python
+@dataclass(frozen=True, slots=True)
+class TraceMeta:
+    submitted_at: float       # unix epoch
+    rotated_id: str           # submitter's rotated pseudonym (90-day cycle)
+    redactor_version: str     # which redactor pipeline produced this
+    score: float              # admin-assigned quality score, 0.0-1.0
+```
+
+Metadata block separate from the body so the redactor pipeline can
+re-process body content without losing provenance.
+
+### `TraceOutcome` / `TraceStatus`
+
+- `TraceOutcome` — Literal of submission outcomes:
+  `"submitted"` / `"deduped"` / `"rejected_redaction"` /
+  `"rejected_quality"` / `"rate_limited"`.
+- `TraceStatus` — Literal of trace lifecycle states on the network:
+  `"pending"` / `"published"` / `"rejected"` / `"rotated_out"`.
+
+### `QueryResult` / `SubmitReceipt`
+
+```python
+@dataclass(frozen=True, slots=True)
+class QueryResult:
+    matches: tuple[TraceCard, ...]
+    truncated: bool
+
+@dataclass(frozen=True, slots=True)
+class SubmitReceipt:
+    trace_id: str
+    outcome: TraceOutcome
+    server_msg: str
+```
+
+Returned by `TraceNetworkClient.query` / `.submit` respectively.
+
+### `TraceNetworkClient`
+
+```python
+class TraceNetworkClient(ABC):
+    async def query(*, intent: str, tags: Sequence[str], k: int = 5) -> QueryResult: ...
+    async def submit(card: TraceCard) -> SubmitReceipt: ...
+    async def health() -> bool: ...
+```
+
+Contract for any client backend (HTTP, in-memory, mock) that talks to
+the trace network. The bundled `HttpTraceNetworkClient` implements
+this against an OpenHub endpoint; tests use an in-memory fake.
+
+### `TRACE_API_V1`
+
+```python
+TRACE_API_V1: Final[str] = "trace-network/v1"
+```
+
+Wire-protocol version string. Bumped on any breaking change to the
+JSON shape of `TraceCard` / `QueryResult` / `SubmitReceipt`. Clients
+include this in the `X-Trace-API` header so the server can refuse
+incompatible versions cleanly.
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute
