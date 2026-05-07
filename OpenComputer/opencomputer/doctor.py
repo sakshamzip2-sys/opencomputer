@@ -157,9 +157,82 @@ def _check_channel_tokens(cfg) -> list[Check]:
         tok = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         if tok:
             out.append(Check("telegram token", "pass", "TELEGRAM_BOT_TOKEN set"))
+            out.extend(_check_telegram_polling_conflict())
         else:
             out.append(Check("telegram token", "skip", "TELEGRAM_BOT_TOKEN not set"))
     return out
+
+
+def _check_telegram_polling_conflict() -> list[Check]:
+    """Heuristic check for another process holding the Telegram polling slot.
+
+    Telegram's getUpdates long-poll only delivers each update to ONE
+    polling client per bot token; if a second client connects, both
+    intermittently steal updates from each other. The OC adapter
+    handles this via ``_set_fatal_error(retryable=True)`` after 10
+    consecutive Conflict errors, but the user has no easy way to see
+    "I have two gateways running, that's why my replies aren't going
+    through" except by chasing tracebacks for hours (observed on
+    2026-05-08: 33-hour drainer error loop while Hermes held the slot).
+
+    This check runs ``ps`` and reports any non-self process whose
+    command line matches a known gateway pattern (hermes_cli, opencomputer
+    gateway). It is intentionally a heuristic: env-based bot token
+    sharing can't be detected without elevated permissions, and false
+    positives (different bot tokens, manually launched test daemons)
+    are acceptable since the message is a WARN, not an ERROR.
+    """
+    import re
+    import shutil
+    import subprocess
+
+    if shutil.which("ps") is None:
+        return []
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "pid,comm,args"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if proc.returncode != 0:
+        return []
+
+    self_pid = str(os.getpid())
+    suspects: list[tuple[str, str]] = []
+    pat = re.compile(r"hermes[_-]?cli|hermes[_-]?agent|opencomputer.*gateway", re.I)
+    for line in proc.stdout.splitlines()[1:]:
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, _comm, args = parts
+        if pid == self_pid:
+            continue
+        if pat.search(args):
+            suspects.append((pid, args[:100]))
+
+    if not suspects:
+        return [Check(
+            "telegram polling slot",
+            "pass",
+            "no other gateway process detected",
+        )]
+
+    # WARN, not fail: even if another gateway is running, it might
+    # use a DIFFERENT bot token. The user is the only one who knows
+    # for certain. We give them the PIDs.
+    descs = "; ".join(f"PID {pid}: {args[:50]}" for pid, args in suspects[:3])
+    if len(suspects) > 3:
+        descs += f" (+{len(suspects) - 3} more)"
+    return [Check(
+        "telegram polling slot",
+        "warn",
+        (
+            f"{len(suspects)} other gateway process(es) running — "
+            f"if any uses the same bot token, only one will receive "
+            f"replies. {descs}"
+        ),
+    )]
 
 
 def _check_profile_artifacts() -> list[Check]:

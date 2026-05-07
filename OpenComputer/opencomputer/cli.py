@@ -3141,12 +3141,34 @@ def _service_start() -> None:
 
 @service_app.command("stop")
 def _service_stop() -> None:
-    """OS-level stop (does not uninstall the service)."""
+    """OS-level stop (does not uninstall the service).
+
+    On macOS, this runs ``launchctl bootout`` to remove the service
+    from launchd's domain — the only way KeepAlive can't trigger
+    a respawn. Use ``oc service start`` to bring it back online.
+    """
     from opencomputer.service.factory import get_backend
     backend = get_backend()
     ok = backend.stop()
     typer.echo("stopped" if ok else "stop failed")
     raise typer.Exit(0 if ok else 1)
+
+
+@service_app.command("restart")
+def _service_restart() -> None:
+    """Stop + start the service, in one command.
+
+    Useful after editing config or reinstalling the package — the
+    long-running daemon picks up the new code.
+    """
+    from opencomputer.service.factory import get_backend
+    backend = get_backend()
+    stopped = backend.stop()
+    if not stopped:
+        typer.echo("stop failed (continuing to start anyway)")
+    started = backend.start()
+    typer.echo("restarted" if started else "restart failed: start step failed")
+    raise typer.Exit(0 if started else 1)
 
 
 @service_app.command("logs")

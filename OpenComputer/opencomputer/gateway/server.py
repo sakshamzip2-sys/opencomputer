@@ -232,8 +232,40 @@ class Gateway:
                 logger.error(
                     "gateway: adapter %s failed to connect: %s", adapter.platform, res
                 )
+                # Surface as fatal-retryable so the periodic supervisor
+                # (60s tick) reconnects. Without this, an exception during
+                # boot parks the adapter dead with no recovery — see
+                # 2026-05-08 incident where Telegram polling-slot conflict
+                # silently disabled all replies for hours.
+                try:
+                    adapter._set_fatal_error(
+                        "connect_raised_exception",
+                        f"connect() raised: {res!r}",
+                        retryable=True,
+                    )
+                except Exception:  # noqa: BLE001 — adapter API contract failure
+                    logger.exception(
+                        "gateway: adapter %s does not implement _set_fatal_error",
+                        adapter.platform,
+                    )
             elif res is False:
-                logger.error("gateway: adapter %s returned False from connect()", adapter.platform)
+                logger.error(
+                    "gateway: adapter %s returned False from connect()",
+                    adapter.platform,
+                )
+                # Same recovery path as exception branch — without this,
+                # connect()=False silently parks the adapter forever.
+                try:
+                    adapter._set_fatal_error(
+                        "connect_returned_false",
+                        "connect() returned False at startup — see adapter logs",
+                        retryable=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "gateway: adapter %s does not implement _set_fatal_error",
+                        adapter.platform,
+                    )
 
         # Tier-A item 14 — start the outgoing-message drainer so the
         # MCP write tools (``messages_send``) can route through the

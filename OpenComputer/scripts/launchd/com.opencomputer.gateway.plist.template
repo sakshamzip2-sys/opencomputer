@@ -32,11 +32,23 @@
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- Restart whenever the process exits (clean or crash). Combined
-         with ThrottleInterval below this gives crash-resilience without
-         busy-restart loops on a permanent failure. -->
+    <!--
+      Restart only on CRASH (non-zero exit), not on intentional exit.
+      Without this dict form (KeepAlive=<true/>), launchd respawns even
+      after a clean ``oc service stop`` / ``launchctl kill SIGTERM``,
+      making the daemon impossible to actually stop. We learned this
+      the hard way on 2026-05-08 when a 33-hour SQLite-error loop
+      couldn't be killed because every SIGKILL triggered an immediate
+      respawn. The dict form matches Hermes' production plist.
+      ThrottleInterval still applies, so a crash-loop self-throttles.
+    -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
 
     <!-- Don't restart more than once every 60 seconds. Without this,
          a permanent failure (e.g. bad token) would cause LaunchAgent
