@@ -29,6 +29,50 @@ def _config_path() -> Path:
     return Path(cfg.home) / "config.yaml"
 
 
+@router.put("/config")
+async def merge_put_config(payload: dict) -> dict:
+    """Merge-update structured config. Validates by round-tripping
+    through ``load_config`` after write; rolls back on parse failure."""
+    import shutil
+
+    from opencomputer.agent.config_store import load_config
+
+    p = _config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    bak = p.with_suffix(".yaml.bak")
+    if p.exists():
+        shutil.copy2(p, bak)
+
+    try:
+        import yaml
+
+        existing: dict = {}
+        if p.exists():
+            existing = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        merged = _deep_merge(existing, payload)
+        p.write_text(yaml.safe_dump(merged, sort_keys=True), encoding="utf-8")
+        load_config()  # validate by round-trip
+    except Exception as exc:  # noqa: BLE001
+        if bak.exists():
+            shutil.copy2(bak, p)
+        raise HTTPException(
+            status_code=400, detail=f"merge config invalid (rolled back): {exc}"
+        )
+    audit_log("config.merge_put", keys=list(payload.keys()))
+    return {"ok": True, "path": str(p)}
+
+
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """Deep-merge overlay into base; returns a new dict."""
+    out = dict(base)
+    for k, v in (overlay or {}).items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 @router.get("/config")
 async def get_config() -> dict:
     """Return the resolved config as a dict."""

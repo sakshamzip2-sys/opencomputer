@@ -7,5 +7,11 @@
     "declaration": false,
     "sourceMap": false
   },
-  "include": ["src"]
+  "include": ["src/entry.tsx", "src/app.tsx", "src/theme.ts", "src/gatewayClient.ts"],
+  "exclude": [
+    "src/components",
+    "src/__tests__",
+    "node_modules",
+    "dist"
+  ]
 }
