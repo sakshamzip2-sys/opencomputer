@@ -14,6 +14,18 @@ lib/
 lib64/
 parts/
 sdist/
+
+# Frontend build artifacts (produced by `cd ui-web && npm run build` /
+# `cd ui-tui && npm run build`). Excluded from git but force-included
+# in the wheel via pyproject.toml [tool.hatch.build.targets.wheel.force-include].
+opencomputer/dashboard/static/spa/
+ui-tui/dist/
+ui-tui/packages/*/dist/
+
+# Node ecosystem
+**/node_modules/
+ui-web/public/fonts/
+ui-web/public/ds-assets/
 var/
 wheels/
 *.egg-info/
