@@ -154,3 +154,72 @@ def test_pid_lock_clears_stale_pid(tmp_path):
     release = _acquire_pid_lock(pid_file)
     assert pid_file.read_text().strip() == str(os.getpid())
     release()
+
+
+# ---------------------------------------------------------------------------
+# hey_open_computer fallback (PR-A: requested wake-word vs available)
+# ---------------------------------------------------------------------------
+
+
+def test_default_word_is_hey_open_computer():
+    """The conceptual default is 'hey_open_computer' (user intent)."""
+    fake_ow = MagicMock()
+    with patch.dict(sys.modules, {"openwakeword": fake_ow}):
+        from opencomputer.voice.wake_word import WakeWordDetector
+
+        det = WakeWordDetector()
+        assert det.word == "hey_open_computer"
+
+
+def test_resolve_word_falls_back_to_hey_jarvis_when_custom_unavailable():
+    """Without model_path and a non-bundled word, _resolve_word falls back."""
+    fake_ow = MagicMock()
+    with patch.dict(sys.modules, {"openwakeword": fake_ow}):
+        from opencomputer.voice.wake_word import (
+            FALLBACK_BUNDLED_WORD,
+            WakeWordDetector,
+        )
+
+        det = WakeWordDetector(word="hey_open_computer")
+        active = det._resolve_word()
+        assert active == FALLBACK_BUNDLED_WORD
+        assert det.fell_back is True
+        assert det.effective_word == FALLBACK_BUNDLED_WORD
+
+
+def test_resolve_word_keeps_bundled_words():
+    """A bundled word like 'hey_jarvis' is used as-is, no fallback."""
+    fake_ow = MagicMock()
+    with patch.dict(sys.modules, {"openwakeword": fake_ow}):
+        from opencomputer.voice.wake_word import WakeWordDetector
+
+        det = WakeWordDetector(word="hey_jarvis")
+        active = det._resolve_word()
+        assert active == "hey_jarvis"
+        assert det.fell_back is False
+        assert det.effective_word == "hey_jarvis"
+
+
+def test_resolve_word_keeps_custom_when_model_path_provided(tmp_path):
+    """User-supplied model_path → trust the word label."""
+    fake_ow = MagicMock()
+    with patch.dict(sys.modules, {"openwakeword": fake_ow}):
+        from opencomputer.voice.wake_word import WakeWordDetector
+
+        custom_model = tmp_path / "hey_open_computer.onnx"
+        custom_model.write_bytes(b"fake-onnx-bytes")
+        det = WakeWordDetector(
+            word="hey_open_computer",
+            model_path=custom_model,
+        )
+        active = det._resolve_word()
+        assert active == "hey_open_computer"
+        assert det.fell_back is False
+
+
+def test_bundled_words_constant_includes_hey_jarvis():
+    """Sanity: BUNDLED_WAKE_WORDS includes the documented set."""
+    from opencomputer.voice.wake_word import BUNDLED_WAKE_WORDS
+
+    assert "hey_jarvis" in BUNDLED_WAKE_WORDS
+    assert "alexa" in BUNDLED_WAKE_WORDS

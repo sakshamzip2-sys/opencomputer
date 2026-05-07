@@ -1,9 +1,23 @@
 """Wake-word detection for hands-free OC activation (PR-A Feature 2).
 
-Uses openWakeWord (Apache 2.0, ONNX, CPU). Default model: ``hey_jarvis``
-(bundled with openwakeword). Always-on capture loop runs in a dedicated
-asyncio task; on detection (score >= threshold), an async callback fires
-that hands off to the existing voice-mode pipeline.
+Uses openWakeWord (Apache 2.0, ONNX, CPU). Default wake-word:
+``hey_open_computer`` — but this is NOT bundled with openwakeword.
+The user must train a custom ONNX model for this phrase using the
+openWakeWord training pipeline (~30 min on CPU; Piper TTS synthesis
++ training notebook at https://github.com/dscripka/openWakeWord).
+
+If the custom ``hey_open_computer.onnx`` model is not found at
+startup, the detector AUTOMATICALLY falls back to ``hey_jarvis``
+(bundled with openwakeword) and logs a helpful hint pointing at the
+training URL. This keeps OC working out of the box while preserving
+the user's intent of "hey open computer" once they train their model.
+
+Bundled wake-words available without training:
+    hey_jarvis, alexa, hey_mycroft, hey_rhasspy, ok_google
+
+Always-on capture loop runs in a dedicated asyncio task; on detection
+(score >= threshold), an async callback fires that hands off to the
+existing voice-mode pipeline.
 
 **Default OFF** — must be invoked via ``oc voice wake``. Microphone
 access permission is deferred to the OS.
@@ -36,6 +50,22 @@ from typing import Any, Literal
 _log = logging.getLogger("opencomputer.voice.wake_word")
 
 WakeState = Literal["IDLE", "DETECTED", "SPEAKING"]
+
+#: Wake-words bundled with openwakeword — usable without custom training.
+BUNDLED_WAKE_WORDS: frozenset[str] = frozenset({
+    "hey_jarvis",
+    "alexa",
+    "hey_mycroft",
+    "hey_rhasspy",
+    "ok_google",
+})
+
+#: Default fallback when the user's chosen word isn't a custom-trained
+#: model and isn't in the bundled set.
+FALLBACK_BUNDLED_WORD: str = "hey_jarvis"
+
+#: User-facing hint surfaced when fallback fires.
+TRAINING_URL: str = "https://github.com/dscripka/openWakeWord"
 
 
 class WakeWordError(RuntimeError):
@@ -126,7 +156,7 @@ class WakeWordDetector:
     def __init__(
         self,
         *,
-        word: str = "hey_jarvis",
+        word: str = "hey_open_computer",
         threshold: float = 0.5,
         model_path: Path | None = None,
         on_detect: Callable[[WakeDetection], Awaitable[None]] | None = None,
@@ -141,6 +171,10 @@ class WakeWordDetector:
         self._pid_release: Callable[[], None] | None = None
         self._stop_event: asyncio.Event | None = None
         self._task: asyncio.Task[None] | None = None
+        # PR-A Feature 2: track whether the active word is the requested
+        # one or a fallback (so the CLI can show an honest indicator).
+        self._effective_word: str = word
+        self._fell_back: bool = False
 
         # Lazy import + graceful degrade. We don't actually USE the
         # imported module here — just verify importability so the error
@@ -161,6 +195,45 @@ class WakeWordDetector:
     @property
     def state(self) -> WakeState:
         return self._state
+
+    @property
+    def effective_word(self) -> str:
+        """The wake-word actually being listened for (post-fallback)."""
+        return self._effective_word
+
+    @property
+    def fell_back(self) -> bool:
+        """True if the requested word was unavailable and a fallback was used."""
+        return self._fell_back
+
+    def _resolve_word(self) -> str:
+        """Pick the actual wake-word to listen for.
+
+        Order:
+          1. ``model_path`` set → use ``self.word`` as the label, model
+             loaded from path (caller is responsible for the file).
+          2. ``self.word`` is in ``BUNDLED_WAKE_WORDS`` → use as-is.
+          3. Otherwise → fall back to ``FALLBACK_BUNDLED_WORD`` and log
+             a hint pointing at TRAINING_URL.
+        """
+        if self.model_path is not None:
+            self._effective_word = self.word
+            self._fell_back = False
+            return self.word
+        if self.word in BUNDLED_WAKE_WORDS:
+            self._effective_word = self.word
+            self._fell_back = False
+            return self.word
+        # Custom word requested but no model_path → fall back.
+        _log.warning(
+            "wake: custom wake-word '%s' is not bundled and no model_path "
+            "provided; falling back to '%s'. Train a custom model at %s "
+            "to use '%s' for real.",
+            self.word, FALLBACK_BUNDLED_WORD, TRAINING_URL, self.word,
+        )
+        self._effective_word = FALLBACK_BUNDLED_WORD
+        self._fell_back = True
+        return FALLBACK_BUNDLED_WORD
 
     def set_state(self, new_state: WakeState) -> None:
         """Move the detector to a new state. Logs the transition."""
@@ -234,10 +307,17 @@ class WakeWordDetector:
                 "openwakeword.model not importable — verify install"
             ) from exc
 
+        # Resolve word (may set _effective_word to fallback if custom
+        # word requested without a model_path).
+        active_word = self._resolve_word()
         try:
             if self.model_path is not None:
                 _model = Model(wakeword_models=[str(self.model_path)])
+            elif active_word in BUNDLED_WAKE_WORDS:
+                _model = Model()
             else:
+                # Should be unreachable thanks to _resolve_word, but
+                # defend against unexpected paths.
                 _model = Model()
         except Exception as exc:  # noqa: BLE001
             raise WakeWordError(
@@ -265,6 +345,9 @@ class WakeWordDetector:
 
 
 __all__ = [
+    "BUNDLED_WAKE_WORDS",
+    "FALLBACK_BUNDLED_WORD",
+    "TRAINING_URL",
     "WakeDetection",
     "WakeState",
     "WakeWordDetector",
