@@ -178,6 +178,13 @@ packages = ["opencomputer", "plugin_sdk"]
 # systemd unit template — shipped alongside opencomputer.service so
 # `opencomputer service install` can read it from the installed wheel.
 "opencomputer/service/templates/opencomputer.service" = "opencomputer/service/templates/opencomputer.service"
+# Dashboard SPA build artifact (Vite output). Built by
+# `scripts/build-dashboard.sh` before packaging; excluded from git via
+# .gitignore. The dashboard server.py auto-detects the SPA at
+# ``opencomputer/dashboard/static/spa/`` and falls back to the legacy
+# static pages when absent (so source-installs without a frontend
+# build still get a usable dashboard).
+"opencomputer/dashboard/static/spa" = "opencomputer/dashboard/static/spa"
 
 [tool.ruff]
 line-length = 100
