@@ -54,8 +54,12 @@ def test_e2e_user_types_slash_sees_commands_and_skills(tmp_path: Path) -> None:
     assert any(s.id == "pead-screener" for s in skills_seen)
 
     # Render the rendered list — source tags + 250-char trim must appear.
+    # Slice generously: command count grows over time; we want at least one
+    # SkillEntry rendered so the (skill) tag assertion below stays meaningful.
+    n_cmds = len(cmds)
+    slice_size = max(10, n_cmds + len(skills_seen))
     state = {
-        "matches": items[:10],
+        "matches": items[:slice_size],
         "selected_idx": 0,
         "mode": "slash",
         "at_token_range": None,

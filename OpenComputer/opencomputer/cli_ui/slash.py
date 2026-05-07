@@ -258,6 +258,36 @@ SLASH_REGISTRY: list[CommandDef] = [
         category="meta",
         args_hint="[N|all|last]",
     ),
+    # 2026-05-08 — messaging-gateway parity (PR-2 Task B7). Five new
+    # slash commands. /footer already had a CommandDef above; the rest
+    # are surfaced here so /help + the picker dropdown discover them.
+    CommandDef(
+        name="sethome",
+        description="Set, list, or clear messaging-gateway home channels.",
+        category="config",
+        args_hint="[<platform> <chat_id> [thread]|--list|--clear <platform>]",
+    ),
+    CommandDef(
+        name="voice",
+        description="Voice-mode controls (on/off/tts/join/leave/status).",
+        category="config",
+        args_hint="[on|off|tts|join|leave|status]",
+    ),
+    CommandDef(
+        name="approve",
+        description="Approve the most-recent pending dangerous-command request.",
+        category="session",
+    ),
+    CommandDef(
+        name="deny",
+        description="Deny the most-recent pending dangerous-command request.",
+        category="session",
+    ),
+    CommandDef(
+        name="status",
+        description="Show session info (platform, chat, model, queue mode).",
+        category="meta",
+    ),
 ]
 
 

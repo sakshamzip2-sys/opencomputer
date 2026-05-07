@@ -38,6 +38,7 @@ from opencomputer.agent.slash_commands_impl.display_toggles_cmd import (
     VerboseCommand,
 )
 from opencomputer.agent.slash_commands_impl.fast_cmd import FastCommand
+from opencomputer.agent.slash_commands_impl.footer_cmd import FooterCommand
 from opencomputer.agent.slash_commands_impl.history_cmd import HistoryCommand
 from opencomputer.agent.slash_commands_impl.mode_cmd import ModeCommand
 from opencomputer.agent.slash_commands_impl.persona_mode_cmd import (
@@ -60,10 +61,12 @@ from opencomputer.agent.slash_commands_impl.queue_mode_cmd import (
 from opencomputer.agent.slash_commands_impl.reasoning_cmd import ReasoningCommand
 from opencomputer.agent.slash_commands_impl.save_cmd import SaveCommand
 from opencomputer.agent.slash_commands_impl.scrape import ScrapeCommand
+from opencomputer.agent.slash_commands_impl.sethome_cmd import SethomeCommand
 from opencomputer.agent.slash_commands_impl.skin_personality_cmd import (
     PersonalityCommand,
     SkinCommand,
 )
+from opencomputer.agent.slash_commands_impl.status_cmd import StatusCommand
 from opencomputer.agent.slash_commands_impl.title_cmd import TitleCommand
 from opencomputer.agent.slash_commands_impl.update_cmd import UpdateCommand
 from opencomputer.agent.slash_commands_impl.usage_cmd import UsageCommand
@@ -122,6 +125,13 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     PolicyRevertCommand,
     PolicyMetricsCommand,
     PolicyToolRiskCommand,
+    # 2026-05-08 — messaging-gateway parity (PR-2 Task B7) — three new
+    # built-in slash commands. /sethome and /footer have CLI/Typer twins
+    # already; this exposes them on the SlashCommand class dispatch path
+    # used by gateway / wire / ACP. /status is a fresh read-only summary.
+    SethomeCommand,
+    StatusCommand,
+    FooterCommand,
 )
 
 
