@@ -122,6 +122,93 @@ async def set_active_route(body: SetActiveBody) -> dict:
     return {"ok": True, "active": body.name}
 
 
+@router.post("/profiles/{name}/open-terminal")
+async def open_terminal_route(name: str) -> dict:
+    """Spawn an external terminal pinned to this profile.
+
+    macOS: ``open -a Terminal --env OPENCOMPUTER_PROFILE=<name>``.
+    Linux: ``x-terminal-emulator`` if available, falls back to ``gnome-terminal``.
+    Windows: ``wt`` (Windows Terminal) if available, else ``cmd``.
+
+    Loopback-public; spawns a shell process owned by the same user as
+    the dashboard. NOT a remote-exec surface — the API contract is
+    "open a terminal here, locally."
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    from opencomputer.profiles import list_profiles
+
+    if name not in list_profiles():
+        raise HTTPException(status_code=404, detail="profile not found")
+
+    env_setup = f"export OPENCOMPUTER_PROFILE={name}"
+    audit_log("profile.open_terminal", name=name, platform=sys.platform)
+
+    try:
+        if sys.platform == "darwin":
+            applescript = (
+                f'tell application "Terminal" to do script "{env_setup}; oc"'
+            )
+            subprocess.Popen(["osascript", "-e", applescript])
+        elif sys.platform == "win32":
+            cmd = shutil.which("wt") or shutil.which("cmd")
+            if not cmd:
+                raise HTTPException(status_code=503, detail="no terminal binary found")
+            subprocess.Popen([cmd, "/k", f"set OPENCOMPUTER_PROFILE={name} && oc"])
+        else:
+            cmd = (
+                shutil.which("x-terminal-emulator")
+                or shutil.which("gnome-terminal")
+                or shutil.which("xterm")
+            )
+            if not cmd:
+                raise HTTPException(status_code=503, detail="no terminal binary found")
+            subprocess.Popen([cmd, "-e", f"bash -c '{env_setup}; oc; exec bash'"])
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=f"spawn failed: {exc}")
+    return {"ok": True, "profile": name, "platform": sys.platform}
+
+
+@router.get("/profiles/{name}/persona")
+async def get_persona_route(name: str) -> dict:
+    """Read the active persona for a profile."""
+    from opencomputer.profiles import get_profile_dir, list_profiles
+
+    if name not in list_profiles():
+        raise HTTPException(status_code=404, detail="profile not found")
+    try:
+        d = get_profile_dir(name)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=str(exc))
+    persona_file = d / "persona.txt"
+    if persona_file.exists():
+        return {"profile": name, "persona": persona_file.read_text(encoding="utf-8").strip()}
+    return {"profile": name, "persona": ""}
+
+
+class PersonaBody(BaseModel):
+    persona: str = Field("", max_length=4096)
+
+
+@router.put("/profiles/{name}/persona")
+async def put_persona_route(name: str, body: PersonaBody) -> dict:
+    """Set the active persona for a profile (writes profile_dir/persona.txt)."""
+    from opencomputer.profiles import get_profile_dir, list_profiles
+
+    if name not in list_profiles():
+        raise HTTPException(status_code=404, detail="profile not found")
+    try:
+        d = get_profile_dir(name)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=str(exc))
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "persona.txt").write_text(body.persona, encoding="utf-8")
+    audit_log("profile.persona_set", name=name, len=len(body.persona))
+    return {"ok": True, "profile": name}
+
+
 @router.get("/profiles/{name}/setup-command")
 async def setup_command_route(name: str) -> dict:
     """Return the shell snippet that activates this profile."""

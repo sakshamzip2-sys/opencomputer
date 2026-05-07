@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useApi } from "@/hooks/useApi";
+import { Markdown } from "@/components/Markdown";
 
 interface DocItem { slug: string; title: string; size: number; }
 interface DocsResp { items: DocItem[]; }
@@ -40,18 +41,10 @@ export function DocsPage() {
         </ul>
       </aside>
       <main className="flex-1 overflow-auto p-6">
-        {!active && (
-          <p className="text-zinc-500">Select a doc on the left.</p>
-        )}
+        {!active && <p className="text-zinc-500">Select a doc on the left.</p>}
         {doc.loading && <p className="text-zinc-500">Loading…</p>}
         {doc.error && <p className="text-red-400">{doc.error.message}</p>}
-        {doc.data && (
-          <article className="prose prose-invert max-w-none">
-            <pre className="whitespace-pre-wrap break-words font-mono text-sm">
-              {doc.data.text}
-            </pre>
-          </article>
-        )}
+        {doc.data && <Markdown text={doc.data.text} />}
       </main>
     </div>
   );
