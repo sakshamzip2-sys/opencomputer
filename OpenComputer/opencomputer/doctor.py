@@ -778,6 +778,47 @@ def _check_voice_mode_capable() -> CheckResult:
     )
 
 
+def _check_wake_word_capable() -> CheckResult:
+    """PR-A Feature 2 — verify openwakeword + onnxruntime install.
+
+    Wake-word is opt-in (default off; ships in the ``[wake]`` extra).
+    The check only verifies that ``openwakeword`` and ``onnxruntime``
+    are importable; it does NOT load all bundled models because that
+    would download weights on first run.
+
+    Returns ``info`` when not installed (opt-in feature; doctor
+    exit-code stays clean), ``ok`` when both are importable, ``warning``
+    when one is half-installed (likely environment corruption).
+    """
+    try:
+        import openwakeword  # noqa: F401
+    except ImportError:
+        return CheckResult(
+            ok=True,
+            level="info",
+            message=(
+                "openwakeword not installed (opt-in via "
+                "`pip install opencomputer[wake]`)"
+            ),
+        )
+    try:
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        return CheckResult(
+            ok=False,
+            level="warning",
+            message=(
+                "openwakeword installed but onnxruntime missing — "
+                "reinstall with `pip install opencomputer[wake]`"
+            ),
+        )
+    return CheckResult(
+        ok=True,
+        level="info",
+        message="openwakeword + onnxruntime ready",
+    )
+
+
 def _check_browser_control_capable() -> CheckResult:
     """T1.C (browser-control) — verify Playwright is installed.
 
@@ -1173,6 +1214,12 @@ def run_doctor(fix: bool = False) -> int:
     # stays clean for users who haven't pulled the [browser] extra.
     checks.append(
         _result_to_check("browser-control", _check_browser_control_capable())
+    )
+
+    # PR-A Feature 2 (wake-word) — openwakeword + onnxruntime preflight.
+    # Opt-in via [wake] extra; returns info-level when not installed.
+    checks.append(
+        _result_to_check("wake-word", _check_wake_word_capable())
     )
 
     # Plugin-contributed checks + repairs (run last so plugins see a fully-

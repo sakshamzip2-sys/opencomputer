@@ -450,4 +450,105 @@ async def _run_realtime_loop(
         audio.stop()
 
 
+@voice_app.command("wake")
+def voice_wake(
+    word: Annotated[
+        str,
+        typer.Option(
+            "--word",
+            help="Wake-word model name (default: hey_open_computer; falls "
+                 "back to hey_jarvis when no custom model is trained).",
+        ),
+    ] = "hey_open_computer",
+    threshold: Annotated[
+        float,
+        typer.Option(
+            "--threshold",
+            min=0.0, max=1.0,
+            help="Detection threshold (0.0-1.0; default 0.5).",
+        ),
+    ] = 0.5,
+    model: Annotated[
+        Path | None,
+        typer.Option(
+            "--model",
+            help="Custom ONNX model path (advanced; bypasses fallback).",
+        ),
+    ] = None,
+) -> None:
+    """Listen for a wake-word and emit a notification on detection.
+
+    PR-A Feature 2 — default OFF. Hands off to the existing voice-mode
+    pipeline once production wiring lands; this v1 surface is the
+    audio-capture-and-detect kernel + a friendly status indicator.
+
+    Press Ctrl+C to stop.
+    """
+    import asyncio
+
+    try:
+        from opencomputer.voice.wake_word import (
+            FALLBACK_BUNDLED_WORD,
+            TRAINING_URL,
+            WakeDetection,
+            WakeWordDetector,
+            WakeWordError,
+        )
+    except ImportError as exc:
+        typer.secho(
+            f"wake-word support not installed: {exc}\n"
+            "install with: pip install opencomputer[wake]",
+            err=True, fg="red",
+        )
+        raise typer.Exit(code=4) from exc
+
+    # Resolve PID file under the active profile home for singleton.
+    try:
+        from opencomputer.profiles import profile_home_dir, read_active_profile
+        active = read_active_profile() or "default"
+        profile_home = profile_home_dir(active)
+    except Exception:
+        profile_home = Path.home() / ".opencomputer" / "default"
+
+    pid_file = profile_home / "voice_wake.pid"
+
+    async def _on_detect(d: WakeDetection) -> None:
+        typer.secho(
+            f"[heard '{d.word}' (score={d.score:.2f})]", fg="green",
+        )
+
+    async def _run() -> None:
+        try:
+            async with WakeWordDetector(
+                word=word,
+                threshold=threshold,
+                model_path=model,
+                on_detect=_on_detect,
+                pid_file=pid_file,
+            ) as det:
+                effective = det.effective_word
+                if det.fell_back:
+                    typer.secho(
+                        f"💡 wake: requested '{word}' is not bundled and no "
+                        f"--model was provided. Falling back to "
+                        f"'{FALLBACK_BUNDLED_WORD}'. Train a custom model at "
+                        f"{TRAINING_URL} to use '{word}' for real.",
+                        fg="yellow",
+                    )
+                typer.echo(
+                    f"[listening for '{effective}'... press Ctrl+C to stop]"
+                )
+                # Block until interrupted
+                while True:
+                    await asyncio.sleep(1.0)
+        except WakeWordError as exc:
+            typer.secho(f"wake error: {exc}", fg="red", err=True)
+            raise typer.Exit(code=4) from exc
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        typer.echo("\n[stopped]")
+
+
 __all__ = ["voice_app"]
