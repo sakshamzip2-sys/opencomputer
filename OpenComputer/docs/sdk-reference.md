@@ -1449,6 +1449,92 @@ wire methods that carry credentials. Migrating existing
 
 ---
 
+## Inbound queue modes (S1, 2026-05-06)
+
+Per-session inbound message queue strategies. Plugins reading
+dispatcher state import these from `plugin_sdk` directly.
+
+### `QueueMode`, `ALL_QUEUE_MODES`, `DEFAULT_QUEUE_MODE`
+
+```python
+from plugin_sdk import QueueMode, ALL_QUEUE_MODES, DEFAULT_QUEUE_MODE
+```
+
+StrEnum: `followup` (default — serialize-and-wait), `interrupt`
+(cancel in-flight), `collect` (debounce-and-merge), `steer` (alias of
+`interrupt` today; reserved for replan-with-context). `ALL_QUEUE_MODES`
+is the canonical tuple for UI dropdowns / validation.
+`DEFAULT_QUEUE_MODE = QueueMode.FOLLOWUP`.
+
+### `QueueConfig`, `DEFAULT_COLLECT_DEBOUNCE_S`, `DEFAULT_COLLECT_CAP`
+
+```python
+from plugin_sdk import (
+    QueueConfig,
+    DEFAULT_QUEUE_MODE,
+    DEFAULT_COLLECT_DEBOUNCE_S,
+    DEFAULT_COLLECT_CAP,
+    DEFAULT_DROP_POLICY,
+)
+
+cfg = QueueConfig(
+    mode=DEFAULT_QUEUE_MODE,
+    collect_debounce_s=DEFAULT_COLLECT_DEBOUNCE_S,
+    collect_cap=DEFAULT_COLLECT_CAP,
+    drop_policy=DEFAULT_DROP_POLICY,
+)
+```
+
+Per-session config dataclass. `DEFAULT_*` constants let consumers
+build a default config without hardcoding values.
+
+### `DropPolicy`, `ALL_DROP_POLICIES`, `DEFAULT_DROP_POLICY`
+
+```python
+from plugin_sdk import DropPolicy, ALL_DROP_POLICIES
+```
+
+StrEnum: `drop_old` (discard oldest), `drop_new` (refuse new),
+`summarize` (replace queued with one summary line).
+`ALL_DROP_POLICIES` mirrors `ALL_QUEUE_MODES` for UIs.
+`DEFAULT_DROP_POLICY = DropPolicy.DROP_OLD`.
+
+---
+
+## Trace network (social-traces, 2026-05-05)
+
+Types for the opt-in `social-traces` plugin. Out-of-tree backends
+implement `TraceNetworkClient` to plug into the network.
+
+### `TraceCard`, `TraceMeta`, `TraceStep`, `TraceOutcome`, `TraceStatus`
+
+```python
+from plugin_sdk import (
+    TraceCard, TraceMeta, TraceStep, TraceOutcome, TraceStatus,
+)
+```
+
+Pydantic models for the redacted task trace shape. `TraceMeta` carries
+the redacted intent + tags; `TraceStep` is one tool-call step (name +
+summary + outcome); `TraceCard` bundles them with a `TraceStatus`
+(`pending` / `submitted` / `accepted` / `rejected`) and a
+`TraceOutcome` (`success` / `partial` / `failure`).
+
+### `TraceNetworkClient`, `QueryResult`, `SubmitReceipt`, `TRACE_API_V1`
+
+```python
+from plugin_sdk import (
+    TraceNetworkClient, QueryResult, SubmitReceipt, TRACE_API_V1,
+)
+```
+
+The contract a trace-network backend implements (`query` →
+`QueryResult`; `submit` → `SubmitReceipt`). `TRACE_API_V1` is the
+wire-version sentinel echoed by every server response so clients
+detect schema bumps.
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute
