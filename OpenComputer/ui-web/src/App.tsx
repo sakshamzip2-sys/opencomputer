@@ -4,6 +4,9 @@ import type { StatusResponse } from "@/lib/api";
 import { SessionsPage, SessionDetailPage } from "@/pages/SessionsPage";
 import { LogsPage } from "@/pages/LogsPage";
 import { ModelsPage } from "@/pages/ModelsPage";
+import { PluginsPage } from "@/pages/PluginsPage";
+import { ProfilesPage } from "@/pages/ProfilesPage";
+import { SkillsPage } from "@/pages/SkillsPage";
 
 const Placeholder = ({ name }: { name: string }) => (
   <div className="p-6">
@@ -89,11 +92,15 @@ export default function App() {
           <Route path="/sessions/:id" element={<SessionDetailPage />} />
           <Route path="/logs" element={<LogsPage />} />
           <Route path="/models" element={<ModelsPage />} />
-          {NAV.filter(({ path }) => !["/sessions", "/logs", "/models"].includes(path)).map(
-            ({ path, label }) => (
-              <Route key={path} path={path} element={<Placeholder name={label} />} />
-            ),
-          )}
+          <Route path="/plugins" element={<PluginsPage />} />
+          <Route path="/profiles" element={<ProfilesPage />} />
+          <Route path="/skills" element={<SkillsPage />} />
+          {NAV.filter(
+            ({ path }) =>
+              !["/sessions", "/logs", "/models", "/plugins", "/profiles", "/skills"].includes(path),
+          ).map(({ path, label }) => (
+            <Route key={path} path={path} element={<Placeholder name={label} />} />
+          ))}
           <Route
             path="*"
             element={<div className="p-6 text-zinc-400">Not found</div>}
