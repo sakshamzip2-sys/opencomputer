@@ -132,6 +132,14 @@ class CronTool(BaseTool):
                         "type": "string",
                         "description": "Skill to invoke at run time (preferred over prompt).",
                     },
+                    "skills": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Hermes parity: invoke multiple skills together "
+                            "and combine into one report. Mutually exclusive with `skill`."
+                        ),
+                    },
                     "prompt": {
                         "type": "string",
                         "description": "Free-text prompt for the agent (threat-scanned). Ignored when skill is set.",
@@ -142,7 +150,13 @@ class CronTool(BaseTool):
                     },
                     "notify": {
                         "type": "string",
-                        "description": "Where to deliver output: 'telegram', 'discord', 'telegram:<chat_id>', or omit for local-only.",
+                        "description": (
+                            "Where to deliver output. Hermes parity (2026-05-08): "
+                            "any registered platform — 'telegram', 'discord', "
+                            "'slack:#chan', 'whatsapp:+15551234', etc. — plus "
+                            "'origin' to deliver back to the chat that created "
+                            "this job, or omit for local-only."
+                        ),
                     },
                     "plan_mode": {
                         "type": "boolean",
@@ -200,17 +214,51 @@ class CronTool(BaseTool):
         if action == "create":
             schedule = _require(args, "schedule")
             skill = (args.get("skill") or "").strip() or None
+            skills_arg = args.get("skills")
+            skills = (
+                [s for s in skills_arg if isinstance(s, str) and s.strip()]
+                if isinstance(skills_arg, list)
+                else None
+            ) or None
             prompt = (args.get("prompt") or "").strip() or None
-            if not skill and not prompt:
-                raise ValueError("create requires either 'skill' or 'prompt'")
+            if not skill and not skills and not prompt:
+                raise ValueError(
+                    "create requires one of: 'skill', 'skills', or 'prompt'"
+                )
+
+            # Hermes parity (2026-05-08): capture origin from session_context
+            # so notify="origin" can route delivery back to the chat where
+            # this cron was created. Empty strings (CLI/non-chat origin)
+            # leave the fields as None — _deliver falls through to local.
+            from opencomputer.gateway.session_context import get_session_env
+
+            origin_platform = (
+                get_session_env("OPENCOMPUTER_SESSION_PLATFORM", "") or None
+            )
+            origin_chat_id = (
+                get_session_env("OPENCOMPUTER_SESSION_CHAT_ID", "") or None
+            )
+            origin_thread_id = (
+                get_session_env("OPENCOMPUTER_SESSION_THREAD_ID", "") or None
+            )
+
+            create_kwargs: dict[str, object] = {}
+            if skills:
+                create_kwargs["skills"] = skills
+            elif skill:
+                create_kwargs["skill"] = skill
+
             job = _create_job(
                 schedule=schedule,
                 name=args.get("name"),
                 prompt=prompt,
-                skill=skill,
                 repeat=args.get("repeat"),
                 notify=(args.get("notify") or None),
                 plan_mode=bool(args.get("plan_mode", True)),
+                origin_platform=origin_platform,
+                origin_chat_id=origin_chat_id,
+                origin_thread_id=origin_thread_id,
+                **create_kwargs,
             )
             return {"action": "create", "job": _summarize(job)}
 
