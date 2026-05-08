@@ -37,8 +37,10 @@ def test_all_events_present_in_all_hook_events_tuple() -> None:
     2026-05-06 Phase 3 adds BEFORE_MODEL_RESOLVE / MESSAGE_SENDING /
     MESSAGE_SENT (S3 leftovers from OpenClaw deep-comparison) bringing
     the total to 25.
+    2026-05-08 Hermes Doc-2 parity adds SESSION_FINALIZE / SESSION_RESET /
+    TRANSFORM_LLM_OUTPUT — final tally 28.
     """
-    assert len(ALL_HOOK_EVENTS) == 25
+    assert len(ALL_HOOK_EVENTS) == 28
     assert set(ALL_HOOK_EVENTS) == set(HookEvent)
     # No duplicates.
     assert len(set(ALL_HOOK_EVENTS)) == len(ALL_HOOK_EVENTS)

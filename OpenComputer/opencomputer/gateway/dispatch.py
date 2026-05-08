@@ -332,6 +332,16 @@ class Dispatch:
         # via ``run_coroutine_threadsafe``. ``None`` until bound.
         self._main_loop: asyncio.AbstractEventLoop | None = None
 
+        # 2026-05-08 — Hermes Doc-2 ``session:start`` tracking. Hermes'
+        # spec: "Fires on brand-new sessions only (not continuations)."
+        # We track session ids we've already routed through dispatch in
+        # this process so subsequent messages for the same id fire
+        # ``session:end`` (per-turn) only, not another ``session:start``.
+        # Memory is per-process; a gateway restart resets it (and
+        # legitimately re-fires session:start on resumed sessions —
+        # acceptable semantics).
+        self._known_sessions: set[str] = set()
+
         # Phase 2 multi-routing: accept either ``loop=`` (legacy single
         # loop) or ``router=`` (per-profile cache). Exactly one of the
         # two must be set.
@@ -761,6 +771,30 @@ class Dispatch:
 
         session_id = self._session_id_for(event)
 
+        # 2026-05-08 — Hermes Doc-2 gateway hooks: session:start.
+        # Fire only on first observation of this session id in this
+        # process — subsequent dispatches for the same id are
+        # continuations (session:end fires per-turn instead).
+        if session_id not in self._known_sessions:
+            self._known_sessions.add(session_id)
+            try:
+                from opencomputer.gateway.event_hooks import (
+                    SESSION_START as _GW_SESSION_START,
+                )
+                from opencomputer.gateway.event_hooks import (
+                    engine as _gw_hooks_engine_ss,
+                )
+                asyncio.create_task(
+                    _gw_hooks_engine_ss.fire(_GW_SESSION_START, {
+                        "platform": event.platform.value if event.platform else None,
+                        "user_id": event.chat_id,
+                        "session_id": session_id,
+                    }),
+                    name="gw-hook-session-start",
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("gateway session:start fire failed", exc_info=True)
+
         # PR-A Feature 1: if /steer just fired for this session and the
         # agent loop hasn't yet consumed the cancel state, route this
         # inbound message to SteerBuffer instead of triggering a fresh
@@ -1128,6 +1162,28 @@ class Dispatch:
             # P0-4: capture wall-clock around run_conversation so we
             # can record a turn_outcomes row at the end.
             turn_start_ts = time.time()
+            # 2026-05-08 — Hermes Doc-2 gateway hooks: agent:start.
+            # Fire-and-forget (gathered concurrently; never blocks the
+            # turn). Failure isolated.
+            try:
+                from opencomputer.gateway.event_hooks import (
+                    AGENT_START as _GW_AGENT_START,
+                )
+                from opencomputer.gateway.event_hooks import (
+                    engine as _gw_hooks_engine_a1,
+                )
+                _agent_ctx = {
+                    "session_id": session_id,
+                    "platform": event.platform.value if event.platform else None,
+                    "user_id": event.chat_id,
+                    "message": user_message,
+                }
+                asyncio.create_task(
+                    _gw_hooks_engine_a1.fire(_GW_AGENT_START, _agent_ctx),
+                    name="gw-hook-agent-start",
+                )
+            except Exception:  # noqa: BLE001 — hook firing must never block
+                logger.debug("gateway agent:start fire failed", exc_info=True)
             try:
                 with set_profile(profile_home):
                     if self._plugin_api is not None:
@@ -1145,6 +1201,50 @@ class Dispatch:
                             images=images,
                             runtime=runtime,
                         )
+                # 2026-05-08 — Hermes Doc-2 gateway hooks: agent:end +
+                # session:end. Hermes spec: session:end fires per
+                # run_conversation (i.e. per turn), agent:end same window.
+                # Both fire-and-forget so a slow handler can't delay the
+                # next turn.
+                try:
+                    from opencomputer.gateway.event_hooks import (
+                        AGENT_END as _GW_AGENT_END,
+                    )
+                    from opencomputer.gateway.event_hooks import (
+                        SESSION_END as _GW_SESSION_END,
+                    )
+                    from opencomputer.gateway.event_hooks import (
+                        engine as _gw_hooks_engine_a2,
+                    )
+                    _final_text_for_hook = (
+                        result.final_message.content
+                        if isinstance(result.final_message.content, str)
+                        else ""
+                    )
+                    _agent_end_ctx = {
+                        "session_id": session_id,
+                        "platform": event.platform.value if event.platform else None,
+                        "user_id": event.chat_id,
+                        "message": user_message,
+                        "response": _final_text_for_hook,
+                    }
+                    asyncio.create_task(
+                        _gw_hooks_engine_a2.fire(_GW_AGENT_END, _agent_end_ctx),
+                        name="gw-hook-agent-end",
+                    )
+                    asyncio.create_task(
+                        _gw_hooks_engine_a2.fire(
+                            _GW_SESSION_END,
+                            {
+                                "platform": event.platform.value if event.platform else None,
+                                "user_id": event.chat_id,
+                                "session_key": session_id,
+                            },
+                        ),
+                        name="gw-hook-session-end",
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("gateway agent:end / session:end fire failed", exc_info=True)
                 # P0-4: schedule turn_outcomes write fire-and-forget.
                 # Errors are swallowed inside _record_turn_outcome_async
                 # so a telemetry failure never breaks the user reply.
@@ -1369,6 +1469,49 @@ class Dispatch:
                 if v is not None:
                     custom[k] = v
         runtime = RuntimeContext(custom=custom)
+        # 2026-05-08 — Hermes Doc-2 gateway hooks: command:<slug>.
+        # Fire-and-forget so a slow handler never delays slash dispatch.
+        # The wildcard "command:*" pattern in HOOK.yaml matches every
+        # slug (handled in event_hooks.GatewayHook.matches).
+        try:
+            from opencomputer.gateway.event_hooks import (
+                engine as _gw_hooks_engine_cmd,
+            )
+            asyncio.create_task(
+                _gw_hooks_engine_cmd.fire(
+                    f"command:{name}",
+                    {
+                        "platform": event.platform.value if event.platform else None,
+                        "user_id": event.chat_id,
+                        "session_id": session_id,
+                        "command": name,
+                        "args": args,
+                    },
+                ),
+                name=f"gw-hook-command-{name}",
+            )
+            # 2026-05-08 — Hermes Doc-2 gateway hooks: session:reset
+            # fires when a slash command rotates the session id. The
+            # canonical commands are /new, /reset, /clear (they all
+            # alias to the same handler — see cli_ui/slash.py:72).
+            if name in {"new", "reset", "clear"}:
+                from opencomputer.gateway.event_hooks import (
+                    SESSION_RESET as _GW_SESSION_RESET,
+                )
+                asyncio.create_task(
+                    _gw_hooks_engine_cmd.fire(
+                        _GW_SESSION_RESET,
+                        {
+                            "platform": event.platform.value if event.platform else None,
+                            "user_id": event.chat_id,
+                            "session_key": session_id,
+                            "command": name,
+                        },
+                    ),
+                    name=f"gw-hook-session-reset-{name}",
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug("gateway command:%s fire failed", name, exc_info=True)
         try:
             result = await cmd.execute(args, runtime)
         except Exception as exc:  # noqa: BLE001

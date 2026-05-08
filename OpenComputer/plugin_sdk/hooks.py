@@ -84,6 +84,24 @@ class HookEvent(str, Enum):
     BEFORE_MODEL_RESOLVE = "BeforeModelResolve"
     MESSAGE_SENDING = "MessageSending"
     MESSAGE_SENT = "MessageSent"
+    # 2026-05-08 — Hermes Doc-2 parity (see
+    # docs/refs/hermes-agent/2026-05-08-kanban-goals-execcode-hooks-parity.md).
+    # SESSION_END fires per ``run_conversation`` (every turn). SESSION_FINALIZE
+    # fires once when the surface tears down a session entirely (CLI exits,
+    # gateway evicts, websocket closes). Last chance to flush state.
+    SESSION_FINALIZE = "SessionFinalize"
+    # SESSION_RESET fires after ``/new`` / ``/reset`` / ``/clear`` allocates a
+    # fresh session id. Distinct from SESSION_START because the previous
+    # session id is also exposed via ``HookContext.previous_session_id`` so a
+    # plugin can carry forward state. Gateway + CLI both fire this.
+    SESSION_RESET = "SessionReset"
+    # TRANSFORM_LLM_OUTPUT fires once per turn after the final assistant text
+    # is assembled, before delivery to channel/console. Handlers may return
+    # ``HookDecision(decision="rewrite", rewritten_text=...)`` to replace the
+    # response. First non-empty rewrite wins; later handlers see the rewritten
+    # text. Use cases: PII redaction post-LLM, tone adjustments, citation
+    # appending, A/B response routing.
+    TRANSFORM_LLM_OUTPUT = "TransformLlmOutput"
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +172,22 @@ class HookContext:
     channel: str | None = None
     #: Outgoing chat id (channel-specific) — populated for MESSAGE_SENDING / MESSAGE_SENT.
     outgoing_chat_id: str | None = None
+    # 2026-05-08 — Hermes Doc-2 parity additions.
+    #: Reason a SESSION_FINALIZE fires — "cli_exit" | "gateway_evict" |
+    #: "wire_disconnect" | "shutdown" | "error". Handlers that need to behave
+    #: differently for normal vs abnormal exits can branch on this.
+    finalize_reason: str | None = None
+    #: Previous session id rotated out by ``/new`` / ``/reset`` / ``/clear`` —
+    #: populated for SESSION_RESET so a plugin can carry forward in-memory
+    #: caches keyed on the old id.
+    previous_session_id: str | None = None
+    #: The platform/surface the reset originated on — "cli" | "gateway" |
+    #: "wire" | "acp" — populated for SESSION_RESET / SESSION_FINALIZE.
+    surface_origin: str | None = None
+    #: Final assistant text being delivered — populated for
+    #: TRANSFORM_LLM_OUTPUT. Distinct from ``outgoing_text`` which is the
+    #: per-channel-message text in MESSAGE_SENDING (multiple chunks possible).
+    response_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,4 +278,8 @@ ALL_HOOK_EVENTS: tuple[HookEvent, ...] = (
     HookEvent.BEFORE_MODEL_RESOLVE,
     HookEvent.MESSAGE_SENDING,
     HookEvent.MESSAGE_SENT,
+    # 2026-05-08 — Hermes Doc-2 parity additions.
+    HookEvent.SESSION_FINALIZE,
+    HookEvent.SESSION_RESET,
+    HookEvent.TRANSFORM_LLM_OUTPUT,
 )

@@ -1424,6 +1424,45 @@ class AgentLoop:
             for _iter in range(self.config.loop.max_iterations):
                 iterations += 1
 
+                # 2026-05-08 — Hermes Doc-2 gateway hooks: agent:step.
+                # Fires once per tool-calling iteration (one per LLM turn
+                # within a multi-step session). Fire-and-forget so a slow
+                # filesystem hook can't stall the loop. Only fires when
+                # the gateway hook engine is available — this keeps the
+                # CLI-only path (no gateway) free of an extra import.
+                try:
+                    from opencomputer.gateway.event_hooks import (
+                        AGENT_STEP as _GW_AGENT_STEP,
+                    )
+                    from opencomputer.gateway.event_hooks import (
+                        engine as _gw_hooks_engine_step,
+                    )
+                    if _gw_hooks_engine_step.hooks():
+                        # Tool names from the most recent assistant
+                        # message — empty until the LLM has called tools.
+                        _last_tools: list[str] = []
+                        for _m in reversed(messages):
+                            if getattr(_m, "role", None) == "assistant":
+                                _last_tools = [
+                                    tc.name for tc in (
+                                        getattr(_m, "tool_calls", None) or []
+                                    )
+                                ]
+                                break
+                        asyncio.create_task(
+                            _gw_hooks_engine_step.fire(
+                                _GW_AGENT_STEP,
+                                {
+                                    "session_id": sid,
+                                    "iteration": iterations,
+                                    "tool_names": _last_tools,
+                                },
+                            ),
+                            name=f"gw-hook-agent-step-{iterations}",
+                        )
+                except Exception:  # noqa: BLE001 — never break the loop
+                    pass
+
                 # Round 2B P-3: enforce both timeouts at the top of each iteration.
                 # Inactivity check first (the more useful signal); absolute cap
                 # second. Both raise out of run_conversation — no synthetic
@@ -2169,6 +2208,56 @@ class AgentLoop:
                             system_prompt_override=system_prompt_override,
                         )
                     self.db.end_session(sid)
+                    # 2026-05-08 — Hermes Doc-2 parity: TRANSFORM_LLM_OUTPUT
+                    # fires once per turn after the final response is
+                    # assembled, before delivery. Handlers may return
+                    # ``HookDecision(decision="rewrite", rewritten_text=...)``
+                    # to replace the response delivered to the channel /
+                    # console. The persisted DB content is the original
+                    # (rewriting is "for delivery only" — symmetric with
+                    # TRANSFORM_TOOL_RESULT). Fail-open: any exception
+                    # leaves the original content intact.
+                    try:
+                        _final_text = (
+                            final_assistant_msg.content
+                            if isinstance(final_assistant_msg.content, str)
+                            else ""
+                        )
+                        if _final_text:
+                            from opencomputer.hooks.engine import (
+                                engine as _hook_engine_xllm,
+                            )
+                            from plugin_sdk.hooks import (
+                                HookContext as _HookContextXllm,
+                            )
+                            from plugin_sdk.hooks import (
+                                HookEvent as _HookEventXllm,
+                            )
+
+                            _decision = await _hook_engine_xllm.fire_blocking(
+                                _HookContextXllm(
+                                    event=_HookEventXllm.TRANSFORM_LLM_OUTPUT,
+                                    session_id=sid,
+                                    response_text=_final_text,
+                                    model=self.config.model.model,
+                                    runtime=self._runtime,
+                                )
+                            )
+                            if (
+                                _decision is not None
+                                and _decision.decision == "rewrite"
+                                and _decision.rewritten_text
+                            ):
+                                from dataclasses import replace as _replace_
+
+                                final_assistant_msg = _replace_(
+                                    final_assistant_msg,
+                                    content=_decision.rewritten_text,
+                                )
+                    except Exception:  # noqa: BLE001 — never break delivery
+                        _log.debug(
+                            "TRANSFORM_LLM_OUTPUT hook failed", exc_info=True
+                        )
                     return ConversationResult(
                         final_message=final_assistant_msg,
                         messages=messages,

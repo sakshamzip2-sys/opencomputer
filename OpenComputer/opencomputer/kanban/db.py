@@ -1156,6 +1156,49 @@ def list_tasks(
     return [Task.from_row(r) for r in rows]
 
 
+def apply_specify(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    expanded_body: str,
+    new_status: str = "todo",
+) -> bool:
+    """Persist the result of a triage→spec expansion.
+
+    Idempotent on identical inputs (re-running specify with the same body
+    produces the same row state). Returns False if the task does not
+    exist; raises :class:`ValueError` if ``new_status`` is not a member
+    of :data:`VALID_STATUSES` (catches typos at the call site rather
+    than letting bad data into the DB).
+
+    The function is intentionally decoupled from the LLM call —
+    :mod:`opencomputer.kanban.specify` produces ``expanded_body`` and
+    delegates persistence here so the DB layer stays sync + testable
+    without an LLM dependency.
+    """
+    if new_status not in VALID_STATUSES:
+        raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if not row:
+            return False
+        old_status = row["status"]
+        conn.execute(
+            "UPDATE tasks SET body = ?, status = ? WHERE id = ?",
+            (expanded_body, new_status, task_id),
+        )
+        _append_event(
+            conn, task_id, "specified",
+            {
+                "old_status": old_status, "new_status": new_status,
+                "body_chars": len(expanded_body),
+            },
+        )
+        return True
+
+
 def assign_task(conn: sqlite3.Connection, task_id: str, profile: str | None) -> bool:
     """Assign or reassign a task.  Returns True on success.
 
