@@ -576,6 +576,37 @@ These are explicitly NOT in this PR but are tracked for future work:
 - Subagent-store-aware `oc checkpoints status` per-subagent breakdown. Currently aggregated under each session — sufficient.
 - Migrating `RewindStore` to a shadow git store (Hermes shape). Working alternative; switch is YAGNI.
 
+## Honest-deferral round (closed in this PR)
+
+After the initial implementation, a brutal self-audit identified gaps the
+first pass papered over. **All addressed in this same PR**:
+
+- ✅ **`oc code --worktree-include-dry-run` flag** — initially deferred
+  with "equivalent UX via `oc worktrees include-preview`". Now a
+  first-class flag on `oc code`; requires `--worktree`; runs include
+  in dry-run mode, prints report, exits without entering chat.
+- ✅ **`mark_pruned` ordering bug** — original design wrote
+  `.last_prune` BEFORE prune ran. A failed prune blocked the next 24h
+  of retries. Replaced with in-process `_prune_in_flight` flag +
+  `mark_prune_started` / `mark_prune_finished(success: bool)` pair;
+  the on-disk marker only persists on success.
+- ✅ **`save()` eviction perf bug** — original design called
+  `self.oldest()` per eviction step, which loaded ALL blobs into RAM
+  via `self.list()`. New `_iter_metadata()` generator reads
+  `meta.json` only; eviction is now O(N stat-calls), not O(N ×
+  blob_bytes RAM thrash).
+- ✅ **Extension-boundary violation** — original `auto_checkpoint`
+  hook imported `from opencomputer.agent.config` inside the extension
+  (CI's `test_plugin_extension_boundary` flagged it). Restructured so
+  `plugin.py` (boundary-allowed) resolves `CheckpointsConfig` once and
+  passes it as a dict to `build_auto_checkpoint_hook_spec(config=...)`.
+- ✅ **Real `oc code -w` smoke** — beyond unit-test coverage, smoke
+  ran end-to-end in a tmp `git init`'d Python project with `.env` +
+  `.venv/bin/python` — verified both files copy into the worktree.
+- ✅ **Full-suite segfault** — confirmed pre-existing on main (main
+  segfaults too past test 2952 on macOS Python 3.13). Not introduced
+  by this PR.
+
 ---
 
 ## Rollout
