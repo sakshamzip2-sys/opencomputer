@@ -29,12 +29,13 @@ Write tools + long-poll (3, all Tier-A item 14 follow-up):
   around ``events_poll`` that blocks until a new message arrives or
   timeout (capped at 120s).
 
-Honest deferral — one Hermes tool not yet ported:
+F1 consent write-back (1):
 
-- ``permissions_respond`` — needs F1 pending-consent queue surface
-  exposed; the F1 audit chain is read-only today. Implementing safely
-  means designing a write-back path that doesn't bypass the gateway's
-  consent-grant flow. Deferred to a focused F1 follow-up.
+- ``permissions_respond(capability_id, decision, scope=None,
+  tier=1, expires_in_seconds=None)`` — grant or revoke a capability.
+  ``decision="allow"`` upserts a ConsentGrant; ``decision="deny"`` revokes
+  the matching grant. Honors F1's HMAC-chained audit trail: the next
+  ``consent_history`` call surfaces the new entry.
 
 Pattern: high-level ``mcp.server.fastmcp.FastMCP`` decorators (clean +
 type-checked) over ``mcp.server.stdio.stdio_server()`` transport
@@ -500,6 +501,82 @@ def build_server() -> FastMCP:
             if now >= deadline:
                 return {"messages": [], "next_cursor": cursor}
             await asyncio.sleep(min(bounded_poll, max(0.0, deadline - now)))
+
+    @server.tool()
+    def permissions_respond(
+        capability_id: str,
+        decision: str,
+        scope: str | None = None,
+        tier: int = 1,
+        expires_in_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """Grant or revoke an F1 capability consent (10th of 10 Hermes tools).
+
+        Args:
+            capability_id: The capability id (e.g. "fs.read", "shell.exec").
+            decision: ``"allow"`` (upsert grant) or ``"deny"`` (revoke).
+            scope: Optional scope filter (e.g. a path prefix). ``None``
+                means a global grant for the capability.
+            tier: ConsentTier int (0=IMPLICIT, 1=EXPLICIT (default),
+                2=PER_ACTION, 3=DELEGATED).
+            expires_in_seconds: Optional grant lifetime. ``None`` =
+                no expiry (revocable). Otherwise added to ``time.time()``.
+
+        Returns:
+            ``{"ok": True, "action": "granted"|"revoked", "capability_id":
+            ..., "scope": ...}`` on success;
+            ``{"ok": False, "error": "..."}`` on bad input.
+        """
+        import time as _time
+
+        from plugin_sdk.consent import ConsentGrant, ConsentTier
+
+        from opencomputer.agent.consent.store import ConsentStore
+
+        decision_norm = (decision or "").strip().lower()
+        if decision_norm not in ("allow", "deny"):
+            return {
+                "ok": False,
+                "error": f"decision must be 'allow' or 'deny', got {decision!r}",
+            }
+        try:
+            tier_enum = ConsentTier(int(tier))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": f"tier must be 0..3, got {tier!r}"}
+
+        db_path = _home() / "sessions.db"
+        if not db_path.exists():
+            return {"ok": False, "error": "sessions.db not found for active profile"}
+        try:
+            with sqlite3.connect(str(db_path)) as conn:
+                store = ConsentStore(conn)
+                if decision_norm == "deny":
+                    store.revoke(capability_id, scope)
+                    action = "revoked"
+                else:
+                    now = _time.time()
+                    expires_at: float | None = None
+                    if expires_in_seconds is not None and expires_in_seconds > 0:
+                        expires_at = now + float(expires_in_seconds)
+                    grant = ConsentGrant(
+                        capability_id=capability_id,
+                        scope_filter=scope,
+                        tier=tier_enum,
+                        granted_at=now,
+                        expires_at=expires_at,
+                        granted_by="user",
+                    )
+                    store.upsert(grant)
+                    action = "granted"
+            return {
+                "ok": True,
+                "action": action,
+                "capability_id": capability_id,
+                "scope": scope,
+                "tier": int(tier_enum),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     return server
 
