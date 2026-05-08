@@ -4,6 +4,21 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Fixed — Hermes v2 honest-audit follow-up (2026-05-08)
+
+PR #510 closed three Hermes v2 gaps but missed others on closer audit. This follow-up closes the missed gaps and corrects the overclaimed parity-doc rows.
+
+- **`.zprofile` / `.zlogin` / `.zshenv` / `.bash_login` added to `_BLOCKED_FILE_BASENAMES`** (`opencomputer/agent/at_references.py`). PR #510 had `.zshrc` only; ZSH users source secrets from `.zprofile` (`export ANTHROPIC_API_KEY=...`).
+- **Path-traversal protection on `@file:`** (`at_references._is_outside_workspace`). Hermes v2 spec mandates "References outside allowed workspace root rejected"; PR #510's parity doc claimed shipped but only block-by-name was in place. `@file:/etc/hosts` and `@file:../../../sibling` from a nested `cwd` are now refused. Symlinks resolved before the check so a symlink-bypass cannot leak.
+- **Binary-file detection on `@file:`** (`at_references._looks_binary`). Extension allowlist (PNG/PDF/ZIP/SQLITE/etc.) + null-byte sniff over first 8KB. Was reading binaries with `errors='replace'` and emitting garbage.
+- **`SOUL.md` whitespace-only → built-in default fallback** (`agent/memory.MemoryManager.read_soul`). Hermes spec: "Empty/whitespace-only file → falls back to built-in default identity." PR #510 only handled the missing-file case.
+- **Parity-doc corrections** (`docs/refs/hermes-context-personality-skins-v2-parity.md`): two rows claimed "✅ shipped" that weren't:
+  - Path-traversal — was block-by-name only.
+  - Prompt stack slot order — OC's `base.j2` has identity preamble at top, `/personality` mid-file, `SOUL` near the end (not the strict spec order). Functionally equivalent; ordering is a deliberate template choice.
+  Plus a new "Honest deferrals" section calling out the 70/20/10 head/tail/marker truncation strategy as a known divergence that wasn't measured before deferring.
+
+15 new tests across `tests/test_at_references_followup.py` (11) + `tests/test_soul_empty_fallback.py` (4). Existing `tests/test_at_references_expand.py` stays green.
+
 ### Added — Hermes context/personality/skins v2 parity gaps (2026-05-08)
 
 Closes three concrete deltas between Hermes' v2 reference for context-files / `@`-references / personalities / skins and OpenComputer's `main`. The bulk of those four subsystems already shipped (PR #500 + Sub-project C / PR #24); this PR is the residue.
