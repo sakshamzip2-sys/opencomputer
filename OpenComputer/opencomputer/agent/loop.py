@@ -923,13 +923,24 @@ class AgentLoop:
         # e.g. test fixtures, scripted callers) would silently scribble
         # ``session_id`` / ``session_db`` onto the module-level
         # singleton and pollute every later consumer.
+        # 2026-05-08 — also publish ``model_id`` and ``session_started_at``
+        # so the bottom-bar status line (``cli_ui.status_line``) can read
+        # them O(1) per keystroke without recomputing. ``session_started_at``
+        # only seeds the first time it appears so a multi-turn chat REPL
+        # keeps the original anchor and ``elapsed`` stays monotonic across
+        # turns; ``model_id`` refreshes every turn to track mid-session
+        # ``/model`` swaps.
+        _new_custom = {
+            **self._runtime.custom,
+            "session_id": sid,
+            "session_db": self.db,
+            "model_id": self.config.model.model,
+        }
+        if "session_started_at" not in _new_custom:
+            _new_custom["session_started_at"] = _session_started_at
         self._runtime = replace(
             self._runtime,
-            custom={
-                **self._runtime.custom,
-                "session_id": sid,
-                "session_db": self.db,
-            },
+            custom=_new_custom,
         )
 
         _slash_result = await _slash_dispatch(
@@ -1845,6 +1856,52 @@ class AgentLoop:
                     self._runtime.custom["session_cache_write"] = (
                         int(_cur_cw) if isinstance(_cur_cw, int) else 0
                     ) + step.cache_write_tokens
+                except Exception:  # noqa: BLE001
+                    pass
+
+                # 2026-05-08: token + cost accumulation for the bottom-bar
+                # status line. ``session_tokens_in/out`` and
+                # ``session_cost_usd`` are also consumed by ``/usage``,
+                # which currently shows "(not tracked)" because nothing
+                # writes them. Compaction's pricing helper handles the
+                # provider/model lookup; an unknown model returns ``None``
+                # and we leave ``session_cost_usd`` as-is rather than
+                # zeroing it (sticky display).
+                try:
+                    _cur_in = self._runtime.custom.get("session_tokens_in")
+                    _cur_out = self._runtime.custom.get("session_tokens_out")
+                    self._runtime.custom["session_tokens_in"] = (
+                        int(_cur_in) if isinstance(_cur_in, int) else 0
+                    ) + int(step.input_tokens or 0)
+                    self._runtime.custom["session_tokens_out"] = (
+                        int(_cur_out) if isinstance(_cur_out, int) else 0
+                    ) + int(step.output_tokens or 0)
+                except Exception:  # noqa: BLE001
+                    pass
+
+                try:
+                    from opencomputer.cost_guard.pricing import (
+                        compute_call_cost as _ccc,
+                    )
+
+                    _step_cost = _ccc(
+                        provider=getattr(
+                            self.provider, "name", type(self.provider).__name__,
+                        ),
+                        model=self.config.model.model,
+                        input_tokens=int(step.input_tokens or 0),
+                        output_tokens=int(step.output_tokens or 0),
+                    )
+                    if _step_cost is not None:
+                        _cur_cost = self._runtime.custom.get("session_cost_usd")
+                        _cur_cost_f = (
+                            float(_cur_cost)
+                            if isinstance(_cur_cost, (int, float))
+                            else 0.0
+                        )
+                        self._runtime.custom["session_cost_usd"] = (
+                            _cur_cost_f + float(_step_cost)
+                        )
                 except Exception:  # noqa: BLE001
                     pass
 

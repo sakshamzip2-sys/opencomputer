@@ -973,6 +973,23 @@ async def read_user_input(
     )
     badge_window = VSplit([badge_text_window, title_window])
 
+    # 2026-05-08 — Claude-Code-style status line. Always visible when a
+    # runtime is wired and stdout is a TTY. Lives BELOW the mode badge
+    # so the badge row stays the "overrides shown only" rail and the
+    # status line is the always-on "where am I in the budget" rail.
+    from opencomputer.cli_ui.status_line import render_status_line
+
+    def _status_line_text() -> list[tuple[str, str]]:
+        return render_status_line(runtime)
+
+    status_line_window = ConditionalContainer(
+        content=Window(
+            content=FormattedTextControl(_status_line_text),
+            height=1,
+        ),
+        filter=Condition(lambda: _badge_visible),
+    )
+
     layout = Layout(
         HSplit(
             [
@@ -982,6 +999,7 @@ async def read_user_input(
                 VSplit([prompt_window, input_window]),
                 paste_hint_window,
                 badge_window,
+                status_line_window,
             ]
         ),
         focused_element=input_window,
