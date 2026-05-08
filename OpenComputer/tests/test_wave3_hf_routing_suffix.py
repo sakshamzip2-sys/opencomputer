@@ -66,7 +66,7 @@ def test_known_providers_set_contents():
         "groq", "together", "fireworks", "replicate",
         "sambanova", "hyperbolic", "novita", "cerebras",
     }
-    assert _KNOWN_HF_PROVIDERS == expected
+    assert expected == _KNOWN_HF_PROVIDERS
 
 
 def test_routing_suffixes_set_contents():

@@ -3616,7 +3616,16 @@ class AgentLoop:
             # G.31 — wrap the provider call in the fallback router so
             # transient failures (429 / 5xx / connection refused) walk
             # the configured ``fallback_models`` chain before raising.
-            from opencomputer.agent.fallback import call_with_fallback
+            #
+            # Wave 3 (2026-05-08) — extended with cross-provider chain.
+            # When ``Config.fallback_providers`` is populated, after the
+            # primary's ``fallback_models`` exhaust we try each
+            # provider+model pair in turn (per-turn scoped — primary
+            # restored on the next user turn).
+            from opencomputer.agent.fallback import (
+                call_with_fallback,
+                call_with_provider_fallback,
+            )
 
             _split_kwargs = _maybe_split_system_kwargs(
                 self.provider.complete,
@@ -3636,11 +3645,48 @@ class AgentLoop:
                     **_extra_kwargs,
                 )
 
-            resp = await call_with_fallback(
-                _do_call,
-                primary_model=model_name,
-                fallback_models=self.config.model.fallback_models,
-            )
+            cross_chain = getattr(self.config, "fallback_providers", ())
+            if cross_chain:
+                from opencomputer.agent.fallback_provider_resolver import (
+                    build_fallback_provider_chain,
+                )
+
+                provider_chain = build_fallback_provider_chain(
+                    cross_chain,
+                    self.config,
+                )
+
+                async def _cross_call(prov, active_model: str):
+                    sub_split = _maybe_split_system_kwargs(
+                        prov.complete,
+                        base_system=base_system,
+                        injected_system=injected_system,
+                        session_id=session_id,
+                    )
+                    return await prov.complete(
+                        model=active_model,
+                        messages=wire_messages,
+                        system=system,
+                        tools=tool_schemas,
+                        max_tokens=self.config.model.max_tokens,
+                        temperature=self.config.model.temperature,
+                        **sub_split,
+                        **_extra_kwargs,
+                    )
+
+                resp = await call_with_provider_fallback(
+                    _do_call,
+                    _cross_call,
+                    primary_model=model_name,
+                    fallback_models=self.config.model.fallback_models,
+                    provider_chain=provider_chain,
+                )
+            else:
+                resp = await call_with_fallback(
+                    _do_call,
+                    primary_model=model_name,
+                    fallback_models=self.config.model.fallback_models,
+                )
 
         stop_reason_map = {
             "end_turn": StopReason.END_TURN,

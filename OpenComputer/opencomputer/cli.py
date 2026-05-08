@@ -4264,6 +4264,138 @@ def model_remove(name: str = typer.Argument(...)) -> None:
     console.print(f"[green]✓[/green] removed {name!r}")
 
 
+fallback_app = typer.Typer(
+    help="Manage cross-provider fallback chain (Wave 3 — 2026-05-08).",
+    no_args_is_help=False,
+    invoke_without_command=True,
+)
+app.add_typer(fallback_app, name="fallback")
+
+
+def _split_provider_model_spec(spec: str) -> tuple[str, str]:
+    """Split 'provider/model' or 'custom:<name>/<model>' into (provider, model).
+
+    The first '/' AFTER the optional 'custom:<name>' prefix separates
+    provider and model. Models containing slashes (Anthropic-on-OR
+    'anthropic/claude-sonnet-4') survive because we partition once.
+    """
+    if spec.startswith("custom:"):
+        # custom:<name>/<model_id>
+        cut = spec.find("/", len("custom:"))
+        if cut == -1:
+            raise typer.BadParameter(
+                f"expected 'custom:<name>/<model>', got {spec!r}"
+            )
+        return spec[:cut], spec[cut + 1:]
+    provider, sep, model = spec.partition("/")
+    if not sep or not provider or not model:
+        raise typer.BadParameter(
+            f"expected '<provider>/<model>' or 'custom:<name>/<model>', got {spec!r}"
+        )
+    return provider, model
+
+
+@fallback_app.callback(invoke_without_command=True)
+def fallback_root(ctx: typer.Context) -> None:
+    """Show the current fallback chain when called with no subcommand."""
+    if ctx.invoked_subcommand is not None:
+        return
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    raw = {}
+    if cfg_path.exists():
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    chain = raw.get("fallback_providers", [])
+    if not chain:
+        console.print("[dim]no fallback_providers configured[/dim]")
+        return
+    for i, fp in enumerate(chain):
+        prov = fp.get("provider", "?")
+        mdl = fp.get("model", "?")
+        console.print(f"  [cyan][{i}][/cyan] {prov}/{mdl}")
+
+
+@fallback_app.command("add")
+def fallback_add(
+    spec: str = typer.Argument(
+        ..., help="provider/model or custom:<name>/<model>",
+    ),
+) -> None:
+    """Append a fallback entry to the chain."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    provider, model = _split_provider_model_spec(spec)
+    cfg_path = config_file_path()
+    raw = {}
+    if cfg_path.exists():
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    chain = raw.setdefault("fallback_providers", [])
+    chain.append({"provider": provider, "model": model})
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(f"[green]✓[/green] added {provider}/{model} (position {len(chain) - 1})")
+
+
+@fallback_app.command("remove")
+def fallback_remove(
+    index: int = typer.Argument(..., help="0-based index of the entry to remove."),
+) -> None:
+    """Remove a fallback entry by index."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    if not cfg_path.exists():
+        console.print(f"[bold red]✗[/bold red] no config.yaml at {cfg_path}")
+        raise typer.Exit(1)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    chain = raw.get("fallback_providers", [])
+    if index < 0 or index >= len(chain):
+        console.print(
+            f"[bold red]✗[/bold red] index {index} out of range "
+            f"(chain has {len(chain)} entr{'y' if len(chain) == 1 else 'ies'})"
+        )
+        raise typer.Exit(1)
+    removed = chain.pop(index)
+    raw["fallback_providers"] = chain
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(
+        f"[green]✓[/green] removed {removed.get('provider')}/{removed.get('model')}"
+    )
+
+
+@fallback_app.command("clear")
+def fallback_clear() -> None:
+    """Clear the fallback chain (no entries left)."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    if not cfg_path.exists():
+        console.print("[dim]no config.yaml to update[/dim]")
+        return
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    raw["fallback_providers"] = []
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print("[green]✓[/green] cleared fallback chain")
+
+
 def _apply_loose_env_perms_flag() -> None:
     """Intercept ``--allow-loose-env-perms`` from sys.argv (Round 2B P-16).
 

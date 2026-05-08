@@ -244,6 +244,26 @@ class CustomProviderModelOverride:
 
 
 @dataclass(frozen=True, slots=True)
+class FallbackProvider:
+    """Wave 3 (2026-05-08) — one entry in a cross-provider fallback chain.
+
+    Configured under top-level ``fallback_providers:`` in config.yaml as
+    a list. ``provider`` is either a bundled provider name
+    (``openrouter`` / ``anthropic`` / ``openai`` / ...) or
+    ``custom:<name>`` referencing an entry under ``custom_providers:``.
+
+    Activates at most once per user turn — the primary is restored on
+    the next user message — so a provider-wide rate limit doesn't
+    persist as a permanent silent re-route.
+    """
+
+    provider: str = ""
+    model: str = ""
+    base_url: str | None = None
+    key_env: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CustomProvider:
     """A user-defined OpenAI-compatible (or Anthropic-compatible) endpoint.
 
@@ -932,6 +952,12 @@ class Config:
     #: Wave 3 (2026-05-08) — OpenRouter provider routing knobs. Only
     #: applies when the active provider is OpenRouter; ignored otherwise.
     provider_routing: ProviderRoutingConfig = field(default_factory=ProviderRoutingConfig)
+    #: Wave 3 (2026-05-08) — cross-provider fallback chain. Each entry
+    #: is a (provider_id, model) pair the loop tries after the primary
+    #: provider's ``fallback_models`` are exhausted. Per-turn scoped:
+    #: activates at most once per user turn; primary is restored on
+    #: the next turn.
+    fallback_providers: tuple[FallbackProvider, ...] = ()
     home: Path = field(default_factory=_home)
 
 
@@ -966,6 +992,7 @@ __all__ = [
     "CronConfig",
     "CustomProvider",
     "CustomProviderModelOverride",
+    "FallbackProvider",
     "ProviderRoutingConfig",
     "split_or_routing_suffix",
     "split_hf_routing_suffix",

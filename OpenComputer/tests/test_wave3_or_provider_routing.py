@@ -14,7 +14,6 @@ from opencomputer.agent.config import (
     split_or_routing_suffix,
 )
 
-
 _OR_PROVIDER_PATH = (
     Path(__file__).resolve().parents[1] / "extensions" / "openrouter-provider" / "provider.py"
 )
