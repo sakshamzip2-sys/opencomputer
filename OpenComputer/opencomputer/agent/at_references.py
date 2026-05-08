@@ -136,11 +136,29 @@ class AtRefContext:
 # ─── blocked paths ────────────────────────────────────────────────
 
 _BLOCKED_DIRS = (".ssh", ".aws", ".gnupg", ".kube")
+# Shell profile basenames where users commonly source secrets
+# (``export ANTHROPIC_API_KEY=…``). Hermes v2 parity follow-up: added
+# ``.zprofile`` (was missed in PR #510) plus the broader zsh/bash login
+# profile set so all common shell-credential sources are covered.
 _BLOCKED_FILE_BASENAMES = frozenset({
-    ".netrc", ".pgpass", ".bashrc", ".zshrc",
-    ".bash_profile", ".profile",
+    ".netrc", ".pgpass",
+    ".bashrc", ".bash_profile", ".bash_login", ".profile",
+    ".zshrc", ".zprofile", ".zlogin", ".zshenv",
 })
 _BLOCKED_FILE_GLOBS = ("*.pem", "*.key", "id_rsa*", "id_ed25519*", "id_dsa*")
+# Common binary file extensions — short-circuit before the more
+# expensive null-byte sniff in :func:`_looks_binary`. These are the
+# extensions a casual ``@file:`` user would most often hit by mistake
+# (image / archive / executable) without intending a binary dump.
+_BINARY_EXTENSIONS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".tiff",
+    ".pdf", ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+    ".exe", ".dll", ".so", ".dylib", ".o", ".a", ".class",
+    ".pyc", ".pyo", ".whl",
+    ".mp3", ".mp4", ".wav", ".ogg", ".flac", ".avi", ".mov", ".mkv",
+    ".sqlite", ".db", ".sqlite3",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+})
 
 
 def is_path_blocked(path: Path, *, home: Path) -> bool:
@@ -169,6 +187,52 @@ def is_path_blocked(path: Path, *, home: Path) -> bool:
     return any(fnmatch(name, g) for g in _BLOCKED_FILE_GLOBS)
 
 
+def _is_outside_workspace(path: Path, *, workspace_root: Path) -> bool:
+    """True if ``path`` resolves outside ``workspace_root``.
+
+    Hermes v2 spec: "References outside allowed workspace root rejected."
+    Symlinks are resolved before the comparison so a symlink pointing
+    out cannot be used to bypass.
+
+    Failures (resolve error etc.) return ``True`` — better to refuse
+    a path we cannot reason about than to let it through.
+    """
+    try:
+        resolved = path.resolve()
+        root = workspace_root.resolve()
+    except OSError:
+        return True
+    try:
+        resolved.relative_to(root)
+        return False
+    except ValueError:
+        return True
+
+
+def _looks_binary(path: Path) -> bool:
+    """Best-effort binary-file detection (Hermes v2 parity).
+
+    Two cheap signals in order:
+
+    1. Extension match against :data:`_BINARY_EXTENSIONS`.
+    2. Null-byte scan over the first 8KB of the file.
+
+    Returns ``False`` on any read error — the caller's ``read_text``
+    path will surface the underlying issue with a more specific
+    message. False positives on small text files containing a literal
+    NUL are extremely rare in practice (legitimate source files don't
+    contain NULs).
+    """
+    if path.suffix.lower() in _BINARY_EXTENSIONS:
+        return True
+    try:
+        with path.open("rb") as fh:
+            chunk = fh.read(8192)
+    except OSError:
+        return False
+    return b"\x00" in chunk
+
+
 # ─── expanders ────────────────────────────────────────────────────
 
 def _expand_file(ref: AtRef, ctx: AtRefContext) -> str:
@@ -183,6 +247,14 @@ def _expand_file(ref: AtRef, ctx: AtRefContext) -> str:
         return f"[not a file: {ref.arg}]"
     if is_path_blocked(p, home=Path(ctx.home)):
         return f"[blocked path: {ref.arg}]"
+    # Hermes v2 spec: references outside the workspace root are
+    # refused. Resolves symlinks first so a symlink-bypass cannot leak
+    # secrets via a path that "looks" inside the workspace.
+    if _is_outside_workspace(p, workspace_root=Path(ctx.cwd)):
+        return f"[blocked: {ref.arg} resolves outside workspace]"
+    # Hermes v2 spec: binary files are not supported.
+    if _looks_binary(p):
+        return f"[binary file not supported: {ref.arg}]"
 
     try:
         text = p.read_text(encoding="utf-8", errors="replace")

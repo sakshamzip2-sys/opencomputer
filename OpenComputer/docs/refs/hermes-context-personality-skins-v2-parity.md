@@ -1,7 +1,7 @@
 # Hermes Context / Personality / Skins (v2) — OpenComputer Parity Status
 
 **Spec:** `~/Downloads/files (1)/hermes-context-personality-skins-v2.md` (2026-05-08 reference)
-**Last reviewed:** 2026-05-08
+**Last reviewed:** 2026-05-08 (revised after honest-audit follow-up)
 
 This page maps each section of the Hermes v2 reference to OpenComputer's
 implementation. Use it when porting future Hermes features so you can
@@ -13,7 +13,8 @@ work.
 | Hermes feature | OC status | Where |
 |---|---|---|
 | Hierarchical priority `.hermes.md` / `AGENTS.md` / `CLAUDE.md` / `.cursorrules` | ✅ shipped | `prompt_builder.load_workspace_context` checks `OPENCOMPUTER.md`, `CLAUDE.md`, `AGENTS.md`, `.cursorrules` (PR #500 + this PR for `.cursorrules`) |
-| `SOUL.md` always-loaded slot #1 | ✅ shipped (per-profile, not `HERMES_HOME`) | `profiles._maybe_write_soul_md`, `prompt_builder.PromptContext.soul` (PR #24, Sub-project C) |
+| `SOUL.md` always-loaded (slot position differs from spec — see below) | ⚠️ different placement — OC injects `SOUL.md` near the *end* of `base.j2` as a `## Profile identity` section, with the agent's baseline identity preamble at the *top*. Hermes spec places SOUL at slot #1. Functionally similar (the agent has identity early one way or another); ordering is a deliberate template choice. | `profiles._maybe_write_soul_md`, `prompt_builder.PromptContext.soul`, `agent/prompts/base.j2:241+` (PR #24, Sub-project C) |
+| `SOUL.md` empty/whitespace → fall back to built-in default | ✅ shipped (this follow-up PR) — PR #510 only handled the missing-file case; whitespace-only contents now also return `""` so the j2 omits the section and the built-in identity preamble carries the role | `agent/memory.MemoryManager.read_soul` |
 | Progressive subdirectory discovery (5 ancestors, 8KB cap, dedupe) | ✅ shipped | `subdirectory_hints.SubdirectoryHintTracker` |
 | Per-file 100KB cap | ✅ shipped | `prompt_builder._WORKSPACE_FILE_CAP_BYTES` |
 | Informative truncation marker (kept / total / hint to use file tools) | ✅ shipped (this PR) | `prompt_builder._format_truncation_note` |
@@ -27,10 +28,11 @@ work.
 | `@file:` `@folder:` `@diff` `@staged` `@git:N` `@url:` | ✅ shipped | `opencomputer.agent.at_references.expand` |
 | Soft 25% / hard 50% caps | ✅ shipped | `AtRefContext.soft_cap` / `hard_cap` |
 | Folder 200-entry cap, git 1-10 clamp | ✅ shipped | `_FOLDER_MAX_ENTRIES`, `_GIT_MAX_COMMITS` |
-| Blocked sensitive paths (`.ssh/`, `.aws/`, `*.pem`, etc.) | ✅ shipped | `at_references.is_path_blocked` |
-| Path-traversal protection | ✅ shipped | `Path.resolve` before block check |
+| Blocked sensitive paths (`.ssh/`, `.aws/`, `.gnupg/`, `.kube/`, `.netrc`, `.pgpass`, shell profiles, key globs) | ✅ shipped (this follow-up PR added `.zprofile` / `.zlogin` / `.zshenv` / `.bash_login` — PR #510 missed them) | `at_references.is_path_blocked` |
+| Path-traversal protection — references outside workspace root rejected | ✅ shipped (this follow-up PR — PR #510 falsely claimed shipped; only block-by-name was in place) | `at_references._is_outside_workspace` |
+| Binary file detection — extension allowlist + null-byte sniff | ✅ shipped (this follow-up PR) | `at_references._looks_binary` |
 | Trailing-punctuation strip | ✅ shipped | `_TRAILING_PUNCT` |
-| CLI tab completion | ✅ shipped | provided by prompt-toolkit input loop |
+| CLI tab completion | ✅ shipped — verified `slash_completer.py` + `file_completer.py` are wired into the input loop | `opencomputer/cli_ui/file_completer.py`, `slash_completer.py` |
 | Channel-adapter NOT-expanded policy | ✅ shipped | CLI input loop calls `expand`; channel adapters do not |
 
 ## Personality
@@ -40,8 +42,8 @@ work.
 | 14 built-in personalities (helpful, concise, technical, creative, teacher, kawaii, catgirl, pirate, shakespeare, surfer, noir, uwu, philosopher, hype) | ✅ shipped | `opencomputer.agent.personality.builtins.BUILTINS` |
 | Custom personalities via `agent.personalities` config | ✅ shipped | `personality.loader.resolve` reads custom dict |
 | `/personality` (show), `/personality NAME` (set), `/personality reset` | ✅ shipped | `slash_commands_impl.skin_personality_cmd.PersonalityCommand` |
-| SOUL.md-as-baseline + `/personality`-as-overlay layering | ✅ shipped | SOUL is slot #1 (`PromptContext.soul`); /personality is slot #7 |
-| Prompt stack order (SOUL → tool guidance → memory → skills → context-files → timestamp → /personality) | ✅ shipped | `agent/prompts/base.j2` |
+| SOUL.md-as-baseline + `/personality`-as-overlay layering | ✅ shipped (functional parity, ordering differs) | SOUL appended near the end of `base.j2`; `/personality` rendered at line 172-175 (mid-file, before the memory blocks) |
+| Prompt stack order (SOUL → tool guidance → memory → skills → context-files → timestamp → /personality) | ⚠️ different ordering — OC's `base.j2` has its own identity preamble at the top, then working rules, then `/personality`, then memory + user_facts + persona_overlay + SOUL. Functionally the model gets all the slots; the order is a deliberate template choice. PR #510 falsely claimed strict ordering parity. | `agent/prompts/base.j2` |
 
 ## Skins / Themes
 
@@ -56,6 +58,10 @@ work.
 | Spinner `waiting_faces` + `thinking_faces` | ❌ not shipped — YAGNI | No current renderer site for animated faces. Add when an animated-face renderer exists. |
 | 24-key Hermes color palette (`response_border`, `session_label`, `voice_status_bg`, `selection_bg`, completion-menu keys, ...) | ⚠️ partial — current 15 keys cover OC's render surfaces; remaining ~9 keys are decorative until renderer sites appear | `cli_ui/skin/builtins/default.yaml` |
 | Live TUI repaint on `/skin` | ⚠️ partial — spinner + branding hot-swap; full color re-theme requires session restart | Documented in `skin_personality_cmd.SkinCommand.execute` |
+
+## Honest deferrals (acknowledged, not shipped)
+
+- **70/20/10 head/tail/marker truncation strategy.** Hermes truncates >20K-char files keeping the first 70% + last 20% with a marker in between, so closing-section conventions aren't lost. OC truncates head-only with an informative marker telling the agent file tools can recover the rest. For most config files this loses bottom-of-file context (recent conventions, footer notes). Worth measuring before deferring further; not implemented because head-only matches the existing line-number invariants downstream tools rely on.
 
 ## Out of scope (not Hermes-equivalent by design)
 

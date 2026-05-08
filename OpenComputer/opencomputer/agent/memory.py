@@ -364,19 +364,31 @@ class MemoryManager:
     # ─── personality (SOUL.md) — Phase 14.F / C3 ──────────────────
 
     def read_soul(self) -> str:
-        """Return the contents of ``SOUL.md`` or '' if absent/unreadable.
+        """Return the contents of ``SOUL.md`` or '' if absent/unreadable/empty.
 
         Read-only by design. The profile's personality file is hand-edited
-        by the user, not mutated by the agent. Returning '' when the file
-        doesn't exist means prompt construction degrades gracefully: no
-        profile → no ``## Profile identity`` section.
+        by the user, not mutated by the agent.
+
+        Returns '' in three cases — all of which fall back to the agent's
+        built-in default identity (the preamble baked into ``base.j2``)
+        per Hermes v2 spec: "Empty/whitespace-only file → falls back to
+        built-in default identity":
+
+        - file doesn't exist
+        - file exists but cannot be read (permission etc.)
+        - file exists but has whitespace-only contents
         """
         if not self.soul_path.exists():
             return ""
         try:
-            return self.soul_path.read_text(encoding="utf-8")
+            content = self.soul_path.read_text(encoding="utf-8")
         except OSError:
             return ""
+        # Hermes v2 parity: whitespace-only SOUL.md falls back to built-in
+        # default identity, not an injected blank section.
+        if not content.strip():
+            return ""
+        return content
 
     # ─── backup / restore ──────────────────────────────────────────
 
