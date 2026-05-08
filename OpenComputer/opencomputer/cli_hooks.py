@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -231,6 +232,289 @@ def cmd_clear() -> None:
     """Clear in-memory hook fire history."""
     n = clear_history()
     _console.print(f"[green]Cleared {n} fire records.[/green]")
+
+
+@hooks_app.command("doctor")
+def cmd_doctor(
+    json_out: bool = typer.Option(False, "--json", help="Machine-readable output."),
+) -> None:
+    """Diagnostic health check: gateway hooks, settings hooks, recent activity.
+
+    Surface health issues (broken HOOK.yaml, missing handle(), bad command
+    paths) before they manifest as silent fail-open behaviour at runtime.
+    Mirrors ``hermes hooks doctor`` from the Hermes Doc-2 reference doc.
+    """
+    rows: list[dict[str, str]] = []
+
+    # 1. Gateway file-discovery hooks — walk hooks_root directly so we
+    # can surface broken hook directories that ``discover_hooks`` skips.
+    try:
+        import importlib.util as _ilu
+
+        import yaml as _yaml
+
+        from opencomputer.gateway.event_hooks import (
+            KNOWN_EVENTS,
+            discover_hooks,
+            hooks_root,
+        )
+
+        root = hooks_root()
+        if not root.exists() or not root.is_dir():
+            rows.append(
+                {
+                    "severity": "INFO",
+                    "check": "gateway-hooks-dir",
+                    "detail": f"{root} does not exist (0 gateway file-discovery hooks)",
+                }
+            )
+        else:
+            valid_specs = discover_hooks(root)
+            valid_names = {hk.name for hk in valid_specs}
+            all_dirs = [d for d in sorted(root.iterdir()) if d.is_dir()]
+            rows.append(
+                {
+                    "severity": "INFO",
+                    "check": "gateway-hooks-count",
+                    "detail": (
+                        f"{len(valid_specs)} valid / {len(all_dirs)} "
+                        f"gateway hook directories at {root}"
+                    ),
+                }
+            )
+
+            # Per-directory validation: surface broken ones as ERROR rows.
+            for entry in all_dirs:
+                manifest_path = entry / "HOOK.yaml"
+                handler_path = entry / "handler.py"
+                if not manifest_path.is_file() or not handler_path.is_file():
+                    rows.append(
+                        {
+                            "severity": "ERROR",
+                            "check": f"gateway-hook:{entry.name}",
+                            "detail": "missing HOOK.yaml or handler.py",
+                        }
+                    )
+                    continue
+                try:
+                    manifest = (
+                        _yaml.safe_load(
+                            manifest_path.read_text(encoding="utf-8")
+                        )
+                        or {}
+                    )
+                except _yaml.YAMLError as exc:
+                    rows.append(
+                        {
+                            "severity": "ERROR",
+                            "check": f"gateway-hook:{entry.name}",
+                            "detail": f"malformed HOOK.yaml: {exc}",
+                        }
+                    )
+                    continue
+                events = manifest.get("events") or []
+                if not isinstance(events, list) or not all(
+                    isinstance(e, str) for e in events
+                ):
+                    rows.append(
+                        {
+                            "severity": "ERROR",
+                            "check": f"gateway-hook:{entry.name}",
+                            "detail": "HOOK.yaml 'events' must be list[str]",
+                        }
+                    )
+                    continue
+                # Validate handler.py defines async handle without importing —
+                # discover_hooks already does the import check; if name not
+                # in valid_names, it failed import.
+                if entry.name not in valid_names:
+                    rows.append(
+                        {
+                            "severity": "ERROR",
+                            "check": f"gateway-hook:{entry.name}",
+                            "detail": (
+                                "handler.py failed to import or missing "
+                                "async def handle(event_type, context)"
+                            ),
+                        }
+                    )
+                    # Defensive: keep _ilu import side-effect explicit
+                    # to silence lint if somehow this module compiles.
+                    _ = _ilu
+                    continue
+                # Valid — check event names
+                unknown = [
+                    e
+                    for e in events
+                    if not (
+                        e in KNOWN_EVENTS
+                        or any(
+                            e.startswith(known.rstrip("*"))
+                            for known in KNOWN_EVENTS
+                            if known.endswith(":*")
+                        )
+                        or e.startswith("command:")
+                    )
+                ]
+                if unknown:
+                    rows.append(
+                        {
+                            "severity": "WARN",
+                            "check": f"gateway-hook:{entry.name}",
+                            "detail": f"unknown events: {unknown}",
+                        }
+                    )
+                else:
+                    rows.append(
+                        {
+                            "severity": "OK",
+                            "check": f"gateway-hook:{entry.name}",
+                            "detail": f"events={events}",
+                        }
+                    )
+    except Exception as exc:  # noqa: BLE001
+        rows.append(
+            {
+                "severity": "ERROR",
+                "check": "gateway-hooks-discovery",
+                "detail": f"discovery raised: {type(exc).__name__}: {exc}",
+            }
+        )
+
+    # 2. Settings hooks (config.yaml hooks: block)
+    try:
+        from opencomputer.agent.config import default_config
+
+        cfg = default_config()
+        sh = getattr(cfg, "hooks", None)
+        if sh:
+            for event_name, configs in sh.items():
+                for cmd_config in configs or []:
+                    cmd = getattr(cmd_config, "command", "") or ""
+                    parts = cmd.split()
+                    exe = parts[0] if parts else ""
+                    if exe.startswith("/") and not os.path.exists(exe):
+                        rows.append(
+                            {
+                                "severity": "WARN",
+                                "check": f"settings-hook:{event_name}",
+                                "detail": f"executable not found: {exe}",
+                            }
+                        )
+                    elif exe.startswith("/"):
+                        try:
+                            st = os.stat(exe)
+                            if not (st.st_mode & stat.S_IXUSR):
+                                rows.append(
+                                    {
+                                        "severity": "WARN",
+                                        "check": f"settings-hook:{event_name}",
+                                        "detail": f"not user-executable: {exe}",
+                                    }
+                                )
+                            else:
+                                rows.append(
+                                    {
+                                        "severity": "OK",
+                                        "check": f"settings-hook:{event_name}",
+                                        "detail": f"command={cmd[:80]}",
+                                    }
+                                )
+                        except OSError as exc:
+                            rows.append(
+                                {
+                                    "severity": "WARN",
+                                    "check": f"settings-hook:{event_name}",
+                                    "detail": f"stat failed: {exc}",
+                                }
+                            )
+                    else:
+                        rows.append(
+                            {
+                                "severity": "INFO",
+                                "check": f"settings-hook:{event_name}",
+                                "detail": f"PATH-resolved command: {cmd[:80]}",
+                            }
+                        )
+        else:
+            rows.append(
+                {
+                    "severity": "INFO",
+                    "check": "settings-hooks",
+                    "detail": "no hooks: block in config.yaml",
+                }
+            )
+    except Exception as exc:  # noqa: BLE001
+        rows.append(
+            {
+                "severity": "INFO",
+                "check": "settings-hooks",
+                "detail": f"config not loadable: {type(exc).__name__}",
+            }
+        )
+
+    # 3. Recent fire history — surface staleness
+    try:
+        events_with_fires = list(all_events())
+        if events_with_fires:
+            for event_name in events_with_fires[:5]:
+                records = list(iter_history(event_name))
+                if records:
+                    last = records[-1]
+                    rows.append(
+                        {
+                            "severity": "OK" if last.ok else "WARN",
+                            "check": f"recent-fire:{event_name}",
+                            "detail": (
+                                f"{last.ts_utc:.0f} src={last.source_id[:40]} "
+                                f"ok={last.ok}"
+                            ),
+                        }
+                    )
+        else:
+            rows.append(
+                {
+                    "severity": "INFO",
+                    "check": "recent-fires",
+                    "detail": "no hook fires recorded yet",
+                }
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 4. Note: OC has no shell-hook allowlist by design
+    rows.append(
+        {
+            "severity": "INFO",
+            "check": "shell-hook-allowlist",
+            "detail": (
+                "OC has no allowlist (config.yaml-edit IS consent); "
+                "OPENCOMPUTER_ACCEPT_HOOKS env var is a no-op"
+            ),
+        }
+    )
+
+    if json_out:
+        typer.echo(json.dumps(rows))
+        return
+
+    table = Table(title="Hooks doctor")
+    table.add_column("Severity", style="cyan")
+    table.add_column("Check")
+    table.add_column("Detail")
+    for row in rows:
+        sev_style = {
+            "OK": "green",
+            "INFO": "dim",
+            "WARN": "yellow",
+            "ERROR": "red",
+        }.get(row["severity"], "white")
+        table.add_row(
+            f"[{sev_style}]{row['severity']}[/{sev_style}]",
+            row["check"],
+            row["detail"][:120],
+        )
+    _console.print(table)
 
 
 @hooks_app.command("revoke")

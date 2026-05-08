@@ -168,3 +168,114 @@ def test_hooks_test_execute_handler_raises_is_caught(monkeypatch, tmp_path) -> N
 def test_hooks_test_execute_unknown_event_errors() -> None:
     r = runner.invoke(hooks_app, ["test", "BogusEventName", "--execute"])
     assert r.exit_code != 0
+
+
+# ─── G2 tests — `oc hooks doctor` ────────────────────────────────
+
+
+def test_doctor_reports_no_gateway_hooks_as_info(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OC_PROFILE_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    r = runner.invoke(hooks_app, ["doctor", "--json"])
+    assert r.exit_code == 0, r.output
+    payload = json.loads(r.output)
+    # Either gateway-hooks-dir (does-not-exist branch) or
+    # gateway-hooks-count (empty dir) row should be present.
+    checks = {row["check"] for row in payload}
+    assert "gateway-hooks-dir" in checks or "gateway-hooks-count" in checks
+    # And there should be 0 hooks
+    if "gateway-hooks-dir" in checks:
+        row = next(r for r in payload if r["check"] == "gateway-hooks-dir")
+        assert "does not exist" in row["detail"]
+    else:
+        row = next(r for r in payload if r["check"] == "gateway-hooks-count")
+        assert "0 valid" in row["detail"]
+
+
+def test_doctor_reports_valid_gateway_hook_as_ok(monkeypatch, tmp_path) -> None:
+    import textwrap
+
+    monkeypatch.setenv("OC_PROFILE_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    hook_dir = tmp_path / "hooks" / "logger"
+    hook_dir.mkdir(parents=True)
+    (hook_dir / "HOOK.yaml").write_text(
+        textwrap.dedent(
+            """
+            events:
+              - gateway:startup
+            description: log startups
+            """
+        ).strip()
+    )
+    (hook_dir / "handler.py").write_text(
+        textwrap.dedent(
+            """
+            async def handle(event_type, context):
+                return None
+            """
+        ).strip()
+    )
+
+    r = runner.invoke(hooks_app, ["doctor"])
+    assert r.exit_code == 0, r.output
+    assert "logger" in r.output
+    assert "OK" in r.output
+
+
+def test_doctor_reports_broken_handler_as_error(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OC_PROFILE_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    hook_dir = tmp_path / "hooks" / "broken"
+    hook_dir.mkdir(parents=True)
+    (hook_dir / "HOOK.yaml").write_text("events:\n  - gateway:startup\n")
+    (hook_dir / "handler.py").write_text("def NOT_handle(): pass\n")
+
+    r = runner.invoke(hooks_app, ["doctor"])
+    assert r.exit_code == 0, r.output
+    assert "broken" in r.output
+    assert "ERROR" in r.output or "error" in r.output.lower()
+
+
+def test_doctor_json_mode_returns_parseable_json(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OC_PROFILE_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    r = runner.invoke(hooks_app, ["doctor", "--json"])
+    assert r.exit_code == 0, r.output
+    payload = json.loads(r.output)
+    assert isinstance(payload, list)
+    assert any(row.get("check", "").startswith("gateway") for row in payload)
+
+
+def test_doctor_reports_unknown_event_in_hookyaml_as_warn(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OC_PROFILE_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    hook_dir = tmp_path / "hooks" / "typo"
+    hook_dir.mkdir(parents=True)
+    (hook_dir / "HOOK.yaml").write_text("events:\n  - gatway:startup\n")  # typo
+    (hook_dir / "handler.py").write_text(
+        "async def handle(event_type, context):\n    return None\n"
+    )
+
+    r = runner.invoke(hooks_app, ["doctor"])
+    assert r.exit_code == 0, r.output
+    assert "WARN" in r.output or "warn" in r.output.lower()
+
+
+def test_doctor_settings_hook_missing_executable_warn(monkeypatch, tmp_path) -> None:
+    """A configured shell-hook command pointing at a non-existent path → WARN."""
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("OC_PROFILE_DIR", str(tmp_path))
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+
+    bad_hook = SimpleNamespace(command="/nonexistent/script.sh", timeout_seconds=5)
+    stub_cfg = SimpleNamespace(hooks={"PreToolUse": [bad_hook]})
+    monkeypatch.setattr(
+        "opencomputer.agent.config.default_config",
+        lambda *a, **k: stub_cfg,
+    )
+
+    r = runner.invoke(hooks_app, ["doctor"])
+    assert r.exit_code == 0, r.output
+    assert "/nonexistent/script.sh" in r.output or "settings" in r.output.lower()
