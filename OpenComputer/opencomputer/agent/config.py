@@ -620,6 +620,31 @@ class MCPConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MCPSamplingCaps:
+    """Hermes parity G11 (2026-05-09) — per-server sampling caps.
+
+    Bounds applied when an MCP server uses ``sampling/createMessage`` to
+    reach back into Hermes' LLM. Without caps, a server could trivially
+    exhaust the operator's quota (high ``maxTokens``, runaway multi-turn)
+    or pick a more expensive model than the operator intends.
+
+    * ``max_tokens_cap`` — clip ``params.maxTokens`` to this ceiling.
+    * ``max_rpm`` — soft per-server RPM throttle (token-bucket; warn).
+    * ``max_tool_rounds`` — cap on multi-turn tool-use rounds within
+      one sampling request (reserved; enforcement deferred to the
+      sampling-loop driver when added).
+    * ``allowed_models`` — when non-empty, reject any request whose
+      ``modelPreferences.hints[*].name`` is outside the list. Empty
+      tuple means "no model restriction".
+    """
+
+    max_tokens_cap: int = 4096
+    max_rpm: int = 60
+    max_tool_rounds: int = 5
+    allowed_models: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class WebSearchConfig:
     """Per-tool config for the WebSearch tool (Phase 12d.2).
 
