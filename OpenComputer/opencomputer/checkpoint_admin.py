@@ -35,7 +35,7 @@ class PrunePolicy:
     dry_run: bool = False
 
     @classmethod
-    def from_config(cls, cfg) -> "PrunePolicy":  # type: ignore[no-untyped-def]
+    def from_config(cls, cfg) -> PrunePolicy:  # type: ignore[no-untyped-def]
         """Build from CheckpointsConfig (live config or test stub)."""
         return cls(
             older_than_days=cfg.retention_days,

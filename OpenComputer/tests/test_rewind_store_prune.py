@@ -16,7 +16,6 @@ sys.path.insert(0, str(HARNESS))
 from rewind.checkpoint import Checkpoint  # type: ignore[import-not-found]  # noqa: E402
 from rewind.store import PruneReport, RewindStore  # type: ignore[import-not-found]  # noqa: E402
 
-
 # ─── Checkpoint enhancement (T9) ────────────────────────────────────
 
 

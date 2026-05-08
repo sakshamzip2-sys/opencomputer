@@ -14,7 +14,6 @@ from opencomputer.worktree_include import (
     WorktreeIncludeTooLargeError,
 )
 
-
 # ─── Type tests (T2) ────────────────────────────────────────────────
 
 
