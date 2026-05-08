@@ -155,6 +155,16 @@ class WebSearchTool(BaseTool):
         # invites the model to follow up with a WebFetch that would (rightly)
         # be blocked, wasting a turn. Filtering at the search layer is cheaper.
         hits = [h for h in hits if is_safe_url(h.url)]
+        # Website blocklist (Hermes parity): drop hits whose host matches
+        # the configured policy. Same rationale as SSRF — filter at search
+        # so the model doesn't waste a turn following a blocked link.
+        from opencomputer.security.website_blocklist import (
+            is_blocked,
+            policy_from_active_config,
+        )
+
+        _wbl_policy = policy_from_active_config()
+        hits = [h for h in hits if not is_blocked(h.url, _wbl_policy)]
 
         if not hits:
             return ToolResult(
