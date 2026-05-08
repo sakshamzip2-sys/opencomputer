@@ -304,6 +304,18 @@ def load_config(path: Path | None = None) -> Config:
     parsed_hooks = _parse_hooks_block(hooks_block)
 
     cfg = _apply_overrides(base, raw)
+
+    # Hermes-v2 — timezone validation.
+    if cfg.timezone:
+        try:
+            import zoneinfo
+
+            zoneinfo.ZoneInfo(cfg.timezone)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Invalid timezone {cfg.timezone!r} in {cfg_path}: {exc}"
+            ) from exc
+
     if parsed_hooks:
         kwargs = {f.name: getattr(cfg, f.name) for f in fields(cfg)}
         kwargs["hooks"] = parsed_hooks
@@ -336,6 +348,7 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
         "deepening": _encode(cfg.deepening),
         "gateway": _encode(cfg.gateway),
         "system_control": _encode(cfg.system_control),
+        "timezone": cfg.timezone,
     }
     # III.6 — only serialise the hooks block when non-empty so default
     # configs stay tidy. Shape matches the nested event-keyed form users

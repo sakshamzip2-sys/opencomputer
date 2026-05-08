@@ -11,6 +11,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 def _home() -> Path:
@@ -724,12 +728,49 @@ class Config:
     system_control: FullSystemControlConfig = field(default_factory=FullSystemControlConfig)
     #: Hermes-parity cron knobs (2026-05-08). See :class:`CronConfig`.
     cron: CronConfig = field(default_factory=CronConfig)
+    #: Hermes-v2 IANA timezone for system-prompt time injection, log
+    #: timestamps, and cron scheduling. Empty string = server-local time
+    #: (preserves existing behavior). Validated at ``load_config`` —
+    #: invalid names raise ``RuntimeError``.
+    timezone: str = ""
     home: Path = field(default_factory=_home)
 
 
 def default_config() -> Config:
     """Return the default configuration with filesystem-appropriate paths."""
     return Config()
+
+
+# ─── Hermes config v2 — timezone helpers ─────────────────────────
+
+
+def resolve_tzinfo(cfg: Config) -> Any:
+    """Return ``zoneinfo.ZoneInfo`` for ``cfg.timezone`` or ``None`` when unset.
+
+    Returns ``Any`` typed because importing ``ZoneInfo`` at module top
+    would tighten startup; deferred import. Result is a real
+    ``zoneinfo.ZoneInfo`` instance suitable for ``datetime`` ``tzinfo`` arg.
+    """
+    if not cfg.timezone:
+        return None
+    import zoneinfo
+
+    return zoneinfo.ZoneInfo(cfg.timezone)
+
+
+def now_in_tz(cfg: Config) -> "datetime":
+    """Current ``datetime`` in ``cfg.timezone`` (or naive when unset).
+
+    Used by ``prompt_builder`` for system-prompt time injection. Returns
+    naive ``datetime.now()`` when ``cfg.timezone`` is empty so callers
+    that ``.strftime()`` plain formatters keep working unchanged.
+    """
+    from datetime import datetime as _dt
+
+    tz = resolve_tzinfo(cfg)
+    if tz is None:
+        return _dt.now()
+    return _dt.now(tz)
 
 
 def load_config_for_profile(profile_home: Path) -> Config:
