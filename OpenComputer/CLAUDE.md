@@ -319,7 +319,21 @@ hooks:
     - command: "bash /path/to/cleanup.sh"
 ```
 
-Exit-code contract (matches Claude Code): `0` → pass (tool runs), `2` → block with stderr fed back as the reason, any other code → fail-open (warn + pass). Timeouts are fail-open too — a hung hook must never wedge the loop. Env vars: `OPENCOMPUTER_EVENT`, `OPENCOMPUTER_TOOL_NAME`, `OPENCOMPUTER_SESSION_ID`, `OPENCOMPUTER_PROFILE_HOME`, plus `CLAUDE_PLUGIN_ROOT` aliased to profile home so Claude Code hook scripts drop in unchanged. A JSON blob carrying the `HookContext` is piped to the command's stdin. See `sources/claude-code/plugins/plugin-dev/skills/hook-development/SKILL.md` for the inspiration; settings-declared hooks coexist with (and fire AFTER) plugin-declared ones.
+**Wire protocol** (augmented 2026-05-08 — Hermes Doc-2 G3/G4):
+
+* **stdout JSON (preferred)** — when the script's stdout parses as a JSON object, recognised keys take precedence over the exit code:
+  - `{"action": "block", "message": "..."}` → block (Hermes canonical)
+  - `{"decision": "block", "reason": "..."}` → block (Claude Code)
+  - `{"action": "approve" \| "allow"}` or `{"decision": "approve"}` → pass
+  - `{"context": "..."}` → on PRE_LLM_CALL only, append text to user message; ignored on other events
+  - `{}` or unrecognised keys → pass
+  - malformed JSON → fall back to exit-code path
+* **Exit-code (fallback)** — when stdout is empty or non-JSON: `0` → pass, `2` → block with stderr as reason, anything else → fail-open warn+pass.
+* **Timeouts and crashes** — fail-open. A wedged hook must never wedge the loop.
+
+Env vars: `OPENCOMPUTER_EVENT`, `OPENCOMPUTER_TOOL_NAME`, `OPENCOMPUTER_SESSION_ID`, `OPENCOMPUTER_PROFILE_HOME`, plus `CLAUDE_PLUGIN_ROOT` aliased to profile home so Claude Code hook scripts drop in unchanged. A JSON blob carrying the `HookContext` is piped to the command's stdin. See `sources/claude-code/plugins/plugin-dev/skills/hook-development/SKILL.md` for the inspiration; settings-declared hooks coexist with (and fire AFTER) plugin-declared ones.
+
+**`oc hooks` CLI** (2026-05-08 — Hermes Doc-2 G1/G2): `oc hooks list` shows registration + last-fire metadata, `oc hooks test EVENT --execute [--for-tool NAME]` actually fires synthetic events through the engine (not just dry-run), `oc hooks doctor [--json]` surfaces health diagnostics for gateway file-discovery hooks (HOOK.yaml validity, handler import) plus settings-hook executable resolution plus recent fire activity.
 
 **Bundled settings variants (III.3).** Three starter `config.yaml` templates live under `opencomputer/settings_variants/` — `lax.yaml` (permissive dev posture, no hooks), `strict.yaml` (tightened loop budget + PreToolUse audit hook), and `sandbox.yaml` (placeholder Bash-sandbox hook; full wrapper lands with F3). Mirrors Claude Code's `sources/claude-code/examples/settings/README.md` examples. Discover and initialize from the CLI:
 

@@ -952,6 +952,44 @@ class AuxiliaryConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class CodeExecutionConfig:
+    """Settings for the ExecuteCode / PythonExec tool family.
+
+    Hermes Doc-2 parity (2026-05-08). All fields optional; defaults match
+    the Hermes reference doc values:
+
+    * ``timeout_seconds`` — wallclock cap per script (Hermes default 300).
+      Must be > 0; ValueError raised on construction otherwise so a bad
+      config.yaml fails loudly at load time rather than silently bricking
+      ExecuteCode at first use.
+    * ``max_tool_calls`` — RPC call cap per script (Hermes default 50).
+      Must be > 0. Closes the silent footgun where a buggy
+      ``while True: read_file()`` script could consume API quota until the
+      timeout fired (the cap was previously hardcoded — not configurable).
+    * ``terminal`` — pre-existing free-form dict slot. Honours
+      ``terminal.env_passthrough`` (list[str]) — env var names whose
+      values pass through to the subprocess despite the KEY/TOKEN/SECRET/
+      PASSWORD/CREDENTIAL/PASSWD/AUTH scrub.
+    """
+
+    timeout_seconds: float = 300.0
+    max_tool_calls: int = 50
+    terminal: dict[str, object] = field(default_factory=dict, compare=False, hash=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.timeout_seconds, int | float) or self.timeout_seconds <= 0:
+            raise ValueError(
+                f"code_execution.timeout_seconds must be > 0; "
+                f"got {self.timeout_seconds!r}"
+            )
+        if not isinstance(self.max_tool_calls, int) or self.max_tool_calls <= 0:
+            raise ValueError(
+                f"code_execution.max_tool_calls must be a positive int; "
+                f"got {self.max_tool_calls!r}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Root configuration — composed of small focused configs."""
 
@@ -1022,6 +1060,11 @@ class Config:
     #: Kanban-Goals v2 (2026-05-08) — auxiliary-model overrides
     #: (goal judge today; future slots can be added without churn).
     auxiliary: AuxiliaryConfig = field(default_factory=AuxiliaryConfig)
+    #: Hermes Doc-2 (2026-05-08 G5) — ExecuteCode/PythonExec settings
+    #: (timeout, RPC call cap, env passthrough). Pre-existing
+    #: ``ExecuteCode.execute`` reads ``code_execution.terminal.env_passthrough``;
+    #: G5 adds the ``max_tool_calls`` cap as a configurable slot.
+    code_execution: CodeExecutionConfig = field(default_factory=CodeExecutionConfig)
     home: Path = field(default_factory=_home)
 
 

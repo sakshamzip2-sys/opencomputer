@@ -67,6 +67,25 @@ Then for THIS doc, the user also said: *"do all A b c d everything and also do t
 | **Gateway `~/.opencomputer/hooks/<name>/HOOK.yaml + handler.py` file-discovery** — drop-in startup hooks without writing a plugin | Phase 4 of this PR — see §4 below | OC already has plugin hooks AND shell hooks; the user asked for the third surface anyway. |
 | **`BOOT.md` community pattern** — natural-language startup instructions that the gateway executes via a one-shot AIAgent | Phase 4 of this PR | Lightweight "drop a file, get init" pattern. Coexists with HOOK.yaml. |
 
+### 2.5 Doc 2 — residual gaps closed in follow-up PR (2026-05-08)
+
+A second pass on this same Hermes doc identified 5 smaller residuals that pass the makes-sense filter and ship in a follow-up PR (worktree `feat/hermes-execcode-hooks-residuals-2026-05-08`):
+
+| Residual | What we did |
+|---|---|
+| `oc hooks test --execute` was unimplemented | Now fires synthetic events through the engine (blocking + fire-and-forget paths). Adds `--for-tool` to populate `ctx.tool_call.name` for Pre/PostToolUse. |
+| No `oc hooks doctor` operability surface | New subcommand surfaces gateway-hook health (HOOK.yaml validity, handler.py imports), settings-hook executable resolution, recent-fire timestamps, and a note that OC has no allowlist by design. |
+| Shell hooks accepted only exit-code-based block | Now also accepts both Hermes canonical `{"action":"block","message":"..."}` and Claude Code `{"decision":"block","reason":"..."}` on stdout. Stdout JSON wins when both are present. Exit-code path preserved verbatim. |
+| Shell hooks could not inject context | New `inject_context` field on `HookDecision`. Shell scripts emit `{"context":"..."}` on stdout for PRE_LLM_CALL; engine fan-out collects all and appends to user message. Lets a 5-line bash script inject git status without writing a Python plugin. Plugin PRE_LLM_CALL handlers stay fire-and-forget (semantics preserved). |
+| `code_execution.max_tool_calls` was hardcoded at 50 | Now configurable via `code_execution.max_tool_calls` in `config.yaml`. New `CodeExecutionConfig` dataclass replaces the previously-unused `code_execution` slot. Closes the silent footgun where a buggy `while True: read()` script could consume API quota until the 300s timeout fired. |
+
+These five close the spec-level parity gap with the Hermes "Code Execution & Event Hooks" reference doc; the parity question for this specific reference is now closed pending future Hermes doc updates.
+
+Out of scope (deliberate, with reopen triggers):
+
+- Shell-hook allowlist + per-`(event, command)` consent prompt + `--accept-hooks` flag → OC's design says editing `config.yaml` IS consent. ~200 LOC for marginal value. **Reopen if** a user reports a real "didn't realize I shipped a hook" incident.
+- `hermes_tools` import-shim aliases in execute_code prologue → pure sugar; OC tool stubs are PascalCase by convention. **Reopen if** cross-port script-pasting becomes friction.
+
 ---
 
 ## 3. Phase 3 — `execute_code` (this PR)

@@ -226,7 +226,59 @@ class ExecuteCode(BaseTool):
         else:
             allowed_tools = EXECUTE_CODE_DEFAULT_TOOLS
 
-        timeout_seconds = float(args.get("timeout_seconds") or 300.0)
+        # 2026-05-08 — Hermes Doc-2 ``code_execution`` config block.
+        # Resolve user-config defaults BEFORE per-call args so the LLM's
+        # explicit overrides win cleanly. Production-grade: a bad config
+        # value (negative timeout etc.) fails at load time via the dataclass
+        # ``__post_init__`` guard, so by the time we read it here the
+        # values are guaranteed positive.
+        passthrough: tuple[str, ...] = ()
+        config_max_tool_calls: int | None = None
+        config_timeout_default: float = 300.0
+        try:
+            from opencomputer.agent.config_store import load_config
+
+            cfg = load_config()
+            ce = getattr(cfg, "code_execution", None)
+            if ce is not None:
+                terminal_cfg = getattr(ce, "terminal", None)
+                if isinstance(terminal_cfg, dict):
+                    pt = terminal_cfg.get("env_passthrough")
+                    if isinstance(pt, list):
+                        passthrough = tuple(str(x) for x in pt)
+                # 2026-05-08 G5 — Hermes Doc-2 max_tool_calls config slot.
+                mtc = getattr(ce, "max_tool_calls", None)
+                if isinstance(mtc, int) and mtc > 0:
+                    config_max_tool_calls = mtc
+                # 2026-05-08 — timeout_seconds default from config (was
+                # previously hardcoded 300, defeating the config slot).
+                cts = getattr(ce, "timeout_seconds", None)
+                if isinstance(cts, int | float) and cts > 0:
+                    config_timeout_default = float(cts)
+        except Exception:  # noqa: BLE001 — config absence must not block exec
+            pass
+
+        # Per-call override wins over config default; both must be > 0.
+        raw_timeout = args.get("timeout_seconds")
+        if raw_timeout is None:
+            timeout_seconds = config_timeout_default
+        else:
+            try:
+                timeout_seconds = float(raw_timeout)
+            except (TypeError, ValueError):
+                return ToolResult(
+                    tool_call_id=call.id,
+                    content=f"timeout_seconds must be a number; got {raw_timeout!r}",
+                    is_error=True,
+                )
+            if timeout_seconds <= 0:
+                return ToolResult(
+                    tool_call_id=call.id,
+                    content=(
+                        f"timeout_seconds must be > 0; got {timeout_seconds}"
+                    ),
+                    is_error=True,
+                )
 
         # Mode-specific cwd + python.
         cwd: str | None
@@ -245,36 +297,21 @@ class ExecuteCode(BaseTool):
             cwd = tmpdir
             python_executable = sys.executable
 
-        # Resolve env passthrough from TWO sources, unioned:
-        #   1. config.yaml: code_execution.terminal.env_passthrough (operator opt-in)
-        #   2. skill-declared required_environment_variables (P3.4 Hermes parity)
-        # Both contribute names of parent env vars that ExecuteCode should
-        # pass through to the subprocess. Either source alone is sufficient.
-        passthrough_set: set[str] = set()
-        try:
-            from opencomputer.agent.config import default_config
-
-            cfg = default_config()
-            ce = getattr(cfg, "code_execution", None)
-            if ce is not None:
-                terminal_cfg = getattr(ce, "terminal", None)
-                if isinstance(terminal_cfg, dict):
-                    pt = terminal_cfg.get("env_passthrough")
-                    if isinstance(pt, list):
-                        passthrough_set.update(str(x) for x in pt)
-        except Exception:  # noqa: BLE001 — config absence must not block exec
-            pass
-        # Skill-declared passthrough: pulls from the global registry
-        # populated by MemoryManager.list_skills. Never raises.
+        # P3.4 Hermes-parity: union skill-declared required_environment_variables
+        # on top of the config-driven passthrough resolved earlier. Skills
+        # populate the registry via MemoryManager.list_skills. Never raises.
         try:
             from opencomputer.security.env_passthrough import (
                 get_passthrough_env_keys,
             )
 
-            passthrough_set.update(get_passthrough_env_keys())
-        except Exception:  # noqa: BLE001
+            skill_keys = get_passthrough_env_keys()
+            if skill_keys:
+                merged = set(passthrough)
+                merged.update(skill_keys)
+                passthrough = tuple(sorted(merged))
+        except Exception:  # noqa: BLE001 — registry failure must not block exec
             pass
-        passthrough: tuple[str, ...] = tuple(sorted(passthrough_set))
 
         # Resolve registry — global tool registry instance.
         from opencomputer.tools.registry import registry
@@ -290,6 +327,7 @@ class ExecuteCode(BaseTool):
                 stderr_cap=_MAX_STDERR_BYTES,
                 cwd=cwd,
                 python_executable=python_executable,
+                max_tool_calls=config_max_tool_calls,
             )
         finally:
             # strict mode created a tempdir — clean it up.
