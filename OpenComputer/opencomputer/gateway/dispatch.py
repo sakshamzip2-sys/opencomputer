@@ -320,6 +320,11 @@ class Dispatch:
         # buffer + return early. The leader's drain wait coalesces them.
         # Map: session_id → asyncio.Lock acting as the leader claim.
         self._collect_leaders: dict[str, bool] = {}
+        # /background completion-notifier plumbing — main-thread asyncio
+        # loop is captured by ``bind_main_loop`` at gateway start so the
+        # background-worker thread's notifier can schedule adapter.send
+        # via ``run_coroutine_threadsafe``. ``None`` until bound.
+        self._main_loop: asyncio.AbstractEventLoop | None = None
 
         # Phase 2 multi-routing: accept either ``loop=`` (legacy single
         # loop) or ``router=`` (per-profile cache). Exactly one of the
@@ -1253,4 +1258,91 @@ class Dispatch:
             )
 
 
-__all__ = ["Dispatch", "session_id_for", "_format_user_facing_error"]
+    # ─── /background completion notifier ─────────────────────────────
+
+    def bind_main_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Capture the gateway's main-thread asyncio loop.
+
+        Background-job worker threads call back synchronously into the
+        completion notifier; the notifier needs the gateway's loop to
+        schedule ``adapter.send`` on it via ``run_coroutine_threadsafe``.
+        Called once by ``Gateway.serve_forever`` before the daemon enters
+        the serve-forever wait.
+        """
+        self._main_loop = loop
+
+    def background_completion_notifier(
+        self, job: Any
+    ) -> None:
+        """Sync notifier invoked from the background-job worker thread
+        when a job transitions to ``complete`` or ``error``.
+
+        Routes the result back to the originating channel by:
+        1. Looking up ``_session_channels[job.parent_session_id]`` to
+           find the (adapter, chat_id) pair.
+        2. Building the user-facing summary via
+           :func:`_format_background_completion_text`.
+        3. Scheduling ``adapter.send(chat_id, summary)`` onto the gateway's
+           loop using ``run_coroutine_threadsafe`` (worker thread cannot
+           directly await on the gateway's loop).
+
+        Failure-isolated. The registry swallows any exception this raises;
+        a misbehaving notifier must never tear down the worker thread.
+        """
+        sid = getattr(job, "parent_session_id", None)
+        if not sid:
+            return
+        binding = self._session_channels.get(sid)
+        if binding is None:
+            logger.debug(
+                "/background completion: session=%s has no channel binding "
+                "(non-gateway path or session evicted) — skipping push",
+                sid,
+            )
+            return
+        adapter, chat_id = binding
+        if not hasattr(adapter, "send"):
+            return
+        main_loop = getattr(self, "_main_loop", None)
+        if main_loop is None:
+            logger.debug(
+                "/background completion: no main loop bound — skipping push"
+            )
+            return
+        text = _format_background_completion_text(job)
+        try:
+            asyncio.run_coroutine_threadsafe(
+                adapter.send(chat_id, text), main_loop
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "/background completion: schedule failed for session=%s",
+                sid, exc_info=True,
+            )
+
+
+def _format_background_completion_text(job: Any) -> str:
+    """Render the user-facing summary for a finished background job.
+
+    Single-line head with the job id + status + first 60 chars of prompt,
+    followed by the body (result or error). Kept compact so chat surfaces
+    don't explode on long outputs.
+    """
+    head = (job.prompt or "").splitlines()[0]
+    if len(head) > 60:
+        head = head[:57] + "…"
+    if job.status == "complete":
+        body = job.result or "(empty response)"
+        return f"✓ background {job.job_id} done — {head}\n\n{body}"
+    return (
+        f"✗ background {job.job_id} failed — {head}\n\n"
+        f"error: {job.error or '(no detail)'}"
+    )
+
+
+__all__ = [
+    "Dispatch",
+    "_format_background_completion_text",
+    "_format_user_facing_error",
+    "session_id_for",
+]

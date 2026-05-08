@@ -133,7 +133,7 @@ def _conversation_result(text: str):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_default_does_NOT_fire_lifecycle_reactions() -> None:
+async def test_dispatch_default_does_not_fire_lifecycle_reactions() -> None:
     """Regression test for the 2026-05-08 'bot keeps replying with 👀' issue.
 
     Without ``lifecycle_reactions: true`` in the dispatch config,
@@ -142,8 +142,8 @@ async def test_dispatch_default_does_NOT_fire_lifecycle_reactions() -> None:
     those reactions inline and they read like emoji replies. Default
     must be off; users explicitly opt in via config.
     """
-    from plugin_sdk.core import MessageEvent
     from opencomputer.gateway.dispatch import Dispatch
+    from plugin_sdk.core import MessageEvent
 
     loop_mock = MagicMock()
     loop_mock.run_conversation = AsyncMock(return_value=_conversation_result("hi back"))
