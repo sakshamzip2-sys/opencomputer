@@ -1244,11 +1244,9 @@ class APIServerAdapter(BaseChannelAdapter):
         - ``previous_response_id``: chain to a prior response by id
         - ``conversation``: named-conversation auto-chain
         """
-        if os.environ.get("API_SERVER_API_TYPE", "").lower() != "responses":
-            return web.json_response(
-                {"error": {"message": "Responses API disabled. Set API_SERVER_API_TYPE=responses to enable."}},
-                status=404,
-            )
+        # G3 (Hermes parity, 2026-05-09): /v1/responses is default-on.
+        # ``API_SERVER_API_TYPE`` env retained as a no-op alias for
+        # back-compat — setting it to anything still works.
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer ") or auth[len("Bearer "):] != self._token:
             return web.json_response(
