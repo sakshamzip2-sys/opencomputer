@@ -16,7 +16,6 @@ from textual.widgets import Footer, Header
 
 from experiments.textual_prototype.widget import CollapsibleThinkingCard
 
-
 _SAMPLE_SUMMARY = "Wrote a haiku about sloths"
 _SAMPLE_TREE = """\
 └── Reasoning turn 1

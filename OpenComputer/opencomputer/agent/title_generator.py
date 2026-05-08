@@ -22,6 +22,7 @@ Adaptation from Hermes:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from types import SimpleNamespace
 from typing import Any
@@ -247,9 +248,47 @@ def _role_of(msg: Any) -> str | None:
     return getattr(msg, "role", None)
 
 
+_LINEAGE_RE = re.compile(r"^(.+?)\s+#(\d+)$")
+
+
+def next_title_in_lineage(db: Any, base: str) -> str:
+    """Return the next title in *base*'s lineage (``base``, ``base #2``, …).
+
+    Hermes-CLI parity (doc lines 442-447). Used by manual ``oc session
+    fork --inherit-title`` and (future) compaction-fork hook. Best-effort:
+    if querying fails, the base title is returned unchanged.
+
+    Strategy: pick the highest existing ``#N`` in the family and return
+    ``f"{base} #{N + 1}"``. If only the bare ``base`` exists (no
+    numbered sibling), return ``f"{base} #2"``.
+    """
+    try:
+        rows = db.find_sessions_by_title_lineage(base)
+    except Exception:  # noqa: BLE001 — caller may pass any duck-typed db
+        return base
+    if not rows:
+        return base
+    highest = 1
+    for r in rows:
+        title = (
+            r.get("title") if isinstance(r, dict) else getattr(r, "title", "")
+        ) or ""
+        if title == base:
+            highest = max(highest, 1)
+            continue
+        m = _LINEAGE_RE.match(title)
+        if m and m.group(1) == base:
+            try:
+                highest = max(highest, int(m.group(2)))
+            except ValueError:
+                continue
+    return f"{base} #{highest + 1}"
+
+
 __all__ = [
     "auto_title_session",
     "call_llm",
     "generate_title",
     "maybe_auto_title",
+    "next_title_in_lineage",
 ]

@@ -21,7 +21,6 @@ import asyncio
 import importlib.util
 import json
 import sys
-import time
 import types
 from pathlib import Path
 from urllib import request as urlreq
@@ -70,12 +69,13 @@ def _ensure_alias() -> None:
             sys.modules[full] = sub_mod
             sub_spec.loader.exec_module(sub_mod)
         spec.loader.exec_module(client_pkg)
-        setattr(parent, "client", client_pkg)
+        parent.client = client_pkg
 
 
 _ensure_alias()
 
 from extensions.social_traces.client.http import HttpTraceNetworkClient  # noqa: E402
+
 from plugin_sdk.traces import TraceCard, TraceMeta, TraceStep  # noqa: E402
 
 

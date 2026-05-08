@@ -991,6 +991,44 @@ class SessionDB:
         title = row["title"]
         return title if title else None
 
+    def find_session_by_title(self, title: str) -> dict[str, Any] | None:
+        """Return the session row whose ``title`` exactly matches *title*.
+
+        Hermes-CLI parity (doc line 405) — ``oc chat --resume "title"``.
+        Titles already have a unique index (NULL allowed, non-NULL
+        unique), so at most one row matches. Returns ``None`` when not
+        found.
+        """
+        with self._txn() as conn:
+            cur = conn.execute(
+                "SELECT * FROM sessions WHERE title = ? LIMIT 1", (title,)
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cols = [c[0] for c in cur.description]
+            return dict(zip(cols, row, strict=True))
+
+    def find_sessions_by_title_lineage(self, base: str) -> list[dict[str, Any]]:
+        """Return all sessions in *base*'s `name [#N]` lineage.
+
+        Hermes-CLI parity (doc lines 442-447). ``oc chat -c "my project"``
+        resolves to the latest session whose title is ``"my project"`` or
+        ``"my project #2"``, ``"my project #3"``, … Rows ordered by
+        ``started_at DESC`` so callers can pick row 0 as "latest".
+        """
+        pattern = base + " #*"
+        with self._txn() as conn:
+            cur = conn.execute(
+                "SELECT * FROM sessions "
+                "WHERE title = ? OR title GLOB ? "
+                "ORDER BY started_at DESC",
+                (base, pattern),
+            )
+            rows = cur.fetchall()
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, r, strict=True)) for r in rows]
+
     def set_session_title(self, session_id: str, title: str) -> None:
         """Persist ``title`` on the session row, creating a minimal row
         if it doesn't exist yet.

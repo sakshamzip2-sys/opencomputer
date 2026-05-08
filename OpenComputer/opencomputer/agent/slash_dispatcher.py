@@ -63,6 +63,25 @@ async def dispatch(
     if parsed is None:
         return None
     name, args = parsed
+
+    # Hermes-CLI parity A6 — quick commands run BEFORE registry lookup so
+    # they can shadow a slash name. ``runtime.custom["_quick_commands"]``
+    # is loaded once at session start by the chat entry point.
+    quick = runtime.custom.get("_quick_commands")
+    if quick is not None:
+        try:
+            qresult = quick.run(name, args)
+        except Exception as exc:  # noqa: BLE001 — never crash the dispatch
+            return SlashCommandResult(
+                output=f"quick-command /{name} failed: {type(exc).__name__}: {exc}",
+                handled=True,
+            )
+        if qresult is not None:
+            return SlashCommandResult(
+                output=qresult.output or ("(timed out)" if qresult.timed_out else ""),
+                handled=True,
+            )
+
     cmd = slash_commands.get(name)
     if cmd is None:
         if fallback is not None:
