@@ -648,11 +648,17 @@ class MCPConnection:
                     f"(supported: stdio, sse, http)"
                 )
 
+            # T71 — sampling/createMessage host bridge. Lets MCP servers
+            # ask US to run LLM completions; we route through aux_llm so
+            # the configured provider (+ fallback chain) handles them.
+            from opencomputer.mcp.sampling import make_sampling_callback
+
             session = await self.exit_stack.enter_async_context(
                 ClientSession(
                     read_stream,
                     write_stream,
                     message_handler=self._handle_session_message,
+                    sampling_callback=make_sampling_callback(),
                 )
             )
             init_result = await session.initialize()
