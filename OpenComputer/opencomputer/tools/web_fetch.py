@@ -159,17 +159,51 @@ class WebFetchTool(BaseTool):
                 is_error=True,
             )
 
+        # Website blocklist (Hermes parity): policy-driven domain refusal.
+        # Runs AFTER `is_safe_url` so security-level blocks (private IPs,
+        # cloud metadata) take precedence over policy-level blocks.
+        from opencomputer.security.website_blocklist import (
+            is_blocked,
+            policy_from_active_config,
+        )
+
+        if is_blocked(url, policy_from_active_config()):
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Refused: URL {url} matches the configured "
+                    "website blocklist policy"
+                ),
+                is_error=True,
+            )
+
         async def _validate_redirect(response: httpx.Response) -> None:
             """Re-validate every redirect target — DNS rebinding / chained
             redirects could otherwise reach private space after the initial
             check passed."""
             if response.is_redirect:
                 location = response.headers.get("location", "")
-                if location and location.startswith(("http://", "https://")) and not is_safe_url(location):
-                    raise httpx.RequestError(
-                        f"Blocked redirect to unsafe URL: {location}",
-                        request=response.request,
+                if location and location.startswith(("http://", "https://")):
+                    if not is_safe_url(location):
+                        raise httpx.RequestError(
+                            f"Blocked redirect to unsafe URL: {location}",
+                            request=response.request,
+                        )
+                    # Website blocklist also applies on redirects so a
+                    # policy-blocked target can't be reached via a 301
+                    # from a public origin.
+                    from opencomputer.security.website_blocklist import (
+                        is_blocked as _is_blocked,
                     )
+                    from opencomputer.security.website_blocklist import (
+                        policy_from_active_config as _policy,
+                    )
+
+                    if _is_blocked(location, _policy()):
+                        raise httpx.RequestError(
+                            f"Blocked redirect to {location} — matches website blocklist",
+                            request=response.request,
+                        )
 
         try:
             async with httpx.AsyncClient(

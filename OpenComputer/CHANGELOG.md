@@ -32,6 +32,34 @@ Closes the 5 verified residual gaps from the Hermes "Code Execution & Event Hook
 
 Spec: `docs/superpowers/specs/2026-05-08-hermes-execcode-hooks-residuals-design.md`. Plan: `docs/superpowers/plans/2026-05-08-hermes-execcode-hooks-residuals.md`. Findings doc updated: `docs/refs/hermes-agent/2026-05-08-kanban-goals-execcode-hooks-parity.md` §2.5.
 
+### Fixed — Hermes v2 honest-audit follow-up (2026-05-08)
+
+PR #510 closed three Hermes v2 gaps but missed others on closer audit. This follow-up closes the missed gaps and corrects the overclaimed parity-doc rows.
+
+- **`.zprofile` / `.zlogin` / `.zshenv` / `.bash_login` added to `_BLOCKED_FILE_BASENAMES`** (`opencomputer/agent/at_references.py`). PR #510 had `.zshrc` only; ZSH users source secrets from `.zprofile` (`export ANTHROPIC_API_KEY=...`).
+- **Path-traversal protection on `@file:`** (`at_references._is_outside_workspace`). Hermes v2 spec mandates "References outside allowed workspace root rejected"; PR #510's parity doc claimed shipped but only block-by-name was in place. `@file:/etc/hosts` and `@file:../../../sibling` from a nested `cwd` are now refused. Symlinks resolved before the check so a symlink-bypass cannot leak.
+- **Binary-file detection on `@file:`** (`at_references._looks_binary`). Extension allowlist (PNG/PDF/ZIP/SQLITE/etc.) + null-byte sniff over first 8KB. Was reading binaries with `errors='replace'` and emitting garbage.
+- **`SOUL.md` whitespace-only → built-in default fallback** (`agent/memory.MemoryManager.read_soul`). Hermes spec: "Empty/whitespace-only file → falls back to built-in default identity." PR #510 only handled the missing-file case.
+- **Parity-doc corrections** (`docs/refs/hermes-context-personality-skins-v2-parity.md`): two rows claimed "✅ shipped" that weren't:
+  - Path-traversal — was block-by-name only.
+  - Prompt stack slot order — OC's `base.j2` has identity preamble at top, `/personality` mid-file, `SOUL` near the end (not the strict spec order). Functionally equivalent; ordering is a deliberate template choice.
+  Plus a new "Honest deferrals" section calling out the 70/20/10 head/tail/marker truncation strategy as a known divergence that wasn't measured before deferring.
+
+15 new tests across `tests/test_at_references_followup.py` (11) + `tests/test_soul_empty_fallback.py` (4). Existing `tests/test_at_references_expand.py` stays green.
+
+### Added — Hermes context/personality/skins v2 parity gaps (2026-05-08)
+
+Closes three concrete deltas between Hermes' v2 reference for context-files / `@`-references / personalities / skins and OpenComputer's `main`. The bulk of those four subsystems already shipped (PR #500 + Sub-project C / PR #24); this PR is the residue.
+
+- **Subdirectory-hint security scanner** (gap A — security) — `subdirectory_hints._scan_context_content` was a documented no-op stub, so context injected via progressive subdirectory hint discovery (e.g. a poisoned `.cursorrules` under `backend/`) bypassed the prompt-injection detector + secret redactor that startup workspace-context loading already enforces. Extracted the existing redact + quarantine pipeline from `prompt_builder._post_process_workspace_context` into a shared helper at `opencomputer.security.context_scan.scan_workspace_context_content` and called it from both pipelines so the policy can no longer drift. Subdirectory hints with high-confidence injection signatures now arrive at the model wrapped in a `<quarantined-untrusted-content>` envelope; secret matches are still redacted even inside the envelope.
+- **`.cursorrules` startup priority** (gap B — functional) — Appended `.cursorrules` to `prompt_builder.load_workspace_context.target_names` (last priority, after `AGENTS.md`). Subdirectory hints already scanned it; the inconsistency only hit the cwd at startup. Cursor IDE users with `.cursorrules` at repo root now get it loaded into the system prompt.
+- **Informative truncation marker** (gap C — polish) — Replaced the generic `[truncated — file exceeded 100KB cap]` with `[...truncated NAME: kept first N chars of M total. Use file tools to read the full file.]` so the agent knows what it kept and how to recover the rest.
+- **Parity-status reference doc** — `docs/refs/hermes-context-personality-skins-v2-parity.md` maps every section of the Hermes v2 spec to OC's implementation, calling out YAGNI cuts (`waiting_faces`/`thinking_faces` SkinSpec fields, expanded 24-key color palette) with rationale and out-of-scope-by-design items (per-profile `SOUL.md` vs `HERMES_HOME` single-global; `OPENCOMPUTER.md` vs `.hermes.md`).
+
+13 new tests across `tests/test_context_scan_shared.py`, `tests/test_subdirectory_hints_security.py`, `tests/test_workspace_context_cursorrules.py`. Updated truncation-marker assertion in `tests/agent/test_prompt_builder_redaction.py`. Existing `tests/test_workspace_context.py` and `tests/test_subdirectory_hints.py` stay green.
+
+Spec: `docs/superpowers/specs/2026-05-08-hermes-context-personality-skins-v2-design.md`. Plan: `docs/superpowers/plans/2026-05-08-hermes-context-personality-skins-v2-parity.md`.
+
 ### Added — Kanban + Goals v2 — Ralph-loop parity polish (2026-05-08)
 
 Closes the four real gaps in the Hermes Kanban + Persistent Goals v2 reference spec. Kanban surface (32 CLI subcommands, 7 worker tools, 3 bundled skills, dashboard backend, multi-attempt history) was already shipped — these changes touch only the goal subsystem.

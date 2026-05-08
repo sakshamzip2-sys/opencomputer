@@ -187,6 +187,29 @@ class ExecuteCode(BaseTool):
                 tool_call_id=call.id, content="empty 'code'", is_error=True,
             )
 
+        # Hardline blocklist — non-bypassable. Catches hardline patterns
+        # embedded as string literals inside the python source (e.g.,
+        # ``subprocess.run("rm -rf /", shell=True)``) so the
+        # subprocess-shell escape hatch can't sidestep the refusal.
+        # False-positive risk is low because patterns require
+        # statement-start anchors; the failure mode is one extra
+        # refusal which is the safe direction.
+        from opencomputer.security.hardline import (
+            check_command as _check_hardline,
+        )
+
+        _hardline_hit = _check_hardline(code)
+        if _hardline_hit is not None:
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Refused: {_hardline_hit.reason} "
+                    f"(hardline pattern '{_hardline_hit.pattern_id}'). "
+                    f"This pattern is non-bypassable."
+                ),
+                is_error=True,
+            )
+
         mode = str(args.get("mode") or "project").lower()
         if mode not in ("project", "strict"):
             return ToolResult(

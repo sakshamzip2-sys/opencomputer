@@ -8,6 +8,69 @@ import os
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
+#: Hermes-parity infrastructure-var blocklist. These keys are stripped
+#: from the BashTool subprocess env regardless of user passthrough.
+#:
+#: Rationale (Hermes spec, "What Each Sandbox Filters"): the agent's own
+#: provider keys, gateway tokens, and OpenComputer-internal control vars
+#: must not leak into shell-spawned children (npm install, git push,
+#: arbitrary user scripts) — those callers should never need them, and
+#: prompt-injected commands could exfiltrate them.
+#:
+#: Third-party tool API keys (NPM_TOKEN, AWS_ACCESS_KEY_ID, GH_TOKEN
+#: when used by the user's own scripts) are NOT in this list — users
+#: routinely need them in shell subprocesses.
+_OC_INFRASTRUCTURE_VARS: frozenset[str] = frozenset({
+    # OC + Hermes control vars
+    # (matches every var with these prefixes too — see _strip_infra_env_vars).
+    # Channel platform tokens — the gateway needs these, but user shells don't.
+    "TELEGRAM_BOT_TOKEN",
+    "DISCORD_BOT_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "MATTERMOST_BOT_TOKEN",
+    "MATRIX_ACCESS_TOKEN",
+    "WHATSAPP_API_TOKEN",
+    "SIGNAL_BOT_TOKEN",
+    "SMS_BOT_TOKEN",
+    "EMAIL_BOT_TOKEN",
+    "DINGTALK_BOT_TOKEN",
+    "FEISHU_BOT_TOKEN",
+    "WECOM_BOT_TOKEN",
+    "TEAMS_BOT_TOKEN",
+    # Gateway control
+    "GATEWAY_ALLOW_ALL_USERS",
+    "GATEWAY_ALLOWED_USERS",
+    "OPENCOMPUTER_ALLOW_ROOT_GATEWAY",
+})
+
+#: Variable-name prefixes that imply OC / Hermes infrastructure ownership.
+#: Any env var starting with one of these is stripped.
+_OC_INFRASTRUCTURE_PREFIXES: tuple[str, ...] = (
+    "OPENCOMPUTER_",
+    "HERMES_",
+    "OC_",  # OpenComputer-prefixed knobs
+)
+
+
+def _strip_infra_env_vars(env: dict[str, str] | None) -> dict[str, str] | None:
+    """Strip OC infrastructure vars from a copy of ``env``.
+
+    Returns ``None`` unchanged so the caller's "use parent env" fallback
+    still works. Only OC's own vars are removed — third-party tool keys
+    (NPM_TOKEN, AWS_*, etc.) pass through untouched because user scripts
+    routinely need them.
+    """
+    if env is None:
+        return None
+    out = dict(env)
+    for k in list(out.keys()):
+        if k in _OC_INFRASTRUCTURE_VARS:
+            del out[k]
+            continue
+        if any(k.startswith(p) for p in _OC_INFRASTRUCTURE_PREFIXES):
+            del out[k]
+    return out
+
 
 class BashTool(BaseTool):
     parallel_safe = False  # side effects
@@ -57,6 +120,25 @@ class BashTool(BaseTool):
             return ToolResult(
                 tool_call_id=call.id, content="Error: empty command", is_error=True
             )
+        # Hardline blocklist — non-bypassable. Fires before profile
+        # scoping and any consent gate so a tripped hardline never
+        # produces a user-visible approval prompt. See
+        # opencomputer/security/hardline.py for the pattern list.
+        from opencomputer.security.hardline import (
+            check_command as _check_hardline,
+        )
+
+        _hardline_hit = _check_hardline(cmd)
+        if _hardline_hit is not None:
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Refused: {_hardline_hit.reason} "
+                    f"(hardline pattern '{_hardline_hit.pattern_id}'). "
+                    f"This pattern is non-bypassable."
+                ),
+                is_error=True,
+            )
         # Scope HOME / XDG_* to the active profile's home/ subdir so
         # spawned subprocesses (git, ssh, npm, etc.) get per-profile
         # tool-config isolation for credentials and caches. The parent
@@ -68,14 +150,15 @@ class BashTool(BaseTool):
                 scope_subprocess_env,
             )
 
-            env = scope_subprocess_env(
+            scoped = scope_subprocess_env(
                 os.environ.copy(), profile=read_active_profile()
             )
+            env = _strip_infra_env_vars(scoped)
         except Exception:
-            # If profile scoping fails for any reason, fall back to the
-            # parent's env so the command still runs. BashTool MUST NOT
-            # be brittle to profile lookup edge cases.
-            env = None
+            # If profile scoping fails for any reason, fall back to a
+            # bare strip of the parent env so a tool-internal token can
+            # never leak into the subprocess.
+            env = _strip_infra_env_vars(os.environ.copy())
 
         proc: asyncio.subprocess.Process | None = None
         try:

@@ -37,6 +37,54 @@ ConnectionState = Literal["connected", "disconnected", "error"]
 logger = logging.getLogger("opencomputer.mcp.client")
 
 
+#: Hermes-parity whitelist of parent env vars that MCP stdio subprocesses
+#: are allowed to inherit. Any other key — including everything that looks
+#: like a secret (API keys, tokens, OAuth credentials) — is stripped before
+#: spawn. ``XDG_*`` keys are admitted as a regex (see
+#: :func:`_build_mcp_subprocess_env`).
+#:
+#: Per-server ``env:`` declarations in ``mcp_servers.<name>.env`` config
+#: still pass through (caller intent — that's the whole point of the
+#: explicit declaration).
+_MCP_SAFE_ENV_KEYS: frozenset[str] = frozenset({
+    "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR",
+})
+
+
+def _build_mcp_subprocess_env(
+    parent_env: dict[str, str],
+    declared_env: dict[str, str] | None,
+) -> dict[str, str]:
+    """Return the env dict an MCP stdio subprocess should receive.
+
+    Hermes-parity strict filter: only ``_MCP_SAFE_ENV_KEYS`` and any
+    ``XDG_*`` key from the parent env are admitted; everything else
+    (API keys, OAuth tokens, gateway credentials) is stripped.
+    Per-server ``declared_env`` (from ``mcp_servers.<name>.env``)
+    layers on top — this is explicit caller intent and IS allowed
+    through, since the user typed it into config.yaml deliberately.
+
+    Args:
+        parent_env: snapshot of the parent process's env (typically
+            ``os.environ.copy()``).
+        declared_env: explicit env list from the MCP server's config
+            (e.g., ``GITHUB_PERSONAL_ACCESS_TOKEN: ghp_...``). May be
+            ``None`` or empty.
+
+    Returns:
+        A new dict with the filtered env. Safe to pass directly to
+        ``StdioServerParameters(env=...)``.
+    """
+    out: dict[str, str] = {
+        k: v
+        for k, v in parent_env.items()
+        if k in _MCP_SAFE_ENV_KEYS or k.startswith("XDG_")
+    }
+    if declared_env:
+        out.update(declared_env)
+    return out
+
+
 class MCPLaunchBlockedError(RuntimeError):
     """Raised when an OSV pre-flight scan blocks an MCP launch.
 
@@ -186,6 +234,12 @@ class MCPTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
+        # Hermes-parity MCP credential redaction. MCP server output and
+        # exception strings can contain GitHub PATs, OpenAI-style keys,
+        # bearer tokens, postgres URLs etc. Pipe everything through the
+        # central redaction module BEFORE returning to the LLM.
+        from opencomputer.security.redact import redact_runtime_text
+
         try:
             result = await self.session.call_tool(name=self.tool_name, arguments=call.arguments)
             # Convert MCP result to our string format — concatenate text blocks
@@ -198,15 +252,20 @@ class MCPTool(BaseTool):
                     parts.append("[image]")
                 else:
                     parts.append(str(block))
+            content = "\n".join(parts) or "[empty MCP response]"
             return ToolResult(
                 tool_call_id=call.id,
-                content="\n".join(parts) or "[empty MCP response]",
+                content=redact_runtime_text(content),
                 is_error=is_error,
             )
         except Exception as e:  # noqa: BLE001
+            err = (
+                f"MCP error from {self.server_name}.{self.tool_name}: "
+                f"{type(e).__name__}: {e}"
+            )
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"MCP error from {self.server_name}.{self.tool_name}: {type(e).__name__}: {e}",
+                content=redact_runtime_text(err),
                 is_error=True,
             )
 
@@ -266,18 +325,21 @@ class _MCPListResourcesTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
+        from opencomputer.security.redact import redact_runtime_text
+
         try:
             result = await self._session.list_resources()
             payload = [_serialize_resource(r) for r in (getattr(result, "resources", None) or [])]
             return ToolResult(
                 tool_call_id=call.id,
-                content=json.dumps(payload),
+                content=redact_runtime_text(json.dumps(payload)),
                 is_error=False,
             )
         except Exception as e:  # noqa: BLE001
+            err = f"MCP utility error from {self._server_name}.list_resources: {type(e).__name__}: {e}"
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"MCP utility error from {self._server_name}.list_resources: {type(e).__name__}: {e}",
+                content=redact_runtime_text(err),
                 is_error=True,
             )
 
@@ -306,6 +368,8 @@ class _MCPReadResourceTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
+        from opencomputer.security.redact import redact_runtime_text
+
         uri = call.arguments.get("uri")
         if not uri:
             return ToolResult(
@@ -324,13 +388,14 @@ class _MCPReadResourceTool(BaseTool):
             }
             return ToolResult(
                 tool_call_id=call.id,
-                content=json.dumps(payload),
+                content=redact_runtime_text(json.dumps(payload)),
                 is_error=False,
             )
         except Exception as e:  # noqa: BLE001
+            err = f"MCP utility error from {self._server_name}.read_resource: {type(e).__name__}: {e}"
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"MCP utility error from {self._server_name}.read_resource: {type(e).__name__}: {e}",
+                content=redact_runtime_text(err),
                 is_error=True,
             )
 
@@ -356,18 +421,21 @@ class _MCPListPromptsTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
+        from opencomputer.security.redact import redact_runtime_text
+
         try:
             result = await self._session.list_prompts()
             payload = [_serialize_prompt(p) for p in (getattr(result, "prompts", None) or [])]
             return ToolResult(
                 tool_call_id=call.id,
-                content=json.dumps(payload),
+                content=redact_runtime_text(json.dumps(payload)),
                 is_error=False,
             )
         except Exception as e:  # noqa: BLE001
+            err = f"MCP utility error from {self._server_name}.list_prompts: {type(e).__name__}: {e}"
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"MCP utility error from {self._server_name}.list_prompts: {type(e).__name__}: {e}",
+                content=redact_runtime_text(err),
                 is_error=True,
             )
 
@@ -400,6 +468,8 @@ class _MCPGetPromptTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
+        from opencomputer.security.redact import redact_runtime_text
+
         name = call.arguments.get("name")
         if not name:
             return ToolResult(
@@ -414,13 +484,14 @@ class _MCPGetPromptTool(BaseTool):
             payload = {"messages": [m if isinstance(m, dict) else dict(m) for m in messages]}
             return ToolResult(
                 tool_call_id=call.id,
-                content=json.dumps(payload, default=str),
+                content=redact_runtime_text(json.dumps(payload, default=str)),
                 is_error=False,
             )
         except Exception as e:  # noqa: BLE001
+            err = f"MCP utility error from {self._server_name}.get_prompt: {type(e).__name__}: {e}"
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"MCP utility error from {self._server_name}.get_prompt: {type(e).__name__}: {e}",
+                content=redact_runtime_text(err),
                 is_error=True,
             )
 
@@ -592,30 +663,30 @@ class MCPConnection:
                         self.last_error = blocked
                         await self.disconnect(_preserve_error_state=True)
                         return False
-                # Layer the per-MCP config env on top of the parent's
-                # environment, then scope HOME / XDG_* to the active
-                # profile. This gives MCP servers per-profile credential
-                # isolation (git/ssh/npm caches) without polluting the
-                # parent process — see _apply_profile_override in cli.py
-                # for the architectural rationale.
+                # Strict env filter (Hermes parity): only safe parent
+                # vars + XDG_* + per-MCP declared env reach the
+                # subprocess. Then profile-scope HOME / XDG_* so MCP
+                # servers get per-profile credential isolation
+                # (git/ssh/npm caches).
                 try:
                     from opencomputer.profiles import (
                         read_active_profile,
                         scope_subprocess_env,
                     )
 
-                    base_env = os.environ.copy()
-                    if self.config.env:
-                        base_env.update(self.config.env)
+                    filtered = _build_mcp_subprocess_env(
+                        dict(os.environ), self.config.env,
+                    )
                     spawn_env = scope_subprocess_env(
-                        base_env, profile=read_active_profile()
+                        filtered, profile=read_active_profile()
                     )
                 except Exception:
                     # Defensive — never block an MCP launch on profile
-                    # lookup edge cases. Fall back to the per-config env
-                    # only (or None for parent inheritance), preserving
-                    # the previous behaviour.
-                    spawn_env = self.config.env or None
+                    # lookup edge cases. Fall back to the strict filter
+                    # alone (still secret-safe).
+                    spawn_env = _build_mcp_subprocess_env(
+                        dict(os.environ), self.config.env,
+                    )
                 params = StdioServerParameters(
                     command=self.config.command,
                     args=list(self.config.args),
