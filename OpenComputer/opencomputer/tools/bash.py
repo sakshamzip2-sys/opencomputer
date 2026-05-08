@@ -57,6 +57,25 @@ class BashTool(BaseTool):
             return ToolResult(
                 tool_call_id=call.id, content="Error: empty command", is_error=True
             )
+        # Hardline blocklist — non-bypassable. Fires before profile
+        # scoping and any consent gate so a tripped hardline never
+        # produces a user-visible approval prompt. See
+        # opencomputer/security/hardline.py for the pattern list.
+        from opencomputer.security.hardline import (
+            check_command as _check_hardline,
+        )
+
+        _hardline_hit = _check_hardline(cmd)
+        if _hardline_hit is not None:
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Refused: {_hardline_hit.reason} "
+                    f"(hardline pattern '{_hardline_hit.pattern_id}'). "
+                    f"This pattern is non-bypassable."
+                ),
+                is_error=True,
+            )
         # Scope HOME / XDG_* to the active profile's home/ subdir so
         # spawned subprocesses (git, ssh, npm, etc.) get per-profile
         # tool-config isolation for credentials and caches. The parent

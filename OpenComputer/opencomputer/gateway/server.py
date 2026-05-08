@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +31,34 @@ if TYPE_CHECKING:
     from opencomputer.gateway.agent_router import AgentRouter
 
 logger = logging.getLogger("opencomputer.gateway.server")
+
+
+def _check_not_root() -> None:
+    """Refuse to start the gateway as root unless explicitly allowed.
+
+    Mirrors Hermes ``HERMES_ALLOW_ROOT_GATEWAY`` semantics. The check
+    is POSIX-only — on Windows ``os.geteuid`` doesn't exist and the
+    call is a no-op.
+
+    Set ``OPENCOMPUTER_ALLOW_ROOT_GATEWAY=1`` in the environment to
+    override (e.g., container entrypoint where running as root is
+    expected and the host has its own isolation).
+
+    Called from :meth:`Gateway.start` BEFORE any network or
+    channel-adapter work — a misconfigured root deployment exits
+    cleanly with stderr explaining the override env var.
+    """
+    if not hasattr(os, "geteuid"):
+        return  # Windows / non-POSIX — no concept of effective uid.
+    if os.geteuid() != 0:
+        return
+    if os.environ.get("OPENCOMPUTER_ALLOW_ROOT_GATEWAY") == "1":
+        return
+    sys.stderr.write(
+        "Refusing to start gateway as root. Run as a non-root user, "
+        "or set OPENCOMPUTER_ALLOW_ROOT_GATEWAY=1 to override.\n"
+    )
+    sys.exit(2)
 
 
 class Gateway:
@@ -333,6 +363,12 @@ class Gateway:
         wire the /background completion notifier so worker threads can
         schedule ``adapter.send()`` via ``run_coroutine_threadsafe``.
         """
+        # Security-first: refuse to start as root unless explicitly
+        # allowed (Hermes parity — HERMES_ALLOW_ROOT_GATEWAY → OC's
+        # OPENCOMPUTER_ALLOW_ROOT_GATEWAY). Fires before any other
+        # work touches the host or network.
+        _check_not_root()
+
         # Security-first: refuse to boot if another channel handler
         # owns the same chat surfaces. Must happen before any other
         # work touches the network.

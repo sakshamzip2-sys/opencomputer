@@ -37,6 +37,54 @@ ConnectionState = Literal["connected", "disconnected", "error"]
 logger = logging.getLogger("opencomputer.mcp.client")
 
 
+#: Hermes-parity whitelist of parent env vars that MCP stdio subprocesses
+#: are allowed to inherit. Any other key — including everything that looks
+#: like a secret (API keys, tokens, OAuth credentials) — is stripped before
+#: spawn. ``XDG_*`` keys are admitted as a regex (see
+#: :func:`_build_mcp_subprocess_env`).
+#:
+#: Per-server ``env:`` declarations in ``mcp_servers.<name>.env`` config
+#: still pass through (caller intent — that's the whole point of the
+#: explicit declaration).
+_MCP_SAFE_ENV_KEYS: frozenset[str] = frozenset({
+    "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR",
+})
+
+
+def _build_mcp_subprocess_env(
+    parent_env: dict[str, str],
+    declared_env: dict[str, str] | None,
+) -> dict[str, str]:
+    """Return the env dict an MCP stdio subprocess should receive.
+
+    Hermes-parity strict filter: only ``_MCP_SAFE_ENV_KEYS`` and any
+    ``XDG_*`` key from the parent env are admitted; everything else
+    (API keys, OAuth tokens, gateway credentials) is stripped.
+    Per-server ``declared_env`` (from ``mcp_servers.<name>.env``)
+    layers on top — this is explicit caller intent and IS allowed
+    through, since the user typed it into config.yaml deliberately.
+
+    Args:
+        parent_env: snapshot of the parent process's env (typically
+            ``os.environ.copy()``).
+        declared_env: explicit env list from the MCP server's config
+            (e.g., ``GITHUB_PERSONAL_ACCESS_TOKEN: ghp_...``). May be
+            ``None`` or empty.
+
+    Returns:
+        A new dict with the filtered env. Safe to pass directly to
+        ``StdioServerParameters(env=...)``.
+    """
+    out: dict[str, str] = {
+        k: v
+        for k, v in parent_env.items()
+        if k in _MCP_SAFE_ENV_KEYS or k.startswith("XDG_")
+    }
+    if declared_env:
+        out.update(declared_env)
+    return out
+
+
 class MCPLaunchBlockedError(RuntimeError):
     """Raised when an OSV pre-flight scan blocks an MCP launch.
 
@@ -592,30 +640,30 @@ class MCPConnection:
                         self.last_error = blocked
                         await self.disconnect(_preserve_error_state=True)
                         return False
-                # Layer the per-MCP config env on top of the parent's
-                # environment, then scope HOME / XDG_* to the active
-                # profile. This gives MCP servers per-profile credential
-                # isolation (git/ssh/npm caches) without polluting the
-                # parent process — see _apply_profile_override in cli.py
-                # for the architectural rationale.
+                # Strict env filter (Hermes parity): only safe parent
+                # vars + XDG_* + per-MCP declared env reach the
+                # subprocess. Then profile-scope HOME / XDG_* so MCP
+                # servers get per-profile credential isolation
+                # (git/ssh/npm caches).
                 try:
                     from opencomputer.profiles import (
                         read_active_profile,
                         scope_subprocess_env,
                     )
 
-                    base_env = os.environ.copy()
-                    if self.config.env:
-                        base_env.update(self.config.env)
+                    filtered = _build_mcp_subprocess_env(
+                        dict(os.environ), self.config.env,
+                    )
                     spawn_env = scope_subprocess_env(
-                        base_env, profile=read_active_profile()
+                        filtered, profile=read_active_profile()
                     )
                 except Exception:
                     # Defensive — never block an MCP launch on profile
-                    # lookup edge cases. Fall back to the per-config env
-                    # only (or None for parent inheritance), preserving
-                    # the previous behaviour.
-                    spawn_env = self.config.env or None
+                    # lookup edge cases. Fall back to the strict filter
+                    # alone (still secret-safe).
+                    spawn_env = _build_mcp_subprocess_env(
+                        dict(os.environ), self.config.env,
+                    )
                 params = StdioServerParameters(
                     command=self.config.command,
                     args=list(self.config.args),

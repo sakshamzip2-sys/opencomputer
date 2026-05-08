@@ -34,6 +34,32 @@ from plugin_sdk.sandbox import SandboxConfig, SandboxResult, SandboxStrategy
 _log = logging.getLogger("opencomputer.sandbox.docker")
 
 
+#: Security-hardening flags applied to every container.
+#:
+#: Mirrors the Hermes ``terminal/docker.py`` ``_SECURITY_ARGS``: drop
+#: every Linux capability, then add back the three required for
+#: package managers (CHOWN, FOWNER) and bind-mount writes
+#: (DAC_OVERRIDE); block privilege escalation; cap process count;
+#: force tmpfs on world-writable directories with ``noexec`` where
+#: supported.
+#:
+#: These defaults are always-on — Hermes does not expose a config
+#: knob, and neither do we. Containers that need different limits
+#: should set per-call overrides at the ``SandboxConfig`` level
+#: (none currently needed).
+_SECURITY_ARGS: list[str] = [
+    "--cap-drop", "ALL",
+    "--cap-add", "DAC_OVERRIDE",
+    "--cap-add", "CHOWN",
+    "--cap-add", "FOWNER",
+    "--security-opt", "no-new-privileges",
+    "--pids-limit", "256",
+    "--tmpfs", "/tmp:rw,nosuid,size=512m",
+    "--tmpfs", "/var/tmp:rw,noexec,nosuid,size=256m",
+    "--tmpfs", "/run:rw,noexec,nosuid,size=64m",
+]
+
+
 def _derive_cpu_quota(cpu_seconds_limit: int) -> int:
     """Map wall-clock budget → CPU count for ``docker run --cpus``.
 
@@ -95,6 +121,10 @@ class DockerStrategy(SandboxStrategy):
             "--memory", f"{config.memory_mb_limit}m",
             "--cpus", str(_derive_cpu_quota(config.cpu_seconds_limit)),
         ]
+        # Hermes-parity hardening: cap-drop ALL + selective re-adds,
+        # no-new-privileges, pids-limit, tmpfs trio. Always-on; see
+        # _SECURITY_ARGS for rationale.
+        cmd.extend(_SECURITY_ARGS)
         if not config.network_allowed:
             cmd.extend(["--network", "none"])
         for p in config.read_paths:
