@@ -87,17 +87,24 @@ def build_anthropic_async_client(
     auth_mode: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_S,
+    max_retries: int | None = None,
 ) -> AsyncAnthropic:
     """Build an ``AsyncAnthropic`` honouring proxy + bearer config.
 
     All call sites that talk to Anthropic asynchronously should use this
     instead of constructing ``AsyncAnthropic`` directly — that ensures
     a uniform auth path across chat, batch, vision, slash commands, etc.
+
+    Hermes-v2: ``max_retries`` (when not None) is forwarded to the SDK.
+    Wired from ``cfg.loop.api_max_retries``. ``0`` = fail-fast on first
+    transient error (matches Hermes documented semantics).
     """
     kwargs: dict[str, object] = {"api_key": api_key}
     base = _resolve_base_url(base_url)
     if base:
         kwargs["base_url"] = base
+    if max_retries is not None:
+        kwargs["max_retries"] = max_retries
     mode = _resolve_auth_mode(auth_mode)
     if mode == "bearer":
         kwargs["default_headers"] = {"Authorization": f"Bearer {api_key}"}
@@ -115,6 +122,7 @@ def build_anthropic_sync_client(
     auth_mode: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_S,
+    max_retries: int | None = None,
 ) -> Anthropic:
     """Sync counterpart of :func:`build_anthropic_async_client`.
 
@@ -126,6 +134,8 @@ def build_anthropic_sync_client(
     base = _resolve_base_url(base_url)
     if base:
         kwargs["base_url"] = base
+    if max_retries is not None:
+        kwargs["max_retries"] = max_retries
     mode = _resolve_auth_mode(auth_mode)
     if mode == "bearer":
         kwargs["default_headers"] = {"Authorization": f"Bearer {api_key}"}
