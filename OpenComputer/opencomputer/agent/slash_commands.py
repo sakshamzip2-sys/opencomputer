@@ -27,6 +27,10 @@ from typing import Any
 from opencomputer.agent.slash_commands_impl.agents_cmd import AgentsCommand
 from opencomputer.agent.slash_commands_impl.auto_cmd import AutoCommand, YoloCommand
 from opencomputer.agent.slash_commands_impl.background_cmd import BackgroundCommand
+from opencomputer.agent.slash_commands_impl.busy_cmd import BusyCommand
+from opencomputer.agent.slash_commands_impl.details_cmd import DetailsCommand
+from opencomputer.agent.slash_commands_impl.mouse_cmd import MouseCommand
+from opencomputer.agent.slash_commands_impl.rollback_cmd import RollbackCommand
 from opencomputer.agent.slash_commands_impl.bell_cmd import BellCommand
 from opencomputer.agent.slash_commands_impl.branch_cmd import BranchCommand
 from opencomputer.agent.slash_commands_impl.btw_cmd import BtwCommand
@@ -123,6 +127,13 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # 2026-05-08 — Hermes-parity /background <prompt>. Spawns isolated
     # AgentLoop on a daemon thread, captures result for `/background show`.
     BackgroundCommand,
+    # Hermes CLI/TUI/Sessions v2 parity (2026-05-08):
+    # B1 /rollback [N], B2 /busy [interrupt|queue|steer|status],
+    # B3 /details [section] [mode], D5 /mouse [on|off|toggle|status].
+    RollbackCommand,
+    BusyCommand,
+    DetailsCommand,
+    MouseCommand,
     # 2026-05-03 — Phase 2 v0 outcome-aware learning policy commands.
     PolicyChangesCommand,
     PolicyApproveCommand,
