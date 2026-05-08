@@ -27,6 +27,7 @@ from pathlib import Path
 
 from opencomputer.agent.personality import BUILTINS as _PERS_BUILTINS
 from opencomputer.agent.profile_yaml import (
+    get_custom_personalities,
     set_default_personality,
     set_display_skin,
 )
@@ -92,17 +93,20 @@ class PersonalityCommand(SlashCommand):
                 handled=True,
             )
 
-        # Validate against built-ins. Custom personalities are picked up
-        # from `agent.personalities` config — for a custom one, edit
-        # config and restart (or use `--personality NAME` CLI flag).
-        if sub not in _PERS_BUILTINS:
+        # Validate against built-ins + any custom personalities from
+        # config. Custom names declared in agent.personalities are
+        # accepted live (no restart needed).
+        custom_names = set(get_custom_personalities(_profile_config_path()))
+        if sub not in _PERS_BUILTINS and sub not in custom_names:
+            extra = (
+                f" Custom: {', '.join(sorted(custom_names))}.\n"
+                if custom_names else ""
+            )
             return SlashCommandResult(
                 output=(
                     f"Unknown personality {sub!r}. "
-                    f"Available: {', '.join(available)}\n"
-                    f"(custom personalities live under "
-                    f"`agent.personalities` in config.yaml — "
-                    f"edit + restart)"
+                    f"Built-in: {', '.join(available)}.\n{extra}"
+                    f"(define more under `agent.personalities` in config.yaml)"
                 ),
                 handled=True,
             )

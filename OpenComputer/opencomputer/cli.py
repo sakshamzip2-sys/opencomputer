@@ -281,6 +281,89 @@ _OC_THEME = _RichTheme(
 console = Console(record=True, theme=_OC_THEME)
 
 
+def _profile_config_path() -> Path:
+    """Resolve the active profile's config.yaml path.
+
+    Honors ``OPENCOMPUTER_HOME`` and ``OPENCOMPUTER_PROFILE`` envs to
+    match the slash command + profile-bootstrap conventions.
+    """
+    home = os.environ.get(
+        "OPENCOMPUTER_HOME",
+        str(Path.home() / ".opencomputer"),
+    )
+    profile = os.environ.get("OPENCOMPUTER_PROFILE", "default")
+    return Path(home) / profile / "config.yaml"
+
+
+def _apply_personality_skin_at_startup(
+    runtime: object, personality_flag: str, skin_flag: str,
+) -> None:
+    """Seed runtime.custom with personality + apply skin at session start.
+
+    Resolution order for personality:
+      1. ``--personality NAME`` CLI flag
+      2. ``runtime.custom["personality"]`` (already set by an external caller)
+      3. ``agent.default_personality`` from active profile config
+
+    Resolution order for skin:
+      1. ``--skin NAME`` CLI flag
+      2. ``OPENCOMPUTER_SKIN`` env var
+      3. ``display.skin`` from active profile config
+      4. ``default``
+
+    Fail-soft: any error logs a warning and returns without crashing.
+    """
+    try:
+        from opencomputer.agent.profile_yaml import (
+            get_default_personality,
+            get_display_skin,
+        )
+
+        cfg = _profile_config_path()
+
+        runtime_custom = getattr(runtime, "custom", None)
+        if isinstance(runtime_custom, dict):
+            chosen_personality = (
+                personality_flag
+                or runtime_custom.get("personality", "")
+                or get_default_personality(cfg)
+            )
+            if chosen_personality:
+                runtime_custom["personality"] = chosen_personality
+
+            chosen_skin = (
+                skin_flag
+                or os.environ.get("OPENCOMPUTER_SKIN", "")
+                or get_display_skin(cfg)
+                or "default"
+            )
+            runtime_custom["skin"] = chosen_skin
+        else:
+            chosen_skin = (
+                skin_flag
+                or os.environ.get("OPENCOMPUTER_SKIN", "")
+                or get_display_skin(cfg)
+                or "default"
+            )
+
+        # Apply skin immediately on the live console.
+        try:
+            from opencomputer.cli_ui.skin import apply_skin, load_skin
+            apply_skin(load_skin(chosen_skin), console)
+        except Exception as exc:  # noqa: BLE001 — never crash startup on theme
+            import logging as _logging
+            _logging.getLogger("opencomputer.cli").warning(
+                "skin: apply at startup failed for %r — %s",
+                chosen_skin,
+                exc,
+            )
+    except Exception as exc:  # noqa: BLE001 — outer guard, never crash
+        import logging as _logging
+        _logging.getLogger("opencomputer.cli").warning(
+            "startup: personality/skin init failed — %s", exc,
+        )
+
+
 def _register_builtin_tools() -> None:
     """Register the core bundled tools. Only runs once per process."""
     if "Read" in registry.names():
@@ -902,12 +985,18 @@ def _run_chat_session(
     yolo: bool = False,
     accept_edits: bool = False,
     permission_mode: PermissionMode = PermissionMode.DEFAULT,
+    personality: str = "",
+    skin: str = "",
 ) -> None:
     """Shared interactive REPL used by ``chat`` and ``code`` commands.
 
     V3.A-T7 — extracted from ``chat`` so ``code`` can reuse the full
     setup/loop without copy-paste. ``yolo`` threads through ``RuntimeContext``
     so the consent layer can skip per-action prompts when the user opts in.
+
+    ``personality`` / ``skin``: optional CLI-flag values; if empty, the
+    startup helper reads from the active profile config and falls back
+    to safe defaults.
     """
     _configure_logging_once()
     if not config_file_path().exists() and not _has_any_provider_configured():
@@ -952,6 +1041,11 @@ def _run_chat_session(
     runtime = RuntimeContext(
         plan_mode=plan, yolo_mode=yolo, permission_mode=permission_mode,
     )
+    # Personality / skin: --flag wins, then config default, then nothing.
+    # Values land in runtime.custom so the agent loop and rendering
+    # paths pick them up uniformly. apply_personality_skin_at_startup
+    # is fail-soft — bad config never crashes the chat loop.
+    _apply_personality_skin_at_startup(runtime, personality, skin)
     # One ReasoningStore per chat session — survives across turns,
     # accessed by /reasoning show and the renderer's finalize().
     from opencomputer.cli_ui import ReasoningStore as _ReasoningStore
@@ -2008,6 +2102,27 @@ def chat(
     no_compact: bool = typer.Option(
         False, "--no-compact", help="Disable automatic context compaction (debugging)."
     ),
+    personality: str = typer.Option(
+        "",
+        "--personality",
+        help=(
+            "Active personality NAME (overrides agent.default_personality "
+            "config). Built-in: helpful, concise, technical, creative, "
+            "teacher, kawaii, catgirl, pirate, shakespeare, surfer, noir, "
+            "uwu, philosopher, hype. Custom names from agent.personalities "
+            "config also accepted."
+        ),
+    ),
+    skin: str = typer.Option(
+        "",
+        "--skin",
+        help=(
+            "TUI skin NAME (overrides display.skin config). Built-in: "
+            "default, ares, mono, slate, daylight, warm-lightmode, "
+            "poseidon, sisyphus, charizard. Custom YAML at "
+            "~/.opencomputer/skins/<name>.yaml also accepted."
+        ),
+    ),
 ) -> None:
     """Start an interactive chat session.
 
@@ -2046,6 +2161,8 @@ def chat(
         yolo=auto,
         accept_edits=accept_edits,
         permission_mode=permission_mode,
+        personality=personality,
+        skin=skin,
     )
 
 
