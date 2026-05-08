@@ -50,7 +50,9 @@ def test_three_new_hook_events_exist_and_are_in_all_hook_events() -> None:
     # 2026-05-06 OpenClaw deep-comparison adds BEFORE_INSTALL for 22.
     # 2026-05-06 Phase 3 adds BEFORE_MODEL_RESOLVE / MESSAGE_SENDING /
     # MESSAGE_SENT (S3 leftovers from OpenClaw deep-comparison) for 25.
-    assert len(ALL_HOOK_EVENTS) == 25
+    # 2026-05-08 Hermes Doc-2 adds SESSION_FINALIZE / SESSION_RESET /
+    # TRANSFORM_LLM_OUTPUT — final tally 28.
+    assert len(ALL_HOOK_EVENTS) == 28
 
 
 async def test_base_channel_adapter_send_notification_default_routes_to_send() -> None:
