@@ -130,6 +130,17 @@ oc skills tap remove anthropics/skills
 - `~/.opencomputer/<profile>/skills/.hub/audit.log` is an append-only JSONL of install/uninstall/scan_blocked events.
 - Skills tapped from arbitrary GitHub repos default to `community` trust level.
 
+## Local fine-tuning
+
+OpenComputer ships fine-tuning support via two bundled skills:
+
+- `oc skills run trl-fine-tuning` — SFT / DPO / PPO / GRPO / RLHF using HuggingFace TRL on your local hardware.
+- `oc skills run weights-and-biases` — experiment tracking + hyperparameter sweeps + model registry.
+
+OpenComputer does **not** bundle Atropos / Tinker RL training infrastructure. If you want the GRPO+LoRA-via-Tinker-Atropos path documented in some Hermes references, run it as a separate process and route the resulting model through OC via `oc model → Custom endpoint`. Bundled-Atropos integration is reopen-on-demand — file an issue with your concrete use case.
+
+For local-model **inference** (Ollama / vLLM / SGLang / llama.cpp / LM Studio + WSL2 networking), see [`docs/local-models.md`](docs/local-models.md).
+
 ## Multi-Profile Routing
 
 Run multiple profiles simultaneously on one gateway. Different chats route to different profiles — different system prompts, memory, tools, model configs.
