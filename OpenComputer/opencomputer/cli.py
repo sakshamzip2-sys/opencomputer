@@ -1080,6 +1080,13 @@ def _run_chat_session(
     runtime = RuntimeContext(
         plan_mode=plan, yolo_mode=yolo, permission_mode=permission_mode,
     )
+    # Hermes v2 D7 (2026-05-08) — expose the live Rich Console under
+    # ``runtime.custom["live_console"]`` so slash commands that need to
+    # repaint a live surface (currently /skin) can hot-swap the theme
+    # without a session restart. Channel adapters and the gateway don't
+    # have a live console, so the key stays absent there and slash
+    # commands fall back to throwaway-console + module-state updates.
+    runtime.custom["live_console"] = console
     # Personality / skin: --flag wins, then config default, then nothing.
     # Values land in runtime.custom so the agent loop and rendering
     # paths pick them up uniformly. apply_personality_skin_at_startup

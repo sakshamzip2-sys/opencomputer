@@ -159,9 +159,9 @@ class SkinCommand(SlashCommand):
                     output=f"Reset runtime, but config write failed: {exc}",
                     handled=True,
                 )
-            _try_apply_skin_to_module_state("default")
+            _apply_skin_with_live_console(runtime, "default")
             return SlashCommandResult(
-                output="Skin reset to default.",
+                output="Skin reset to default (live repaint applied).",
                 handled=True,
             )
 
@@ -186,11 +186,15 @@ class SkinCommand(SlashCommand):
             logger.warning("skin: validation failed for %r — %s", sub, exc)
 
         runtime.custom["skin"] = sub
-        # Apply spinner verbs + branding immediately. Color theme
-        # requires a live Console handle which the slash dispatcher
-        # doesn't pass — so the theme part takes effect on next session
-        # start.
-        _try_apply_skin_to_module_state(sub)
+        # Hermes v2 D7 (2026-05-08): full live repaint.
+        # When the CLI input loop puts its live Rich Console under
+        # ``runtime.custom["live_console"]`` (or
+        # ``"_live_console"``), the slash command pushes the theme onto
+        # that live console — so spinner / branding / colors all
+        # hot-swap without a session restart. Channel adapters and the
+        # gateway don't have a live console, so they get spinner +
+        # branding only (color theme is a no-op there anyway).
+        live = _apply_skin_with_live_console(runtime, sub)
 
         try:
             set_display_skin(_profile_config_path(), sub)
@@ -202,22 +206,28 @@ class SkinCommand(SlashCommand):
                 ),
                 handled=True,
             )
+        if live:
+            tail = "color theme + spinner + branding applied live."
+        else:
+            tail = (
+                "spinner + branding applied; color theme will fully "
+                "repaint on next refresh."
+            )
         return SlashCommandResult(
-            output=(
-                f"Skin set to {sub} (persisted to config). "
-                f"Spinner verbs and branding apply immediately; "
-                f"color theme takes effect on next session start."
-            ),
+            output=f"Skin set to {sub} (persisted to config). {tail}",
             handled=True,
         )
 
 
 def _try_apply_skin_to_module_state(name: str) -> None:
-    """Best-effort skin apply for module-global state.
+    """Best-effort skin apply for module-global state (no live console).
 
     Uses a throwaway Console for the theme push (which won't affect any
     live console) but DOES update the module-global spinner/branding/
     tool_emoji state that renderers consult on next render.
+
+    Used as a fallback when no live console is available (channel
+    adapters, gateway).
     """
     try:
         from rich.console import Console
@@ -227,6 +237,39 @@ def _try_apply_skin_to_module_state(name: str) -> None:
         apply_skin(spec, Console())
     except Exception as exc:  # noqa: BLE001 — never crash on hot-swap
         logger.warning("skin: hot-swap failed for %r — %s", name, exc)
+
+
+def _apply_skin_with_live_console(
+    runtime: RuntimeContext, name: str
+) -> bool:
+    """Apply the skin to the live console if the CLI provided one.
+
+    Hermes v2 D7 (2026-05-08): if the caller (typically the CLI input
+    loop) has set ``runtime.custom["live_console"]`` or
+    ``"_live_console"`` to a live Rich Console, push the theme onto it
+    so the color repaint takes effect immediately. Otherwise fall back
+    to the throwaway-console path that still updates module-global
+    spinner / branding / tool-emoji state.
+
+    Returns ``True`` when a live console was used (full repaint), or
+    ``False`` when only module-state was updated.
+    """
+    live = runtime.custom.get("live_console") or runtime.custom.get(
+        "_live_console"
+    )
+    if live is None:
+        _try_apply_skin_to_module_state(name)
+        return False
+    try:
+        from opencomputer.cli_ui.skin import apply_skin, load_skin
+        spec = load_skin(name)
+        apply_skin(spec, live)
+        return True
+    except Exception as exc:  # noqa: BLE001 — never crash on hot-swap
+        logger.warning("skin: live hot-swap failed for %r — %s", name, exc)
+        # Best-effort fallback so module state still updates.
+        _try_apply_skin_to_module_state(name)
+        return False
 
 
 __all__ = ["PersonalityCommand", "SkinCommand"]
