@@ -10,6 +10,7 @@ background (kimi-cli pattern) so startup stays fast.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -208,6 +209,246 @@ class MCPTool(BaseTool):
                 content=f"MCP error from {self.server_name}.{self.tool_name}: {type(e).__name__}: {e}",
                 is_error=True,
             )
+
+
+# ─── T1 — MCP utility tools (resources / prompts) ─────────────────
+#
+# Hermes-doc parity: when an MCP server's ``initialize`` reply
+# advertises the ``resources`` capability, expose two helper tools
+# (``<server>__list_resources`` + ``<server>__read_resource``) so the
+# agent can enumerate + fetch resources without the server having to
+# wrap them as tools. Same for ``prompts``.
+
+
+def _serialize_resource(r: Any) -> dict[str, Any]:
+    """Lift an mcp.types.Resource into a JSON-safe dict."""
+    return {
+        "uri": getattr(r, "uri", None),
+        "name": getattr(r, "name", None),
+        "description": getattr(r, "description", None),
+        "mimeType": getattr(r, "mimeType", None),
+    }
+
+
+def _serialize_prompt(p: Any) -> dict[str, Any]:
+    return {
+        "name": getattr(p, "name", None),
+        "description": getattr(p, "description", None),
+        "arguments": [
+            {
+                "name": getattr(a, "name", None),
+                "description": getattr(a, "description", None),
+                "required": getattr(a, "required", False),
+            }
+            for a in (getattr(p, "arguments", None) or [])
+        ],
+    }
+
+
+class _MCPListResourcesTool(BaseTool):
+    """``<server>__list_resources`` — enumerate the server's resources."""
+
+    parallel_safe = True
+
+    def __init__(self, server_name: str, session: Any) -> None:
+        self._server_name = server_name
+        self._session = session
+
+    @property
+    def schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=f"{self._server_name}__list_resources",
+            description=(
+                f"List resources exposed by MCP server '{self._server_name}'. "
+                "Returns a JSON array of {uri, name, description, mimeType}."
+            ),
+            parameters={"type": "object", "properties": {}, "required": []},
+        )
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        try:
+            result = await self._session.list_resources()
+            payload = [_serialize_resource(r) for r in (getattr(result, "resources", None) or [])]
+            return ToolResult(
+                tool_call_id=call.id,
+                content=json.dumps(payload),
+                is_error=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"MCP utility error from {self._server_name}.list_resources: {type(e).__name__}: {e}",
+                is_error=True,
+            )
+
+
+class _MCPReadResourceTool(BaseTool):
+    """``<server>__read_resource(uri)`` — fetch one resource's contents."""
+
+    parallel_safe = True
+
+    def __init__(self, server_name: str, session: Any) -> None:
+        self._server_name = server_name
+        self._session = session
+
+    @property
+    def schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=f"{self._server_name}__read_resource",
+            description=f"Read a resource by URI from MCP server '{self._server_name}'.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "uri": {"type": "string", "description": "Resource URI"},
+                },
+                "required": ["uri"],
+            },
+        )
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        uri = call.arguments.get("uri")
+        if not uri:
+            return ToolResult(
+                tool_call_id=call.id,
+                content="Missing required argument 'uri'.",
+                is_error=True,
+            )
+        try:
+            result = await self._session.read_resource(uri)
+            contents = getattr(result, "contents", None) or []
+            payload = {
+                "contents": [
+                    {"uri": getattr(c, "uri", None), "text": getattr(c, "text", None)}
+                    for c in contents
+                ],
+            }
+            return ToolResult(
+                tool_call_id=call.id,
+                content=json.dumps(payload),
+                is_error=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"MCP utility error from {self._server_name}.read_resource: {type(e).__name__}: {e}",
+                is_error=True,
+            )
+
+
+class _MCPListPromptsTool(BaseTool):
+    """``<server>__list_prompts`` — enumerate prompts the server offers."""
+
+    parallel_safe = True
+
+    def __init__(self, server_name: str, session: Any) -> None:
+        self._server_name = server_name
+        self._session = session
+
+    @property
+    def schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=f"{self._server_name}__list_prompts",
+            description=(
+                f"List prompts exposed by MCP server '{self._server_name}'. "
+                "Returns a JSON array of {name, description, arguments}."
+            ),
+            parameters={"type": "object", "properties": {}, "required": []},
+        )
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        try:
+            result = await self._session.list_prompts()
+            payload = [_serialize_prompt(p) for p in (getattr(result, "prompts", None) or [])]
+            return ToolResult(
+                tool_call_id=call.id,
+                content=json.dumps(payload),
+                is_error=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"MCP utility error from {self._server_name}.list_prompts: {type(e).__name__}: {e}",
+                is_error=True,
+            )
+
+
+class _MCPGetPromptTool(BaseTool):
+    """``<server>__get_prompt(name, arguments?)`` — render a server prompt."""
+
+    parallel_safe = True
+
+    def __init__(self, server_name: str, session: Any) -> None:
+        self._server_name = server_name
+        self._session = session
+
+    @property
+    def schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=f"{self._server_name}__get_prompt",
+            description=f"Get a prompt by name from MCP server '{self._server_name}'.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Prompt name"},
+                    "arguments": {
+                        "type": "object",
+                        "description": "Prompt template arguments (optional).",
+                    },
+                },
+                "required": ["name"],
+            },
+        )
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        name = call.arguments.get("name")
+        if not name:
+            return ToolResult(
+                tool_call_id=call.id,
+                content="Missing required argument 'name'.",
+                is_error=True,
+            )
+        arguments = call.arguments.get("arguments")
+        try:
+            result = await self._session.get_prompt(name, arguments=arguments)
+            messages = getattr(result, "messages", None) or []
+            payload = {"messages": [m if isinstance(m, dict) else dict(m) for m in messages]}
+            return ToolResult(
+                tool_call_id=call.id,
+                content=json.dumps(payload, default=str),
+                is_error=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"MCP utility error from {self._server_name}.get_prompt: {type(e).__name__}: {e}",
+                is_error=True,
+            )
+
+
+def _build_utility_tools(
+    server_name: str,
+    session: Any,
+    capabilities: dict[str, Any] | None,
+) -> list[BaseTool]:
+    """Return MCP resource/prompt utility tools, capability-gated.
+
+    ``capabilities`` is the ``capabilities`` block of the MCP server's
+    ``initialize`` reply (or ``None`` / empty dict when nothing was
+    advertised). Each present capability adds 2 tools.
+    """
+    tools: list[BaseTool] = []
+    if not capabilities:
+        return tools
+    # An MCP capability is "advertised" when its key is present with a
+    # non-None value (the spec uses an empty object ``{}`` to mean
+    # "supported, no sub-features").
+    if capabilities.get("resources") is not None:
+        tools.append(_MCPListResourcesTool(server_name=server_name, session=session))
+        tools.append(_MCPReadResourceTool(server_name=server_name, session=session))
+    if capabilities.get("prompts") is not None:
+        tools.append(_MCPListPromptsTool(server_name=server_name, session=session))
+        tools.append(_MCPGetPromptTool(server_name=server_name, session=session))
+    return tools
 
 
 # ─── MCPConnection — one live server connection ───────────────────
@@ -455,6 +696,25 @@ class MCPConnection:
                     "MCP server '%s' filtered %d tool(s) per tools_allow/tools_deny",
                     self.config.name,
                     filtered,
+                )
+
+            # T1 — register Hermes-doc utility tools when the server
+            # advertises ``resources`` / ``prompts`` capabilities. The
+            # ServerCapabilities object exposes one attribute per
+            # capability; presence (non-None) means "supported."
+            try:
+                caps_obj = getattr(init_result, "capabilities", None)
+                cap_dict: dict[str, Any] = {
+                    "resources": getattr(caps_obj, "resources", None),
+                    "prompts": getattr(caps_obj, "prompts", None),
+                }
+                for utility in _build_utility_tools(self.config.name, session, cap_dict):
+                    self.tools.append(utility)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "MCP server '%s' utility-tool registration skipped (defensive)",
+                    self.config.name,
+                    exc_info=True,
                 )
             self.state = "connected"
             self.connect_time = time.monotonic()
