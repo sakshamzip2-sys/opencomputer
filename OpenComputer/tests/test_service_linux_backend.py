@@ -27,7 +27,11 @@ def test_install_writes_unit_with_restart_always(
         sysctl.return_value = (0, "active", "")
         result = _linux_systemd.install(profile="default", extra_args="gateway")
 
-    expected = fake_home / ".config" / "systemd" / "user" / "opencomputer.service"
+    # Multi-install hashing: unit filename is 'opencomputer.service' on canonical
+    # home and 'opencomputer-<hash>.service' on non-canonical homes (CI runners).
+    # Use the production helper _unit_filename so the test passes regardless.
+    unit_name = _linux_systemd._unit_filename("default")
+    expected = fake_home / ".config" / "systemd" / "user" / unit_name
     assert result.config_path == expected
     assert result.backend == "systemd"
     body = expected.read_text()
@@ -81,10 +85,12 @@ def test_status_reports_running_active_service(
     unit_path.parent.mkdir(parents=True, exist_ok=True)
     unit_path.write_text("(unit body)")
 
+    unit_name = _linux_systemd._unit_filename("default")
+
     def fake_systemctl(*args):
-        if args == ("is-enabled", "opencomputer.service"):
+        if args == ("is-enabled", unit_name):
             return (0, "enabled\n", "")
-        if args == ("is-active", "opencomputer.service"):
+        if args == ("is-active", unit_name):
             return (0, "active\n", "")
         if args[0] == "show":
             return (
@@ -136,7 +142,8 @@ def test_start_invokes_systemctl_start(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda *a: (calls.append(a) or (0, "", "")),
     )
     assert _linux_systemd.start() is True
-    assert ("start", "opencomputer.service") in calls
+    unit_name = _linux_systemd._unit_filename("default")
+    assert ("start", unit_name) in calls
 
 
 def test_stop_invokes_systemctl_stop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -148,7 +155,8 @@ def test_stop_invokes_systemctl_stop(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda *a: (calls.append(a) or (0, "", "")),
     )
     assert _linux_systemd.stop() is True
-    assert ("stop", "opencomputer.service") in calls
+    unit_name = _linux_systemd._unit_filename("default")
+    assert ("stop", unit_name) in calls
 
 
 def test_follow_logs_returns_journalctl_lines(monkeypatch: pytest.MonkeyPatch) -> None:
