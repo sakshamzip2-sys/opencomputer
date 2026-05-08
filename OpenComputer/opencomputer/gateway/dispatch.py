@@ -777,6 +777,33 @@ class Dispatch:
 
         session_id = self._session_id_for(event)
 
+        # ── Hermes-parity consent-reply text classification (Phase 3 P3.3) ──
+        # When the user has a pending approval prompt and replies with a
+        # bare "yes"/"no"/"approve"/"deny" (the Hermes-spec keywords),
+        # route the reply to ConsentGate.resolve_pending instead of the
+        # agent loop. This complements the existing button-based
+        # ``_handle_approval_click`` path — text replies are necessary on
+        # platforms without inline buttons (SMS, IRC, Email) and natural
+        # on platforms that support buttons (the user can type or tap).
+        if event.text and event.text.strip():
+            try:
+                consumed = await self._maybe_resolve_consent_text_reply(
+                    session_id=session_id, text=event.text,
+                )
+            except Exception:  # noqa: BLE001 — never let a consent-side
+                # bug starve the regular reply path.
+                logger.debug(
+                    "consent text-reply check failed for session=%s",
+                    session_id, exc_info=True,
+                )
+                consumed = False
+            if consumed:
+                # The reply has been delivered to the gate. The agent
+                # loop's request_approval coroutine will unblock and
+                # post the actual response. We return None so the
+                # adapter doesn't double-respond.
+                return None
+
         # 2026-05-08 — Hermes Doc-2 gateway hooks: session:start.
         # Fire only on first observation of this session id in this
         # process — subsequent dispatches for the same id are
@@ -1731,6 +1758,81 @@ class Dispatch:
         # otherwise a synchronous failure would leave a dangling entry
         # that a stale click could pick up against a future request.
         self._approval_tokens[token] = (session_id, claim.capability_id)
+        return True
+
+    async def _maybe_resolve_consent_text_reply(
+        self, *, session_id: str, text: str,
+    ) -> bool:
+        """Resolve a pending consent prompt with a bare-text user reply.
+
+        Hermes-parity for the "type yes/no in chat" flow. Returns True
+        iff the reply was consumed (i.e., a pending consent request was
+        resolved). False means the caller should continue to route the
+        message through the agent loop normally.
+
+        Logic:
+        - Look up the per-profile loop's :class:`ConsentGate`.
+        - If no pending request keyed on ``session_id`` exists, return
+          False immediately. The reply is ordinary user input.
+        - Classify ``text`` via :func:`opencomputer.security.approval_keywords.classify_reply`.
+          Strict single-token match — anything ambiguous (e.g.
+          ``"yes please"``) returns None and is treated as a normal
+          message.
+        - When approve/deny: resolve every pending key for this
+          session — there's typically only one but the registry shape
+          permits multiples. ``persist=False`` semantics mirror
+          "allow once" for approve and a plain deny for deny.
+
+        Never raises — callers see a False on any internal error.
+        """
+        from opencomputer.security.approval_keywords import classify_reply
+
+        # Find the gate via the same indirection as
+        # ``_handle_approval_click``: profile → router._loops → gate.
+        try:
+            profile = self._session_profiles.get(session_id, "default")
+            loop = self._router._loops.get(profile) if self._router else None
+            gate = getattr(loop, "_consent_gate", None)
+        except Exception:  # noqa: BLE001
+            return False
+        if gate is None:
+            return False
+
+        pending = getattr(gate, "_pending_requests", None)
+        if not pending:
+            return False
+        # Find any pending key for this session_id.
+        target_keys = [k for k in pending if k[0] == session_id]
+        if not target_keys:
+            return False
+
+        verdict = classify_reply(text)
+        if verdict is None:
+            return False
+
+        decision = verdict == "approve"
+        persist = False  # text replies always allow_once / deny — explicit
+        # "always" requires the button surface, not a single keyword.
+        for key in target_keys:
+            session, capability_id = key
+            try:
+                gate.resolve_pending(
+                    session_id=session,
+                    capability_id=capability_id,
+                    decision=decision,
+                    persist=persist,
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "consent text-reply resolve_pending failed for "
+                    "session=%s capability=%s",
+                    session, capability_id, exc_info=True,
+                )
+                continue
+            logger.info(
+                "consent text-reply: session=%s capability=%s verdict=%s",
+                session, capability_id, verdict,
+            )
         return True
 
     async def _handle_approval_click(self, verb: str, token: str) -> None:

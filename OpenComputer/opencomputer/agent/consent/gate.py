@@ -34,10 +34,14 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from opencomputer.agent.consent.audit import AuditEvent, AuditLogger
 from opencomputer.agent.consent.store import ConsentStore
 from plugin_sdk import CapabilityClaim, ConsentDecision, ConsentGrant, ConsentTier
+
+if TYPE_CHECKING:
+    from opencomputer.security.approvals import ApprovalsConfig as _ApprovalsConfig
 
 _log = logging.getLogger("opencomputer.agent.consent.gate")
 
@@ -73,6 +77,12 @@ def render_prompt_message(claim: CapabilityClaim, scope: str | None) -> str:
     return f"Allow {cap}? [y/N/always]"
 
 
+#: Sentinel value for ``request_approval(timeout_s=...)`` so we can
+#: distinguish "caller didn't pass anything" (resolve from config) vs
+#: "caller passed an explicit float" (honour their value).
+_TIMEOUT_FROM_CONFIG: float = -1.0
+
+
 class ConsentGate:
     def __init__(self, *, store: ConsentStore, audit: AuditLogger) -> None:
         self._store = store
@@ -91,6 +101,45 @@ class ConsentGate:
         # :meth:`request_approval` immediately auto-denies because there
         # is no surface to ask the user on.
         self._prompt_handler: PromptHandler | None = None
+        # Cached approvals config (mode + timeout). Lazy-loaded on first
+        # use to avoid hitting the YAML loader at construction time
+        # (gates are constructed early in CLI startup before the active
+        # profile is necessarily resolved). Refresh via
+        # :meth:`refresh_approvals_config` when the operator changes the
+        # config file.
+        self._approvals_config: _ApprovalsConfig | None = None
+
+    def _get_approvals_config(self) -> "_ApprovalsConfig":
+        """Lazy-load + cache the active profile's ``security.approvals`` config.
+
+        Imports inside the function so a circular-import on cold load
+        (security/__init__.py → approvals → profiles → ...) doesn't
+        break gate construction. Always returns a usable
+        :class:`ApprovalsConfig`; never raises.
+        """
+        if self._approvals_config is not None:
+            return self._approvals_config
+        try:
+            from opencomputer.security.approvals import (
+                ApprovalsConfig,
+                load_approvals_from_active_config,
+            )
+
+            self._approvals_config = load_approvals_from_active_config()
+            return self._approvals_config
+        except Exception:  # noqa: BLE001
+            from opencomputer.security.approvals import ApprovalsConfig
+
+            self._approvals_config = ApprovalsConfig()
+            return self._approvals_config
+
+    def refresh_approvals_config(self) -> None:
+        """Force a re-read of ``security.approvals`` config on next use.
+
+        Call this after the operator edits ``config.yaml`` so the gate
+        picks up the new mode/timeout without restarting the daemon.
+        """
+        self._approvals_config = None
 
     def set_prompt_handler(self, handler: PromptHandler | None) -> None:
         """Register (or clear) the channel-side prompt sender.
@@ -119,6 +168,30 @@ class ConsentGate:
         scope: str | None,
         session_id: str | None,
     ) -> ConsentDecision:
+        # Hermes-parity: when ``security.approvals.mode == off`` the
+        # operator has explicitly opted into auto-allow for all consent
+        # prompts (equivalent to per-session ``--auto``). Hardline
+        # patterns are NEVER affected by this — they fire at tool entry
+        # before the consent gate ever runs. Audit-log every auto-allow
+        # so the trail is intact.
+        approvals_cfg = self._get_approvals_config()
+        if approvals_cfg.auto_allow:
+            audit_id = self._audit.append(AuditEvent(
+                session_id=session_id, actor="hook",
+                action="check_auto_allow",
+                capability_id=claim.capability_id,
+                tier=int(claim.tier_required),
+                scope=scope,
+                decision="allow",
+                reason="security.approvals.mode=off (operator opt-in auto-allow)",
+            ))
+            return ConsentDecision(
+                allowed=True,
+                reason="security.approvals.mode=off (operator opt-in)",
+                tier_matched=claim.tier_required,
+                audit_event_id=audit_id,
+            )
+
         grant = None
         # 1. Exact scope match (if caller has a concrete scope)
         if scope is not None:
@@ -194,7 +267,7 @@ class ConsentGate:
         claim: CapabilityClaim,
         scope: str | None,
         session_id: str,
-        timeout_s: float = 300.0,
+        timeout_s: float = _TIMEOUT_FROM_CONFIG,
     ) -> ConsentDecision:
         """Block until a channel callback resolves the request, or timeout.
 
@@ -215,7 +288,40 @@ class ConsentGate:
         future ``check`` calls succeed immediately. ``allow_once``
         leaves the store untouched — the in-memory grant covers only
         this dispatch.
+
+        ``timeout_s`` defaults to the value of
+        ``security.approvals.timeout`` from the active profile's
+        ``config.yaml`` (300s if unset). Pass an explicit float to
+        override per call.
         """
+        # Resolve the config-driven default lazily so callers that don't
+        # pass a timeout get the operator's configured value.
+        if timeout_s == _TIMEOUT_FROM_CONFIG:
+            timeout_s = self._get_approvals_config().timeout_s
+
+        # Hermes-parity: ``mode == off`` skips the prompt entirely.
+        # Already handled in ``check`` for the no-grant path, but a
+        # caller that explicitly invokes ``request_approval`` (e.g.
+        # AgentLoop bypassing the cached check decision) still gets the
+        # honest auto-allow.
+        approvals_cfg = self._get_approvals_config()
+        if approvals_cfg.auto_allow:
+            audit_id = self._audit.append(AuditEvent(
+                session_id=session_id, actor="hook",
+                action="approval_auto_allow",
+                capability_id=claim.capability_id,
+                tier=int(claim.tier_required),
+                scope=scope,
+                decision="allow",
+                reason="security.approvals.mode=off (operator opt-in auto-allow)",
+            ))
+            return ConsentDecision(
+                allowed=True,
+                reason="security.approvals.mode=off (operator opt-in)",
+                tier_matched=claim.tier_required,
+                audit_event_id=audit_id,
+            )
+
         key = (session_id, claim.capability_id)
         event = asyncio.Event()
         # If a request is already pending for this key, the new caller
