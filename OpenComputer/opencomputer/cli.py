@@ -623,11 +623,18 @@ def _register_settings_hooks(cfg: Config) -> int:
                 h.command,
             )
             continue
+        # 2026-05-08 G4 — settings hooks for PRE_LLM_CALL register with
+        # fire_and_forget=False so they participate in
+        # engine.collect_inject_contexts (which runs ONLY blocking-eligible
+        # handlers). Plugin PRE_LLM_CALL handlers stay fire-and-forget by
+        # default; their existing semantics are preserved.
+        fire_and_forget = (event != HookEvent.PRE_LLM_CALL)
         hook_engine.register(
             HookSpec(
                 event=event,
                 handler=make_shell_hook_handler(h),
                 matcher=h.matcher,
+                fire_and_forget=fire_and_forget,
             )
         )
         registered += 1

@@ -3615,15 +3615,53 @@ class AgentLoop:
         from plugin_sdk.hooks import HookContext as _HookContext
         from plugin_sdk.hooks import HookEvent as _HookEvent
 
-        _hook_engine.fire_and_forget(
-            _HookContext(
+        _pre_llm_ctx = _HookContext(
+            event=_HookEvent.PRE_LLM_CALL,
+            session_id=session_id,
+            runtime=self._runtime,
+            messages=list(wire_messages),
+            model=model_name,
+        )
+
+        # 2026-05-08 G4 — Hermes Doc-2 shell-hook context injection.
+        # Run blocking-eligible PRE_LLM_CALL handlers (settings/shell hooks
+        # registered with fire_and_forget=False) and collect any
+        # ``inject_context`` strings they returned. Plugin handlers (default
+        # fire_and_forget=True) keep flowing through fire_and_forget below;
+        # their existing semantics are preserved.
+        try:
+            _injected_contexts = await _hook_engine.collect_inject_contexts(
+                _pre_llm_ctx
+            )
+        except Exception:  # noqa: BLE001 — fail-open: never wedge the loop
+            _injected_contexts = []
+        if _injected_contexts and wire_messages:
+            from dataclasses import replace as _dc_replace
+            _joined = "\n\n".join(_injected_contexts)
+            # Append to the last user message; if the last message isn't
+            # a user message (rare — e.g. a continuation after a tool
+            # result), append a new trailing user message instead.
+            _last = wire_messages[-1]
+            if _last.role == "user" and not _last.tool_calls and not _last.tool_call_id:
+                wire_messages = wire_messages[:-1] + [
+                    _dc_replace(_last, content=_last.content + "\n\n" + _joined)
+                ]
+            else:
+                from plugin_sdk.core import Message as _Message
+                wire_messages = wire_messages + [
+                    _Message(role="user", content=_joined)
+                ]
+            # Update the ctx we'll pass to fire_and_forget so plugin
+            # observers see the post-injection message list.
+            _pre_llm_ctx = _HookContext(
                 event=_HookEvent.PRE_LLM_CALL,
                 session_id=session_id,
                 runtime=self._runtime,
                 messages=list(wire_messages),
                 model=model_name,
             )
-        )
+
+        _hook_engine.fire_and_forget(_pre_llm_ctx)
 
         # Tier 2.A — /reasoning + /fast slash commands wrote flags to
         # runtime.custom; translate to provider kwargs. Only pass

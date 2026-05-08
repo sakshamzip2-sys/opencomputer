@@ -175,3 +175,60 @@ def test_stdout_approve_plus_context_works_on_pre_llm_call(tmp_path):
     assert decision is not None
     assert decision.decision == "pass"
     assert decision.inject_context == "branch=main"
+
+
+# ─── G4 engine integration — collect_inject_contexts ────────────────
+
+
+def test_collect_inject_contexts_runs_blocking_shell_hooks(tmp_path):
+    """End-to-end: shell hook with fire_and_forget=False participates in collect."""
+    from opencomputer.hooks.engine import engine
+    from plugin_sdk.hooks import HookSpec
+
+    script = _write_script(
+        tmp_path,
+        "cat - >/dev/null; printf '%s' '{\"context\":\"git: clean\"}'",
+    )
+    handler = make_shell_hook_handler(
+        HookCommandConfig(command=str(script), timeout_seconds=5.0)
+    )
+
+    engine.unregister_all()
+    engine.register(
+        HookSpec(
+            event=HookEvent.PRE_LLM_CALL,
+            handler=handler,
+            fire_and_forget=False,
+        )
+    )
+    try:
+        ctx = _ctx(HookEvent.PRE_LLM_CALL)
+        contexts = asyncio.run(engine.collect_inject_contexts(ctx))
+        assert contexts == ["git: clean"]
+    finally:
+        engine.unregister_all()
+
+
+def test_collect_inject_contexts_skips_fire_and_forget_handlers(tmp_path):
+    """Fire-and-forget handlers do NOT participate in collect (preserves
+    existing PRE_LLM_CALL semantics for plugin hooks)."""
+    from opencomputer.hooks.engine import engine
+    from plugin_sdk.hooks import HookDecision, HookSpec
+
+    async def slow_handler(ctx):
+        return HookDecision(decision="pass", inject_context="should-not-appear")
+
+    engine.unregister_all()
+    engine.register(
+        HookSpec(
+            event=HookEvent.PRE_LLM_CALL,
+            handler=slow_handler,
+            fire_and_forget=True,  # default
+        )
+    )
+    try:
+        ctx = _ctx(HookEvent.PRE_LLM_CALL)
+        contexts = asyncio.run(engine.collect_inject_contexts(ctx))
+        assert contexts == []
+    finally:
+        engine.unregister_all()

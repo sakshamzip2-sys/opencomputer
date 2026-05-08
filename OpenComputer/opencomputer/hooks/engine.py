@@ -128,6 +128,62 @@ class HookEngine:
             return decision
         return None
 
+    async def collect_inject_contexts(self, ctx: HookContext) -> list[str]:
+        """Run blocking-eligible handlers for ``ctx.event`` and return their
+        ``inject_context`` strings (in priority order).
+
+        Only handlers registered with ``fire_and_forget=False`` participate.
+        This is the load-bearing distinction: plugin PRE_LLM_CALL handlers
+        are fire-and-forget by default and continue to run that way via
+        the existing :meth:`fire_and_forget` path. Settings (shell) hooks
+        for PRE_LLM_CALL register with ``fire_and_forget=False`` so they
+        DO participate here.
+
+        Each handler's exception or timeout is swallowed (fail-open) so a
+        wedged hook never wedges the loop (CLAUDE.md §7).
+        """
+        from opencomputer.agent.hook_history import record_fire
+
+        contexts: list[str] = []
+        for _, _, spec in self._hooks.get(ctx.event, []):
+            if spec.fire_and_forget:
+                continue
+            if not self._matches(spec, ctx):
+                continue
+            handler_id = getattr(spec.handler, "__qualname__", repr(spec.handler))
+            try:
+                if spec.timeout_ms and spec.timeout_ms > 0:
+                    decision = await asyncio.wait_for(
+                        spec.handler(ctx),
+                        timeout=spec.timeout_ms / 1000.0,
+                    )
+                else:
+                    decision = await spec.handler(ctx)
+            except TimeoutError:
+                logger.warning(
+                    "collect_inject_contexts: handler %s timed out — skipping",
+                    handler_id,
+                )
+                record_fire(
+                    event=ctx.event.value,
+                    source_id=handler_id,
+                    ok=False,
+                    summary="timeout in collect_inject_contexts",
+                )
+                continue
+            except Exception as exc:  # noqa: BLE001 — fail-open
+                logger.exception("collect_inject_contexts: handler raised")
+                record_fire(
+                    event=ctx.event.value,
+                    source_id=handler_id,
+                    ok=False,
+                    summary=f"{type(exc).__name__}: {exc}",
+                )
+                continue
+            if decision is not None and decision.inject_context:
+                contexts.append(decision.inject_context)
+        return contexts
+
     def fire_and_forget(self, ctx: HookContext) -> None:
         """Fire a hook event without waiting. Used for PostToolUse logging etc.
 
