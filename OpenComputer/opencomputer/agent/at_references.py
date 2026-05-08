@@ -166,10 +166,7 @@ def is_path_blocked(path: Path, *, home: Path) -> bool:
     name = resolved.name
     if name in _BLOCKED_FILE_BASENAMES:
         return True
-    if any(fnmatch(name, g) for g in _BLOCKED_FILE_GLOBS):
-        return True
-
-    return False
+    return any(fnmatch(name, g) for g in _BLOCKED_FILE_GLOBS)
 
 
 # ─── expanders ────────────────────────────────────────────────────

@@ -56,7 +56,7 @@ def test_maybe_expand_processes_real_ref(tmp_path, monkeypatch):
     f.write_text("MARKER-DATA-XYZ\n")
 
     monkeypatch.chdir(tmp_path)
-    out = _maybe_expand_at_refs(f"check @file:data.txt for me")
+    out = _maybe_expand_at_refs("check @file:data.txt for me")
     assert "MARKER-DATA-XYZ" in out
     assert "Attached Context" in out
 

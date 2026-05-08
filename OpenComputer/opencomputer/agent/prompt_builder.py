@@ -296,16 +296,32 @@ class PromptBuilder:
     ) -> str:
         memory = _truncate_from_top(declarative_memory, memory_char_limit)
         profile = _truncate_from_top(user_profile, user_char_limit)
-        # Resolve personality NAME → BODY using built-ins + custom override.
-        # Empty name → empty body → template omits the section.
+        # Resolve personality NAME → BODY. OC design (preserves prior
+        # contract from PR-5):
+        #   * empty / unset       → no overlay
+        #   * "helpful" baseline  → no overlay (the default register
+        #                           lives in the base prompt itself;
+        #                           naming it doesn't add a directive)
+        #   * unknown name        → no overlay (typos no-op, do not
+        #                           silently fall back to a different
+        #                           register)
+        #   * custom override     → custom body (always wins, including
+        #                           overriding the helpful baseline)
+        #   * non-helpful builtin → built-in body
         personality_body = ""
         if personality:
-            from opencomputer.agent import personality as _personality
-            resolved = _personality.resolve(
-                personality,
-                custom=custom_personalities or {},
-            )
-            personality_body = resolved.body
+            requested = personality.strip().lower()
+            custom_dict = custom_personalities or {}
+            custom_body = custom_dict.get(requested)
+            if (
+                isinstance(custom_body, str)
+                and custom_body.strip()
+            ):
+                personality_body = custom_body.strip()
+            elif requested != "helpful":
+                from opencomputer.agent.personality.builtins import BUILTINS
+                if requested in BUILTINS:
+                    personality_body = BUILTINS[requested]
         ctx = PromptContext(
             cwd=os.getcwd(),
             user_home=str(Path.home()),

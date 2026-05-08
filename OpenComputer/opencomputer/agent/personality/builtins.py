@@ -18,9 +18,10 @@ BUILTINS: dict[str, str] = {
         "did. Show, don't tell."
     ),
     "technical": (
-        "Engineering register: precise terminology, named patterns, "
-        "explicit complexity claims. Cite line numbers when discussing "
-        "code. Prefer 'O(n log n)' to 'fast'. State invariants directly."
+        "Technical / engineering register: precise terminology, named "
+        "patterns, explicit complexity claims. Cite line numbers when "
+        "discussing code. Prefer 'O(n log n)' to 'fast'. State invariants "
+        "directly."
     ),
     "creative": (
         "Lateral register: propose multiple approaches, explore unusual "

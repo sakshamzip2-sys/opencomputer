@@ -159,7 +159,7 @@ def test_expand_git_clamped_to_10(tmp_path):
 
 def test_expand_git_in_real_repo(tmp_path):
     """End-to-end: real git repo with one commit."""
-    if not subprocess.run(["which", "git"], capture_output=True).returncode == 0:
+    if subprocess.run(["which", "git"], capture_output=True).returncode != 0:
         pytest.skip("git not on PATH")
 
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
