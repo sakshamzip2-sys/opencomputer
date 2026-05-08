@@ -15,6 +15,7 @@ Subcommands:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from datetime import UTC, datetime
@@ -107,9 +108,22 @@ def cmd_list(
 def cmd_test(
     event: str = typer.Argument(..., help="Hook event name (e.g. UserPromptSubmit)."),
     payload: str = typer.Option("{}", "--payload", help="JSON-encoded synthetic payload."),
-    execute: bool = typer.Option(False, "--execute", help="Actually dispatch (default: dry-run)."),
+    for_tool: str = typer.Option(
+        "",
+        "--for-tool",
+        help="Tool name for Pre/PostToolUse synthetic ctx.tool_call.name.",
+    ),
+    execute: bool = typer.Option(
+        False, "--execute", help="Actually dispatch (default: dry-run)."
+    ),
 ) -> None:
-    """Fire a synthetic hook event. Default is dry-run."""
+    """Fire a synthetic hook event. Default is dry-run.
+
+    With ``--execute``, builds a synthetic :class:`HookContext` and routes
+    through :func:`engine.fire_blocking` for events that can block
+    (PRE_TOOL_USE, PRE_LLM_CALL, PRE_GATEWAY_DISPATCH, PRE_APPROVAL_REQUEST)
+    or :func:`engine.fire` (fire-and-forget) for the rest.
+    """
     try:
         payload_obj = json.loads(payload)
     except json.JSONDecodeError as exc:
@@ -142,8 +156,74 @@ def cmd_test(
             _console.print(f"  [dim](handler enumeration unavailable: {exc})[/dim]")
         return
 
-    _console.print("[red]--execute is not yet implemented;[/red] use dry-run for now.")
-    raise typer.Exit(2)
+    # 2026-05-08 G1 — real dispatch. Build a synthetic HookContext and
+    # invoke the engine through the production code path.
+    try:
+        from opencomputer.hooks.engine import engine
+        from plugin_sdk.core import ToolCall
+        from plugin_sdk.hooks import HookContext, HookEvent
+
+        try:
+            event_enum = HookEvent(event)
+        except ValueError:
+            _console.print(
+                f"[red]Unknown event {event!r}[/red]; "
+                f"known events: {[e.value for e in HookEvent]}"
+            )
+            raise typer.Exit(1)
+
+        # ToolCall is built only when --for-tool is provided so non-tool
+        # events don't get a misleading stub call.
+        tool_call = None
+        if for_tool:
+            tool_call = ToolCall(
+                id="oc-hooks-test-synthetic",
+                name=for_tool,
+                arguments=payload_obj if isinstance(payload_obj, dict) else {},
+            )
+        ctx = HookContext(
+            event=event_enum,
+            session_id=str(payload_obj.get("session_id", "oc-hooks-test"))
+            if isinstance(payload_obj, dict)
+            else "oc-hooks-test",
+            tool_call=tool_call,
+        )
+
+        specs = engine._ordered_specs(event_enum)  # noqa: SLF001
+        if not specs:
+            _console.print(f"[dim]0 handlers registered for {event}[/dim]")
+            return
+
+        blocking_events = {
+            HookEvent.PRE_TOOL_USE,
+            HookEvent.PRE_LLM_CALL,
+            HookEvent.PRE_GATEWAY_DISPATCH,
+            HookEvent.PRE_APPROVAL_REQUEST,
+        }
+        if event_enum in blocking_events:
+            decision = asyncio.run(engine.fire_blocking(ctx))
+            if decision is None:
+                _console.print(
+                    f"[green]{event}[/green]: {len(specs)} handler(s) "
+                    f"ran, all returned pass"
+                )
+            else:
+                _console.print(
+                    f"[yellow]{event}[/yellow]: first non-pass decision "
+                    f"= [bold]{decision.decision}[/bold] "
+                    f"reason={decision.reason!r}"
+                )
+        else:
+            asyncio.run(engine.fire(ctx))
+            _console.print(
+                f"[green]{event}[/green]: dispatched to {len(specs)} "
+                f"fire-and-forget handler(s)"
+            )
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 — surface to user
+        _console.print(f"[red]CLI error during dispatch:[/red] {exc}")
+        raise typer.Exit(2) from exc
 
 
 @hooks_app.command("clear")

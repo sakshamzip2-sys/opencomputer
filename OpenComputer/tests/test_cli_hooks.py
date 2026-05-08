@@ -94,3 +94,77 @@ def test_revoke_dedups(tmp_path: Path, monkeypatch) -> None:
     runner.invoke(hooks_app, ["revoke", "plugin:x"])
     data = json.loads((tmp_path / "settings.local.json").read_text())
     assert data["disabled_hooks"].count("plugin:x") == 1
+
+
+# ─── G1 tests — `oc hooks test --execute` (Hermes Doc-2 residuals) ─────
+
+
+def test_hooks_test_execute_invokes_registered_handler(monkeypatch, tmp_path) -> None:
+    """`oc hooks test PreToolUse --execute` actually fires registered handlers.
+
+    Verifies the engine dispatch path is exercised, not just enumerated.
+    Touches the global engine singleton — clears registrations before/after
+    so we don't bleed state to neighbouring tests.
+    """
+    monkeypatch.setenv("OC_PROFILE_DIR", str(tmp_path))
+    from opencomputer.hooks.engine import engine
+    from plugin_sdk.hooks import HookDecision, HookEvent, HookSpec
+
+    captured: list[str] = []
+
+    async def my_handler(ctx):
+        captured.append(ctx.event.value)
+        return HookDecision(decision="pass")
+
+    engine.unregister_all()
+    engine.register(HookSpec(event=HookEvent.PRE_TOOL_USE, handler=my_handler))
+    try:
+        r = runner.invoke(
+            hooks_app,
+            ["test", "PreToolUse", "--execute", "--for-tool", "Read"],
+        )
+        assert r.exit_code == 0, r.output
+        assert "PreToolUse" in r.output
+        assert captured == ["PreToolUse"]
+    finally:
+        engine.unregister_all()
+
+
+def test_hooks_test_execute_no_handlers_returns_zero(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("OC_PROFILE_DIR", str(tmp_path))
+    from opencomputer.hooks.engine import engine
+
+    engine.unregister_all()
+    try:
+        r = runner.invoke(hooks_app, ["test", "PostToolUse", "--execute"])
+        assert r.exit_code == 0
+        out = r.output.lower()
+        assert "0 handlers" in out or "no handlers" in out
+    finally:
+        engine.unregister_all()
+
+
+def test_hooks_test_execute_handler_raises_is_caught(monkeypatch, tmp_path) -> None:
+    """Engine swallows handler exceptions; CLI should not crash."""
+    monkeypatch.setenv("OC_PROFILE_DIR", str(tmp_path))
+    from opencomputer.hooks.engine import engine
+    from plugin_sdk.hooks import HookEvent, HookSpec
+
+    async def boom(ctx):
+        raise RuntimeError("boom")
+
+    engine.unregister_all()
+    engine.register(HookSpec(event=HookEvent.PRE_TOOL_USE, handler=boom))
+    try:
+        r = runner.invoke(
+            hooks_app,
+            ["test", "PreToolUse", "--execute", "--for-tool", "Read"],
+        )
+        assert r.exit_code == 0, r.output
+    finally:
+        engine.unregister_all()
+
+
+def test_hooks_test_execute_unknown_event_errors() -> None:
+    r = runner.invoke(hooks_app, ["test", "BogusEventName", "--execute"])
+    assert r.exit_code != 0
