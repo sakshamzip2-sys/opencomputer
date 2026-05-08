@@ -4214,7 +4214,58 @@ def steer(
     )
 
 
-@app.command(name="acp")
+acp_app = typer.Typer(
+    name="acp",
+    help="Agent Client Protocol — serve over stdio or emit agent.json.",
+    no_args_is_help=False,
+)
+
+
+def _run_acp_stdio() -> None:
+    """Block on the ACP JSON-RPC server reading stdin/writing stdout."""
+    import asyncio as _asyncio
+
+    from opencomputer.acp import ACPServer
+
+    server = ACPServer()
+    _asyncio.run(server.serve_stdio())
+
+
+def _build_agent_manifest() -> dict:
+    """T63 — Hermes-doc agent.json shape for ACP IDE registration.
+
+    IDEs (Zed, VS Code ACP extension, Cursor, Claude Desktop) read
+    this manifest to discover the agent and learn how to spawn it.
+    Capability flags mirror what ``ACPServer._handle_initialize``
+    advertises so static config and runtime advertisement agree.
+    """
+    from opencomputer import __version__ as _oc_version
+    from opencomputer.acp.server import ACP_PROTOCOL_VERSION
+
+    return {
+        "name": "opencomputer",
+        "displayName": "OpenComputer",
+        "version": _oc_version,
+        "protocolVersion": ACP_PROTOCOL_VERSION,
+        "transport": "stdio",
+        "command": "oc",
+        "args": ["acp", "serve"],
+        "capabilities": {
+            "streaming": True,
+            "cancellation": True,
+            "toolset": True,
+        },
+    }
+
+
+@acp_app.callback(invoke_without_command=True)
+def acp_main(ctx: typer.Context) -> None:
+    """Bare ``oc acp`` (no subcommand) defaults to serve — backwards compat."""
+    if ctx.invoked_subcommand is None:
+        _run_acp_stdio()
+
+
+@acp_app.command(name="serve")
 def acp_serve() -> None:
     """Start the Agent Client Protocol server over stdio.
 
@@ -4224,12 +4275,34 @@ def acp_serve() -> None:
     PR-D of ~/.claude/plans/replicated-purring-dewdrop.md.
     See docs/acp.md for IDE setup instructions.
     """
-    import asyncio as _asyncio
+    _run_acp_stdio()
 
-    from opencomputer.acp import ACPServer
 
-    server = ACPServer()
-    _asyncio.run(server.serve_stdio())
+@acp_app.command(name="manifest")
+def acp_manifest(
+    write: str = typer.Option(
+        "",
+        "--write",
+        "-w",
+        help="Write the manifest to this path instead of stdout.",
+    ),
+) -> None:
+    """Emit ``agent.json`` for IDE registration (T63 — Hermes-doc parity)."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    payload = _build_agent_manifest()
+    rendered = _json.dumps(payload, indent=2)
+    if write:
+        target = _Path(write).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(rendered + "\n")
+        typer.echo(f"wrote {target}")
+        return
+    typer.echo(rendered)
+
+
+app.add_typer(acp_app, name="acp")
 
 
 @app.command()
