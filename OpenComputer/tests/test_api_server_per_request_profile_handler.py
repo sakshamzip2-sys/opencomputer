@@ -154,7 +154,7 @@ async def test_concurrent_requests_dont_leak_profile(adapter_mod):
         if not all(seen.values()):
             try:
                 await asyncio.wait_for(barrier.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
         else:
             barrier.set()

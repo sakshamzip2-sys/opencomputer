@@ -467,7 +467,7 @@ class ACPServer:
 
         try:
             result = await asyncio.wait_for(fut, timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._outbound_futures.pop(request_id, None)
             return {"outcome": "deny", "reason": "timeout"}
         except _ACPRemoteError as exc:

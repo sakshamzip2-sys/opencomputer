@@ -529,9 +529,8 @@ def build_server() -> FastMCP:
         """
         import time as _time
 
-        from plugin_sdk.consent import ConsentGrant, ConsentTier
-
         from opencomputer.agent.consent.store import ConsentStore
+        from plugin_sdk.consent import ConsentGrant, ConsentTier
 
         decision_norm = (decision or "").strip().lower()
         if decision_norm not in ("allow", "deny"):
