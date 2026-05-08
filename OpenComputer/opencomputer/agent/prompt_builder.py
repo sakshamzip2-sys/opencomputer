@@ -66,7 +66,11 @@ def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> 
     # Files to check, in priority order. We collect ALL that exist, not
     # just the highest-priority one — multiple files may coexist (e.g.
     # both CLAUDE.md and AGENTS.md in the same repo).
-    target_names = ("OPENCOMPUTER.md", "CLAUDE.md", "AGENTS.md")
+    # Hermes v2 parity, gap B (2026-05-08): `.cursorrules` is the
+    # Cursor IDE convention; subdir hints already scan it, and now the
+    # startup loader does too. Last-priority — explicit OC files come
+    # first when they exist alongside.
+    target_names = ("OPENCOMPUTER.md", "CLAUDE.md", "AGENTS.md", ".cursorrules")
 
     found: list[tuple[str, str]] = []
     seen_paths: set[Path] = set()
