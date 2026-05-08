@@ -910,24 +910,125 @@ def _handle_skills_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
 
 
 def _handle_cron_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
-    """``/cron`` — list active cron jobs (best-effort)."""
+    """``/cron [list|add|pause|resume|run|remove|help] [args...]`` — Hermes parity.
+
+    Bare ``/cron`` lists jobs (back-compat with the prior read-only
+    handler; the prior code referenced a nonexistent
+    ``opencomputer.cron.store.CronStore`` and silently failed — fixed
+    here). Subcommands wrap :mod:`opencomputer.cron.jobs` directly.
+    """
+    sub = args[0].lower() if args else "list"
+    rest = args[1:]
+
     try:
-        from opencomputer.agent.config import _home
-        from opencomputer.cron.store import CronStore
-        store = CronStore(_home() / "cron" / "cron.json")
-        jobs = store.list()
+        from opencomputer.cron.jobs import (
+            create_job,
+            list_jobs,
+            pause_job,
+            remove_job,
+            resume_job,
+            trigger_job,
+        )
+        from opencomputer.cron.threats import CronThreatBlocked
     except Exception as e:  # noqa: BLE001
         ctx.console.print(f"[yellow]Cron unavailable: {e}[/yellow]")
         return SlashResult(handled=True)
-    if not jobs:
-        ctx.console.print("[dim]No cron jobs configured.[/dim]")
+
+    if sub == "list":
+        jobs = list_jobs(include_disabled=("all" in rest or "-a" in rest))
+        if not jobs:
+            ctx.console.print(
+                "[dim]No cron jobs configured. Use `/cron add <schedule> <prompt>`.[/dim]"
+            )
+            return SlashResult(handled=True)
+        lines = [f"## Cron jobs ({len(jobs)})\n"]
+        for j in jobs:
+            target = (
+                j.get("skill")
+                or (",".join(j["skills"]) if j.get("skills") else None)
+                or (j.get("prompt") or "")[:40]
+            )
+            lines.append(
+                f"  {j['id'][:8]} {j['name'][:30]:<30} "
+                f"{j.get('schedule_display', ''):<18} {target}"
+            )
+        ctx.console.print("\n".join(lines))
         return SlashResult(handled=True)
-    lines = [f"## Cron jobs ({len(jobs)})\n"]
-    for j in jobs:
-        name = getattr(j, "name", None) or getattr(j, "id", "?")
-        sched = getattr(j, "schedule", "?")
-        lines.append(f"  {name} — {sched}")
-    ctx.console.print("\n".join(lines))
+
+    if sub == "add":
+        if not rest:
+            ctx.console.print(
+                '[yellow]Usage: /cron add "<schedule>" "<prompt>" [--skill name][/yellow]'
+            )
+            return SlashResult(handled=True)
+        sched = rest[0]
+        skills: list[str] = []
+        prompt_parts: list[str] = []
+        i = 1
+        while i < len(rest):
+            tok = rest[i]
+            if tok == "--skill" and i + 1 < len(rest):
+                skills.append(rest[i + 1])
+                i += 2
+            else:
+                prompt_parts.append(tok)
+                i += 1
+        prompt_text = " ".join(prompt_parts).strip() or None
+        if not prompt_text and not skills:
+            ctx.console.print("[yellow]Need either a prompt or --skill name[/yellow]")
+            return SlashResult(handled=True)
+        try:
+            kwargs: dict = {"schedule": sched}
+            if skills and len(skills) == 1:
+                kwargs["skill"] = skills[0]
+            elif skills:
+                kwargs["skills"] = skills
+            else:
+                kwargs["prompt"] = prompt_text
+            job = create_job(**kwargs)
+        except CronThreatBlocked as e:
+            ctx.console.print(f"[red]Blocked: {e}[/red]")
+            return SlashResult(handled=True)
+        except ValueError as e:
+            ctx.console.print(f"[red]Error: {e}[/red]")
+            return SlashResult(handled=True)
+        ctx.console.print(
+            f"[green]✓[/green] Created cron {job['id']} ({job['schedule_display']})"
+        )
+        return SlashResult(handled=True)
+
+    if sub in ("pause", "resume", "run", "remove"):
+        if not rest:
+            ctx.console.print(f"[yellow]Usage: /cron {sub} <job_id>[/yellow]")
+            return SlashResult(handled=True)
+        job_id = rest[0]
+        if sub == "pause":
+            result = pause_job(job_id)
+        elif sub == "resume":
+            result = resume_job(job_id)
+        elif sub == "run":
+            result = trigger_job(job_id)
+        else:  # remove
+            result = remove_job(job_id)
+        if not result:
+            ctx.console.print(f"[red]Cron job {job_id!r} not found[/red]")
+            return SlashResult(handled=True)
+        ctx.console.print(f"[green]✓[/green] /cron {sub} {job_id}")
+        return SlashResult(handled=True)
+
+    if sub in ("help", "?"):
+        ctx.console.print(
+            "## /cron commands\n"
+            "  /cron list [all]                    — show jobs (default)\n"
+            "  /cron add <schedule> <prompt>       — create with prompt\n"
+            "  /cron add <schedule> --skill X      — create with skill\n"
+            "  /cron pause|resume|run|remove <id>  — manage by id\n"
+        )
+        return SlashResult(handled=True)
+
+    ctx.console.print(
+        f"[yellow]Unknown /cron subcommand: {sub!r}. Try /cron help.[/yellow]"
+    )
     return SlashResult(handled=True)
 
 

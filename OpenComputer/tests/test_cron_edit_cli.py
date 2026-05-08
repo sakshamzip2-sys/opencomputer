@@ -1,8 +1,6 @@
 """Hermes parity: oc cron edit — change schedule/prompt/skill on existing jobs."""
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 from typer.testing import CliRunner
 
@@ -12,10 +10,10 @@ from opencomputer.cron.jobs import create_job, get_job
 runner = CliRunner()
 
 
-@pytest.fixture
-def isolated_home(tmp_path):
-    with patch("opencomputer.agent.config._home", return_value=tmp_path):
-        yield tmp_path
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    yield tmp_path
 
 
 def test_edit_schedule(isolated_home):

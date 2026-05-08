@@ -1,17 +1,15 @@
 """Hermes parity: multiple skills per cron job."""
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
 from opencomputer.cron.jobs import create_job
 
 
-@pytest.fixture
-def isolated_home(tmp_path):
-    with patch("opencomputer.agent.config._home", return_value=tmp_path):
-        yield tmp_path
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    yield tmp_path
 
 
 def test_create_with_skills_list_persists(isolated_home):
