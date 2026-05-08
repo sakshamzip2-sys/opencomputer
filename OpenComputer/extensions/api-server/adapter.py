@@ -1032,9 +1032,15 @@ class APIServerAdapter(BaseChannelAdapter):
         # Hermes parity (2026-05-08) — Open-WebUI multi-profile model
         # discovery via GET /v1/models. Auth-required.
         app.router.add_get("/v1/models", self._handle_list_models)
-        # Hermes parity (2026-05-08) — opt-in Responses-API stub.
-        # Returns 404 unless API_SERVER_API_TYPE=responses.
+        # Hermes parity G3 (2026-05-09) — Responses API default-on.
         app.router.add_post("/v1/responses", self._handle_responses_stub)
+        # Hermes parity G4 (2026-05-09) — GET / DELETE individual response.
+        app.router.add_get(
+            "/v1/responses/{response_id}", self._handle_response_get
+        )
+        app.router.add_delete(
+            "/v1/responses/{response_id}", self._handle_response_delete
+        )
         # Wave 6.A — Hermes-port (0a15dbdc4) — POST /v1/runs/{id}/stop
         app.router.add_post("/v1/runs/{run_id}/stop", self._handle_run_stop)
         # T59 — Hermes-doc Runs API. Create / status / SSE-events.
@@ -1200,6 +1206,63 @@ class APIServerAdapter(BaseChannelAdapter):
             self._responses_store.popitem(last=False)
         if conversation:
             self._named_conversations[conversation] = response_id
+
+    # ─── G4 — GET + DELETE /v1/responses/{id} (Hermes parity 2026-05-09) ──
+
+    async def _handle_response_get(
+        self, request: web.Request
+    ) -> web.Response:
+        """Hermes parity G4: GET /v1/responses/{id} — fetch stored response."""
+        err = self._auth_check(request)
+        if err is not None:
+            return err
+        response_id = request.match_info.get("response_id", "")
+        entry = self._responses_store.get(response_id)
+        if entry is None:
+            return web.json_response(
+                {"error": {"message": f"response {response_id!r} not found"}},
+                status=404,
+            )
+        payload = {
+            "id": response_id,
+            "object": "response",
+            "status": "completed",
+            "input": entry.get("user", ""),
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": entry.get("agent", "")},
+                    ],
+                },
+            ],
+            "previous_response_id": entry.get("previous_response_id"),
+            "conversation": entry.get("conversation"),
+        }
+        return web.json_response(payload)
+
+    async def _handle_response_delete(
+        self, request: web.Request
+    ) -> web.Response:
+        """Hermes parity G4: DELETE /v1/responses/{id} — remove stored response."""
+        err = self._auth_check(request)
+        if err is not None:
+            return err
+        response_id = request.match_info.get("response_id", "")
+        if response_id not in self._responses_store:
+            return web.json_response(
+                {"error": {"message": f"response {response_id!r} not found"}},
+                status=404,
+            )
+        del self._responses_store[response_id]
+        return web.json_response(
+            {
+                "id": response_id,
+                "deleted": True,
+                "object": "response.deleted",
+            }
+        )
 
     def _build_chained_input(
         self,
