@@ -27,17 +27,15 @@ from typing import Any
 from opencomputer.agent.slash_commands_impl.agents_cmd import AgentsCommand
 from opencomputer.agent.slash_commands_impl.auto_cmd import AutoCommand, YoloCommand
 from opencomputer.agent.slash_commands_impl.background_cmd import BackgroundCommand
-from opencomputer.agent.slash_commands_impl.busy_cmd import BusyCommand
-from opencomputer.agent.slash_commands_impl.details_cmd import DetailsCommand
-from opencomputer.agent.slash_commands_impl.mouse_cmd import MouseCommand
-from opencomputer.agent.slash_commands_impl.rollback_cmd import RollbackCommand
 from opencomputer.agent.slash_commands_impl.bell_cmd import BellCommand
 from opencomputer.agent.slash_commands_impl.branch_cmd import BranchCommand
 from opencomputer.agent.slash_commands_impl.btw_cmd import BtwCommand
+from opencomputer.agent.slash_commands_impl.busy_cmd import BusyCommand
 from opencomputer.agent.slash_commands_impl.capabilities_cmd import (
     CapabilitiesCommand,
 )
 from opencomputer.agent.slash_commands_impl.copy_cmd import CopyCommand
+from opencomputer.agent.slash_commands_impl.details_cmd import DetailsCommand
 from opencomputer.agent.slash_commands_impl.display_toggles_cmd import (
     StatusbarCommand,
     VerboseCommand,
@@ -46,6 +44,7 @@ from opencomputer.agent.slash_commands_impl.fast_cmd import FastCommand
 from opencomputer.agent.slash_commands_impl.footer_cmd import FooterCommand
 from opencomputer.agent.slash_commands_impl.history_cmd import HistoryCommand
 from opencomputer.agent.slash_commands_impl.mode_cmd import ModeCommand
+from opencomputer.agent.slash_commands_impl.mouse_cmd import MouseCommand
 from opencomputer.agent.slash_commands_impl.persona_mode_cmd import (
     PersonaModeCommand,
 )
@@ -64,6 +63,7 @@ from opencomputer.agent.slash_commands_impl.queue_mode_cmd import (
     QueueModeCommand,
 )
 from opencomputer.agent.slash_commands_impl.reasoning_cmd import ReasoningCommand
+from opencomputer.agent.slash_commands_impl.rollback_cmd import RollbackCommand
 from opencomputer.agent.slash_commands_impl.save_cmd import SaveCommand
 from opencomputer.agent.slash_commands_impl.scrape import ScrapeCommand
 from opencomputer.agent.slash_commands_impl.sethome_cmd import SethomeCommand

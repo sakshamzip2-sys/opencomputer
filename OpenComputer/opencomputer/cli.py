@@ -1001,10 +1001,11 @@ def _run_chat_session(
     # the registry so user aliases / exec quick wins can shadow slash.
     if "_quick_commands" not in runtime.custom:
         try:
-            from opencomputer.agent.config_store import config_file_path
-            from opencomputer.agent.quick_commands import QuickCommands as _QC
+            from opencomputer.agent.quick_commands import (
+                QuickCommands as _QuickCommands,
+            )
 
-            runtime.custom["_quick_commands"] = _QC.load(config_file_path())
+            runtime.custom["_quick_commands"] = _QuickCommands.load(config_file_path())
         except Exception:  # noqa: BLE001
             # Quick commands are optional — never crash session start.
             pass
