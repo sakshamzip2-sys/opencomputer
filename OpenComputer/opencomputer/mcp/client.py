@@ -459,7 +459,7 @@ class MCPConnection:
     config: MCPServerConfig
     session: ClientSession | None = None
     exit_stack: AsyncExitStack | None = None
-    tools: list[MCPTool] = field(default_factory=list)
+    tools: list[BaseTool] = field(default_factory=list)
     #: Lifecycle state used by :meth:`MCPManager.status_snapshot` (IV.4).
     #: Starts ``disconnected``; flips to ``connected`` after a successful
     #: ``connect()``, ``error`` on failure, and back to ``disconnected``
@@ -477,6 +477,16 @@ class MCPConnection:
     reconnect_attempts: int = 0
     #: T3 — start of current 60s reconnect window (monotonic).
     reconnect_window_start: float | None = None
+    #: Hermes-doc dynamic tool discovery — fired when the server pushes
+    #: ``notifications/tools/list_changed`` and reconciliation has updated
+    #: ``self.tools``. Callback receives ``(added: list[BaseTool],
+    #: removed: list[BaseTool])`` so the registry can sync. ``MCPManager``
+    #: wires this in :meth:`MCPManager.connect_all`. Synchronous — must
+    #: not block on the asyncio loop.
+    tools_changed_callback: Any = None
+    #: T3 (dynamic discovery) — true while reconciliation is in flight to
+    #: prevent re-entrant reconcile races on rapid notification bursts.
+    _reconcile_in_flight: bool = False
 
     def _osv_pre_flight(self, *, fail_closed: bool) -> str | None:
         """Run the OSV pre-flight check; return an error string if blocking.
@@ -639,7 +649,11 @@ class MCPConnection:
                 )
 
             session = await self.exit_stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
+                ClientSession(
+                    read_stream,
+                    write_stream,
+                    message_handler=self._handle_session_message,
+                )
             )
             init_result = await session.initialize()
             # Capture server version from the InitializeResult.serverInfo block
@@ -731,6 +745,105 @@ class MCPConnection:
             self.last_error = f"{type(e).__name__}: {e}"
             await self.disconnect(_preserve_error_state=True)
             return False
+
+    async def _handle_session_message(self, message: Any) -> None:
+        """Receive notifications from the MCP server.
+
+        Hermes-doc dynamic discovery: when a ``notifications/tools/list_changed``
+        arrives, schedule a tool-list reconciliation in the background.
+        Other notifications (logging/progress/etc.) are ignored — the
+        SDK's default handler already logs them at debug level.
+        """
+        # Lazy-import to avoid a hard dep on mcp.types in unit tests that
+        # mock MCPConnection's internals.
+        try:
+            from mcp.types import (
+                ServerNotification,
+                ToolListChangedNotification,
+            )
+        except Exception:  # noqa: BLE001
+            return
+        # Notifications arrive wrapped in a ServerNotification union; the
+        # inner ``root`` carries the typed notification.
+        notif = getattr(message, "root", message)
+        if isinstance(message, ServerNotification):
+            notif = message.root
+        if isinstance(notif, ToolListChangedNotification):
+            if self._reconcile_in_flight:
+                return
+            self._reconcile_in_flight = True
+            asyncio.create_task(self._reconcile_tools_safely())
+
+    async def _reconcile_tools_safely(self) -> None:
+        try:
+            await self._reconcile_tools()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "MCP server '%s' reconcile failed: %s",
+                self.config.name,
+                exc,
+            )
+        finally:
+            self._reconcile_in_flight = False
+
+    async def _reconcile_tools(self) -> None:
+        """Re-fetch tools from the live session and diff against ``self.tools``.
+
+        Notifies ``tools_changed_callback`` with ``(added, removed)`` so
+        the registry can sync. Internal tools and per-server filter
+        rules are honored.
+        """
+        if self.session is None:
+            return
+        tool_list = await self.session.list_tools()
+        # Build the desired tool set with the same filter rules as connect().
+        new_tools_by_name: dict[str, BaseTool] = {}
+        allow = self.config.tools_allow
+        deny = self.config.tools_deny or ()
+        for t in tool_list.tools:
+            if _tool_is_internal(t):
+                continue
+            if allow is not None and t.name not in allow:
+                continue
+            if t.name in deny:
+                continue
+            new_tools_by_name[t.name] = MCPTool(
+                server_name=self.config.name,
+                tool_name=t.name,
+                description=t.description or "",
+                parameters=t.inputSchema or {"type": "object", "properties": {}},
+                session=self.session,
+            )
+        old_tools_by_name = {tool.tool_name: tool for tool in self.tools if isinstance(tool, MCPTool)}
+        added_names = set(new_tools_by_name) - set(old_tools_by_name)
+        removed_names = set(old_tools_by_name) - set(new_tools_by_name)
+        added = [new_tools_by_name[n] for n in added_names]
+        removed = [old_tools_by_name[n] for n in removed_names]
+        # Update self.tools — preserve utility tools (resources/prompts)
+        # because list_changed only signals tool-list changes.
+        utility_tools = [t for t in self.tools if not isinstance(t, MCPTool)]
+        # Keep tools that survived (in old + new) plus the new ones.
+        survivors = [
+            old_tools_by_name[n] for n in (set(old_tools_by_name) & set(new_tools_by_name))
+        ]
+        self.tools = survivors + added + utility_tools
+        if added or removed:
+            logger.info(
+                "MCP server '%s' tools/list_changed: +%d -%d",
+                self.config.name,
+                len(added),
+                len(removed),
+            )
+            cb = self.tools_changed_callback
+            if cb is not None:
+                try:
+                    cb(self, added, removed)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "MCP server '%s' tools_changed_callback failed: %s",
+                        self.config.name,
+                        exc,
+                    )
 
     async def disconnect(self, *, _preserve_error_state: bool = False) -> None:
         if self.exit_stack is not None:
@@ -857,7 +970,10 @@ class MCPManager:
         for cfg in servers:
             if not cfg.enabled:
                 continue
-            conn = MCPConnection(config=cfg)
+            conn = MCPConnection(
+                config=cfg,
+                tools_changed_callback=self._on_connection_tools_changed,
+            )
             ok = await conn.connect(
                 osv_check_enabled=osv_check_enabled,
                 osv_check_fail_closed=osv_check_fail_closed,
@@ -872,6 +988,37 @@ class MCPManager:
                 except ValueError:
                     logger.warning("MCP tool name collision (skipped): %s", tool.schema.name)
         return total
+
+    def _on_connection_tools_changed(
+        self,
+        conn: MCPConnection,
+        added: list[BaseTool],
+        removed: list[BaseTool],
+    ) -> None:
+        """Sync the tool registry when an MCP server pushes tools/list_changed.
+
+        Called synchronously from the connection's reconcile loop. Both
+        registry mutations (unregister + register) are best-effort;
+        unknown-name unregister is logged but not raised.
+        """
+        for tool in removed:
+            try:
+                self.tool_registry.unregister(tool.schema.name)
+            except KeyError:
+                logger.debug(
+                    "MCP server '%s' removed tool %s already absent from registry",
+                    conn.config.name,
+                    tool.schema.name,
+                )
+        for tool in added:
+            try:
+                self.tool_registry.register(tool)
+            except ValueError:
+                logger.warning(
+                    "MCP server '%s' tool name collision on dynamic add: %s",
+                    conn.config.name,
+                    tool.schema.name,
+                )
 
     async def shutdown(self) -> None:
         """Disconnect all servers and remove their tools from the registry."""
