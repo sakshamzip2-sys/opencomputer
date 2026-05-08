@@ -147,17 +147,34 @@ def test_start_kickstart(monkeypatch: pytest.MonkeyPatch) -> None:
     assert any(c[0] == "kickstart" for c in calls)
 
 
-def test_stop_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stop_uses_bootout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Updated 2026-05-08 (PR #489): stop() now uses ``launchctl bootout``
+    instead of ``launchctl kill SIGTERM``. With KeepAlive=dict, a clean
+    SIGTERM exit can still cause launchd to re-bootstrap; bootout
+    atomically removes the service from the domain so KeepAlive can't
+    trigger. See _macos_launchd.stop() docstring for the full rationale."""
     from opencomputer.service import _macos_launchd
 
     monkeypatch.setattr(_macos_launchd, "_uid", lambda: 501)
     calls: list = []
-    monkeypatch.setattr(
-        _macos_launchd, "_launchctl",
-        lambda *a: (calls.append(a) or (0, "", "")),
-    )
+
+    def fake_launchctl(*args: str) -> tuple[int, str, str]:
+        calls.append(args)
+        # First call is "print" (state probe); return rc=0 (loaded).
+        if args[0] == "print":
+            return (0, "state = running", "")
+        return (0, "", "")
+
+    monkeypatch.setattr(_macos_launchd, "_launchctl", fake_launchctl)
     assert _macos_launchd.stop() is True
-    assert any(c[0] == "kill" for c in calls)
+    cmds = [c[0] for c in calls]
+    assert "bootout" in cmds, f"stop() must use bootout (not kill); called: {cmds}"
+    # Regression guard: stop() MUST NOT use raw `kill SIGTERM` because
+    # KeepAlive=dict can re-bootstrap on a clean exit if the service
+    # is still in launchd's domain.
+    for c in calls:
+        if c and c[0] == "kill":
+            raise AssertionError(f"stop() regressed to launchctl kill: {c}")
 
 
 def test_follow_logs_tails_stdout_log(

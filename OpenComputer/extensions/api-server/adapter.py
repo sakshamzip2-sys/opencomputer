@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -64,6 +65,9 @@ oc_response_to_openai = _of.oc_response_to_openai
 openai_to_oc_messages = _of.openai_to_oc_messages
 streaming_delta_chunk = _of.streaming_delta_chunk
 streaming_final_chunk = _of.streaming_final_chunk
+# Hermes parity (2026-05-08): multi-profile model name + Responses-API stub.
+list_models = _of.list_models
+oc_response_to_responses_api = _of.oc_response_to_responses_api
 
 logger = logging.getLogger("opencomputer.ext.api_server")
 
@@ -380,9 +384,115 @@ class APIServerAdapter(BaseChannelAdapter):
         app.router.add_post(
             "/v1/chat/completions", self._handle_openai_chat_completions
         )
+        # Hermes parity (2026-05-08) — Open-WebUI multi-profile model
+        # discovery via GET /v1/models. Auth-required.
+        app.router.add_get("/v1/models", self._handle_list_models)
+        # Hermes parity (2026-05-08) — opt-in Responses-API stub.
+        # Returns 404 unless API_SERVER_API_TYPE=responses.
+        app.router.add_post("/v1/responses", self._handle_responses_stub)
         # Wave 6.A — Hermes-port (0a15dbdc4) — POST /v1/runs/{id}/stop
         app.router.add_post("/v1/runs/{run_id}/stop", self._handle_run_stop)
         return app
+
+    async def _handle_list_models(self, request: web.Request) -> web.Response:
+        """Hermes parity (2026-05-08): advertise active profile as model id.
+
+        GET /v1/models returns the OpenAI-compatible models list, advertising
+        the active OC profile name so Open-WebUI sees per-profile servers as
+        distinct models. Override via API_SERVER_MODEL_NAME env var.
+        """
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth[len("Bearer "):] != self._token:
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "Invalid API key",
+                        "type": "invalid_request_error",
+                    }
+                },
+                status=401,
+            )
+        # Resolve active profile lazily — fall back to "default" if not set.
+        profile = (
+            os.environ.get("OPENCOMPUTER_PROFILE")
+            or os.environ.get("OC_PROFILE")
+            or "default"
+        )
+        env_override = os.environ.get("API_SERVER_MODEL_NAME")
+        return web.json_response(
+            list_models(profile_name=profile, env_override=env_override)
+        )
+
+    async def _handle_responses_stub(self, request: web.Request) -> web.Response:
+        """Hermes parity (2026-05-08): opt-in Responses-API stub.
+
+        Gated on ``API_SERVER_API_TYPE=responses`` env var; returns 404
+        otherwise. Stub builds a Responses-shaped envelope from the
+        chat-completions response. Full SSE event semantics
+        (``function_call``, ``function_call_output``) deferred to demand.
+        """
+        if os.environ.get("API_SERVER_API_TYPE", "").lower() != "responses":
+            return web.json_response(
+                {"error": {"message": "Responses API disabled. Set API_SERVER_API_TYPE=responses to enable."}},
+                status=404,
+            )
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth[len("Bearer "):] != self._token:
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "Invalid API key",
+                        "type": "invalid_request_error",
+                    }
+                },
+                status=401,
+            )
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response(
+                {"error": {"message": "invalid json body"}}, status=400
+            )
+
+        # Responses-API uses `input` (str) instead of chat-completions `messages`.
+        # Accept both for ergonomics.
+        if isinstance(payload.get("input"), str):
+            user_text = payload["input"]
+        else:
+            messages = payload.get("messages", [])
+            if not isinstance(messages, list) or not messages:
+                return web.json_response(
+                    {"error": {"message": "input or messages required"}},
+                    status=400,
+                )
+            oc_messages = openai_to_oc_messages(messages)
+            user_text = "\n".join(
+                f"[{m['role']}] {m['content']}" for m in oc_messages
+            )
+
+        if self._handler is None:
+            return web.json_response(
+                {"error": {"message": "handler not configured"}}, status=503
+            )
+
+        session_id = payload.get("session_id", "")
+        try:
+            agent_text = await self._handler(user_text, session_id) or ""
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("api-server: responses-stub handler raised")
+            return web.json_response(
+                {"error": {"message": f"agent error: {exc}"}}, status=500
+            )
+
+        model = payload.get("model") or "opencomputer"
+        return web.json_response(
+            oc_response_to_responses_api(
+                agent_text,
+                model=model,
+                input_tokens=len(user_text.split()),
+                output_tokens=len(agent_text.split()),
+            )
+        )
 
     async def connect(self) -> None:
         """Start the aiohttp server bound to host:port."""

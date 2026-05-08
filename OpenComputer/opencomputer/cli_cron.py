@@ -113,14 +113,29 @@ def cron_create(
     notify: Annotated[str | None, typer.Option("--notify", help="Where to deliver: 'telegram', 'discord', 'telegram:<chat_id>', or omit.")] = None,
     auto: Annotated[bool, typer.Option("--auto", help="Disable plan_mode (USE WITH CAUTION — destructive tools run unguarded).")] = False,
     yolo: Annotated[bool, typer.Option("--yolo", help="[deprecated] Alias for --auto.")] = False,
+    no_agent: Annotated[bool, typer.Option("--no-agent", help="Run a script instead of invoking the agent (Hermes parity).")] = False,
+    script: Annotated[str | None, typer.Option("--script", help="Script name (relative to ~/.opencomputer/<profile>/scripts/). Required with --no-agent.")] = None,
+    script_timeout: Annotated[int | None, typer.Option("--script-timeout", help="Per-job override of cron.script_timeout_seconds (default 120).")] = None,
 ) -> None:
     """Create a new scheduled job.
 
-    At least one of --skill or --prompt is required. --skill is preferred
-    because skills are vetted code; --prompt requires a stricter threat scan.
+    At least one of --skill or --prompt is required (or --no-agent --script).
+    --skill is preferred because skills are vetted code; --prompt requires a
+    stricter threat scan.
+
+    Hermes parity: --no-agent --script <name> runs a shell script under
+    ~/.opencomputer/<profile>/scripts/ with no LLM invocation. Empty stdout
+    = silent tick (watchdog pattern); non-zero exit = error notification.
     """
-    if not skill and not prompt:
-        typer.secho("Error: must supply --skill or --prompt", fg="red", err=True)
+    if no_agent:
+        if not script:
+            typer.secho("Error: --no-agent requires --script <name>", fg="red", err=True)
+            raise typer.Exit(2)
+        if skill or prompt:
+            typer.secho("Error: --no-agent is exclusive with --skill/--prompt", fg="red", err=True)
+            raise typer.Exit(2)
+    elif not skill and not prompt:
+        typer.secho("Error: must supply --skill or --prompt (or --no-agent --script)", fg="red", err=True)
         raise typer.Exit(2)
 
     if yolo:
@@ -137,6 +152,9 @@ def cron_create(
             repeat=repeat,
             notify=notify,
             plan_mode=not auto,
+            no_agent=no_agent,
+            script=script,
+            script_timeout_seconds=script_timeout,
         )
     except CronThreatBlocked as exc:
         typer.secho(f"Blocked by threat scan: {exc}", fg="red", err=True)
@@ -150,6 +168,9 @@ def cron_create(
     typer.echo(f"  next_run_at: {job.get('next_run_at') or 'n/a'}")
     typer.echo(f"  notify:      {job.get('notify') or 'local'}")
     typer.echo(f"  plan_mode:   {job.get('plan_mode')}")
+    if job.get("no_agent"):
+        typer.echo(f"  script:      {job.get('script')}")
+        typer.echo("  no_agent:    True")
 
 
 # ---------------------------------------------------------------------------

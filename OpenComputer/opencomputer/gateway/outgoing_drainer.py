@@ -58,6 +58,11 @@ class OutgoingDrainer:
         self.adapters = adapters_by_platform
         self.poll_interval = poll_interval_seconds
         self._stop = asyncio.Event()
+        # Exponential backoff state — protects errors.log from being filled
+        # with 100k+ identical tracebacks when the drain pass fails on every
+        # tick (observed: 33h-stuck daemon, 2026-05-07). Cap at ~5 min.
+        self._consecutive_errors = 0
+        self._max_backoff_seconds = 300.0
 
     def stop(self) -> None:
         self._stop.set()
@@ -83,11 +88,31 @@ class OutgoingDrainer:
         while not self._stop.is_set():
             try:
                 await self._drain_once()
+                if self._consecutive_errors:
+                    logger.info(
+                        "outgoing drainer: recovered after %d failed pass(es)",
+                        self._consecutive_errors,
+                    )
+                self._consecutive_errors = 0
+                wait_for = self.poll_interval
             except Exception:  # noqa: BLE001 — never break the loop
-                logger.exception("outgoing drainer: drain pass raised; continuing")
+                self._consecutive_errors += 1
+                # Log full traceback only on first, 10th, 100th, 1000th... so
+                # errors.log doesn't fill up at 1Hz on a wedged DB path.
+                n = self._consecutive_errors
+                if n == 1 or (n & (n - 1)) == 0:  # powers of 2 only
+                    logger.exception(
+                        "outgoing drainer: drain pass raised "
+                        "(consecutive_errors=%d); continuing", n,
+                    )
+                # Exponential backoff: 1s, 2s, 4s, ... up to 5min cap.
+                wait_for = min(
+                    self.poll_interval * (2 ** min(n - 1, 9)),
+                    self._max_backoff_seconds,
+                )
             try:
                 await asyncio.wait_for(
-                    self._stop.wait(), timeout=self.poll_interval,
+                    self._stop.wait(), timeout=wait_for,
                 )
             except TimeoutError:
                 continue

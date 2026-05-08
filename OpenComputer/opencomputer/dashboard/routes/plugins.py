@@ -96,6 +96,19 @@ async def disable_plugin(name: str) -> dict:
     return {"ok": True, "name": name, "enabled": False}
 
 
+@router.post("/plugins/dashboard/install")
+async def install_dashboard_plugin(body: InstallBody) -> dict:
+    """Install a dashboard-side plugin (drops into dashboard/plugins/<name>/).
+
+    Same backend as plugins/install — the distinction is purely UI: this
+    endpoint is what dashboard's PluginsPage calls when the user picks
+    'install dashboard plugin' (vs. agent plugin). Routes the source to
+    the same installer; downstream sorting by manifest.kind decides
+    which UI tab the new plugin shows in.
+    """
+    return await install_plugin(body)
+
+
 @router.post("/plugins/install")
 async def install_plugin(body: InstallBody) -> dict:
     """Install a plugin from a URL, git url, or local path.

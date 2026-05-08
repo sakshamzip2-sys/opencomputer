@@ -28,6 +28,7 @@
   ],
   "extensions/coding-harness/plugin.py": [
     "opencomputer.agent.bg_notify",
+    "opencomputer.agent.config",
     "opencomputer.agent.injection_providers"
   ],
   "extensions/coding-harness/tools/background.py": [

@@ -988,6 +988,47 @@ def _run_chat_session(
     )
     DelegateTool.set_runtime(runtime)
 
+    # Wire the /background slash factory — same shape as the delegate
+    # factory but spawns a fresh AgentLoop per submitted job, ensuring
+    # "no shared history" between foreground and background turns.
+    from opencomputer.agent.background_jobs import (
+        BackgroundJob as _BgJob,
+    )
+    from opencomputer.agent.background_jobs import (
+        get_default_registry as _bg_get_default_registry,
+    )
+
+    _bg_registry = _bg_get_default_registry()
+    _bg_registry.set_factory(
+        lambda: AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
+    )
+
+    # Push-on-completion for the CLI: print a Rich panel when a background
+    # job finishes. Runs from the worker thread, so we marshal the print
+    # call through ``console.print`` (which is thread-safe per Rich's
+    # internal lock). Failure is swallowed by the registry — the worker
+    # thread can never be torn down by a notifier exception.
+    def _cli_bg_completion_notifier(job: _BgJob) -> None:  # noqa: D401
+        head = job.prompt.splitlines()[0] if job.prompt else ""
+        if len(head) > 60:
+            head = head[:57] + "…"
+        if job.status == "complete":
+            body = job.result or "(empty response)"
+            title = f"[green]✓ background {job.job_id}[/green] · {head}"
+        else:  # error
+            body = job.error or "(no detail)"
+            title = f"[red]✗ background {job.job_id}[/red] · {head}"
+        try:
+            from rich.panel import Panel
+
+            console.print(
+                Panel.fit(body, title=title, border_style="dim"),
+            )
+        except Exception:  # noqa: BLE001 — fall back to plain print if Rich misbehaves
+            console.print(f"\n{title}\n{body}\n")
+
+    _bg_registry.set_completion_notifier(_cli_bg_completion_notifier)
+
     # social-traces post-task subscriber (Phase 9 production wiring).
     # Opt-in via ``oc traces enable``; only wires when the on-disk
     # flag is set. Failure-isolated — chat must work even if the
@@ -1931,6 +1972,21 @@ def chat(
             "recent, or `pick` for an interactive picker of the last 10."
         ),
     ),
+    cont: bool = typer.Option(
+        False,
+        "--continue",
+        "-c",
+        help="Resume the most recent session (alias for ``--resume last``).",
+    ),
+    query: str = typer.Option(
+        "",
+        "--query",
+        "-q",
+        help=(
+            "Run a single non-interactive turn with this prompt and exit "
+            "(alias for ``oc oneshot``)."
+        ),
+    ),
     plan: bool = typer.Option(
         False, "--plan", help="Plan mode — agent describes actions, refuses destructive tools."
     ),
@@ -1957,13 +2013,28 @@ def chat(
 
     ``oc chat`` starts fresh. ``oc chat resume`` opens the polished
     picker. ``oc chat <id-prefix>`` resumes that session directly.
+    ``oc chat -c`` resumes the most recent session.
+    ``oc chat -q "..."`` runs one non-interactive turn (Hermes-parity alias
+    for ``oc oneshot``).
     """
+    # ``-q "..."`` short-circuits the REPL — delegate to the shared oneshot
+    # helper. Hermes-parity alias for ``hermes chat -q``. Done before any
+    # session-resume munging. Calling the typer-decorated ``oneshot`` directly
+    # would pass OptionInfo objects in place of defaults, so we route through
+    # the shared helper that both ``oc oneshot`` and this branch use.
+    if query:
+        _run_oneshot_turn(query, plan=plan)
+        return
     if action == "resume":
         # Delegate to the picker flow.
         resume = "pick"
     elif action:
         # Treat as a session-id (or prefix) to resume directly.
         resume = action
+    # ``-c`` / ``--continue`` is sugar for ``--resume last`` and only applies
+    # when no explicit resume target was given.
+    if cont and not resume:
+        resume = "last"
     if yolo:
         _emit_yolo_deprecation()
         auto = True
@@ -2004,35 +2075,20 @@ def kanban(ctx: typer.Context) -> None:
     raise typer.Exit(rc or 0)
 
 
-@app.command(name="oneshot")
-def oneshot(
-    prompt: str = typer.Argument(
-        ..., help="The single user message to send. Wrap in quotes for multi-word prompts.",
-    ),
-    model: str = typer.Option(
-        "", "--model", "-m",
-        help="Override the configured model for this run.",
-    ),
-    provider_name: str = typer.Option(
-        "", "--provider", "-p",
-        help="Override the configured provider (anthropic, openai, openrouter, ...).",
-    ),
-    plan: bool = typer.Option(
-        False, "--plan", help="Plan mode (read-only / refuses destructive tools).",
-    ),
+def _run_oneshot_turn(
+    prompt: str,
+    *,
+    model: str = "",
+    provider_name: str = "",
+    plan: bool = False,
 ) -> None:
-    """Run a single agent turn non-interactively, print the response, exit.
+    """Single-turn non-interactive run shared by ``oc oneshot`` and ``oc chat -q``.
 
-    Wave 6.A — Hermes-port (7c8c031f6 ``hermes -z``). Non-interactive
-    one-shot mode for shell scripts, CI hooks, and quick "ask the agent"
-    invocations. Differs from ``oc chat`` by NOT entering the REPL: one
-    user turn, full agent loop (compaction + tools + hooks), final
-    assistant text printed to stdout, exit.
-
-    Examples:
-        oc oneshot "what's in the README?"
-        oc oneshot "summarise this file" --model anthropic:claude-opus-4-7
-        oc oneshot "describe a kanban board" --plan
+    Same flow Hermes uses for ``hermes -z``: configure → discover → run one
+    turn → drain fire-and-forget tasks → print final assistant text → exit.
+    Extracted so ``oc chat -q "..."`` can reuse this path without going through
+    Typer's command machinery (calling typer-decorated functions directly
+    would pass OptionInfo objects in place of defaults).
     """
     import asyncio as _asyncio
 
@@ -2123,6 +2179,41 @@ def oneshot(
         typer.echo(text)
 
 
+@app.command(name="oneshot")
+def oneshot(
+    prompt: str = typer.Argument(
+        ..., help="The single user message to send. Wrap in quotes for multi-word prompts.",
+    ),
+    model: str = typer.Option(
+        "", "--model", "-m",
+        help="Override the configured model for this run.",
+    ),
+    provider_name: str = typer.Option(
+        "", "--provider", "-p",
+        help="Override the configured provider (anthropic, openai, openrouter, ...).",
+    ),
+    plan: bool = typer.Option(
+        False, "--plan", help="Plan mode (read-only / refuses destructive tools).",
+    ),
+) -> None:
+    """Run a single agent turn non-interactively, print the response, exit.
+
+    Wave 6.A — Hermes-port (7c8c031f6 ``hermes -z``). Non-interactive
+    one-shot mode for shell scripts, CI hooks, and quick "ask the agent"
+    invocations. Differs from ``oc chat`` by NOT entering the REPL: one
+    user turn, full agent loop (compaction + tools + hooks), final
+    assistant text printed to stdout, exit.
+
+    Examples:
+        oc oneshot "what's in the README?"
+        oc oneshot "summarise this file" --model anthropic:claude-opus-4-7
+        oc oneshot "describe a kanban board" --plan
+
+    See also: ``oc chat -q "..."`` is a Hermes-parity alias for this command.
+    """
+    _run_oneshot_turn(prompt, model=model, provider_name=provider_name, plan=plan)
+
+
 @app.command()
 def code(
     path: str | None = typer.Argument(
@@ -2175,6 +2266,16 @@ def code(
         "--keep-worktree",
         help="Do NOT remove the worktree on exit (when --worktree is set).",
     ),
+    worktree_include_dry_run: bool = typer.Option(
+        False,
+        "--worktree-include-dry-run",
+        help=(
+            "When --worktree is set: read .worktreeinclude, print what "
+            "would be copied, then exit without entering chat. Useful "
+            "for verifying include patterns before committing to a "
+            "session."
+        ),
+    ),
 ) -> None:
     """Start the coding agent in [path] (or cwd). Snappy entry-point.
 
@@ -2182,7 +2283,9 @@ def code(
     MultiEdit, TodoWrite, RunTests etc. are enabled by default. Use
     ``--plan`` for read-only discovery; ``--yolo`` to skip per-action
     confirmation prompts. Use ``--worktree`` to isolate this session in a
-    fresh git worktree (auto-removed on exit).
+    fresh git worktree (auto-removed on exit). Pair with
+    ``--worktree-include-dry-run`` to preview ``.worktreeinclude``
+    behaviour without starting chat.
     """
     if path:
         target = os.path.abspath(path)
@@ -2197,12 +2300,27 @@ def code(
         auto = True
     permission_mode = _derive_permission_mode(plan=plan, auto=auto, accept_edits=accept_edits)
 
+    if worktree_include_dry_run and not worktree:
+        console.print(
+            "[bold red]error:[/bold red] --worktree-include-dry-run requires --worktree."
+        )
+        raise typer.Exit(code=2)
+
     if worktree:
         from opencomputer.worktree import session_worktree
 
-        with session_worktree(Path.cwd(), keep=keep_worktree) as wt:
+        with session_worktree(
+            Path.cwd(),
+            keep=keep_worktree,
+            include_dry_run=worktree_include_dry_run,
+        ) as wt:
             if wt != Path.cwd().parent:  # i.e. the worktree was actually created
                 console.print(f"[dim]worktree: {wt}[/dim]")
+            if worktree_include_dry_run:
+                console.print(
+                    "[green]dry-run complete — exiting without starting chat.[/green]"
+                )
+                return
             _run_chat_session(
                 resume=resume,
                 plan=plan,
@@ -2359,6 +2477,13 @@ def wire(
     provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
     DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
+
+    # Wire /background slash factory (parity with chat path).
+    from opencomputer.agent.background_jobs import (
+        get_default_registry as _bg_wire_registry,
+    )
+
+    _bg_wire_registry().set_factory(lambda: AgentLoop(provider=provider, config=cfg))
 
     server = WireServer(loop=loop, host=host, port=port)
     console.print(f"[bold cyan]OpenComputer wire server[/bold cyan] — ws://{host}:{port}")
@@ -2866,6 +2991,85 @@ def agents_list() -> None:
         console.print(f"[dim]  source: {tpl.source_path}[/dim]")
 
 
+# Hermes parity (2026-05-08): runtime visibility into in-flight subagents.
+# The existing `agents list` shows TEMPLATES (definition-time); these
+# commands show RUNNING / HISTORY (runtime state) backed by SubagentRegistry.
+@agents_app.command("running", help="Show currently-running subagents (Hermes parity).")
+def agents_running() -> None:
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    from rich.table import Table
+
+    from opencomputer.agent.subagent_registry import SubagentRegistry
+
+    rows = SubagentRegistry.instance().list_running()
+    if not rows:
+        console.print("[dim](no running subagents)[/dim]")
+        return
+    t = Table(title="Running subagents")
+    t.add_column("agent_id", style="cyan", no_wrap=True)
+    t.add_column("parent")
+    t.add_column("goal")
+    t.add_column("elapsed", style="yellow")
+    t.add_column("current tool")
+    now = _dt.now(UTC)
+    for r in rows:
+        elapsed = (now - r.started_at).total_seconds()
+        t.add_row(
+            r.agent_id,
+            r.parent_id or "(root)",
+            r.goal[:60],
+            f"{elapsed:.0f}s ago",
+            r.current_tool or "—",
+        )
+    console.print(t)
+
+
+@agents_app.command("kill", help="Cancel a running subagent (Hermes parity).")
+def agents_kill(
+    agent_id: str = typer.Argument(..., help="Subagent id (from `agents running`)."),
+) -> None:
+    from opencomputer.agent.subagent_registry import SubagentRegistry
+
+    ok = SubagentRegistry.instance().kill(agent_id)
+    if ok:
+        typer.secho(f"killed {agent_id}", fg="green")
+    else:
+        typer.secho(f"no running agent {agent_id!r}", fg="yellow", err=True)
+        raise typer.Exit(1)
+
+
+@agents_app.command("history", help="Show last N completed/failed/killed subagent runs.")
+def agents_history(
+    limit: int = typer.Option(20, "--limit", "-n", help="Max rows (default 20)."),
+) -> None:
+    from rich.table import Table
+
+    from opencomputer.agent.subagent_registry import SubagentRegistry
+
+    rows = SubagentRegistry.instance().history(limit=limit)
+    if not rows:
+        console.print("[dim](no completed subagents)[/dim]")
+        return
+    t = Table(title=f"Subagent history (last {len(rows)})")
+    t.add_column("agent_id", style="cyan", no_wrap=True)
+    t.add_column("state")
+    t.add_column("goal")
+    t.add_column("ended", style="yellow")
+    t.add_column("error")
+    for r in rows:
+        ended = r.ended_at.strftime("%H:%M:%S") if r.ended_at else "—"
+        t.add_row(
+            r.agent_id,
+            r.state,
+            r.goal[:60],
+            ended,
+            (r.error or "")[:40],
+        )
+    console.print(t)
+
+
 config_app = typer.Typer(
     name="config", help="Manage OpenComputer config (~/.opencomputer/config.yaml)"
 )
@@ -2955,6 +3159,13 @@ app.add_typer(consent_app, name="consent")
 # user-facing surface matches the docs (`oc dashboard`, `oc tui`).
 app.add_typer(dashboard_app, name="dashboard")
 app.add_typer(tui_app, name="tui")
+
+# 2026-05-08 — `.worktreeinclude` + checkpoint hygiene CLIs.
+from opencomputer.cli_checkpoints import checkpoints_app  # noqa: E402
+from opencomputer.cli_worktrees import worktrees_app  # noqa: E402
+
+app.add_typer(checkpoints_app, name="checkpoints")
+app.add_typer(worktrees_app, name="worktrees")
 
 # ─── service (cross-platform always-on daemon) ────────────────────────
 service_app = typer.Typer(
@@ -3058,12 +3269,34 @@ def _service_start() -> None:
 
 @service_app.command("stop")
 def _service_stop() -> None:
-    """OS-level stop (does not uninstall the service)."""
+    """OS-level stop (does not uninstall the service).
+
+    On macOS, this runs ``launchctl bootout`` to remove the service
+    from launchd's domain — the only way KeepAlive can't trigger
+    a respawn. Use ``oc service start`` to bring it back online.
+    """
     from opencomputer.service.factory import get_backend
     backend = get_backend()
     ok = backend.stop()
     typer.echo("stopped" if ok else "stop failed")
     raise typer.Exit(0 if ok else 1)
+
+
+@service_app.command("restart")
+def _service_restart() -> None:
+    """Stop + start the service, in one command.
+
+    Useful after editing config or reinstalling the package — the
+    long-running daemon picks up the new code.
+    """
+    from opencomputer.service.factory import get_backend
+    backend = get_backend()
+    stopped = backend.stop()
+    if not stopped:
+        typer.echo("stop failed (continuing to start anyway)")
+    started = backend.start()
+    typer.echo("restarted" if started else "restart failed: start step failed")
+    raise typer.Exit(0 if started else 1)
 
 
 @service_app.command("logs")
@@ -3076,6 +3309,85 @@ def _service_logs(
     backend = get_backend()
     for line in backend.follow_logs(lines=n, follow=follow):
         typer.echo(line)
+
+
+@service_app.command("preflight")
+def _service_preflight(
+    force_takeover: bool = typer.Option(
+        False,
+        "--force-takeover",
+        help="Terminate any competing channel-handler processes "
+        "(SIGTERM with 5s grace, then SIGKILL). Writes audit log to "
+        "<profile_home>/audit/competitor-takeover.jsonl.",
+    ),
+) -> None:
+    """Channel ownership preflight check.
+
+    OpenComputer is the SOLE channel handler — no other process should
+    be polling the same Telegram bot, hosting the same Discord adapter,
+    etc. (See ``user_oc_owns_all_channels.md`` directive 2026-05-08.)
+
+    This command scans the process table for known competitor patterns:
+
+    \b
+      - Claude Code's `--channels plugin:telegram` bun bridge
+      - Hermes daemon (`hermes_cli main gateway run`)
+      - Rival `oc gateway` instance
+
+    Default behavior is read-only: lists competitors and exits non-zero.
+    Pass ``--force-takeover`` to terminate them.
+    """
+    from opencomputer.agent.config import _home
+    from opencomputer.gateway.preflight import (
+        ChannelOwnershipConflict,
+        default_audit_path,
+        detect_competitors,
+        run_preflight,
+    )
+
+    if not force_takeover:
+        # Read-only path: list and exit.
+        competitors = detect_competitors()
+        if not competitors:
+            typer.echo("✓ no competitors detected — OC is the sole channel handler")
+            raise typer.Exit(0)
+        typer.echo(
+            f"⚠ {len(competitors)} competitor process(es) detected:"
+        )
+        for c in competitors:
+            typer.echo(f"  - {c.display()}")
+        typer.echo("")
+        typer.echo("To terminate them: oc service preflight --force-takeover")
+        typer.echo(
+            "Or set ``gateway.takeover_on_start: true`` in your config.yaml "
+            "for automatic takeover on every gateway start."
+        )
+        raise typer.Exit(1)
+
+    # Takeover path.
+    audit_path = default_audit_path(_home())
+    try:
+        survivors = run_preflight(
+            takeover_on_start=True,
+            grace_seconds=5.0,
+            audit_log=audit_path,
+        )
+    except ChannelOwnershipConflict as e:
+        # Shouldn't happen with takeover_on_start=True, but defensive.
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2) from e
+
+    if survivors:
+        typer.echo(
+            f"⚠ takeover incomplete — {len(survivors)} competitor(s) refused "
+            f"to die:",
+            err=True,
+        )
+        for c in survivors:
+            typer.echo(f"  - {c.display()}", err=True)
+        typer.echo(f"  Audit log: {audit_path}")
+        raise typer.Exit(1)
+    typer.echo(f"✓ takeover complete — audit at {audit_path}")
 
 
 @service_app.command("doctor")

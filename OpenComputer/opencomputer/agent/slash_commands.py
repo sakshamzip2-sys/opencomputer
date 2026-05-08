@@ -26,6 +26,7 @@ from typing import Any
 
 from opencomputer.agent.slash_commands_impl.agents_cmd import AgentsCommand
 from opencomputer.agent.slash_commands_impl.auto_cmd import AutoCommand, YoloCommand
+from opencomputer.agent.slash_commands_impl.background_cmd import BackgroundCommand
 from opencomputer.agent.slash_commands_impl.bell_cmd import BellCommand
 from opencomputer.agent.slash_commands_impl.branch_cmd import BranchCommand
 from opencomputer.agent.slash_commands_impl.btw_cmd import BtwCommand
@@ -119,6 +120,9 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # 2026-05-06 — Phase 2 (S1 from OpenClaw deep-comparison) — inbound
     # queue mode override. /queue-mode [followup|interrupt|status].
     QueueModeCommand,
+    # 2026-05-08 — Hermes-parity /background <prompt>. Spawns isolated
+    # AgentLoop on a daemon thread, captures result for `/background show`.
+    BackgroundCommand,
     # 2026-05-03 — Phase 2 v0 outcome-aware learning policy commands.
     PolicyChangesCommand,
     PolicyApproveCommand,

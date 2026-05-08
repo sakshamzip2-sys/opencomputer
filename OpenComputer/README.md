@@ -22,13 +22,15 @@ Pre-alpha (0.1.0). Core architecture stable. 114 tests passing. Adding features 
 
 Requires **Python 3.13+**.
 
-**One-line install** (macOS / Linux / Termux):
+**One-line install** (macOS / Linux / Termux — on Windows, see the note below):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sakshamzip2-sys/opencomputer/main/scripts/install.sh | bash
 ```
 
 The installer auto-detects pipx / pip --user / venv and falls back gracefully on PEP 668 ("externally managed") Python distributions. Pass `--dry-run` to preview, `--dev` to install from a local clone in editable mode, `--use-pipx` to force pipx.
+
+**Windows users:** OpenComputer runs natively on Windows (Python 3.13+) via `pip install opencomputer`. The interactive `oc model`, clipboard, screenshot, and PowerShell-run paths all work on Windows out of the box. If you'd rather use the curl install script, run it inside WSL2 (`wsl --install` from PowerShell, then run the install command above inside the WSL shell). All the same paths apply — keep the install on the Linux side of the WSL filesystem (`~/`) for performance.
 
 **Manual install:**
 

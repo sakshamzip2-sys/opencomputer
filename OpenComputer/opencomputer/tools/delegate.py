@@ -189,13 +189,68 @@ class DelegateTool(BaseTool):
                             "Defaults to false when omitted."
                         ),
                     },
+                    # Hermes parity (2026-05-08): parallel batch shape.
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "properties": {
+                                "goal": {"type": "string"},
+                                "context": {"type": "string"},
+                                "toolsets": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                            },
+                            "required": ["goal"],
+                        },
+                        "description": (
+                            "Hermes parity: parallel batch. Mutually "
+                            "exclusive with `task`. Each entry runs in its "
+                            "own subagent with isolated context. Concurrency "
+                            "capped by LoopConfig.max_concurrent_children "
+                            "(default 3); batches larger than that cap return "
+                            "a tool error rather than silently truncating."
+                        ),
+                    },
+                    # Hermes parity (2026-05-08): role-based nested delegation.
+                    "role": {
+                        "type": "string",
+                        "enum": ["leaf", "orchestrator"],
+                        "description": (
+                            "Hermes parity. 'leaf' (default) — subagent "
+                            "cannot delegate. 'orchestrator' — subagent "
+                            "retains the delegate tool, allowing nested "
+                            "delegation up to LoopConfig.max_delegation_depth. "
+                            "Requires LoopConfig.orchestrator_enabled=True. "
+                            "Cost warning: depth=3 + concurrency=3 yields up "
+                            "to 27 leaves; default depth=4 / concurrency=3 = "
+                            "up to 81. Use orchestrators sparingly."
+                        ),
+                    },
                 },
-                "required": ["task"],
+                # `task` is no longer required when `tasks` is supplied — the
+                # execute() handler enforces mutual exclusion at runtime.
+                "required": [],
             },
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        task = call.arguments.get("task", "").strip()
+        # Hermes parity (2026-05-08): tasks=[...] parallel batch.
+        # Mutually exclusive with single-task `task` arg.
+        raw_tasks = call.arguments.get("tasks")
+        raw_task = (call.arguments.get("task") or "").strip()
+        if raw_tasks is not None and raw_task:
+            return ToolResult(
+                tool_call_id=call.id,
+                content="Error: supply either `task` OR `tasks`, not both.",
+                is_error=True,
+            )
+        if raw_tasks is not None:
+            return await self._execute_batch(call.id, raw_tasks)
+
+        task = raw_task
         if not task:
             return ToolResult(
                 tool_call_id=call.id,
@@ -226,6 +281,37 @@ class DelegateTool(BaseTool):
                 ),
                 is_error=True,
             )
+
+        # Hermes parity (2026-05-08): role-based nested delegation.
+        # role="orchestrator" + orchestrator_enabled=True keeps `delegate` in
+        # the child's allowlist so the child can spawn its own leaves. At
+        # max_depth, promote orchestrator → leaf with a warning (no point
+        # giving an orchestrator role to a child that can't spawn anyway).
+        raw_role = (call.arguments.get("role") or "leaf").strip().lower()
+        if raw_role not in ("leaf", "orchestrator"):
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Error: 'role' must be 'leaf' or 'orchestrator' "
+                    f"(got {raw_role!r})."
+                ),
+                is_error=True,
+            )
+        orchestrator_enabled = True
+        if parent_loop is not None and hasattr(parent_loop, "config"):
+            orchestrator_enabled = getattr(
+                parent_loop.config.loop, "orchestrator_enabled", True
+            )
+        is_orchestrator = (raw_role == "orchestrator") and orchestrator_enabled
+        if is_orchestrator and self._current_runtime.delegation_depth + 1 >= max_depth:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "delegate role=orchestrator promoted to leaf "
+                "(child would be at max_depth=%d with no room to delegate)",
+                max_depth,
+            )
+            is_orchestrator = False
+
         # III.1: parse the allowlist input. ``None`` / missing → unrestricted
         # (parent's full registry); explicit ``[]`` → no tools at all; list
         # of strings → exactly those tool names.
@@ -247,9 +333,19 @@ class DelegateTool(BaseTool):
                 is_error=True,
             )
 
+        # Hermes parity: orchestrators keep `delegate` so they can spawn
+        # leaves of their own; leaves still strip it. The other entries in
+        # DELEGATE_BLOCKED_TOOLS (AskUserQuestion, Clarify, ExitPlanMode)
+        # remain unsafe regardless of role.
+        effective_blocked = (
+            DELEGATE_BLOCKED_TOOLS - {"delegate"}
+            if is_orchestrator
+            else DELEGATE_BLOCKED_TOOLS
+        )
+
         # T1.2: enforce blocklist regardless of allowlist mode
         if allowed is not None:
-            overlap = allowed & DELEGATE_BLOCKED_TOOLS
+            overlap = allowed & effective_blocked
             if overlap:
                 return ToolResult(
                     tool_call_id=call.id,
@@ -268,7 +364,7 @@ class DelegateTool(BaseTool):
             try:
                 from opencomputer.tools.registry import registry as _reg
                 all_names = frozenset(_reg.names())
-                allowed = all_names - DELEGATE_BLOCKED_TOOLS
+                allowed = all_names - effective_blocked
             except Exception:
                 # If registry isn't loaded (test/edge case), fall back to passing
                 # `None` to the child — the child loop's existing allowlist filter
@@ -381,11 +477,65 @@ class DelegateTool(BaseTool):
                 child_cfg.loop,
                 max_iterations=child_cfg.loop.delegation_max_iterations,
             )
-            subagent_loop.config = dataclasses.replace(child_cfg, loop=new_loop_cfg)
+            new_model_cfg = child_cfg.model
+            # Hermes parity (2026-05-08): apply DelegationConfig overrides if
+            # the parent's loop config has any non-None field. None values
+            # inherit the parent's provider/model. ``base_url`` and ``api_key``
+            # require plugin-level wiring (provider plugins consume their own
+            # env vars / config); v1 swaps env vars at run-time so the active
+            # provider picks them up. Read DelegationConfig from the PARENT
+            # (not the child) — the override is configured by the user on the
+            # parent loop and flows down to children at delegation time.
+            parent_loop_for_delegation = getattr(self._factory, "__self__", None)
+            delegation = None
+            if parent_loop_for_delegation is not None and hasattr(
+                parent_loop_for_delegation, "config"
+            ):
+                delegation = getattr(
+                    parent_loop_for_delegation.config.loop, "delegation", None
+                )
+            if delegation is not None:
+                replace_kwargs: dict = {}
+                if delegation.model:
+                    replace_kwargs["model"] = delegation.model
+                if delegation.provider:
+                    replace_kwargs["provider"] = delegation.provider
+                if replace_kwargs:
+                    new_model_cfg = dataclasses.replace(
+                        child_cfg.model, **replace_kwargs
+                    )
+                if delegation.base_url or delegation.api_key:
+                    import os as _os
+                    if delegation.base_url:
+                        _os.environ["OPENCOMPUTER_DELEGATION_BASE_URL"] = delegation.base_url
+                    if delegation.api_key:
+                        _os.environ["OPENCOMPUTER_DELEGATION_API_KEY"] = delegation.api_key
+            subagent_loop.config = dataclasses.replace(
+                child_cfg,
+                loop=new_loop_cfg,
+                model=new_model_cfg,
+            )
         # III.1: push the allowlist onto the child BEFORE it runs. ``None``
         # is also explicitly assigned so callers who re-use a loop factory
         # don't inherit a stale allowlist from a prior delegation.
         subagent_loop.allowed_tools = allowed
+
+        # Hermes parity (2026-05-08): SubagentRegistry — register the child so
+        # `oc agents running` / `oc agents kill <id>` can see/cancel it.
+        # Best-effort: registry import / register failure must not break
+        # delegation. Update the record on completion/failure in the
+        # try/except below.
+        _registry_record = None
+        try:
+            from opencomputer.agent.subagent_registry import SubagentRegistry
+            _registry_record = SubagentRegistry.instance().register(
+                parent_id=self._current_runtime.custom.get("agent_id")
+                if self._current_runtime.custom
+                else None,
+                goal=task,
+            )
+        except Exception:
+            _registry_record = None
 
         coordinator = get_default_coordinator()
         try:
@@ -440,16 +590,156 @@ class DelegateTool(BaseTool):
                 except Exception:
                     pass
 
+                # Hermes parity: mark the subagent record completed.
+                if _registry_record is not None:
+                    try:
+                        from datetime import UTC
+                        from datetime import datetime as _dt
+
+                        from opencomputer.agent.subagent_registry import SubagentRegistry
+                        SubagentRegistry.instance().update(
+                            _registry_record.agent_id,
+                            state="completed",
+                            ended_at=_dt.now(UTC),
+                        )
+                    except Exception:
+                        pass
+
                 return ToolResult(
                     tool_call_id=call.id,
                     content=result.final_message.content,
                 )
         except DelegationLockTimeout as exc:
+            # Hermes parity: mark the subagent record failed on lock timeout.
+            if _registry_record is not None:
+                try:
+                    from datetime import UTC
+                    from datetime import datetime as _dt
+
+                    from opencomputer.agent.subagent_registry import SubagentRegistry
+                    SubagentRegistry.instance().update(
+                        _registry_record.agent_id,
+                        state="failed",
+                        ended_at=_dt.now(UTC),
+                        error=str(exc)[:200],
+                    )
+                except Exception:
+                    pass
             return ToolResult(
                 tool_call_id=call.id,
                 content=f"Error: {exc}",
                 is_error=True,
             )
+        except BaseException as exc:
+            # Hermes parity: mark the subagent record failed on any other error.
+            # Re-raise after recording (don't swallow asyncio.CancelledError etc.).
+            if _registry_record is not None:
+                try:
+                    from datetime import UTC
+                    from datetime import datetime as _dt
+
+                    from opencomputer.agent.subagent_registry import SubagentRegistry
+                    SubagentRegistry.instance().update(
+                        _registry_record.agent_id,
+                        state="failed",
+                        ended_at=_dt.now(UTC),
+                        error=str(exc)[:200],
+                    )
+                except Exception:
+                    pass
+            raise
+
+    async def _execute_batch(
+        self, call_id: str, tasks: list[dict[str, object]]
+    ) -> ToolResult:
+        """Hermes parity (2026-05-08): tasks=[...] parallel batch dispatch.
+
+        Each task is a dict with at least ``goal`` (Hermes naming). We map
+        ``goal`` → OC's single-task ``task`` field and re-enter ``execute``
+        per child via an asyncio.gather under a semaphore sized to
+        ``LoopConfig.max_concurrent_children`` (env override:
+        ``DELEGATION_MAX_CONCURRENT_CHILDREN``).
+
+        Batches larger than the cap return a tool error rather than silently
+        truncating — matches the Hermes documented behavior.
+        """
+        import asyncio as _asyncio
+        import os as _os
+
+        if not isinstance(tasks, list) or not tasks:
+            return ToolResult(
+                tool_call_id=call_id,
+                content="Error: `tasks` must be a non-empty list.",
+                is_error=True,
+            )
+
+        # Resolve cap (parent_loop.config takes precedence; env var is the
+        # operational override; default 3 mirrors Hermes).
+        parent_loop = getattr(self._factory, "__self__", None)
+        cap = 3
+        if parent_loop is not None and hasattr(parent_loop, "config"):
+            cap = getattr(parent_loop.config.loop, "max_concurrent_children", 3)
+        env_cap = _os.environ.get("DELEGATION_MAX_CONCURRENT_CHILDREN", "").strip()
+        if env_cap:
+            try:
+                cap = max(1, int(env_cap))
+            except ValueError:
+                pass
+
+        if len(tasks) > cap:
+            return ToolResult(
+                tool_call_id=call_id,
+                content=(
+                    f"Error: batch size {len(tasks)} exceeds "
+                    f"max_concurrent_children={cap}. Submit fewer tasks per call "
+                    f"or raise LoopConfig.max_concurrent_children."
+                ),
+                is_error=True,
+            )
+
+        sem = _asyncio.Semaphore(cap)
+
+        async def _run_one(idx: int, spec: dict[str, object]) -> str:
+            async with sem:
+                # Hermes uses `goal`; OC's existing single-task uses `task`.
+                # Map goal → task internally; preserve `toolsets` → `allowed_tools`.
+                goal = (spec.get("goal") or spec.get("task") or "")
+                if not isinstance(goal, str) or not goal.strip():
+                    return f"## Task {idx + 1}: ERROR\nempty/invalid goal in batch entry"
+                ctx = (spec.get("context") or "").strip() if isinstance(spec.get("context"), str) else ""
+                # Inline the optional context block into the task text.
+                task_text = f"{goal.strip()}\n\nContext:\n{ctx}" if ctx else goal.strip()
+                toolsets = spec.get("toolsets")
+                child_args: dict[str, object] = {"task": task_text}
+                if isinstance(toolsets, list):
+                    child_args["allowed_tools"] = toolsets
+                child_call = ToolCall(
+                    id=f"{call_id}-batch-{idx}",
+                    name="delegate",
+                    arguments=child_args,
+                )
+                res = await self.execute(child_call)
+                return res.content or ""
+
+        results = await _asyncio.gather(
+            *[_run_one(i, t) for i, t in enumerate(tasks)],
+            return_exceptions=True,
+        )
+        output_lines: list[str] = []
+        any_error = False
+        for i, r in enumerate(results):
+            if isinstance(r, BaseException):
+                any_error = True
+                output_lines.append(
+                    f"## Task {i + 1}: ERROR\n{type(r).__name__}: {r}"
+                )
+            else:
+                output_lines.append(f"## Task {i + 1}\n{r}")
+        return ToolResult(
+            tool_call_id=call_id,
+            content="\n\n".join(output_lines),
+            is_error=any_error,
+        )
 
 
 __all__ = ["DelegateTool", "DELEGATE_BLOCKED_TOOLS"]

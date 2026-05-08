@@ -305,6 +305,10 @@ def create_job(
     enabled_toolsets: list[str] | None = None,
     context_from: list[str] | None = None,
     workdir: str | None = None,
+    # Hermes parity (2026-05-08): script-only mode + per-job timeout override.
+    no_agent: bool = False,
+    script: str | None = None,
+    script_timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     """Create a new cron job.
 
@@ -333,7 +337,15 @@ def create_job(
         ValueError: schedule unparseable or neither ``prompt`` nor ``skill`` set.
         CronThreatBlocked: prompt failed the threat scan.
     """
-    if not prompt and not skill:
+    # Hermes parity: script-only jobs are mutually exclusive with prompt/skill.
+    if no_agent:
+        if not script:
+            raise ValueError("create_job: --no-agent requires --script <name>")
+        if prompt or skill:
+            raise ValueError(
+                "create_job: --no-agent is exclusive with --prompt/--skill"
+            )
+    elif not prompt and not skill:
         raise ValueError("create_job requires either prompt= or skill=")
     if prompt:
         assert_cron_prompt_safe(prompt)
@@ -347,7 +359,9 @@ def create_job(
 
     job_id = uuid.uuid4().hex[:12]
     now_iso = _now().isoformat()
-    label = (prompt or skill or "cron job")[:50].strip()
+    # For script-only jobs, surface the script name in the auto-generated label.
+    label_source = prompt or skill or (f"[script: {script}]" if script else None) or "cron job"
+    label = label_source[:50].strip()
 
     job = {
         "id": job_id,
@@ -381,6 +395,10 @@ def create_job(
         # jobs that list this job in their context_from. Empty until the
         # first successful run.
         "last_response": "",
+        # Hermes parity (2026-05-08): script-only mode.
+        "no_agent": bool(no_agent),
+        "script": script,
+        "script_timeout_seconds": script_timeout_seconds,
     }
 
     with _jobs_lock:

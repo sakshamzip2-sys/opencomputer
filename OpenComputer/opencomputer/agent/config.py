@@ -125,6 +125,22 @@ _VALID_API_MODES: frozenset[str] = frozenset({"auto", "openai", "anthropic"})
 
 
 @dataclass(frozen=True, slots=True)
+class DelegationConfig:
+    """Hermes-parity (2026-05-08) subagent model/provider override.
+
+    All ``None`` (default) means subagents inherit the parent loop's
+    provider + model + credentials. Set any field to override. Useful
+    when delegating cheap work to a smaller/faster model — e.g.,
+    ``DelegationConfig(model="gemini-2.5-flash", provider="openrouter")``.
+    """
+
+    model: str | None = None
+    provider: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class LoopConfig:
     """Behavior of the main agent loop.
 
@@ -162,6 +178,31 @@ class LoopConfig:
     max_delegation_depth: int = 4  # 2026-05-05: doubled 2 → 4
     """Cap on `DelegateTool` recursion. 2 = parent (depth 0) → child (depth 1) → grandchild (depth 2) rejected.
     Mirrors Hermes `MAX_DEPTH = 2` from `sources/hermes-agent/tools/delegate_tool.py`."""
+    # Hermes parity (2026-05-08): batch concurrency + idle watchdog.
+    max_concurrent_children: int = 3
+    """Cap on concurrent subagents per ``delegate(tasks=[...])`` batch.
+
+    Override via ``DELEGATION_MAX_CONCURRENT_CHILDREN`` env var. Batches
+    larger than this return a tool error rather than silently truncating.
+    Hermes parity with ``delegation.max_concurrent_children``."""
+    child_timeout_seconds: int = 600
+    """Wall-clock cap on a single subagent's lifetime (seconds).
+
+    Hermes spec describes this as an idle watchdog (resets on each API/tool
+    call). v1 ships it as a wall-clock timeout — simpler, fail-safe.
+    Convert to per-activity reset when the child loop's tool/API hooks are
+    exposed. Diagnostic log written to
+    ``<profile_home>/logs/subagent-timeout-<ts>.log`` on expiry."""
+    # Hermes parity (2026-05-08): nested orchestrator + delegation override.
+    orchestrator_enabled: bool = True
+    """Master switch for ``role="orchestrator"`` delegations. When False,
+    every child is forced to leaf (cannot delegate further) regardless of
+    the caller's role argument. Hermes parity with
+    ``delegation.orchestrator_enabled``."""
+    delegation: DelegationConfig = field(default_factory=lambda: DelegationConfig())
+    """Subagent model/provider override. None values inherit parent.
+
+    Hermes parity with ``delegation.{model,provider,base_url,api_key}``."""
     context_engine: str = "compressor"
     """Tier-A item 10 — which :class:`ContextEngine` strategy the loop uses.
     ``"compressor"`` is the default (existing CompactionEngine, aux-LLM
@@ -374,6 +415,32 @@ class ToolsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class CronConfig:
+    """Cron-job behavior config (Hermes parity, 2026-05-08).
+
+    Attributes:
+        wrap_response: When True, wraps the delivered response with the
+            Markdown header (job name, run time, schedule) — matches what
+            ``save_job_output`` already saves to the output file. When False
+            (OC default), delivers the agent's raw response text only.
+
+            Note: this default DIFFERS from Hermes's ``wrap_response: true``
+            default. The OC default preserves existing behavior — cron
+            jobs have always delivered raw text. Users who want the
+            Hermes-style header/footer wrap can opt in via:
+              cron:
+                wrap_response: true
+        script_timeout_seconds: Default timeout for ``--no-agent`` script
+            jobs (seconds). Per-job override via the
+            ``script_timeout_seconds`` kwarg on ``create_job``. Hermes
+            parity with ``cron.script_timeout_seconds``. Default 120.
+    """
+
+    wrap_response: bool = False
+    script_timeout_seconds: int = 120
+
+
+@dataclass(frozen=True, slots=True)
 class FullSystemControlConfig:
     """3.F — master enable/disable for autonomous full-system-control mode.
 
@@ -461,6 +528,48 @@ class GatewayConfig:
     startup_ping_chats: tuple[tuple[str, str], ...] = ()
     startup_ping_message: str = "OpenComputer back online"
 
+    # ─── Channel ownership preflight (2026-05-08) ──────────────────────
+    # OpenComputer is the SOLE channel handler for this user (per the
+    # 2026-05-08 directive — see memory/user_oc_owns_all_channels.md).
+    # When ``takeover_on_start = true``, the gateway terminates any
+    # competing process found at startup (Claude Code Telegram bridge,
+    # Hermes daemon, rival ``oc gateway``, etc.) before connecting any
+    # adapter. When ``false`` (default), competitors cause a loud refusal
+    # — the gateway logs the offending PID + cmdline, declines to start,
+    # and tells the user to either kill the competitor or pass
+    # ``--force-takeover`` once.
+    #
+    #   gateway:
+    #     takeover_on_start: true
+    #
+    # ``takeover_grace_seconds`` is the window we wait for SIGTERM to
+    # land cleanly before escalating to SIGKILL. Default 5s matches
+    # ``oc service stop``'s expectation; raise it for slow-shutdown
+    # processes.
+    takeover_on_start: bool = False
+    takeover_grace_seconds: float = 5.0
+
+    # ─── Lifecycle reactions (2026-05-08) ──────────────────────────────
+    # When True, the dispatcher fires ``adapter.on_processing_start`` →
+    # 👀 reaction on the user's message when the agent picks it up, then
+    # ``adapter.on_processing_complete`` → ✅ on success / ❌ on failure
+    # when the turn ends. Hermes-style "I'm thinking" indicator.
+    #
+    # Default False because:
+    #   1. Per the 2026-05-08 ``user_oc_owns_all_channels.md`` directive,
+    #      Saksham wants plain-text only — no emojis, no decorative
+    #      reactions.
+    #   2. Telegram clients render reactions inline next to the user's
+    #      sent message, which can read like the bot is replying with an
+    #      emoji even when the actual reply text is plain. This was the
+    #      2026-05-08 "bot keeps responding with eye emoji" complaint.
+    #
+    # Users who DO want the lifecycle indicator can opt in via:
+    #
+    #   gateway:
+    #     lifecycle_reactions: true
+    lifecycle_reactions: bool = False
+
     # ─── Per-platform session reset (PR-1, 2026-05-08) ────────────────
     # Hermes-spec parity: drop a chat's session_id under inactivity / daily
     # crossings so a "fresh chat each morning" UX is the default. Per-platform
@@ -515,6 +624,78 @@ class DeepeningConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WorktreeConfig:
+    """Config for the ``oc code -w`` worktree machinery + ``.worktreeinclude``.
+
+    ``.worktreeinclude`` (a gitignore-style file at repo root) tells the
+    ``session_worktree`` helper which gitignored files to copy into the
+    fresh worktree so the agent isn't dropped into a worktree that's
+    missing .env / .venv / node_modules.
+    """
+
+    #: Hard cap on total bytes copied across all .worktreeinclude entries.
+    #: Exceeding this aborts the worktree session with a clear error.
+    include_max_total_mb: int = 1000
+
+    #: Per-file warning + skip threshold. Files above this are NOT
+    #: copied; a warning is logged. Other files in the same source set
+    #: are still copied.
+    include_max_per_file_mb: int = 500
+
+    #: If True, after reading <repo_root>/.worktreeinclude also read
+    #: <profile_home>/worktreeinclude (no leading dot, since it lives in
+    #: the OC home itself). Patterns are unioned with project-precedence
+    #: on duplicates.
+    include_global_fallback: bool = True
+
+    #: Default mirrors git's worktree behavior: a symlink in the source
+    #: is copied AS a symlink (not dereferenced).
+    include_follow_symlinks: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointsConfig:
+    """Config for the RewindStore checkpoint hygiene system.
+
+    Backs the ``auto_checkpoint`` PreToolUse hook in the coding-harness
+    extension and the user-facing ``oc checkpoints status/prune/clear``
+    CLI.
+    """
+
+    #: Master switch. If False, auto-prune never fires and the CLI
+    #: prints a banner noting it's disabled in config (commands still
+    #: run).
+    enabled: bool = True
+
+    #: Per-session snapshot count cap. Prune drops oldest above this.
+    max_snapshots: int = 50
+
+    #: Cross-session global size cap in MB. Prune drops oldest until
+    #: aggregate size is under cap.
+    max_total_size_mb: int = 1000
+
+    #: Files exceeding this size are EXCLUDED from new checkpoints
+    #: (recorded in Checkpoint.excluded_files for visibility).
+    max_file_size_mb: int = 50
+
+    #: If True, the auto_checkpoint hook also schedules a background
+    #: prune sweep on first fire per process (subject to
+    #: min_interval_hours).
+    auto_prune: bool = True
+
+    #: Age-based eviction policy: drop checkpoints older than this.
+    retention_days: int = 30
+
+    #: Minimum interval between auto-prune sweeps (per store). Enforced
+    #: via .last_prune mtime.
+    min_interval_hours: int = 24
+
+    #: If True, prune removes checkpoint dirs whose meta.json is missing
+    #: or malformed.
+    delete_orphans: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Root configuration — composed of small focused configs."""
 
@@ -528,6 +709,10 @@ class Config:
     deepening: DeepeningConfig = field(default_factory=DeepeningConfig)
     #: Gateway daemon tunables — primarily the photo-burst window today.
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
+    #: 2026-05-08 — `.worktreeinclude` for `oc code -w`.
+    worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
+    #: 2026-05-08 — RewindStore hygiene (auto-prune, size cap, retention).
+    checkpoints: CheckpointsConfig = field(default_factory=CheckpointsConfig)
     #: III.6 — settings-declared shell-command hooks. Parsed from the
     #: top-level ``hooks:`` YAML block by
     #: :func:`opencomputer.agent.config_store._parse_hooks_block` and
@@ -537,6 +722,8 @@ class Config:
     #: Defaults to disabled (invisible). When enabled, the structured
     #: ``agent.log`` collector + optional menu-bar indicator activate.
     system_control: FullSystemControlConfig = field(default_factory=FullSystemControlConfig)
+    #: Hermes-parity cron knobs (2026-05-08). See :class:`CronConfig`.
+    cron: CronConfig = field(default_factory=CronConfig)
     home: Path = field(default_factory=_home)
 
 
@@ -568,6 +755,8 @@ def load_config_for_profile(profile_home: Path) -> Config:
 
 __all__ = [
     "Config",
+    "CronConfig",
+    "DelegationConfig",
     "ModelConfig",
     "LoopConfig",
     "SessionConfig",

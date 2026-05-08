@@ -177,6 +177,49 @@ def remove_session_worktree(wt_path: Path, *, force: bool = True) -> bool:
             return False
 
 
+def _apply_worktreeinclude(
+    repo_root_path: Path,
+    worktree: Path,
+    *,
+    include_dry_run: bool,
+) -> None:
+    """Read config + invoke ``worktree_include.apply_to_worktree``.
+
+    Lazy imports to avoid import cycles: ``worktree.py`` is imported
+    very early in CLI bootstrap, while ``config`` and
+    ``worktree_include`` are not always needed.
+    """
+    from opencomputer.agent.config import default_config
+    from opencomputer.worktree_include import apply_to_worktree
+
+    cfg = default_config()
+    wcfg = cfg.worktree
+
+    global_path: Path | None = None
+    if wcfg.include_global_fallback:
+        try:
+            from opencomputer.profiles import get_default_root, read_active_profile
+
+            active = read_active_profile()
+            if active in (None, "default"):
+                root = get_default_root()
+            else:
+                root = get_default_root() / "profiles" / active
+            global_path = root / "worktreeinclude"
+        except Exception:  # noqa: BLE001 — never break worktree on profile lookup
+            global_path = None
+
+    apply_to_worktree(
+        repo_root_path,
+        worktree,
+        dry_run=include_dry_run,
+        max_total_mb=wcfg.include_max_total_mb,
+        max_per_file_mb=wcfg.include_max_per_file_mb,
+        follow_symlinks=wcfg.include_follow_symlinks,
+        global_fallback_path=global_path,
+    )
+
+
 @contextmanager
 def session_worktree(
     cwd: Path,
@@ -184,6 +227,7 @@ def session_worktree(
     session_id: str | None = None,
     branch: str | None = None,
     keep: bool = False,
+    include_dry_run: bool = False,
 ) -> Iterator[Path]:
     """Context manager: create a worktree, chdir into it, clean up on exit.
 
@@ -196,15 +240,35 @@ def session_worktree(
         branch: optional branch to create.
         keep: if True, do NOT remove the worktree on exit. Useful when
             the user wants to inspect/keep the experimental branch.
+        include_dry_run: when True, ``.worktreeinclude`` is read but no
+            files are actually copied — useful for ``oc worktrees
+            include-preview``.
 
     The chdir happens inside the contextmanager so the caller doesn't
     need to manage cwd state.
+
+    After ``git worktree add`` succeeds, the helper consults
+    ``<repo_root>/.worktreeinclude`` (and the optional global fallback)
+    and copies matched gitignored runtime files (``.env``, ``.venv/``,
+    etc.) into the fresh worktree so the agent that lands inside has a
+    working environment. On a hard failure during the include phase
+    (:class:`~opencomputer.worktree_include.WorktreeIncludeTooLargeError`)
+    the partial worktree is removed and the exception propagates — a
+    half-populated worktree is worse than a clear failure.
     """
     original_cwd = Path.cwd()
     wt = create_session_worktree(cwd, session_id=session_id, branch=branch)
     if wt is None:
         yield original_cwd
         return
+
+    rr = repo_root(cwd)
+    if rr is not None:
+        try:
+            _apply_worktreeinclude(rr, wt, include_dry_run=include_dry_run)
+        except Exception:
+            remove_session_worktree(wt)
+            raise
 
     os.chdir(wt)
     try:

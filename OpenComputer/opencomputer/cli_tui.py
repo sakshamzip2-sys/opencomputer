@@ -54,6 +54,25 @@ def run(
     dashboard_url: Annotated[
         str, typer.Option(help="HTTP URL of the OC dashboard for non-streaming reads.")
     ] = "http://127.0.0.1:9119",
+    cont: Annotated[
+        bool,
+        typer.Option(
+            "--continue",
+            "-c",
+            help="Resume the most recent session on launch (sets OC_TUI_RESUME=last).",
+        ),
+    ] = False,
+    resume: Annotated[
+        str,
+        typer.Option(
+            "--resume",
+            "-r",
+            help=(
+                "Resume the given session id (or id prefix) on launch "
+                "(sets OC_TUI_RESUME=<id>)."
+            ),
+        ),
+    ] = "",
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
@@ -82,6 +101,25 @@ def run(
     env = os.environ.copy()
     env["OC_WIRE_URL"] = wire_url
     env["OC_DASHBOARD_URL"] = dashboard_url
+
+    # Resume contract — OPENCOMPUTER_TUI_RESUME env var mirrors hermes-agent's
+    # HERMES_TUI_RESUME. Precedence: explicit --resume <id> > --continue > env var.
+    # The env-var-only path lets users export OPENCOMPUTER_TUI_RESUME=1 to always
+    # auto-resume latest (the value "1" is normalised to "last" for ergonomic
+    # parity with the Hermes shell idiom).
+    resume_spec = ""
+    if resume:
+        resume_spec = resume
+    elif cont:
+        resume_spec = "last"
+    else:
+        env_resume = env.pop("OPENCOMPUTER_TUI_RESUME", "").strip()
+        if env_resume:
+            # "1" / "true" / "yes" → "last"; anything else is treated as a literal id.
+            resume_spec = "last" if env_resume.lower() in {"1", "true", "yes"} else env_resume
+
+    if resume_spec:
+        env["OC_TUI_RESUME"] = resume_spec
 
     typer.echo(f"Launching TUI against {wire_url}…")
     os.execvpe(node, [node, str(entry)], env)
