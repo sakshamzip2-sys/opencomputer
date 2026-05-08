@@ -44,15 +44,22 @@ def test_with_models_dict():
 
 
 def test_models_dict_auto_converts_from_yaml_dict():
-    """The YAML auto-parser delivers nested dicts; __post_init__ converts."""
+    """The YAML auto-parser delivers nested dicts; __post_init__ converts.
+
+    Asserts on duck-type fields rather than ``isinstance`` because in
+    CI's full-suite pytest ordering this module gets reloaded and the
+    class identity drifts (see __post_init__ comment).
+    """
     p = CustomProvider(
         name="local",
         base_url="http://x",
         models={"m1": {"context_length": 4096}},
     )
-    assert isinstance(p.models["m1"], CustomProviderModelOverride)
-    assert p.models["m1"].context_length == 4096
-    assert p.models["m1"].timeout_seconds is None
+    m1 = p.models["m1"]
+    assert hasattr(m1, "context_length")
+    assert hasattr(m1, "timeout_seconds")
+    assert m1.context_length == 4096
+    assert m1.timeout_seconds is None
 
 
 def test_invalid_api_mode_raises():
