@@ -24,6 +24,7 @@ the WebFetch tool) pipe their payloads through
 
 from __future__ import annotations
 
+from opencomputer.security.context_scan import scan_workspace_context_content
 from opencomputer.security.instruction_detector import (
     DetectionVerdict,
     InstructionDetector,
@@ -50,4 +51,5 @@ __all__ = [
     "redact_runtime_text",
     "redact_runtime_text_with_counts",
     "sanitize_external_content",
+    "scan_workspace_context_content",
 ]
