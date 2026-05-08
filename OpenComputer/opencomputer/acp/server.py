@@ -72,6 +72,11 @@ class ACPServer:
             "queue": self._handle_queue,
             # PR-A Feature 3 (2026-05-07) — per-session tool gating
             "setSessionPermissions": self._handle_set_session_permissions,
+            # T62 — Hermes-doc parity. ACP toolset registration: IDEs
+            # call tools/list to learn the agent's tool surface before
+            # any prompt, so they can render UI / approval prompts
+            # against accurate schemas.
+            "tools/list": self._handle_tools_list,
         }
 
     async def serve_stdio(self) -> None:
@@ -165,6 +170,10 @@ class ACPServer:
                 "streaming": True,
                 "cancellation": True,
                 "provider": detect_provider(),
+                # T62 — Hermes-doc toolset registration. IDEs probe this
+                # flag before calling tools/list or relying on the
+                # session/toolset notification fired post-newSession.
+                "toolset": True,
             },
         }
 
@@ -190,7 +199,67 @@ class ACPServer:
             ))
         except Exception:  # noqa: BLE001
             logger.debug("acp: SESSION_START hook fire failed", exc_info=True)
+
+        # T62 — proactive toolset announcement so IDEs that don't probe
+        # tools/list still see what's available. Schedule for the next
+        # event-loop tick so the newSession result is delivered FIRST
+        # (the session id reaches the client before the announcement
+        # that names it). Best-effort: registry import failures must
+        # not block session creation.
+        async def _announce_toolset() -> None:
+            try:
+                self._send_notification(
+                    "session/toolset",
+                    {
+                        "sessionId": session_id,
+                        "tools": self._collect_tool_descriptors(),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("acp: session/toolset notification failed", exc_info=True)
+
+        try:
+            asyncio.create_task(_announce_toolset())
+        except RuntimeError:
+            # No running loop (e.g. _handle_new_session called from a
+            # synchronous test harness). Fall back to inline emit so
+            # the contract still holds.
+            try:
+                self._send_notification(
+                    "session/toolset",
+                    {
+                        "sessionId": session_id,
+                        "tools": self._collect_tool_descriptors(),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("acp: session/toolset notification failed", exc_info=True)
         return {"sessionId": session_id}
+
+    def _collect_tool_descriptors(self) -> list[dict[str, Any]]:
+        """Return the registered tool list as ACP-shaped descriptors.
+
+        Each entry: ``{name, description, input_schema}`` (Anthropic-
+        compatible shape). Imported lazily so the ACP module stays
+        independent of the tools registry import path.
+        """
+        from opencomputer.tools import registry as _registry_mod
+
+        out: list[dict[str, Any]] = []
+        for tool in _registry_mod.registry._tools.values():
+            schema = tool.schema
+            out.append(
+                {
+                    "name": schema.name,
+                    "description": schema.description,
+                    "input_schema": schema.parameters,
+                }
+            )
+        return out
+
+    async def _handle_tools_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        """T62 — JSON-RPC ``tools/list`` returning all registered tools."""
+        return {"tools": self._collect_tool_descriptors()}
 
     async def _handle_load_session(self, params: dict[str, Any]) -> dict[str, Any]:
         session_id = params.get("sessionId")
