@@ -109,4 +109,78 @@ async def call_with_fallback[T](
     raise last_exc
 
 
-__all__ = ["call_with_fallback", "is_transient_error"]
+async def call_with_provider_fallback[T](
+    primary_call: Callable[[str], Awaitable[T]],
+    cross_provider_call: Callable[[object, str], Awaitable[T]],
+    primary_model: str,
+    fallback_models: tuple[str, ...],
+    provider_chain: tuple[tuple[object, str], ...],
+) -> T:
+    """Walk same-provider fallback_models, then cross-provider chain.
+
+    Wave 3 (2026-05-08) extension to the existing fallback router.
+
+    Order of attempts:
+      1. ``primary_call(primary_model)``
+      2. ``primary_call(m)`` for each m in ``fallback_models`` (same provider)
+      3. ``cross_provider_call(provider, model)`` for each pair in
+         ``provider_chain``
+
+    Same transient-vs-fatal classification as :func:`call_with_fallback`.
+    Empty ``provider_chain`` makes this behave identically to
+    ``call_with_fallback`` (zero overhead path).
+
+    Per-turn scoping is the caller's responsibility — the loop
+    rebuilds ``provider_chain`` each turn from
+    ``Config.fallback_providers``, so a provider-wide outage doesn't
+    persist as a permanent re-route.
+    """
+    last_exc: BaseException | None = None
+    same_provider_chain: tuple[str, ...] = (primary_model, *fallback_models)
+    for idx, model in enumerate(same_provider_chain):
+        try:
+            return await primary_call(model)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if not is_transient_error(exc):
+                raise
+            logger.info(
+                "primary provider model %r hit transient error (%s); next attempt",
+                model,
+                type(exc).__name__,
+            )
+            if idx < len(same_provider_chain) - 1:
+                continue
+            # Primary chain exhausted — fall through to cross-provider.
+            break
+    # Cross-provider phase.
+    if provider_chain:
+        logger.info(
+            "primary chain exhausted; trying %d fallback_provider entr(ies)",
+            len(provider_chain),
+        )
+        for prov, model in provider_chain:
+            try:
+                return await cross_provider_call(prov, model)
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if not is_transient_error(exc):
+                    # Non-transient on a fallback provider → still raise.
+                    # If a fallback's auth fails we want to fix it, not
+                    # silently hide behind the next link.
+                    raise
+                logger.info(
+                    "fallback provider %r model %r hit transient error (%s); next",
+                    getattr(prov, "name", "?"),
+                    model,
+                    type(exc).__name__,
+                )
+    assert last_exc is not None  # pragma: no cover
+    raise last_exc
+
+
+__all__ = [
+    "call_with_fallback",
+    "call_with_provider_fallback",
+    "is_transient_error",
+]

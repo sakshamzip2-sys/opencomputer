@@ -676,6 +676,7 @@ class AgentLoop:
             disabled=compaction_disabled,
             memory_bridge=self.memory_bridge,
             usage_recorder=_record_compaction_usage,
+            custom_providers=config.custom_providers,
         )
         # Phase 11d: third-pillar episodic memory. Records one event per
         # completed turn for cross-session "remind me" queries via FTS5.
@@ -3593,6 +3594,22 @@ class AgentLoop:
             if _eff != "none" and not _native:
                 from opencomputer.agent.thinking_parser import ThinkingTagsParser
                 stream_source = ThinkingTagsParser().wrap(stream_source)
+            # Wave 3 (2026-05-08) — wrap with the streaming-stall watchdog
+            # when the provider opts in via stale_timeout_seconds. Catches
+            # LLM-side hangs on alive HTTP connections (common on local
+            # model servers under memory pressure). The wrap is a no-op
+            # pass-through when stale_timeout_seconds is None.
+            _stale_timeout = getattr(self.provider, "stale_timeout_seconds", None)
+            # Strict numeric check — test stubs that return MagicMock for
+            # arbitrary attribute access would otherwise tank here when
+            # asyncio.wait_for tries to compare MagicMock to int.
+            if isinstance(_stale_timeout, (int, float)) and _stale_timeout > 0:
+                from opencomputer.agent.stream_watchdog import stream_with_watchdog
+                stream_source = stream_with_watchdog(
+                    stream_source,
+                    stale_timeout_seconds=float(_stale_timeout),
+                    provider_name=getattr(self.provider, "name", "?"),
+                )
             # Phase 5 (2026-05-07) — partial-message recovery wiring (A4).
             # Accumulate the streamed text as it arrives so we can attempt
             # recovery if the stream is interrupted (network drop, gateway
@@ -3641,7 +3658,16 @@ class AgentLoop:
             # G.31 — wrap the provider call in the fallback router so
             # transient failures (429 / 5xx / connection refused) walk
             # the configured ``fallback_models`` chain before raising.
-            from opencomputer.agent.fallback import call_with_fallback
+            #
+            # Wave 3 (2026-05-08) — extended with cross-provider chain.
+            # When ``Config.fallback_providers`` is populated, after the
+            # primary's ``fallback_models`` exhaust we try each
+            # provider+model pair in turn (per-turn scoped — primary
+            # restored on the next user turn).
+            from opencomputer.agent.fallback import (
+                call_with_fallback,
+                call_with_provider_fallback,
+            )
 
             _split_kwargs = _maybe_split_system_kwargs(
                 self.provider.complete,
@@ -3661,11 +3687,48 @@ class AgentLoop:
                     **_extra_kwargs,
                 )
 
-            resp = await call_with_fallback(
-                _do_call,
-                primary_model=model_name,
-                fallback_models=self.config.model.fallback_models,
-            )
+            cross_chain = getattr(self.config, "fallback_providers", ())
+            if cross_chain:
+                from opencomputer.agent.fallback_provider_resolver import (
+                    build_fallback_provider_chain,
+                )
+
+                provider_chain = build_fallback_provider_chain(
+                    cross_chain,
+                    self.config,
+                )
+
+                async def _cross_call(prov, active_model: str):
+                    sub_split = _maybe_split_system_kwargs(
+                        prov.complete,
+                        base_system=base_system,
+                        injected_system=injected_system,
+                        session_id=session_id,
+                    )
+                    return await prov.complete(
+                        model=active_model,
+                        messages=wire_messages,
+                        system=system,
+                        tools=tool_schemas,
+                        max_tokens=self.config.model.max_tokens,
+                        temperature=self.config.model.temperature,
+                        **sub_split,
+                        **_extra_kwargs,
+                    )
+
+                resp = await call_with_provider_fallback(
+                    _do_call,
+                    _cross_call,
+                    primary_model=model_name,
+                    fallback_models=self.config.model.fallback_models,
+                    provider_chain=provider_chain,
+                )
+            else:
+                resp = await call_with_fallback(
+                    _do_call,
+                    primary_model=model_name,
+                    fallback_models=self.config.model.fallback_models,
+                )
 
         stop_reason_map = {
             "end_turn": StopReason.END_TURN,

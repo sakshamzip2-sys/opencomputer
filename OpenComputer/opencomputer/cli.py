@@ -1818,10 +1818,42 @@ def _run_chat_session(
                 so subsequent turns pick up the new id. AgentLoop reads
                 ``self.config.model.model`` per turn (loop.py:1971), so the
                 swap takes effect immediately.
+
+                Wave 3 (2026-05-08) — also accepts the
+                ``custom:<name>:<model_id>`` form, which dispatches to
+                the named entry under ``custom_providers:`` in
+                config.yaml (swaps both provider AND model).
                 """
                 import dataclasses as _dc
 
                 from opencomputer.agent.model_resolver import resolve_model
+
+                # Wave 3 — custom:<name>:<model_id> branch
+                if new_model.startswith("custom:"):
+                    from opencomputer.agent.custom_provider_client import (
+                        build_custom_provider,
+                        parse_custom_model_spec,
+                    )
+
+                    try:
+                        cp_name, model_id = parse_custom_model_spec(new_model)
+                        new_provider_inst = build_custom_provider(cp_name, loop.config)
+                    except (ValueError, RuntimeError) as e:
+                        return (False, str(e))
+                    loop.provider = new_provider_inst
+                    new_model_cfg = _dc.replace(
+                        loop.config.model,
+                        provider=f"custom:{cp_name}",
+                        model=model_id,
+                    )
+                    loop.config = _dc.replace(loop.config, model=new_model_cfg)
+                    try:
+                        runtime.custom["_provider_supports_native_thinking"] = (
+                            loop.provider.supports_native_thinking_for(model_id)
+                        )
+                    except Exception:  # noqa: BLE001
+                        runtime.custom["_provider_supports_native_thinking"] = False
+                    return (True, f"swapped to custom:{cp_name}:{model_id}")
 
                 aliases = getattr(loop.config.model, "model_aliases", None) or {}
                 try:
@@ -1830,6 +1862,24 @@ def _run_chat_session(
                     return (False, str(e))
                 if not canonical or not isinstance(canonical, str):
                     return (False, f"invalid model id: {new_model!r}")
+                # Wave 3 (2026-05-08) — strip + warn on :nitro / :floor
+                # suffix when the active provider is NOT OpenRouter.
+                # Those suffixes are OR-specific routing sugar; passing
+                # them verbatim to (e.g.) Anthropic returns 404. Strip
+                # them here so the swap succeeds; emit a one-shot warning
+                # to alert the user that their preference is being
+                # ignored.
+                from opencomputer.agent.config import split_or_routing_suffix
+                _stripped, _suffix = split_or_routing_suffix(canonical)
+                if _suffix is not None and loop.config.model.provider != "openrouter":
+                    if not getattr(_on_model_swap, "_or_suffix_warned", False):
+                        console.print(
+                            f"[yellow]⚠[/yellow] :{_suffix} suffix is OpenRouter-only; "
+                            f"stripping and using {_stripped!r} on provider "
+                            f"{loop.config.model.provider!r}."
+                        )
+                        _on_model_swap._or_suffix_warned = True  # type: ignore[attr-defined]
+                    canonical = _stripped
                 new_model_cfg = _dc.replace(loop.config.model, model=canonical)
                 loop.config = _dc.replace(loop.config, model=new_model_cfg)
                 # Phase B: refresh native-thinking flag for the new model so
@@ -4232,6 +4282,293 @@ def batch(
         console.print(f"[bold red]error:[/bold red] {type(e).__name__}: {e}")
         raise typer.Exit(1) from None
     console.print(f"[green]✓[/green] batch finished ({final_status}) — {n} result(s) → {out_path}")
+
+
+model_app = typer.Typer(
+    help="Manage custom OpenAI/Anthropic-compatible providers (Wave 3 — 2026-05-08).",
+    no_args_is_help=True,
+)
+app.add_typer(model_app, name="model")
+
+
+@model_app.command("add")
+def model_add(
+    name: str = typer.Argument(
+        ..., help="Provider name used in /model custom:<name>:<model_id>"
+    ),
+    base_url: str = typer.Option(..., "--base-url", "-u"),
+    key_env: str | None = typer.Option(
+        None, "--key-env", "-k", help="Env var holding the API key (preferred over inline)."
+    ),
+    api_mode: str = typer.Option(
+        "auto", "--api-mode", "-m", help="auto | openai | anthropic"
+    ),
+    probe: bool = typer.Option(
+        True, "--probe/--no-probe", help="Probe /v1/models for connectivity."
+    ),
+) -> None:
+    """Add a custom_providers entry to the active profile's config.yaml."""
+    import httpx
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    raw = {}
+    if cfg_path.exists():
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    providers = raw.setdefault("custom_providers", [])
+    if any(p.get("name") == name for p in providers):
+        console.print(
+            f"[bold red]✗[/bold red] provider {name!r} already exists; "
+            f"run `oc model remove {name}` first"
+        )
+        raise typer.Exit(1)
+    entry: dict = {"name": name, "base_url": base_url}
+    if key_env:
+        entry["key_env"] = key_env
+    if api_mode != "auto":
+        entry["api_mode"] = api_mode
+    if probe:
+        try:
+            r = httpx.get(f"{base_url.rstrip('/')}/models", timeout=10.0)
+            if r.status_code == 200:
+                console.print("[green]✓[/green] endpoint reachable")
+            else:
+                console.print(
+                    f"[yellow]⚠[/yellow] probe returned {r.status_code}; writing entry anyway"
+                )
+        except Exception as e:  # noqa: BLE001
+            console.print(f"[yellow]⚠[/yellow] probe failed ({e}); writing entry anyway")
+    providers.append(entry)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(f"[green]✓[/green] wrote {name!r} to {cfg_path}")
+    console.print(f"  use it now: [cyan]/model custom:{name}:<model_id>[/cyan]")
+
+
+@model_app.command("list")
+def model_list() -> None:
+    """List configured custom_providers entries."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    raw = {}
+    if cfg_path.exists():
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    providers = raw.get("custom_providers", [])
+    if not providers:
+        console.print("[dim]no custom_providers configured[/dim]")
+        return
+    for p in providers:
+        name = p.get("name", "?")
+        base_url = p.get("base_url", "?")
+        key_env = p.get("key_env", "")
+        suffix = f" ([dim]key_env={key_env}[/dim])" if key_env else ""
+        console.print(f"  [cyan]{name:20s}[/cyan] {base_url}{suffix}")
+
+
+@model_app.command("remove")
+def model_remove(name: str = typer.Argument(...)) -> None:
+    """Remove a custom_providers entry by name."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    if not cfg_path.exists():
+        console.print(f"[bold red]✗[/bold red] no config.yaml at {cfg_path}")
+        raise typer.Exit(1)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    providers = raw.get("custom_providers", [])
+    before = len(providers)
+    providers[:] = [p for p in providers if p.get("name") != name]
+    if len(providers) == before:
+        console.print(f"[bold red]✗[/bold red] no provider named {name!r}")
+        raise typer.Exit(1)
+    raw["custom_providers"] = providers
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(f"[green]✓[/green] removed {name!r}")
+
+
+fallback_app = typer.Typer(
+    help="Manage cross-provider fallback chain (Wave 3 — 2026-05-08).",
+    no_args_is_help=False,
+    invoke_without_command=True,
+)
+app.add_typer(fallback_app, name="fallback")
+
+
+def _split_provider_model_spec(spec: str) -> tuple[str, str]:
+    """Split 'provider/model' or 'custom:<name>/<model>' into (provider, model).
+
+    The first '/' AFTER the optional 'custom:<name>' prefix separates
+    provider and model. Models containing slashes (Anthropic-on-OR
+    'anthropic/claude-sonnet-4') survive because we partition once.
+    """
+    if spec.startswith("custom:"):
+        # custom:<name>/<model_id>
+        cut = spec.find("/", len("custom:"))
+        if cut == -1:
+            raise typer.BadParameter(
+                f"expected 'custom:<name>/<model>', got {spec!r}"
+            )
+        return spec[:cut], spec[cut + 1:]
+    provider, sep, model = spec.partition("/")
+    if not sep or not provider or not model:
+        raise typer.BadParameter(
+            f"expected '<provider>/<model>' or 'custom:<name>/<model>', got {spec!r}"
+        )
+    return provider, model
+
+
+@fallback_app.callback(invoke_without_command=True)
+def fallback_root(ctx: typer.Context) -> None:
+    """Show the current fallback chain when called with no subcommand."""
+    if ctx.invoked_subcommand is not None:
+        return
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    raw = {}
+    if cfg_path.exists():
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    chain = raw.get("fallback_providers", [])
+    if not chain:
+        console.print("[dim]no fallback_providers configured[/dim]")
+        return
+    for i, fp in enumerate(chain):
+        prov = fp.get("provider", "?")
+        mdl = fp.get("model", "?")
+        console.print(f"  [cyan][{i}][/cyan] {prov}/{mdl}")
+
+
+@fallback_app.command("add")
+def fallback_add(
+    spec: str = typer.Argument(
+        ..., help="provider/model or custom:<name>/<model>",
+    ),
+) -> None:
+    """Append a fallback entry to the chain."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    provider, model = _split_provider_model_spec(spec)
+    cfg_path = config_file_path()
+    raw = {}
+    if cfg_path.exists():
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    chain = raw.setdefault("fallback_providers", [])
+    chain.append({"provider": provider, "model": model})
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(f"[green]✓[/green] added {provider}/{model} (position {len(chain) - 1})")
+
+
+@fallback_app.command("remove")
+def fallback_remove(
+    index: int = typer.Argument(..., help="0-based index of the entry to remove."),
+) -> None:
+    """Remove a fallback entry by index."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    if not cfg_path.exists():
+        console.print(f"[bold red]✗[/bold red] no config.yaml at {cfg_path}")
+        raise typer.Exit(1)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    chain = raw.get("fallback_providers", [])
+    if index < 0 or index >= len(chain):
+        console.print(
+            f"[bold red]✗[/bold red] index {index} out of range "
+            f"(chain has {len(chain)} entr{'y' if len(chain) == 1 else 'ies'})"
+        )
+        raise typer.Exit(1)
+    removed = chain.pop(index)
+    raw["fallback_providers"] = chain
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(
+        f"[green]✓[/green] removed {removed.get('provider')}/{removed.get('model')}"
+    )
+
+
+@fallback_app.command("move")
+def fallback_move(
+    from_idx: int = typer.Argument(..., help="0-based source index."),
+    to_idx: int = typer.Argument(..., help="0-based target index."),
+) -> None:
+    """Move a fallback entry from one position to another."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    if not cfg_path.exists():
+        console.print(f"[bold red]✗[/bold red] no config.yaml at {cfg_path}")
+        raise typer.Exit(1)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    chain = raw.get("fallback_providers", [])
+    if from_idx < 0 or from_idx >= len(chain):
+        console.print(
+            f"[bold red]✗[/bold red] from_idx {from_idx} out of range "
+            f"(chain has {len(chain)} entr{'y' if len(chain) == 1 else 'ies'})"
+        )
+        raise typer.Exit(1)
+    if to_idx < 0 or to_idx >= len(chain):
+        console.print(
+            f"[bold red]✗[/bold red] to_idx {to_idx} out of range"
+        )
+        raise typer.Exit(1)
+    entry = chain.pop(from_idx)
+    chain.insert(to_idx, entry)
+    raw["fallback_providers"] = chain
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(
+        f"[green]✓[/green] moved {entry.get('provider')}/{entry.get('model')} "
+        f"from [{from_idx}] to [{to_idx}]"
+    )
+
+
+@fallback_app.command("clear")
+def fallback_clear() -> None:
+    """Clear the fallback chain (no entries left)."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    if not cfg_path.exists():
+        console.print("[dim]no config.yaml to update[/dim]")
+        return
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    raw["fallback_providers"] = []
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print("[green]✓[/green] cleared fallback chain")
 
 
 def _apply_loose_env_perms_flag() -> None:

@@ -279,6 +279,11 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
             return {k: _encode(getattr(v, k)) for k in [f.name for f in fields(v)]}
         if isinstance(v, tuple):
             return [_encode(item) for item in v]
+        if isinstance(v, dict):
+            # Recurse so nested dataclasses (e.g.
+            # ``CustomProvider.models[<id>] = CustomProviderModelOverride``)
+            # are encoded into plain dicts that yaml.SafeDumper can write.
+            return {k: _encode(item) for k, item in v.items()}
         return v
 
     result: dict[str, Any] = {
@@ -292,6 +297,17 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
         "gateway": _encode(cfg.gateway),
         "system_control": _encode(cfg.system_control),
     }
+    # Wave 3 — only serialize the new top-level fields when non-empty
+    # / non-default so existing configs stay tidy. Each round-trips
+    # through the auto-parser.
+    if cfg.custom_providers:
+        result["custom_providers"] = [_encode(cp) for cp in cfg.custom_providers]
+    # Compare against a freshly-constructed default to detect any non-
+    # default ProviderRoutingConfig field. Cheap; no cost when default.
+    if cfg.provider_routing != type(cfg.provider_routing)():
+        result["provider_routing"] = _encode(cfg.provider_routing)
+    if cfg.fallback_providers:
+        result["fallback_providers"] = [_encode(fp) for fp in cfg.fallback_providers]
     # III.6 — only serialise the hooks block when non-empty so default
     # configs stay tidy. Shape matches the nested event-keyed form users
     # write by hand (see _parse_hooks_block for the round-trip contract).

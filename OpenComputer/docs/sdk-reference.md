@@ -318,6 +318,28 @@ Frozen dataclass — one event from `stream_complete()`. Three kinds:
 `"text_delta"` (incremental text), `"tool_call"` (assembled call),
 `"done"` (final; `response` carries the aggregated `ProviderResponse`).
 
+### `StreamStaleError`
+
+Raised by `opencomputer.agent.stream_watchdog.stream_with_watchdog`
+when a streaming response stalls — i.e. the connection is alive but
+no new tokens have arrived for `BaseProvider.stale_timeout_seconds`.
+Distinct from `httpx.TimeoutException` (which fires on full-request
+or dead-connection timeouts); this catches the LLM-side hang case
+common on local model servers under memory pressure. Subclass of
+`TimeoutError` so `except TimeoutError:` catches both.
+
+```python
+from plugin_sdk import StreamStaleError
+
+try:
+    async for event in stream_source:
+        ...
+except StreamStaleError as e:
+    # Stream stalled — e.provider_name + e.stale_seconds for diagnostics
+    log.warning("provider %s stalled after %.1fs", e.provider_name, e.stale_seconds)
+    raise
+```
+
 ### `Usage`
 
 Frozen dataclass — token counts: `input_tokens`, `output_tokens`,

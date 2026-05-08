@@ -75,6 +75,23 @@ class _OSVSecurityEvent(SignalEvent):
     blocked: bool = False
 
 
+def _passes_tool_filter(tool_name: str, cfg: MCPServerConfig) -> bool:
+    """Apply the per-server ``tools_allow`` / ``tools_deny`` filter (Wave 3).
+
+    Allow-list semantics:
+    - ``tools_allow=None`` (default) — no filter, every name passes.
+    - ``tools_allow=()`` (empty tuple) — deny all (no name matches an
+      empty allow-list; this is the intuitive reading).
+    - ``tools_allow=("a", "b")`` — only those names pass.
+
+    Deny-list applies AFTER allow-list. ``tools_deny=()`` (default) is a
+    no-op.
+    """
+    if cfg.tools_allow is not None and tool_name not in cfg.tools_allow:
+        return False
+    return not (cfg.tools_deny and tool_name in cfg.tools_deny)
+
+
 def _tool_is_internal(tool: Any) -> bool:
     """Return ``True`` when an MCP tool is flagged ``owner=system`` or ``internal=true``.
 
@@ -399,11 +416,21 @@ class MCPConnection:
             # them in its schema. P-16 sub-item (a).
             tool_list = await session.list_tools()
             hidden = 0
+            filtered = 0
             for t in tool_list.tools:
                 if _tool_is_internal(t):
                     hidden += 1
                     logger.debug(
                         "MCP server '%s' tool '%s' hidden (internal/system)",
+                        self.config.name,
+                        t.name,
+                    )
+                    continue
+                # Wave 3 (2026-05-08) — per-server tools_allow / tools_deny.
+                if not _passes_tool_filter(t.name, self.config):
+                    filtered += 1
+                    logger.debug(
+                        "MCP server '%s' tool '%s' filtered by tools_allow/tools_deny",
                         self.config.name,
                         t.name,
                     )
@@ -422,6 +449,12 @@ class MCPConnection:
                     "MCP server '%s' suppressed %d internal tool(s)",
                     self.config.name,
                     hidden,
+                )
+            if filtered:
+                logger.info(
+                    "MCP server '%s' filtered %d tool(s) per tools_allow/tools_deny",
+                    self.config.name,
+                    filtered,
                 )
             self.state = "connected"
             self.connect_time = time.monotonic()

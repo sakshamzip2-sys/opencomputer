@@ -175,6 +175,28 @@ class CompactionResult:
     reason: str = ""
 
 
+def context_window_with_overrides(
+    model: str,
+    custom_providers: tuple = (),
+) -> int:
+    """Wave 3 (2026-05-08) — resolve context length honoring per-model overrides.
+
+    First checks ``custom_providers[].models[<model>].context_length``;
+    falls back to the standard :func:`context_window_for` chain. Used
+    by :class:`CompactionEngine` so a user running a custom Ollama
+    model with ``num_ctx`` set in a Modelfile can declare its real
+    context window in ``config.yaml`` and have the loop's compaction
+    threshold respect it.
+    """
+    for cp in custom_providers:
+        override = getattr(cp, "models", {}).get(model)
+        if override is not None:
+            ctx_len = getattr(override, "context_length", None)
+            if ctx_len is not None:
+                return int(ctx_len)
+    return context_window_for(model)
+
+
 def context_window_for(model: str) -> int:
     """Look up the context window for a model.
 
@@ -220,6 +242,7 @@ class CompactionEngine(ContextEngine):
         disabled: bool = False,
         memory_bridge: object | None = None,
         usage_recorder: Callable[[Any], None] | None = None,
+        custom_providers: tuple = (),
     ) -> None:
         self.provider = provider
         self.model = model
@@ -227,6 +250,10 @@ class CompactionEngine(ContextEngine):
         self.disabled = disabled
         #: PR-6 T2.2 — optional MemoryBridge for on_pre_compress key-fact extraction.
         self._memory_bridge = memory_bridge
+        #: Wave 3 (2026-05-08) — pass-through of Config.custom_providers
+        #: so should_compact can honor per-model context_length overrides
+        #: declared under ``custom_providers[].models[<id>].context_length``.
+        self._custom_providers = custom_providers
         #: Hermes B4 follow-up — optional callback fired with the
         #: ``ProviderResponse.usage`` after each compaction LLM call.
         #: Caller (typically AgentLoop) supplies this to route compaction
@@ -267,7 +294,7 @@ class CompactionEngine(ContextEngine):
         """Use actual measured tokens, not an estimate."""
         if self.disabled:
             return False
-        window = context_window_for(self.model)
+        window = context_window_with_overrides(self.model, self._custom_providers)
         threshold = int(window * self.config.threshold_ratio)
         return last_input_tokens >= threshold
 
@@ -536,5 +563,6 @@ __all__ = [
     "CompactionConfig",
     "CompactionResult",
     "context_window_for",
+    "context_window_with_overrides",
     "DEFAULT_CONTEXT_WINDOWS",
 ]

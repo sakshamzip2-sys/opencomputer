@@ -830,8 +830,14 @@ class AnthropicProvider(BaseProvider):
         from opencomputer.agent.anthropic_client import (
             build_anthropic_async_client,
         )
+        # Wave 3 (2026-05-08) — pass request_timeout_seconds through so
+        # the BaseProvider class attribute (or any subclass override)
+        # actually shapes the underlying httpx client's timeout.
         self.client = build_anthropic_async_client(
-            key, base_url=base, auth_mode=mode,
+            key,
+            base_url=base,
+            auth_mode=mode,
+            timeout=self.request_timeout_seconds,
         )
         # Idle-aware TTL switch — track wall-clock between calls so we can
         # bump cache TTL to 1h when a session has been idle long enough
@@ -1285,8 +1291,14 @@ class AnthropicProvider(BaseProvider):
         from opencomputer.agent.anthropic_client import (
             build_anthropic_async_client,
         )
+        # Wave 3 (2026-05-08) — wire request_timeout_seconds into the
+        # underlying AsyncAnthropic / httpx client so per-provider
+        # timeout overrides actually take effect.
         return build_anthropic_async_client(
-            key, base_url=self._base, auth_mode=self._mode,
+            key,
+            base_url=self._base,
+            auth_mode=self._mode,
+            timeout=self.request_timeout_seconds,
         )
 
     def _build_files_cache_pair(

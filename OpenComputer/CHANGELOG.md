@@ -4,6 +4,27 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Hermes Wave 3 — provider-config polish (2026-05-08, PR #501)
+
+Closes 10 verified gaps from the Hermes "Integrations & AI Providers" reference doc. All additions are backward compatible — pre-Wave-3 `config.yaml` files parse unchanged.
+
+- **Named `custom_providers:` config schema** — declare any number of OpenAI- or Anthropic-compatible endpoints under one top-level list. Each entry carries `name`, `base_url`, `api_key` / `key_env`, `api_mode` ∈ {auto, openai, anthropic}, `request_timeout_seconds`, and a per-model `models: { <id>: { context_length, timeout_seconds } }` overrides map. Per-model `context_length` flows into `compaction.context_window_with_overrides` so the loop's compaction threshold respects user-declared windows for local models.
+- **`/model custom:<name>:<model_id>` slash dispatch** — mid-session swap to any registered `custom_providers` entry. Model ids carrying their own colons (Ollama tag form `qwen3.5:27b`, HF routing suffix `:fastest`) survive the parse.
+- **`oc model add/list/remove`** Typer wizard — friendly wrapper around the YAML schema with optional `/v1/models` connectivity probe.
+- **`fallback_providers:`** cross-provider failover chain — declarative list of `(provider, model)` pairs the agent loop walks after the primary's `fallback_models` exhaust. Per-turn scoped — primary restored on the next user message. Supports `provider: "custom:<name>"` entries that reference `custom_providers`.
+- **`oc fallback`** Typer subcommand group — `list / add / remove / move / clear` for managing the fallback chain interactively.
+- **OpenRouter `provider_routing:`** config block — `sort` / `only` / `ignore` / `order` / `require_parameters` / `data_collection` knobs injected into the `body["provider"]` field via httpx request hook on the OR provider's `AsyncOpenAI` client. `data_collection: deny` is the privacy-conscious knob.
+- **OpenRouter `:nitro` / `:floor` model-name suffix sugar** — per-call override for the routing block's `sort` (`:nitro` → throughput, `:floor` → price). Suffix wins over the config-block sort.
+- **HuggingFace routing-suffix parser** — `split_hf_routing_suffix` recognizes `:fastest` / `:cheapest` / 8 known provider names. The wire format is HF-router-passthrough (no client-side transform); the parser is exposed for CLI completion + typo validation.
+- **xAI `x-grok-conv-id` auto-cache** — XAIProvider attaches a stable per-instance UUID via `AsyncOpenAI.with_options(default_headers=...)`. Free perf win on Grok via xAI's KV-cache key reuse across multi-turn workloads.
+- **Per-provider `request_timeout_seconds`** on `BaseProvider` — wired into anthropic-provider + openai-provider httpx clients so pool-rotated and inline keys both honor the timeout. Default 60.0; subclasses override per-class.
+- **Per-provider `stale_timeout_seconds`** on `BaseProvider` (opt-in, default `None`) + `plugin_sdk.StreamStaleError` + `opencomputer.agent.stream_watchdog.stream_with_watchdog` — wraps the agent loop's stream consumer so an LLM-side hang on a still-alive HTTP connection raises a typed exception instead of waiting forever.
+- **MCP per-server `tools_allow` / `tools_deny`** filter on `MCPServerConfig` — applied at server-tool-registration time. `tools_allow=None` is no-filter (default), `tools_allow=()` is deny-all (server stays connected for resources/prompts but contributes zero tools), `tools_deny=("write_file",)` blacklists. Token-bloat fix for users running many MCP servers.
+- **`mlx-whisper` STT backend** — Apple Silicon-native Whisper via MLX (Metal Performance Shaders). 5-10× faster than `openai-whisper` on M-series. Local-only; no network call. Opt-in via `pip install opencomputer[voice-mlx]` + `voice.stt: "mlx-whisper"` in `config.yaml`. Falls through gracefully on non-Apple-Silicon hosts.
+- **Save/load round-trip preservation** — `_to_yaml_dict` now emits `custom_providers`, `provider_routing`, and `fallback_providers` so `save_config(load_config(path))` is idempotent.
+
+92 new tests pass + 2 skipped (Apple-Silicon-gated mlx-whisper transcribe smoke test).
+
 ### Added — Messaging Gateway parity (Hermes) — PR-1: UX + security (2026-05-08, branch `feat/gateway-parity-pr1-2026-05-08`)
 
 Closes the Hermes-spec messaging-gateway UX gap with a unified `oc gateway *`

@@ -123,6 +123,207 @@ class ModelConfig:
 
 _VALID_API_MODES: frozenset[str] = frozenset({"auto", "openai", "anthropic"})
 
+#: Wave 3 — recognized OpenRouter `:nitro` / `:floor` routing suffixes
+#: that translate into ``provider: {sort: ...}`` body overrides. Other
+#: suffixes (e.g. tool-version markers) pass through verbatim.
+_OR_ROUTING_SUFFIXES: frozenset[str] = frozenset({"nitro", "floor"})
+
+#: Wave 3 — recognized HuggingFace Inference Providers routing
+#: suffixes. Per HF's docs, ``:fastest`` / ``:cheapest`` are auto-routed
+#: and a specific provider name (e.g. ``:groq``) pins to that backend.
+#: We don't transform the wire format — HF parses the suffix server-side
+#: when it appears in the ``model`` field. The set is exposed for
+#: client-side validation (warn on typos) and CLI completions.
+_KNOWN_HF_PROVIDERS: frozenset[str] = frozenset(
+    {"groq", "together", "fireworks", "replicate", "sambanova",
+     "hyperbolic", "novita", "cerebras"}
+)
+_HF_ROUTING_SUFFIXES: frozenset[str] = (
+    frozenset({"fastest", "cheapest"}) | _KNOWN_HF_PROVIDERS
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRoutingConfig:
+    """Wave 3 — OpenRouter-style provider routing knobs.
+
+    Configured under ``provider_routing:`` (top-level) in config.yaml.
+    Only meaningful when the active provider is OpenRouter; ignored
+    elsewhere. The :nitro / :floor model-name suffixes override
+    ``sort`` per-call.
+
+    See https://openrouter.ai/docs/provider-routing for upstream
+    semantics. All fields default to OpenRouter's own defaults — no
+    config block at all means no behavior change.
+    """
+
+    sort: str | None = None  # "price" | "throughput" | "latency"
+    only: tuple[str, ...] = ()
+    ignore: tuple[str, ...] = ()
+    order: tuple[str, ...] = ()
+    require_parameters: bool = False
+    data_collection: str | None = None  # "allow" | "deny"
+
+    def to_body_block(self) -> dict | None:
+        """Serialize to the ``provider: {...}`` body block OpenRouter expects.
+
+        Returns None when the config is fully default (so we don't emit
+        an empty ``"provider": {}`` block on every request).
+        """
+        block: dict = {}
+        if self.sort:
+            block["sort"] = self.sort
+        if self.only:
+            block["only"] = list(self.only)
+        if self.ignore:
+            block["ignore"] = list(self.ignore)
+        if self.order:
+            block["order"] = list(self.order)
+        if self.require_parameters:
+            block["require_parameters"] = True
+        if self.data_collection:
+            block["data_collection"] = self.data_collection
+        return block or None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.only, list):
+            object.__setattr__(self, "only", tuple(self.only))
+        if isinstance(self.ignore, list):
+            object.__setattr__(self, "ignore", tuple(self.ignore))
+        if isinstance(self.order, list):
+            object.__setattr__(self, "order", tuple(self.order))
+
+
+def split_or_routing_suffix(model: str) -> tuple[str, str | None]:
+    """Strip a recognized ``:nitro`` / ``:floor`` suffix from ``model``.
+
+    Returns ``(model_without_suffix, suffix_or_none)``. Unknown suffixes
+    (e.g. ``:beta`` on a model name that legitimately uses ``:`` for
+    something else) pass through verbatim — only the recognized set is
+    consumed.
+    """
+    if ":" not in model:
+        return model, None
+    prefix, _, suffix = model.rpartition(":")
+    if suffix in _OR_ROUTING_SUFFIXES:
+        return prefix, suffix
+    return model, None
+
+
+def split_hf_routing_suffix(model: str) -> tuple[str, str | None]:
+    """Strip a recognized HuggingFace routing suffix from ``model``.
+
+    Returns ``(model_without_suffix, suffix_or_none)``. Unknown suffixes
+    pass through verbatim. Caller decides whether to put the suffix
+    back on (HF's API parses it server-side) or use the known suffix
+    set for validation / CLI completion.
+    """
+    if ":" not in model:
+        return model, None
+    prefix, _, suffix = model.rpartition(":")
+    if suffix in _HF_ROUTING_SUFFIXES:
+        return prefix, suffix
+    return model, None
+
+
+@dataclass(frozen=True, slots=True)
+class CustomProviderModelOverride:
+    """Per-model override carried under ``custom_providers[].models[<id>]``.
+
+    Both fields are optional. When set, they take precedence over the
+    enclosing ``CustomProvider`` defaults / global resolution chain.
+
+    * ``context_length`` — manual context-window size in tokens; bypasses
+      the cached + probed lookup chain in ``compaction.resolve_context_length``.
+    * ``timeout_seconds`` — per-model HTTP timeout override; falls back to
+      the enclosing ``CustomProvider.request_timeout_seconds``.
+    """
+
+    context_length: int | None = None
+    timeout_seconds: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FallbackProvider:
+    """Wave 3 (2026-05-08) — one entry in a cross-provider fallback chain.
+
+    Configured under top-level ``fallback_providers:`` in config.yaml as
+    a list. ``provider`` is either a bundled provider name
+    (``openrouter`` / ``anthropic`` / ``openai`` / ...) or
+    ``custom:<name>`` referencing an entry under ``custom_providers:``.
+
+    Activates at most once per user turn — the primary is restored on
+    the next user message — so a provider-wide rate limit doesn't
+    persist as a permanent silent re-route.
+    """
+
+    provider: str = ""
+    model: str = ""
+    base_url: str | None = None
+    key_env: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CustomProvider:
+    """A user-defined OpenAI-compatible (or Anthropic-compatible) endpoint.
+
+    Configured under top-level ``custom_providers:`` in ``config.yaml``.
+    Used via ``/model custom:<name>:<model_id>`` mid-session, or by setting
+    the model resolver's provider hint to ``custom:<name>``.
+
+    ``api_mode``:
+    - ``"auto"`` (default) probes the endpoint's ``/v1/models`` once on
+      first use and caches the inferred shape (openai vs anthropic).
+    - ``"openai"`` / ``"anthropic"`` skip the probe.
+
+    ``api_key`` (inline) wins over ``key_env`` (env var name lookup).
+    Missing both = no auth header (acceptable for local servers).
+    """
+
+    name: str = ""
+    base_url: str = ""
+    api_key: str | None = None
+    key_env: str | None = None
+    api_mode: str = "auto"
+    request_timeout_seconds: float = 60.0
+    models: dict[str, CustomProviderModelOverride] = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self.api_mode not in _VALID_API_MODES:
+            raise ValueError(
+                f"api_mode must be one of {sorted(_VALID_API_MODES)!r}, "
+                f"got {self.api_mode!r}"
+            )
+        if self.request_timeout_seconds <= 0:
+            raise ValueError(
+                "request_timeout_seconds must be > 0, "
+                f"got {self.request_timeout_seconds}"
+            )
+        # YAML auto-parser delivers ``models`` as dict-of-dict; convert
+        # each value to ``CustomProviderModelOverride`` so callers get a
+        # uniform type. Frozen+slots requires ``object.__setattr__``.
+        # We deliberately use duck-typing rather than a strict
+        # ``isinstance(..., CustomProviderModelOverride)`` check: in some
+        # CI ordering this dataclass gets module-reloaded and class
+        # identity drifts (a perfectly valid override object then fails
+        # isinstance against the *current* class). Duck-typing works in
+        # both regimes; bad shapes still fail later when callers access
+        # ``.context_length`` / ``.timeout_seconds``.
+        converted: dict[str, CustomProviderModelOverride] = {}
+        changed = False
+        for key, value in self.models.items():
+            if isinstance(value, dict):
+                converted[key] = CustomProviderModelOverride(**value)
+                changed = True
+            else:
+                converted[key] = value
+        if changed:
+            object.__setattr__(self, "models", converted)
+
 
 @dataclass(frozen=True, slots=True)
 class DelegationConfig:
@@ -347,6 +548,26 @@ class MCPServerConfig:
     env: dict[str, str] = field(default_factory=dict)  # for stdio: env vars
     headers: dict[str, str] = field(default_factory=dict)  # for sse/http: HTTP headers (auth)
     enabled: bool = True
+    #: Wave 3 (2026-05-08) — per-server tool whitelist. ``None`` (the
+    #: default) means no filter — every tool the server publishes is
+    #: registered. An EMPTY tuple means deny-all (the server stays
+    #: connected for resources / prompts but contributes zero tools);
+    #: this is the intuitive reading of "the allow-list is empty".
+    tools_allow: tuple[str, ...] | None = None
+    #: Wave 3 (2026-05-08) — per-server tool blacklist. Applied AFTER
+    #: ``tools_allow``. Default empty tuple = no exclusions.
+    tools_deny: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # YAML auto-parser delivers list-typed fields as Python ``list``;
+        # we keep them as ``tuple`` for hashability + the frozen-dataclass
+        # contract. The auto-parser already tuplifies fields whose default
+        # is a tuple (``args``, ``tools_deny``), but a default of ``None``
+        # bypasses that path — convert here.
+        if isinstance(self.tools_allow, list):
+            object.__setattr__(self, "tools_allow", tuple(self.tools_allow))
+        if isinstance(self.tools_deny, list):
+            object.__setattr__(self, "tools_deny", tuple(self.tools_deny))
 
 
 @dataclass(frozen=True, slots=True)
@@ -724,6 +945,21 @@ class Config:
     system_control: FullSystemControlConfig = field(default_factory=FullSystemControlConfig)
     #: Hermes-parity cron knobs (2026-05-08). See :class:`CronConfig`.
     cron: CronConfig = field(default_factory=CronConfig)
+    #: Wave 3 (2026-05-08) — named OpenAI/Anthropic-compatible endpoints.
+    #: Each entry is a :class:`CustomProvider` reachable via
+    #: ``/model custom:<name>:<model_id>`` or by setting the model
+    #: resolver's provider hint to ``custom:<name>``. Empty by default;
+    #: backward compatible — pre-Wave-3 configs parse unchanged.
+    custom_providers: tuple[CustomProvider, ...] = ()
+    #: Wave 3 (2026-05-08) — OpenRouter provider routing knobs. Only
+    #: applies when the active provider is OpenRouter; ignored otherwise.
+    provider_routing: ProviderRoutingConfig = field(default_factory=ProviderRoutingConfig)
+    #: Wave 3 (2026-05-08) — cross-provider fallback chain. Each entry
+    #: is a (provider_id, model) pair the loop tries after the primary
+    #: provider's ``fallback_models`` are exhausted. Per-turn scoped:
+    #: activates at most once per user turn; primary is restored on
+    #: the next turn.
+    fallback_providers: tuple[FallbackProvider, ...] = ()
     home: Path = field(default_factory=_home)
 
 
@@ -756,6 +992,12 @@ def load_config_for_profile(profile_home: Path) -> Config:
 __all__ = [
     "Config",
     "CronConfig",
+    "CustomProvider",
+    "CustomProviderModelOverride",
+    "FallbackProvider",
+    "ProviderRoutingConfig",
+    "split_or_routing_suffix",
+    "split_hf_routing_suffix",
     "DelegationConfig",
     "ModelConfig",
     "LoopConfig",
