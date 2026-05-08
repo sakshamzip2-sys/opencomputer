@@ -38,9 +38,77 @@ import shlex
 from typing import Any
 
 from opencomputer.agent.config import HookCommandConfig, _home
-from plugin_sdk.hooks import HookContext, HookDecision, HookHandler
+from plugin_sdk.hooks import HookContext, HookDecision, HookEvent, HookHandler
 
 _log = logging.getLogger("opencomputer.hooks.shell")
+
+
+# 2026-05-08 G3 — recognised stdout JSON keys.
+# We accept both Hermes canonical and Claude Code shapes:
+#   {"action": "block" | "approve" | "allow", "message": "..."}
+#   {"decision": "block" | "approve", "reason": "..."}
+#   {"context": "..."} — only honoured on PRE_LLM_CALL (G4)
+_RECOGNISED_STDOUT_KEYS: frozenset[str] = frozenset(
+    {"action", "decision", "message", "reason", "context"}
+)
+
+
+def _stdout_has_known_keys(obj: dict[str, Any]) -> bool:
+    """True if the parsed stdout JSON object has at least one recognised key."""
+    return bool(_RECOGNISED_STDOUT_KEYS.intersection(obj.keys()))
+
+
+def _decision_from_stdout(
+    obj: dict[str, Any],
+    event: HookEvent,
+) -> HookDecision | None:
+    """Translate a parsed stdout JSON object into a :class:`HookDecision`.
+
+    Returns ``None`` when the object's keys don't unambiguously map to a
+    decision (caller falls back to the exit-code path or returns pass).
+    Returns a ``HookDecision`` for recognised shapes:
+
+    * Hermes canonical ``{"action": "block", "message": "..."}``
+    * Claude Code ``{"decision": "block", "reason": "..."}``
+    * Either ``{"action": "approve"|"allow"}`` /
+      ``{"decision": "approve"}`` → pass (with optional inject_context
+      on PRE_LLM_CALL)
+    * ``{"context": "..."}`` alone on PRE_LLM_CALL → pass + inject
+
+    Non-PRE_LLM_CALL events: ``context`` field is ignored (Hermes parity).
+    """
+    inject_raw = obj.get("context")
+    inject_str = (
+        str(inject_raw).strip()
+        if isinstance(inject_raw, str) and inject_raw.strip()
+        else None
+    )
+
+    raw_action = obj.get("action")
+    raw_decision = obj.get("decision")
+
+    def _is_block(value: object) -> bool:
+        return isinstance(value, str) and value.lower() == "block"
+
+    def _is_approve(value: object) -> bool:
+        return isinstance(value, str) and value.lower() in (
+            "approve", "allow", "pass",
+        )
+
+    if _is_block(raw_action) or _is_block(raw_decision):
+        message = (
+            obj.get("message") or obj.get("reason") or "blocked by settings hook"
+        )
+        return HookDecision(decision="block", reason=str(message))
+    if _is_approve(raw_action) or _is_approve(raw_decision):
+        if inject_str and event == HookEvent.PRE_LLM_CALL:
+            return HookDecision(decision="pass", inject_context=inject_str)
+        return HookDecision(decision="pass")
+    if inject_str:
+        if event == HookEvent.PRE_LLM_CALL:
+            return HookDecision(decision="pass", inject_context=inject_str)
+        return HookDecision(decision="pass")
+    return None
 
 
 def _ctx_payload(ctx: HookContext) -> dict[str, Any]:
@@ -205,7 +273,40 @@ def make_shell_hook_handler(config: HookCommandConfig) -> HookHandler:
             return HookDecision(decision="pass")
 
         rc = proc.returncode
-        stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip() if stderr_bytes else ""
+        stdout_text = (
+            stdout_bytes.decode("utf-8", errors="replace").strip()
+            if stdout_bytes
+            else ""
+        )
+        stderr_text = (
+            stderr_bytes.decode("utf-8", errors="replace").strip()
+            if stderr_bytes
+            else ""
+        )
+
+        # 2026-05-08 G3 — Hermes Doc-2 stdout JSON wire protocol.
+        # If stdout parses as a JSON object, recognised keys take
+        # precedence over the exit-code path. Lets a script return
+        # {"action":"block","message":"..."} (Hermes canonical) or
+        # {"decision":"block","reason":"..."} (Claude Code) with exit 0.
+        if stdout_text:
+            try:
+                stdout_obj = json.loads(stdout_text)
+            except json.JSONDecodeError:
+                stdout_obj = None
+            if isinstance(stdout_obj, dict):
+                resolved = _decision_from_stdout(stdout_obj, ctx.event)
+                if resolved is not None:
+                    return resolved
+                # Recognised JSON but no actionable shape → pass.
+                if not _stdout_has_known_keys(stdout_obj):
+                    _log.debug(
+                        "settings hook %r: stdout JSON had no recognised "
+                        "keys (%s); passing",
+                        config.command,
+                        list(stdout_obj.keys()),
+                    )
+                return HookDecision(decision="pass")
 
         if rc == 0:
             return HookDecision(decision="pass")

@@ -4,6 +4,34 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Hermes Doc-2 residuals — Code Execution & Event Hooks closeout (2026-05-08)
+
+Closes the 5 verified residual gaps from the Hermes "Code Execution & Event Hooks" reference doc that PR #496 left out. Debug surfaces and protocol-parity gaps that pass the makes-sense filter.
+
+- **`oc hooks test --execute`** actually fires synthetic events through the engine (was previously raising "not yet implemented"). Adds `--for-tool NAME` to populate `ctx.tool_call.name` for Pre/PostToolUse synthetic contexts. Routes through `engine.fire_blocking` for blocking events (PRE_TOOL_USE, PRE_LLM_CALL, PRE_GATEWAY_DISPATCH, PRE_APPROVAL_REQUEST) and `engine.fire_and_forget` otherwise. Surfaces the first non-pass decision for blocking events; reports dispatch count for fire-and-forget.
+- **`oc hooks doctor [--json]`** health diagnostics — surfaces gateway file-discovery hook validity (HOOK.yaml schema, handler.py import), settings-hook executable resolution + executable-bit, plugin/settings hook registration counts per event, hook script mtime drift (recently-modified WARN; >90-day-stale INFO), recent fire history with staleness checks for canary events (PreToolUse/PostToolUse), and an explicit note that OC has no shell-hook allowlist by design (config.yaml-edit IS consent). Severity buckets: OK / INFO / WARN / ERROR. `--json` mode emits a clean JSON list to stdout (warnings go to stderr); piped consumers like `oc hooks doctor --json | jq '.[] | select(.severity == "ERROR")'` work safely.
+- **Shell-hook stdout JSON wire protocol** — accepts both Hermes canonical `{"action": "block", "message": "..."}` and Claude Code `{"decision": "block", "reason": "..."}` shapes. `{"action": "approve"}` / `{"decision": "approve"}` / `{"action": "allow"}` map to pass. Stdout JSON wins over the exit-code path when both are present (precedence rule). Malformed JSON, JSON arrays, JSON null, and non-string action values fall back to the exit-code path. Unrecognised JSON keys pass with a debug log. Existing OC shell-hook scripts (which print `{}` or empty) hit the unchanged exit-code path and behave identically — fully backward compatible.
+- **Shell-hook context injection on PRE_LLM_CALL** — new `inject_context: str | None = None` field on `HookDecision`. Settings hooks (registered via `hooks:` block in `config.yaml`) for PRE_LLM_CALL emit `{"context": "..."}` on stdout; `engine.collect_inject_contexts` runs blocking-eligible (`fire_and_forget=False`) handlers in priority order, collects each handler's `inject_context` string, and `apply_inject_contexts` appends them to the wire-message list before the provider call. A 5-line bash script can now inject git status, branch name, current time, etc., into every turn without writing a Python plugin. Plugin handlers (default `fire_and_forget=True`) keep their existing fire-and-forget semantics — no behavior change for plugin authors. Block decisions on PRE_LLM_CALL are honoured (block wins over context).
+- **`code_execution.max_tool_calls` config slot + `CodeExecutionConfig` dataclass** — closes the silent footgun where a buggy `while True: read_file()` script could consume API quota until the 300s timeout fired. The cap (default 50, Hermes spec) is now configurable via `config.yaml`:
+  ```yaml
+  code_execution:
+    timeout_seconds: 600          # default 300
+    max_tool_calls: 100           # default 50
+    terminal:
+      env_passthrough:            # bypass KEY/TOKEN/SECRET/etc. env scrub
+        - MY_API_KEY
+  ```
+  `CodeExecutionConfig.__post_init__` validates `max_tool_calls > 0` and `timeout_seconds > 0` so a bad `config.yaml` fails loudly at load time rather than silently bricking ExecuteCode at first use. `ExecuteCode.execute` reads `code_execution.timeout_seconds` as the per-call default (LLM-supplied `timeout_seconds` arg still wins). Per-call `timeout_seconds=0` or non-numeric values return a clear error rather than infinite-hang silently.
+
+**Tests:** 74 new tests across `tests/test_cli_hooks.py` (24 total, 15 new), `tests/test_shell_hook_stdout_protocol.py` (33 new), `tests/test_execute_code_max_tool_calls.py` (17 new). 160 cumulative hook + execcode + browser + voice tests pass when run together (regression-free vs main).
+
+**Out of scope (deliberate, with reopen triggers):**
+
+- Shell-hook allowlist + per-`(event, command)` consent prompt + `--accept-hooks` flag — OC's design says editing `config.yaml` IS consent. ~200 LOC for marginal value. Reopen if a user reports a real "didn't realize I shipped a hook" incident.
+- `hermes_tools` import-shim aliases in execute_code prologue — pure sugar; OC tool stubs are PascalCase (Read/Write/Edit/Grep/Glob/WebFetch/WebSearch/Bash). Reopen if cross-port script-pasting becomes friction.
+
+Spec: `docs/superpowers/specs/2026-05-08-hermes-execcode-hooks-residuals-design.md`. Plan: `docs/superpowers/plans/2026-05-08-hermes-execcode-hooks-residuals.md`. Findings doc updated: `docs/refs/hermes-agent/2026-05-08-kanban-goals-execcode-hooks-parity.md` §2.5.
+
 ### Fixed — Hermes v2 honest-audit follow-up (2026-05-08)
 
 PR #510 closed three Hermes v2 gaps but missed others on closer audit. This follow-up closes the missed gaps and corrects the overclaimed parity-doc rows.

@@ -206,6 +206,12 @@ class HookDecision:
     modified_message: str = ""  # if set, injected as a system reminder
     #: Wave 5 T13 — for decision="rewrite", the new event text.
     rewritten_text: str | None = None
+    #: 2026-05-08 G4 — text to inject into the user message for
+    #: PRE_LLM_CALL only. Mirrors Hermes' shell-hook stdout
+    #: ``{"context": "..."}`` shape and the existing plugin-side
+    #: pre_llm_call return-value contract. Ignored for non-PRE_LLM_CALL
+    #: events (callers in loop.py decide the apply-condition).
+    inject_context: str | None = None
 
 
 # Hook handler is an async callable: (ctx) -> HookDecision or None (= "pass")
