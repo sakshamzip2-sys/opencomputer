@@ -365,6 +365,42 @@ def build_server() -> FastMCP:
             return [dict(r) for r in rows]
 
     @server.tool()
+    def permissions_list_open(limit: int = 50) -> list[dict[str, Any]]:
+        """Hermes parity G13 (2026-05-09): list OPEN consent requests.
+
+        Returns capabilities currently awaiting a user/operator decision.
+        Distinct from ``consent_history`` (which returns the full audit
+        log) — this is the live "approvals queue".
+
+        Falls back to ``[]`` if the F1 ``consent_requests`` table doesn't
+        exist (pre-F1 profile or fresh DB).
+
+        Args:
+            limit: Max entries to return (default 50, max 500).
+
+        Returns:
+            List of dicts: ``capability_id`` (e.g. "fs.write"), ``scope``
+            (path / arg constraints), ``requested_at`` (unix-ts float),
+            ``requested_by`` (caller — usually ``"tool:<name>"``).
+        """
+        bounded = max(1, min(limit, 500))
+        db_path = _home() / "sessions.db"
+        if not db_path.exists():
+            return []
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT capability_id, scope, requested_at, requested_by "
+                    "FROM consent_requests WHERE state = 'pending' "
+                    "ORDER BY requested_at DESC LIMIT ?",
+                    (bounded,),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [dict(r) for r in rows]
+
+    @server.tool()
     async def messages_send(
         platform: str,
         chat_id: str,

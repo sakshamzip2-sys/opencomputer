@@ -51,6 +51,7 @@ class TestServerStructure:
             "messages_read",
             "messages_send",
             "messages_send_status",
+            "permissions_list_open",
             "permissions_respond",
             "recall_search",
             "session_get",
