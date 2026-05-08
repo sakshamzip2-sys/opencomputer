@@ -193,11 +193,17 @@ def max_context_for(
     try:
         from opencomputer.agent.compaction import context_window_with_overrides
 
+        # Hot path — every keystroke triggers a render. ``enable_probe=
+        # False`` keeps this synchronous-fast; the agent loop's first
+        # turn fills the probe cache via the same resolver, after
+        # which subsequent renders return the up-to-date value with
+        # zero network latency.
         return int(
             context_window_with_overrides(
                 model_id,
                 custom_providers=custom_providers,
                 model_context_overrides=model_context_overrides,
+                enable_probe=False,
             )
         )
     except Exception:  # noqa: BLE001 — fallback path
