@@ -8,7 +8,6 @@ from opencomputer.tools.bash_safety import (
     load_command_allowlist_from_active_config,
 )
 
-
 # ── leading-token matcher ────────────────────────────────────────────
 
 

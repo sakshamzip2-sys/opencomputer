@@ -409,6 +409,92 @@ def detect_destructive_with_allowlist(
     return detect_destructive(cmd)
 
 
+#: Sandbox strategy names that provide container-grade isolation strong
+#: enough to make the advisory bash_safety detector redundant. Mirrors
+#: the Hermes "Container bypass" table in the security doc.
+#:
+#: Hardline patterns (:mod:`opencomputer.security.hardline`) STILL apply
+#: regardless — even a Docker container with bind-mounted /workspace can
+#: leak a destructive ``rm -rf /`` back to the host filesystem.
+_CONTAINER_ISOLATED_STRATEGIES: frozenset[str] = frozenset({
+    "docker",
+    "singularity",
+    "modal",
+    "daytona",
+    "vercel_sandbox",
+})
+
+
+def is_sandbox_strategy_container_isolated(strategy: str | None) -> bool:
+    """True iff the named sandbox strategy is in :data:`_CONTAINER_ISOLATED_STRATEGIES`.
+
+    Used by callers that need to decide whether to skip bash_safety
+    advisory checks for commands that will run inside a container.
+    """
+    if not strategy:
+        return False
+    return strategy.lower() in _CONTAINER_ISOLATED_STRATEGIES
+
+
+def load_active_sandbox_strategy() -> str | None:
+    """Read ``sandbox.strategy`` from the active profile's ``config.yaml``.
+
+    Returns ``None`` on any error (missing file, missing section, parse
+    error). Independent of the central config dataclass (consistent
+    with the other ``load_*_from_active_config`` helpers in this PR).
+    """
+    try:
+        import yaml
+
+        from opencomputer.profiles import (
+            profile_home_dir,
+            read_active_profile,
+        )
+
+        prof = read_active_profile()
+        if prof is None:
+            return None
+        config_path = profile_home_dir(prof) / "config.yaml"
+        if not config_path.exists():
+            return None
+        with config_path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        sandbox = data.get("sandbox") or {}
+        raw = sandbox.get("strategy")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip().lower()
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def detect_destructive_with_context(cmd: str) -> DestructivePattern | None:
+    """Production-ready wrapper that consults both the user's
+    ``security.command_allowlist`` AND the active ``sandbox.strategy``.
+
+    Suppression rules (in order):
+
+    1. If the active sandbox is in
+       :data:`_CONTAINER_ISOLATED_STRATEGIES`, return ``None`` — the
+       container is the boundary. Hardline patterns still apply via
+       :mod:`opencomputer.security.hardline` at tool entry, so this
+       suppression is safe.
+    2. If the cmd matches an entry in
+       ``security.command_allowlist``, return ``None`` (per
+       :func:`detect_destructive_with_allowlist`).
+    3. Otherwise return the result of :func:`detect_destructive`.
+
+    Designed for callers (plan-mode hook, agent loop's pre-tool-use
+    advisory) that need a single function call and don't want to
+    coordinate the multiple config knobs themselves.
+    """
+    if is_sandbox_strategy_container_isolated(load_active_sandbox_strategy()):
+        return None
+    return detect_destructive_with_allowlist(
+        cmd, load_command_allowlist_from_active_config()
+    )
+
+
 def load_command_allowlist_from_active_config() -> tuple[str, ...]:
     """Read ``security.command_allowlist`` from the active profile's
     ``config.yaml``.
@@ -448,6 +534,9 @@ __all__ = [
     "DestructivePattern",
     "detect_destructive",
     "detect_destructive_with_allowlist",
+    "detect_destructive_with_context",
     "is_command_allowlisted",
+    "is_sandbox_strategy_container_isolated",
+    "load_active_sandbox_strategy",
     "load_command_allowlist_from_active_config",
 ]

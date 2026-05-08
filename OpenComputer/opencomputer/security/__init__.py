@@ -24,6 +24,14 @@ the WebFetch tool) pipe their payloads through
 
 from __future__ import annotations
 
+from opencomputer.security.approval_keywords import (
+    ReplyClassification,
+    classify_reply,
+)
+from opencomputer.security.approvals import (
+    ApprovalsConfig,
+    load_approvals_from_active_config,
+)
 from opencomputer.security.instruction_detector import (
     DetectionVerdict,
     InstructionDetector,
@@ -41,10 +49,14 @@ from opencomputer.security.redact import (
 from opencomputer.security.sanitize import sanitize_external_content
 
 __all__ = [
+    "ApprovalsConfig",
     "DetectionVerdict",
     "InstructionDetector",
     "InstructionDetectorConfig",
+    "ReplyClassification",
+    "classify_reply",
     "default_detector",
+    "load_approvals_from_active_config",
     "redact_is_enabled",
     "redact_runtime_mapping",
     "redact_runtime_text",
