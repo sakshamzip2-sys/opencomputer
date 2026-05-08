@@ -1369,6 +1369,10 @@ def _run_chat_session(
 
     def _on_clear() -> None:
         nonlocal session_id
+        # 2026-05-08 — Hermes Doc-2 parity: capture the rotated-out id so
+        # SESSION_RESET handlers can carry forward in-memory caches keyed
+        # on the previous session.
+        _previous_session_id = session_id
         session_id = str(uuid.uuid4())
         _token_tally["in"] = 0
         _token_tally["out"] = 0
@@ -1378,6 +1382,17 @@ def _run_chat_session(
         # Drop folded-paste blobs — placeholder ids reset to #1 on the new session.
         paste_folder.clear()
         console.clear()
+        # Fire SESSION_RESET after rotation so handlers see the new id as
+        # ``ctx.session_id`` and the rotated-out id as ``previous_session_id``.
+        from opencomputer.hooks.session_lifecycle import (
+            fire_session_reset as _fire_reset,
+        )
+
+        _fire_reset(
+            new_session_id=session_id,
+            previous_session_id=_previous_session_id,
+            surface="cli",
+        )
 
     def _on_snapshot_create(label: str | None) -> str | None:
         from opencomputer.snapshot import create_snapshot
@@ -1627,6 +1642,17 @@ def _run_chat_session(
             except (KeyboardInterrupt, EOFError):
                 console.print("\n[dim]bye.[/dim]")
                 _print_update_hint_if_any()
+                # 2026-05-08 — Hermes Doc-2 parity: SESSION_FINALIZE fires
+                # once when a surface tears down, distinct from per-turn
+                # SESSION_END. Plugins use this for last-chance state
+                # flushes that must NOT happen between turns.
+                from opencomputer.hooks.session_lifecycle import (
+                    fire_session_finalize as _fire_finalize,
+                )
+
+                _fire_finalize(
+                    session_id=session_id, reason="cli_exit", surface="cli",
+                )
                 return
         if not user_input.strip():
             continue
@@ -1923,6 +1949,16 @@ def _run_chat_session(
                 if result.message:
                     console.print(f"[dim]{result.message}[/dim]")
                 _print_update_hint_if_any()
+                # 2026-05-08 — fire SESSION_FINALIZE before /exit returns
+                # so plugins flush state. See cli_exit branch above for
+                # rationale.
+                from opencomputer.hooks.session_lifecycle import (
+                    fire_session_finalize as _fire_finalize,
+                )
+
+                _fire_finalize(
+                    session_id=session_id, reason="cli_exit", surface="cli",
+                )
                 return
             continue
 

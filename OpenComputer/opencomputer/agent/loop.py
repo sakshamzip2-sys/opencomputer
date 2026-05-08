@@ -2112,6 +2112,56 @@ class AgentLoop:
                             system_prompt_override=system_prompt_override,
                         )
                     self.db.end_session(sid)
+                    # 2026-05-08 — Hermes Doc-2 parity: TRANSFORM_LLM_OUTPUT
+                    # fires once per turn after the final response is
+                    # assembled, before delivery. Handlers may return
+                    # ``HookDecision(decision="rewrite", rewritten_text=...)``
+                    # to replace the response delivered to the channel /
+                    # console. The persisted DB content is the original
+                    # (rewriting is "for delivery only" — symmetric with
+                    # TRANSFORM_TOOL_RESULT). Fail-open: any exception
+                    # leaves the original content intact.
+                    try:
+                        _final_text = (
+                            final_assistant_msg.content
+                            if isinstance(final_assistant_msg.content, str)
+                            else ""
+                        )
+                        if _final_text:
+                            from opencomputer.hooks.engine import (
+                                engine as _hook_engine_xllm,
+                            )
+                            from plugin_sdk.hooks import (
+                                HookContext as _HookContextXllm,
+                            )
+                            from plugin_sdk.hooks import (
+                                HookEvent as _HookEventXllm,
+                            )
+
+                            _decision = await _hook_engine_xllm.fire_blocking(
+                                _HookContextXllm(
+                                    event=_HookEventXllm.TRANSFORM_LLM_OUTPUT,
+                                    session_id=sid,
+                                    response_text=_final_text,
+                                    model=self.config.model.model,
+                                    runtime=self._runtime,
+                                )
+                            )
+                            if (
+                                _decision is not None
+                                and _decision.decision == "rewrite"
+                                and _decision.rewritten_text
+                            ):
+                                from dataclasses import replace as _replace_
+
+                                final_assistant_msg = _replace_(
+                                    final_assistant_msg,
+                                    content=_decision.rewritten_text,
+                                )
+                    except Exception:  # noqa: BLE001 — never break delivery
+                        _log.debug(
+                            "TRANSFORM_LLM_OUTPUT hook failed", exc_info=True
+                        )
                     return ConversationResult(
                         final_message=final_assistant_msg,
                         messages=messages,
