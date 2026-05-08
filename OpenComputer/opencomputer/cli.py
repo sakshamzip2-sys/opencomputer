@@ -3732,10 +3732,50 @@ def config_get(key: str = typer.Argument(..., help="Dotted key, e.g. model.provi
 def config_set(
     key: str = typer.Argument(..., help="Dotted key, e.g. model.provider"),
     value: str = typer.Argument(..., help="New value"),
+    secret: bool = typer.Option(
+        False, "--secret", help="Force write to .env (mode 0600)."
+    ),
+    public: bool = typer.Option(
+        False, "--public", help="Force write to config.yaml (overrides secret heuristic)."
+    ),
 ) -> None:
-    """Set a config value and persist to ~/.opencomputer/config.yaml."""
+    """Set a config value.
+
+    Hermes config v2 — secret-routing: keys matching the secret-name
+    heuristic (``API_KEY``/``TOKEN``/``SECRET``/``PASSWORD``/``WEBHOOK_URL``)
+    are written to ``~/.opencomputer/<profile>/.env`` (mode 0600). Other
+    keys go to ``config.yaml``. ``--secret``/``--public`` override the
+    heuristic.
+    """
+    if secret and public:
+        console.print(
+            "[bold red]error:[/bold red] --secret and --public are mutually exclusive"
+        )
+        raise typer.Exit(1)
+
+    from opencomputer.agent.config_store import env_file_path
+    from opencomputer.profile_env_init import is_secret_key, write_env_var
+
+    if secret:
+        target = "env"
+    elif public:
+        target = "yaml"
+    else:
+        target = "env" if is_secret_key(key) else "yaml"
+
+    if target == "env":
+        env_path = env_file_path()
+        write_env_var(env_path, key, value)
+        console.print(f"[green]✓[/green] wrote [bold]{key}[/bold] to [dim]{env_path}[/dim] (.env, mode 0600)")
+        if public:
+            console.print(
+                "[yellow]warning:[/yellow] --public was used to force a likely "
+                "secret into config.yaml — consider .env for secrets."
+            )
+        return
+
+    # YAML route — existing behavior, with secret warning if forced.
     cfg = load_config()
-    # Attempt to coerce numeric / bool / path values sensibly
     coerced: object = value
     if value.lower() in {"true", "false"}:
         coerced = value.lower() == "true"
@@ -3755,6 +3795,12 @@ def config_set(
     save_config(new_cfg)
     console.print(f"[green]✓[/green] {key} = {coerced!r}")
     console.print(f"[dim]saved to {config_file_path()}[/dim]")
+    if public and is_secret_key(key):
+        console.print(
+            f"[yellow]warning:[/yellow] {key} looks like a secret but was "
+            "written to config.yaml because --public was used. "
+            "Consider [bold].env[/bold] for secrets."
+        )
 
 
 @config_app.command("path")
