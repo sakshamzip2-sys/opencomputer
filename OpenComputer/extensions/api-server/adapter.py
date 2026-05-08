@@ -36,11 +36,14 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import logging
 import os
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from aiohttp import web
@@ -69,6 +72,24 @@ def get_current_request_profile() -> str | None:
 # T3 — adapter start time for uptime computation. Module-level so the
 # value survives across requests + adapter rebuilds within a process.
 _ADAPTER_START_TIME: float = time.monotonic()
+
+
+# G2 (Hermes parity, 2026-05-09) — Idempotency-Key dedup cache.
+# Process-wide bounded LRU. TTL = 5 min. Key shape: (token-hash, key).
+# Cap = 256 to prevent runaway-client OOM.
+_IDEMPOTENCY_CACHE: "OrderedDict[tuple[str, str], _CachedResponse]" = OrderedDict()
+_IDEMPOTENCY_CACHE_MAX = 256
+_IDEMPOTENCY_TTL_S = 300.0
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedResponse:
+    """One entry in the Idempotency-Key LRU."""
+
+    body: bytes
+    status: int
+    headers: dict[str, str]
+    expires_at: float
 
 
 def _count_active_sessions() -> int | None:
@@ -912,6 +933,53 @@ class APIServerAdapter(BaseChannelAdapter):
             finally:
                 _CURRENT_PROFILE.reset(token)
 
+        # G2 (Hermes parity, 2026-05-09) — Idempotency-Key dedup
+        # middleware. Caches POST responses by (token-hash, key) for 5
+        # min so retried requests get the original answer instead of
+        # re-running the agent. No-op when the header is absent.
+        @web.middleware
+        async def _idempotency_middleware(request, handler):
+            key = request.headers.get("Idempotency-Key", "").strip()
+            if not key or request.method != "POST":
+                return await handler(request)
+            auth = request.headers.get("Authorization", "")
+            token_hash = hashlib.sha256(auth.encode()).hexdigest()[:16]
+            cache_key = (token_hash, key)
+            now = time.monotonic()
+            cached = _IDEMPOTENCY_CACHE.get(cache_key)
+            if cached is not None:
+                if cached.expires_at > now:
+                    _IDEMPOTENCY_CACHE.move_to_end(cache_key)
+                    return web.Response(
+                        body=cached.body,
+                        status=cached.status,
+                        headers={
+                            **cached.headers,
+                            "X-Idempotent-Replay": "1",
+                        },
+                    )
+                # Expired — fall through to live handler.
+                del _IDEMPOTENCY_CACHE[cache_key]
+            response = await handler(request)
+            # Skip caching streaming responses (StreamResponse without
+            # a fully-buffered body) — replaying SSE is not supported.
+            if not isinstance(response, web.Response):
+                return response
+            body = response.body if isinstance(response.body, bytes) else b""
+            _IDEMPOTENCY_CACHE[cache_key] = _CachedResponse(
+                body=body,
+                status=response.status,
+                headers={
+                    k: v
+                    for k, v in response.headers.items()
+                    if k.lower() not in {"date", "content-length"}
+                },
+                expires_at=now + _IDEMPOTENCY_TTL_S,
+            )
+            while len(_IDEMPOTENCY_CACHE) > _IDEMPOTENCY_CACHE_MAX:
+                _IDEMPOTENCY_CACHE.popitem(last=False)
+            return response
+
         # G1 (Hermes parity, 2026-05-09) — CORS middleware. Honors
         # ``API_SERVER_CORS_ORIGINS`` (comma-separated). Default OFF
         # when env unset (no regression for server-to-server users).
@@ -950,7 +1018,11 @@ class APIServerAdapter(BaseChannelAdapter):
 
         app = web.Application(
             client_max_size=self.max_message_length,
-            middlewares=[_cors_middleware, _profile_middleware],
+            middlewares=[
+                _cors_middleware,
+                _idempotency_middleware,
+                _profile_middleware,
+            ],
         )
         app.router.add_post("/v1/chat", self._handle_chat)
         # T2 (tier-2 trio, 2026-05-04) — OpenAI Chat Completions compat.
