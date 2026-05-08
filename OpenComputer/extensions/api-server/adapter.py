@@ -147,6 +147,32 @@ StreamingChatHandler = Callable[
 ]
 
 
+class StreamHooks:
+    """V2 streaming hooks — provides both text and tool-progress emission.
+
+    Hermes-doc parity: ``event: hermes.tool.progress`` SSE events let
+    frontends render in-flight tool activity (e.g. "Running grep…")
+    alongside the assistant's text deltas. The adapter constructs a
+    ``StreamHooks`` instance per-request and passes it to the V2
+    streaming handler. Hosts that don't have tool progress to emit can
+    just call ``emit_text`` and ignore the rest.
+    """
+
+    def __init__(
+        self,
+        *,
+        emit_text: Callable[[str], Awaitable[None]],
+        emit_tool_progress: Callable[[str, str, str], Awaitable[None]],
+    ) -> None:
+        self.emit_text = emit_text
+        self.emit_tool_progress = emit_tool_progress
+
+
+# StreamingChatHandlerV2 takes a StreamHooks instance instead of just
+# the on_delta callback. Hosts opt in via set_streaming_handler_v2(...).
+StreamingChatHandlerV2 = Callable[[str, str, StreamHooks], Awaitable[None]]
+
+
 class APIServerAdapter(BaseChannelAdapter):
     """REST API channel — exposes /v1/chat for external callers."""
 
@@ -170,6 +196,9 @@ class APIServerAdapter(BaseChannelAdapter):
         # stream=True, the OpenAI-compat endpoint emits one SSE chunk
         # per delta. Falls back to single-chunk path when None.
         self._streaming_handler: StreamingChatHandler | None = None
+        # T58 — V2 streaming handler (StreamHooks-based). When set,
+        # takes precedence over the V1 _streaming_handler.
+        self._streaming_handler_v2: StreamingChatHandlerV2 | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         # Wave 6.A — Hermes-port (0a15dbdc4) — track in-flight chat runs
@@ -196,6 +225,15 @@ class APIServerAdapter(BaseChannelAdapter):
         after registration. Without a handler set, requests return 503.
         """
         self._handler = handler
+
+    def set_streaming_handler_v2(self, handler: StreamingChatHandlerV2) -> None:
+        """Inject the V2 per-token streaming handler (T58 — Hermes-doc).
+
+        Receives a :class:`StreamHooks` instance — both ``emit_text``
+        and ``emit_tool_progress`` callbacks. Takes precedence over the
+        V1 handler set via :meth:`set_streaming_handler`.
+        """
+        self._streaming_handler_v2 = handler
 
     def set_streaming_handler(self, handler: StreamingChatHandler) -> None:
         """Inject the per-token streaming handler (E.2).
@@ -342,7 +380,12 @@ class APIServerAdapter(BaseChannelAdapter):
         # E.2 — when streaming is requested, the streaming_handler is
         # sufficient; otherwise we need the legacy handler. 503 only when
         # neither path is viable for the requested mode.
-        if stream and self._streaming_handler is None and self._handler is None:
+        if (
+            stream
+            and self._streaming_handler is None
+            and self._streaming_handler_v2 is None
+            and self._handler is None
+        ):
             return web.json_response(
                 {"error": {"message": "handler not configured"}}, status=503
             )
@@ -373,7 +416,11 @@ class APIServerAdapter(BaseChannelAdapter):
             # registered, drive it with an on_delta callback that pushes
             # one SSE chunk per text delta. Fall through to the legacy
             # single-chunk path when only the synchronous handler exists.
-            if self._streaming_handler is not None:
+            #
+            # T58 — V2 path additionally exposes ``emit_tool_progress``,
+            # which writes ``event: hermes.tool.progress`` SSE events
+            # for frontends to render in-flight tool activity.
+            if self._streaming_handler_v2 is not None or self._streaming_handler is not None:
                 async def _on_delta(text: str) -> None:
                     if not text:
                         return
@@ -381,8 +428,31 @@ class APIServerAdapter(BaseChannelAdapter):
                         f"data: {streaming_delta_chunk(chunk_id, model, text)}\n\n".encode()
                     )
 
+                async def _on_tool_progress(name: str, status: str, detail: str = "") -> None:
+                    """Emit a Hermes-doc `hermes.tool.progress` SSE event.
+
+                    SSE wire format: an explicit ``event: <name>`` line
+                    plus a ``data: <json>`` line. Frontends listening
+                    for ``hermes.tool.progress`` see {tool, status, detail}.
+                    """
+                    import json as _json
+
+                    payload = _json.dumps(
+                        {"tool": name, "status": status, "detail": detail or ""}
+                    )
+                    await resp.write(
+                        f"event: hermes.tool.progress\ndata: {payload}\n\n".encode()
+                    )
+
                 try:
-                    await self._streaming_handler(session_id, user_text, _on_delta)
+                    if self._streaming_handler_v2 is not None:
+                        hooks = StreamHooks(
+                            emit_text=_on_delta,
+                            emit_tool_progress=_on_tool_progress,
+                        )
+                        await self._streaming_handler_v2(session_id, user_text, hooks)
+                    else:
+                        await self._streaming_handler(session_id, user_text, _on_delta)
                 except Exception as e:  # noqa: BLE001
                     logger.exception("openai-compat streaming handler raised")
                     # We've already written the SSE headers; we can't
