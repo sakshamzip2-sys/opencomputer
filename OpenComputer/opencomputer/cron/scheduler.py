@@ -476,31 +476,63 @@ def _failed_doc(job: dict[str, Any], error: str) -> str:
 async def _deliver(job: dict[str, Any], content: str) -> str | None:
     """Best-effort delivery of cron output to the configured channel.
 
-    Returns ``None`` on success or no-op (``notify=None``); returns an error
-    string on failure. Failures are logged but never raise — the job result
-    is already saved to the output file.
+    Hermes parity (2026-05-08): any channel registered with the plugin
+    registry is a valid notify target — the spec lists 17+ platforms
+    (telegram, discord, slack, whatsapp, signal, matrix, mattermost,
+    email, sms, homeassistant, dingtalk, feishu, wecom, weixin, qqbot,
+    teams, irc, webhook, etc.). Lookup goes through the module-level
+    ``registry.channels`` dict (the canonical singleton — there is no
+    ``PluginRegistry.instance()`` classmethod; the prior code had a
+    latent bug that only manifested if an unknown target was provided).
+
+    Special targets:
+        ``"local"`` / ``""`` / ``None`` → no-op (saved locally only).
+        ``"origin"`` → use the originating chat captured at create time
+            (``origin_platform`` + ``origin_chat_id``); falls through to
+            local-save when origin context is absent.
+
+    Returns ``None`` on success / no-op; returns an error string on
+    failure. Failures are logged but never raise — the job's output
+    file is already saved.
     """
     target = (job.get("notify") or "").strip().lower()
     if not target or target == "local":
         return None
 
+    # Hermes parity: notify="origin" → resolve to platform:chat_id captured
+    # at create time. Falls through to local-save (None) silently when the
+    # origin context is missing — matches Hermes behavior of "default to
+    # local for non-messaging-spawned jobs."
+    if target == "origin":
+        plat = (job.get("origin_platform") or "").strip().lower()
+        chat = (job.get("origin_chat_id") or "").strip()
+        if not plat or not chat:
+            logger.info(
+                "Cron job %s notify=origin but origin context missing; "
+                "saving locally only",
+                job.get("id", "?"),
+            )
+            return None
+        target = f"{plat}:{chat}"
+
     try:
-        from opencomputer.plugins.registry import PluginRegistry
+        from opencomputer.plugins.registry import registry as plugin_registry
         from plugin_sdk.core import Platform
 
-        registry = PluginRegistry.instance()
-        platform_map = {"telegram": Platform.TELEGRAM, "discord": Platform.DISCORD}
-        platform = platform_map.get(target.split(":", 1)[0])
-        if platform is None:
-            return f"unknown notify target {target!r}"
+        plat_str, _, suffix = target.partition(":")
 
-        adapter = registry.get_channel_adapter(platform)
+        try:
+            Platform(plat_str)  # validates against the enum
+        except ValueError:
+            return f"unknown notify target {target!r} (not in Platform enum)"
+
+        adapter = plugin_registry.channels.get(plat_str)
         if adapter is None:
-            return f"channel plugin {target!r} not enabled in this profile"
+            return f"channel plugin {plat_str!r} not enabled in this profile"
 
-        chat_id = _resolve_chat_id(target)
+        chat_id = suffix.strip() or _resolve_default_chat_id(plat_str)
         if not chat_id:
-            return f"no chat_id resolved for {target!r}"
+            return f"no chat_id resolved for {target!r}; use {plat_str}:<chat_id>"
 
         await adapter.send(chat_id, content)
         return None
@@ -509,22 +541,24 @@ async def _deliver(job: dict[str, Any], content: str) -> str | None:
         return str(exc)
 
 
-def _resolve_chat_id(target: str) -> str | None:
-    """Resolve a notify target string to a concrete chat_id.
+def _resolve_default_chat_id(platform: str) -> str | None:
+    """Resolve a bare ``"telegram"`` / ``"discord"`` to its env-var fallback.
 
-    ``"telegram"`` → reads ``TELEGRAM_CRON_CHAT_ID`` env var.
-    ``"telegram:12345"`` → returns ``"12345"``.
+    Other platforms have no env shortcut — callers must use the
+    ``<platform>:<chat_id>`` form.
     """
-    if ":" in target:
-        return target.split(":", 1)[1].strip()
     env_map = {
         "telegram": "TELEGRAM_CRON_CHAT_ID",
         "discord": "DISCORD_CRON_CHANNEL",
     }
-    var = env_map.get(target.lower())
+    var = env_map.get(platform.lower())
     if not var:
         return None
     return os.environ.get(var, "").strip() or None
+
+
+# Back-compat alias — older tests/scripts may have imported the old name.
+_resolve_chat_id = _resolve_default_chat_id
 
 
 # ---------------------------------------------------------------------------
