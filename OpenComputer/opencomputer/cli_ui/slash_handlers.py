@@ -1032,6 +1032,61 @@ def _handle_cron_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+def _handle_agents_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
+    """``/agents`` — read-only tree of running + recently-finished subagents.
+
+    Hermes parity (2026-05-08): the spec mentions a TUI overlay; this
+    is the read-only inline version. Kill/cancel is via the existing
+    ``oc agents kill <id>`` CLI.
+    """
+    try:
+        from datetime import UTC, datetime
+
+        from opencomputer.agent.subagent_registry import SubagentRegistry
+        registry = SubagentRegistry.instance()
+        running = registry.list_running()
+        finished = registry.history(limit=20)
+        records = list(running) + list(finished)
+    except Exception as e:  # noqa: BLE001
+        ctx.console.print(f"[yellow]Subagent registry unavailable: {e}[/yellow]")
+        return SlashResult(handled=True)
+
+    if not records:
+        ctx.console.print("[dim]No subagents running or recently finished.[/dim]")
+        return SlashResult(handled=True)
+
+    # Group by parent_id. None == top-level.
+    by_parent: dict[str | None, list] = {}
+    for r in records:
+        by_parent.setdefault(r.parent_id, []).append(r)
+
+    state_icon = {"running": "▶", "completed": "✓", "failed": "✗", "killed": "⊘"}
+    lines = [f"## Subagents ({len(records)})\n"]
+
+    def _emit(rec, depth: int) -> None:
+        indent = "  " * depth
+        icon = state_icon.get(rec.state, "?")
+        if rec.ended_at:
+            elapsed = f" ({(rec.ended_at - rec.started_at).total_seconds():.1f}s)"
+        elif rec.state == "running":
+            elapsed = (
+                f" ({(datetime.now(UTC) - rec.started_at).total_seconds():.0f}s)"
+            )
+        else:
+            elapsed = ""
+        goal = (rec.goal or "")[:60]
+        lines.append(
+            f"{indent}{icon} {rec.agent_id[:8]} [{rec.state}]{elapsed}  {goal}"
+        )
+        for child in by_parent.get(rec.agent_id, []):
+            _emit(child, depth + 1)
+
+    for top in by_parent.get(None, []):
+        _emit(top, 0)
+    ctx.console.print("\n".join(lines))
+    return SlashResult(handled=True)
+
+
 def _handle_plugins_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
     """``/plugins`` — list installed plugins."""
     try:
@@ -1197,6 +1252,7 @@ _HANDLERS: dict[str, Callable[[SlashContext, list[str]], SlashResult]] = {
     "insights": _handle_insights,
     "skills":   _handle_skills_inline,
     "cron":     _handle_cron_inline,
+    "agents":   _handle_agents_inline,
     "plugins":  _handle_plugins_inline,
     "profile":  _handle_profile_inline,
     "image":    _handle_image,
