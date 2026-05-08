@@ -23,7 +23,7 @@ Hermes-parity adapter notes:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from plugin_sdk.runtime_context import RuntimeContext
 from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
@@ -31,7 +31,7 @@ from plugin_sdk.slash_command import SlashCommand, SlashCommandResult
 
 def _format_started_at(epoch: float) -> str:
     """Render an absolute epoch timestamp as a short HH:MM:SS UTC marker."""
-    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%H:%M:%S")
+    return datetime.fromtimestamp(epoch, tz=UTC).strftime("%H:%M:%S")
 
 
 def _format_duration(start: float, end: float | None) -> str:
@@ -80,10 +80,7 @@ class BackgroundCommand(SlashCommand):
             return self._render_list(registry)
         if head_l == "show":
             return self._render_show(registry, rest.strip())
-        if head_l == "start":
-            prompt = rest.strip()
-        else:
-            prompt = text
+        prompt = rest.strip() if head_l == "start" else text
 
         if not prompt:
             return SlashCommandResult(

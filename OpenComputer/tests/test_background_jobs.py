@@ -22,7 +22,6 @@ from opencomputer.agent.background_jobs import (
 from opencomputer.agent.slash_commands_impl.background_cmd import BackgroundCommand
 from plugin_sdk.runtime_context import RuntimeContext
 
-
 # ─── Registry tests ──────────────────────────────────────────────────
 
 

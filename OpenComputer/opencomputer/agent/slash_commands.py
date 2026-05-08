@@ -26,6 +26,7 @@ from typing import Any
 
 from opencomputer.agent.slash_commands_impl.agents_cmd import AgentsCommand
 from opencomputer.agent.slash_commands_impl.auto_cmd import AutoCommand, YoloCommand
+from opencomputer.agent.slash_commands_impl.background_cmd import BackgroundCommand
 from opencomputer.agent.slash_commands_impl.bell_cmd import BellCommand
 from opencomputer.agent.slash_commands_impl.branch_cmd import BranchCommand
 from opencomputer.agent.slash_commands_impl.btw_cmd import BtwCommand
@@ -37,7 +38,6 @@ from opencomputer.agent.slash_commands_impl.display_toggles_cmd import (
     StatusbarCommand,
     VerboseCommand,
 )
-from opencomputer.agent.slash_commands_impl.background_cmd import BackgroundCommand
 from opencomputer.agent.slash_commands_impl.fast_cmd import FastCommand
 from opencomputer.agent.slash_commands_impl.history_cmd import HistoryCommand
 from opencomputer.agent.slash_commands_impl.mode_cmd import ModeCommand
