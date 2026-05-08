@@ -958,17 +958,46 @@ def _handle_cron_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
     if sub == "add":
         if not rest:
             ctx.console.print(
-                '[yellow]Usage: /cron add "<schedule>" "<prompt>" [--skill name][/yellow]'
+                "[yellow]Usage: /cron add <schedule> [prompt] [--skill name]\n"
+                "Examples:\n"
+                "  /cron add every 1h --skill blogwatcher\n"
+                "  /cron add 'every 1h' Check on the server\n"
+                "  /cron add '0 9 * * *' --skill morning-briefing[/yellow]"
             )
             return SlashResult(handled=True)
-        sched = rest[0]
+
+        # The slash dispatcher whitespace-splits, so multi-token schedules
+        # like ``every 1h`` arrive as two tokens. Detect schedule by
+        # consuming tokens until the first ``--flag`` or until the prefix
+        # parses cleanly as a schedule. This makes ``/cron add every 1h
+        # --skill X`` and ``/cron add 0 9 * * * --skill X`` both work.
+        from opencomputer.cron.jobs import parse_schedule
+
+        sched_tokens: list[str] = []
+        consumed = 0
+        for tok in rest:
+            if tok.startswith("--"):
+                break
+            sched_tokens.append(tok)
+            consumed += 1
+            try:
+                parse_schedule(" ".join(sched_tokens))
+                break  # prefix parses → that's our schedule
+            except ValueError:
+                continue  # need more tokens
+        if not sched_tokens:
+            ctx.console.print("[yellow]Missing schedule[/yellow]")
+            return SlashResult(handled=True)
+        sched = " ".join(sched_tokens)
+        post_sched = rest[consumed:]
+
         skills: list[str] = []
         prompt_parts: list[str] = []
-        i = 1
-        while i < len(rest):
-            tok = rest[i]
-            if tok == "--skill" and i + 1 < len(rest):
-                skills.append(rest[i + 1])
+        i = 0
+        while i < len(post_sched):
+            tok = post_sched[i]
+            if tok == "--skill" and i + 1 < len(post_sched):
+                skills.append(post_sched[i + 1])
                 i += 2
             else:
                 prompt_parts.append(tok)
