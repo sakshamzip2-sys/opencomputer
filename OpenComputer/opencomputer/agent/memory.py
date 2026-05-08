@@ -390,6 +390,7 @@ class MemoryManager:
         *,
         user_path: Path | None = None,
         soul_path: Path | None = None,
+        global_soul_path: Path | None = None,
         memory_char_limit: int = 4000,
         user_char_limit: int = 2000,
         bundled_skills_paths: list[Path] | None = None,
@@ -402,6 +403,19 @@ class MemoryManager:
         self.soul_path = (
             soul_path if soul_path is not None else declarative_path.parent / "SOUL.md"
         )
+        # Hermes v2 D4 (2026-05-08) — optional global SOUL.md fallback.
+        # When the per-profile soul_path is missing/empty, ``read_soul``
+        # consults this path instead. Defaults to
+        # ``~/.opencomputer/SOUL.md`` (sibling of all per-profile
+        # directories), respecting the ``OPENCOMPUTER_HOME`` env var so
+        # tests + alt configurations can override.
+        if global_soul_path is None:
+            home_root = os.environ.get(
+                "OPENCOMPUTER_HOME",
+                str(Path.home() / ".opencomputer"),
+            )
+            global_soul_path = Path(home_root) / "SOUL.md"
+        self.global_soul_path = global_soul_path
         self.skills_path = skills_path
         self.skills_path.mkdir(parents=True, exist_ok=True)
         self.memory_char_limit = memory_char_limit
@@ -418,8 +432,9 @@ class MemoryManager:
         flow to make subsequent read_* calls hit the new profile's
         SOUL.md / MEMORY.md / USER.md without recreating the manager.
 
-        ``skills_path`` and bundled-skills paths are NOT rebound — skill
-        roots are global, not per-profile, in the current model.
+        ``skills_path``, bundled-skills paths, and ``global_soul_path``
+        are NOT rebound — skill roots and the global SOUL fallback are
+        shared across profiles, not per-profile.
         """
         self.declarative_path = profile_home / "MEMORY.md"
         self.user_path = profile_home / "USER.md"
@@ -482,28 +497,37 @@ class MemoryManager:
     # ─── personality (SOUL.md) — Phase 14.F / C3 ──────────────────
 
     def read_soul(self) -> str:
-        """Return the contents of ``SOUL.md`` or '' if absent/unreadable/empty.
+        """Return SOUL.md text — per-profile preferred, global fallback, '' otherwise.
 
-        Read-only by design. The profile's personality file is hand-edited
-        by the user, not mutated by the agent.
+        Resolution order (Hermes v2 D4, 2026-05-08):
 
-        Returns '' in three cases — all of which fall back to the agent's
-        built-in default identity (the preamble baked into ``base.j2``)
-        per Hermes v2 spec: "Empty/whitespace-only file → falls back to
-        built-in default identity":
+        1. Per-profile ``self.soul_path`` (e.g. ``~/.opencomputer/coder/SOUL.md``).
+           Used if it exists and has non-whitespace content.
+        2. Global ``self.global_soul_path`` (e.g. ``~/.opencomputer/SOUL.md``).
+           Used as fallback when per-profile is missing/empty. Mirrors
+           Hermes' ``HERMES_HOME/SOUL.md`` behavior — a single identity
+           shared across profiles unless the profile explicitly overrides.
+        3. ``""`` — falls back to base.j2's built-in identity preamble
+           per Hermes v2: "Empty/whitespace-only file → falls back to
+           built-in default identity".
 
-        - file doesn't exist
-        - file exists but cannot be read (permission etc.)
-        - file exists but has whitespace-only contents
+        Read-only by design. Each candidate is treated as missing if it
+        doesn't exist, fails to read, or contains only whitespace.
         """
-        if not self.soul_path.exists():
+        for candidate in (self.soul_path, self.global_soul_path):
+            content = self._read_soul_candidate(candidate)
+            if content:
+                return content
+        return ""
+
+    def _read_soul_candidate(self, path: Path) -> str:
+        """Read one SOUL.md candidate. Returns '' if missing/unreadable/empty."""
+        if not path.exists():
             return ""
         try:
-            content = self.soul_path.read_text(encoding="utf-8")
+            content = path.read_text(encoding="utf-8")
         except OSError:
             return ""
-        # Hermes v2 parity: whitespace-only SOUL.md falls back to built-in
-        # default identity, not an injected blank section.
         if not content.strip():
             return ""
         return content

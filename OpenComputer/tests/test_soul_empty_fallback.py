@@ -13,11 +13,18 @@ from opencomputer.agent.memory import MemoryManager
 
 
 def _make_memory(tmp_path: Path) -> MemoryManager:
-    """Construct a MemoryManager pointed at a fresh profile dir."""
+    """Construct a MemoryManager pointed at a fresh profile dir.
+
+    Pass an explicit non-existent ``global_soul_path`` so these tests
+    isolate from the user's real ``~/.opencomputer/SOUL.md`` (D4 added
+    a global fallback; without isolation a real file there would mask
+    the empty-fallback behavior we're trying to verify).
+    """
     return MemoryManager(
         declarative_path=tmp_path / "MEMORY.md",
         skills_path=tmp_path / "skills",
         soul_path=tmp_path / "SOUL.md",
+        global_soul_path=tmp_path / "non-existent-global-SOUL.md",
     )
 
 
