@@ -2364,6 +2364,15 @@ class AgentLoop:
                 except Exception:
                     pass  # delegate tool may not be registered yet in some contexts
 
+                # Hermes spec parity (2026-05-08): CronTool reads ``cron_session``
+                # from runtime to block recursive cron management. Mirror the
+                # DelegateTool runtime-propagation pattern.
+                try:
+                    from opencomputer.tools.cron_tool import CronTool
+                    CronTool.set_runtime(self._runtime)
+                except Exception:
+                    pass  # cron tool may not be registered in some contexts
+
                 # Dispatch tools BEFORE persisting the assistant message. If we saved
                 # it first and then got cancelled mid-dispatch, the DB would hold a
                 # tool_use with no matching tool_result — Anthropic 400s on resume.

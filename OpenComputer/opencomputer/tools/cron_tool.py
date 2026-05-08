@@ -36,6 +36,7 @@ from opencomputer.cron.jobs import (
 from opencomputer.cron.threats import CronThreatBlocked
 from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
+from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -46,12 +47,23 @@ _VALID_ACTIONS = frozenset(
 )
 
 
+# Hermes spec parity (2026-05-08): "Cron jobs CANNOT recursively create
+# more cron jobs — Hermes disables cron management tools inside cron
+# executions." Mutating actions are blocked when ``cron_session`` is True
+# in the active runtime. Read-only actions remain allowed.
+_MUTATING_ACTIONS = frozenset({"create", "pause", "resume", "trigger", "remove"})
+
+
 class CronTool(BaseTool):
     """Manage scheduled cron jobs from agent chat.
 
     Single-tool design: one tool, one ``action`` parameter, action-specific
     fields. Mirrors Hermes's ``cronjob`` tool to avoid schema/context bloat
     from exposing N separate tools.
+
+    Hermes spec parity (2026-05-08): mutating actions are refused when
+    invoked inside a cron run (``runtime.custom['cron_session'] is True``)
+    to prevent recursive job creation / fork-bombing the scheduler.
     """
 
     parallel_safe = False
@@ -60,6 +72,26 @@ class CronTool(BaseTool):
 
     strict_mode = True
     """Cron writes shared state (jobs.json); serialize tool calls."""
+
+    # Class-level "current runtime" set by AgentLoop before dispatching tool
+    # calls — same pattern as DelegateTool._current_runtime. Used to detect
+    # ``cron_session`` and block recursive cron management.
+    _current_runtime: RuntimeContext = DEFAULT_RUNTIME_CONTEXT
+
+    @classmethod
+    def set_runtime(cls, runtime: RuntimeContext) -> None:
+        """Set the runtime context. Called by AgentLoop alongside DelegateTool."""
+        cls._current_runtime = runtime
+
+    def _is_cron_session(self) -> bool:
+        """Return True when running inside a cron job's agent run.
+
+        The cron scheduler stamps ``runtime.custom['cron_session'] = True``
+        before calling ``loop.run_conversation``; this is the marker that
+        triggers the recursion block.
+        """
+        custom = getattr(self._current_runtime, "custom", None) or {}
+        return bool(custom.get("cron_session"))
 
     capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
         CapabilityClaim(
@@ -178,6 +210,21 @@ class CronTool(BaseTool):
     async def execute(self, call: ToolCall) -> ToolResult:
         args = call.arguments or {}
         action = (args.get("action") or "").strip().lower()
+
+        # Hermes spec parity (2026-05-08): block mutating cron actions
+        # while running INSIDE a cron job. Read-only list/get still work
+        # so the agent can introspect the schedule.
+        if action in _MUTATING_ACTIONS and self._is_cron_session():
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Error: cron action {action!r} is disabled inside cron runs. "
+                    "Cron jobs cannot recursively create or modify other cron "
+                    "jobs (Hermes spec). Read-only actions (list, get) remain available."
+                ),
+                is_error=True,
+            )
+
         if action not in _VALID_ACTIONS:
             return ToolResult(
                 tool_call_id=call.id,
