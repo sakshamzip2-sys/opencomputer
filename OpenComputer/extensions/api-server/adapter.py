@@ -885,9 +885,30 @@ class APIServerAdapter(BaseChannelAdapter):
         # standard contextvars propagation.
         @web.middleware
         async def _profile_middleware(request, handler):
-            token = _CURRENT_PROFILE.set(self._resolve_request_profile(request))
+            resolved = self._resolve_request_profile(request)
+            token = _CURRENT_PROFILE.set(resolved)
             try:
-                return await handler(request)
+                response = await handler(request)
+                # T61 follow-up — surface the resolved profile back to
+                # the caller so multi-tenant clients can confirm where
+                # their request landed. Lands on every response
+                # regardless of which handler fired.
+                effective = resolved or os.environ.get(
+                    "OPENCOMPUTER_PROFILE", "default"
+                )
+                try:
+                    response.headers["X-OC-Profile-Active"] = effective
+                except (AttributeError, RuntimeError):
+                    # StreamResponse already sent + closed → can't add header
+                    pass
+                if resolved:
+                    logger.info(
+                        "api-server: %s %s served on profile=%s",
+                        request.method,
+                        request.path,
+                        resolved,
+                    )
+                return response
             finally:
                 _CURRENT_PROFILE.reset(token)
 

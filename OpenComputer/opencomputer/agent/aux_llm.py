@@ -138,26 +138,35 @@ async def complete_text(
             temperature=temperature,
         )
 
+    return await _aux_call_with_fallback(_attempt, resolved_model)
+
+
+async def _aux_call_with_fallback(attempt, primary_model: str) -> str:
+    """T68 — shared fallback driver for aux LLM calls.
+
+    Tries the configured provider; on transient failure walks the
+    ``fallback_providers`` chain. Records cost on every success.
+    Returns the assistant text. Raises the last error after
+    chain exhaustion. Used by complete_text / complete_vision /
+    complete_video so all three share one fallback contract.
+    """
     primary = _resolve_provider()
     last_exc: BaseException | None = None
     try:
-        resp = await _attempt(primary, resolved_model)
-        _record_aux_cost(primary, resolved_model, resp)
+        resp = await attempt(primary, primary_model)
+        _record_aux_cost(primary, primary_model, resp)
         return resp.message.content if resp and resp.message else ""
     except Exception as exc:  # noqa: BLE001
         last_exc = exc
         if not _is_transient_aux(exc):
             raise
 
-    # T68 — walk the configured cross-provider fallback chain. Same
-    # transient-vs-fatal classification as the chat-loop fallback;
-    # auth errors / bad requests have already short-circuited above.
     cfg = default_config()
     for fp in getattr(cfg, "fallback_providers", ()) or ():
         try:
             backup = _resolve_fallback_provider(fp)
-            backup_model = fp.model or resolved_model
-            resp = await _attempt(backup, backup_model)
+            backup_model = fp.model or primary_model
+            resp = await attempt(backup, backup_model)
             _record_aux_cost(backup, backup_model, resp)
             return resp.message.content if resp and resp.message else ""
         except Exception as exc:  # noqa: BLE001
@@ -203,19 +212,14 @@ async def complete_vision(
 ) -> str:
     """Run a vision completion (text + image) through the configured provider.
 
-    Both Anthropic and OpenAI use the multimodal-content-array shape
-    where each item is either ``{"type": "text", "text": "..."}`` or
-    ``{"type": "image", "source": {"type": "base64", "media_type": "...",
-    "data": "..."}}``. We pass that shape verbatim — providers whose
-    ``complete()`` understands it (anthropic, openai-compat with vision
-    models, gemini) handle the call; providers without vision raise.
-
-    Caller should catch the resulting error and surface a clean
-    "vision not available on <provider>" message rather than a stack trace.
+    T68 — same fallback chain as :func:`complete_text`. A transient
+    failure on the primary provider walks the configured
+    ``fallback_providers`` chain. Non-transient errors short-circuit
+    immediately so the existing "vision not available on <provider>"
+    UX is preserved.
     """
     from plugin_sdk.core import Message
 
-    provider = _resolve_provider()
     content = [
         {
             "type": "image",
@@ -228,13 +232,15 @@ async def complete_vision(
         {"type": "text", "text": prompt},
     ]
     resolved_model = model or _resolve_default_model()
-    resp = await provider.complete(
-        model=resolved_model,
-        messages=[Message(role="user", content=content)],
-        max_tokens=max_tokens,
-    )
-    _record_aux_cost(provider, resolved_model, resp)
-    return resp.message.content if resp and resp.message else ""
+
+    async def _attempt(prov: Any, model_name: str) -> Any:
+        return await prov.complete(
+            model=model_name,
+            messages=[Message(role="user", content=content)],
+            max_tokens=max_tokens,
+        )
+
+    return await _aux_call_with_fallback(_attempt, resolved_model)
 
 
 async def complete_video(
@@ -247,28 +253,25 @@ async def complete_video(
 ) -> str:
     """Run a video completion (text + base64 video) through the configured provider.
 
-    Wave 5 T7 — Hermes-port (c9a3f36f5). Uses the OpenRouter / Gemini-style
-    multimodal-content-array shape with a ``video_url`` block whose URL
-    is a ``data:<mime>;base64,<b64>`` URI. Providers that can't decode
-    a video block raise; the caller (``video_analyze`` tool) catches
-    and surfaces a clean error.
+    T68 — same fallback chain as :func:`complete_text` and :func:`complete_vision`.
     """
     from plugin_sdk.core import Message
 
-    provider = _resolve_provider()
     data_url = f"data:{mime_type};base64,{video_base64}"
     content = [
         {"type": "video_url", "video_url": {"url": data_url}},
         {"type": "text", "text": prompt},
     ]
     resolved_model = model or _resolve_default_model()
-    resp = await provider.complete(
-        model=resolved_model,
-        messages=[Message(role="user", content=content)],
-        max_tokens=max_tokens,
-    )
-    _record_aux_cost(provider, resolved_model, resp)
-    return resp.message.content if resp and resp.message else ""
+
+    async def _attempt(prov: Any, model_name: str) -> Any:
+        return await prov.complete(
+            model=model_name,
+            messages=[Message(role="user", content=content)],
+            max_tokens=max_tokens,
+        )
+
+    return await _aux_call_with_fallback(_attempt, resolved_model)
 
 
 def _record_aux_cost(provider: Any, model: str, resp: Any) -> None:

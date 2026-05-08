@@ -785,6 +785,24 @@ class AnthropicProvider(BaseProvider):
         # Optional credential pool (PR-A): comma-separated env value triggers pool mode.
         # Single key (no comma) → no pool, behavior IDENTICAL to today (regression-tested).
         api_key_raw = api_key or os.environ.get(self._api_key_env, "")
+        # T69 — auth.json + Claude Code credential discovery as a final
+        # fallback. Only fires when explicit api_key + env var are both
+        # empty, so existing single/multi-key flows are unchanged.
+        if not api_key_raw:
+            try:
+                from plugin_sdk.auth_discovery import discover_anthropic_credential
+                discovered = discover_anthropic_credential()
+                if discovered:
+                    api_key_raw = discovered["api_key"]
+                    _log.info(
+                        "anthropic-provider: using API key discovered via %s",
+                        discovered["source"],
+                    )
+            except Exception:  # noqa: BLE001
+                # Discovery is best-effort; fall through to the existing
+                # "no key" RuntimeError below so the user gets the same
+                # clear error message they always got.
+                pass
         if "," in api_key_raw:
             keys = [k.strip() for k in api_key_raw.split(",") if k.strip()]
             self._credential_pool: CredentialPool | None = CredentialPool(keys=keys) if len(keys) > 1 else None
