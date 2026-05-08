@@ -65,10 +65,12 @@ async def test_capabilities_returns_feature_dict(adapter_mod):
         assert features["chat_completions"] is True
         assert features["streaming"] is True
         assert features["tool_calls"] is True
-        # T57 — chaining shipped; runs/jobs honestly deferred.
+        # T57 chaining + T59 runs + T60 jobs all shipped.
         assert features["previous_response_id"] is True
-        assert features["runs_api"] is False
-        assert features["jobs_api"] is False
+        assert features["runs_api"] is True
+        assert features["jobs_api"] is True
+        # T58 — Hermes-doc tool-progress vendor extension.
+        assert features["tool_progress"] is True
 
 
 @pytest.mark.asyncio

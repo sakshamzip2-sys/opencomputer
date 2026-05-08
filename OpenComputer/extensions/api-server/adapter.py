@@ -319,6 +319,25 @@ class APIServerAdapter(BaseChannelAdapter):
             return web.json_response({"error": "unauthorized"}, status=401)
         return None
 
+    def _resolve_request_profile(self, request: web.Request) -> str | None:
+        """T61 — resolve the per-request profile.
+
+        Reads the ``X-OC-Profile`` header (case-insensitive, dashes
+        normalized to underscores by aiohttp). Returns ``None`` when
+        absent — caller stays on the process-default profile.
+
+        Validation: rejects path-traversal-y names. Profile must be
+        ``[a-z0-9_-]+`` (Hermes profile naming convention).
+        """
+        import re
+
+        raw = request.headers.get("X-OC-Profile") or request.headers.get("x-oc-profile")
+        if not raw:
+            return None
+        if not re.match(r"^[A-Za-z0-9_-]{1,32}$", raw):
+            return None  # silently ignore — never error on a missing header
+        return raw
+
     async def _handle_jobs_list(self, request: web.Request) -> web.Response:
         deny = self._auth_check(request)
         if deny is not None:
@@ -883,7 +902,12 @@ class APIServerAdapter(BaseChannelAdapter):
         capability before negotiating auth. Honest about deferred items
         (``runs_api`` / ``jobs_api`` / ``previous_response_id``).
         """
-        profile = os.environ.get("OPENCOMPUTER_PROFILE", "default")
+        # T61 — X-OC-Profile header overrides process-default for this
+        # response only. Useful for multi-tenant routers that share one
+        # api-server process across profiles.
+        profile = self._resolve_request_profile(request) or os.environ.get(
+            "OPENCOMPUTER_PROFILE", "default"
+        )
         payload = {
             "version": "1",
             "model": profile,
@@ -898,6 +922,9 @@ class APIServerAdapter(BaseChannelAdapter):
                 "previous_response_id": True,
                 "runs_api": True,
                 "jobs_api": True,
+                # T58 — Hermes-doc vendor extension: `event: hermes.tool.progress`
+                # SSE events on streaming /v1/chat/completions and /v1/responses.
+                "tool_progress": True,
             },
         }
         return web.json_response(payload)
@@ -947,7 +974,10 @@ class APIServerAdapter(BaseChannelAdapter):
             "api_server": {
                 "host": self._host,
                 "port": self._port,
-                "profile": os.environ.get("OPENCOMPUTER_PROFILE", "default"),
+                "profile": (
+                    self._resolve_request_profile(request)
+                    or os.environ.get("OPENCOMPUTER_PROFILE", "default")
+                ),
             },
         }
         return web.json_response(payload)
@@ -1098,12 +1128,34 @@ class APIServerAdapter(BaseChannelAdapter):
             conversation=(conversation if isinstance(conversation, str) else None),
         )
 
+        session_id = payload.get("session_id", "")
+        stream = bool(payload.get("stream", False))
+
+        # T58 — SSE streaming on /v1/responses. Emits Responses-API
+        # native lifecycle events plus `event: hermes.tool.progress`
+        # when a V2 streaming handler is registered. Falls back to
+        # collecting text from the V2 handler, otherwise the legacy
+        # synchronous _handler. Same wire shape as the non-streaming
+        # path's `oc_response_to_responses_api` envelope, just split
+        # across SSE deltas.
+        if stream and (
+            self._streaming_handler_v2 is not None or self._handler is not None
+        ):
+            return await self._stream_responses(
+                request=request,
+                prompt_text=prompt_text,
+                user_text=user_text,
+                session_id=session_id,
+                payload=payload,
+                resolved_prev=resolved_prev,
+                conversation=conversation if isinstance(conversation, str) else None,
+            )
+
         if self._handler is None:
             return web.json_response(
                 {"error": {"message": "handler not configured"}}, status=503
             )
 
-        session_id = payload.get("session_id", "")
         try:
             agent_text = await self._handler(prompt_text, session_id) or ""
         except Exception as exc:  # noqa: BLE001
@@ -1133,6 +1185,109 @@ class APIServerAdapter(BaseChannelAdapter):
         if isinstance(conversation, str):
             envelope["conversation"] = conversation
         return web.json_response(envelope)
+
+    async def _stream_responses(
+        self,
+        *,
+        request: web.Request,
+        prompt_text: str,
+        user_text: str,
+        session_id: str,
+        payload: dict[str, Any],
+        resolved_prev: str | None,
+        conversation: str | None,
+    ) -> web.StreamResponse:
+        """SSE driver for /v1/responses with hermes.tool.progress side-channel.
+
+        Emits, in order: ``response.created``, N × ``response.output_text.delta``
+        (interleaved with vendor ``hermes.tool.progress``), and a final
+        ``response.completed`` carrying the full envelope. Mirrors the
+        non-streaming path's storage + previous_response_id echo.
+        """
+        import json as _json
+        import uuid as _uuid
+
+        model = payload.get("model") or "opencomputer"
+        response_id = f"resp-{_uuid.uuid4().hex[:24]}"
+
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        await resp.prepare(request)
+
+        async def _emit(event: str, data: dict[str, Any]) -> None:
+            await resp.write(
+                f"event: {event}\ndata: {_json.dumps(data)}\n\n".encode()
+            )
+
+        await _emit(
+            "response.created",
+            {"id": response_id, "model": model, "object": "response"},
+        )
+
+        text_buf: list[str] = []
+
+        async def _on_text(chunk: str) -> None:
+            if not chunk:
+                return
+            text_buf.append(chunk)
+            await _emit(
+                "response.output_text.delta",
+                {"id": response_id, "delta": chunk},
+            )
+
+        async def _on_tool_progress(name: str, status: str, detail: str = "") -> None:
+            await _emit(
+                "hermes.tool.progress",
+                {"tool": name, "status": status, "detail": detail or ""},
+            )
+
+        try:
+            if self._streaming_handler_v2 is not None:
+                hooks = StreamHooks(
+                    emit_text=_on_text, emit_tool_progress=_on_tool_progress
+                )
+                await self._streaming_handler_v2(session_id, user_text, hooks)
+            else:
+                # Fall back: non-streaming handler — emit its output as
+                # one big delta so the SSE shape stays uniform.
+                agent_text = await self._handler(prompt_text, session_id) or ""
+                await _on_text(agent_text)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("api-server: responses-stub streaming raised")
+            await _emit("response.error", {"message": str(exc)})
+            await resp.write(b"data: [DONE]\n\n")
+            await resp.write_eof()
+            return resp
+
+        agent_text = "".join(text_buf)
+        envelope = oc_response_to_responses_api(
+            agent_text,
+            model=model,
+            input_tokens=len(prompt_text.split()),
+            output_tokens=len(agent_text.split()),
+        )
+        envelope["id"] = response_id
+        if resolved_prev is not None:
+            envelope["previous_response_id"] = resolved_prev
+        if conversation is not None:
+            envelope["conversation"] = conversation
+        self._store_response(
+            response_id=response_id,
+            user_text=user_text,
+            agent_text=agent_text,
+            previous_response_id=resolved_prev,
+            conversation=conversation,
+        )
+        await _emit("response.completed", envelope)
+        await resp.write(b"data: [DONE]\n\n")
+        await resp.write_eof()
+        return resp
 
     async def connect(self) -> None:
         """Start the aiohttp server bound to host:port."""
