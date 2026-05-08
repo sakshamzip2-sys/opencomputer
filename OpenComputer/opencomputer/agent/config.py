@@ -495,6 +495,78 @@ class DeepeningConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WorktreeConfig:
+    """Config for the ``oc code -w`` worktree machinery + ``.worktreeinclude``.
+
+    ``.worktreeinclude`` (a gitignore-style file at repo root) tells the
+    ``session_worktree`` helper which gitignored files to copy into the
+    fresh worktree so the agent isn't dropped into a worktree that's
+    missing .env / .venv / node_modules.
+    """
+
+    #: Hard cap on total bytes copied across all .worktreeinclude entries.
+    #: Exceeding this aborts the worktree session with a clear error.
+    include_max_total_mb: int = 1000
+
+    #: Per-file warning + skip threshold. Files above this are NOT
+    #: copied; a warning is logged. Other files in the same source set
+    #: are still copied.
+    include_max_per_file_mb: int = 500
+
+    #: If True, after reading <repo_root>/.worktreeinclude also read
+    #: <profile_home>/worktreeinclude (no leading dot, since it lives in
+    #: the OC home itself). Patterns are unioned with project-precedence
+    #: on duplicates.
+    include_global_fallback: bool = True
+
+    #: Default mirrors git's worktree behavior: a symlink in the source
+    #: is copied AS a symlink (not dereferenced).
+    include_follow_symlinks: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointsConfig:
+    """Config for the RewindStore checkpoint hygiene system.
+
+    Backs the ``auto_checkpoint`` PreToolUse hook in the coding-harness
+    extension and the user-facing ``oc checkpoints status/prune/clear``
+    CLI.
+    """
+
+    #: Master switch. If False, auto-prune never fires and the CLI
+    #: prints a banner noting it's disabled in config (commands still
+    #: run).
+    enabled: bool = True
+
+    #: Per-session snapshot count cap. Prune drops oldest above this.
+    max_snapshots: int = 50
+
+    #: Cross-session global size cap in MB. Prune drops oldest until
+    #: aggregate size is under cap.
+    max_total_size_mb: int = 1000
+
+    #: Files exceeding this size are EXCLUDED from new checkpoints
+    #: (recorded in Checkpoint.excluded_files for visibility).
+    max_file_size_mb: int = 50
+
+    #: If True, the auto_checkpoint hook also schedules a background
+    #: prune sweep on first fire per process (subject to
+    #: min_interval_hours).
+    auto_prune: bool = True
+
+    #: Age-based eviction policy: drop checkpoints older than this.
+    retention_days: int = 30
+
+    #: Minimum interval between auto-prune sweeps (per store). Enforced
+    #: via .last_prune mtime.
+    min_interval_hours: int = 24
+
+    #: If True, prune removes checkpoint dirs whose meta.json is missing
+    #: or malformed.
+    delete_orphans: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Root configuration — composed of small focused configs."""
 
@@ -508,6 +580,10 @@ class Config:
     deepening: DeepeningConfig = field(default_factory=DeepeningConfig)
     #: Gateway daemon tunables — primarily the photo-burst window today.
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
+    #: 2026-05-08 — `.worktreeinclude` for `oc code -w`.
+    worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
+    #: 2026-05-08 — RewindStore hygiene (auto-prune, size cap, retention).
+    checkpoints: CheckpointsConfig = field(default_factory=CheckpointsConfig)
     #: III.6 — settings-declared shell-command hooks. Parsed from the
     #: top-level ``hooks:`` YAML block by
     #: :func:`opencomputer.agent.config_store._parse_hooks_block` and
