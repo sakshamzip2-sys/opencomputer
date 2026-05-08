@@ -14,9 +14,13 @@ interface Turn {
 
 interface AppProps {
   client: OCWireClient;
+  // OC_TUI_RESUME contract: "" = fresh, "last" = most recent session,
+  // anything else = treated as a session-id (or id prefix). Mirrors
+  // HERMES_TUI_RESUME from hermes-agent.
+  resumeSpec?: string;
 }
 
-export const App: React.FC<AppProps> = ({ client }) => {
+export const App: React.FC<AppProps> = ({ client, resumeSpec = "" }) => {
   const { exit } = useApp();
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
@@ -45,6 +49,31 @@ export const App: React.FC<AppProps> = ({ client }) => {
             setSlashList(s.commands);
           } catch {
             // older wire-server without slash.list — ignore
+          }
+          // Resume target plumbing: if OC_TUI_RESUME is set, seed
+          // sessionId.current so the first ``client.chat()`` call
+          // routes into that session instead of starting fresh.
+          if (resumeSpec && !sessionId.current) {
+            try {
+              if (resumeSpec === "last") {
+                const r = (await client.sessionsList(1)) as { sessions: Array<{ session_id?: string; id?: string }> };
+                const first = r.sessions?.[0];
+                const sid = first?.session_id ?? first?.id;
+                if (sid) {
+                  sessionId.current = sid;
+                  setTurns((t) => [...t, { role: "system", text: `resumed latest session: ${sid.slice(0, 12)}…` }]);
+                } else {
+                  setTurns((t) => [...t, { role: "system", text: "OC_TUI_RESUME=last but no recent sessions found — starting fresh" }]);
+                }
+              } else {
+                // Treat as a literal session id (or prefix). Wire chat
+                // accepts the prefix; the dispatch layer resolves it.
+                sessionId.current = resumeSpec;
+                setTurns((t) => [...t, { role: "system", text: `resuming session: ${resumeSpec}` }]);
+              }
+            } catch (e) {
+              setTurns((t) => [...t, { role: "system", text: `resume failed: ${(e as Error).message}` }]);
+            }
           }
         } catch (e) {
           setTurns((t) => [...t, { role: "system", text: `hello failed: ${(e as Error).message}` }]);
@@ -77,7 +106,7 @@ export const App: React.FC<AppProps> = ({ client }) => {
       }
     });
     return () => { offConn(); offEv(); };
-  }, [client]);
+  }, [client, resumeSpec]);
 
   useInput((rawInput, key) => {
     if (key.escape) exit();

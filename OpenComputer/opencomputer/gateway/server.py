@@ -162,7 +162,13 @@ class Gateway:
         self.dispatch = Dispatch(
             router=router,
             plugin_api=plugin_registry.shared_api,
-            config={"photo_burst_window": self._config.photo_burst_window},
+            config={
+                "photo_burst_window": self._config.photo_burst_window,
+                # 2026-05-08: gate lifecycle reactions so the default-off
+                # invariant is enforced at the dispatcher (see
+                # GatewayConfig.lifecycle_reactions docstring).
+                "lifecycle_reactions": self._config.lifecycle_reactions,
+            },
             resolver=self._resolver,
         )
         # Pass-2 F7: now that Dispatch exists, register the consent
@@ -221,8 +227,86 @@ class Gateway:
         # Give Dispatch a handle so it can send typing indicators back out.
         self.dispatch.register_adapter(adapter.platform.value, adapter)
 
+    def _run_channel_ownership_preflight(self) -> None:
+        """Refuse to start if a non-OC channel handler is running on this box.
+
+        Per the 2026-05-08 directive (``user_oc_owns_all_channels.md``):
+        OpenComputer is the SOLE channel handler. If a competing process
+        (Claude Code's ``claude --channels plugin:telegram`` bun bridge,
+        Hermes daemon, rival ``oc gateway``, ...) is detected, behavior
+        depends on ``cfg.gateway.takeover_on_start``:
+
+        * ``False`` (default): raise :class:`ChannelOwnershipConflict`
+          with the offending PIDs + cmdlines + remediation steps.
+          Gateway boot aborts; launchd's KeepAlive=dict means the
+          service stays stopped until operator intervention.
+        * ``True``: terminate the competitors (SIGTERM with grace, then
+          SIGKILL), append to audit log, and proceed.
+
+        The audit log lives at
+        ``<profile_home>/audit/competitor-takeover.jsonl`` and is
+        append-only. Tests exercise both modes; see
+        ``tests/test_gateway_preflight.py``.
+        """
+        from opencomputer.agent.config import _home
+        from opencomputer.gateway.preflight import (
+            default_audit_path,
+            run_preflight,
+        )
+
+        cfg_gateway = getattr(self, "_config", None)
+        if cfg_gateway is None:
+            # Defensive: Gateway built without a config (test scaffolding
+            # via ``Gateway.__new__``) skips preflight rather than raising.
+            return
+
+        takeover_enabled = bool(getattr(cfg_gateway, "takeover_on_start", False))
+        grace = float(getattr(cfg_gateway, "takeover_grace_seconds", 5.0))
+        audit_path = default_audit_path(_home())
+
+        run_preflight(
+            takeover_on_start=takeover_enabled,
+            grace_seconds=grace,
+            audit_log=audit_path,
+        )
+
     async def start(self) -> None:
-        """Connect all adapters. Returns once they're all running."""
+        """Connect all adapters. Returns once they're all running.
+
+        Phase 0 (2026-05-08, ``user_oc_owns_all_channels.md`` directive):
+        run channel-ownership preflight before connecting any adapter.
+        OpenComputer is the sole channel handler; if competitors are
+        running and ``cfg.gateway.takeover_on_start`` is False, raise
+        :class:`ChannelOwnershipConflict` so the operator sees a loud
+        refusal rather than a silent reply blackhole.
+
+        After preflight passes, capture the running asyncio loop and
+        wire the /background completion notifier so worker threads can
+        schedule ``adapter.send()`` via ``run_coroutine_threadsafe``.
+        """
+        # Security-first: refuse to boot if another channel handler
+        # owns the same chat surfaces. Must happen before any other
+        # work touches the network.
+        self._run_channel_ownership_preflight()
+
+        # Capture the gateway's main asyncio loop and register the
+        # /background completion notifier on the registry. Done after
+        # preflight (the directive above) but before adapter connect()
+        # so an early background-job completion (e.g. test mode)
+        # routes correctly. Failure-isolated — a missing background
+        # registry must never block gateway boot.
+        try:
+            from opencomputer.agent.background_jobs import (
+                get_default_registry as _bg_get_registry,
+            )
+
+            self.dispatch.bind_main_loop(asyncio.get_running_loop())
+            _bg_get_registry().set_completion_notifier(
+                self.dispatch.background_completion_notifier
+            )
+        except Exception:  # noqa: BLE001 — never block gateway boot on this
+            logger.debug("gateway: /background notifier wire failed", exc_info=True)
+
         logger.info("gateway: starting %d adapters", len(self._adapters))
         results = await asyncio.gather(
             *(a.connect() for a in self._adapters), return_exceptions=True
@@ -232,8 +316,40 @@ class Gateway:
                 logger.error(
                     "gateway: adapter %s failed to connect: %s", adapter.platform, res
                 )
+                # Surface as fatal-retryable so the periodic supervisor
+                # (60s tick) reconnects. Without this, an exception during
+                # boot parks the adapter dead with no recovery — see
+                # 2026-05-08 incident where Telegram polling-slot conflict
+                # silently disabled all replies for hours.
+                try:
+                    adapter._set_fatal_error(
+                        "connect_raised_exception",
+                        f"connect() raised: {res!r}",
+                        retryable=True,
+                    )
+                except Exception:  # noqa: BLE001 — adapter API contract failure
+                    logger.exception(
+                        "gateway: adapter %s does not implement _set_fatal_error",
+                        adapter.platform,
+                    )
             elif res is False:
-                logger.error("gateway: adapter %s returned False from connect()", adapter.platform)
+                logger.error(
+                    "gateway: adapter %s returned False from connect()",
+                    adapter.platform,
+                )
+                # Same recovery path as exception branch — without this,
+                # connect()=False silently parks the adapter forever.
+                try:
+                    adapter._set_fatal_error(
+                        "connect_returned_false",
+                        "connect() returned False at startup — see adapter logs",
+                        retryable=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "gateway: adapter %s does not implement _set_fatal_error",
+                        adapter.platform,
+                    )
 
         # Tier-A item 14 — start the outgoing-message drainer so the
         # MCP write tools (``messages_send``) can route through the

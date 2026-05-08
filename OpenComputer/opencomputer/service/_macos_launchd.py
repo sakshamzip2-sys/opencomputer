@@ -145,12 +145,42 @@ def status() -> StatusResult:
 
 
 def start() -> bool:
+    """Kickstart the gateway service.
+
+    Idempotent — if the plist exists but isn't bootstrapped, run a
+    bootstrap first (covers the case where the user manually removed
+    the service from launchd's domain via `launchctl bootout`).
+    """
+    path = _plist_path()
+    rc, _, _ = _launchctl("print", f"gui/{_uid()}/{_LABEL}")
+    if rc != 0 and path.exists():
+        rc_b, _, _ = _launchctl("bootstrap", f"gui/{_uid()}", str(path))
+        if rc_b == 0:
+            return True
     rc, _, _ = _launchctl("kickstart", "-k", f"gui/{_uid()}/{_LABEL}")
     return rc == 0
 
 
 def stop() -> bool:
-    rc, _, _ = _launchctl("kill", "SIGTERM", f"gui/{_uid()}/{_LABEL}")
+    """Cleanly stop the gateway service WITHOUT triggering a respawn.
+
+    KeepAlive (even the dict form with SuccessfulExit=false) will
+    re-bootstrap the service on a SIGTERM that exits cleanly. To
+    actually keep it stopped, bootout the plist first — that removes
+    it from launchd's domain so it can't respawn until the user runs
+    `oc gateway start` (or the plist is bootstrapped again).
+
+    Returns True iff the service was successfully stopped (or wasn't
+    running to begin with).
+    """
+    rc_print, _, _ = _launchctl("print", f"gui/{_uid()}/{_LABEL}")
+    if rc_print != 0:
+        # Already not loaded — nothing to do.
+        return True
+    # bootout removes from launchd's domain and sends SIGTERM in one
+    # atomic operation. The KeepAlive policy can't trigger because
+    # the service is no longer in the domain.
+    rc, _, _ = _launchctl("bootout", f"gui/{_uid()}/{_LABEL}")
     return rc == 0
 
 

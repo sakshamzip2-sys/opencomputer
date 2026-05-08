@@ -9,7 +9,16 @@ import { OCWireClient } from "./gatewayClient.js";
 const url = process.env.OC_WIRE_URL || "ws://127.0.0.1:18789";
 const client = new OCWireClient(url);
 
-const { waitUntilExit, unmount } = render(<App client={client} />);
+// OC_TUI_RESUME mirrors hermes-agent's HERMES_TUI_RESUME env contract.
+// Values:
+//   "" / unset       — start fresh (session picker behaviour as before)
+//   "last"           — auto-resume the most recent session
+//   "<session-id>"   — auto-resume that specific session (or session-id prefix)
+// The Python wrapper (cli_tui.py) sets this from the user's
+// OPENCOMPUTER_TUI_RESUME env var or `oc tui --continue` / `oc tui --resume <id>`.
+const resumeSpec = process.env.OC_TUI_RESUME || "";
+
+const { waitUntilExit, unmount } = render(<App client={client} resumeSpec={resumeSpec} />);
 
 const cleanup = () => {
   client.close();

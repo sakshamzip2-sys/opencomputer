@@ -461,6 +461,48 @@ class GatewayConfig:
     startup_ping_chats: tuple[tuple[str, str], ...] = ()
     startup_ping_message: str = "OpenComputer back online"
 
+    # ─── Channel ownership preflight (2026-05-08) ──────────────────────
+    # OpenComputer is the SOLE channel handler for this user (per the
+    # 2026-05-08 directive — see memory/user_oc_owns_all_channels.md).
+    # When ``takeover_on_start = true``, the gateway terminates any
+    # competing process found at startup (Claude Code Telegram bridge,
+    # Hermes daemon, rival ``oc gateway``, etc.) before connecting any
+    # adapter. When ``false`` (default), competitors cause a loud refusal
+    # — the gateway logs the offending PID + cmdline, declines to start,
+    # and tells the user to either kill the competitor or pass
+    # ``--force-takeover`` once.
+    #
+    #   gateway:
+    #     takeover_on_start: true
+    #
+    # ``takeover_grace_seconds`` is the window we wait for SIGTERM to
+    # land cleanly before escalating to SIGKILL. Default 5s matches
+    # ``oc service stop``'s expectation; raise it for slow-shutdown
+    # processes.
+    takeover_on_start: bool = False
+    takeover_grace_seconds: float = 5.0
+
+    # ─── Lifecycle reactions (2026-05-08) ──────────────────────────────
+    # When True, the dispatcher fires ``adapter.on_processing_start`` →
+    # 👀 reaction on the user's message when the agent picks it up, then
+    # ``adapter.on_processing_complete`` → ✅ on success / ❌ on failure
+    # when the turn ends. Hermes-style "I'm thinking" indicator.
+    #
+    # Default False because:
+    #   1. Per the 2026-05-08 ``user_oc_owns_all_channels.md`` directive,
+    #      Saksham wants plain-text only — no emojis, no decorative
+    #      reactions.
+    #   2. Telegram clients render reactions inline next to the user's
+    #      sent message, which can read like the bot is replying with an
+    #      emoji even when the actual reply text is plain. This was the
+    #      2026-05-08 "bot keeps responding with eye emoji" complaint.
+    #
+    # Users who DO want the lifecycle indicator can opt in via:
+    #
+    #   gateway:
+    #     lifecycle_reactions: true
+    lifecycle_reactions: bool = False
+
 
 @dataclass(frozen=True, slots=True)
 class DeepeningConfig:

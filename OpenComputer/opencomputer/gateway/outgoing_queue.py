@@ -123,9 +123,31 @@ class OutgoingQueue:
             conn.executescript(_DDL)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, isolation_level=None, timeout=10.0)
+        # Re-create the parent dir on every connect. Without this, if anything
+        # removes the parent between init and the next call (profile cleanup,
+        # rename, partial test teardown, network-mounted home that briefly
+        # vanishes), every subsequent _connect raises
+        # "sqlite3.OperationalError: unable to open database file" forever.
+        # The drainer would then error-loop at 1Hz writing the same traceback
+        # to errors.log indefinitely (observed: 33h-stuck daemon, 2026-05-07).
+        try:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        try:
+            conn = sqlite3.connect(
+                self.db_path, isolation_level=None, timeout=10.0,
+            )
+        except sqlite3.OperationalError as e:
+            raise sqlite3.OperationalError(
+                f"{e} (db_path={self.db_path})",
+            ) from e
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        # Re-run DDL: if the DB file got deleted/recreated since __init__
+        # (parent rm -rf'd, fresh tempdir, etc.), the table won't exist.
+        # CREATE IF NOT EXISTS is idempotent and cheap on the hot path.
+        conn.executescript(_DDL)
         return conn
 
     @contextmanager
