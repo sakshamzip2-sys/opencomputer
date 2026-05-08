@@ -4,6 +4,20 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Fixed — Hermes v2 D5/D6/D7 *real* renderer wiring (2026-05-09, "production-grade for real this time")
+
+PR #515 shipped the YAML data + accessor functions for spinner faces, the 22-key color palette, and the live console plumbing. But the actual renderers didn't consume any of it — the streaming spinner had hardcoded "Thinking…" text, Rich panel borders used literal hex like `"grey50"`, and the prompt-toolkit completion menu used a static `MENU_STYLE` dict. User asked for a brutally honest audit; this PR closes the consumer-side gaps that audit surfaced.
+
+- **D5 wiring** — `cli_ui/streaming.py` now consumes the active skin's spinner faces. New `_skin_spinner_text(phase=...)` helper picks `spinner.waiting_faces[0]` during the pre-first-byte network wait (`StreamingRenderer.start_thinking`) and `spinner.thinking_faces[0]` once reasoning content arrives (`_render` post-first-chunk). Defensive: import-failures + empty cycles fall back to legacy `"Thinking…"` so the spinner never breaks.
+- **D6 wiring (panels)** — Rich panel borders now read the active skin's color keys via the new `_skin_color(key, fallback)` helper. The thinking-panel border uses `banner_dim`, the tool-panel border uses `banner_dim` — different skins now visually tint these surfaces consistently.
+- **D6 wiring (prompt-toolkit menu)** — `cli_ui/style.py` adds `current_menu_style()` returning a fresh prompt-toolkit `Style` derived from the active skin's `banner_title` / `banner_dim` / `ui_ok` / `ui_label` and the `completion_menu_*` family of keys. Every key in the 22-key Hermes palette now flows into a real render surface.
+- **D7 fix (PromptSession live)** — `input_loop.py`'s PromptSession now uses `DynamicStyle(current_menu_style)` so `/skin <name>` mid-session triggers a live completion-menu repaint. Previously the menu colors were frozen at session start.
+- **D8 verify (slot-order branches)** — 8 new tests in `tests/test_prompt_slot_order_branches.py` pin the slot order under companion mode, default persona, no-personality, no-workspace, no-soul, companion+no-skills, user_tone-rendering, and persona_preferred_tone-fallback paths. PR #515's `test_prompt_slot_order.py` only covered the default-persona-with-everything-set branch.
+
+15 new tests in `tests/test_skin_renderer_wiring.py` pin every consumer surface so a future contributor can't silently regress the renderer to hardcoded values. 8 new branch tests in `tests/test_prompt_slot_order_branches.py`.
+
+The parity doc at `docs/refs/hermes-context-personality-skins-v2-parity.md` is updated to reflect data-AND-wiring shipped status.
+
 ### Added — Hermes v2 production-grade closure (2026-05-08, "do them all")
 
 Closes every honest deferral / partial / YAGNI cut from PRs #510 + #512. With this PR the parity doc has zero remaining `⚠️ partial` / `❌ deferred` rows.

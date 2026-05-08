@@ -274,6 +274,15 @@ def build_prompt_session(
         buf.delete_before_cursor(count=len(text))
         buf.insert_text(target)
 
+    # Hermes v2 D7 wiring (2026-05-09): use a DynamicStyle so the
+    # completion menu picks up live skin changes from /skin <name>
+    # without rebuilding the PromptSession. ``current_menu_style`` is
+    # called on every render; ``DynamicStyle`` accepts a callable and
+    # re-resolves each time.
+    from prompt_toolkit.styles import DynamicStyle
+
+    from opencomputer.cli_ui.style import current_menu_style
+
     return PromptSession(
         message=HTML("<ansigreen><b>you ›</b></ansigreen> "),
         history=FileHistory(str(history_path)),
@@ -297,6 +306,7 @@ def build_prompt_session(
         # descriptions on every row. Acceptable V1 — strict Claude-Code
         # parity is a follow-up requiring a custom Application layout.
         complete_style=CompleteStyle.MULTI_COLUMN,
+        style=DynamicStyle(current_menu_style),
         # erase_when_done clears the typed prompt line on submit so the
         # chat loop can re-render the user's message inside a styled
         # boundary box (no duplicate "you › ..." line in scrollback).
