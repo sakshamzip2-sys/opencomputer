@@ -2266,6 +2266,16 @@ def code(
         "--keep-worktree",
         help="Do NOT remove the worktree on exit (when --worktree is set).",
     ),
+    worktree_include_dry_run: bool = typer.Option(
+        False,
+        "--worktree-include-dry-run",
+        help=(
+            "When --worktree is set: read .worktreeinclude, print what "
+            "would be copied, then exit without entering chat. Useful "
+            "for verifying include patterns before committing to a "
+            "session."
+        ),
+    ),
 ) -> None:
     """Start the coding agent in [path] (or cwd). Snappy entry-point.
 
@@ -2273,7 +2283,9 @@ def code(
     MultiEdit, TodoWrite, RunTests etc. are enabled by default. Use
     ``--plan`` for read-only discovery; ``--yolo`` to skip per-action
     confirmation prompts. Use ``--worktree`` to isolate this session in a
-    fresh git worktree (auto-removed on exit).
+    fresh git worktree (auto-removed on exit). Pair with
+    ``--worktree-include-dry-run`` to preview ``.worktreeinclude``
+    behaviour without starting chat.
     """
     if path:
         target = os.path.abspath(path)
@@ -2288,12 +2300,27 @@ def code(
         auto = True
     permission_mode = _derive_permission_mode(plan=plan, auto=auto, accept_edits=accept_edits)
 
+    if worktree_include_dry_run and not worktree:
+        console.print(
+            "[bold red]error:[/bold red] --worktree-include-dry-run requires --worktree."
+        )
+        raise typer.Exit(code=2)
+
     if worktree:
         from opencomputer.worktree import session_worktree
 
-        with session_worktree(Path.cwd(), keep=keep_worktree) as wt:
+        with session_worktree(
+            Path.cwd(),
+            keep=keep_worktree,
+            include_dry_run=worktree_include_dry_run,
+        ) as wt:
             if wt != Path.cwd().parent:  # i.e. the worktree was actually created
                 console.print(f"[dim]worktree: {wt}[/dim]")
+            if worktree_include_dry_run:
+                console.print(
+                    "[green]dry-run complete — exiting without starting chat.[/green]"
+                )
+                return
             _run_chat_session(
                 resume=resume,
                 plan=plan,
@@ -3143,6 +3170,13 @@ app.add_typer(consent_app, name="consent")
 # user-facing surface matches the docs (`oc dashboard`, `oc tui`).
 app.add_typer(dashboard_app, name="dashboard")
 app.add_typer(tui_app, name="tui")
+
+# 2026-05-08 — `.worktreeinclude` + checkpoint hygiene CLIs.
+from opencomputer.cli_checkpoints import checkpoints_app  # noqa: E402
+from opencomputer.cli_worktrees import worktrees_app  # noqa: E402
+
+app.add_typer(checkpoints_app, name="checkpoints")
+app.add_typer(worktrees_app, name="worktrees")
 
 # ─── service (cross-platform always-on daemon) ────────────────────────
 service_app = typer.Typer(
