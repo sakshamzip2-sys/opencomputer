@@ -917,6 +917,41 @@ class CheckpointsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class GoalsConfig:
+    """Persistent-goal (Ralph loop) tunables.
+
+    Spec: docs/superpowers/specs/2026-05-08-kanban-goals-v2-design.md §3.
+    """
+
+    #: Maximum number of continuation turns the loop may inject before
+    #: auto-pausing. Hit this and the user sees a "⏸ Goal paused" banner.
+    max_turns: int = 20
+
+
+@dataclass(frozen=True, slots=True)
+class GoalJudgeConfig:
+    """Auxiliary judge-model override for the goal Ralph loop.
+
+    When both fields are unset (``None``), :func:`opencomputer.agent.goal.
+    _call_judge_model` falls back to the chat provider via
+    :func:`opencomputer.agent.aux_llm.complete_text`. Setting both routes
+    the judge through the named registered provider, which lets users
+    aim a cheap-but-capable model (e.g. ``google/gemini-3-flash-preview``)
+    at the gate without affecting the main chat model.
+    """
+
+    provider: str | None = None
+    model: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AuxiliaryConfig:
+    """Bundle of auxiliary-model overrides. Goal judge is the first slot."""
+
+    goal_judge: GoalJudgeConfig = field(default_factory=GoalJudgeConfig)
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Root configuration — composed of small focused configs."""
 
@@ -973,6 +1008,11 @@ class Config:
     #: activates at most once per user turn; primary is restored on
     #: the next turn.
     fallback_providers: tuple[FallbackProvider, ...] = ()
+    #: Kanban-Goals v2 (2026-05-08) — Ralph-loop turn budget.
+    goals: GoalsConfig = field(default_factory=GoalsConfig)
+    #: Kanban-Goals v2 (2026-05-08) — auxiliary-model overrides
+    #: (goal judge today; future slots can be added without churn).
+    auxiliary: AuxiliaryConfig = field(default_factory=AuxiliaryConfig)
     home: Path = field(default_factory=_home)
 
 
