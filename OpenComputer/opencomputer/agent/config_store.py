@@ -308,6 +308,8 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
         result["provider_routing"] = _encode(cfg.provider_routing)
     if cfg.fallback_providers:
         result["fallback_providers"] = [_encode(fp) for fp in cfg.fallback_providers]
+    if cfg.model_context_overrides:
+        result["model_context_overrides"] = dict(cfg.model_context_overrides)
     # III.6 — only serialise the hooks block when non-empty so default
     # configs stay tidy. Shape matches the nested event-keyed form users
     # write by hand (see _parse_hooks_block for the round-trip contract).
