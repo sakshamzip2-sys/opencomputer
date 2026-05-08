@@ -2503,105 +2503,15 @@ def wire(
         console.print("\n[dim]wire server stopped[/dim]")
 
 
-@app.command()
-def gateway(
-    install_daemon: bool = typer.Option(
-        False, "--install-daemon",
-        help=(
-            "Install OpenComputer as an always-on system service and exit "
-            "(does not run the gateway in the foreground)."
-        ),
-    ),
-    daemon_profile: str = typer.Option(
-        "default", "--daemon-profile",
-        help="Profile to install the daemon for (only with --install-daemon).",
-    ),
-) -> None:
-    """Run the gateway daemon — connects all configured channel adapters.
+# PR-1 (Task 1.8) — `oc gateway` is now a Typer subcommand group.
+# The body of the historic ``@app.command def gateway()`` lives in
+# ``opencomputer.cli_gateway._run_foreground``. Bare ``oc gateway`` falls
+# through to it via the group's ``invoke_without_command=True`` callback.
+# ``--install-daemon`` flag preserved (deprecated, hidden in help).
+from opencomputer.cli_gateway import gateway_app, top_pairing_app  # noqa: E402
 
-    Requires provider API key + at least one channel token (TELEGRAM_BOT_TOKEN,
-    DISCORD_BOT_TOKEN, etc.) in the environment. The same agent loop runs,
-    but input comes from channels instead of the terminal.
-    """
-    if install_daemon:
-        from opencomputer.service.factory import get_backend
-        backend = get_backend()
-        result = backend.install(profile=daemon_profile, extra_args="gateway")
-        typer.echo(f"Installed {result.backend} service at {result.config_path}")
-        for note in result.notes:
-            typer.echo(f"note: {note}")
-        raise typer.Exit(0)
-    _configure_logging_once()
-    from opencomputer.gateway.server import Gateway
-    from opencomputer.mcp.client import MCPManager
-
-    cfg = load_config()
-    # Follow-up #25 — one-shot hint if Docker became available after setup.
-    from opencomputer.cli_hints import maybe_print_docker_toggle_hint
-
-    maybe_print_docker_toggle_hint(cfg)
-    _check_provider_key(cfg.model.provider)
-
-    _register_builtin_tools()
-    n_plugins = _discover_plugins()
-    _apply_model_overrides()
-    _discover_and_register_agents()
-    _register_settings_hooks(cfg)
-
-    provider = _resolve_provider(cfg.model.provider)
-    loop = AgentLoop(provider=provider, config=cfg)
-    DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
-
-    # Wire /background slash factory for the gateway daemon.
-    from opencomputer.agent.background_jobs import (
-        get_default_registry as _bg_gw_registry,
-    )
-
-    _bg_gw_registry().set_factory(lambda: AgentLoop(provider=provider, config=cfg))
-
-    # Connect to MCP servers in the background (kimi-cli deferred pattern)
-    mcp_mgr = MCPManager(tool_registry=registry)
-    if cfg.mcp.servers:
-        console.print(f"[dim]mcp: deferring connection to {len(cfg.mcp.servers)} server(s)[/dim]")
-
-    gw = Gateway(loop=loop, config=cfg.gateway)
-    for platform_name, adapter in plugin_registry.channels.items():
-        console.print(f"[dim]registering channel:[/dim] [cyan]{platform_name}[/cyan]")
-        gw.register_adapter(adapter)
-
-    if not gw.adapters:
-        console.print(
-            "[bold yellow]warning:[/bold yellow] no channel adapters registered. "
-            "Set TELEGRAM_BOT_TOKEN (or another channel token) and ensure the "
-            "channel plugin is discovered."
-        )
-        console.print(f"[dim]plugins loaded: {n_plugins}[/dim]")
-        raise typer.Exit(1)
-
-    console.print(
-        f"[bold cyan]OpenComputer gateway[/bold cyan] — "
-        f"{len(gw.adapters)} channel(s), model={cfg.model.model}"
-    )
-    console.print("[dim]ctrl+c to stop[/dim]\n")
-
-    async def _run():
-        if cfg.mcp.servers:
-            asyncio.create_task(
-                mcp_mgr.connect_all(
-                    list(cfg.mcp.servers),
-                    osv_check_enabled=cfg.mcp.osv_check_enabled,
-                    osv_check_fail_closed=cfg.mcp.osv_check_fail_closed,
-                )
-            )
-        try:
-            await gw.serve_forever()
-        finally:
-            await mcp_mgr.shutdown()
-
-    try:
-        asyncio.run(_run())
-    except KeyboardInterrupt:
-        console.print("\n[dim]gateway stopped[/dim]")
+app.add_typer(gateway_app, name="gateway")
+app.add_typer(top_pairing_app, name="pairing")  # Hermes-CLI compat
 
 
 @app.command()

@@ -50,11 +50,16 @@ def test_install_writes_plist_and_calls_bootstrap(
     monkeypatch.setattr(_macos_launchd, "_launchctl", fake_launchctl)
 
     result = _macos_launchd.install(profile="default", extra_args="")
-    expected = fake_home / "Library" / "LaunchAgents" / "com.opencomputer.gateway.plist"
+    # Multi-install hashing: the plist filename / launchd label is
+    # 'com.opencomputer.gateway' on canonical home but
+    # 'com.opencomputer.gateway.<hash>' on a non-canonical home (CI runners).
+    # Mirror what production uses (_label) rather than asserting a static name.
+    label = _macos_launchd._label("default")
+    expected = fake_home / "Library" / "LaunchAgents" / f"{label}.plist"
     assert result.config_path == expected
     assert expected.exists()
     body = expected.read_text()
-    assert "com.opencomputer.gateway" in body
+    assert label in body
     bootstrap_calls = [c for c in calls if c[:1] == ("bootstrap",)]
     assert bootstrap_calls
     assert bootstrap_calls[0][1] == "gui/501"

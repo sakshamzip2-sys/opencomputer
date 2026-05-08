@@ -4,6 +4,77 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Messaging Gateway parity (Hermes) — PR-1: UX + security (2026-05-08, branch `feat/gateway-parity-pr1-2026-05-08`)
+
+Closes the Hermes-spec messaging-gateway UX gap with a unified `oc gateway *`
+command verb plus 7 production-grade subsystems. Backwards compatible —
+bare `oc gateway` still runs the foreground daemon; existing systemd /
+launchd unit files keep working untouched.
+
+- **`oc gateway` Typer subcommand group** consolidating run/setup/install/
+  uninstall/start/stop/restart/status/logs/sethome/pairing under one verb.
+  - `oc gateway` (bare) — runs foreground (back-compat preserved).
+  - `oc gateway --install-daemon` flag — kept as a deprecated alias to
+    `oc gateway install` (no removal date; honors user requirement).
+  - Top-level `oc pairing list/approve/...` — Hermes-CLI-compat alias.
+- **DM Pairing system (`opencomputer.channels.pairing_codes`)** —
+  production port of Hermes `gateway/pairing.py` plus three OC-specific
+  enhancements: cross-process `flock` for daemon + CLI safety, admin
+  `regenerate_code()` escape hatch (bypasses rate limit), Telegram
+  deep-link URL generator (`https://t.me/<bot>?start=approve_<code>`).
+  - 8-char codes from 32-char unambiguous alphabet (no 0/O/1/I).
+  - Crypto-random via `secrets.choice`, atomic file writes, chmod 0600.
+  - 1-hour code expiry, 10-min rate limit per (platform, user_id),
+    platform-wide lockout after 5 failed approval attempts, 3-pending cap.
+  - Cron sweep wired through gateway boot; corrupt-JSON recovery with
+    timestamped backup.
+- **`AllowlistGate` (`opencomputer.channels.allowlist`)** composing six
+  allowlist sources in priority order: `GATEWAY_ALLOW_ALL_USERS` escape
+  hatch → `<PLATFORM>_ALLOWED_USERS` env (CSV) for 20 platforms →
+  `GATEWAY_ALLOWED_USERS` catch-all → `<profile>/allowlist.json`
+  overlay → `PairingCodeStore` approved-store → deny + mint code.
+- **Per-platform reset policies (`gateway.reset_mode`,
+  `reset_idle_minutes`, `reset_daily_at_hour`, `reset_by_platform`)** —
+  drops the chat's session_id under inactivity / daily UTC crossings so
+  "fresh chat each morning" is the default UX. Per-platform overrides
+  (e.g., Slack channels reset more aggressively than personal Telegram).
+- **Multi-installation service-name hashing
+  (`opencomputer.service._naming`)** — `service_label("default")` returns
+  the historical `opencomputer-gateway` so existing installs are
+  unchanged; non-canonical `OPENCOMPUTER_HOME` or named profiles get an
+  8-char sha256 suffix so two daemons can coexist on one host. Plumbed
+  through systemd / launchd / schtasks backends.
+- **Sophisticated `oc gateway status`
+  (`opencomputer.cli_gateway_status`)** — `GatewayRuntimeSnapshot`
+  detects process-vs-service mismatch, manual PIDs vs service PIDs, and
+  foreign-`OPENCOMPUTER_HOME` daemons. Rich-rendered panel highlights
+  inconsistent state (yellow border + actionable warning).
+- **Dispatcher integration
+  (`opencomputer.gateway.dispatch.Dispatch`)** — optional
+  `allowlist_gate` + `reset_policy` constructor params (defaults None
+  for back-compat). When wired, allowlist denials send a pairing-code
+  reply via the adapter; resets write a per-(platform, chat_id)
+  reset-token consumed by `_session_id_for` so the next session_id
+  derivation lands in a fresh session. `_chat_last_seen` +
+  `_chat_reset_tokens` persist to `<profile>/gateway/last_seen.json`
+  via atomic tmpfile + os.replace.
+- **`oc gateway sethome <platform> <chat_id> [--thread <id>]`** writes
+  home channels to `<profile>/gateway/home_channels.json` for cron
+  auto-deliver (consumed by PR-2's `DeliveryRouter`).
+
+**Test coverage:** +146 tests across `tests/cli/`, `tests/channels/`,
+`tests/gateway/`, `tests/service/`. All green; existing suite unchanged.
+
+**Spec:** `docs/superpowers/specs/2026-05-08-messaging-gateway-parity-design.md`
+**Plan:** `docs/superpowers/plans/2026-05-08-messaging-gateway-parity.md`
+
+### Deprecated
+
+- `oc gateway --install-daemon` flag — use `oc gateway install`. Still
+  works; no removal date.
+
+---
+
 ### Added — Dashboard + TUI full port (2026-05-07, branch `feat/dashboard-polish-2026-05-07`)
 
 Closes the Hermes Tier-A1 dashboard polish gap from the 2026-05-06

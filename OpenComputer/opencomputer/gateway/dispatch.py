@@ -22,6 +22,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 from opencomputer.agent.loop import AgentLoop
@@ -33,9 +34,11 @@ from plugin_sdk.runtime_context import (
 )
 
 if TYPE_CHECKING:
+    from opencomputer.channels.allowlist import AllowlistGate
     from opencomputer.gateway.agent_router import AgentRouter
     from opencomputer.gateway.binding_resolver import BindingResolver
     from opencomputer.gateway.channel_directory import ChannelDirectory
+    from opencomputer.gateway.reset_policy import ResetPolicyChecker
     from opencomputer.plugins.loader import PluginAPI
     from plugin_sdk.consent import CapabilityClaim
 
@@ -314,6 +317,9 @@ class Dispatch:
         *,
         router: AgentRouter | None = None,
         resolver: BindingResolver | None = None,
+        allowlist_gate: AllowlistGate | None = None,
+        reset_policy: ResetPolicyChecker | None = None,
+        last_seen_path: Any = None,  # Path to <profile>/gateway/last_seen.json
     ) -> None:
         # Phase 2 collect-mode leader registry. Only ONE arrival per
         # session in collect mode runs the agent; subsequent arrivals
@@ -452,6 +458,30 @@ class Dispatch:
         if gate is not None and hasattr(gate, "set_prompt_handler"):
             gate.set_prompt_handler(self._send_approval_prompt)
 
+        # ── PR-1 (Task 1.6): allowlist + reset policy + last-seen ──────
+        # All optional — Dispatch constructed without them preserves the
+        # historic permissive flow (existing tests untouched). Gateway
+        # wires these in production to gate unknown users + reset stale
+        # sessions.
+        self._allowlist_gate: AllowlistGate | None = allowlist_gate
+        self._reset_policy: ResetPolicyChecker | None = reset_policy
+        self._last_seen_path = last_seen_path
+        # ``(platform, chat_id) → unix_seconds`` and ``(platform, chat_id) →
+        # reset_token`` — both tracked here, persisted to last_seen.json.
+        self._chat_last_seen: dict[tuple[str, str], float] = {}
+        self._chat_reset_tokens: dict[tuple[str, str], str] = {}
+        self._last_seen_dirty_count = 0
+        self._last_seen_persist_every = 10
+        self._load_last_seen()
+        # PR-1 follow-up — drain coordination. ``_drain_active`` is set by
+        # ``Gateway.serve_forever`` when ``oc gateway restart`` writes the
+        # drain flag; new arrivals while drain is active return None
+        # immediately without entering the agent loop. ``_inflight_count``
+        # tracks how many handle_message calls are mid-flight so the
+        # serve loop can wait until 0 before exiting.
+        self._drain_active = False
+        self._inflight_count = 0
+
     def register_adapter(self, platform: str, adapter) -> None:
         self._adapters_by_platform[platform] = adapter
         # Round 2a P-5 — if the adapter exposes the approval-button
@@ -461,19 +491,127 @@ class Dispatch:
             adapter.set_approval_callback(self._handle_approval_click)
 
     def _session_id_for(self, event: MessageEvent) -> str:
-        """Stable session id: hash(platform + chat_id[, thread_hint]).
+        """Stable session id: hash(platform + chat_id[, thread_hint][, reset_token]).
 
         ``thread_hint`` (Item 21) comes from ``event.metadata["thread_hint"]``
         if set, letting cron / non-conversational paths route output to
         a separate session within the same chat. Default behaviour
         (no hint) keeps existing chats on a single session forever.
+
+        PR-1 (Task 1.6) — when a reset policy fires for ``(platform, chat_id)``,
+        the dispatcher writes a ``reset_token`` (e.g., ``daily-2026-05-08``)
+        into ``self._chat_reset_tokens``. The token is OR'd into the hash
+        salt so the next session_id derivation lands in a fresh session
+        without mutating the channel id or thread hint.
         """
         thread_hint: str | None = None
         if event.metadata:
             raw = event.metadata.get("thread_hint")
             if isinstance(raw, str) and raw.strip():
                 thread_hint = raw.strip()
-        return session_id_for(event.platform.value, event.chat_id, thread_hint)
+        platform_value = event.platform.value if event.platform else ""
+        # Defensive: callers that bypass __init__ (e.g.,
+        # Dispatch.__new__(Dispatch) in tests) won't have _chat_reset_tokens.
+        # The reset path is opt-in; falling back to no token preserves the
+        # legacy behavior for those callers.
+        reset_tokens = getattr(self, "_chat_reset_tokens", {})
+        token_key = (platform_value, event.chat_id)
+        reset_token = reset_tokens.get(token_key)
+        if reset_token:
+            # Compose with thread_hint so explicit cron threads still
+            # partition cleanly inside the reset boundary.
+            thread_hint = (
+                f"{thread_hint}|reset:{reset_token}"
+                if thread_hint
+                else f"reset:{reset_token}"
+            )
+        return session_id_for(platform_value, event.chat_id, thread_hint)
+
+    # ── PR-1 (Task 1.6) — last-seen persistence + pairing reply helpers ──
+
+    def _load_last_seen(self) -> None:
+        """Restore ``_chat_last_seen`` + ``_chat_reset_tokens`` from disk."""
+        if self._last_seen_path is None:
+            return
+        try:
+            from pathlib import Path
+
+            path = Path(self._last_seen_path)
+            if not path.exists():
+                return
+            import json as _json
+
+            data = _json.loads(path.read_text(encoding="utf-8"))
+            for key, ts in (data.get("last_seen") or {}).items():
+                if "|" in key:
+                    plat, chat = key.split("|", 1)
+                    self._chat_last_seen[(plat, chat)] = float(ts)
+            for key, tok in (data.get("reset_tokens") or {}).items():
+                if "|" in key:
+                    plat, chat = key.split("|", 1)
+                    self._chat_reset_tokens[(plat, chat)] = str(tok)
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "dispatch: last_seen.json unreadable (%s) — starting fresh", exc
+            )
+
+    def _persist_last_seen(self, force: bool = False) -> None:
+        """Write ``_chat_last_seen`` + ``_chat_reset_tokens`` to disk.
+
+        Throttled to every Nth write (default 10) so the dispatch hot-path
+        stays cheap. ``force=True`` ignores throttle (used on shutdown).
+        """
+        if self._last_seen_path is None:
+            return
+        self._last_seen_dirty_count += 1
+        if not force and self._last_seen_dirty_count < self._last_seen_persist_every:
+            return
+        self._last_seen_dirty_count = 0
+        try:
+            import json as _json
+            import tempfile
+            from pathlib import Path
+
+            path = Path(self._last_seen_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "last_seen": {f"{p}|{c}": ts for (p, c), ts in self._chat_last_seen.items()},
+                "reset_tokens": {f"{p}|{c}": tok for (p, c), tok in self._chat_reset_tokens.items()},
+            }
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    _json.dump(payload, f)
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except OSError as exc:
+            logger.warning("dispatch: last_seen persist failed: %s", exc)
+
+    def _format_pairing_reply(self, platform: str, code: str | None) -> str | None:
+        """Format the bot's reply for an unknown user.
+
+        Returns ``None`` when the gate suppressed the code (rate-limit /
+        lockout) — the dispatcher then sends nothing.
+        """
+        if not code:
+            return None
+        bot_username = os.environ.get("TELEGRAM_BOT_USERNAME") or ""
+        deep = ""
+        if platform == "telegram" and bot_username:
+            deep = (
+                f"\nOr click: https://t.me/{bot_username}?start=approve_{code}"
+            )
+        return (
+            f"Pairing code: `{code}` (expires in 60 minutes)\n"
+            f"Ask the OpenComputer admin to run:\n"
+            f"`oc gateway pairing approve {platform} {code}`"
+            f"{deep}"
+        )
 
     async def handle_message(self, event: MessageEvent) -> str | None:
         """
@@ -530,6 +668,96 @@ class Dispatch:
         attach_present = bool(event.attachments)
         if not text_present and not attach_present:
             return None
+
+        # PR-1 follow-up — drain mode: refuse new arrivals while
+        # ``oc gateway restart`` is waiting for in-flight runs to drain.
+        # Existing in-flight runs continue (they're tracked in
+        # ``_inflight_count``); the gateway's serve_forever waits for
+        # the count to reach 0 before exiting.
+        if getattr(self, "_drain_active", False):
+            logger.info(
+                "dispatch: drain active — skipping new arrival on %s:%s",
+                event.platform.value if event.platform else "?",
+                event.chat_id,
+            )
+            return None
+
+        # ── PR-1 (Task 1.6) — AllowlistGate check ───────────────────────
+        # Default-OFF: when ``self._allowlist_gate`` is None (unit-test
+        # constructions, legacy paths) this whole block is a no-op.
+        if self._allowlist_gate is not None:
+            platform_value = event.platform.value if event.platform else ""
+            user_id = ""
+            user_name = ""
+            if event.metadata:
+                raw_uid = event.metadata.get("user_id") or event.metadata.get(
+                    "from_user_id"
+                )
+                if isinstance(raw_uid, str | int):
+                    user_id = str(raw_uid)
+                raw_name = event.metadata.get("user_name") or event.metadata.get(
+                    "from_user_name"
+                )
+                if isinstance(raw_name, str):
+                    user_name = raw_name
+            # Fall back to chat_id when no per-user id is available — for
+            # 1:1 DMs the chat_id IS the user_id on most platforms.
+            if not user_id:
+                user_id = event.chat_id
+            decision = self._allowlist_gate.check(
+                platform_value, user_id, user_name=user_name
+            )
+            if not decision.allowed:
+                reply = self._format_pairing_reply(
+                    platform_value, decision.pairing_code
+                )
+                if reply:
+                    adapter = self._adapters_by_platform.get(platform_value)
+                    if adapter is not None:
+                        try:
+                            await adapter.send(event.chat_id, reply)
+                        except Exception:  # noqa: BLE001
+                            logger.warning(
+                                "pairing-reply: adapter.send failed for %s:%s",
+                                platform_value,
+                                event.chat_id,
+                                exc_info=True,
+                            )
+                logger.info(
+                    "allowlist-gate: denied %s:%s (source=%s, code=%s)",
+                    platform_value,
+                    user_id,
+                    decision.source,
+                    "yes" if decision.pairing_code else "rate-limited",
+                )
+                return None
+
+        # ── PR-1 (Task 1.6) — Reset Policy ──────────────────────────────
+        # Default-OFF: skipped when ``self._reset_policy`` is None.
+        if self._reset_policy is not None:
+            platform_value = event.platform.value if event.platform else ""
+            key = (platform_value, event.chat_id)
+            last_seen = self._chat_last_seen.get(key, 0.0)
+            do_reset, reason = self._reset_policy.should_reset(
+                platform_value, event.chat_id, last_seen
+            )
+            if do_reset:
+                # Compose a reset token from the reason + current UTC date
+                # so the new session_id is stable within the post-reset
+                # window (later messages on the same day reach the same
+                # token; the next reset advances to a new token).
+                from datetime import datetime
+
+                stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%S")
+                self._chat_reset_tokens[key] = f"{reason}-{stamp}"
+                logger.info(
+                    "reset-policy: fresh session for %s:%s (reason=%s)",
+                    platform_value,
+                    event.chat_id,
+                    reason,
+                )
+            self._chat_last_seen[key] = time.time()
+            self._persist_last_seen()
 
         session_id = self._session_id_for(event)
 
@@ -694,7 +922,30 @@ class Dispatch:
         ``set_profile(profile_home)`` so ``_home()`` and PluginAPI
         lazy properties resolve to the right profile inside the
         request scope.
+
+        PR-1 follow-up — inflight bookkeeping. Increments
+        ``self._inflight_count`` for the duration of this call so the
+        gateway's drain-aware ``serve_forever`` can wait for active
+        dispatches to finish before exiting.
         """
+        # Inflight tracking — guarded so legacy callers that bypass
+        # __init__ (Dispatch.__new__(Dispatch) in tests) keep working.
+        try:
+            self._inflight_count = getattr(self, "_inflight_count", 0) + 1
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            return await self.__do_dispatch_inner(event, session_id)
+        finally:
+            try:
+                self._inflight_count = max(0, getattr(self, "_inflight_count", 0) - 1)
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def __do_dispatch_inner(
+        self, event: MessageEvent, session_id: str
+    ) -> str | None:
+        """Inner dispatch — wrapped by ``_do_dispatch`` for inflight bookkeeping."""
         # Phase 3 Task 3.3: per-event profile resolution via the
         # BindingResolver. Falls back to "default" when no resolver
         # was wired — preserves the legacy behaviour for callers /

@@ -45,7 +45,9 @@ from permissions.scope_check_hook import (
 )
 from rewind.store import RewindStore  # type: ignore[import-not-found]
 from slash_commands.accept_edits import AcceptEditsCommand  # type: ignore[import-not-found]
+from slash_commands.approve_cmd import ApproveCommand  # type: ignore[import-not-found]
 from slash_commands.checkpoint import CheckpointCommand  # type: ignore[import-not-found]
+from slash_commands.deny_cmd import DenyCommand  # type: ignore[import-not-found]
 from slash_commands.diff import DiffCommand  # type: ignore[import-not-found]
 from slash_commands.plan import PlanOffCommand, PlanOnCommand  # type: ignore[import-not-found]
 from slash_commands.rollback import RollbackCommand  # type: ignore[import-not-found]
@@ -189,6 +191,12 @@ def register(api) -> None:  # PluginAPI duck-typed
         api.register_slash_command(DiffCommand(harness_ctx=ctx))
         api.register_slash_command(UndoCommand(harness_ctx=ctx))
         api.register_slash_command(RollbackCommand(harness_ctx=ctx))
+        # Messaging-gateway parity (PR-2 Task B7) — manual escape hatch
+        # for the consent-prompt flow. Users can /approve or /deny the
+        # most-recent pending request from the chat surface; out-of-band
+        # callbacks (Telegram buttons etc.) still work as before.
+        api.register_slash_command(ApproveCommand(harness_ctx=ctx))
+        api.register_slash_command(DenyCommand(harness_ctx=ctx))
 
     # Native introspection tools — Tier 1 only.
     #

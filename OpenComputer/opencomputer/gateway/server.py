@@ -40,6 +40,9 @@ class Gateway:
         config: GatewayConfig | None = None,
         *,
         router: AgentRouter | None = None,
+        allowlist_gate: Any = None,
+        reset_policy: Any = None,
+        last_seen_path: Any = None,
     ) -> None:
         # Phase 2 multi-routing: accept either ``loop=`` (legacy single
         # loop) or ``router=`` (per-profile cache). Exactly one of the
@@ -48,6 +51,12 @@ class Gateway:
             raise ValueError("Gateway: pass either loop or router, not both")
         if router is None and loop is None:
             raise ValueError("Gateway: pass either loop or router")
+        # PR-1 (Task 1.6 follow-up): hold the gate / policy / last_seen
+        # path until Dispatch is constructed below; Gateway forwards them
+        # in the Dispatch ctor.
+        self._allowlist_gate = allowlist_gate
+        self._reset_policy = reset_policy
+        self._last_seen_path = last_seen_path
 
         # ``self.loop`` preserves the legacy attribute access path that
         # tests and downstream code may read.
@@ -170,6 +179,9 @@ class Gateway:
                 "lifecycle_reactions": self._config.lifecycle_reactions,
             },
             resolver=self._resolver,
+            allowlist_gate=self._allowlist_gate,
+            reset_policy=self._reset_policy,
+            last_seen_path=self._last_seen_path,
         )
         # Pass-2 F7: now that Dispatch exists, register the consent
         # prompt handler on the seeded "default" loop's gate. The
@@ -226,6 +238,43 @@ class Gateway:
         self._adapters.append(adapter)
         # Give Dispatch a handle so it can send typing indicators back out.
         self.dispatch.register_adapter(adapter.platform.value, adapter)
+
+    # ── PR-1 follow-up: late-bind setters for AllowlistGate + ResetPolicy ──
+    # The cli_gateway._run_foreground constructs these AFTER Gateway() was
+    # built (during the daemon-bootstrap dance). Setter methods let the
+    # production path wire the gates without rebuilding Gateway, and tests
+    # can swap fakes in cleanly.
+
+    def set_allowlist_gate(self, gate: Any) -> None:
+        """Bind/replace the AllowlistGate forwarded to Dispatch."""
+        self._allowlist_gate = gate
+        self.dispatch._allowlist_gate = gate
+
+    def set_reset_policy(
+        self,
+        policy: Any,
+        *,
+        last_seen_path: Any = None,
+    ) -> None:
+        """Bind/replace the ResetPolicyChecker (and optional last_seen path)
+        forwarded to Dispatch. If ``last_seen_path`` is provided, replays the
+        on-disk state into the dispatcher's caches.
+        """
+        self._reset_policy = policy
+        self.dispatch._reset_policy = policy
+        if last_seen_path is not None:
+            self._last_seen_path = last_seen_path
+            self.dispatch._last_seen_path = last_seen_path
+            # Re-load — Dispatch's __init__ already loaded what was on disk
+            # at construction time; this picks up any changes since.
+            try:
+                self.dispatch._load_last_seen()
+            except Exception:  # noqa: BLE001 — never block at this seam
+                logger.warning(
+                    "gateway: re-loading last_seen.json from %s failed",
+                    last_seen_path,
+                    exc_info=True,
+                )
 
     def _run_channel_ownership_preflight(self) -> None:
         """Refuse to start if a non-OC channel handler is running on this box.
@@ -823,11 +872,79 @@ class Gateway:
         )
 
     async def serve_forever(self) -> None:
-        """Connect adapters and block until interrupted."""
+        """Connect adapters and block until interrupted.
+
+        Beyond the historic "sleep forever" body, this loop now drives:
+
+        1. **Drain-flag polling** — when ``oc gateway restart
+           --drain-timeout=N`` writes ``<profile>/gateway/drain.flag``,
+           we stop accepting new dispatches (set
+           ``self.dispatch._drain_active = True``) and wait for in-flight
+           runs to complete before exiting cleanly.
+        2. **Pairing-code expired-sweep** — every 60 seconds we ask the
+           dispatcher's pairing store (if attached) to drop expired
+           codes. The PairingCodeStore handles its own locking; we just
+           tick.
+        """
         await self.start()
+        # Resolve the drain-flag location the same way the CLI writes it.
+        drain_flag_path: Path | None = None
+        try:
+            from opencomputer.agent.config_store import config_file_path
+
+            drain_flag_path = config_file_path().parent / "gateway" / "drain.flag"
+        except Exception:  # noqa: BLE001 — drain is opt-in
+            drain_flag_path = None
+
+        last_sweep = 0.0
         try:
             while True:
-                await asyncio.sleep(3600)
+                # Drain-flag check (CLI restart writes it; we honor it).
+                if drain_flag_path is not None and drain_flag_path.exists():
+                    logger.info("gateway: drain flag detected at %s", drain_flag_path)
+                    # Tell Dispatch to refuse new arrivals.
+                    self.dispatch._drain_active = True  # noqa: SLF001
+                    # Wait up to the timeout written in the flag (default 30).
+                    timeout_s = 30
+                    try:
+                        timeout_s = max(1, int(drain_flag_path.read_text().strip() or "30"))
+                    except (OSError, ValueError):
+                        pass
+                    deadline = asyncio.get_running_loop().time() + timeout_s
+                    while asyncio.get_running_loop().time() < deadline:
+                        inflight = getattr(self.dispatch, "_inflight_count", 0)
+                        if inflight <= 0:
+                            break
+                        await asyncio.sleep(0.5)
+                    # Clean the flag so the next start is fresh.
+                    try:
+                        drain_flag_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    logger.info("gateway: drain complete; exiting serve_forever")
+                    return
+
+                # Pairing-code expired-sweep (60s tick).
+                now = asyncio.get_running_loop().time()
+                if now - last_sweep >= 60.0:
+                    last_sweep = now
+                    gate = getattr(self, "_allowlist_gate", None)
+                    if gate is not None and hasattr(gate, "pairing_store"):
+                        try:
+                            removed = gate.pairing_store.expired_sweep_all()
+                            if removed:
+                                logger.info(
+                                    "gateway: expired-sweep dropped %d pairing codes",
+                                    removed,
+                                )
+                        except Exception:  # noqa: BLE001
+                            logger.warning(
+                                "gateway: pairing expired-sweep failed",
+                                exc_info=True,
+                            )
+
+                # Sleep — short enough that drain-flag responsiveness is good.
+                await asyncio.sleep(2.0)
         except asyncio.CancelledError:
             pass
         finally:

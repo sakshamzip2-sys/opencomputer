@@ -246,15 +246,84 @@ def format_system_message(payload: BgProcessExit) -> str:
 # ─── Default subscriber ────────────────────────────────────────────────
 
 
+def _resolve_bg_notify_mode(platform_key: str | None = None) -> str:
+    """Resolve ``display.background_process_notifications`` for ``platform_key``.
+
+    Resolution: env override (``OPENCOMPUTER_BACKGROUND_NOTIFICATIONS``) >
+    user config (per-platform > global > tier default > built-in default).
+    Returns one of ``"all" | "result" | "error" | "off"``.
+    """
+    import os as _os
+
+    env_override = _os.environ.get("OPENCOMPUTER_BACKGROUND_NOTIFICATIONS", "").strip().lower()
+    if env_override in ("all", "result", "error", "off"):
+        return env_override
+
+    try:
+        import yaml
+
+        from opencomputer.agent.config_store import config_file_path
+        from opencomputer.gateway.display_config import resolve_display_setting
+
+        path = config_file_path()
+        user_cfg: dict = {}
+        if path.exists():
+            try:
+                user_cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError):
+                user_cfg = {}
+        return resolve_display_setting(
+            user_cfg, platform_key, "background_process_notifications", fallback="all"
+        )
+    except Exception:  # noqa: BLE001 — never block notifications
+        return "all"
+
+
+def _should_emit(payload: BgProcessExit, platform_key: str | None = None) -> bool:
+    """Apply the ``display.background_process_notifications`` filter.
+
+    - ``"off"``    — drop silently.
+    - ``"all"``    — emit every notification (running output is upstream;
+                     this layer only handles process-exit events).
+    - ``"result"`` — emit on every completion regardless of exit code.
+    - ``"error"``  — emit only when ``payload.exit_code != 0``.
+
+    Per-platform overrides land via ``platform_key`` (the dispatcher
+    threads the chat's platform value through; CLI/test paths pass None
+    and get the global resolution).
+    """
+    mode = _resolve_bg_notify_mode(platform_key)
+    if mode == "off":
+        return False
+    if mode == "all":
+        return True
+    if mode == "result":
+        return True
+    if mode == "error":
+        return payload.exit_code != 0
+    # Unknown mode — fail open (emit). Logged at debug.
+    return True
+
+
 async def _default_handler(ctx: HookContext) -> HookDecision | None:
     """Notification-hook handler that stashes bg-process exits.
 
     Returns ``None`` (= "pass") in every case: this is a fire-and-forget
     observation handler. Decoding failures and unknown payloads are
     silent so the wider Notification subscriber chain isn't spammed.
+
+    PR-2 (T2.3) — applies the
+    ``display.background_process_notifications`` filter so users can
+    suppress / narrow which exits surface as system messages. The
+    payload itself is still stored in the bg-exit registry (we only
+    suppress the system-message stash); other Notification subscribers
+    (Telegram mirroring etc.) are unaffected and run independently via
+    ``fire_and_forget``.
     """
     payload = decode_payload(ctx)
     if payload is None:
+        return None
+    if not _should_emit(payload):
         return None
     body = format_system_message(payload)
     add_pending(payload.session_id, body)
@@ -310,6 +379,8 @@ def drain_for_session(session_id: str) -> list[Any]:
 __all__ = [
     "BG_PROCESS_EXIT_MARKER",
     "BgProcessExit",
+    "_resolve_bg_notify_mode",
+    "_should_emit",
     "add_pending",
     "build_default_subscriber_spec",
     "consume_pending",
