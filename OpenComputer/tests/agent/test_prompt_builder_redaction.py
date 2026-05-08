@@ -61,4 +61,8 @@ def test_size_cap_still_enforced(tmp_path: Path) -> None:
     big = "x" * 200_000  # 200KB
     _write(tmp_path, "CLAUDE.md", big)
     out = load_workspace_context(start=tmp_path)
-    assert "[truncated — file exceeded 100KB cap]" in out
+    # Hermes v2 parity, gap C: marker tells the agent what was kept and
+    # that file tools can recover the rest.
+    assert "[...truncated CLAUDE.md:" in out
+    assert "kept first 100,000 chars of 200,000 total" in out
+    assert "Use file tools to read the full file." in out
