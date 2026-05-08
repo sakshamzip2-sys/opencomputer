@@ -47,6 +47,23 @@ _VALID_ACTIONS = frozenset(
 )
 
 
+def _audit(action: str, **fields: object) -> None:
+    """Emit a structured audit-log line for cron mutations.
+
+    Production-grade (2026-05-09): mirrors the dashboard route's audit
+    discipline. Best-effort — import failure must never break the cron
+    tool. Call sites: create / pause / resume / trigger / remove from
+    the agent-callable CronTool. (CLI mutations log via Typer's --verbose
+    by convention; the dashboard route already emits its own audit.)
+    """
+    try:
+        from opencomputer.dashboard.routes._common import audit_log
+        audit_log(action, source="cron_tool", **fields)
+    except Exception:  # noqa: BLE001
+        # Audit must never break the user's request.
+        logger.debug("audit_log failed for %s", action, exc_info=True)
+
+
 # Hermes spec parity (2026-05-08): "Cron jobs CANNOT recursively create
 # more cron jobs — Hermes disables cron management tools inside cron
 # executions." Mutating actions are blocked when ``cron_session`` is True
@@ -307,31 +324,48 @@ class CronTool(BaseTool):
                 origin_thread_id=origin_thread_id,
                 **create_kwargs,
             )
+            _audit(
+                "cron.create",
+                job_id=job["id"],
+                schedule=job.get("schedule_display"),
+                has_prompt=bool(prompt),
+                skill_count=len(skills) if skills else (1 if skill else 0),
+                notify=(args.get("notify") or None),
+                origin_platform=origin_platform,
+            )
             return {"action": "create", "job": _summarize(job)}
 
         if action == "pause":
-            job = pause_job(_require(args, "job_id"), args.get("reason"))
+            job_id = _require(args, "job_id")
+            job = pause_job(job_id, args.get("reason"))
             if not job:
-                raise KeyError(f"job_id={args.get('job_id')!r} not found")
+                raise KeyError(f"job_id={job_id!r} not found")
+            _audit("cron.pause", job_id=job_id, reason=args.get("reason"))
             return {"action": "pause", "job": _summarize(job)}
 
         if action == "resume":
-            job = resume_job(_require(args, "job_id"))
+            job_id = _require(args, "job_id")
+            job = resume_job(job_id)
             if not job:
-                raise KeyError(f"job_id={args.get('job_id')!r} not found")
+                raise KeyError(f"job_id={job_id!r} not found")
+            _audit("cron.resume", job_id=job_id)
             return {"action": "resume", "job": _summarize(job)}
 
         if action == "trigger":
-            job = trigger_job(_require(args, "job_id"))
+            job_id = _require(args, "job_id")
+            job = trigger_job(job_id)
             if not job:
-                raise KeyError(f"job_id={args.get('job_id')!r} not found")
+                raise KeyError(f"job_id={job_id!r} not found")
+            _audit("cron.trigger", job_id=job_id)
             return {"action": "trigger", "job": _summarize(job)}
 
         if action == "remove":
-            ok = remove_job(_require(args, "job_id"))
+            job_id = _require(args, "job_id")
+            ok = remove_job(job_id)
             if not ok:
-                raise KeyError(f"job_id={args.get('job_id')!r} not found")
-            return {"action": "remove", "job_id": args["job_id"], "removed": True}
+                raise KeyError(f"job_id={job_id!r} not found")
+            _audit("cron.remove", job_id=job_id)
+            return {"action": "remove", "job_id": job_id, "removed": True}
 
         raise ValueError(f"unhandled action {action!r}")
 

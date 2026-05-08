@@ -923,6 +923,7 @@ def _handle_cron_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
     try:
         from opencomputer.cron.jobs import (
             create_job,
+            get_job,
             list_jobs,
             pause_job,
             remove_job,
@@ -1045,6 +1046,132 @@ def _handle_cron_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
         ctx.console.print(f"[green]✓[/green] /cron {sub} {job_id}")
         return SlashResult(handled=True)
 
+    if sub == "edit":
+        # /cron edit <job_id> [--schedule "every 4h"] [--prompt "..."]
+        # [--skill X] [--add-skill Y] [--remove-skill Z] [--clear-skills]
+        # [--notify telegram:123]
+        if not rest:
+            ctx.console.print(
+                "[yellow]Usage: /cron edit <job_id> [--schedule X] "
+                "[--prompt X] [--skill X] [--add-skill X] [--remove-skill X] "
+                "[--clear-skills] [--notify X][/yellow]"
+            )
+            return SlashResult(handled=True)
+        from opencomputer.cron.jobs import update_job
+        from opencomputer.cron.threats import assert_cron_prompt_safe
+
+        edit_job_id = rest[0]
+        existing = get_job(edit_job_id)
+        if not existing:
+            ctx.console.print(f"[red]Cron job {edit_job_id!r} not found[/red]")
+            return SlashResult(handled=True)
+
+        edit_updates: dict = {}
+        edit_skills: list[str] = []
+        edit_add_skills: list[str] = []
+        edit_remove_skills: list[str] = []
+        clear_skills = False
+        i = 1
+        while i < len(rest):
+            tok = rest[i]
+            if tok == "--schedule" and i + 1 < len(rest):
+                # Schedule may span tokens (every 1h, 0 9 * * *) — consume
+                # until next --flag or end, then parse.
+                j = i + 1
+                tokens = []
+                while j < len(rest) and not rest[j].startswith("--"):
+                    tokens.append(rest[j])
+                    j += 1
+                edit_updates["schedule"] = " ".join(tokens)
+                i = j
+            elif tok == "--prompt" and i + 1 < len(rest):
+                # --prompt consumes until next --flag.
+                j = i + 1
+                tokens = []
+                while j < len(rest) and not rest[j].startswith("--"):
+                    tokens.append(rest[j])
+                    j += 1
+                try:
+                    assert_cron_prompt_safe(" ".join(tokens))
+                except CronThreatBlocked as e:
+                    ctx.console.print(f"[red]Blocked: {e}[/red]")
+                    return SlashResult(handled=True)
+                edit_updates["prompt"] = " ".join(tokens)
+                i = j
+            elif tok == "--skill" and i + 1 < len(rest):
+                edit_skills.append(rest[i + 1])
+                i += 2
+            elif tok == "--add-skill" and i + 1 < len(rest):
+                edit_add_skills.append(rest[i + 1])
+                i += 2
+            elif tok == "--remove-skill" and i + 1 < len(rest):
+                edit_remove_skills.append(rest[i + 1])
+                i += 2
+            elif tok == "--clear-skills":
+                clear_skills = True
+                i += 1
+            elif tok == "--notify" and i + 1 < len(rest):
+                edit_updates["notify"] = rest[i + 1] or None
+                i += 2
+            else:
+                ctx.console.print(f"[yellow]Unknown flag: {tok}[/yellow]")
+                return SlashResult(handled=True)
+
+        # Apply skill mutations (clear → set → add → remove).
+        new_skills = list(
+            existing.get("skills") or ([existing["skill"]] if existing.get("skill") else [])
+        )
+        skill_touched = False
+        if clear_skills:
+            new_skills = []
+            skill_touched = True
+        if edit_skills:
+            new_skills = list(edit_skills)
+            skill_touched = True
+        if edit_add_skills:
+            for s in edit_add_skills:
+                if s not in new_skills:
+                    new_skills.append(s)
+            skill_touched = True
+        if edit_remove_skills:
+            new_skills = [s for s in new_skills if s not in set(edit_remove_skills)]
+            skill_touched = True
+        if skill_touched:
+            edit_updates["skills"] = new_skills if new_skills else None
+            edit_updates["skill"] = None
+            # Mutual exclusion: skill active ⇒ clear stale prompt.
+            if new_skills and "prompt" not in edit_updates:
+                edit_updates["prompt"] = None
+        # Mirror: --prompt active ⇒ clear stale skills.
+        if "prompt" in edit_updates and edit_updates["prompt"] and not skill_touched:
+            if existing.get("skills") or existing.get("skill"):
+                edit_updates["skills"] = None
+                edit_updates["skill"] = None
+
+        if not edit_updates:
+            ctx.console.print(
+                "[yellow]Nothing to update. Pass at least one of "
+                "--schedule/--prompt/--skill/etc.[/yellow]"
+            )
+            return SlashResult(handled=True)
+
+        try:
+            updated = update_job(edit_job_id, edit_updates)
+        except CronThreatBlocked as e:
+            ctx.console.print(f"[red]Blocked: {e}[/red]")
+            return SlashResult(handled=True)
+        except ValueError as e:
+            ctx.console.print(f"[red]Error: {e}[/red]")
+            return SlashResult(handled=True)
+        if not updated:
+            ctx.console.print(f"[red]Cron job {edit_job_id!r} not found[/red]")
+            return SlashResult(handled=True)
+        ctx.console.print(
+            f"[green]✓[/green] Updated cron {updated['id']} "
+            f"({updated['schedule_display']})"
+        )
+        return SlashResult(handled=True)
+
     if sub in ("help", "?"):
         ctx.console.print(
             "## /cron commands\n"
@@ -1062,17 +1189,71 @@ def _handle_cron_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
 
 
 def _handle_agents_inline(ctx: SlashContext, args: list[str]) -> SlashResult:
-    """``/agents`` — read-only tree of running + recently-finished subagents.
+    """``/agents [list|kill <id>|help]`` — Hermes parity TUI-overlay-lite.
 
-    Hermes parity (2026-05-08): the spec mentions a TUI overlay; this
-    is the read-only inline version. Kill/cancel is via the existing
-    ``oc agents kill <id>`` CLI.
+    Hermes parity (2026-05-08, extended 2026-05-09): the spec mentions a
+    TUI overlay with kill/pause controls. This is the slash version:
+    bare ``/agents`` prints the live tree (read-only), ``/agents kill <id>``
+    cancels a running subagent. Pause is not implemented (Hermes itself
+    treats it as advisory; OC's asyncio-task model only supports cancel).
     """
+    sub = args[0].lower() if args else "list"
+    rest = args[1:]
+
+    try:
+        from opencomputer.agent.subagent_registry import SubagentRegistry
+        registry = SubagentRegistry.instance()
+    except Exception as e:  # noqa: BLE001
+        ctx.console.print(f"[yellow]Subagent registry unavailable: {e}[/yellow]")
+        return SlashResult(handled=True)
+
+    if sub == "kill":
+        if not rest:
+            ctx.console.print("[yellow]Usage: /agents kill <agent_id>[/yellow]")
+            return SlashResult(handled=True)
+        target_id = rest[0]
+        # Allow ID prefix match for convenience (mirrors `oc agents kill`).
+        running = registry.list_running()
+        match = next(
+            (r for r in running if r.agent_id == target_id or r.agent_id.startswith(target_id)),
+            None,
+        )
+        if match is None:
+            ctx.console.print(
+                f"[red]No running subagent matches {target_id!r}.[/red] "
+                "Try `/agents list` for ids."
+            )
+            return SlashResult(handled=True)
+        ok = registry.kill(match.agent_id)
+        if ok:
+            ctx.console.print(
+                f"[green]✓[/green] Killed subagent {match.agent_id[:8]} "
+                f"({match.goal[:40] if match.goal else '?'})"
+            )
+        else:
+            ctx.console.print(
+                f"[yellow]Subagent {match.agent_id[:8]} could not be killed "
+                "(already finished?)[/yellow]"
+            )
+        return SlashResult(handled=True)
+
+    if sub in ("help", "?"):
+        ctx.console.print(
+            "## /agents commands\n"
+            "  /agents [list]             — show subagent tree (default)\n"
+            "  /agents kill <agent_id>    — cancel a running subagent\n"
+        )
+        return SlashResult(handled=True)
+
+    if sub != "list":
+        ctx.console.print(
+            f"[yellow]Unknown /agents subcommand: {sub!r}. Try /agents help.[/yellow]"
+        )
+        return SlashResult(handled=True)
+
     try:
         from datetime import UTC, datetime
 
-        from opencomputer.agent.subagent_registry import SubagentRegistry
-        registry = SubagentRegistry.instance()
         running = registry.list_running()
         finished = registry.history(limit=20)
         records = list(running) + list(finished)

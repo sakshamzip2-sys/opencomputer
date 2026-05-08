@@ -91,3 +91,55 @@ def test_cron_help(ctx, isolated_home):
 def test_cron_unknown_subcommand(ctx, isolated_home):
     res = _handle_cron_inline(ctx, ["fakecmd"])
     assert res.handled
+
+
+def test_cron_edit_schedule(ctx, isolated_home):
+    from opencomputer.cron.jobs import create_job, get_job
+    job = create_job(schedule="every 1h", skill="x")
+    res = _handle_cron_inline(ctx, ["edit", job["id"], "--schedule", "every", "4h"])
+    assert res.handled
+    assert get_job(job["id"])["schedule"]["display"] == "every 240m"
+
+
+def test_cron_edit_skill_replace(ctx, isolated_home):
+    from opencomputer.cron.jobs import create_job, get_job
+    job = create_job(schedule="every 1h", skill="x")
+    res = _handle_cron_inline(ctx, ["edit", job["id"], "--skill", "y"])
+    assert res.handled
+    updated = get_job(job["id"])
+    assert updated["skills"] == ["y"]
+
+
+def test_cron_edit_add_skill(ctx, isolated_home):
+    from opencomputer.cron.jobs import create_job, get_job
+    job = create_job(schedule="every 1h", skills=["a"])
+    res = _handle_cron_inline(ctx, ["edit", job["id"], "--add-skill", "b"])
+    assert res.handled
+    assert get_job(job["id"])["skills"] == ["a", "b"]
+
+
+def test_cron_edit_clear_skills(ctx, isolated_home):
+    from opencomputer.cron.jobs import create_job, get_job
+    job = create_job(schedule="every 1h", skills=["a", "b"])
+    res = _handle_cron_inline(ctx, ["edit", job["id"], "--clear-skills"])
+    assert res.handled
+    assert not get_job(job["id"]).get("skills")
+
+
+def test_cron_edit_no_args_prints_usage(ctx, isolated_home):
+    res = _handle_cron_inline(ctx, ["edit"])
+    assert res.handled
+
+
+def test_cron_edit_unknown_id(ctx, isolated_home):
+    res = _handle_cron_inline(ctx, ["edit", "nonexistent", "--prompt", "x"])
+    assert res.handled
+
+
+def test_cron_edit_invalid_notify_rejected(ctx, isolated_home):
+    from opencomputer.cron.jobs import create_job, get_job
+    job = create_job(schedule="every 1h", skill="x")
+    res = _handle_cron_inline(ctx, ["edit", job["id"], "--notify", "made_up:1"])
+    assert res.handled
+    # Job should be unchanged.
+    assert get_job(job["id"])["notify"] is None
