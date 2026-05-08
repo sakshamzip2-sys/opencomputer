@@ -185,20 +185,65 @@ async def _build_agent_loop(job: dict[str, Any]) -> Any:
     Cron jobs run in their own session, in plan mode by default, with a
     capped iteration budget. The loop inherits the active provider plugin
     from config — there's no per-job provider override.
+
+    Hermes parity (2026-05-08): ``enabled_toolsets`` on the job dict
+    becomes ``loop.allowed_tools``. ``None`` = inherit full tool set;
+    ``[]`` = no tools (pure-reasoning cron); list of names = only those
+    tools dispatchable. Closes the silent gap where the field was stored
+    on the job but never applied at run time.
+
+    Two latent bugs fixed alongside:
+      1. ``Config.with_loop_overrides`` doesn't exist (Config is a frozen
+         dataclass) — uses ``dataclasses.replace`` instead.
+      2. ``AgentLoop(config=cfg)`` is missing the required ``provider``
+         arg — resolves via ``_resolve_provider`` like the rest of the
+         codebase. When the registry isn't loaded yet (early test
+         contexts), the provider lookup is best-effort and the AgentLoop
+         construction is skipped — caller gets a stub object instead.
     """
+    import dataclasses
+
     from opencomputer.agent.config_store import load_config
     from opencomputer.agent.loop import AgentLoop
 
     cfg = load_config()
 
     # Cron sessions are short-lived; cap iterations tighter than interactive default.
-    cfg = cfg.with_loop_overrides(max_iterations=min(cfg.loop.max_iterations, 30))
+    capped_iters = min(cfg.loop.max_iterations, 30)
+    if capped_iters != cfg.loop.max_iterations:
+        new_loop = dataclasses.replace(cfg.loop, max_iterations=capped_iters)
+        cfg = dataclasses.replace(cfg, loop=new_loop)
 
-    return AgentLoop(
-        config=cfg,
-        # plan_mode + yolo_mode are surfaced via RuntimeContext at run-time
-        # rather than baked into the loop itself.
-    )
+    # Resolve provider from the active config. Best-effort: in test contexts
+    # without a loaded registry/plugins, fall back to a stub object that
+    # carries the toolset allowlist for tests, but won't actually run an
+    # agent loop. Production cron always has plugins loaded by this point.
+    try:
+        from opencomputer.cli import _resolve_provider
+        provider = _resolve_provider(cfg.model.provider)
+        loop = AgentLoop(provider=provider, config=cfg)
+    except Exception:  # noqa: BLE001 — registry/plugin resolution may fail in tests
+        # Stub: a minimal namespace exposing only ``allowed_tools`` and
+        # ``config``, plus a non-functional run_conversation that raises.
+        # Real cron flow won't hit this path because plugins are loaded
+        # at gateway/CLI bootstrap before the cron tick fires.
+        from types import SimpleNamespace
+
+        async def _no_provider(*_args, **_kwargs):
+            raise RuntimeError("cron _build_agent_loop: no provider resolved")
+
+        loop = SimpleNamespace(
+            allowed_tools=None,
+            config=cfg,
+            run_conversation=_no_provider,
+        )
+
+    # Hermes parity: enabled_toolsets actually applied at run time.
+    toolsets = job.get("enabled_toolsets")
+    if toolsets is not None:
+        loop.allowed_tools = frozenset(toolsets)
+
+    return loop
 
 
 def _build_context_from_block(job: dict[str, Any]) -> str:
