@@ -47,7 +47,7 @@ from opencomputer.agent.tool_guardrails import (
     ToolLoopGuardrailError,
 )
 from opencomputer.agent.tool_ordering import sort_tools_for_request
-from opencomputer.tools.bash_safety import detect_destructive
+from opencomputer.tools.bash_safety import detect_destructive_with_context
 from opencomputer.tools.memory_tool import MemoryTool
 from opencomputer.tools.registry import registry
 from opencomputer.tools.session_search_tool import SessionSearchTool
@@ -4677,7 +4677,7 @@ class AgentLoop:
         for c in calls:
             if c.name == "Bash":
                 cmd = c.arguments.get("command")
-                if isinstance(cmd, str) and detect_destructive(cmd) is not None:
+                if isinstance(cmd, str) and detect_destructive_with_context(cmd) is not None:
                     return False
 
         return True

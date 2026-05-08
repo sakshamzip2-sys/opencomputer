@@ -1,4 +1,4 @@
-"""Tirith pre-exec command scanner — Hermes Tier 3 port (MVP).
+"""Tirith pre-exec command scanner — Hermes Tier 3 port (production).
 
 Wraps the external Rust binary at ``sheeki03/tirith`` for shell-command
 security scanning before execution. Catches:
@@ -8,16 +8,21 @@ security scanning before execution. Catches:
 - Suspicious sudo escalations
 - Known-bad binary patterns
 
-This is the **MVP** wrapper. Auto-install + cosign verification (which
-the Hermes upstream ships) are intentionally NOT in this PR — users
-install ``tirith`` themselves (``brew install tirith`` / ``cargo install
-tirith``) and we just call it. Lazy-install is a clean follow-up.
+Auto-install + cosign verification: when
+``security.tirith.auto_install: true`` is set in config (default
+False), :func:`check_command` lazy-installs the binary into
+``~/.opencomputer/<profile>/bin/tirith`` on first use via
+:mod:`opencomputer.security.tirith_install`. SHA-256 checksums from the
+release's ``checksums.txt`` are mandatory; cosign provenance is checked
+when the cosign binary is on PATH (silently skipped otherwise — log the
+fact, don't block).
 
 Config (``~/.opencomputer/<profile>/config.yaml``)::
 
     security:
       tirith:
         enabled: true              # default false; opt-in
+        auto_install: false        # default false; lazy-fetch+verify on miss
         path: tirith               # bin name on PATH (or absolute)
         timeout_seconds: 5         # subprocess timeout
         fail_open: true            # on spawn error / timeout: allow
@@ -79,6 +84,58 @@ def _resolve_binary(path: str) -> str | None:
 def is_available(*, path: str = "tirith") -> bool:
     """Whether the tirith binary is reachable. Useful for doctor checks."""
     return _resolve_binary(path) is not None
+
+
+def _maybe_auto_install():
+    """Lazily install tirith into the active profile's bin dir.
+
+    Returns the installed binary path on success, or None when:
+        * ``security.tirith.auto_install`` is not enabled in config.
+        * The active profile cannot be resolved.
+        * The platform is unsupported.
+        * Network / verification failure.
+
+    Always best-effort — never raises to the caller. The
+    ``check_command`` caller treats None as "binary still missing,
+    apply fail_open semantics".
+    """
+    # Lazy imports keep the test path clean — opting out of network
+    # is the default so this code only runs when explicitly enabled.
+    try:
+        import yaml
+
+        from opencomputer.profiles import (
+            profile_home_dir,
+            read_active_profile,
+        )
+
+        prof = read_active_profile()
+        if prof is None:
+            return None
+        home = profile_home_dir(prof)
+        cfg_path = home / "config.yaml"
+        if not cfg_path.exists():
+            return None
+        with cfg_path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        cfg = (data.get("security") or {}).get("tirith") or {}
+        if not bool(cfg.get("auto_install", False)):
+            return None
+        from opencomputer.security.tirith_install import (
+            cleanup_stale_tmp_files,
+            install_if_missing,
+        )
+
+        target_dir = home / "bin"
+        # Drop any leftovers from a previous interrupted install.
+        try:
+            cleanup_stale_tmp_files(target_dir)
+        except OSError:
+            pass
+        return install_if_missing(target_dir=target_dir)
+    except Exception:  # noqa: BLE001 — never let auto-install crash the agent
+        logger.warning("tirith auto-install attempt failed", exc_info=True)
+        return None
 
 
 # ─── local pre-flight ──────────────────────────────────────────────────
@@ -256,11 +313,22 @@ def check_command(
 
     bin_path = _resolve_binary(path)
     if bin_path is None:
+        # Auto-install path (Hermes parity): if the operator opted in
+        # via ``security.tirith.auto_install: true``, fetch + verify +
+        # install. The function is best-effort — failure returns None
+        # and we fall through to the fail_open-aware deny branch below.
+        installed = _maybe_auto_install()
+        if installed is not None:
+            bin_path = str(installed)
+    if bin_path is None:
         action: Verdict = "allow" if fail_open else "block"
         return TirithResult(
             action=action,
             error=f"tirith binary not found ({path!r})",
-            summary="tirith not installed; install via your package manager",
+            summary=(
+                "tirith not installed; install via your package manager "
+                "or set security.tirith.auto_install: true to fetch"
+            ),
         )
 
     try:

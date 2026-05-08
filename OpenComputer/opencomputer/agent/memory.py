@@ -20,6 +20,7 @@ Write-path invariants for MEMORY.md / USER.md:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -31,6 +32,8 @@ from pathlib import Path
 from typing import Literal
 
 import frontmatter
+
+logger = logging.getLogger("opencomputer.agent.memory")
 
 # ─── exceptions ───────────────────────────────────────────────────────
 
@@ -81,6 +84,49 @@ SkillExample = SkillReference
 
 
 @dataclass(frozen=True, slots=True)
+class RequiredEnvVar:
+    """A skill-declared environment-variable dependency (Hermes parity).
+
+    Mirrors the Hermes ``required_environment_variables`` SKILL.md
+    frontmatter shape. When a skill is loaded, each declared var is
+    auto-registered for passthrough into ExecuteCode + sandbox subprocesses
+    and the user is prompted to supply it (via ``oc setup`` /
+    ``oc skills env``) if it isn't already in the environment.
+
+    Attributes:
+        name: env var key (e.g. ``TENOR_API_KEY``).
+        prompt: short label shown in the setup prompt
+            (e.g. ``"Tenor API key"``).
+        help: optional URL or text pointing to where the user can
+            obtain the value.
+    """
+
+    name: str
+    prompt: str = ""
+    help: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RequiredCredentialFile:
+    """A skill-declared credential-file dependency (Hermes parity).
+
+    Mirrors ``required_credential_files`` SKILL.md frontmatter. When the
+    Docker sandbox spawns a process, each declared file is bind-mounted
+    read-only into ``/root/.opencomputer/<path>`` so OAuth tokens and
+    similar long-lived credentials are visible inside the container
+    without having to re-pair every run.
+
+    Attributes:
+        path: relative path under ``~/.opencomputer/`` (e.g.
+            ``google_token.json``).
+        description: human description shown when the file is missing.
+    """
+
+    path: str
+    description: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class SkillMeta:
     """Lightweight skill metadata — from frontmatter, without loading the body.
 
@@ -88,6 +134,10 @@ class SkillMeta:
     support Claude Code's directory-hierarchy skill layout. Flat
     single-file SKILL.md skills get empty tuples for both — the behaviour
     is unchanged from their perspective.
+
+    Hermes-parity (P3.4): ``required_env_vars`` + ``required_credential_files``
+    declare passthrough requirements. They land empty for skills that don't
+    set the frontmatter keys — fully backward compatible.
     """
 
     id: str
@@ -101,6 +151,74 @@ class SkillMeta:
     #: Higher = surfaced earlier. None = unweighted (alphabetical fallback).
     #: Future engines may auto-update this based on outcome data.
     priority: float | None = None
+    #: P3.4 Hermes parity: skill-declared environment-var passthrough.
+    required_env_vars: tuple[RequiredEnvVar, ...] = field(default_factory=tuple)
+    #: P3.5 Hermes parity: skill-declared credential-file bind mounts.
+    required_credential_files: tuple[RequiredCredentialFile, ...] = field(default_factory=tuple)
+
+
+# ─── Hermes-parity skill-frontmatter parsers (P3.4 + P3.5) ────────────
+
+
+def _parse_required_env_vars(raw: object) -> tuple[RequiredEnvVar, ...]:
+    """Parse the ``required_environment_variables`` frontmatter key.
+
+    Accepts:
+        - list of dicts ``[{name: X, prompt: Y, help: Z}, ...]``
+        - list of bare strings ``[X, Y, Z]`` — name only
+        - any other shape → empty tuple
+
+    Empty-name entries are dropped silently (a malformed skill must
+    never break the loader for the others).
+    """
+    if not isinstance(raw, list):
+        return ()
+    out: list[RequiredEnvVar] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            name = entry.strip()
+            if name:
+                out.append(RequiredEnvVar(name=name))
+        elif isinstance(entry, dict):
+            name = str(entry.get("name", "")).strip()
+            if not name:
+                continue
+            out.append(
+                RequiredEnvVar(
+                    name=name,
+                    prompt=str(entry.get("prompt", "") or ""),
+                    help=str(entry.get("help", "") or ""),
+                )
+            )
+        # Anything else: skip silently.
+    return tuple(out)
+
+
+def _parse_required_credential_files(raw: object) -> tuple[RequiredCredentialFile, ...]:
+    """Parse the ``required_credential_files`` frontmatter key.
+
+    Accepts list of dicts ``[{path: ..., description: ...}, ...]`` or
+    list of bare strings (path only). Non-list / malformed → empty tuple.
+    """
+    if not isinstance(raw, list):
+        return ()
+    out: list[RequiredCredentialFile] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            path = entry.strip()
+            if path:
+                out.append(RequiredCredentialFile(path=path))
+        elif isinstance(entry, dict):
+            path = str(entry.get("path", "")).strip()
+            if not path:
+                continue
+            out.append(
+                RequiredCredentialFile(
+                    path=path,
+                    description=str(entry.get("description", "") or ""),
+                )
+            )
+    return tuple(out)
 
 
 # ─── bus helper (T3.2 PR-8) ───────────────────────────────────────────
@@ -538,6 +656,19 @@ class MemoryManager:
                     )
                 except (TypeError, ValueError):
                     priority = None
+                # P3.4 + P3.5 Hermes parity: parse required_env_vars +
+                # required_credential_files out of frontmatter. Each is
+                # tolerant of either a list of dicts (preferred shape)
+                # or a list of bare strings (Hermes accepts both for
+                # env vars). Malformed entries are skipped silently to
+                # match existing skill-loader resilience posture (a
+                # broken skill must never starve other skills' load).
+                required_env = _parse_required_env_vars(
+                    meta.get("required_environment_variables")
+                )
+                required_creds = _parse_required_credential_files(
+                    meta.get("required_credential_files")
+                )
                 out.append(
                     SkillMeta(
                         id=skill_dir.name,
@@ -548,8 +679,29 @@ class MemoryManager:
                         references=references,
                         examples=examples,
                         priority=priority,
+                        required_env_vars=required_env,
+                        required_credential_files=required_creds,
                     )
                 )
+                # Hermes parity (P3.4 / P3.5): publish the skill's
+                # declared requirements to the global passthrough
+                # registry. ExecuteCode + sandbox.docker + setup
+                # wizard consult that registry. Failure here must not
+                # break skill enumeration — a registry bug shouldn't
+                # starve the rest of the agent.
+                try:
+                    from opencomputer.security import env_passthrough
+
+                    env_passthrough.register_skill_requirements(
+                        skill_dir.name,
+                        env_vars=required_env,
+                        credential_files=required_creds,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "env_passthrough register failed for skill %s",
+                        skill_dir.name, exc_info=True,
+                    )
         # v0.5+: stable sort by (priority DESC NULLS LAST, name ASC).
         # Skills without priority retain alphabetical ordering — zero
         # behavior change for v0 skills that don't set the field.

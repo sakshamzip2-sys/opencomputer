@@ -297,6 +297,22 @@ class ExecuteCode(BaseTool):
             cwd = tmpdir
             python_executable = sys.executable
 
+        # P3.4 Hermes-parity: union skill-declared required_environment_variables
+        # on top of the config-driven passthrough resolved earlier. Skills
+        # populate the registry via MemoryManager.list_skills. Never raises.
+        try:
+            from opencomputer.security.env_passthrough import (
+                get_passthrough_env_keys,
+            )
+
+            skill_keys = get_passthrough_env_keys()
+            if skill_keys:
+                merged = set(passthrough)
+                merged.update(skill_keys)
+                passthrough = tuple(sorted(merged))
+        except Exception:  # noqa: BLE001 — registry failure must not block exec
+            pass
+
         # Resolve registry — global tool registry instance.
         from opencomputer.tools.registry import registry
 
