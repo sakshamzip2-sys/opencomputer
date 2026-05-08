@@ -44,6 +44,35 @@ class HonchoConfig:
     host_key: str = "opencomputer"  # Phase 14.J override target
     context_cadence: int = 1
     dialectic_cadence: int = 3
+    # T4 — Hermes-doc query-adaptive dialectic reasoning. Server-side
+    # consumers may ignore the field on older versions — best-effort
+    # forward.
+    dialectic_reasoning_level: Literal["low", "medium", "high"] = "low"
+    reasoning_level_cap: Literal["low", "medium", "high"] = "high"
+
+
+# T4 — query-length-driven reasoning-level scaling.
+_REASONING_LEVELS: tuple[str, ...] = ("low", "medium", "high")
+
+
+def _adapt_reasoning_level(base: str, query: str, cap: str) -> str:
+    """Bump the dialectic reasoning level by query length.
+
+    Heuristic from the Hermes reference doc: ≥120 chars → +1 step,
+    ≥400 chars → +2 steps. Clamped at ``cap``. If either ``base`` or
+    ``cap`` is not a known level, returns ``base`` unchanged.
+    """
+    try:
+        base_idx = _REASONING_LEVELS.index(base)
+        cap_idx = _REASONING_LEVELS.index(cap)
+    except ValueError:
+        return base
+    boost = 0
+    if len(query) >= 120:
+        boost += 1
+    if len(query) >= 400:
+        boost += 1
+    return _REASONING_LEVELS[min(base_idx + boost, cap_idx)]
 
 
 @dataclass(slots=True)
@@ -238,6 +267,14 @@ class HonchoSelfHostedProvider(MemoryProvider):
         cadence = max(1, self._config.context_cadence)
         if turn_index % cadence != 0:
             return None
+        # T4 — Hermes-doc query-adaptive scaling. Boost reasoning level
+        # by query length; honoured server-side if supported, ignored
+        # silently on older versions.
+        reasoning_level = _adapt_reasoning_level(
+            self._config.dialectic_reasoning_level,
+            query or "",
+            self._config.reasoning_level_cap,
+        )
         try:
             resp = await self._client.post(
                 "/v1/context",
@@ -245,6 +282,7 @@ class HonchoSelfHostedProvider(MemoryProvider):
                     "workspace": self._config.workspace,
                     "host_key": self._config.host_key,
                     "query": query,
+                    "reasoning_level": reasoning_level,
                 },
             )
             resp.raise_for_status()
