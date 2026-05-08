@@ -736,6 +736,16 @@ class AnthropicProviderConfig(BaseModel):
     auth_mode: Literal["api_key", "x-api-key", "bearer"] = Field(default="api_key")
 
 
+# Pydantic 2.12 + ``from __future__ import annotations`` (PEP 563): all
+# class annotations become strings at definition time, so ``Literal[...]``
+# is an unresolved forward reference until ``model_rebuild()`` runs in a
+# context where ``Literal`` is in scope. Without this, instantiating
+# AnthropicProviderConfig raises ``PydanticUserError: ... is not fully
+# defined`` — observed 2026-05-08 against pydantic 2.12.4. Idempotent and
+# cheap on import.
+AnthropicProviderConfig.model_rebuild()
+
+
 async def _strip_x_api_key(request: httpx.Request) -> None:
     """httpx event hook: remove x-api-key header before sending.
 

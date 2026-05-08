@@ -3141,12 +3141,34 @@ def _service_start() -> None:
 
 @service_app.command("stop")
 def _service_stop() -> None:
-    """OS-level stop (does not uninstall the service)."""
+    """OS-level stop (does not uninstall the service).
+
+    On macOS, this runs ``launchctl bootout`` to remove the service
+    from launchd's domain — the only way KeepAlive can't trigger
+    a respawn. Use ``oc service start`` to bring it back online.
+    """
     from opencomputer.service.factory import get_backend
     backend = get_backend()
     ok = backend.stop()
     typer.echo("stopped" if ok else "stop failed")
     raise typer.Exit(0 if ok else 1)
+
+
+@service_app.command("restart")
+def _service_restart() -> None:
+    """Stop + start the service, in one command.
+
+    Useful after editing config or reinstalling the package — the
+    long-running daemon picks up the new code.
+    """
+    from opencomputer.service.factory import get_backend
+    backend = get_backend()
+    stopped = backend.stop()
+    if not stopped:
+        typer.echo("stop failed (continuing to start anyway)")
+    started = backend.start()
+    typer.echo("restarted" if started else "restart failed: start step failed")
+    raise typer.Exit(0 if started else 1)
 
 
 @service_app.command("logs")
@@ -3159,6 +3181,85 @@ def _service_logs(
     backend = get_backend()
     for line in backend.follow_logs(lines=n, follow=follow):
         typer.echo(line)
+
+
+@service_app.command("preflight")
+def _service_preflight(
+    force_takeover: bool = typer.Option(
+        False,
+        "--force-takeover",
+        help="Terminate any competing channel-handler processes "
+        "(SIGTERM with 5s grace, then SIGKILL). Writes audit log to "
+        "<profile_home>/audit/competitor-takeover.jsonl.",
+    ),
+) -> None:
+    """Channel ownership preflight check.
+
+    OpenComputer is the SOLE channel handler — no other process should
+    be polling the same Telegram bot, hosting the same Discord adapter,
+    etc. (See ``user_oc_owns_all_channels.md`` directive 2026-05-08.)
+
+    This command scans the process table for known competitor patterns:
+
+    \b
+      - Claude Code's `--channels plugin:telegram` bun bridge
+      - Hermes daemon (`hermes_cli main gateway run`)
+      - Rival `oc gateway` instance
+
+    Default behavior is read-only: lists competitors and exits non-zero.
+    Pass ``--force-takeover`` to terminate them.
+    """
+    from opencomputer.agent.config import _home
+    from opencomputer.gateway.preflight import (
+        ChannelOwnershipConflict,
+        default_audit_path,
+        detect_competitors,
+        run_preflight,
+    )
+
+    if not force_takeover:
+        # Read-only path: list and exit.
+        competitors = detect_competitors()
+        if not competitors:
+            typer.echo("✓ no competitors detected — OC is the sole channel handler")
+            raise typer.Exit(0)
+        typer.echo(
+            f"⚠ {len(competitors)} competitor process(es) detected:"
+        )
+        for c in competitors:
+            typer.echo(f"  - {c.display()}")
+        typer.echo("")
+        typer.echo("To terminate them: oc service preflight --force-takeover")
+        typer.echo(
+            "Or set ``gateway.takeover_on_start: true`` in your config.yaml "
+            "for automatic takeover on every gateway start."
+        )
+        raise typer.Exit(1)
+
+    # Takeover path.
+    audit_path = default_audit_path(_home())
+    try:
+        survivors = run_preflight(
+            takeover_on_start=True,
+            grace_seconds=5.0,
+            audit_log=audit_path,
+        )
+    except ChannelOwnershipConflict as e:
+        # Shouldn't happen with takeover_on_start=True, but defensive.
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2) from e
+
+    if survivors:
+        typer.echo(
+            f"⚠ takeover incomplete — {len(survivors)} competitor(s) refused "
+            f"to die:",
+            err=True,
+        )
+        for c in survivors:
+            typer.echo(f"  - {c.display()}", err=True)
+        typer.echo(f"  Audit log: {audit_path}")
+        raise typer.Exit(1)
+    typer.echo(f"✓ takeover complete — audit at {audit_path}")
 
 
 @service_app.command("doctor")

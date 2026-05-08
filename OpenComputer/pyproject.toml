@@ -257,6 +257,16 @@ target-version = ["py312"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Default-deselect benchmark tests so the regular suite stays hermetic.
+# The benchmark mark gates live-LLM tests that need a working
+# Anthropic/OpenAI key + network — not a CI gate. To run them:
+#   pytest -m benchmark                # ALL benchmarks
+#   pytest -m benchmark tests/foo.py   # one file's benchmarks
+# The 2026-05-08 incident: a benchmark test was failing in the default
+# suite because the user's ANTHROPIC_API_KEY was a Claude-Router proxy
+# key not valid for direct Anthropic — the test should never have been
+# collected in the first place.
+addopts = "-m 'not benchmark'"
 markers = [
   "benchmark: opt-in slow benchmark tests requiring a live LLM provider (run via `pytest -m benchmark`)",
 ]

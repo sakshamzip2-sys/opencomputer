@@ -16,8 +16,22 @@
     <string>{workdir}</string>
     <key>RunAtLoad</key>
     <true/>
+    <!--
+      KeepAlive=dict (not <true/>): only respawn on crash (exit != 0).
+      With KeepAlive=<true/>, launchd respawns even after intentional
+      `kill -9`, making `oc gateway stop` impossible without first
+      `launchctl bootout`. The Hermes plist uses this same dict form;
+      we adopted it after the 2026-05-08 respawn-loop incident
+      (drainer SQLite error every 1s for 33h while user couldn't kill
+      the daemon). See gateway/server.py docstring for full context.
+    -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
     <key>StandardOutPath</key>
     <string>{stdout_log}</string>
     <key>StandardErrorPath</key>
