@@ -21,6 +21,11 @@ sdist/
 # (caught 2026-05-07 when CI failed loading "@/lib/api").
 !ui-web/src/lib/
 !ui-web/src/lib/**
+# Same exception for the TUI's `lib/` (TypeScript helpers like
+# themeDetect.ts) — caught 2026-05-08 when Hermes-parity D1 source was
+# silently ignored.
+!ui-tui/src/lib/
+!ui-tui/src/lib/**
 
 # Frontend build artifacts (produced by `cd ui-web && npm run build` /
 # `cd ui-tui && npm run build`). Excluded from git but force-included

@@ -94,8 +94,9 @@ class RollbackCommand(SlashCommand):
             return store
         # 2. Real RewindStore — optional dep.
         try:
-            from opencomputer.agent.config import default_config
             from rewind.store import RewindStore  # type: ignore[import-not-found]
+
+            from opencomputer.agent.config import default_config
         except ImportError:
             return None
         try:
