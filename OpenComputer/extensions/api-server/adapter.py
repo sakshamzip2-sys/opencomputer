@@ -217,6 +217,15 @@ class APIServerAdapter(BaseChannelAdapter):
         # name → response_id (latest in chain); allows
         # ``conversation: "my-project"`` to auto-chain.
         self._named_conversations: dict[str, str] = {}
+        # T59 — Hermes-doc /v1/runs full Runs API. Each run holds:
+        #   - status: pending|running|done|error|cancelled
+        #   - events: list of dicts ({type, ...}) for SSE replay
+        #   - task: the asyncio.Task driving execution
+        #   - created_at / completed_at: monotonic timestamps
+        # Bounded LRU (max 100) — older completed runs evicted; in-flight
+        # runs are never evicted.
+        self._runs: dict[str, dict[str, Any]] = {}
+        self._runs_max = 100
 
     def set_handler(self, handler: ChatHandler) -> None:
         """Inject the per-request agent handler.
@@ -302,6 +311,184 @@ class APIServerAdapter(BaseChannelAdapter):
             {"session_id": session_id, "run_id": run_id, "response": reply}
         )
 
+    # T59 — Hermes-doc /v1/runs full API ─────────────────────────────
+
+    async def _handle_run_create(self, request: web.Request) -> web.Response:
+        """``POST /v1/runs`` — start a background run, return ``{run_id}``.
+
+        Body: ``{"input": "<user text>", "session_id"?: str, "model"?: str}``.
+        """
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth[len("Bearer "):] != self._token:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"error": "invalid json"}, status=400)
+        user_text = payload.get("input") or payload.get("prompt") or ""
+        if not isinstance(user_text, str) or not user_text.strip():
+            return web.json_response({"error": "input required"}, status=400)
+        if self._handler is None and self._streaming_handler is None and self._streaming_handler_v2 is None:
+            return web.json_response({"error": "handler not configured"}, status=503)
+
+        run_id = f"run-{uuid.uuid4().hex[:24]}"
+        session_id = payload.get("session_id") or run_id
+        loop = asyncio.get_event_loop()
+        run: dict[str, Any] = {
+            "id": run_id,
+            "status": "pending",
+            "events": [],
+            "task": None,
+            "queue": asyncio.Queue(),
+            "created_at": loop.time(),
+            "completed_at": None,
+            "result": None,
+            "error": None,
+        }
+        self._runs[run_id] = run
+        self._evict_runs_if_needed()
+        run["task"] = asyncio.create_task(
+            self._drive_run(run_id, session_id, user_text)
+        )
+        return web.json_response({"run_id": run_id, "status": "pending"})
+
+    def _evict_runs_if_needed(self) -> None:
+        """LRU-evict completed runs once over cap; never evict in-flight."""
+        if len(self._runs) <= self._runs_max:
+            return
+        completed = [
+            (rid, r) for rid, r in self._runs.items()
+            if r["status"] in ("done", "error", "cancelled")
+        ]
+        completed.sort(key=lambda kv: kv[1].get("completed_at") or 0)
+        while len(self._runs) > self._runs_max and completed:
+            rid, _ = completed.pop(0)
+            self._runs.pop(rid, None)
+
+    async def _drive_run(self, run_id: str, session_id: str, user_text: str) -> None:
+        """Execute the agent for this run, accumulating events for SSE replay."""
+        run = self._runs.get(run_id)
+        if run is None:
+            return
+        run["status"] = "running"
+        await self._enqueue_run_event(run, {"type": "run.created", "run_id": run_id})
+        try:
+            chunks: list[str] = []
+
+            async def _on_text(text: str) -> None:
+                if not text:
+                    return
+                chunks.append(text)
+                await self._enqueue_run_event(run, {"type": "token", "delta": text})
+
+            async def _on_tool_progress(name: str, status: str, detail: str = "") -> None:
+                await self._enqueue_run_event(
+                    run,
+                    {"type": "tool.progress", "tool": name, "status": status, "detail": detail},
+                )
+
+            if self._streaming_handler_v2 is not None:
+                hooks = StreamHooks(emit_text=_on_text, emit_tool_progress=_on_tool_progress)
+                await self._streaming_handler_v2(session_id, user_text, hooks)
+            elif self._streaming_handler is not None:
+                await self._streaming_handler(session_id, user_text, _on_text)
+            elif self._handler is not None:
+                final = await self._handler(user_text, session_id) or ""
+                chunks.append(final)
+                await self._enqueue_run_event(run, {"type": "token", "delta": final})
+
+            run["result"] = "".join(chunks)
+            run["status"] = "done"
+            await self._enqueue_run_event(run, {"type": "run.completed", "run_id": run_id})
+        except asyncio.CancelledError:
+            run["status"] = "cancelled"
+            await self._enqueue_run_event(run, {"type": "run.cancelled", "run_id": run_id})
+            raise
+        except Exception as exc:  # noqa: BLE001
+            run["status"] = "error"
+            run["error"] = f"{type(exc).__name__}: {exc}"
+            await self._enqueue_run_event(
+                run, {"type": "run.error", "run_id": run_id, "error": run["error"]}
+            )
+        finally:
+            run["completed_at"] = asyncio.get_event_loop().time()
+            # Sentinel — wakes any waiting /events consumers so they can close.
+            await run["queue"].put(None)
+
+    async def _enqueue_run_event(self, run: dict[str, Any], event: dict[str, Any]) -> None:
+        """Append to both the events log (for replay) and the live queue."""
+        run["events"].append(event)
+        await run["queue"].put(event)
+
+    async def _handle_run_get(self, request: web.Request) -> web.Response:
+        """``GET /v1/runs/{run_id}`` — current status snapshot."""
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth[len("Bearer "):] != self._token:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        run_id = request.match_info["run_id"]
+        run = self._runs.get(run_id)
+        if run is None:
+            return web.json_response({"error": "run not found"}, status=404)
+        return web.json_response(
+            {
+                "run_id": run["id"],
+                "status": run["status"],
+                "result": run.get("result"),
+                "error": run.get("error"),
+                "event_count": len(run["events"]),
+            }
+        )
+
+    async def _handle_run_events(self, request: web.Request) -> web.StreamResponse:
+        """``GET /v1/runs/{run_id}/events`` — SSE stream of events.
+
+        Replays already-buffered events first, then streams live until the
+        run completes (or the connection closes).
+        """
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth[len("Bearer "):] != self._token:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        run_id = request.match_info["run_id"]
+        run = self._runs.get(run_id)
+        if run is None:
+            return web.json_response({"error": "run not found"}, status=404)
+
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        await resp.prepare(request)
+        import json as _json
+
+        # Replay buffered events.
+        for ev in list(run["events"]):
+            await resp.write(f"data: {_json.dumps(ev)}\n\n".encode())
+        # If already terminal, close.
+        if run["status"] in ("done", "error", "cancelled"):
+            await resp.write(b"data: [DONE]\n\n")
+            await resp.write_eof()
+            return resp
+        # Live drain: pull from the queue until sentinel.
+        seen = len(run["events"])
+        try:
+            while True:
+                ev = await run["queue"].get()
+                if ev is None:
+                    break
+                # Skip if we already replayed this event (race with replay loop).
+                if seen > 0:
+                    seen -= 1
+                    continue
+                await resp.write(f"data: {_json.dumps(ev)}\n\n".encode())
+        finally:
+            await resp.write(b"data: [DONE]\n\n")
+            await resp.write_eof()
+        return resp
+
     async def _handle_run_stop(self, request: web.Request) -> web.Response:
         """``POST /v1/runs/{run_id}/stop`` — cancel an in-flight chat run.
 
@@ -312,14 +499,19 @@ class APIServerAdapter(BaseChannelAdapter):
         if not auth.startswith("Bearer ") or auth[len("Bearer "):] != self._token:
             return web.json_response({"error": "unauthorized"}, status=401)
         run_id = request.match_info.get("run_id", "")
+        # Try both stores: legacy /v1/chat in-flight runs AND T59 /v1/runs.
         task = self._active_runs.get(run_id)
-        if task is None:
-            return web.json_response(
-                {"error": "unknown run_id (already finished or never existed)"},
-                status=404,
-            )
-        task.cancel()
-        return web.json_response({"run_id": run_id, "stopped": True})
+        if task is not None:
+            task.cancel()
+            return web.json_response({"run_id": run_id, "stopped": True})
+        run = self._runs.get(run_id)
+        if run is not None and run.get("task") is not None:
+            run["task"].cancel()
+            return web.json_response({"run_id": run_id, "stopped": True})
+        return web.json_response(
+            {"error": "unknown run_id (already finished or never existed)"},
+            status=404,
+        )
 
     # ─── Server lifecycle ───────────────────────────────────────────
 
@@ -527,6 +719,10 @@ class APIServerAdapter(BaseChannelAdapter):
         app.router.add_post("/v1/responses", self._handle_responses_stub)
         # Wave 6.A — Hermes-port (0a15dbdc4) — POST /v1/runs/{id}/stop
         app.router.add_post("/v1/runs/{run_id}/stop", self._handle_run_stop)
+        # T59 — Hermes-doc Runs API. Create / status / SSE-events.
+        app.router.add_post("/v1/runs", self._handle_run_create)
+        app.router.add_get("/v1/runs/{run_id}", self._handle_run_get)
+        app.router.add_get("/v1/runs/{run_id}/events", self._handle_run_events)
         # T2 — Hermes-doc parity. Public capability probe (no auth).
         app.router.add_get("/v1/capabilities", self._handle_capabilities)
         # T3 — Hermes-doc parity. Public detailed health probe (no auth).
@@ -555,7 +751,7 @@ class APIServerAdapter(BaseChannelAdapter):
                 "vision": True,
                 "system_prompt": True,
                 "previous_response_id": True,
-                "runs_api": False,
+                "runs_api": True,
                 "jobs_api": False,
             },
         }
