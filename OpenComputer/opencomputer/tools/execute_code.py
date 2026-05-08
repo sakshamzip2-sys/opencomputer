@@ -100,6 +100,7 @@ class ExecuteCode(BaseTool):
         ),
     )
 
+    @property
     def schema(self) -> ToolSchema:
         return ToolSchema(
             name="ExecuteCode",
@@ -156,6 +157,7 @@ class ExecuteCode(BaseTool):
                     },
                 },
                 "required": ["code"],
+                "additionalProperties": False,
             },
         )
 

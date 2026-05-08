@@ -40,7 +40,7 @@ from plugin_sdk.core import ToolCall
 
 
 def test_execute_code_schema_uses_hermes_name() -> None:
-    schema = ExecuteCode().schema()
+    schema = ExecuteCode().schema
     assert schema.name == "ExecuteCode"
     assert "code" in schema.parameters["properties"]
     assert "code" in schema.parameters["required"]
