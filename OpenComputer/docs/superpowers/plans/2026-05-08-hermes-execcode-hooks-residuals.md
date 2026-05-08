@@ -361,14 +361,16 @@ def test_doctor_settings_hook_missing_executable_warn(monkeypatch, tmp_path):
     """A configured shell-hook command pointing at a non-existent path → WARN."""
     monkeypatch.setenv("OC_PROFILE_DIR", str(tmp_path))
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
-    cfg = tmp_path / "config.yaml"
-    cfg.write_text(textwrap.dedent("""
-        hooks:
-          PreToolUse:
-            - matcher: ".*"
-              command: "/nonexistent/script.sh"
-              timeout_seconds: 5
-    """).strip())
+
+    # Stub load_config rather than relying on profile-dir conventions
+    # the test environment may not satisfy.
+    from types import SimpleNamespace
+    bad_hook = SimpleNamespace(command="/nonexistent/script.sh", timeout_seconds=5)
+    stub_cfg = SimpleNamespace(hooks={"PreToolUse": [bad_hook]})
+    monkeypatch.setattr(
+        "opencomputer.agent.config.default_config",
+        lambda *a, **k: stub_cfg,
+    )
 
     runner = CliRunner()
     result = runner.invoke(hooks_app, ["doctor"])
@@ -458,9 +460,9 @@ def cmd_doctor(
 
     # 2. Settings hooks (config.yaml hooks: block)
     try:
-        from opencomputer.agent.config import load_config
+        from opencomputer.agent.config import default_config
 
-        cfg = load_config()
+        cfg = default_config()
         sh = getattr(cfg, "hooks", None)
         if sh:
             for event_name, configs in sh.items():
@@ -631,6 +633,21 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 Run: `cd OpenComputer && grep -l "make_shell_hook_handler\|HookCommandConfig" tests/ | head -5`
 
 Expected: at least one test file using `HookCommandConfig` + a small bash script payload. Use the same fixture pattern.
+
+- [ ] **Step 1b: Add `inject_context` field to `HookDecision` (lands in this commit so the helper compiles cleanly)**
+
+Edit `OpenComputer/plugin_sdk/hooks.py`. Find the `HookDecision` dataclass (around line 193-208). Append a new field:
+
+```python
+    #: 2026-05-08 G4 — text to inject into the user message for
+    #: PRE_LLM_CALL only. Mirrors Hermes' shell-hook stdout
+    #: ``{"context": "..."}`` shape and the existing plugin-side
+    #: pre_llm_call return-value contract. Ignored for non-PRE_LLM_CALL
+    #: events (callers in loop.py decide the apply-condition).
+    inject_context: str | None = None
+```
+
+Append-only — does not change any existing field. T4 wires it into the loop; T3 just reserves the field so `_decision_from_stdout` can populate it from day one without a two-commit dance.
 
 - [ ] **Step 2: Write failing tests**
 
@@ -911,9 +928,7 @@ Run: `cd OpenComputer && pytest tests/test_shell_hook_stdout_protocol.py -v`
 
 Expected: all seven tests PASS.
 
-Note: the `inject_context=` kwarg in `_decision_from_stdout` won't compile yet because Task 4 adds the field to `HookDecision`. **For this Task 3 commit only**, replace `HookDecision(decision="pass", inject_context=inject_str)` calls in `_decision_from_stdout` with `HookDecision(decision="pass")` and add a `# G4 will plug context here` comment. The G4 commit will replace these.
-
-After this revert, re-run: `pytest tests/test_shell_hook_stdout_protocol.py -v`. Expected: all seven tests still PASS (none of them check `inject_context` — that's Task 4 territory).
+Note: `_decision_from_stdout` uses `HookDecision(decision="pass", inject_context=inject_str)` — that compiles because Step 1b above added the `inject_context` field to `HookDecision`. The seven G3 tests don't assert on `inject_context` (those are G4 tests in T4); the populated field is observable but inert until T4 wires it through the loop.
 
 - [ ] **Step 6: Run existing settings-hook tests to check no regression**
 
@@ -930,7 +945,7 @@ Expected: clean.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add OpenComputer/opencomputer/hooks/shell_handlers.py OpenComputer/tests/test_shell_hook_stdout_protocol.py
+git add OpenComputer/plugin_sdk/hooks.py OpenComputer/opencomputer/hooks/shell_handlers.py OpenComputer/tests/test_shell_hook_stdout_protocol.py
 git commit -m "feat(hooks): G3 — shell-hook stdout JSON wire protocol (Hermes + CC shapes)
 
 Augments make_shell_hook_handler to parse stdout JSON before the
@@ -966,49 +981,36 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 ### Task 4: G4 — Shell-hook `{"context":"..."}` injection on PRE_LLM_CALL
 
 **Files:**
-- Modify: `OpenComputer/plugin_sdk/hooks.py` — add `inject_context: str | None = None` to `HookDecision`
-- Modify: `OpenComputer/opencomputer/hooks/shell_handlers.py` — uncomment the `inject_context=` kwarg in `_decision_from_stdout` (added in Task 3)
-- Modify: `OpenComputer/opencomputer/agent/loop.py` — collect `inject_context` from blocking PRE_LLM_CALL decisions and append to user message
+- Modify: `OpenComputer/opencomputer/hooks/engine.py` — new `collect_inject_contexts(ctx)` async method that runs only `fire_and_forget=False` handlers and collects `inject_context` strings
+- Modify: `OpenComputer/opencomputer/hooks/shell_handlers.py` — register-side helper that callers use to wrap a `make_shell_hook_handler` callable in a `HookSpec` with `fire_and_forget=False` for PRE_LLM_CALL events; OR adjust the existing settings-hook loader to use `fire_and_forget=False` when `event == HookEvent.PRE_LLM_CALL`
+- Modify: `OpenComputer/opencomputer/agent/loop.py` — call `engine.collect_inject_contexts` BEFORE the existing `engine.fire(ctx)` for PRE_LLM_CALL; append non-empty results to user message
 - Test: `OpenComputer/tests/test_shell_hook_stdout_protocol.py` — context-injection tests
 
-- [ ] **Step 1: Add `inject_context` field to `HookDecision`**
+**Design constraint:** PRE_LLM_CALL is currently fire-and-forget for plugin hooks. We MUST NOT change that — plugin authors may be doing slow work expecting fire-and-forget semantics. Instead we add a NEW collect-only blocking pass that runs ONLY handlers registered with `fire_and_forget=False` (shell hooks for PRE_LLM_CALL register this way). Plugin handlers (default `fire_and_forget=True`) stay fire-and-forget.
 
-Edit `OpenComputer/plugin_sdk/hooks.py`. Find the `HookDecision` dataclass (around line 193-208). Replace its body with:
+- [ ] **Step 1: Note — `inject_context` field landed in T3 Step 1b already**
 
+Verify by running: `grep -n "inject_context" OpenComputer/plugin_sdk/hooks.py`
+
+Expected: see the field defined on `HookDecision`. If absent, T3 was incomplete — re-run T3 Step 1b before continuing.
+
+- [ ] **Step 2: Locate the shell-hook registration callsite**
+
+Run: `grep -rn "make_shell_hook_handler" OpenComputer/opencomputer --include="*.py" | grep -v __pycache__`
+
+Expected: ONE caller (likely `agent/config.py` or `cli.py` startup) that creates `HookSpec(event=..., handler=make_shell_hook_handler(...))`. Read 10 lines around the caller to understand how event names are mapped to `HookEvent` enum values.
+
+- [ ] **Step 3: Adjust shell-hook registration to use `fire_and_forget=False` for PRE_LLM_CALL**
+
+At the call site identified in Step 2, the `HookSpec(...)` constructor call must add `fire_and_forget=False` when `event == HookEvent.PRE_LLM_CALL`. Other events stay default (True). Exact line edit depends on the call-site shape; use Grep + Read first.
+
+If the caller uses a loop over event types, the conditional looks like:
 ```python
-@dataclass(frozen=True, slots=True)
-class HookDecision:
-    """A hook's response. PreToolUse hooks use `decision` to approve/block."""
-
-    # Wave 5 T13 — added "skip", "rewrite", "allow" verdicts for
-    # PreGatewayDispatch (Hermes 1ef1e4c66). "skip" drops the message
-    # silently, "rewrite" replaces gateway_event_text via rewritten_text,
-    # "allow" is a positive ack equivalent to "pass" but documents that
-    # the hook explicitly inspected and approved.
-    decision: Literal[
-        "approve", "block", "pass", "skip", "rewrite", "allow",
-    ] = "pass"
-    reason: str = ""
-    modified_message: str = ""  # if set, injected as a system reminder
-    #: Wave 5 T13 — for decision="rewrite", the new event text.
-    rewritten_text: str | None = None
-    #: 2026-05-08 G4 — text to inject into the user message for
-    #: PRE_LLM_CALL only. Mirrors Hermes' shell-hook stdout
-    #: ``{"context": "..."}`` shape and the existing plugin-side
-    #: pre_llm_call return-value contract. Ignored for non-PRE_LLM_CALL
-    #: events (callers in loop.py decide the apply-condition).
-    inject_context: str | None = None
+fire_and_forget = (event != HookEvent.PRE_LLM_CALL)
+spec = HookSpec(event=event, handler=handler, fire_and_forget=fire_and_forget, ...)
 ```
 
-- [ ] **Step 2: Restore `inject_context=` kwargs in `_decision_from_stdout`**
-
-Edit `OpenComputer/opencomputer/hooks/shell_handlers.py`. In `_decision_from_stdout`, replace the two placeholder lines that say `# G4 will plug context here` with the real kwargs:
-
-* Where `HookDecision(decision="pass")` is returned alongside an `inject_str` and event is PRE_LLM_CALL, change to `HookDecision(decision="pass", inject_context=inject_str)`.
-
-After Task 3 already wrote the structure with `inject_context=inject_str` then reverted them, this step re-applies them. The two locations to update are inside `_decision_from_stdout` where the function returns `HookDecision(decision="pass", inject_context=inject_str)`.
-
-- [ ] **Step 3: Write the failing tests**
+- [ ] **Step 4: Write the failing tests
 
 Add to `OpenComputer/tests/test_shell_hook_stdout_protocol.py`:
 
@@ -1058,97 +1060,97 @@ def test_stdout_approve_plus_context_works_on_pre_llm_call(tmp_path):
     assert decision.inject_context == "branch=main"
 ```
 
-- [ ] **Step 4: Run new tests to verify they fail without loop wiring**
+- [ ] **Step 5: Run shape-only G4 tests to verify they pass without loop wiring**
 
 Run: `cd OpenComputer && pytest tests/test_shell_hook_stdout_protocol.py::test_stdout_context_injection_only_on_pre_llm_call tests/test_shell_hook_stdout_protocol.py::test_stdout_context_ignored_on_non_pre_llm_call tests/test_shell_hook_stdout_protocol.py::test_stdout_approve_plus_context_works_on_pre_llm_call -v`
 
-Expected: all three tests should now PASS just from Steps 1-2 — they verify the HookDecision shape, not the loop integration. If they don't pass, debug the `_decision_from_stdout` translator.
+Expected: PASS — these test the `HookDecision.inject_context` shape, not the loop integration. T3 already wired `_decision_from_stdout` to populate this field on PRE_LLM_CALL.
 
-- [ ] **Step 5: Verify wiring into agent/loop.py is correct**
+- [ ] **Step 6: Add `engine.collect_inject_contexts(ctx)` method**
 
-Read the current PRE_LLM_CALL fire-point:
-
-Run: `sed -n '3580,3640p' OpenComputer/opencomputer/agent/loop.py`
-
-Expected: see the existing `_fire_pre_llm_call` helper that calls `engine.fire` (fire-and-forget).
-
-We need to make this call `fire_blocking` instead so we can collect `inject_context` from each handler's decision, then append to the user message.
-
-- [ ] **Step 6: Wire `inject_context` into the user message**
-
-Edit `OpenComputer/opencomputer/agent/loop.py`. Find the `_fire_pre_llm_call` helper (or equivalent — search for `PRE_LLM_CALL`). The current pattern is fire-and-forget. We need to replace it with a blocking call that collects `inject_context` strings from every handler's decision and appends them to the user message before the LLM call.
-
-Search for the canonical fire-point:
-
-Run: `grep -n "PRE_LLM_CALL\|fire.*pre_llm\|_fire_pre_llm" OpenComputer/opencomputer/agent/loop.py`
-
-Locate the function that fires PRE_LLM_CALL. Replace its single `engine.fire(ctx)` call with a blocking variant that collects `inject_context`. Conceptually:
+Edit `OpenComputer/opencomputer/hooks/engine.py`. Add this new method to the `HookEngine` class (place after `fire_blocking`):
 
 ```python
-# Within whatever method currently fires PRE_LLM_CALL,
-# replace `engine.fire(ctx)` (or fire-and-forget call) with:
-collected_contexts: list[str] = []
-async for decision in engine.fire_blocking_each(ctx):
-    if decision and decision.inject_context:
-        collected_contexts.append(decision.inject_context)
-# Then, BEFORE calling provider.complete, append:
-if collected_contexts:
-    appended = "\n\n".join(collected_contexts)
-    user_message_text += "\n\n" + appended
-```
+    async def collect_inject_contexts(self, ctx: HookContext) -> list[str]:
+        """Run blocking handlers for ``ctx.event`` and return their
+        ``inject_context`` strings (in priority order).
 
-The exact integration depends on how `_fire_pre_llm_call` is structured. If `engine.fire_blocking` returns only the FIRST non-pass decision, we need a new method `fire_blocking_each` that returns an async iterator. Add it to `OpenComputer/opencomputer/hooks/engine.py`:
+        Only handlers registered with ``fire_and_forget=False`` participate.
+        This is the load-bearing distinction: plugin PRE_LLM_CALL handlers
+        are fire-and-forget by default and continue to run that way via
+        the existing :meth:`fire` path. Shell hooks for PRE_LLM_CALL are
+        registered with ``fire_and_forget=False`` (see settings-hook
+        loader) and DO participate here.
 
-```python
-async def fire_blocking_each(self, ctx: HookContext):
-    """Fire all hooks for ``ctx.event`` and yield each handler's decision.
+        Each handler's exception or timeout is swallowed (fail-open) so a
+        wedged hook never wedges the loop.
+        """
+        from opencomputer.agent.hook_history import record_fire
 
-    Like :meth:`fire_blocking` but does NOT short-circuit on the first
-    non-pass decision. Used by PRE_LLM_CALL where multiple handlers may
-    contribute ``inject_context`` strings that all need to be collected.
-    """
-    for _, _, spec in self._hooks.get(ctx.event, []):
-        if not self._matches(spec, ctx):
-            continue
-        try:
-            if spec.timeout_ms and spec.timeout_ms > 0:
-                decision = await asyncio.wait_for(
-                    spec.handler(ctx),
-                    timeout=spec.timeout_ms / 1000.0,
+        contexts: list[str] = []
+        for _, _, spec in self._hooks.get(ctx.event, []):
+            if spec.fire_and_forget:
+                continue
+            if not self._matches(spec, ctx):
+                continue
+            handler_id = getattr(spec.handler, "__qualname__", repr(spec.handler))
+            try:
+                if spec.timeout_ms and spec.timeout_ms > 0:
+                    decision = await asyncio.wait_for(
+                        spec.handler(ctx),
+                        timeout=spec.timeout_ms / 1000.0,
+                    )
+                else:
+                    decision = await spec.handler(ctx)
+            except (TimeoutError, Exception) as exc:  # noqa: BLE001 — fail-open
+                record_fire(
+                    event=ctx.event.value,
+                    source_id=handler_id,
+                    ok=False,
+                    summary=f"{type(exc).__name__}: {exc}",
                 )
-            else:
-                decision = await spec.handler(ctx)
-        except (TimeoutError, Exception):  # noqa: BLE001 — fail-open
-            continue
-        yield decision
+                continue
+            if decision is not None and decision.inject_context:
+                contexts.append(decision.inject_context)
+        return contexts
 ```
 
-Then in `loop.py`, the call sites:
+- [ ] **Step 7: Wire the call into `agent/loop.py` PRE_LLM_CALL fire-point**
 
-Find the PRE_LLM_CALL fire-point. Replace the fire-and-forget call with:
+Run: `grep -n "PRE_LLM_CALL\|engine.fire" OpenComputer/opencomputer/agent/loop.py | head -10`
+
+Expected: locate where `engine.fire(ctx)` is called for PRE_LLM_CALL (around line 3620 from earlier exploration). Read 30 lines around it to understand the surrounding code path (which variable holds the user message text, where the provider call happens).
+
+Add — IMMEDIATELY BEFORE the existing `engine.fire(...)` PRE_LLM_CALL call, but AFTER the `HookContext` is built — a new collect call:
 
 ```python
-        # 2026-05-08 G4 — collect inject_context from every blocking
-        # PRE_LLM_CALL handler and append to user message.
+        # 2026-05-08 G4 — shell hooks may inject context via stdout
+        # {"context":"..."} JSON. They register with fire_and_forget=False
+        # so they participate here. Plugin hooks (default fire_and_forget
+        # = True) continue via the unchanged engine.fire() call below.
         injected_contexts: list[str] = []
-        async for decision in _hook_engine.fire_blocking_each(_pre_llm_ctx):
-            if decision is not None and decision.inject_context:
-                injected_contexts.append(decision.inject_context)
+        try:
+            injected_contexts = await _hook_engine.collect_inject_contexts(_pre_llm_ctx)
+        except Exception:  # noqa: BLE001 — fail-open
+            pass
         if injected_contexts:
             joined = "\n\n".join(injected_contexts)
-            # Append to user message — same shape used by InjectionEngine.
-            user_message_for_provider = user_message_for_provider + "\n\n" + joined
+            # Append to the user message text used for the next provider call.
+            # Variable name varies — search for the locale of the existing
+            # user-message-injection in loop.py (likely `user_message`,
+            # `pre_llm_message`, or threaded via the InjectionEngine return).
+            <APPEND TO USER MESSAGE — see locale comment>
 ```
 
-(Replace `_pre_llm_ctx` and `user_message_for_provider` with the actual variable names in the current loop.)
+The angle-bracket placeholder is intentional: the actual variable name depends on what `loop.py` calls the user message at this point. Read 50 lines around the `engine.fire(ctx)` callsite, identify the variable that holds the per-turn user message, and append `joined` to it. The InjectionEngine path uses similar shape — model G4 on what the InjectionEngine does locally.
 
-- [ ] **Step 7: Write integration test for end-to-end injection**
+- [ ] **Step 8: Write end-to-end integration test**
 
 Add to `OpenComputer/tests/test_shell_hook_stdout_protocol.py`:
 
 ```python
-def test_pre_llm_call_inject_context_appended_to_user_message(tmp_path, monkeypatch):
-    """End-to-end: registered shell hook emits {"context":"..."} → injected."""
+def test_collect_inject_contexts_runs_blocking_shell_hooks(tmp_path):
+    """End-to-end: shell hook with fire_and_forget=False participates in collect."""
     from opencomputer.hooks.engine import engine
     from opencomputer.hooks.shell_handlers import make_shell_hook_handler
     from plugin_sdk.hooks import HookSpec
@@ -1162,44 +1164,64 @@ def test_pre_llm_call_inject_context_appended_to_user_message(tmp_path, monkeypa
     )
 
     engine.unregister_all()
-    engine.register(HookSpec(event=HookEvent.PRE_LLM_CALL, handler=handler))
+    engine.register(HookSpec(
+        event=HookEvent.PRE_LLM_CALL,
+        handler=handler,
+        fire_and_forget=False,
+    ))
     try:
-        contexts = []
         ctx = _ctx(HookEvent.PRE_LLM_CALL)
-
-        async def collect():
-            async for decision in engine.fire_blocking_each(ctx):
-                if decision and decision.inject_context:
-                    contexts.append(decision.inject_context)
-
-        asyncio.run(collect())
+        contexts = asyncio.run(engine.collect_inject_contexts(ctx))
         assert contexts == ["git: clean"]
+    finally:
+        engine.unregister_all()
+
+
+def test_collect_inject_contexts_skips_fire_and_forget_handlers(tmp_path):
+    """Fire-and-forget handlers do NOT participate in collect (preserves
+    existing PRE_LLM_CALL semantics for plugin hooks)."""
+    from opencomputer.hooks.engine import engine
+    from plugin_sdk.hooks import HookDecision, HookSpec
+
+    async def slow_handler(ctx):
+        return HookDecision(decision="pass", inject_context="should-not-appear")
+
+    engine.unregister_all()
+    engine.register(HookSpec(
+        event=HookEvent.PRE_LLM_CALL,
+        handler=slow_handler,
+        fire_and_forget=True,  # default
+    ))
+    try:
+        ctx = _ctx(HookEvent.PRE_LLM_CALL)
+        contexts = asyncio.run(engine.collect_inject_contexts(ctx))
+        assert contexts == []
     finally:
         engine.unregister_all()
 ```
 
-- [ ] **Step 8: Run the full G4 test set**
+- [ ] **Step 9: Run the full G4 test set**
 
 Run: `cd OpenComputer && pytest tests/test_shell_hook_stdout_protocol.py -v`
 
-Expected: all four new G4 tests + previous seven G3 tests PASS.
+Expected: all 11 tests PASS (7 from T3 + 4 G4 = 11 total in this file at this point; one is the engine fire-and-forget skip test).
 
-- [ ] **Step 9: Run the broader hook test suite to catch regressions**
+- [ ] **Step 10: Run the broader hook test suite to catch regressions**
 
 Run: `cd OpenComputer && pytest tests/test_settings_hooks.py tests/test_phase_doc2_hooks.py tests/test_hook_expansion.py tests/test_cli_hooks.py -v`
 
 Expected: all green.
 
-- [ ] **Step 10: Run ruff**
+- [ ] **Step 11: Run ruff**
 
-Run: `ruff check OpenComputer/plugin_sdk/hooks.py OpenComputer/opencomputer/hooks/engine.py OpenComputer/opencomputer/hooks/shell_handlers.py OpenComputer/opencomputer/agent/loop.py OpenComputer/tests/test_shell_hook_stdout_protocol.py`
+Run: `ruff check OpenComputer/opencomputer/hooks/engine.py OpenComputer/opencomputer/hooks/shell_handlers.py OpenComputer/opencomputer/agent/loop.py OpenComputer/tests/test_shell_hook_stdout_protocol.py`
 
 Expected: clean.
 
-- [ ] **Step 11: Commit**
+- [ ] **Step 12: Commit**
 
 ```bash
-git add OpenComputer/plugin_sdk/hooks.py OpenComputer/opencomputer/hooks/engine.py OpenComputer/opencomputer/hooks/shell_handlers.py OpenComputer/opencomputer/agent/loop.py OpenComputer/tests/test_shell_hook_stdout_protocol.py
+git add OpenComputer/opencomputer/hooks/engine.py OpenComputer/opencomputer/hooks/shell_handlers.py OpenComputer/opencomputer/agent/loop.py OpenComputer/tests/test_shell_hook_stdout_protocol.py
 git commit -m "feat(hooks): G4 — shell-hook context injection on PRE_LLM_CALL
 
 A 5-line bash script can now inject context into every turn:
@@ -1210,25 +1232,31 @@ A 5-line bash script can now inject context into every turn:
     && jq --null-input --arg s \"\$status\" '{context: (\"Uncommitted:\\n\" + \$s)}' \\
     || printf '{}\\n'
 
-Wired in two places:
+Design constraint: do NOT change PRE_LLM_CALL fire-and-forget semantics
+for existing plugin handlers. Plugin hooks (default fire_and_forget=
+True) keep running through the existing engine.fire() path. Shell hooks
+for PRE_LLM_CALL register with fire_and_forget=False and participate in
+a NEW collect path:
 
-- HookDecision gains an inject_context: str | None = None field
-  (additive — existing handlers / decisions unaffected).
-- shell_handlers._decision_from_stdout reads {\"context\":\"...\"} from
-  parsed stdout JSON; populates inject_context only when event ==
-  PRE_LLM_CALL. Non-PRE_LLM_CALL events: ignored (Hermes parity).
-- engine.fire_blocking_each is the new fan-out variant: yields every
-  handler's decision instead of short-circuiting on the first non-pass.
-- agent/loop.py PRE_LLM_CALL fire-point switches from fire-and-forget
-  to fire_blocking_each, collects all inject_context strings, joins
-  with double newlines, appends to user message before provider call.
+- engine.collect_inject_contexts(ctx) — runs only fire_and_forget=False
+  handlers in priority order, collects each handler's inject_context
+  string. Fail-open on exceptions / timeouts (CLAUDE.md §7).
+- shell-hook registration loader passes fire_and_forget=False when the
+  event is PRE_LLM_CALL, so settings hooks for that event participate.
+- agent/loop.py PRE_LLM_CALL fire-point: BEFORE the existing
+  engine.fire() call, await engine.collect_inject_contexts(ctx); join
+  with double newlines and append to the user message text.
+
+(HookDecision.inject_context field landed in the G3 commit so the
+shell-hook stdout parser could populate it from day one.)
 
 Symmetric with existing plugin-side pre_llm_call return-value contract
 ({\"context\": \"text\"}). Mirrors the InjectionEngine shape used by
 DynamicInjectionProvider.
 
-4 new tests covering: PRE_LLM_CALL inject, non-PRE_LLM_CALL ignored,
-combined approve+context, end-to-end engine fan-out.
+5 new tests covering: PRE_LLM_CALL inject, non-PRE_LLM_CALL ignored,
+combined approve+context, collect-blocking shell hook, fire-and-forget
+plugin handler skip.
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 ```
@@ -1251,71 +1279,56 @@ Expected: `execute_code.py` reads `code_execution.terminal.env_passthrough` from
 
 - [ ] **Step 2: Write failing tests**
 
-Create `OpenComputer/tests/test_execute_code_max_tool_calls.py`:
+Create `OpenComputer/tests/test_execute_code_max_tool_calls.py`. Prologue-inspection unit tests (deterministic, fast, no subprocess):
 
 ```python
 """G5 — code_execution.max_tool_calls override."""
 
 from __future__ import annotations
 
-import asyncio
 
-import pytest
-
-
-@pytest.mark.asyncio
-async def test_max_tool_calls_default_is_50():
+def test_max_tool_calls_default_is_50():
+    """Default cap stays at Hermes-spec 50."""
     from opencomputer.tools.ptc import _MAX_RPC_CALLS
 
-    # Implementation detail check — default cap stays at Hermes-spec 50.
     assert _MAX_RPC_CALLS == 50
 
 
-@pytest.mark.asyncio
-async def test_run_ptc_honours_max_tool_calls_override(monkeypatch, tmp_path):
-    """A run_ptc(max_tool_calls=3) call caps the prologue at 3 RPC calls."""
-    from opencomputer.tools.ptc import run_ptc
-    from opencomputer.tools.registry import ToolRegistry
+def test_build_prologue_default_uses_50():
+    """_build_prologue() with no override → in-script cap is 50."""
+    from opencomputer.tools.ptc import _build_prologue
 
-    # Use a stub registry with a Read-like tool that returns predictable text.
-    registry = ToolRegistry()
-
-    # Build a script that tries to make 5 RPC calls; should fail at the 4th.
-    code = """
-import sys
-ok = 0
-for i in range(5):
-    try:
-        Read(path='/tmp/does-not-exist-x')
-    except RuntimeError as e:
-        if 'cap exceeded' in str(e) or 'limit' in str(e).lower():
-            print(f'CAPPED_AT_{i+1}')
-            sys.exit(0)
-    ok += 1
-print(f'NEVER_CAPPED ok={ok}')
-"""
-    result = await run_ptc(
-        code,
-        registry=registry,
-        allowed_tools=("Read",),
-        timeout_s=15.0,
-        max_tool_calls=3,
-    )
-    # The prologue should refuse the 4th call.
-    assert "CAPPED_AT_" in result.stdout, result.stdout + "|" + result.stderr
+    prologue = _build_prologue(("Read",))
+    assert "_ptc_max_calls = 50" in prologue
 
 
-@pytest.mark.asyncio
-async def test_execute_code_reads_max_tool_calls_from_config(monkeypatch, tmp_path):
-    """`ExecuteCode.execute(...)` plumbs config.code_execution.max_tool_calls."""
+def test_build_prologue_honours_override():
+    """_build_prologue(max_tool_calls=7) → in-script cap is 7."""
+    from opencomputer.tools.ptc import _build_prologue
+
+    prologue = _build_prologue(("Read",), max_tool_calls=7)
+    assert "_ptc_max_calls = 7" in prologue
+    # And the default value must NOT also appear:
+    assert "_ptc_max_calls = 50" not in prologue
+
+
+def test_code_execution_config_default_max_tool_calls():
+    """CodeExecutionConfig defaults match Hermes spec (300s, 50 calls)."""
     from opencomputer.agent.config import CodeExecutionConfig
 
     cfg = CodeExecutionConfig()
-    assert cfg.max_tool_calls == 50  # default
+    assert cfg.max_tool_calls == 50
+    assert cfg.timeout_seconds == 300.0
 
-    cfg2 = CodeExecutionConfig(max_tool_calls=10)
-    assert cfg2.max_tool_calls == 10
+
+def test_code_execution_config_override():
+    from opencomputer.agent.config import CodeExecutionConfig
+
+    cfg = CodeExecutionConfig(max_tool_calls=10)
+    assert cfg.max_tool_calls == 10
 ```
+
+Why prologue-inspection only: the subprocess RPC mechanism is already covered by the existing PTC test suite (`tests/test_pr8_exec_trace_and_bus_hooks.py`). G5 only needs to verify the cap value plumbs from config → run_ptc kwarg → prologue source string. Subprocess-level behavior is identical; rerunning that path here would be redundant + flaky.
 
 - [ ] **Step 3: Run tests to verify they fail**
 
