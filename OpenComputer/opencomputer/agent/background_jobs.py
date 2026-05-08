@@ -51,6 +51,12 @@ JobStatus = Literal["pending", "running", "complete", "error"]
 # at import time (background_jobs is imported from the slash module that
 # plugin_sdk-only environments may also touch).
 _LoopFactory = Callable[[], Any]
+# Notifier signature: called once per terminal job state (complete/error)
+# from the worker thread, AFTER the registry has updated the job snapshot.
+# Caller is responsible for any thread/loop marshalling needed to deliver
+# the message — the registry just calls this synchronously and swallows
+# any exception.
+_CompletionNotifier = Callable[["BackgroundJob"], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +66,10 @@ class BackgroundJob:
     All fields are populated at submit time except ``completed_at`` /
     ``result`` / ``error``, which are filled in by the worker thread on
     completion.
+
+    ``parent_session_id`` is the foreground session that initiated the
+    job. Used by the completion notifier to route the result back to the
+    originating channel (e.g. Telegram chat / Discord guild).
     """
 
     job_id: str
@@ -71,6 +81,7 @@ class BackgroundJob:
     error: str | None = None
     iterations: int | None = None
     session_id: str | None = None
+    parent_session_id: str | None = None
 
 
 class BackgroundJobRegistry:
@@ -86,11 +97,13 @@ class BackgroundJobRegistry:
     ``RegistryFull``.
     """
 
-    def __init__(self, *, max_jobs: int = 200) -> None:
+    def __init__(self, *, max_jobs: int = 200, retain_seconds: float = 86400.0) -> None:
         self._jobs: OrderedDict[str, BackgroundJob] = OrderedDict()
         self._lock = threading.Lock()
         self._factory: _LoopFactory | None = None
         self._max_jobs = max_jobs
+        self._retain_seconds = retain_seconds
+        self._notifier: _CompletionNotifier | None = None
 
     # ─── factory plumbing ────────────────────────────────────────────
 
@@ -108,10 +121,40 @@ class BackgroundJobRegistry:
         with self._lock:
             return self._factory is not None
 
+    # ─── completion notifier plumbing ─────────────────────────────────
+
+    def set_completion_notifier(self, notifier: _CompletionNotifier | None) -> None:
+        """Register a callable invoked from the worker thread when a job
+        transitions to ``complete`` or ``error``.
+
+        ``None`` clears the notifier. Passed the final :class:`BackgroundJob`
+        snapshot. The notifier runs synchronously inside the worker thread
+        — it MUST be quick or schedule its work onto another loop. Any
+        exception raised is swallowed (logged at debug); a failing notifier
+        must never tear down the worker.
+        """
+        with self._lock:
+            self._notifier = notifier
+
+    @property
+    def completion_notifier_registered(self) -> bool:
+        with self._lock:
+            return self._notifier is not None
+
     # ─── lifecycle ──────────────────────────────────────────────────
 
-    def submit(self, prompt: str, *, plan: bool = False) -> str:
+    def submit(
+        self,
+        prompt: str,
+        *,
+        plan: bool = False,
+        parent_session_id: str | None = None,
+    ) -> str:
         """Spawn a background job for ``prompt`` and return its job id.
+
+        ``parent_session_id`` is the foreground session that initiated this
+        job. The completion notifier (if any) uses it to route the result
+        back to the originating channel.
 
         The worker thread is daemonised so process exit doesn't wait on
         an in-flight background turn — completed results are best-effort
@@ -126,6 +169,7 @@ class BackgroundJobRegistry:
                     "background registry has no AgentLoop factory; "
                     "the CLI entrypoint forgot to call set_factory()"
                 )
+            self._prune_expired_locked()
             self._evict_if_full_locked()
             factory = self._factory
             job_id = uuid.uuid4().hex[:12]
@@ -134,6 +178,7 @@ class BackgroundJobRegistry:
                 prompt=prompt,
                 status="pending",
                 started_at=time.time(),
+                parent_session_id=parent_session_id,
             )
             self._jobs[job_id] = job
 
@@ -145,6 +190,27 @@ class BackgroundJobRegistry:
         )
         thread.start()
         return job_id
+
+    def _prune_expired_locked(self) -> int:
+        """Drop completed/error jobs older than ``retain_seconds``.
+
+        Caller MUST hold ``self._lock``. Returns the number of jobs evicted.
+        Running/pending jobs are never expired by age — only by
+        ``_evict_if_full_locked`` if absolutely necessary.
+        """
+        if self._retain_seconds <= 0:
+            return 0
+        cutoff = time.time() - self._retain_seconds
+        expired = [
+            jid
+            for jid, j in self._jobs.items()
+            if j.status in ("complete", "error")
+            and j.completed_at is not None
+            and j.completed_at < cutoff
+        ]
+        for jid in expired:
+            self._jobs.pop(jid, None)
+        return len(expired)
 
     def _evict_if_full_locked(self) -> None:
         """Evict the oldest completed/error job to free space.
@@ -216,7 +282,7 @@ class BackgroundJobRegistry:
             if cur is None:
                 # Evicted between start and finish — drop the result.
                 return
-            self._jobs[job_id] = replace(
+            updated = replace(
                 cur,
                 status="error" if err else "complete",
                 completed_at=time.time(),
@@ -225,6 +291,17 @@ class BackgroundJobRegistry:
                 iterations=iters,
                 session_id=sid,
             )
+            self._jobs[job_id] = updated
+            notifier = self._notifier
+
+        if notifier is not None:
+            try:
+                notifier(updated)
+            except Exception:  # noqa: BLE001 — notifier failure must not crash worker
+                logger.exception(
+                    "background completion notifier raised for job %s",
+                    job_id,
+                )
 
     # ─── readers ────────────────────────────────────────────────────
 
@@ -258,6 +335,7 @@ def reset_for_tests() -> None:
     try:
         _default_registry._jobs.clear()
         _default_registry._factory = None
+        _default_registry._notifier = None
     finally:
         _default_registry._lock.release()
 

@@ -268,6 +268,222 @@ def test_slash_plan_mode_propagates_into_job():
     assert captured_runtimes[0].plan_mode is True
 
 
+def test_completion_notifier_called_on_success():
+    """Notifier is invoked synchronously from the worker thread when a job completes."""
+    reg = BackgroundJobRegistry()
+    reg.set_factory(_fake_factory(final_text="bg-result"))
+    captured: list = []
+
+    def _notifier(job):
+        captured.append(job)
+
+    reg.set_completion_notifier(_notifier)
+    jid = reg.submit("hi", parent_session_id="parent-123")
+    for _ in range(100):
+        if captured:
+            break
+        time.sleep(0.01)
+    assert len(captured) == 1
+    job = captured[0]
+    assert job.job_id == jid
+    assert job.status == "complete"
+    assert job.result == "bg-result"
+    assert job.parent_session_id == "parent-123"
+
+
+def test_completion_notifier_called_on_error():
+    """Notifier fires for error states too — recipient should be able to render the failure."""
+    reg = BackgroundJobRegistry()
+
+    def _failing_factory():
+        loop_obj = MagicMock()
+        loop_obj.run_conversation = AsyncMock(side_effect=ValueError("nope"))
+        return loop_obj
+
+    reg.set_factory(_failing_factory)
+    seen: list = []
+    reg.set_completion_notifier(lambda j: seen.append(j))
+    reg.submit("doomed")
+    for _ in range(100):
+        if seen:
+            break
+        time.sleep(0.01)
+    assert len(seen) == 1
+    assert seen[0].status == "error"
+    assert "ValueError" in (seen[0].error or "")
+
+
+def test_completion_notifier_exception_swallowed():
+    """A misbehaving notifier must not tear down the worker thread."""
+    reg = BackgroundJobRegistry()
+    reg.set_factory(_fake_factory(final_text="ok"))
+
+    def _bad_notifier(job):
+        raise RuntimeError("notifier blew up")
+
+    reg.set_completion_notifier(_bad_notifier)
+    jid = reg.submit("hi")
+    for _ in range(100):
+        snap = reg.get(jid)
+        if snap and snap.status == "complete":
+            break
+        time.sleep(0.01)
+    # Job still finished cleanly even though the notifier raised.
+    snap = reg.get(jid)
+    assert snap is not None and snap.status == "complete"
+    assert snap.result == "ok"
+
+
+def test_parent_session_id_recorded_on_job():
+    reg = BackgroundJobRegistry()
+    reg.set_factory(_fake_factory())
+    jid = reg.submit("research X", parent_session_id="parent-abc")
+    snap = reg.get(jid)
+    assert snap is not None and snap.parent_session_id == "parent-abc"
+
+
+def test_time_based_retention_prunes_old_completed_jobs():
+    """Jobs older than retain_seconds get pruned on next submit."""
+    reg = BackgroundJobRegistry(retain_seconds=0.1)
+    reg.set_factory(_fake_factory())
+    j_old = reg.submit("old job")
+    for _ in range(100):
+        snap = reg.get(j_old)
+        if snap and snap.status == "complete":
+            break
+        time.sleep(0.01)
+    # Wait past the retention window, then submit a new job.
+    time.sleep(0.15)
+    j_new = reg.submit("new job")
+    # The old job should now be gone; the new one present.
+    assert reg.get(j_old) is None
+    assert reg.get(j_new) is not None
+
+
+def test_retention_disabled_when_zero():
+    """retain_seconds=0 disables pruning entirely."""
+    reg = BackgroundJobRegistry(retain_seconds=0)
+    reg.set_factory(_fake_factory())
+    j_old = reg.submit("old job")
+    for _ in range(100):
+        snap = reg.get(j_old)
+        if snap and snap.status == "complete":
+            break
+        time.sleep(0.01)
+    time.sleep(0.05)
+    reg.submit("new")
+    # Old job survives.
+    assert reg.get(j_old) is not None
+
+
+def test_running_jobs_never_pruned():
+    """Pruning never removes still-running jobs even if their started_at is ancient."""
+    reg = BackgroundJobRegistry(retain_seconds=0.01)
+
+    # Slow factory keeps the job in a running state.
+    def _slow_factory():
+        loop_obj = MagicMock()
+
+        async def _slow(prompt, runtime=None):
+            await asyncio.sleep(0.5)
+            return MagicMock(final_message=MagicMock(content="late"), iterations=1, session_id="s")
+
+        loop_obj.run_conversation = AsyncMock(side_effect=_slow)
+        return loop_obj
+
+    reg.set_factory(_slow_factory)
+    jid = reg.submit("running-job")
+    time.sleep(0.05)
+    # Submit another job — pruning runs but the running one survives.
+    reg.submit("trigger pruning")
+    snap = reg.get(jid)
+    assert snap is not None
+    assert snap.status in ("pending", "running")
+
+
+def test_slash_command_passes_session_id_from_runtime():
+    """The slash command should capture runtime.custom['session_id'] and pass it through."""
+    reg = get_default_registry()
+    reg.set_factory(_fake_factory())
+    runtime = RuntimeContext(custom={"session_id": "fg-session-abc"})
+    out = _run_slash("research", runtime=runtime)
+    assert "started" in out
+    jobs = reg.list_recent(1)
+    assert jobs[0].parent_session_id == "fg-session-abc"
+
+
+def test_format_background_completion_text_complete():
+    from opencomputer.agent.background_jobs import BackgroundJob as Bj
+    from opencomputer.gateway.dispatch import _format_background_completion_text
+
+    job = Bj(
+        job_id="ab12",
+        prompt="explain X clearly",
+        status="complete",
+        started_at=0,
+        result="here is the explanation",
+    )
+    out = _format_background_completion_text(job)
+    assert "✓ background ab12 done" in out
+    assert "explain X clearly" in out
+    assert "here is the explanation" in out
+
+
+def test_format_background_completion_text_error():
+    from opencomputer.agent.background_jobs import BackgroundJob as Bj
+    from opencomputer.gateway.dispatch import _format_background_completion_text
+
+    job = Bj(
+        job_id="cd34",
+        prompt="oops",
+        status="error",
+        started_at=0,
+        error="RuntimeError: nope",
+    )
+    out = _format_background_completion_text(job)
+    assert "✗ background cd34 failed" in out
+    assert "RuntimeError" in out
+
+
+def test_dispatch_notifier_skips_when_no_parent_session():
+    """Notifier with a job that has no parent_session_id should no-op silently."""
+    from opencomputer.agent.background_jobs import BackgroundJob as Bj
+
+    # Build a minimal Dispatch standin — we only need the methods the notifier touches.
+    from opencomputer.gateway.dispatch import Dispatch
+
+    fake_loop_obj = MagicMock()
+    fake_loop_obj.config = MagicMock()
+    dispatch = Dispatch.__new__(Dispatch)
+    dispatch._session_channels = {}
+    dispatch._main_loop = None  # not bound — should still no-op safely
+
+    job = Bj(job_id="x", prompt="p", status="complete", started_at=0, result="r")
+    # No parent_session_id → early return, no exception.
+    dispatch.background_completion_notifier(job)
+
+
+def test_dispatch_notifier_skips_when_no_binding():
+    """Notifier with parent_session_id that isn't in _session_channels should no-op."""
+    from opencomputer.agent.background_jobs import BackgroundJob as Bj
+    from opencomputer.gateway.dispatch import Dispatch
+
+    dispatch = Dispatch.__new__(Dispatch)
+    dispatch._session_channels = {}  # empty
+    dispatch._main_loop = None
+
+    job = Bj(
+        job_id="y",
+        prompt="p",
+        status="complete",
+        started_at=0,
+        result="r",
+        parent_session_id="unknown-session",
+    )
+    # No binding → early return, no exception.
+    dispatch.background_completion_notifier(job)
+
+
 def test_slash_command_registered_as_builtin():
     """Ensure /background is registered into the global slash registry."""
     from opencomputer.agent.slash_commands import (

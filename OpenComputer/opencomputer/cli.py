@@ -992,12 +992,42 @@ def _run_chat_session(
     # factory but spawns a fresh AgentLoop per submitted job, ensuring
     # "no shared history" between foreground and background turns.
     from opencomputer.agent.background_jobs import (
+        BackgroundJob as _BgJob,
+    )
+    from opencomputer.agent.background_jobs import (
         get_default_registry as _bg_get_default_registry,
     )
 
-    _bg_get_default_registry().set_factory(
+    _bg_registry = _bg_get_default_registry()
+    _bg_registry.set_factory(
         lambda: AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
     )
+
+    # Push-on-completion for the CLI: print a Rich panel when a background
+    # job finishes. Runs from the worker thread, so we marshal the print
+    # call through ``console.print`` (which is thread-safe per Rich's
+    # internal lock). Failure is swallowed by the registry — the worker
+    # thread can never be torn down by a notifier exception.
+    def _cli_bg_completion_notifier(job: _BgJob) -> None:  # noqa: D401
+        head = job.prompt.splitlines()[0] if job.prompt else ""
+        if len(head) > 60:
+            head = head[:57] + "…"
+        if job.status == "complete":
+            body = job.result or "(empty response)"
+            title = f"[green]✓ background {job.job_id}[/green] · {head}"
+        else:  # error
+            body = job.error or "(no detail)"
+            title = f"[red]✗ background {job.job_id}[/red] · {head}"
+        try:
+            from rich.panel import Panel
+
+            console.print(
+                Panel.fit(body, title=title, border_style="dim"),
+            )
+        except Exception:  # noqa: BLE001 — fall back to plain print if Rich misbehaves
+            console.print(f"\n{title}\n{body}\n")
+
+    _bg_registry.set_completion_notifier(_cli_bg_completion_notifier)
 
     # social-traces post-task subscriber (Phase 9 production wiring).
     # Opt-in via ``oc traces enable``; only wires when the on-disk

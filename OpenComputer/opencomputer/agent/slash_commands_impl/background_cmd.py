@@ -100,8 +100,23 @@ class BackgroundCommand(SlashCommand):
             )
 
         plan_mode = bool(getattr(runtime, "plan_mode", False))
+        # Capture the foreground session id so the completion notifier can
+        # route the result back to the originating channel. AgentLoop seeds
+        # ``runtime.custom["session_id"]`` per turn; gateway dispatch threads
+        # the same id through ``_session_channels`` so the dispatch-side
+        # notifier can resolve (adapter, chat_id) on completion.
+        parent_session_id: str | None = None
+        if runtime is not None and runtime.custom is not None:
+            sid = runtime.custom.get("session_id")
+            if isinstance(sid, str) and sid:
+                parent_session_id = sid
+
         try:
-            job_id = registry.submit(prompt, plan=plan_mode)
+            job_id = registry.submit(
+                prompt,
+                plan=plan_mode,
+                parent_session_id=parent_session_id,
+            )
         except (ValueError, RuntimeError) as e:
             return SlashCommandResult(
                 output=f"/background: {e}",

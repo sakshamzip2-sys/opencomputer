@@ -279,8 +279,33 @@ class Gateway:
         running and ``cfg.gateway.takeover_on_start`` is False, raise
         :class:`ChannelOwnershipConflict` so the operator sees a loud
         refusal rather than a silent reply blackhole.
+
+        After preflight passes, capture the running asyncio loop and
+        wire the /background completion notifier so worker threads can
+        schedule ``adapter.send()`` via ``run_coroutine_threadsafe``.
         """
+        # Security-first: refuse to boot if another channel handler
+        # owns the same chat surfaces. Must happen before any other
+        # work touches the network.
         self._run_channel_ownership_preflight()
+
+        # Capture the gateway's main asyncio loop and register the
+        # /background completion notifier on the registry. Done after
+        # preflight (the directive above) but before adapter connect()
+        # so an early background-job completion (e.g. test mode)
+        # routes correctly. Failure-isolated — a missing background
+        # registry must never block gateway boot.
+        try:
+            from opencomputer.agent.background_jobs import (
+                get_default_registry as _bg_get_registry,
+            )
+
+            self.dispatch.bind_main_loop(asyncio.get_running_loop())
+            _bg_get_registry().set_completion_notifier(
+                self.dispatch.background_completion_notifier
+            )
+        except Exception:  # noqa: BLE001 — never block gateway boot on this
+            logger.debug("gateway: /background notifier wire failed", exc_info=True)
 
         logger.info("gateway: starting %d adapters", len(self._adapters))
         results = await asyncio.gather(
