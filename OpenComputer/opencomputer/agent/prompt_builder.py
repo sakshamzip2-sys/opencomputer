@@ -288,6 +288,7 @@ class PromptBuilder:
         yolo_mode: bool = False,
         permission_mode: str = "default",
         personality: str = "",
+        custom_personalities: dict[str, str] | None = None,
         persona_overlay: str = "",
         active_persona_id: str = "",
         user_tone: str = "",
@@ -295,6 +296,16 @@ class PromptBuilder:
     ) -> str:
         memory = _truncate_from_top(declarative_memory, memory_char_limit)
         profile = _truncate_from_top(user_profile, user_char_limit)
+        # Resolve personality NAME → BODY using built-ins + custom override.
+        # Empty name → empty body → template omits the section.
+        personality_body = ""
+        if personality:
+            from opencomputer.agent import personality as _personality
+            resolved = _personality.resolve(
+                personality,
+                custom=custom_personalities or {},
+            )
+            personality_body = resolved.body
         ctx = PromptContext(
             cwd=os.getcwd(),
             user_home=str(Path.home()),
@@ -331,6 +342,7 @@ class PromptBuilder:
             yolo_mode=ctx.yolo_mode,
             permission_mode=ctx.permission_mode,
             personality=ctx.personality,
+            personality_body=personality_body,
             persona_overlay=ctx.persona_overlay,
             active_persona_id=ctx.active_persona_id,
             user_tone=ctx.user_tone,
