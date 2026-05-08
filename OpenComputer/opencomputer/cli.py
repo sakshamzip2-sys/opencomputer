@@ -988,6 +988,17 @@ def _run_chat_session(
     )
     DelegateTool.set_runtime(runtime)
 
+    # Wire the /background slash factory — same shape as the delegate
+    # factory but spawns a fresh AgentLoop per submitted job, ensuring
+    # "no shared history" between foreground and background turns.
+    from opencomputer.agent.background_jobs import (
+        get_default_registry as _bg_get_default_registry,
+    )
+
+    _bg_get_default_registry().set_factory(
+        lambda: AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
+    )
+
     # social-traces post-task subscriber (Phase 9 production wiring).
     # Opt-in via ``oc traces enable``; only wires when the on-disk
     # flag is set. Failure-isolated — chat must work even if the
@@ -2410,6 +2421,13 @@ def wire(
     loop = AgentLoop(provider=provider, config=cfg)
     DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
 
+    # Wire /background slash factory (parity with chat path).
+    from opencomputer.agent.background_jobs import (
+        get_default_registry as _bg_wire_registry,
+    )
+
+    _bg_wire_registry().set_factory(lambda: AgentLoop(provider=provider, config=cfg))
+
     server = WireServer(loop=loop, host=host, port=port)
     console.print(f"[bold cyan]OpenComputer wire server[/bold cyan] — ws://{host}:{port}")
     console.print(f"[dim]model: {cfg.model.model} ({cfg.model.provider})[/dim]")
@@ -2476,6 +2494,13 @@ def gateway(
     provider = _resolve_provider(cfg.model.provider)
     loop = AgentLoop(provider=provider, config=cfg)
     DelegateTool.set_factory(lambda: AgentLoop(provider=provider, config=cfg))
+
+    # Wire /background slash factory for the gateway daemon.
+    from opencomputer.agent.background_jobs import (
+        get_default_registry as _bg_gw_registry,
+    )
+
+    _bg_gw_registry().set_factory(lambda: AgentLoop(provider=provider, config=cfg))
 
     # Connect to MCP servers in the background (kimi-cli deferred pattern)
     mcp_mgr = MCPManager(tool_registry=registry)

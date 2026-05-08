@@ -37,6 +37,7 @@ from opencomputer.agent.slash_commands_impl.display_toggles_cmd import (
     StatusbarCommand,
     VerboseCommand,
 )
+from opencomputer.agent.slash_commands_impl.background_cmd import BackgroundCommand
 from opencomputer.agent.slash_commands_impl.fast_cmd import FastCommand
 from opencomputer.agent.slash_commands_impl.history_cmd import HistoryCommand
 from opencomputer.agent.slash_commands_impl.mode_cmd import ModeCommand
@@ -116,6 +117,9 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # 2026-05-06 — Phase 2 (S1 from OpenClaw deep-comparison) — inbound
     # queue mode override. /queue-mode [followup|interrupt|status].
     QueueModeCommand,
+    # 2026-05-08 — Hermes-parity /background <prompt>. Spawns isolated
+    # AgentLoop on a daemon thread, captures result for `/background show`.
+    BackgroundCommand,
     # 2026-05-03 — Phase 2 v0 outcome-aware learning policy commands.
     PolicyChangesCommand,
     PolicyApproveCommand,
