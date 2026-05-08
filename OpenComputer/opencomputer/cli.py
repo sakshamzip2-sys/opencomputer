@@ -3309,6 +3309,11 @@ from opencomputer.cli_honcho import honcho_app  # noqa: E402
 
 app.add_typer(honcho_app, name="honcho")
 
+# T8 — Hermes-doc parity: `oc auth` subcommand group (credential pools).
+from opencomputer.cli_auth import auth_app  # noqa: E402
+
+app.add_typer(auth_app, name="auth")
+
 # 2026-04-28 — `oc help tour` opt-in guided walkthrough
 from opencomputer.cli_help import help_app  # noqa: E402
 
