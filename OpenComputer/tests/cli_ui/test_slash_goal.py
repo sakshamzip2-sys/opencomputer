@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ class _StubConfig:
 
 def _make_ctx(
     tmp_path: Path, *, running: bool = False,
-) -> tuple[SlashContext, str, SessionDB, "io.StringIO"]:
+) -> tuple[SlashContext, str, SessionDB, io.StringIO]:
     """Build a slash context. Returns the ``io.StringIO`` buffer too so
     tests that need to inspect rendered output can read ``buf.getvalue()``.
     """
@@ -39,7 +40,6 @@ def _make_ctx(
     sid = str(uuid.uuid4())
     db.create_session(sid, platform="cli")
     cfg = _StubConfig(session=_StubSessionConfig(db_path=db_path))
-    import io
     buf = io.StringIO()
     ctx = SlashContext(
         console=Console(file=buf, width=120, force_terminal=False),
@@ -144,16 +144,21 @@ def test_v2_status_omits_reason_when_unset(tmp_path: Path):
     assert "last judge" not in out
 
 
+def _reset(buf: io.StringIO) -> None:
+    buf.truncate(0)
+    buf.seek(0)
+
+
 def test_v2_pause_resume_clear_use_icons(tmp_path: Path):
     ctx, sid, db, buf = _make_ctx(tmp_path)
     _handle_goal(ctx, ["x"])
-    buf.truncate(0); buf.seek(0)
+    _reset(buf)
     _handle_goal(ctx, ["pause"])
     assert "⏸" in buf.getvalue()
-    buf.truncate(0); buf.seek(0)
+    _reset(buf)
     _handle_goal(ctx, ["resume"])
     assert "↻" in buf.getvalue()
-    buf.truncate(0); buf.seek(0)
+    _reset(buf)
     _handle_goal(ctx, ["clear"])
     assert "✗" in buf.getvalue()
 
