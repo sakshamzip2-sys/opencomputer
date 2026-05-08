@@ -193,6 +193,12 @@ class HonchoSelfHostedProvider(MemoryProvider):
                             "default": 800,
                             "maximum": 2000,
                         },
+                        # T67 — Honcho-doc identity tag scopes the
+                        # search to a particular user identity.
+                        "identity": {
+                            "type": "string",
+                            "description": "Optional identity tag (e.g. email).",
+                        },
                     },
                     "required": ["query"],
                 },
@@ -219,6 +225,25 @@ class HonchoSelfHostedProvider(MemoryProvider):
                     "properties": {
                         "query": {"type": "string"},
                         "peer": {"type": "string", "default": "user"},
+                        # T65 — multi-pass dialectic reasoning. Each
+                        # pass refines the answer against the previous.
+                        # Capped at 5 to bound cost.
+                        "dialectic_depth": {
+                            "type": "integer",
+                            "default": 1,
+                            "minimum": 1,
+                            "maximum": 5,
+                        },
+                        # T67 — request shape uplift.
+                        "mode": {
+                            "type": "string",
+                            "description": "Reasoning mode hint (e.g. concise, deep).",
+                        },
+                        "max_tokens": {
+                            "type": "integer",
+                            "default": 800,
+                            "maximum": 2000,
+                        },
                     },
                     "required": ["query"],
                 },
@@ -231,6 +256,14 @@ class HonchoSelfHostedProvider(MemoryProvider):
                     "properties": {
                         "fact": {"type": "string"},
                         "peer": {"type": "string", "default": "user"},
+                        # T66 — observation provenance: explicit (user
+                        # said it), inferred (deduced from behavior),
+                        # hypothetical (best-guess for testing).
+                        "observation_mode": {
+                            "type": "string",
+                            "enum": ["explicit", "inferred", "hypothetical"],
+                            "default": "explicit",
+                        },
                     },
                     "required": ["fact"],
                 },
@@ -416,16 +449,19 @@ class HonchoSelfHostedProvider(MemoryProvider):
         return _as_text(resp.json())
 
     async def _search(self, args: dict[str, Any]) -> str:
-        resp = await self._client.post(
-            "/v1/search",
-            json={
-                "workspace": self._config.workspace,
-                "host_key": self._config.host_key,
-                "peer": str(args.get("peer", "user")),
-                "query": str(args["query"]),
-                "max_tokens": int(args.get("max_tokens", 800)),
-            },
-        )
+        body: dict[str, Any] = {
+            "workspace": self._config.workspace,
+            "host_key": self._config.host_key,
+            "peer": str(args.get("peer", "user")),
+            "query": str(args["query"]),
+            "max_tokens": int(args.get("max_tokens", 800)),
+        }
+        # T67 — optional identity scope. Forwarded only when set so
+        # older Honcho servers that don't recognize it stay happy.
+        identity = args.get("identity")
+        if identity:
+            body["identity"] = str(identity)
+        resp = await self._client.post("/v1/search", json=body)
         resp.raise_for_status()
         return _as_text(resp.json())
 
@@ -442,19 +478,43 @@ class HonchoSelfHostedProvider(MemoryProvider):
         return _as_text(resp.json())
 
     async def _reasoning(self, args: dict[str, Any]) -> str:
-        resp = await self._client.post(
-            "/v1/chat",
-            json={
-                "workspace": self._config.workspace,
-                "host_key": self._config.host_key,
-                "peer": str(args.get("peer", "user")),
-                "query": str(args["query"]),
-            },
-        )
+        # T65 — clamp dialectic_depth to [1, 5]. Out-of-range values
+        # silently snap to the cap so a misbehaving caller can't
+        # drive multi-pass reasoning into runaway cost.
+        try:
+            depth_raw = int(args.get("dialectic_depth", 1))
+        except (TypeError, ValueError):
+            depth_raw = 1
+        dialectic_depth = max(1, min(5, depth_raw))
+
+        body: dict[str, Any] = {
+            "workspace": self._config.workspace,
+            "host_key": self._config.host_key,
+            "peer": str(args.get("peer", "user")),
+            "query": str(args["query"]),
+            "dialectic_depth": dialectic_depth,
+        }
+        # T67 — optional mode + tokens forwarded only when set.
+        if args.get("mode"):
+            body["mode"] = str(args["mode"])
+        if args.get("max_tokens") is not None:
+            try:
+                body["max_tokens"] = int(args["max_tokens"])
+            except (TypeError, ValueError):
+                pass
+        resp = await self._client.post("/v1/chat", json=body)
         resp.raise_for_status()
         return _as_text(resp.json())
 
     async def _conclude(self, args: dict[str, Any]) -> str:
+        # T66 — observation_mode: explicit (default) | inferred |
+        # hypothetical. Unknown values fall back to explicit so the
+        # downstream Honcho server always sees a known enum value.
+        _OBS_MODES = {"explicit", "inferred", "hypothetical"}
+        mode = str(args.get("observation_mode", "explicit"))
+        if mode not in _OBS_MODES:
+            mode = "explicit"
+
         resp = await self._client.post(
             "/v1/conclude",
             json={
@@ -462,6 +522,7 @@ class HonchoSelfHostedProvider(MemoryProvider):
                 "host_key": self._config.host_key,
                 "peer": str(args.get("peer", "user")),
                 "fact": str(args["fact"]),
+                "observation_mode": mode,
             },
         )
         resp.raise_for_status()

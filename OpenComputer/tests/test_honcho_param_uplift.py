@@ -7,21 +7,42 @@ T67: peer override, mode, tokens, identity rounded out across tools.
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from extensions.memory_honcho.provider import HonchoConfig, HonchoSelfHostedProvider
 from plugin_sdk.core import ToolCall
 
 
+def _load_provider_mod():
+    if "memory_honcho_provider_test" in sys.modules:
+        return sys.modules["memory_honcho_provider_test"]
+    spec_path = (
+        Path(__file__).parent.parent
+        / "extensions"
+        / "memory-honcho"
+        / "provider.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "memory_honcho_provider_test", spec_path
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["memory_honcho_provider_test"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _provider_with_mock():
-    cfg = HonchoConfig(
+    mod = _load_provider_mod()
+    cfg = mod.HonchoConfig(
         workspace="ws-test",
         host_key="host-test",
         base_url="http://x",
     )
-    p = HonchoSelfHostedProvider(cfg)
+    p = mod.HonchoSelfHostedProvider(cfg)
     fake = MagicMock()
     fake.is_closed = False
     fake.get = AsyncMock(return_value=MagicMock(json=lambda: {"context": "ok"}, raise_for_status=lambda: None))
