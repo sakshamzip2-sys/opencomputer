@@ -1,0 +1,46 @@
+name: default
+description: Default OpenComputer skin — gold accents, kawaii spinner verbs.
+
+colors:
+  banner_border:    "#D4AF37"
+  banner_title:     "#FFD700"
+  banner_accent:    "#B8860B"
+  prompt:           "#A0E0FF"
+  user_text:        "#FFFFFF"
+  agent_text:       "#FFE08A"
+  agent_label:      "#D4AF37"
+  tool_label:       "#88C0D0"
+  tool_output:      "#A3BE8C"
+  error:            "#BF616A"
+  warning:          "#EBCB8B"
+  info:             "#81A1C1"
+  dim:              "#6E7B8B"
+  status_bar_bg:    "#2E3440"
+  status_bar_fg:    "#ECEFF4"
+
+spinner:
+  thinking_verbs:
+    - thinking
+    - pondering
+    - musing
+    - cogitating
+  wings:
+    - ["⟨✦", "✦⟩"]
+    - ["⟨✿", "✿⟩"]
+
+branding:
+  agent_name: "OpenComputer"
+  response_label: " ✦ OC "
+  prompt_symbol: ">"
+
+banner_logo: ""
+banner_hero: ""
+
+tool_prefix: "┊"
+tool_emojis:
+  Read: "📖"
+  Write: "📝"
+  Edit: "✏"
+  Bash: "⚙"
+  WebFetch: "🌐"
+  WebSearch: "🔎"

@@ -62,6 +62,30 @@ from plugin_sdk.tool_matcher import parse as _parse_pattern
 _log = logging.getLogger("opencomputer.agent.loop")
 
 
+def _load_custom_personalities() -> dict[str, str]:
+    """Read ``agent.personalities`` from the active profile config.
+
+    Returns ``{}`` on any error so an unparseable config never breaks
+    the prompt build. Called once per ``build()`` invocation; PyYAML
+    loads from disk are sub-millisecond on the small profile config so
+    no caching is needed.
+    """
+    try:
+        from pathlib import Path
+
+        from opencomputer.agent.profile_yaml import get_custom_personalities
+
+        home = os.environ.get(
+            "OPENCOMPUTER_HOME",
+            str(Path.home() / ".opencomputer"),
+        )
+        profile = os.environ.get("OPENCOMPUTER_PROFILE", "default")
+        return get_custom_personalities(Path(home) / profile / "config.yaml")
+    except Exception as exc:  # noqa: BLE001 — never break prompt build
+        _log.debug("loop: failed to load custom personalities — %s", exc)
+        return {}
+
+
 class LoopTimeout(Exception):  # noqa: N818 — public name is the load-bearing one (no Error suffix per project style)
     """Base class for agent-loop wall-clock timeout exceptions.
 
@@ -1171,6 +1195,7 @@ class AgentLoop:
                         self._runtime.custom.get("personality", "")
                         if self._runtime else ""
                     ),
+                    custom_personalities=_load_custom_personalities(),
                     persona_overlay=persona_overlay,
                     active_persona_id=self._active_persona_id,
                     user_tone=user_tone,

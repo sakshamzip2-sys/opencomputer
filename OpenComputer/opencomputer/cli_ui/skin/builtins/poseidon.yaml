@@ -1,0 +1,19 @@
+name: poseidon
+description: Deep blue + seafoam, trident register.
+
+colors:
+  banner_border:    "#0C4A6E"
+  banner_title:     "#0EA5E9"
+  banner_accent:    "#67E8F9"
+  prompt:           "#7DD3FC"
+  agent_text:       "#CFFAFE"
+  agent_label:      "#0EA5E9"
+
+spinner:
+  thinking_verbs: [diving, surfacing, currents-checking, depth-sounding]
+  wings: [["≈", "≈"], ["⟆", "⟇"]]
+
+branding:
+  agent_name: "Poseidon"
+  response_label: " 🔱 Poseidon "
+  prompt_symbol: "🔱"

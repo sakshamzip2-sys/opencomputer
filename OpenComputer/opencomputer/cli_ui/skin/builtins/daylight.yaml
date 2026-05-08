@@ -1,0 +1,28 @@
+name: daylight
+description: Light theme — for bright terminals.
+
+colors:
+  banner_border:    "#404040"
+  banner_title:     "#1F2937"
+  banner_accent:    "#4B5563"
+  prompt:           "#1F2937"
+  user_text:        "#000000"
+  agent_text:       "#1F2937"
+  agent_label:      "#7C3AED"
+  tool_label:       "#0369A1"
+  tool_output:      "#166534"
+  error:            "#991B1B"
+  warning:          "#92400E"
+  info:             "#1E40AF"
+  dim:              "#9CA3AF"
+  status_bar_bg:    "#F3F4F6"
+  status_bar_fg:    "#1F2937"
+
+spinner:
+  thinking_verbs: [thinking, working]
+  wings: [["·", "·"]]
+
+branding:
+  agent_name: "OpenComputer"
+  response_label: " ✦ OC "
+  prompt_symbol: ">"

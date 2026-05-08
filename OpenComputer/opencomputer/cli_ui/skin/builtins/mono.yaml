@@ -1,0 +1,28 @@
+name: mono
+description: Grayscale, no color — terminals that hate ANSI.
+
+colors:
+  banner_border:    "#FFFFFF"
+  banner_title:     "#FFFFFF"
+  banner_accent:    "#A0A0A0"
+  prompt:           "#FFFFFF"
+  user_text:        "#FFFFFF"
+  agent_text:       "#FFFFFF"
+  agent_label:      "#FFFFFF"
+  tool_label:       "#FFFFFF"
+  tool_output:      "#FFFFFF"
+  error:            "#FFFFFF"
+  warning:          "#FFFFFF"
+  info:             "#FFFFFF"
+  dim:              "#808080"
+  status_bar_bg:    "#000000"
+  status_bar_fg:    "#FFFFFF"
+
+spinner:
+  thinking_verbs: [thinking, working, processing]
+  wings: [[">", "<"]]
+
+branding:
+  agent_name: "OpenComputer"
+  response_label: " > OC "
+  prompt_symbol: ">"

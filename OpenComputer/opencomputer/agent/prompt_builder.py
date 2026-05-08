@@ -288,6 +288,7 @@ class PromptBuilder:
         yolo_mode: bool = False,
         permission_mode: str = "default",
         personality: str = "",
+        custom_personalities: dict[str, str] | None = None,
         persona_overlay: str = "",
         active_persona_id: str = "",
         user_tone: str = "",
@@ -295,6 +296,32 @@ class PromptBuilder:
     ) -> str:
         memory = _truncate_from_top(declarative_memory, memory_char_limit)
         profile = _truncate_from_top(user_profile, user_char_limit)
+        # Resolve personality NAME → BODY. OC design (preserves prior
+        # contract from PR-5):
+        #   * empty / unset       → no overlay
+        #   * "helpful" baseline  → no overlay (the default register
+        #                           lives in the base prompt itself;
+        #                           naming it doesn't add a directive)
+        #   * unknown name        → no overlay (typos no-op, do not
+        #                           silently fall back to a different
+        #                           register)
+        #   * custom override     → custom body (always wins, including
+        #                           overriding the helpful baseline)
+        #   * non-helpful builtin → built-in body
+        personality_body = ""
+        if personality:
+            requested = personality.strip().lower()
+            custom_dict = custom_personalities or {}
+            custom_body = custom_dict.get(requested)
+            if (
+                isinstance(custom_body, str)
+                and custom_body.strip()
+            ):
+                personality_body = custom_body.strip()
+            elif requested != "helpful":
+                from opencomputer.agent.personality.builtins import BUILTINS
+                if requested in BUILTINS:
+                    personality_body = BUILTINS[requested]
         ctx = PromptContext(
             cwd=os.getcwd(),
             user_home=str(Path.home()),
@@ -331,6 +358,7 @@ class PromptBuilder:
             yolo_mode=ctx.yolo_mode,
             permission_mode=ctx.permission_mode,
             personality=ctx.personality,
+            personality_body=personality_body,
             persona_overlay=ctx.persona_overlay,
             active_persona_id=ctx.active_persona_id,
             user_tone=ctx.user_tone,
@@ -431,6 +459,7 @@ class PromptBuilder:
         yolo_mode: bool = False,
         permission_mode: str = "default",
         personality: str = "",
+        custom_personalities: dict[str, str] | None = None,
         persona_overlay: str = "",
         active_persona_id: str = "",
         user_tone: str = "",
@@ -463,6 +492,7 @@ class PromptBuilder:
             yolo_mode=yolo_mode,
             permission_mode=permission_mode,
             personality=personality,
+            custom_personalities=custom_personalities,
             persona_overlay=persona_overlay,
             active_persona_id=active_persona_id,
             user_tone=user_tone,

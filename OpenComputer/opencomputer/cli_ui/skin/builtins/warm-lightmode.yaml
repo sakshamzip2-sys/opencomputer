@@ -1,0 +1,28 @@
+name: warm-lightmode
+description: Warm parchment — light terminals, easy on eyes.
+
+colors:
+  banner_border:    "#92400E"
+  banner_title:     "#78350F"
+  banner_accent:    "#B45309"
+  prompt:           "#7C2D12"
+  user_text:        "#1C1917"
+  agent_text:       "#44403C"
+  agent_label:      "#92400E"
+  tool_label:       "#9A3412"
+  tool_output:      "#3F6212"
+  error:            "#991B1B"
+  warning:          "#854D0E"
+  info:             "#3730A3"
+  dim:              "#A8A29E"
+  status_bar_bg:    "#FEF3C7"
+  status_bar_fg:    "#78350F"
+
+spinner:
+  thinking_verbs: [contemplating, brewing, settling]
+  wings: [["~", "~"]]
+
+branding:
+  agent_name: "OpenComputer"
+  response_label: " ☀ OC "
+  prompt_symbol: ">"
