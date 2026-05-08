@@ -89,6 +89,24 @@ def build_server() -> FastMCP:
         db = SessionDB(_home() / "sessions.db")
         return db.list_sessions(limit=bounded)
 
+    # G12 (Hermes parity, 2026-05-09): spec-named aliases. Same body,
+    # second tool name. FastMCP keys the registry on tool name so
+    # registering ``conversations_list`` next to ``sessions_list`` adds
+    # a second registration that delegates to the same body — no
+    # collision because each is a unique tool name.
+    @server.tool()
+    def conversations_list(limit: int = 20) -> list[dict[str, Any]]:
+        """Hermes-spec alias for ``sessions_list`` (G12 — 2026-05-09)."""
+        bounded = max(1, min(limit, 200))
+        db = SessionDB(_home() / "sessions.db")
+        return db.list_sessions(limit=bounded)
+
+    @server.tool()
+    def conversation_get(session_id: str) -> dict[str, Any] | None:
+        """Hermes-spec alias for ``session_get`` (G12 — 2026-05-09)."""
+        db = SessionDB(_home() / "sessions.db")
+        return db.get_session(session_id)
+
     @server.tool()
     def session_get(session_id: str) -> dict[str, Any] | None:
         """Get one session's metadata by id.
