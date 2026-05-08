@@ -322,6 +322,10 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
             entry["timeout_seconds"] = h.timeout_seconds
             hooks_by_event.setdefault(h.event, []).append(entry)
         result["hooks"] = hooks_by_event
+    # T6 — Hermes-doc credential_pool_strategies. Only emit when
+    # non-empty so default configs stay tidy.
+    if getattr(cfg, "credential_pool_strategies", None):
+        result["credential_pool_strategies"] = dict(cfg.credential_pool_strategies)
     return result
 
 
