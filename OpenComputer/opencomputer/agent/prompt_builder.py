@@ -30,9 +30,21 @@ _TRUNCATION_MARKER = "[earlier entries truncated]\n\n"
 
 #: V3.A-T8 — per-file size cap for workspace context loader. Keeps the
 #: prefix prompt bounded if a project ships a 10MB CLAUDE.md. Truncated
-#: files get a marker so the agent knows what happened.
+#: files get a marker so the agent knows what happened and how to recover.
 _WORKSPACE_FILE_CAP_BYTES = 100_000
-_WORKSPACE_TRUNCATION_NOTE = "\n\n[truncated — file exceeded 100KB cap]\n"
+
+
+def _format_truncation_note(name: str, kept: int, total: int) -> str:
+    """Return the marker appended to a truncated workspace-context file.
+
+    Tells the agent what got kept and how to recover the rest. Format
+    intentionally mirrors Hermes v2 — the file-tools hint is what makes
+    truncation actionable instead of a dead end. (Hermes v2 parity, gap C.)
+    """
+    return (
+        f"\n\n[...truncated {name}: kept first {kept:,} chars of "
+        f"{total:,} total. Use file tools to read the full file.]\n"
+    )
 
 
 def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> str:
@@ -66,7 +78,11 @@ def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> 
     # Files to check, in priority order. We collect ALL that exist, not
     # just the highest-priority one — multiple files may coexist (e.g.
     # both CLAUDE.md and AGENTS.md in the same repo).
-    target_names = ("OPENCOMPUTER.md", "CLAUDE.md", "AGENTS.md")
+    # Hermes v2 parity, gap B (2026-05-08): `.cursorrules` is the
+    # Cursor IDE convention; subdir hints already scan it, and now the
+    # startup loader does too. Last-priority — explicit OC files come
+    # first when they exist alongside.
+    target_names = ("OPENCOMPUTER.md", "CLAUDE.md", "AGENTS.md", ".cursorrules")
 
     found: list[tuple[str, str]] = []
     seen_paths: set[Path] = set()
@@ -93,7 +109,10 @@ def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> 
                 continue
             seen_paths.add(resolved)
             if len(content) > _WORKSPACE_FILE_CAP_BYTES:
-                content = content[:_WORKSPACE_FILE_CAP_BYTES] + _WORKSPACE_TRUNCATION_NOTE
+                total = len(content)
+                content = content[:_WORKSPACE_FILE_CAP_BYTES] + _format_truncation_note(
+                    name, _WORKSPACE_FILE_CAP_BYTES, total
+                )
             found.append((name, content))
         if current.parent == current:
             break  # filesystem root reached
@@ -110,8 +129,14 @@ def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> 
 
 
 def _post_process_workspace_context(raw: str) -> str:
-    """Apply runtime redaction + prompt-injection scan to workspace
-    context before it enters the system prompt.
+    """Scrub secrets + quarantine prompt-injection in workspace context.
+
+    Thin shim over
+    :func:`opencomputer.security.context_scan.scan_workspace_context_content`
+    so the two callers (this startup loader and progressive
+    subdirectory-hint discovery in
+    :mod:`opencomputer.agent.subdirectory_hints`) share a single policy
+    and cannot drift.
 
     RR-3 (May-5): secrets in CLAUDE.md / AGENTS.md / OPENCOMPUTER.md
     must not ship to the LLM unredacted.
@@ -119,41 +144,11 @@ def _post_process_workspace_context(raw: str) -> str:
     instructions...") gets wrapped in a quarantine envelope so the
     model recognizes it as untrusted.
     """
-    # Lazy imports — keep prompt_builder lightweight if redaction is
-    # off (snapshot env var) or if the detector loads heavier patterns.
-    import logging
+    # Lazy import — preserves original module-load cost; no top-level
+    # cycle risk because context_scan does not import from prompt_builder.
+    from opencomputer.security.context_scan import scan_workspace_context_content
 
-    from opencomputer.security.instruction_detector import default_detector
-    from opencomputer.security.redact import redact_runtime_text_with_counts
-
-    redacted, counts = redact_runtime_text_with_counts(raw)
-    total = sum(counts.values())
-    if total > 0:
-        logging.getLogger(__name__).info(
-            "workspace_context: redacted %d secret/PII occurrence(s) before LLM",
-            total,
-        )
-
-    verdict = default_detector().detect(redacted)
-    if verdict.quarantine_recommended:
-        logging.getLogger(__name__).warning(
-            "workspace_context: prompt-injection signature detected (rules=%s, conf=%.2f)",
-            verdict.triggered_rules,
-            verdict.confidence,
-        )
-        warning_line = (
-            f"<!-- workspace-context-injection-warning rules="
-            f"{','.join(verdict.triggered_rules)} "
-            f"confidence={verdict.confidence:.2f} -->"
-        )
-        return (
-            f"{warning_line}\n"
-            "<quarantined-untrusted-content>\n"
-            f"{redacted}\n"
-            "</quarantined-untrusted-content>\n"
-        )
-
-    return redacted
+    return scan_workspace_context_content(raw, source="workspace_context")
 
 
 def _truncate_from_top(text: str, limit: int) -> str:

@@ -30,15 +30,17 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _scan_context_content(content: str, _filename: str) -> str:
-    """No-op security scan placeholder.
+def _scan_context_content(content: str, filename: str) -> str:
+    """Scrub secrets + quarantine prompt-injection in subdir-hint content.
 
-    Hermes runs prompt-injection scanning on workspace context content;
-    OC's V3.B MVP does not yet ship that scanner. Defining a no-op here
-    preserves the call site so a future security pass can swap in a real
-    implementation without touching this module's logic.
+    Delegates to the shared
+    :func:`opencomputer.security.context_scan.scan_workspace_context_content`
+    helper so subdirectory hints follow the same policy as the startup
+    workspace-context loader (Hermes v2 parity, gap A — 2026-05-08).
     """
-    return content
+    from opencomputer.security.context_scan import scan_workspace_context_content
+
+    return scan_workspace_context_content(content, source=filename)
 
 
 # Context files to look for in subdirectories, in priority order.
