@@ -404,6 +404,32 @@ class Gateway:
             name="gateway-fatal-error-supervisor",
         )
 
+        # 2026-05-08 — Hermes Doc-2 parity: discover ~/.opencomputer/hooks
+        # filesystem hooks + fire ``gateway:startup``. This is the third
+        # hook surface (alongside plugin hooks + shell hooks). Failure
+        # isolated — a broken HOOK.yaml/handler.py never blocks boot.
+        try:
+            from opencomputer.gateway.boot_md import register_boot_md_hook
+            from opencomputer.gateway.event_hooks import (
+                GATEWAY_STARTUP as _GW_STARTUP,
+            )
+            from opencomputer.gateway.event_hooks import (
+                engine as _gw_hooks_engine,
+            )
+
+            _gw_hooks_engine.reload()
+            register_boot_md_hook(_gw_hooks_engine)
+            await _gw_hooks_engine.fire(
+                _GW_STARTUP,
+                {
+                    "platforms": [a.platform.value for a in self._adapters],
+                },
+            )
+        except Exception:  # noqa: BLE001 — boot must not fail on hooks
+            logger.warning(
+                "gateway hooks discovery / fire failed", exc_info=True,
+            )
+
         # Startup ping (the OpenClaw "back online" magic message).
         # Opt-in via gateway.startup_ping_chats. Fires once after every
         # adapter has had a chance to connect. Fail-open — a flaky
