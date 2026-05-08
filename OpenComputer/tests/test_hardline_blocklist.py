@@ -5,7 +5,6 @@ import asyncio
 
 from opencomputer.security.hardline import HARDLINE_PATTERNS, check_command
 
-
 # ── Pattern coverage ───────────────────────────────────────────────────
 
 
@@ -28,7 +27,8 @@ def test_check_command_blocks_rm_rf_root_glob():
     assert hit.pattern_id == "rm_rf_root"
 
 
-def test_check_command_blocks_rm_rf_root_capital_R():
+def test_check_command_blocks_rm_rf_root_capital_r_flag():
+    # Capital -R variant — same regex must catch it.
     hit = check_command("rm -Rf /")
     assert hit is not None
     assert hit.pattern_id == "rm_rf_root"

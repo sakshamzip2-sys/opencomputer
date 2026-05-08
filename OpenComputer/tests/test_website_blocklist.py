@@ -14,7 +14,6 @@ from opencomputer.security.website_blocklist import (
     parse_rules,
 )
 
-
 # ── Matcher coverage ──────────────────────────────────────────────────
 
 
