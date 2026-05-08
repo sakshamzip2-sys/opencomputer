@@ -33,18 +33,59 @@ _TRUNCATION_MARKER = "[earlier entries truncated]\n\n"
 #: files get a marker so the agent knows what happened and how to recover.
 _WORKSPACE_FILE_CAP_BYTES = 100_000
 
+#: Hermes v2 head/tail/marker split. Head 70% + tail 20% + marker 10%
+#: gives the agent both the *intro* of the file (typical project / repo
+#: layout / overview) and the *closing sections* (usage examples,
+#: footers, recent additions) — head-only truncation systematically lost
+#: the closing material, which often carries the most-recent
+#: conventions in long-lived workspace docs.
+_TRUNCATION_HEAD_FRAC = 0.70
+_TRUNCATION_TAIL_FRAC = 0.20
+# Marker reserves the remaining 10% so head+tail+marker fits within the
+# cap. The marker text itself is much shorter than 10K bytes; the slack
+# accommodates UTF-8 multi-byte boundary safety + a small comfort margin.
 
-def _format_truncation_note(name: str, kept: int, total: int) -> str:
-    """Return the marker appended to a truncated workspace-context file.
 
-    Tells the agent what got kept and how to recover the rest. Format
-    intentionally mirrors Hermes v2 — the file-tools hint is what makes
-    truncation actionable instead of a dead end. (Hermes v2 parity, gap C.)
+def _format_truncation_note(name: str, kept_head: int, kept_tail: int, total: int) -> str:
+    """Marker injected between head and tail of a truncated workspace file.
+
+    Format mirrors the Hermes v2 spec example:
+    ``[...truncated AGENTS.md: kept 14000+4000 of 25000 chars. Use file
+    tools to read the full file.]``
+
+    The ``head+tail`` notation tells the agent both segments are present
+    so it doesn't waste tool calls trying to reconstruct material that's
+    already in context — only the gap between them is missing.
     """
     return (
-        f"\n\n[...truncated {name}: kept first {kept:,} chars of "
-        f"{total:,} total. Use file tools to read the full file.]\n"
+        f"\n\n[...truncated {name}: kept {kept_head:,}+{kept_tail:,} of "
+        f"{total:,} chars. Use file tools to read the full file.]\n\n"
     )
+
+
+def _truncate_head_tail(content: str, *, name: str, cap: int) -> str:
+    """Apply Hermes v2 head/tail/marker truncation.
+
+    Returns the original ``content`` unchanged if it fits within ``cap``.
+    Otherwise keeps the first ``cap * 0.70`` chars + the last
+    ``cap * 0.20`` chars with a marker between them showing what was
+    kept and the original total.
+
+    The boundary handling: if the head end or tail start lands inside a
+    multi-byte UTF-8 sequence Python's slice produces a malformed
+    surrogate. We slice on str (chars), not bytes, so this is a non-issue
+    in practice — Python strings are unicode-clean. The 10% marker
+    budget covers any small marker-overshoot.
+    """
+    total = len(content)
+    if total <= cap:
+        return content
+    head_size = int(cap * _TRUNCATION_HEAD_FRAC)
+    tail_size = int(cap * _TRUNCATION_TAIL_FRAC)
+    head = content[:head_size]
+    tail = content[-tail_size:]
+    marker = _format_truncation_note(name, head_size, tail_size, total)
+    return head + marker + tail
 
 
 def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> str:
@@ -108,11 +149,9 @@ def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> 
             except OSError:
                 continue
             seen_paths.add(resolved)
-            if len(content) > _WORKSPACE_FILE_CAP_BYTES:
-                total = len(content)
-                content = content[:_WORKSPACE_FILE_CAP_BYTES] + _format_truncation_note(
-                    name, _WORKSPACE_FILE_CAP_BYTES, total
-                )
+            content = _truncate_head_tail(
+                content, name=name, cap=_WORKSPACE_FILE_CAP_BYTES
+            )
             found.append((name, content))
         if current.parent == current:
             break  # filesystem root reached
