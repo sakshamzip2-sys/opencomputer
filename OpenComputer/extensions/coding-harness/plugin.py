@@ -137,7 +137,29 @@ def register(api) -> None:  # PluginAPI duck-typed
     # PR-3 (2026-04-29): auto-approve Edit/Write/MultiEdit/NotebookEdit when
     # effective mode is ACCEPT_EDITS. Bash and network still prompt.
     api.register_hook(build_accept_edits_hook_spec())
-    api.register_hook(build_auto_checkpoint_hook_spec(harness_ctx=ctx))
+    # 2026-05-08: pull CheckpointsConfig values here (plugin.py is allowed
+    # to import from opencomputer.*) and pass them as a dict to the hook
+    # — the hook itself MUST NOT cross the extension-boundary.
+    _cp_cfg: dict | None = None
+    try:
+        from opencomputer.agent.config import default_config
+
+        _cp = default_config().checkpoints
+        _cp_cfg = {
+            "enabled": _cp.enabled,
+            "auto_prune": _cp.auto_prune,
+            "min_interval_hours": _cp.min_interval_hours,
+            "max_snapshots": _cp.max_snapshots,
+            "max_total_size_mb": _cp.max_total_size_mb,
+            "max_file_size_mb": _cp.max_file_size_mb,
+            "retention_days": _cp.retention_days,
+            "delete_orphans": _cp.delete_orphans,
+        }
+    except Exception:  # noqa: BLE001 — defaults baked into the hook
+        _cp_cfg = None
+    api.register_hook(
+        build_auto_checkpoint_hook_spec(harness_ctx=ctx, config=_cp_cfg)
+    )
     api.register_hook(build_post_edit_review_hook_spec(harness_ctx=ctx))
     api.register_hook(build_session_bootstrap_hook_spec(harness_ctx=ctx))
     api.register_hook(build_cleanup_session_hook_spec())

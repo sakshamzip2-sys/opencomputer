@@ -31,33 +31,31 @@ def _extract_candidate_path(args: dict) -> str | None:
     return None
 
 
-def _config_or_defaults() -> dict:
-    """Read ``CheckpointsConfig`` defaults if available, otherwise return safe values."""
-    try:
-        from opencomputer.agent.config import default_config
+_DEFAULT_CFG: dict = {
+    "enabled": True,
+    "auto_prune": True,
+    "min_interval_hours": 24,
+    "max_snapshots": 50,
+    "max_total_size_mb": 1000,
+    "max_file_size_mb": 50,
+    "retention_days": 30,
+    "delete_orphans": True,
+}
 
-        cp = default_config().checkpoints
-        return {
-            "enabled": cp.enabled,
-            "auto_prune": cp.auto_prune,
-            "min_interval_hours": cp.min_interval_hours,
-            "max_snapshots": cp.max_snapshots,
-            "max_total_size_mb": cp.max_total_size_mb,
-            "max_file_size_mb": cp.max_file_size_mb,
-            "retention_days": cp.retention_days,
-            "delete_orphans": cp.delete_orphans,
-        }
-    except Exception:  # noqa: BLE001
-        return {
-            "enabled": True,
-            "auto_prune": True,
-            "min_interval_hours": 24,
-            "max_snapshots": 50,
-            "max_total_size_mb": 1000,
-            "max_file_size_mb": 50,
-            "retention_days": 30,
-            "delete_orphans": True,
-        }
+
+def _resolve_cfg(override: dict | None) -> dict:
+    """Merge caller-supplied config (from plugin.py) with safe defaults.
+
+    The hook itself MUST NOT import from ``opencomputer.*`` (extension
+    boundary rule). The plugin.py — which IS allowed to cross the
+    boundary — reads ``Config.checkpoints`` and passes a dict through
+    to :func:`build_auto_checkpoint_hook_spec`.
+    """
+    if not override:
+        return dict(_DEFAULT_CFG)
+    cfg = dict(_DEFAULT_CFG)
+    cfg.update({k: v for k, v in override.items() if k in _DEFAULT_CFG})
+    return cfg
 
 
 async def _background_prune(store, cfg: dict) -> None:
@@ -85,8 +83,17 @@ async def _background_prune(store, cfg: dict) -> None:
         store.mark_prune_finished(success=success)
 
 
-def build_auto_checkpoint_hook_spec(*, harness_ctx) -> HookSpec:
-    cfg = _config_or_defaults()
+def build_auto_checkpoint_hook_spec(*, harness_ctx, config: dict | None = None) -> HookSpec:
+    """Build the PreToolUse hook spec.
+
+    Args:
+        harness_ctx: shared HarnessContext (rewind_store, session_state).
+        config: optional dict of CheckpointsConfig values. The hook
+            cannot import from ``opencomputer.*`` (extension boundary
+            rule), so the plugin's ``register()`` resolves
+            ``default_config().checkpoints`` and passes it in.
+    """
+    cfg = _resolve_cfg(config)
 
     async def handler(ctx: HookContext) -> HookDecision | None:
         if ctx.tool_call is None:
