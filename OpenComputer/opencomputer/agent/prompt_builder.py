@@ -110,8 +110,14 @@ def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> 
 
 
 def _post_process_workspace_context(raw: str) -> str:
-    """Apply runtime redaction + prompt-injection scan to workspace
-    context before it enters the system prompt.
+    """Scrub secrets + quarantine prompt-injection in workspace context.
+
+    Thin shim over
+    :func:`opencomputer.security.context_scan.scan_workspace_context_content`
+    so the two callers (this startup loader and progressive
+    subdirectory-hint discovery in
+    :mod:`opencomputer.agent.subdirectory_hints`) share a single policy
+    and cannot drift.
 
     RR-3 (May-5): secrets in CLAUDE.md / AGENTS.md / OPENCOMPUTER.md
     must not ship to the LLM unredacted.
@@ -119,41 +125,11 @@ def _post_process_workspace_context(raw: str) -> str:
     instructions...") gets wrapped in a quarantine envelope so the
     model recognizes it as untrusted.
     """
-    # Lazy imports — keep prompt_builder lightweight if redaction is
-    # off (snapshot env var) or if the detector loads heavier patterns.
-    import logging
+    # Lazy import — preserves original module-load cost; no top-level
+    # cycle risk because context_scan does not import from prompt_builder.
+    from opencomputer.security.context_scan import scan_workspace_context_content
 
-    from opencomputer.security.instruction_detector import default_detector
-    from opencomputer.security.redact import redact_runtime_text_with_counts
-
-    redacted, counts = redact_runtime_text_with_counts(raw)
-    total = sum(counts.values())
-    if total > 0:
-        logging.getLogger(__name__).info(
-            "workspace_context: redacted %d secret/PII occurrence(s) before LLM",
-            total,
-        )
-
-    verdict = default_detector().detect(redacted)
-    if verdict.quarantine_recommended:
-        logging.getLogger(__name__).warning(
-            "workspace_context: prompt-injection signature detected (rules=%s, conf=%.2f)",
-            verdict.triggered_rules,
-            verdict.confidence,
-        )
-        warning_line = (
-            f"<!-- workspace-context-injection-warning rules="
-            f"{','.join(verdict.triggered_rules)} "
-            f"confidence={verdict.confidence:.2f} -->"
-        )
-        return (
-            f"{warning_line}\n"
-            "<quarantined-untrusted-content>\n"
-            f"{redacted}\n"
-            "</quarantined-untrusted-content>\n"
-        )
-
-    return redacted
+    return scan_workspace_context_content(raw, source="workspace_context")
 
 
 def _truncate_from_top(text: str, limit: int) -> str:
