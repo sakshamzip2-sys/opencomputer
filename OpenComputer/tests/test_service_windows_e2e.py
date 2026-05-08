@@ -119,10 +119,20 @@ def test_real_install_uninstall_via_backend(
         pytest.skip("schtasks.exe not on PATH — likely not a Windows env")
 
     # Override the task name so we don't touch a real OpenComputerGateway
-    # install. The test isolates by patching _TASK_NAME in the module.
+    # install. PR #488 (multi-install hashing) replaced the static
+    # _TASK_NAME constant with a _task_name(profile) helper; patch that
+    # to return the test-isolated name unconditionally.
     from opencomputer.service import _windows_schtasks
 
-    monkeypatch.setattr(_windows_schtasks, "_TASK_NAME", _TASK_NAME)
+    monkeypatch.setattr(
+        _windows_schtasks, "_task_name", lambda *a, **kw: _TASK_NAME
+    )
+    # The XML filename uses _task_name() too — make sure it lines up.
+    monkeypatch.setattr(
+        _windows_schtasks,
+        "_xml_filename",
+        lambda *a, **kw: f"{_TASK_NAME}.xml",
+    )
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr(
         _windows_schtasks, "_resolve_executable",
