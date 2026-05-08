@@ -557,6 +557,14 @@ class MCPServerConfig:
     #: Wave 3 (2026-05-08) — per-server tool blacklist. Applied AFTER
     #: ``tools_allow``. Default empty tuple = no exclusions.
     tools_deny: tuple[str, ...] = ()
+    #: Hermes parity G9 (2026-05-09) — suppress per-server MCP prompt
+    #: utility tools (``<server>__list_prompts`` / ``__get_prompt``).
+    #: Default ``True`` keeps every utility tool the server publishes;
+    #: setting ``False`` drops just the prompt utility tools.
+    prompts_enabled: bool = True
+    #: Hermes parity G9 (2026-05-09) — suppress per-server MCP resource
+    #: utility tools (``<server>__list_resources`` / ``__read_resource``).
+    resources_enabled: bool = True
 
     def __post_init__(self) -> None:
         # YAML auto-parser delivers list-typed fields as Python ``list``;

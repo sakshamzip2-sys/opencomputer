@@ -544,12 +544,20 @@ def _build_utility_tools(
     server_name: str,
     session: Any,
     capabilities: dict[str, Any] | None,
+    *,
+    prompts_enabled: bool = True,
+    resources_enabled: bool = True,
 ) -> list[BaseTool]:
     """Return MCP resource/prompt utility tools, capability-gated.
 
     ``capabilities`` is the ``capabilities`` block of the MCP server's
     ``initialize`` reply (or ``None`` / empty dict when nothing was
     advertised). Each present capability adds 2 tools.
+
+    G9 (Hermes parity, 2026-05-09): per-server ``prompts_enabled`` /
+    ``resources_enabled`` suppress the corresponding utility tools even
+    when the server advertises the capability. Default is to register
+    both, matching the prior behavior.
     """
     tools: list[BaseTool] = []
     if not capabilities:
@@ -557,10 +565,10 @@ def _build_utility_tools(
     # An MCP capability is "advertised" when its key is present with a
     # non-None value (the spec uses an empty object ``{}`` to mean
     # "supported, no sub-features").
-    if capabilities.get("resources") is not None:
+    if resources_enabled and capabilities.get("resources") is not None:
         tools.append(_MCPListResourcesTool(server_name=server_name, session=session))
         tools.append(_MCPReadResourceTool(server_name=server_name, session=session))
-    if capabilities.get("prompts") is not None:
+    if prompts_enabled and capabilities.get("prompts") is not None:
         tools.append(_MCPListPromptsTool(server_name=server_name, session=session))
         tools.append(_MCPGetPromptTool(server_name=server_name, session=session))
     return tools
@@ -845,7 +853,13 @@ class MCPConnection:
                     "resources": getattr(caps_obj, "resources", None),
                     "prompts": getattr(caps_obj, "prompts", None),
                 }
-                for utility in _build_utility_tools(self.config.name, session, cap_dict):
+                for utility in _build_utility_tools(
+                    self.config.name,
+                    session,
+                    cap_dict,
+                    prompts_enabled=self.config.prompts_enabled,
+                    resources_enabled=self.config.resources_enabled,
+                ):
                     self.tools.append(utility)
             except Exception:  # noqa: BLE001
                 logger.debug(
