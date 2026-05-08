@@ -49,6 +49,7 @@ def _scan_context_content(content: str, filename: str) -> str:
 # directory, the FIRST match wins (matching Hermes' "first-match" rule).
 _HINT_FILENAMES = [
     "OPENCOMPUTER.md", "opencomputer.md",
+    ".hermes.md", "HERMES.md",  # Hermes v2 D3 (2026-05-08)
     "AGENTS.md", "agents.md",
     "CLAUDE.md", "claude.md",
     ".cursorrules",

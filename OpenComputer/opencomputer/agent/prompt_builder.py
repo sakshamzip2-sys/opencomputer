@@ -119,11 +119,27 @@ def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> 
     # Files to check, in priority order. We collect ALL that exist, not
     # just the highest-priority one — multiple files may coexist (e.g.
     # both CLAUDE.md and AGENTS.md in the same repo).
-    # Hermes v2 parity, gap B (2026-05-08): `.cursorrules` is the
-    # Cursor IDE convention; subdir hints already scan it, and now the
-    # startup loader does too. Last-priority — explicit OC files come
-    # first when they exist alongside.
-    target_names = ("OPENCOMPUTER.md", "CLAUDE.md", "AGENTS.md", ".cursorrules")
+    #
+    # Priority rationale:
+    #   1. ``OPENCOMPUTER.md`` / ``.hermes.md`` — agent-specific. Users
+    #      who fork upstream Hermes (`.hermes.md`) get parity without
+    #      renaming. ``OPENCOMPUTER.md`` wins ties because OC is the
+    #      host runtime here.
+    #   2. ``CLAUDE.md`` / ``AGENTS.md`` — common cross-tool conventions
+    #      that almost every multi-agent repo uses.
+    #   3. ``.cursorrules`` — Cursor IDE format; widely seen in
+    #      JS/TS-heavy repos. Subdir hints scan this too.
+    #
+    # Hermes v2 parity D3 (2026-05-08): `.hermes.md` added between
+    # OPENCOMPUTER.md and CLAUDE.md so Hermes-forked workspaces work
+    # without rename.
+    target_names = (
+        "OPENCOMPUTER.md",
+        ".hermes.md",
+        "CLAUDE.md",
+        "AGENTS.md",
+        ".cursorrules",
+    )
 
     found: list[tuple[str, str]] = []
     seen_paths: set[Path] = set()
