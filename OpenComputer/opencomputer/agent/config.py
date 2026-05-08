@@ -424,6 +424,26 @@ class MCPServerConfig:
     env: dict[str, str] = field(default_factory=dict)  # for stdio: env vars
     headers: dict[str, str] = field(default_factory=dict)  # for sse/http: HTTP headers (auth)
     enabled: bool = True
+    #: Wave 3 (2026-05-08) — per-server tool whitelist. ``None`` (the
+    #: default) means no filter — every tool the server publishes is
+    #: registered. An EMPTY tuple means deny-all (the server stays
+    #: connected for resources / prompts but contributes zero tools);
+    #: this is the intuitive reading of "the allow-list is empty".
+    tools_allow: tuple[str, ...] | None = None
+    #: Wave 3 (2026-05-08) — per-server tool blacklist. Applied AFTER
+    #: ``tools_allow``. Default empty tuple = no exclusions.
+    tools_deny: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # YAML auto-parser delivers list-typed fields as Python ``list``;
+        # we keep them as ``tuple`` for hashability + the frozen-dataclass
+        # contract. The auto-parser already tuplifies fields whose default
+        # is a tuple (``args``, ``tools_deny``), but a default of ``None``
+        # bypasses that path — convert here.
+        if isinstance(self.tools_allow, list):
+            object.__setattr__(self, "tools_allow", tuple(self.tools_allow))
+        if isinstance(self.tools_deny, list):
+            object.__setattr__(self, "tools_deny", tuple(self.tools_deny))
 
 
 @dataclass(frozen=True, slots=True)
