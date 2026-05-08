@@ -1060,7 +1060,20 @@ class APIServerAdapter(BaseChannelAdapter):
         app.router.add_get("/v1/capabilities", self._handle_capabilities)
         # T3 — Hermes-doc parity. Public detailed health probe (no auth).
         app.router.add_get("/health/detailed", self._handle_health_detailed)
+        # G5 (Hermes parity, 2026-05-09) — minimal /health probe + /v1/health alias.
+        app.router.add_get("/health", self._handle_health)
+        app.router.add_get("/v1/health", self._handle_health)
         return app
+
+    # ─── G5 — minimal health (Hermes spec 2026-05-09) ───────────────
+
+    async def _handle_health(self, request: web.Request) -> web.Response:
+        """Hermes parity G5: ``GET /health`` and ``GET /v1/health`` → 200 ok.
+
+        Public — no Bearer token required, so frontends + load balancers
+        can probe liveness without negotiating auth.
+        """
+        return web.json_response({"status": "ok"})
 
     # ─── T2 — /v1/capabilities ──────────────────────────────────────
 
