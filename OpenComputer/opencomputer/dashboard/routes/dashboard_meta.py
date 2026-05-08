@@ -14,11 +14,20 @@ class ThemeBody(BaseModel):
     name: str
 
 
-_THEMES = ["dark", "midnight", "high-contrast"]
+# Source of truth: the THEMES object in static/_themes.js. Keep aligned —
+# tests/test_dashboard_themes_alignment.py regression-locks the match.
+_THEMES = ["dark", "light", "solarized", "monokai"]
 
 
 @router.get("/dashboard/themes")
 async def list_themes() -> dict:
+    """List available dashboard themes.
+
+    The ``active`` field reflects the server-side default. Actual
+    persistence is client-side (``localStorage["oc-dashboard-theme"]``,
+    set by ``static/_themes.js``); the server has no concept of a
+    per-user active theme.
+    """
     return {"items": [{"name": t} for t in _THEMES], "active": _THEMES[0]}
 
 
