@@ -187,7 +187,8 @@ class TestProgressBar:
 
 class TestMaxContextFor:
     def test_known_claude(self) -> None:
-        assert max_context_for("claude-opus-4-7") == 200_000
+        # Wave 3 (2026-05-08) — Opus 4.6/4.7 ship 1M by default.
+        assert max_context_for("claude-opus-4-7") == 1_000_000
 
     def test_known_gpt_4o(self) -> None:
         assert max_context_for("gpt-4o") == 128_000
@@ -235,9 +236,11 @@ class TestRenderStatusLine:
         # Exact format the user requested. Leading + trailing pad are
         # part of the rendered line; the visible "core" is the segment
         # in between.
+        # Wave 3 (2026-05-08) — Opus 4.6/4.7 default to 1M context;
+        # 12.4K / 1M = 1% (rounded down from 1.24%).
         assert (
             text
-            == " ⚕ claude-opus-4-7 │ 12.4K/200K │ [░░░░░░░░░░] 6% │ $0.06 │ 15m "
+            == " ⚕ claude-opus-4-7 │ 12.4K/1M │ [░░░░░░░░░░] 1% │ $0.06 │ 15m "
         )
 
     def test_cold_start_snapshot(self) -> None:
@@ -245,7 +248,8 @@ class TestRenderStatusLine:
         text = _flatten(render_status_line(rt))
         # No model id, no tokens, no cost, no start time.
         # Cost segment is omitted (None → ""); elapsed shows "0s" so the
-        # field's existence is visible from the first frame.
+        # field's existence is visible from the first frame. (unknown) hits
+        # DEFAULT_MAX_CONTEXT (200K) because no model id is set.
         assert text == " ⚕ (unknown) │ 0/200K │ [░░░░░░░░░░] 0% │ 0s "
 
     def test_one_m_model_uses_extended_context(self, monkeypatch) -> None:
@@ -268,6 +272,9 @@ class TestRenderStatusLine:
         # Defensive — test fixtures sometimes pass None.
         text = _flatten(render_status_line(None))
         assert text.startswith(" ⚕ ")
+        # No model_id when runtime is None → falls through to
+        # DEFAULT_MAX_CONTEXT (200K) since the override layers and
+        # static table both need a real model id to resolve.
         assert "0/200K" in text
         assert "0%" in text
 
@@ -296,7 +303,8 @@ class TestRenderStatusLine:
         text = _flatten(render_status_line(rt))
         # Tokens in: bad → 0; tokens out: float (not int) → 0; cost: bad
         # → omitted; started_at: bad → 0s.
-        assert "0/200K" in text
+        # Wave 3 (2026-05-08) — Opus 4.7 = 1M context.
+        assert "0/1M" in text
         assert "$" not in text
         assert "0s" in text
 

@@ -951,6 +951,19 @@ class Config:
     #: resolver's provider hint to ``custom:<name>``. Empty by default;
     #: backward compatible — pre-Wave-3 configs parse unchanged.
     custom_providers: tuple[CustomProvider, ...] = ()
+    #: Wave 3 (2026-05-08) — per-model context-window overrides for
+    #: bundled providers (Anthropic, OpenAI, OpenRouter, etc.). Set
+    #: this when the embedded :data:`compaction.DEFAULT_CONTEXT_WINDOWS`
+    #: table is wrong or stale, e.g. the user's account has a 1M
+    #: context window enabled for a model the table still has at
+    #: 200k. Format: ``{"claude-opus-4-7": 1000000, ...}``. Wins over
+    #: the static table; loses to the per-provider per-model override
+    #: under :attr:`CustomProvider.models`. Empty by default.
+    model_context_overrides: dict[str, int] = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+    )
     #: Wave 3 (2026-05-08) — OpenRouter provider routing knobs. Only
     #: applies when the active provider is OpenRouter; ignored otherwise.
     provider_routing: ProviderRoutingConfig = field(default_factory=ProviderRoutingConfig)

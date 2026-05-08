@@ -960,6 +960,12 @@ class AgentLoop:
             "session_id": sid,
             "session_db": self.db,
             "model_id": self.config.model.model,
+            # Wave 3 (2026-05-08) — publish per-model context-window
+            # override sources so the status line bar can resolve the
+            # correct max-context for *any* model the user runs,
+            # without a hardcoded 200K assumption.
+            "model_context_overrides": dict(getattr(self.config, "model_context_overrides", {}) or {}),
+            "custom_providers": tuple(getattr(self.config, "custom_providers", ()) or ()),
         }
         if "session_started_at" not in _new_custom:
             _new_custom["session_started_at"] = _session_started_at

@@ -49,8 +49,13 @@ DEFAULT_CONTEXT_WINDOWS: dict[str, int] = {
     # supports a 1M beta; we use the conservative 200k for it too —
     # callers needing the extended window can override via
     # CompactionConfig.
-    "claude-opus-4-7": 200_000,
-    "claude-opus-4-6": 200_000,
+    # Wave 3 (2026-05-08) — Opus 4.6 / 4.7 ship a 1M context window
+    # by default (no beta header required). Older Opus 4.x and the
+    # Sonnet line still use 200k; update those individually as
+    # Anthropic publishes new sizes. User can override per-model via
+    # ``model_context_overrides`` in config.yaml regardless.
+    "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
     "claude-opus-4-5": 200_000,
     "claude-opus-4-1": 200_000,
     "claude-opus-4": 200_000,
@@ -178,16 +183,33 @@ class CompactionResult:
 def context_window_with_overrides(
     model: str,
     custom_providers: tuple = (),
+    model_context_overrides: dict | None = None,
 ) -> int:
     """Wave 3 (2026-05-08) — resolve context length honoring per-model overrides.
 
-    First checks ``custom_providers[].models[<model>].context_length``;
-    falls back to the standard :func:`context_window_for` chain. Used
-    by :class:`CompactionEngine` so a user running a custom Ollama
-    model with ``num_ctx`` set in a Modelfile can declare its real
-    context window in ``config.yaml`` and have the loop's compaction
-    threshold respect it.
+    Resolution order (highest → lowest priority):
+
+    1. ``model_context_overrides[<model>]`` — flat user-supplied
+       per-model override that applies to *any* provider, including
+       bundled ones (Anthropic, OpenAI, OpenRouter). Set this in
+       ``config.yaml`` when the static :data:`DEFAULT_CONTEXT_WINDOWS`
+       is wrong or stale (e.g., a newer Opus model with 1M context
+       that the embedded table hasn't caught up to).
+    2. ``custom_providers[].models[<model>].context_length`` — same
+       intent but scoped to a named ``custom_providers`` entry; used
+       when the model id is unique to that endpoint (e.g., an Ollama
+       Modelfile name).
+    3. :func:`context_window_for` — the embedded static table +
+       family-prefix rules + 64k conservative default.
+
+    Both override layers are user-editable and survive across
+    sessions; a user-overstated window is the user's risk, but if
+    the override comes from concrete vendor docs it's accurate.
     """
+    if model_context_overrides:
+        explicit = model_context_overrides.get(model)
+        if explicit is not None:
+            return int(explicit)
     for cp in custom_providers:
         override = getattr(cp, "models", {}).get(model)
         if override is not None:

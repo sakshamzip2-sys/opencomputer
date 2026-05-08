@@ -156,17 +156,27 @@ def percent_used(used: int, total: int) -> int:
     return min(pct, 100)
 
 
-def max_context_for(model_id: str) -> int:
+def max_context_for(
+    model_id: str,
+    *,
+    model_context_overrides: dict | None = None,
+    custom_providers: tuple = (),
+) -> int:
     """Resolve max-context-window for a model id.
 
-    Resolution order:
+    Resolution order (highest → lowest priority):
       1. ``-1m`` / ``-1M`` suffix in the id → :data:`EXTENDED_MAX_CONTEXT`.
-         This wins over the compaction table because vendor aliases like
-         ``claude-sonnet-4-6-1m`` aren't in the table and we don't want
-         the conservative default to clip the bar.
-      2. ``opencomputer.agent.compaction.context_window_for`` — the
-         canonical table shared with the compaction engine.
-      3. :data:`DEFAULT_MAX_CONTEXT` as the final fallback.
+         This wins because vendor aliases like ``claude-sonnet-4-6-1m``
+         aren't in the table and we don't want the conservative default
+         to clip the bar.
+      2. ``model_context_overrides`` (Wave 3) — flat user-supplied
+         per-model overrides from ``config.yaml`` so a stale embedded
+         table doesn't show ``475/200K`` when the actual window is 1M.
+      3. ``custom_providers[].models[<id>].context_length`` (Wave 3) —
+         scoped per-named-endpoint override.
+      4. ``opencomputer.agent.compaction.context_window_with_overrides`` —
+         honors all of (2) + (3) + the canonical static table.
+      5. :data:`DEFAULT_MAX_CONTEXT` as the final fallback.
 
     Cold-path import: kept inside the function so module load doesn't
     pull the compaction engine into every CLI render.
@@ -181,9 +191,15 @@ def max_context_for(model_id: str) -> int:
     if "-1m" in lowered or lowered.endswith("1m") or "[1m]" in lowered:
         return EXTENDED_MAX_CONTEXT
     try:
-        from opencomputer.agent.compaction import context_window_for
+        from opencomputer.agent.compaction import context_window_with_overrides
 
-        return int(context_window_for(model_id))
+        return int(
+            context_window_with_overrides(
+                model_id,
+                custom_providers=custom_providers,
+                model_context_overrides=model_context_overrides,
+            )
+        )
     except Exception:  # noqa: BLE001 — fallback path
         return DEFAULT_MAX_CONTEXT
 
@@ -204,6 +220,8 @@ def _read_runtime_state(runtime: object) -> dict[str, Any]:
             "tokens_used": 0,
             "cost": None,
             "started_at": None,
+            "model_context_overrides": {},
+            "custom_providers": (),
         }
     custom = getattr(runtime, "custom", None) or {}
     model_id = custom.get("model_id") or ""
@@ -222,11 +240,19 @@ def _read_runtime_state(runtime: object) -> dict[str, Any]:
     started = custom.get("session_started_at")
     started = float(started) if isinstance(started, (int, float)) else None
 
+    overrides = custom.get("model_context_overrides") or {}
+    if not isinstance(overrides, dict):
+        overrides = {}
+    cps = custom.get("custom_providers") or ()
+    if not isinstance(cps, tuple):
+        cps = tuple(cps) if isinstance(cps, (list, tuple)) else ()
     return {
         "model_id": model_id,
         "tokens_used": tokens_used,
         "cost": cost,
         "started_at": started,
+        "model_context_overrides": overrides,
+        "custom_providers": cps,
     }
 
 
@@ -252,7 +278,11 @@ def render_status_line(runtime: object) -> list[tuple[str, str]]:
     cost = state["cost"]
     started = state["started_at"]
 
-    max_ctx = max_context_for(model_id)
+    max_ctx = max_context_for(
+        model_id,
+        model_context_overrides=state.get("model_context_overrides") or {},
+        custom_providers=state.get("custom_providers") or (),
+    )
     pct = percent_used(tokens_used, max_ctx)
     bar = progress_bar(tokens_used, max_ctx)
 
