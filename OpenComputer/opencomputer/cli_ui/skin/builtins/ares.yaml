@@ -1,0 +1,19 @@
+name: ares
+description: Crimson + bronze, sword/shield register.
+
+colors:
+  banner_border:    "#8B1A1A"
+  banner_title:     "#DC143C"
+  banner_accent:    "#CD7F32"
+  prompt:           "#FFB347"
+  agent_text:       "#FFD7B8"
+  agent_label:      "#DC143C"
+
+spinner:
+  thinking_verbs: [strategizing, drilling, sparring, marshalling]
+  wings: [["⚔", "⚔"], ["▲", "▲"]]
+
+branding:
+  agent_name: "Ares"
+  response_label: " ⚔ Ares "
+  prompt_symbol: "⚔"

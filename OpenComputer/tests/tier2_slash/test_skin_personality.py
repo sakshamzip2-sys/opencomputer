@@ -8,6 +8,16 @@ from opencomputer.agent.slash_commands_impl.skin_personality_cmd import (
 from plugin_sdk.runtime_context import RuntimeContext
 
 
+@pytest.fixture(autouse=True)
+def _isolate_profile_home(tmp_path, monkeypatch):
+    """Redirect OPENCOMPUTER_HOME to a tmp dir so persistence writes
+    don't pollute the user's real ~/.opencomputer/default/config.yaml.
+    """
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    monkeypatch.setenv("OPENCOMPUTER_PROFILE", "default")
+    yield
+
+
 def _fresh_runtime(**custom) -> RuntimeContext:
     return RuntimeContext(custom=dict(custom))
 

@@ -1,0 +1,19 @@
+name: sisyphus
+description: Austere grayscale, boulder energy.
+
+colors:
+  banner_border:    "#6B7280"
+  banner_title:     "#9CA3AF"
+  banner_accent:    "#4B5563"
+  prompt:           "#D1D5DB"
+  agent_text:       "#E5E7EB"
+  agent_label:      "#9CA3AF"
+
+spinner:
+  thinking_verbs: [pushing, again, again, still-pushing]
+  wings: [["○", "○"]]
+
+branding:
+  agent_name: "OpenComputer"
+  response_label: " ○ OC "
+  prompt_symbol: "○"

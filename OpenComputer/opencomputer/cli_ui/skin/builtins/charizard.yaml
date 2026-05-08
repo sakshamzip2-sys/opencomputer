@@ -1,0 +1,19 @@
+name: charizard
+description: Burnt orange + ember, dragon register.
+
+colors:
+  banner_border:    "#9A3412"
+  banner_title:     "#EA580C"
+  banner_accent:    "#FB923C"
+  prompt:           "#FED7AA"
+  agent_text:       "#FFEDD5"
+  agent_label:      "#EA580C"
+
+spinner:
+  thinking_verbs: [igniting, blazing, soaring, kindling]
+  wings: [["🔥", "🔥"], ["⟆", "⟇"]]
+
+branding:
+  agent_name: "Charizard"
+  response_label: " 🔥 Char "
+  prompt_symbol: "🔥"
