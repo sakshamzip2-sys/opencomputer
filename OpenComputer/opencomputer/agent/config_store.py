@@ -9,6 +9,8 @@ or if a given key isn't set.
 from __future__ import annotations
 
 import logging
+import os
+import re
 from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,44 @@ _log = logging.getLogger("opencomputer.config")
 
 def config_file_path() -> Path:
     return _home() / "config.yaml"
+
+
+def env_file_path() -> Path:
+    """Hermes-v2 — return ``<home>/.env`` for the active profile."""
+    return _home() / ".env"
+
+
+# ─── ${VAR} env-var substitution (Hermes config v2) ──────────────
+
+#: Strict ASCII env-var name pattern. Matches Hermes contract: must start
+#: with letter/underscore, only letters/digits/underscore after.
+_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
+
+
+def _expand_env_vars(value: Any) -> Any:
+    """Recursively walk a dict/list, substituting ``${VAR}`` in string values.
+
+    Hermes config v2 contract:
+
+    - ``${VAR}`` syntax only — bare ``$VAR`` not expanded.
+    - Multiple references per value supported (``"${HOST}:${PORT}"``).
+    - Undefined vars kept verbatim (``${UNDEFINED}``).
+    - Single-pass: a substituted value containing ``${OTHER}`` is NOT
+      expanded recursively. This is intentional — recursive expansion
+      would let users build cycles or surprise themselves with implicit
+      indirection. Match Hermes's documented behavior.
+    """
+    if isinstance(value, str):
+
+        def _sub(m: re.Match[str]) -> str:
+            return os.environ.get(m.group(1), m.group(0))
+
+        return _ENV_VAR_PATTERN.sub(_sub, value)
+    if isinstance(value, dict):
+        return {k: _expand_env_vars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env_vars(item) for item in value]
+    return value
 
 
 # ─── load ────────────────────────────────────────────────────────
@@ -251,6 +291,11 @@ def load_config(path: Path | None = None) -> Config:
         raise RuntimeError(f"Failed to parse {cfg_path}: {e}") from e
     if not isinstance(raw, dict):
         raise RuntimeError(f"Config file {cfg_path} must be a YAML mapping")
+
+    # Hermes config v2 — ``${VAR}`` substitution. Applied BEFORE any further
+    # parsing so secrets in .env can be referenced from config.yaml without
+    # leaking into committed dotfiles. Single-pass; undefined vars verbatim.
+    raw = _expand_env_vars(raw)
 
     # Extract and parse the hooks block before applying regular overrides
     # (so the nested/list shape doesn't go through _apply_overrides, which
