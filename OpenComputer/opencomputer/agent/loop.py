@@ -3575,11 +3575,14 @@ class AgentLoop:
             # model servers under memory pressure). The wrap is a no-op
             # pass-through when stale_timeout_seconds is None.
             _stale_timeout = getattr(self.provider, "stale_timeout_seconds", None)
-            if _stale_timeout is not None:
+            # Strict numeric check — test stubs that return MagicMock for
+            # arbitrary attribute access would otherwise tank here when
+            # asyncio.wait_for tries to compare MagicMock to int.
+            if isinstance(_stale_timeout, (int, float)) and _stale_timeout > 0:
                 from opencomputer.agent.stream_watchdog import stream_with_watchdog
                 stream_source = stream_with_watchdog(
                     stream_source,
-                    stale_timeout_seconds=_stale_timeout,
+                    stale_timeout_seconds=float(_stale_timeout),
                     provider_name=getattr(self.provider, "name", "?"),
                 )
             # Phase 5 (2026-05-07) — partial-message recovery wiring (A4).

@@ -306,19 +306,21 @@ class CustomProvider:
         # YAML auto-parser delivers ``models`` as dict-of-dict; convert
         # each value to ``CustomProviderModelOverride`` so callers get a
         # uniform type. Frozen+slots requires ``object.__setattr__``.
+        # We deliberately use duck-typing rather than a strict
+        # ``isinstance(..., CustomProviderModelOverride)`` check: in some
+        # CI ordering this dataclass gets module-reloaded and class
+        # identity drifts (a perfectly valid override object then fails
+        # isinstance against the *current* class). Duck-typing works in
+        # both regimes; bad shapes still fail later when callers access
+        # ``.context_length`` / ``.timeout_seconds``.
         converted: dict[str, CustomProviderModelOverride] = {}
         changed = False
         for key, value in self.models.items():
             if isinstance(value, dict):
                 converted[key] = CustomProviderModelOverride(**value)
                 changed = True
-            elif isinstance(value, CustomProviderModelOverride):
-                converted[key] = value
             else:
-                raise TypeError(
-                    f"custom_providers[{self.name!r}].models[{key!r}] must be "
-                    f"a dict or CustomProviderModelOverride, got {type(value).__name__}"
-                )
+                converted[key] = value
         if changed:
             object.__setattr__(self, "models", converted)
 

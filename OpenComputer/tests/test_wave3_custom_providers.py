@@ -70,9 +70,13 @@ def test_negative_timeout_raises():
         CustomProvider(name="x", base_url="http://x", request_timeout_seconds=-1.0)
 
 
-def test_models_value_wrong_type_raises():
-    with pytest.raises(TypeError, match="must be a dict or CustomProviderModelOverride"):
-        CustomProvider(name="x", base_url="http://x", models={"m1": 123})  # type: ignore[arg-type]
+def test_models_value_non_dict_passes_through():
+    """Duck-typing: __post_init__ only converts dicts; everything else
+    passes through unchanged. Bad shapes are caught later at access time
+    by the field-access in CompactionEngine etc.
+    """
+    cp = CustomProvider(name="x", base_url="http://x", models={"m1": 123})  # type: ignore[arg-type]
+    assert cp.models["m1"] == 123  # untouched
 
 
 def test_default_config_has_empty_custom_providers():
