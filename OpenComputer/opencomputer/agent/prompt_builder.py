@@ -30,9 +30,21 @@ _TRUNCATION_MARKER = "[earlier entries truncated]\n\n"
 
 #: V3.A-T8 — per-file size cap for workspace context loader. Keeps the
 #: prefix prompt bounded if a project ships a 10MB CLAUDE.md. Truncated
-#: files get a marker so the agent knows what happened.
+#: files get a marker so the agent knows what happened and how to recover.
 _WORKSPACE_FILE_CAP_BYTES = 100_000
-_WORKSPACE_TRUNCATION_NOTE = "\n\n[truncated — file exceeded 100KB cap]\n"
+
+
+def _format_truncation_note(name: str, kept: int, total: int) -> str:
+    """Return the marker appended to a truncated workspace-context file.
+
+    Tells the agent what got kept and how to recover the rest. Format
+    intentionally mirrors Hermes v2 — the file-tools hint is what makes
+    truncation actionable instead of a dead end. (Hermes v2 parity, gap C.)
+    """
+    return (
+        f"\n\n[...truncated {name}: kept first {kept:,} chars of "
+        f"{total:,} total. Use file tools to read the full file.]\n"
+    )
 
 
 def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> str:
@@ -97,7 +109,10 @@ def load_workspace_context(*, start: Path | None = None, max_depth: int = 5) -> 
                 continue
             seen_paths.add(resolved)
             if len(content) > _WORKSPACE_FILE_CAP_BYTES:
-                content = content[:_WORKSPACE_FILE_CAP_BYTES] + _WORKSPACE_TRUNCATION_NOTE
+                total = len(content)
+                content = content[:_WORKSPACE_FILE_CAP_BYTES] + _format_truncation_note(
+                    name, _WORKSPACE_FILE_CAP_BYTES, total
+                )
             found.append((name, content))
         if current.parent == current:
             break  # filesystem root reached
