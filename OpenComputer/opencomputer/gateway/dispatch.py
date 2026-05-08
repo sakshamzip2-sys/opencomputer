@@ -1337,10 +1337,41 @@ class Dispatch:
                         _model_str = (
                             getattr(_model_name, "model", "") if _model_name else ""
                         )
+                        # 2026-05-09 — resolve context_length via the same
+                        # multi-source probe the CLI status-line uses.
+                        # Resolution chain: model_context_overrides →
+                        # custom_providers per-model override → probe
+                        # (OpenRouter / Ollama / Anthropic / models.dev) →
+                        # static DEFAULT_CONTEXT_WINDOWS table. Result is
+                        # always an int (>= 64k conservative default) so
+                        # context_pct now renders for every gateway turn.
+                        # ``enable_probe=False`` keeps this hot path
+                        # synchronous; the disk-cached 24h probe layer is
+                        # separately refreshed by status-line / startup.
+                        _ctx_len: int | None = None
+                        try:
+                            from opencomputer.agent.compaction import (
+                                context_window_with_overrides,
+                            )
+
+                            _cfg = getattr(loop, "config", None)
+                            if _cfg is not None and _model_str:
+                                _ctx_len = context_window_with_overrides(
+                                    _model_str,
+                                    custom_providers=getattr(
+                                        _cfg, "custom_providers", (),
+                                    ),
+                                    model_context_overrides=getattr(
+                                        _cfg, "model_context_overrides", None,
+                                    ),
+                                    enable_probe=False,
+                                )
+                        except Exception:  # noqa: BLE001 — defensive
+                            _ctx_len = None
                         _line = format_runtime_footer(
                             model=_model_str,
                             tokens_used=getattr(result, "input_tokens", 0) or 0,
-                            context_length=None,  # provider-specific lookup TBD
+                            context_length=_ctx_len,
                             cwd=os.getcwd(),
                         )
                         if _line:
