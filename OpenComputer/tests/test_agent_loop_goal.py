@@ -176,6 +176,103 @@ async def test_maybe_continue_goal_no_op_without_goal(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_per_session_banner_callback_takes_precedence(
+    monkeypatch, tmp_path: Path,
+):
+    """Per-session callback wins over the global goal_banner_callback."""
+    db = SessionDB(tmp_path / "sessions.db")
+    sid = "s_h"
+    db.ensure_session(sid, platform="cli", model="x", cwd=None)
+    db.set_session_goal(sid, text="x", budget=5)
+
+    async def fake_judge(*, goal_text, last_response):
+        return JudgeVerdict(done=False, reason="ongoing")
+
+    monkeypatch.setattr("opencomputer.agent.goal.judge_goal", fake_judge)
+
+    global_calls: list[str] = []
+    sid_calls: list[str] = []
+
+    def global_cb(**kw):
+        global_calls.append(kw["kind"])
+
+    def sid_cb(**kw):
+        sid_calls.append(kw["kind"])
+
+    loop = _bare_loop(db)
+    loop.goal_banner_callback = global_cb
+    loop.set_goal_banner_callback(sid, sid_cb)
+
+    await loop._maybe_continue_goal(sid, "step")
+    assert sid_calls == ["continue"]
+    assert global_calls == []  # per-session wins
+
+
+@pytest.mark.asyncio
+async def test_clear_goal_banner_callback_falls_back_to_global(
+    monkeypatch, tmp_path: Path,
+):
+    db = SessionDB(tmp_path / "sessions.db")
+    sid = "s_i"
+    db.ensure_session(sid, platform="cli", model="x", cwd=None)
+    db.set_session_goal(sid, text="x", budget=5)
+
+    async def fake_judge(*, goal_text, last_response):
+        return JudgeVerdict(done=False, reason="ongoing")
+
+    monkeypatch.setattr("opencomputer.agent.goal.judge_goal", fake_judge)
+
+    global_calls: list[str] = []
+    loop = _bare_loop(db)
+    loop.goal_banner_callback = lambda **kw: global_calls.append(kw["kind"])
+    loop.set_goal_banner_callback(sid, lambda **kw: None)
+    loop.clear_goal_banner_callback(sid)
+
+    await loop._maybe_continue_goal(sid, "step")
+    assert global_calls == ["continue"]  # fell through to global
+
+
+@pytest.mark.asyncio
+async def test_set_goal_banner_callback_isolates_sessions(
+    monkeypatch, tmp_path: Path,
+):
+    """Two concurrent sessions get their own banner callbacks."""
+    db = SessionDB(tmp_path / "sessions.db")
+    sid_a, sid_b = "s_aa", "s_bb"
+    for sid in (sid_a, sid_b):
+        db.ensure_session(sid, platform="cli", model="x", cwd=None)
+        db.set_session_goal(sid, text="x", budget=5)
+
+    async def fake_judge(*, goal_text, last_response):
+        return JudgeVerdict(done=False, reason="ongoing")
+
+    monkeypatch.setattr("opencomputer.agent.goal.judge_goal", fake_judge)
+
+    seen_a: list[str] = []
+    seen_b: list[str] = []
+    loop = _bare_loop(db)
+    loop.set_goal_banner_callback(sid_a, lambda **kw: seen_a.append(kw["session_id"]))
+    loop.set_goal_banner_callback(sid_b, lambda **kw: seen_b.append(kw["session_id"]))
+
+    await loop._maybe_continue_goal(sid_a, "step")
+    await loop._maybe_continue_goal(sid_b, "step")
+    assert seen_a == [sid_a]
+    assert seen_b == [sid_b]
+
+
+@pytest.mark.asyncio
+async def test_clear_goal_banner_callback_idempotent(tmp_path: Path):
+    db = SessionDB(tmp_path / "sessions.db")
+    loop = _bare_loop(db)
+    # Never registered — no error.
+    loop.clear_goal_banner_callback("never_seen")
+    # Register and double-clear.
+    loop.set_goal_banner_callback("s_x", lambda **kw: None)
+    loop.clear_goal_banner_callback("s_x")
+    loop.clear_goal_banner_callback("s_x")  # idempotent
+
+
+@pytest.mark.asyncio
 async def test_maybe_continue_goal_no_op_when_paused(tmp_path: Path):
     db = SessionDB(tmp_path / "sessions.db")
     sid = "s_g"

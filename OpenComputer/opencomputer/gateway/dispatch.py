@@ -1192,6 +1192,20 @@ class Dispatch:
                 logger.debug("gateway agent:start fire failed", exc_info=True)
             try:
                 self._active_runs.add(session_id)
+                # Kanban-Goals v2 (2026-05-08) — install a per-session
+                # goal-banner callback so the Ralph loop's ``↻/✓/⏸``
+                # transitions reach this chat as a separate message.
+                # Per-session keying matters because one AgentLoop can
+                # serve multiple concurrent sessions on the same
+                # profile; a global callback would fan banners to the
+                # wrong chat.
+                if adapter is not None and hasattr(loop, "set_goal_banner_callback"):
+                    self._install_goal_banner_callback(
+                        loop=loop,
+                        session_id=session_id,
+                        adapter=adapter,
+                        chat_id=event.chat_id,
+                    )
                 with set_profile(profile_home):
                     if self._plugin_api is not None:
                         with self._plugin_api.in_request(request_ctx):
@@ -1322,6 +1336,12 @@ class Dispatch:
                 # marker so /goal <text> dispatched in the next moment
                 # is no longer refused.
                 self._active_runs.discard(session_id)
+                # Symmetric banner-callback teardown.
+                if hasattr(loop, "clear_goal_banner_callback"):
+                    try:
+                        loop.clear_goal_banner_callback(session_id)
+                    except Exception:  # noqa: BLE001
+                        pass
                 heartbeat.cancel()
                 try:
                     await heartbeat
@@ -1541,6 +1561,58 @@ class Dispatch:
             logger.exception("bypass slash %s raised", name)
             return f"/{name}: {type(exc).__name__}: {exc}"
         return result.output if result is not None else None
+
+    def _install_goal_banner_callback(
+        self,
+        *,
+        loop,
+        session_id: str,
+        adapter,
+        chat_id: str,
+    ) -> None:
+        """Wire ``loop._fire_goal_banner`` for ``session_id`` to send a
+        chat message via ``adapter``.
+
+        The callback runs inside the agent loop (sync, no event loop in
+        scope by signature). We need to schedule an async ``adapter.send``
+        — capture the running loop's event-loop here and use
+        ``call_soon_threadsafe`` + ``ensure_future`` to fire-and-forget.
+        Adapter errors are swallowed — banner rendering must never
+        wedge the agent loop.
+        """
+        from opencomputer.cli_ui.goal_banner import format_banner
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+
+        def _cb(*, session_id, kind, verdict, goal):
+            try:
+                text = format_banner(kind=kind, verdict=verdict, goal=goal)
+            except Exception:  # noqa: BLE001
+                return
+            if running is None or running.is_closed():
+                return
+            try:
+                # Schedule from whatever thread fires the banner.
+                asyncio.run_coroutine_threadsafe(
+                    self._safe_send_goal_banner(adapter, chat_id, text),
+                    running,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        loop.set_goal_banner_callback(session_id, _cb)
+
+    async def _safe_send_goal_banner(
+        self, adapter, chat_id: str, text: str,
+    ) -> None:
+        """Best-effort banner-as-message send. Errors swallowed."""
+        try:
+            await adapter.send(chat_id, text)
+        except Exception:  # noqa: BLE001
+            logger.debug("goal banner send failed", exc_info=True)
 
     async def _goal_midrun_check(
         self,
