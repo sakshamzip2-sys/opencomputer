@@ -4,6 +4,21 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Kanban + Goals v2 — Ralph-loop parity polish (2026-05-08)
+
+Closes the four real gaps in the Hermes Kanban + Persistent Goals v2 reference spec. Kanban surface (32 CLI subcommands, 7 worker tools, 3 bundled skills, dashboard backend, multi-attempt history) was already shipped — these changes touch only the goal subsystem.
+
+- **Strict-JSON judge with reason** — `agent.goal.judge_satisfied` (text `SATISFIED`/`NOT_SATISFIED`) replaced by `judge_goal()` returning a frozen `JudgeVerdict(done: bool, reason: str)`. Strips ```` ```json ```` fences before parse; fails open with a self-explaining reason on `JSONDecodeError`, missing `done` key, network error, or empty response. Single caller (`AgentLoop._maybe_continue_goal`) migrated atomically.
+- **`goal_last_judge_reason` column** (schema v14, additive nullable) — the judge's most recent rationale persists across restarts. Exposed via `GoalState.last_judge_reason`; surfaced by `/goal status` and `oc goal status` (text + `--json`). `set_session_goal` and `clear_session_goal` null it; `update_session_goal` accepts `last_judge_reason=` (patch) or `clear_last_judge_reason=True` (explicit-null) since `None` is the "leave unchanged" sentinel.
+- **Live banners** — `cli_ui.goal_banner.format_banner` renders `↻ Continuing toward goal (N/M): <reason>` / `✓ Goal achieved: <reason>` / `⏸ Goal paused — N/M turns used. Use /goal resume / /goal clear`. Wired into the CLI input loop via `AgentLoop.goal_banner_callback`. Gateway-side banner forwarding is a follow-up; reasons still surface via `/goal status` so this is a UX-only deferral.
+- **`/goal` and `oc goal` UX upgrade** — icons (`⊙ Goal set`, `⏸ paused`, `↻ resumed`, `✗ cleared`); status surfaces `last_judge_reason` when present; budget-exhausted state renders a dedicated pause banner with `/goal resume`/`/goal clear` cues. `oc goal status --json` now includes `last_judge_reason`.
+- **Config slots** — new `goals.max_turns` (int, default 20) and `auxiliary.goal_judge.{provider, model}` (str | None) under top-level `Config`. `set_session_goal` defaults its budget from the live config; `_call_judge_model` routes through the configured judge provider when both fields are set, else falls back to `aux_llm.complete_text` (chat provider).
+- **Mid-run race-guard** — gateway `Dispatch._goal_midrun_check` refuses `/goal <text>` while a `run_conversation` is in flight for the same session ("use /stop first, then set the new goal"). Tracked via a new per-session `_active_runs: set[str]` instrumented around the agent-loop call. Status / pause / resume / clear remain unrestricted.
+
+68 new tests across `agent/test_goal.py`, `agent/test_state_goal.py`, `test_agent_loop_goal.py`, `test_config_goals.py`, `cli_ui/test_slash_goal.py`, `cli_ui/test_goal_banners.py`, `test_cli_goal.py`, `gateway/test_goal_midrun_guard.py`.
+
+Spec: `docs/superpowers/specs/2026-05-08-kanban-goals-v2-design.md`. Plan: `docs/superpowers/plans/2026-05-08-kanban-goals-v2-plan.md`.
+
 ### Added — Hermes Wave 3 — provider-config polish (2026-05-08, PR #501)
 
 Closes 10 verified gaps from the Hermes "Integrations & AI Providers" reference doc. All additions are backward compatible — pre-Wave-3 `config.yaml` files parse unchanged.
