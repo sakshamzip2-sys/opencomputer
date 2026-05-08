@@ -1413,6 +1413,45 @@ class AgentLoop:
             for _iter in range(self.config.loop.max_iterations):
                 iterations += 1
 
+                # 2026-05-08 — Hermes Doc-2 gateway hooks: agent:step.
+                # Fires once per tool-calling iteration (one per LLM turn
+                # within a multi-step session). Fire-and-forget so a slow
+                # filesystem hook can't stall the loop. Only fires when
+                # the gateway hook engine is available — this keeps the
+                # CLI-only path (no gateway) free of an extra import.
+                try:
+                    from opencomputer.gateway.event_hooks import (
+                        AGENT_STEP as _GW_AGENT_STEP,
+                    )
+                    from opencomputer.gateway.event_hooks import (
+                        engine as _gw_hooks_engine_step,
+                    )
+                    if _gw_hooks_engine_step.hooks():
+                        # Tool names from the most recent assistant
+                        # message — empty until the LLM has called tools.
+                        _last_tools: list[str] = []
+                        for _m in reversed(messages):
+                            if getattr(_m, "role", None) == "assistant":
+                                _last_tools = [
+                                    tc.name for tc in (
+                                        getattr(_m, "tool_calls", None) or []
+                                    )
+                                ]
+                                break
+                        asyncio.create_task(
+                            _gw_hooks_engine_step.fire(
+                                _GW_AGENT_STEP,
+                                {
+                                    "session_id": sid,
+                                    "iteration": iterations,
+                                    "tool_names": _last_tools,
+                                },
+                            ),
+                            name=f"gw-hook-agent-step-{iterations}",
+                        )
+                except Exception:  # noqa: BLE001 — never break the loop
+                    pass
+
                 # Round 2B P-3: enforce both timeouts at the top of each iteration.
                 # Inactivity check first (the more useful signal); absolute cap
                 # second. Both raise out of run_conversation — no synthetic
