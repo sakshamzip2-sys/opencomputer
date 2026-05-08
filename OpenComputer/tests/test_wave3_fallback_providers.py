@@ -232,6 +232,28 @@ def test_fallback_remove_out_of_range(tmp_path, monkeypatch):
     assert "out of range" in result.output
 
 
+def test_fallback_move(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(app, ["fallback", "add", "a/m1"])
+    runner.invoke(app, ["fallback", "add", "b/m2"])
+    runner.invoke(app, ["fallback", "add", "c/m3"])
+    result = runner.invoke(app, ["fallback", "move", "0", "2"])
+    assert result.exit_code == 0, result.output
+    cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
+    order = [p["provider"] for p in cfg["fallback_providers"]]
+    assert order == ["b", "c", "a"]
+
+
+def test_fallback_move_out_of_range(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    runner = CliRunner()
+    runner.invoke(app, ["fallback", "add", "a/m1"])
+    result = runner.invoke(app, ["fallback", "move", "5", "0"])
+    assert result.exit_code == 1
+    assert "out of range" in result.output
+
+
 def test_fallback_clear(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
     runner = CliRunner()

@@ -652,6 +652,7 @@ class AgentLoop:
             disabled=compaction_disabled,
             memory_bridge=self.memory_bridge,
             usage_recorder=_record_compaction_usage,
+            custom_providers=config.custom_providers,
         )
         # Phase 11d: third-pillar episodic memory. Records one event per
         # completed turn for cross-session "remind me" queries via FTS5.
@@ -3568,6 +3569,19 @@ class AgentLoop:
             if _eff != "none" and not _native:
                 from opencomputer.agent.thinking_parser import ThinkingTagsParser
                 stream_source = ThinkingTagsParser().wrap(stream_source)
+            # Wave 3 (2026-05-08) — wrap with the streaming-stall watchdog
+            # when the provider opts in via stale_timeout_seconds. Catches
+            # LLM-side hangs on alive HTTP connections (common on local
+            # model servers under memory pressure). The wrap is a no-op
+            # pass-through when stale_timeout_seconds is None.
+            _stale_timeout = getattr(self.provider, "stale_timeout_seconds", None)
+            if _stale_timeout is not None:
+                from opencomputer.agent.stream_watchdog import stream_with_watchdog
+                stream_source = stream_with_watchdog(
+                    stream_source,
+                    stale_timeout_seconds=_stale_timeout,
+                    provider_name=getattr(self.provider, "name", "?"),
+                )
             # Phase 5 (2026-05-07) — partial-message recovery wiring (A4).
             # Accumulate the streamed text as it arrives so we can attempt
             # recovery if the stream is interrupted (network drop, gateway

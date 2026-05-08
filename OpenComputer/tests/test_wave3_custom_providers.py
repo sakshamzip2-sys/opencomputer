@@ -122,6 +122,80 @@ custom_providers:
     assert groq.models == {}
 
 
+def test_context_window_with_overrides_honors_per_model_setting():
+    from opencomputer.agent.compaction import context_window_with_overrides
+
+    cp = CustomProvider(
+        name="local",
+        base_url="http://x",
+        models={"qwen": CustomProviderModelOverride(context_length=8192)},
+    )
+    # With the override, returns 8192.
+    assert context_window_with_overrides("qwen", (cp,)) == 8192
+    # Without a matching override, falls through to the standard chain.
+    assert context_window_with_overrides("not-in-overrides", (cp,)) > 0
+
+
+def test_context_window_with_overrides_no_custom_providers():
+    from opencomputer.agent.compaction import (
+        context_window_for,
+        context_window_with_overrides,
+    )
+
+    # Empty custom_providers → identical to context_window_for.
+    assert (
+        context_window_with_overrides("claude-sonnet-4-6", ())
+        == context_window_for("claude-sonnet-4-6")
+    )
+
+
+def test_save_config_emits_provider_routing(tmp_path, monkeypatch):
+    """Round-trip preservation — provider_routing must survive save→load."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    from opencomputer.agent.config import ProviderRoutingConfig
+    from opencomputer.agent.config_store import load_config, save_config
+
+    cfg = default_config()
+    cfg = type(cfg)(
+        **{
+            **{f.name: getattr(cfg, f.name) for f in __import__("dataclasses").fields(cfg)},
+            "provider_routing": ProviderRoutingConfig(
+                sort="price",
+                only=("Anthropic",),
+                data_collection="deny",
+            ),
+        }
+    )
+    path = save_config(cfg, tmp_path / "config.yaml")
+    cfg2 = load_config(path)
+    assert cfg2.provider_routing.sort == "price"
+    assert cfg2.provider_routing.only == ("Anthropic",)
+    assert cfg2.provider_routing.data_collection == "deny"
+
+
+def test_save_config_emits_fallback_providers(tmp_path, monkeypatch):
+    """Round-trip preservation — fallback_providers must survive save→load."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    from opencomputer.agent.config import FallbackProvider
+    from opencomputer.agent.config_store import load_config, save_config
+
+    cfg = default_config()
+    cfg = type(cfg)(
+        **{
+            **{f.name: getattr(cfg, f.name) for f in __import__("dataclasses").fields(cfg)},
+            "fallback_providers": (
+                FallbackProvider(provider="openrouter", model="anthropic/claude-sonnet-4"),
+                FallbackProvider(provider="custom:local", model="qwen3.5:27b"),
+            ),
+        }
+    )
+    path = save_config(cfg, tmp_path / "config.yaml")
+    cfg2 = load_config(path)
+    assert len(cfg2.fallback_providers) == 2
+    assert cfg2.fallback_providers[0].provider == "openrouter"
+    assert cfg2.fallback_providers[1].provider == "custom:local"
+
+
 def test_save_load_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
     from opencomputer.agent.config_store import load_config, save_config

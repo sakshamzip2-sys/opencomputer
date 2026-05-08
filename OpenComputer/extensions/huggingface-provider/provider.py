@@ -7,6 +7,24 @@ provider serves the requested model.
 Env vars:
   HF_API_KEY    — required; HF token from https://huggingface.co/settings/tokens
   HF_BASE_URL   — optional override (default: https://router.huggingface.co/v1)
+
+Wave 3 (2026-05-08) — routing-suffix support is **passthrough**:
+
+  The HF router parses ``model`` field suffixes server-side. So a
+  request body like::
+
+      {"model": "meta-llama/Llama-3.3-70B-Instruct:fastest", ...}
+
+  is sent verbatim and HF auto-routes to the lowest-latency upstream.
+  No client-side transformation needed — this provider already forwards
+  ``body["model"]`` unchanged via the OpenAIProvider parent.
+
+  Recognized suffixes (``:fastest`` / ``:cheapest`` / ``:groq`` /
+  ``:together`` / ``:fireworks`` / ``:replicate`` / ``:sambanova`` /
+  ``:hyperbolic`` / ``:novita`` / ``:cerebras``) are exposed via
+  :func:`opencomputer.agent.config.split_hf_routing_suffix` for CLI
+  completion + client-side typo validation; this module doesn't
+  consume them.
 """
 from __future__ import annotations
 

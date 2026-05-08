@@ -249,6 +249,11 @@ class OpenAIProvider(BaseProvider):
         kwargs: dict[str, Any] = {"api_key": key}
         if base:
             kwargs["base_url"] = base
+        # Wave 3 (2026-05-08) — wire request_timeout_seconds into the SDK
+        # client. AsyncOpenAI accepts a httpx.Timeout (or float). Use the
+        # class-attribute default so subclasses (xai, openrouter, etc.)
+        # inherit cleanly and per-instance overrides work.
+        kwargs["timeout"] = self.request_timeout_seconds
         self.client = AsyncOpenAI(**kwargs)
 
     # ─── message conversion ─────────────────────────────────────────
@@ -399,6 +404,8 @@ class OpenAIProvider(BaseProvider):
         kwargs: dict[str, Any] = {"api_key": key}
         if self._base:
             kwargs["base_url"] = self._base
+        # Wave 3 — pool-rotated clients inherit the same request timeout.
+        kwargs["timeout"] = self.request_timeout_seconds
         return AsyncOpenAI(**kwargs)
 
     async def _do_complete(

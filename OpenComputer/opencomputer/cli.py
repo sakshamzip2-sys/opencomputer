@@ -4376,6 +4376,46 @@ def fallback_remove(
     )
 
 
+@fallback_app.command("move")
+def fallback_move(
+    from_idx: int = typer.Argument(..., help="0-based source index."),
+    to_idx: int = typer.Argument(..., help="0-based target index."),
+) -> None:
+    """Move a fallback entry from one position to another."""
+    import yaml
+
+    from opencomputer.agent.config_store import config_file_path
+
+    cfg_path = config_file_path()
+    if not cfg_path.exists():
+        console.print(f"[bold red]✗[/bold red] no config.yaml at {cfg_path}")
+        raise typer.Exit(1)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    chain = raw.get("fallback_providers", [])
+    if from_idx < 0 or from_idx >= len(chain):
+        console.print(
+            f"[bold red]✗[/bold red] from_idx {from_idx} out of range "
+            f"(chain has {len(chain)} entr{'y' if len(chain) == 1 else 'ies'})"
+        )
+        raise typer.Exit(1)
+    if to_idx < 0 or to_idx >= len(chain):
+        console.print(
+            f"[bold red]✗[/bold red] to_idx {to_idx} out of range"
+        )
+        raise typer.Exit(1)
+    entry = chain.pop(from_idx)
+    chain.insert(to_idx, entry)
+    raw["fallback_providers"] = chain
+    cfg_path.write_text(
+        yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(
+        f"[green]✓[/green] moved {entry.get('provider')}/{entry.get('model')} "
+        f"from [{from_idx}] to [{to_idx}]"
+    )
+
+
 @fallback_app.command("clear")
 def fallback_clear() -> None:
     """Clear the fallback chain (no entries left)."""
