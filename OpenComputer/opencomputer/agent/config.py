@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from opencomputer.agent.auxiliary_client import AuxiliaryConfig
+
 if TYPE_CHECKING:
     from datetime import datetime
 
@@ -728,6 +730,8 @@ class Config:
     system_control: FullSystemControlConfig = field(default_factory=FullSystemControlConfig)
     #: Hermes-parity cron knobs (2026-05-08). See :class:`CronConfig`.
     cron: CronConfig = field(default_factory=CronConfig)
+    #: Hermes-v2 — auxiliary model slots (compression, vision, etc.).
+    auxiliary: AuxiliaryConfig = field(default_factory=AuxiliaryConfig)
     #: Hermes-v2 IANA timezone for system-prompt time injection, log
     #: timestamps, and cron scheduling. Empty string = server-local time
     #: (preserves existing behavior). Validated at ``load_config`` —

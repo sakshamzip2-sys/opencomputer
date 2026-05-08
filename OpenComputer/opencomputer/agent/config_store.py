@@ -86,6 +86,22 @@ def _apply_overrides(base: Any, overrides: dict[str, Any]) -> Any:
             if is_dataclass(nested) and isinstance(new, dict):
                 # Nested dataclass (e.g. model, loop, mcp)
                 kwargs[name] = _apply_overrides(nested, new)
+            elif nested is None and isinstance(new, dict):
+                # Hermes-v2 — Optional[Dataclass] field with None default,
+                # YAML provides a dict. Resolve the field's annotated
+                # dataclass type and instantiate with the dict.
+                inner_cls = _extract_optional_dataclass_type(type(base), name)
+                if inner_cls is not None:
+                    try:
+                        default_instance = inner_cls()
+                    except TypeError:
+                        default_instance = None
+                    if default_instance is not None:
+                        kwargs[name] = _apply_overrides(default_instance, new)
+                    else:
+                        kwargs[name] = new
+                else:
+                    kwargs[name] = new
             elif isinstance(nested, tuple) and isinstance(new, list):
                 # Tuple-of-dataclasses field (e.g. mcp.servers = [MCPServerConfig, ...])
                 inner_type = _extract_tuple_inner_type(type(base), name, nested)
@@ -116,6 +132,38 @@ def _apply_overrides(base: Any, overrides: dict[str, Any]) -> Any:
         else:
             kwargs[name] = getattr(base, name)
     return type(base)(**kwargs)
+
+
+def _extract_optional_dataclass_type(
+    base_cls: type, field_name: str
+) -> type | None:
+    """Best-effort: resolve ``Optional[SomeDataclass]`` annotation to the dataclass.
+
+    Used by :func:`_apply_overrides` when the existing field value is
+    ``None`` (so we can't read the type off the instance) and the YAML
+    override provides a dict that should construct a fresh dataclass.
+
+    Returns the dataclass type when the annotation is exactly
+    ``X | None`` / ``Optional[X]`` for a dataclass ``X``. Otherwise None.
+    """
+    import typing
+
+    try:
+        hints = typing.get_type_hints(base_cls)
+    except Exception:
+        return None
+    annotation = hints.get(field_name)
+    if annotation is None:
+        return None
+    origin = typing.get_origin(annotation)
+    # ``X | None`` and ``Optional[X]`` both surface as Union with two args.
+    import types as _types
+
+    if origin is typing.Union or origin is _types.UnionType:
+        non_none = [a for a in typing.get_args(annotation) if a is not type(None)]
+        if len(non_none) == 1 and is_dataclass(non_none[0]):
+            return non_none[0]
+    return None
 
 
 def _extract_tuple_inner_type(
@@ -348,6 +396,7 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
         "deepening": _encode(cfg.deepening),
         "gateway": _encode(cfg.gateway),
         "system_control": _encode(cfg.system_control),
+        "auxiliary": _encode(cfg.auxiliary),
         "timezone": cfg.timezone,
     }
     # III.6 — only serialise the hooks block when non-empty so default
