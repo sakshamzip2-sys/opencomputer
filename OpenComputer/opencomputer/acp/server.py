@@ -47,6 +47,10 @@ ACP_SERVER_VERSION = "0.1.0"
 ACP_PROTOCOL_VERSION = "0.9.0"  # mirrors hermes/openclaw acp dep version
 
 
+class _ACPRemoteError(Exception):
+    """T64 — IDE returned a JSON-RPC error to one of our outbound calls."""
+
+
 class ACPServer:
     """ACP JSON-RPC server.
 
@@ -58,6 +62,15 @@ class ACPServer:
         self._sessions: dict[str, ACPSession] = {}
         self._initialized: bool = False
         self._client_capabilities: dict[str, Any] = {}
+        # T64 — outbound RPC. When the agent calls a method on the IDE
+        # (e.g. session/requestPermission), we allocate an id, write
+        # the request, and stash a Future keyed by id. The dispatcher
+        # routes any inbound message that has an id but no method to
+        # the matching Future.
+        self._outbound_counter: int = 0
+        self._outbound_futures: dict[
+            str, asyncio.Future[dict[str, Any]]
+        ] = {}
         # Router: method name -> async handler
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[Any]]] = {
             "initialize": self._handle_initialize,
@@ -130,6 +143,22 @@ class ACPServer:
         msg_id = msg.get("id")
         method = msg.get("method")
         params = msg.get("params", {})
+
+        # T64 — response routing. Inbound messages without a method but
+        # with an id are JSON-RPC responses to outbound requests we
+        # made (e.g. session/requestPermission). Resolve the matching
+        # Future. Stale / duplicate / unknown ids are silently dropped
+        # so a misbehaving IDE can't crash the dispatch loop.
+        if not method and msg_id is not None:
+            fut = self._outbound_futures.pop(str(msg_id), None)
+            if fut is not None and not fut.done():
+                if "error" in msg:
+                    fut.set_exception(
+                        _ACPRemoteError(msg["error"].get("message") or "remote error")
+                    )
+                else:
+                    fut.set_result(msg.get("result") or {})
+            return
 
         if not method:
             self._send_error(msg_id, ERR_INVALID_REQUEST, "missing method")
@@ -398,6 +427,61 @@ class ACPServer:
         }
 
     # --- transport ---
+
+    async def request_permission(
+        self,
+        *,
+        session_id: str,
+        command: str,
+        description: str,
+        timeout: float = 60.0,
+    ) -> dict[str, Any]:
+        """T64 — outbound `session/requestPermission` to the IDE.
+
+        Sends a JSON-RPC *request* (with id) and awaits the IDE's
+        response. The IDE is expected to reply with
+        ``{"outcome": "allow"|"deny", "grantType": "once"|"always"}``.
+
+        On timeout, JSON-RPC error response, or any internal failure,
+        returns a deny verdict with a structured ``reason`` field so
+        the consent gate can audit the denial cause.
+        """
+        self._outbound_counter += 1
+        request_id = f"oc-out-{self._outbound_counter}"
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._outbound_futures[request_id] = fut
+
+        self._write(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "session/requestPermission",
+                "params": {
+                    "sessionId": session_id,
+                    "command": command,
+                    "description": description,
+                },
+            }
+        )
+
+        try:
+            result = await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._outbound_futures.pop(request_id, None)
+            return {"outcome": "deny", "reason": "timeout"}
+        except _ACPRemoteError as exc:
+            return {"outcome": "deny", "reason": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"outcome": "deny", "reason": f"{type(exc).__name__}: {exc}"}
+
+        outcome = result.get("outcome", "deny")
+        verdict: dict[str, Any] = {"outcome": outcome}
+        if "grantType" in result:
+            verdict["grantType"] = result["grantType"]
+        if "reason" in result:
+            verdict["reason"] = result["reason"]
+        return verdict
 
     def _send_result(self, msg_id: int | str | None, result: Any) -> None:
         self._write({"jsonrpc": "2.0", "id": msg_id, "result": result})
