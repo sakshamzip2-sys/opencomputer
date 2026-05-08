@@ -3304,6 +3304,11 @@ from opencomputer.cli_memory import memory_app  # noqa: E402
 
 app.add_typer(memory_app, name="memory")
 
+# T5 — Hermes-doc parity: `oc honcho` subcommand group.
+from opencomputer.cli_honcho import honcho_app  # noqa: E402
+
+app.add_typer(honcho_app, name="honcho")
+
 # 2026-04-28 — `oc help tour` opt-in guided walkthrough
 from opencomputer.cli_help import help_app  # noqa: E402
 
