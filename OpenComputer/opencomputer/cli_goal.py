@@ -48,7 +48,10 @@ goal_app = typer.Typer(
 )
 console = Console()
 
-DEFAULT_GOAL_BUDGET = 20  # matches /goal slash default
+# Budget default is now resolved at call time from
+# :class:`opencomputer.agent.config.GoalsConfig` (Kanban-Goals v2). Pass
+# ``None`` through to ``SessionDB.set_session_goal`` and let it consult
+# the live config — keeps CLI and slash + agent loop in lockstep.
 
 
 def _db() -> SessionDB:
@@ -78,10 +81,13 @@ def _resolve_session_id(db: SessionDB, explicit: str | None) -> str:
 @goal_app.command("set")
 def set_cmd(
     text: str = typer.Argument(..., help="Goal text. Quote multi-word goals."),
-    budget: int = typer.Option(
-        DEFAULT_GOAL_BUDGET,
+    budget: int | None = typer.Option(
+        None,
         "--budget", "-b",
-        help="Maximum continuation turns the loop may inject before auto-stopping.",
+        help=(
+            "Maximum continuation turns before auto-stopping. "
+            "Default: goals.max_turns from config (typically 20)."
+        ),
         min=1,
     ),
     session: str | None = typer.Option(
@@ -100,12 +106,13 @@ def set_cmd(
     db = _db()
     sid = _resolve_session_id(db, session)
     db.set_session_goal(sid, text=text.strip(), budget=budget)
+    g = db.get_session_goal(sid)
+    actual_budget = g.budget if g is not None else (budget or 20)
     preview = text if len(text) <= 80 else text[:77] + "..."
     console.print(
-        f"[green]goal set[/green] on session [cyan]{sid}[/cyan]:\n"
-        f"  {preview}\n"
-        f"  [dim]budget={budget} continuations · "
-        f"check progress with [cyan]oc goal status[/cyan][/dim]"
+        f"[green]⊙ Goal set[/green] ({actual_budget}-turn budget) on session "
+        f"[cyan]{sid}[/cyan]:\n  {preview}\n"
+        f"  [dim]check progress with [cyan]oc goal status[/cyan][/dim]"
     )
 
 
@@ -137,6 +144,7 @@ def status_cmd(
                     "active": g.active,
                     "turns_used": g.turns_used,
                     "budget": g.budget,
+                    "last_judge_reason": g.last_judge_reason,
                 },
             }
         console.print(_json.dumps(payload, indent=2))
@@ -149,13 +157,28 @@ def status_cmd(
         )
         return
 
+    if g.budget_exhausted():
+        console.print(
+            f"[yellow]⏸ goal paused — {g.turns_used}/{g.budget} turns "
+            f"used.[/yellow]\n"
+            f"  [bold]goal:[/bold] {g.text}\n"
+            f"  Use [cyan]oc goal resume[/cyan] to keep going, or "
+            f"[cyan]oc goal clear[/cyan] to stop."
+        )
+        if g.last_judge_reason:
+            console.print(f"  last judge: [dim]{g.last_judge_reason}[/dim]")
+        return
+
     state = "[green]active[/green]" if g.active else "[yellow]paused[/yellow]"
-    console.print(
+    body = (
         f"[bold]goal[/bold] (session [cyan]{sid}[/cyan]):\n"
         f"  text:   {g.text}\n"
         f"  status: {state}\n"
         f"  turns:  {g.turns_used}/{g.budget}"
     )
+    if g.last_judge_reason:
+        body += f"\n  last judge: [dim]{g.last_judge_reason}[/dim]"
+    console.print(body)
 
 
 @goal_app.command("pause")
@@ -179,7 +202,7 @@ def pause_cmd(
         raise typer.Exit(code=1)
     db.update_session_goal(sid, active=False)
     console.print(
-        f"[yellow]goal paused[/yellow] on session [cyan]{sid}[/cyan]"
+        f"[yellow]⏸ goal paused[/yellow] on session [cyan]{sid}[/cyan]"
     )
 
 
@@ -199,9 +222,11 @@ def resume_cmd(
             "nothing to resume."
         )
         raise typer.Exit(code=1)
-    db.update_session_goal(sid, active=True, turns_used=0)
+    db.update_session_goal(
+        sid, active=True, turns_used=0, clear_last_judge_reason=True,
+    )
     console.print(
-        f"[green]goal resumed[/green] on session [cyan]{sid}[/cyan] "
+        f"[green]↻ goal resumed[/green] on session [cyan]{sid}[/cyan] "
         "(turn counter reset to 0)"
     )
 
@@ -227,7 +252,7 @@ def clear_cmd(
         return
     db.clear_session_goal(sid)
     console.print(
-        f"[green]goal cleared[/green] on session [cyan]{sid}[/cyan]"
+        f"[green]✗ goal cleared[/green] on session [cyan]{sid}[/cyan]"
     )
 
 
