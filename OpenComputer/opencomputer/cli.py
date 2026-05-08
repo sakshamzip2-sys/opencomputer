@@ -3039,6 +3039,11 @@ app.add_typer(consent_app, name="consent")
 app.add_typer(dashboard_app, name="dashboard")
 app.add_typer(tui_app, name="tui")
 
+# 2026-05-08 — `.worktreeinclude` + checkpoint hygiene CLIs.
+from opencomputer.cli_worktrees import worktrees_app  # noqa: E402
+
+app.add_typer(worktrees_app, name="worktrees")
+
 # ─── service (cross-platform always-on daemon) ────────────────────────
 service_app = typer.Typer(
     help="Install/uninstall the always-on system service "
