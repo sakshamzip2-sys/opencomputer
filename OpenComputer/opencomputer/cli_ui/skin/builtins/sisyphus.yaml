@@ -2,16 +2,46 @@ name: sisyphus
 description: Austere grayscale, boulder energy.
 
 colors:
+  # Banner
   banner_border:    "#6B7280"
   banner_title:     "#9CA3AF"
   banner_accent:    "#4B5563"
+  banner_dim:       "#374151"
+  banner_text:      "#E5E7EB"
+  # UI semantic
+  ui_accent:        "#9CA3AF"
+  ui_label:         "#D1D5DB"
+  ui_ok:            "#86EFAC"
+  ui_error:         "#FCA5A5"
+  ui_warn:          "#FCD34D"
+  # Prompt + input area
   prompt:           "#D1D5DB"
+  input_rule:       "#4B5563"
+  # Agent response box
+  response_border:  "#9CA3AF"
+  # Session badge + border
+  session_label:    "#E5E7EB"
+  session_border:   "#374151"
+  # Status bars
+  status_bar_bg:    "#1F2937"
+  status_bar_fg:    "#E5E7EB"
+  voice_status_bg:  "#374151"
+  # TUI selection highlight
+  selection_bg:     "#4B5563"
+  # Completion menu panes
+  completion_menu_bg:               "#1F2937"
+  completion_menu_current_bg:       "#4B5563"
+  completion_menu_meta_bg:          "#111827"
+  completion_menu_meta_current_bg:  "#374151"
+  # Legacy / extra
   agent_text:       "#E5E7EB"
   agent_label:      "#9CA3AF"
 
 spinner:
   thinking_verbs: [pushing, again, again, still-pushing]
   wings: [["○", "○"]]
+  waiting_faces: ["(¬_¬)", "(¬‿¬)", "(◔_◔)"]
+  thinking_faces: ["(◔‿◔)", "(•_•)", "(˘_˘)"]
 
 branding:
   agent_name: "OpenComputer"

@@ -90,6 +90,18 @@ def _spec_from_dict(name: str, data: dict) -> SkinSpec:
     if not wings:
         wings = (("⟨", "⟩"),)
 
+    # Hermes v2 D5 (2026-05-08): waiting/thinking face cycles.
+    # ``thinking_faces`` falls back to ``waiting_faces`` when only one
+    # is configured (common single-face skins) so renderers can always
+    # call ``current_spinner_thinking_faces`` without checking which
+    # set was populated.
+    waiting_faces = tuple(
+        str(f) for f in (spinner.get("waiting_faces") or ()) if isinstance(f, str)
+    )
+    thinking_faces = tuple(
+        str(f) for f in (spinner.get("thinking_faces") or ()) if isinstance(f, str)
+    )
+
     return SkinSpec(
         name=name,
         description=str(data.get("description", "")),
@@ -98,6 +110,8 @@ def _spec_from_dict(name: str, data: dict) -> SkinSpec:
             spinner.get("thinking_verbs") or ("thinking",)
         ),
         spinner_wings=wings,
+        spinner_waiting_faces=waiting_faces,
+        spinner_thinking_faces=thinking_faces,
         agent_name=str(branding.get("agent_name", "OpenComputer")),
         response_label=str(branding.get("response_label", " ✦ OC ")),
         prompt_symbol=str(branding.get("prompt_symbol", ">")),

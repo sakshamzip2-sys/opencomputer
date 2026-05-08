@@ -2,16 +2,46 @@ name: slate
 description: Royal blue — focused developer surface.
 
 colors:
+  # Banner
   banner_border:    "#1E3A8A"
   banner_title:     "#3B82F6"
   banner_accent:    "#60A5FA"
+  banner_dim:       "#475569"
+  banner_text:      "#DBEAFE"
+  # UI semantic
+  ui_accent:        "#3B82F6"
+  ui_label:         "#60A5FA"
+  ui_ok:            "#10B981"
+  ui_error:         "#EF4444"
+  ui_warn:          "#F59E0B"
+  # Prompt + input area
   prompt:           "#93C5FD"
+  input_rule:       "#1E3A8A"
+  # Agent response box
+  response_border:  "#3B82F6"
+  # Session badge + border
+  session_label:    "#DBEAFE"
+  session_border:   "#475569"
+  # Status bars
+  status_bar_bg:    "#1E293B"
+  status_bar_fg:    "#DBEAFE"
+  voice_status_bg:  "#1E3A8A"
+  # TUI selection highlight
+  selection_bg:     "#334155"
+  # Completion menu panes
+  completion_menu_bg:               "#1E293B"
+  completion_menu_current_bg:       "#3B82F6"
+  completion_menu_meta_bg:          "#0F172A"
+  completion_menu_meta_current_bg:  "#1E3A8A"
+  # Legacy / extra
   agent_text:       "#DBEAFE"
   agent_label:      "#3B82F6"
 
 spinner:
   thinking_verbs: [thinking, computing, parsing]
   wings: [["[", "]"]]
+  waiting_faces: ["[◌]", "[◍]", "[◎]"]
+  thinking_faces: ["[◐]", "[◓]", "[◑]", "[◒]"]
 
 branding:
   agent_name: "OpenComputer"
