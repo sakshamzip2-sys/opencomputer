@@ -963,6 +963,25 @@ def _run_chat_session(
     if "_reasoning_store" not in runtime.custom:
         runtime.custom["_reasoning_store"] = _ReasoningStore()
 
+    # Hermes-CLI parity A3 — per-prompt elapsed clock. status_line.py
+    # reads this if present; turn dispatch calls .start() / .stop().
+    from opencomputer.cli_ui.per_prompt_elapsed import PromptClock as _PromptClock
+    if "_prompt_clock" not in runtime.custom:
+        runtime.custom["_prompt_clock"] = _PromptClock()
+
+    # Hermes-CLI parity A6 — quick commands. Loaded once per session;
+    # slash_dispatcher checks runtime.custom["_quick_commands"] BEFORE
+    # the registry so user aliases / exec quick wins can shadow slash.
+    if "_quick_commands" not in runtime.custom:
+        try:
+            from opencomputer.agent.config_store import config_file_path
+            from opencomputer.agent.quick_commands import QuickCommands as _QC
+
+            runtime.custom["_quick_commands"] = _QC.load(config_file_path())
+        except Exception:  # noqa: BLE001
+            # Quick commands are optional — never crash session start.
+            pass
+
     # Phase B (model-agnostic thinking): stash the active provider's
     # native-thinking capability for the configured model on
     # runtime.custom. The ThinkingInjector + AgentLoop's stream wrapper
@@ -1986,12 +2005,19 @@ def _run_chat_session(
                 finally:
                     listener.stop()
 
+        # Hermes-CLI parity A3 — per-prompt elapsed clock.
+        _ppc = runtime.custom.get("_prompt_clock")
+        if _ppc is not None:
+            _ppc.start()
         try:
             asyncio.run(
                 _run_turn_cancellable(cleaned_text, _image_paths or None)
             )
         except Exception as e:
             console.print(f"[bold red]error:[/bold red] {type(e).__name__}: {e}")
+        finally:
+            if _ppc is not None:
+                _ppc.stop()
 
 
 @app.command()

@@ -517,6 +517,16 @@ class StreamingRenderer:
             for url in stripped_urls:
                 self._sources.add_url(url)
             content = rewrite_inline_url_refs(content, self._sources)
+            # Hermes-CLI parity A2: strip rendered `**bold**` / `*italic*`
+            # markup so terminals without bold/italic don't print literal
+            # asterisks. Code blocks / lists / tables preserved.
+            # Disable via `OPENCOMPUTER_NO_MD_STRIP=1` for raw markdown.
+            import os as _os
+
+            from opencomputer.cli_ui.markdown_strip import strip_for_terminal
+
+            if not _os.environ.get("OPENCOMPUTER_NO_MD_STRIP"):
+                content = strip_for_terminal(content)
             if self._header_shown:
                 self.console.print("[bold magenta]oc ›[/bold magenta]")
             self.console.print(Markdown(content, code_theme="ansi_dark"))

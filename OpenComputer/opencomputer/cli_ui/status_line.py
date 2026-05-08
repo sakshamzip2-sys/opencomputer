@@ -293,6 +293,20 @@ def render_status_line(runtime: object) -> list[tuple[str, str]]:
         fragments.append((style_sep, SEPARATOR))
         fragments.append((style_time, "0s"))
 
+    # Hermes-CLI parity A3 — per-prompt elapsed clock. Reads from
+    # ``runtime.custom["_prompt_clock"]`` if present (PromptClock instance).
+    # Renders empty when no prompt is in flight.
+    custom = getattr(runtime, "custom", None) or {}
+    clock = custom.get("_prompt_clock")
+    if clock is not None:
+        try:
+            tag = clock.render()
+        except Exception:  # noqa: BLE001 — never crash the status line
+            tag = ""
+        if tag:
+            fragments.append((style_sep, SEPARATOR))
+            fragments.append((style_time, tag))
+
     fragments.append(("", " "))  # trailing pad so the right edge breathes
     return fragments
 

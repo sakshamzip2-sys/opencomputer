@@ -798,6 +798,35 @@ async def read_user_input(
     def _ctrl_j(event):  # noqa: ANN001
         input_buffer.insert_text("\n")
 
+    # Hermes-CLI parity A7 — Ctrl+Z suspends to background (Unix only).
+    # Use ``shell-out`` style: leave alt-screen / restore tty, raise
+    # SIGTSTP, then re-init when ``fg`` returns. prompt-toolkit doesn't
+    # ship ``enable_suspend`` (verified via `inspect.signature`), so we
+    # wire the key binding manually. Windows is no-op.
+    @kb.add(Keys.ControlZ)
+    def _ctrl_z(event):  # noqa: ANN001
+        import os as _os
+        import signal as _signal
+        import sys as _sys
+
+        if _sys.platform == "win32":
+            return  # no SIGTSTP on Windows
+        try:
+            _sys.stderr.write(
+                "\nOpenComputer Agent has been suspended. Run `fg` to bring OpenComputer Agent back.\n"
+            )
+            _sys.stderr.flush()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            event.app.exit(result="")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _os.kill(_os.getpid(), _signal.SIGTSTP)
+        except Exception:  # noqa: BLE001
+            pass
+
     @kb.add(Keys.Escape, Keys.Enter)
     def _alt_enter(event):  # noqa: ANN001
         input_buffer.insert_text("\n")
