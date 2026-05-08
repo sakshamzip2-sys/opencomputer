@@ -200,7 +200,26 @@ def _check_telegram_polling_conflict() -> list[Check]:
 
     self_pid = str(os.getpid())
     suspects: list[tuple[str, str]] = []
-    pat = re.compile(r"hermes[_-]?cli|hermes[_-]?agent|opencomputer.*gateway", re.I)
+    # Patterns that match KNOWN gateway-style processes that could be
+    # polling the same bot token:
+    #   - hermes_cli / hermes_agent: Hermes daemon
+    #   - opencomputer.*gateway: another OC gateway instance
+    #   - claude-plugins-official/telegram: Claude Code's --channels
+    #     Telegram bridge (a bun process); when started with
+    #     `claude --channels plugin:telegram`, this spawns a server.ts
+    #     that long-polls Telegram with the same TELEGRAM_BOT_TOKEN.
+    #     2026-05-08 incident: ghost bun bridges from prior sessions
+    #     held the slot for hours, OC's adapter spun in conflict-retry
+    #     loops, no Telegram replies. Caught only by lsof; we surface
+    #     here so `oc doctor` is sufficient to find the culprit.
+    pat = re.compile(
+        r"hermes[_-]?cli"
+        r"|hermes[_-]?agent"
+        r"|opencomputer.*gateway"
+        r"|claude-plugins-official/telegram"
+        r"|claude.*channels.*telegram",
+        re.I,
+    )
     for line in proc.stdout.splitlines()[1:]:
         parts = line.strip().split(None, 2)
         if len(parts) < 3:
