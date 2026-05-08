@@ -341,8 +341,113 @@ def detect_destructive(cmd: str) -> DestructivePattern | None:
     return None
 
 
+def is_command_allowlisted(cmd: str, allowlist: list[str] | tuple[str, ...]) -> bool:
+    """Check if ``cmd`` matches any user-provided permanent allowlist entry.
+
+    Mirrors the Hermes ``command_allowlist`` semantics: each entry is the
+    leading word of a command the user has approved permanently. The match
+    is on the first whitespace-delimited token of ``cmd``.
+
+    Examples:
+        >>> is_command_allowlisted("rm -rf /tmp/foo", ["rm"])
+        True
+        >>> is_command_allowlisted("systemctl stop sshd", ["systemctl"])
+        True
+        >>> is_command_allowlisted("ls -la", ["rm", "systemctl"])
+        False
+
+    Pattern IDs are also accepted as entries, so power users can pin a
+    specific match (``"chmod_666"`` rather than the broader ``"chmod"``).
+    The match against pattern IDs is exact.
+
+    Args:
+        cmd: raw shell command.
+        allowlist: tuple/list of strings — leading-token entries, pattern
+            IDs, or a mix.
+
+    Returns:
+        True iff cmd's leading token OR any matched pattern_id is in the
+        allowlist.
+    """
+    if not cmd or not allowlist:
+        return False
+    cmd_stripped = cmd.lstrip()
+    if not cmd_stripped:
+        return False
+    leading = cmd_stripped.split(None, 1)[0]
+    # Strip trailing /flags so "rm" matches "rm -rf"
+    leading_word = leading.split("/")[-1]  # handle "/usr/bin/rm" → "rm"
+    if leading_word in allowlist or leading in allowlist:
+        return True
+    # Fall through: check if any matching pattern's pattern_id is allowlisted.
+    hit = detect_destructive(cmd)
+    return hit is not None and hit.pattern_id in allowlist
+
+
+def detect_destructive_with_allowlist(
+    cmd: str, allowlist: list[str] | tuple[str, ...] | None = None
+) -> DestructivePattern | None:
+    """Like :func:`detect_destructive` but suppresses matches the user has
+    permanently allowlisted via ``command_allowlist`` config.
+
+    NOTE: this only suppresses *advisory* (bash_safety) detection. The
+    enforcement-tier hardline blocklist
+    (:mod:`opencomputer.security.hardline`) is NOT consulted here and is
+    NEVER bypassable, regardless of allowlist contents.
+
+    Args:
+        cmd: raw shell command.
+        allowlist: user-configured permanent allowlist. ``None`` is
+            treated as empty.
+
+    Returns:
+        Matching pattern, or ``None`` if no match OR the cmd is
+        allowlisted.
+    """
+    if allowlist and is_command_allowlisted(cmd, allowlist):
+        return None
+    return detect_destructive(cmd)
+
+
+def load_command_allowlist_from_active_config() -> tuple[str, ...]:
+    """Read ``security.command_allowlist`` from the active profile's
+    ``config.yaml``.
+
+    Bypasses the central ``SecurityConfig`` dataclass (consistent with
+    :mod:`opencomputer.security.website_blocklist`) so the module stays
+    independent of unrelated schema changes. On any error returns an
+    empty tuple — fail-safe.
+    """
+    try:
+        import yaml
+
+        from opencomputer.profiles import (
+            profile_home_dir,
+            read_active_profile,
+        )
+
+        prof = read_active_profile()
+        if prof is None:
+            return ()
+        config_path = profile_home_dir(prof) / "config.yaml"
+        if not config_path.exists():
+            return ()
+        with config_path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        sec = data.get("security") or {}
+        raw = sec.get("command_allowlist") or []
+        if not isinstance(raw, list):
+            return ()
+        return tuple(str(e) for e in raw if isinstance(e, str) and e.strip())
+    except Exception:  # noqa: BLE001
+        return ()
+
+
 __all__ = [
-    "DestructivePattern",
     "DESTRUCTIVE_PATTERNS",
+    "DestructivePattern",
     "detect_destructive",
+    "detect_destructive_with_allowlist",
+    "is_command_allowlisted",
+    "load_command_allowlist_from_active_config",
 ]
