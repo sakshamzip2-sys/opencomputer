@@ -477,11 +477,65 @@ class DelegateTool(BaseTool):
                 child_cfg.loop,
                 max_iterations=child_cfg.loop.delegation_max_iterations,
             )
-            subagent_loop.config = dataclasses.replace(child_cfg, loop=new_loop_cfg)
+            new_model_cfg = child_cfg.model
+            # Hermes parity (2026-05-08): apply DelegationConfig overrides if
+            # the parent's loop config has any non-None field. None values
+            # inherit the parent's provider/model. ``base_url`` and ``api_key``
+            # require plugin-level wiring (provider plugins consume their own
+            # env vars / config); v1 swaps env vars at run-time so the active
+            # provider picks them up. Read DelegationConfig from the PARENT
+            # (not the child) — the override is configured by the user on the
+            # parent loop and flows down to children at delegation time.
+            parent_loop_for_delegation = getattr(self._factory, "__self__", None)
+            delegation = None
+            if parent_loop_for_delegation is not None and hasattr(
+                parent_loop_for_delegation, "config"
+            ):
+                delegation = getattr(
+                    parent_loop_for_delegation.config.loop, "delegation", None
+                )
+            if delegation is not None:
+                replace_kwargs: dict = {}
+                if delegation.model:
+                    replace_kwargs["model"] = delegation.model
+                if delegation.provider:
+                    replace_kwargs["provider"] = delegation.provider
+                if replace_kwargs:
+                    new_model_cfg = dataclasses.replace(
+                        child_cfg.model, **replace_kwargs
+                    )
+                if delegation.base_url or delegation.api_key:
+                    import os as _os
+                    if delegation.base_url:
+                        _os.environ["OPENCOMPUTER_DELEGATION_BASE_URL"] = delegation.base_url
+                    if delegation.api_key:
+                        _os.environ["OPENCOMPUTER_DELEGATION_API_KEY"] = delegation.api_key
+            subagent_loop.config = dataclasses.replace(
+                child_cfg,
+                loop=new_loop_cfg,
+                model=new_model_cfg,
+            )
         # III.1: push the allowlist onto the child BEFORE it runs. ``None``
         # is also explicitly assigned so callers who re-use a loop factory
         # don't inherit a stale allowlist from a prior delegation.
         subagent_loop.allowed_tools = allowed
+
+        # Hermes parity (2026-05-08): SubagentRegistry — register the child so
+        # `oc agents running` / `oc agents kill <id>` can see/cancel it.
+        # Best-effort: registry import / register failure must not break
+        # delegation. Update the record on completion/failure in the
+        # try/except below.
+        _registry_record = None
+        try:
+            from opencomputer.agent.subagent_registry import SubagentRegistry
+            _registry_record = SubagentRegistry.instance().register(
+                parent_id=self._current_runtime.custom.get("agent_id")
+                if self._current_runtime.custom
+                else None,
+                goal=task,
+            )
+        except Exception:
+            _registry_record = None
 
         coordinator = get_default_coordinator()
         try:
@@ -536,16 +590,64 @@ class DelegateTool(BaseTool):
                 except Exception:
                     pass
 
+                # Hermes parity: mark the subagent record completed.
+                if _registry_record is not None:
+                    try:
+                        from datetime import UTC
+                        from datetime import datetime as _dt
+
+                        from opencomputer.agent.subagent_registry import SubagentRegistry
+                        SubagentRegistry.instance().update(
+                            _registry_record.agent_id,
+                            state="completed",
+                            ended_at=_dt.now(UTC),
+                        )
+                    except Exception:
+                        pass
+
                 return ToolResult(
                     tool_call_id=call.id,
                     content=result.final_message.content,
                 )
         except DelegationLockTimeout as exc:
+            # Hermes parity: mark the subagent record failed on lock timeout.
+            if _registry_record is not None:
+                try:
+                    from datetime import UTC
+                    from datetime import datetime as _dt
+
+                    from opencomputer.agent.subagent_registry import SubagentRegistry
+                    SubagentRegistry.instance().update(
+                        _registry_record.agent_id,
+                        state="failed",
+                        ended_at=_dt.now(UTC),
+                        error=str(exc)[:200],
+                    )
+                except Exception:
+                    pass
             return ToolResult(
                 tool_call_id=call.id,
                 content=f"Error: {exc}",
                 is_error=True,
             )
+        except BaseException as exc:
+            # Hermes parity: mark the subagent record failed on any other error.
+            # Re-raise after recording (don't swallow asyncio.CancelledError etc.).
+            if _registry_record is not None:
+                try:
+                    from datetime import UTC
+                    from datetime import datetime as _dt
+
+                    from opencomputer.agent.subagent_registry import SubagentRegistry
+                    SubagentRegistry.instance().update(
+                        _registry_record.agent_id,
+                        state="failed",
+                        ended_at=_dt.now(UTC),
+                        error=str(exc)[:200],
+                    )
+                except Exception:
+                    pass
+            raise
 
     async def _execute_batch(
         self, call_id: str, tasks: list[dict[str, object]]
