@@ -790,7 +790,7 @@ class AnthropicProvider(BaseProvider):
         # empty, so existing single/multi-key flows are unchanged.
         if not api_key_raw:
             try:
-                from opencomputer.auth.discovery import discover_anthropic_credential
+                from plugin_sdk.auth_discovery import discover_anthropic_credential
                 discovered = discover_anthropic_credential()
                 if discovered:
                     api_key_raw = discovered["api_key"]
