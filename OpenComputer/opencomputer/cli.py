@@ -624,14 +624,18 @@ def default(
 def _resolve_resume_target(spec: str) -> str | None:
     """Resolve a magic ``--resume`` value to a concrete session id.
 
-    Supports two magic spellings:
+    Supports several spellings:
 
-    - ``last`` → most-recent session by ``started_at``
-    - ``pick`` → interactive prompt listing the last 10 sessions
+    - ``last``    — most-recent session by ``started_at``.
+    - ``pick``    — interactive prompt listing the last 10 sessions.
+    - exact title — Hermes-parity C6: ``oc chat --resume "refactor auth"``
+                     resolves to the unique session with that title.
+    - lineage     — Hermes-parity C5: ``oc chat -c "my project"`` resolves
+                     to the most-recent session with title ``my project``
+                     or ``my project #2``, ``my project #3``, …
 
-    Returns the resolved id, or ``None`` when there are no sessions to
-    pick from (caller falls back to a fresh session). Reuses
-    :meth:`SessionDB.list_sessions` — no duplicate query path.
+    Returns the resolved id, or ``None`` when nothing matches (caller
+    treats as a fresh session, or as an id-prefix downstream).
     """
     from opencomputer.agent.config import default_config
     from opencomputer.agent.state import SessionDB
@@ -640,31 +644,54 @@ def _resolve_resume_target(spec: str) -> str | None:
     db = SessionDB(cfg.session.db_path)
     rows = db.list_sessions(limit=10)
     if not rows:
+        # Even with no recent sessions, an exact-title lookup may still
+        # find a row beyond the first 10 (e.g., a long-lived named
+        # session). Try the title path before bailing.
+        if spec not in ("last", "pick"):
+            row = db.find_session_by_title(spec)
+            if row:
+                return str(row["id"])
+            lineage = db.find_sessions_by_title_lineage(spec)
+            if lineage:
+                return str(lineage[0]["id"])
         return None
     if spec == "last":
         return str(rows[0]["id"])
 
-    # spec == "pick" — open the polished alt-screen picker (PR #207).
-    # Falls back to None if the user cancels (Esc / Ctrl+C).
-    from opencomputer.cli_ui.resume_picker import SessionRow, run_resume_picker
+    if spec == "pick":
+        # Open the polished alt-screen picker (PR #207).
+        # Falls back to None if the user cancels (Esc / Ctrl+C).
+        from opencomputer.cli_ui.resume_picker import SessionRow, run_resume_picker
 
-    def _coerce_started_at(v) -> float:
-        try:
-            return float(v) if v is not None else 0.0
-        except (TypeError, ValueError):
-            return 0.0
+        def _coerce_started_at(v) -> float:
+            try:
+                return float(v) if v is not None else 0.0
+            except (TypeError, ValueError):
+                return 0.0
 
-    picker_rows = [
-        SessionRow(
-            id=str(r.get("id", "")),
-            title=r.get("title") or "",
-            started_at=_coerce_started_at(r.get("started_at")),
-            message_count=int(r.get("message_count", 0) or 0),
-        )
-        for r in rows
-        if r.get("id")
-    ]
-    return run_resume_picker(picker_rows, db=db)
+        picker_rows = [
+            SessionRow(
+                id=str(r.get("id", "")),
+                title=r.get("title") or "",
+                started_at=_coerce_started_at(r.get("started_at")),
+                message_count=int(r.get("message_count", 0) or 0),
+            )
+            for r in rows
+            if r.get("id")
+        ]
+        return run_resume_picker(picker_rows, db=db)
+
+    # Hermes-CLI parity C5/C6 — title and lineage resolution.
+    # Exact-title match first (titles have a UNIQUE index, so at most 1).
+    row = db.find_session_by_title(spec)
+    if row:
+        return str(row["id"])
+    # Lineage match — newest session in `spec`, `spec #2`, `spec #3` family.
+    lineage = db.find_sessions_by_title_lineage(spec)
+    if lineage:
+        return str(lineage[0]["id"])
+    # Fall through — caller treats as id-prefix downstream.
+    return None
 
 
 _STREAM_HOOKS_WIRED = False
@@ -3511,6 +3538,10 @@ app.add_typer(cron_app, name="cron")
 app.add_typer(heartbeat_app, name="heartbeat")
 app.add_typer(pair_app, name="pair")
 app.add_typer(session_app, name="session")
+# Hermes-CLI parity C1 — plural alias of `oc session` for users who
+# expect `sessions list/stats/export/rename` (Hermes UX). The same
+# session_app handles both — no fork.
+app.add_typer(session_app, name="sessions")
 app.add_typer(voice_app, name="voice")
 app.add_typer(webhook_app, name="webhook")
 

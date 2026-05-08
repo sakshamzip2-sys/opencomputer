@@ -511,4 +511,126 @@ def session_prune(
     console.print(f"[green]pruned[/green] {deleted} session(s)")
 
 
+# ---------------------------------------------------------------------------
+# Hermes-CLI parity C2-C4 — `oc sessions {stats,export,rename}` subcommands.
+# These ride on the same session_app so they're reachable as both
+# `oc session …` (singular) and `oc sessions …` (plural alias added in cli.py).
+# ---------------------------------------------------------------------------
+
+
+@session_app.command("stats")
+def stats_(
+    profile: str | None = typer.Option(
+        None, "--agent", help="Read another profile's sessions.db."
+    ),
+) -> None:
+    """Counts of sessions by source + total messages + DB size on disk.
+
+    Hermes-CLI parity (doc lines 477-486).
+    """
+    db = _db_for_profile(profile) if profile else _db()
+    db_path: Path = (
+        get_profile_dir(profile) / "sessions.db" if profile else _home() / "sessions.db"
+    )
+
+    rows = db.list_sessions(limit=10_000)
+    total = len(rows)
+    by_src: dict[str, int] = {}
+    n_msg = 0
+    for r in rows:
+        src = (r.get("platform") or r.get("source") or "cli") or "cli"
+        by_src[src] = by_src.get(src, 0) + 1
+        n_msg += int(r.get("message_count") or 0)
+
+    size_mb = db_path.stat().st_size / 1_048_576 if db_path.exists() else 0.0
+    console.print(f"Total sessions: [bold]{total}[/]")
+    console.print(f"Total messages: [bold]{n_msg}[/]")
+    for src, n in sorted(by_src.items(), key=lambda kv: -kv[1]):
+        console.print(f"  {src}: {n}")
+    console.print(f"Database size: [bold]{size_mb:.1f} MB[/]")
+
+
+@session_app.command("export")
+def export_(
+    path: str = typer.Argument(..., help="Output JSONL file."),
+    source: str | None = typer.Option(
+        None, "--source", help="Filter by source/platform."
+    ),
+    session_id: str | None = typer.Option(
+        None, "--session-id", help="Export one session only."
+    ),
+    include_messages: bool = typer.Option(
+        True, "--include-messages/--no-messages",
+        help="Inline full messages (default true).",
+    ),
+) -> None:
+    """Dump sessions to JSONL — one JSON object per line.
+
+    Hermes-CLI parity (doc line 472). Messages are inlined under the
+    ``messages`` key when --include-messages (default).
+    """
+    import json
+
+    db = _db()
+    if session_id:
+        row = db.get_session(session_id)
+        rows = [row] if row else []
+    else:
+        rows = list(db.list_sessions(limit=10_000))
+        if source:
+            rows = [
+                r
+                for r in rows
+                if (r.get("platform") or r.get("source") or "cli") == source
+            ]
+
+    out_p = Path(path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    n = 0
+    with out_p.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            sid = row.get("id") if isinstance(row, dict) else getattr(row, "id", None)
+            payload: dict = (
+                dict(row) if isinstance(row, dict) else dict(vars(row))
+            )
+            if include_messages and sid:
+                try:
+                    payload["messages"] = list(db.get_messages(sid) or [])
+                except Exception:  # noqa: BLE001
+                    payload["messages"] = []
+            fh.write(json.dumps(payload, default=str) + "\n")
+            n += 1
+    console.print(f"exported {n} session(s) to {out_p}")
+
+
+@session_app.command("rename")
+def rename_(
+    session_id: str = typer.Argument(..., help="Session id (or unique prefix)."),
+    title: list[str] = typer.Argument(
+        None, help="New title (no quotes needed for multi-word)."
+    ),
+) -> None:
+    """Set or change the title of a saved session.
+
+    Hermes-CLI parity (doc line 433). Multi-word titles need no quotes:
+    ``oc sessions rename ABCD debugging auth flow``.
+    """
+    new_title = " ".join(title or []).strip()
+    if not new_title:
+        console.print("[red]title required[/]")
+        raise typer.Exit(2)
+    db = _db()
+    if hasattr(db, "set_session_title"):
+        db.set_session_title(session_id, new_title)
+    else:  # pragma: no cover — should always exist on the current SessionDB
+        with db._txn() as conn:  # type: ignore[attr-defined]
+            conn.execute(
+                "UPDATE sessions SET title=? WHERE id=?",
+                (new_title, session_id),
+            )
+    console.print(
+        f"renamed [cyan]{session_id[:8]}[/] -> [bold]{new_title}[/]"
+    )
+
+
 __all__ = ["session_app"]
