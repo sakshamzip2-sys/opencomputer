@@ -565,6 +565,15 @@ class MCPServerConfig:
     #: Hermes parity G9 (2026-05-09) — suppress per-server MCP resource
     #: utility tools (``<server>__list_resources`` / ``__read_resource``).
     resources_enabled: bool = True
+    #: Hermes parity G10 (2026-05-09) — per-server tool-call timeout (s).
+    #: Wraps ``ClientSession.call_tool`` with ``asyncio.wait_for``. The
+    #: 30 s default matches Hermes spec; lower values catch hung MCP
+    #: tools before they wedge the agent loop.
+    timeout: float = 30.0
+    #: Initial-connect timeout (s). Applies to the ``stdio_client`` /
+    #: ``streamablehttp_client`` / ``sse_client`` connect path. Same
+    #: 30 s default; lower values fail-fast a slow remote MCP host.
+    connect_timeout: float = 30.0
 
     def __post_init__(self) -> None:
         # YAML auto-parser delivers list-typed fields as Python ``list``;

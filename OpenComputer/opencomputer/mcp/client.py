@@ -215,12 +215,15 @@ class MCPTool(BaseTool):
         description: str,
         parameters: dict[str, Any],
         session: ClientSession,
+        timeout: float = 30.0,
     ) -> None:
         self.server_name = server_name
         self.tool_name = tool_name
         self.description = description
         self.parameters = parameters
         self.session = session
+        # G10 (Hermes parity, 2026-05-09): per-tool-call timeout cap.
+        self.timeout = timeout
 
     @property
     def schema(self) -> ToolSchema:
@@ -241,7 +244,14 @@ class MCPTool(BaseTool):
         from opencomputer.security.redact import redact_runtime_text
 
         try:
-            result = await self.session.call_tool(name=self.tool_name, arguments=call.arguments)
+            # G10 (Hermes parity, 2026-05-09): cap the per-tool-call wait
+            # so a wedged MCP server can't block the agent loop forever.
+            result = await asyncio.wait_for(
+                self.session.call_tool(
+                    name=self.tool_name, arguments=call.arguments
+                ),
+                timeout=self.timeout,
+            )
             # Convert MCP result to our string format — concatenate text blocks
             parts: list[str] = []
             is_error = bool(getattr(result, "isError", False))
@@ -825,6 +835,7 @@ class MCPConnection:
                     description=t.description or "",
                     parameters=t.inputSchema or {"type": "object", "properties": {}},
                     session=session,
+                    timeout=self.config.timeout,
                 )
                 self.tools.append(tool_obj)
                 # G8 (Hermes parity, 2026-05-09): also register the
@@ -950,6 +961,7 @@ class MCPConnection:
                 description=t.description or "",
                 parameters=t.inputSchema or {"type": "object", "properties": {}},
                 session=self.session,
+                timeout=self.config.timeout,
             )
         old_tools_by_name = {tool.tool_name: tool for tool in self.tools if isinstance(tool, MCPTool)}
         added_names = set(new_tools_by_name) - set(old_tools_by_name)
