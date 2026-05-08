@@ -368,6 +368,12 @@ def create_job(
     if prompt:
         assert_cron_prompt_safe(prompt)
 
+    # Production-grade (2026-05-09): validate notify target at create time
+    # so misconfigured jobs surface immediately, not at first delivery.
+    if notify:
+        from opencomputer.cron.scheduler import validate_notify_target
+        validate_notify_target(notify)
+
     # When skills list is supplied, clear singular skill to avoid double-emission
     # in run prompt. Plural takes precedence (matches Hermes spec).
     effective_skill = None if effective_skills else skill
@@ -459,7 +465,21 @@ def list_jobs(*, include_disabled: bool = False) -> list[dict[str, Any]]:
 
 
 def update_job(job_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
-    """Update a job by id, refreshing schedule fields when changed."""
+    """Update a job by id, refreshing schedule fields when changed.
+
+    Production-grade (2026-05-09): re-scans the prompt for threats when
+    ``prompt`` is in ``updates`` (closes the API edit bypass — previously
+    only the CLI re-scanned). Re-validates ``notify`` when it changes so
+    invalid targets surface immediately.
+    """
+    # Threat-scan and notify-validate BEFORE acquiring the write lock so
+    # we don't hold it during a potentially expensive scan.
+    if "prompt" in updates and updates["prompt"]:
+        assert_cron_prompt_safe(updates["prompt"])
+    if "notify" in updates and updates["notify"]:
+        from opencomputer.cron.scheduler import validate_notify_target
+        validate_notify_target(updates["notify"])
+
     with _jobs_lock:
         jobs = load_jobs()
         for i, job in enumerate(jobs):

@@ -407,6 +407,20 @@ def cron_edit(
         else:
             updates["skills"] = new_skills
             updates["skill"] = None
+        # Production-grade (2026-05-09): when skills become active, clear
+        # any stale prompt so the job's behavior is unambiguous (skills
+        # take precedence in _build_run_prompt; leaving the old prompt
+        # around is confusing for operators reading jobs.json).
+        if new_skills and "prompt" not in updates:
+            updates["prompt"] = None
+
+    # Production-grade (2026-05-09): switching to prompt-only ⇒ clear
+    # stale skills so _build_run_prompt actually emits the new prompt.
+    # Otherwise the prompt edit silently no-ops because skills win.
+    if prompt is not None and not skill_touched:
+        if job.get("skills") or job.get("skill"):
+            updates["skills"] = None
+            updates["skill"] = None
 
     if not updates:
         typer.secho(

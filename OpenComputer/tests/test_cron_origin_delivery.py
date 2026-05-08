@@ -84,3 +84,83 @@ async def test_deliver_origin_missing_falls_through_to_local():
     job = {"id": "j1", "name": "n", "notify": "origin"}
     err = await _deliver(job, "hi")
     assert err is None  # silent fall-through
+
+
+@pytest.mark.asyncio
+async def test_deliver_origin_with_thread_id_telegram_topic():
+    """Production-grade: Telegram forum-topic threads are delivered correctly."""
+    job = {
+        "id": "j1",
+        "name": "n",
+        "notify": "origin",
+        "origin_platform": "telegram",
+        "origin_chat_id": "-100123",
+        "origin_thread_id": "17585",
+    }
+
+    # Thread-aware adapter accepts thread_id kwarg.
+    class FakeThreadAdapter:
+        def __init__(self):
+            self.calls = []
+
+        async def send(self, chat_id, content, *, thread_id=None):
+            self.calls.append((chat_id, content, thread_id))
+            return None
+
+    adapter = FakeThreadAdapter()
+    with patch.dict(
+        "opencomputer.plugins.registry.registry.channels",
+        {"telegram": adapter},
+        clear=False,
+    ):
+        err = await _deliver(job, "hi topic")
+    assert err is None
+    assert adapter.calls == [("-100123", "hi topic", "17585")]
+
+
+@pytest.mark.asyncio
+async def test_deliver_explicit_target_with_thread_id():
+    """notify='telegram:-100123:17585' is parsed and forwarded."""
+    job = {"id": "j1", "name": "n", "notify": "telegram:-100123:17585"}
+
+    captured = {}
+
+    class FakeAdapter:
+        async def send(self, chat_id, content, *, thread_id=None):
+            captured["chat_id"] = chat_id
+            captured["thread_id"] = thread_id
+            return None
+
+    with patch.dict(
+        "opencomputer.plugins.registry.registry.channels",
+        {"telegram": FakeAdapter()},
+        clear=False,
+    ):
+        err = await _deliver(job, "x")
+    assert err is None
+    assert captured == {"chat_id": "-100123", "thread_id": "17585"}
+
+
+@pytest.mark.asyncio
+async def test_deliver_thread_id_skipped_when_adapter_lacks_kwarg():
+    """Production-grade: adapter without thread_id support gets clean call."""
+    job = {"id": "j1", "name": "n", "notify": "slack:#x:thread1"}
+
+    class TwoArgAdapter:
+        def __init__(self):
+            self.calls = []
+
+        async def send(self, chat_id, content):
+            self.calls.append((chat_id, content))
+            return None
+
+    adapter = TwoArgAdapter()
+    with patch.dict(
+        "opencomputer.plugins.registry.registry.channels",
+        {"slack": adapter},
+        clear=False,
+    ):
+        err = await _deliver(job, "msg")
+    assert err is None
+    # Adapter called with two positional args, no thread_id.
+    assert adapter.calls == [("#x", "msg")]
