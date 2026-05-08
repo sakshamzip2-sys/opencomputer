@@ -3081,6 +3081,85 @@ def agents_list() -> None:
         console.print(f"[dim]  source: {tpl.source_path}[/dim]")
 
 
+# Hermes parity (2026-05-08): runtime visibility into in-flight subagents.
+# The existing `agents list` shows TEMPLATES (definition-time); these
+# commands show RUNNING / HISTORY (runtime state) backed by SubagentRegistry.
+@agents_app.command("running", help="Show currently-running subagents (Hermes parity).")
+def agents_running() -> None:
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    from rich.table import Table
+
+    from opencomputer.agent.subagent_registry import SubagentRegistry
+
+    rows = SubagentRegistry.instance().list_running()
+    if not rows:
+        console.print("[dim](no running subagents)[/dim]")
+        return
+    t = Table(title="Running subagents")
+    t.add_column("agent_id", style="cyan", no_wrap=True)
+    t.add_column("parent")
+    t.add_column("goal")
+    t.add_column("elapsed", style="yellow")
+    t.add_column("current tool")
+    now = _dt.now(UTC)
+    for r in rows:
+        elapsed = (now - r.started_at).total_seconds()
+        t.add_row(
+            r.agent_id,
+            r.parent_id or "(root)",
+            r.goal[:60],
+            f"{elapsed:.0f}s ago",
+            r.current_tool or "—",
+        )
+    console.print(t)
+
+
+@agents_app.command("kill", help="Cancel a running subagent (Hermes parity).")
+def agents_kill(
+    agent_id: str = typer.Argument(..., help="Subagent id (from `agents running`)."),
+) -> None:
+    from opencomputer.agent.subagent_registry import SubagentRegistry
+
+    ok = SubagentRegistry.instance().kill(agent_id)
+    if ok:
+        typer.secho(f"killed {agent_id}", fg="green")
+    else:
+        typer.secho(f"no running agent {agent_id!r}", fg="yellow", err=True)
+        raise typer.Exit(1)
+
+
+@agents_app.command("history", help="Show last N completed/failed/killed subagent runs.")
+def agents_history(
+    limit: int = typer.Option(20, "--limit", "-n", help="Max rows (default 20)."),
+) -> None:
+    from rich.table import Table
+
+    from opencomputer.agent.subagent_registry import SubagentRegistry
+
+    rows = SubagentRegistry.instance().history(limit=limit)
+    if not rows:
+        console.print("[dim](no completed subagents)[/dim]")
+        return
+    t = Table(title=f"Subagent history (last {len(rows)})")
+    t.add_column("agent_id", style="cyan", no_wrap=True)
+    t.add_column("state")
+    t.add_column("goal")
+    t.add_column("ended", style="yellow")
+    t.add_column("error")
+    for r in rows:
+        ended = r.ended_at.strftime("%H:%M:%S") if r.ended_at else "—"
+        t.add_row(
+            r.agent_id,
+            r.state,
+            r.goal[:60],
+            ended,
+            (r.error or "")[:40],
+        )
+    console.print(t)
+
+
 config_app = typer.Typer(
     name="config", help="Manage OpenComputer config (~/.opencomputer/config.yaml)"
 )

@@ -21,11 +21,20 @@ Adapted from `sources/hermes-agent-2026.4.23/cron/scheduler.py` but slimmer:
   rather than a Hermes-specific `AIAgent` class.
 - Delivery is OC-native: telegram/discord/webhook channels resolved through
   the bundled adapter plugins.
+
+Hermes parity (2026-05-08):
+- :func:`_parse_wake_agent_marker` — last-line ``{"wakeAgent": false}`` JSON
+  marker on agent-path output suppresses delivery (silent tick).
+- :func:`_run_script_only` — ``--no-agent`` / ``--script`` script-only mode
+  bypasses the LLM entirely.
+- ``cron.wrap_response`` config — opt-in delivery wrap.
+- ``cron.script_timeout_seconds`` config — default timeout for script jobs.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from datetime import UTC, datetime
@@ -60,6 +69,41 @@ DEFAULT_JOB_TIMEOUT_S = 2400
 
 DEFAULT_MAX_PARALLEL = 6
 """2x Hermes default after 2026-05-05 cap-doubling sweep (was 3)."""
+
+DEFAULT_SCRIPT_TIMEOUT_S = 120
+"""Default ``--no-agent`` script timeout. Overridden by ``cron.script_timeout_seconds``
+config or per-job ``script_timeout_seconds`` field. Hermes parity."""
+
+
+def _parse_wake_agent_marker(text: str) -> bool:
+    """Hermes parity: parse last non-empty stdout line as JSON.
+
+    If it's a dict with key ``wakeAgent`` set to ``False``, the scheduler
+    suppresses delivery for this tick (treat as silent).
+
+    Returns ``True`` (default — proceed with delivery) for:
+    - empty/whitespace-only output
+    - last line not valid JSON
+    - last line valid JSON but not a dict
+    - dict has no ``wakeAgent`` key
+    - dict has ``wakeAgent: True``
+
+    Returns ``False`` only when the last non-empty line is a JSON dict with
+    ``wakeAgent: false``.
+    """
+    if not text:
+        return True
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return True
+    last = lines[-1].strip()
+    try:
+        parsed = json.loads(last)
+    except (json.JSONDecodeError, ValueError):
+        return True
+    if not isinstance(parsed, dict):
+        return True
+    return bool(parsed.get("wakeAgent", True))
 
 
 def _now() -> datetime:
@@ -211,10 +255,18 @@ def _build_run_prompt(job: dict[str, Any]) -> str:
 async def _run_one_job(job: dict[str, Any]) -> tuple[bool, str, str, str | None]:
     """Run a single cron job. Returns ``(success, full_doc, final_response, error)``.
 
+    Hermes parity (2026-05-08): branches on ``no_agent`` to ``_run_script_only``
+    when the job is script-only (no LLM invocation). The agent path also
+    honors a final ``{"wakeAgent": false}`` JSON marker as a silent tick.
+
     Defence-in-depth: re-scan the prompt for threats before invoking the
     agent. A poisoned prompt that survived create-time scanning (e.g.
     via direct file edit) is blocked here too.
     """
+    # Hermes parity: --no-agent / --script branch (skip LLM entirely).
+    if job.get("no_agent"):
+        return await _run_script_only(job)
+
     from plugin_sdk.runtime_context import RuntimeContext
 
     job_id = job["id"]
@@ -290,8 +342,109 @@ async def _run_one_job(job: dict[str, Any]) -> tuple[bool, str, str, str | None]
     if final.strip() == "(No response generated)":
         final = ""
 
+    # Hermes parity: wakeAgent: false marker on last stdout line suppresses
+    # delivery (silent tick). The marker is removed from the saved doc too.
+    if not _parse_wake_agent_marker(final):
+        return True, "", SILENT_MARKER, None
+
     doc = _success_doc(job, full_prompt, final or "(empty response)")
     return True, doc, final, None
+
+
+# ---------------------------------------------------------------------------
+# Script-only jobs (Hermes parity, 2026-05-08)
+# ---------------------------------------------------------------------------
+
+
+async def _run_script_only(
+    job: dict[str, Any],
+) -> tuple[bool, str, str, str | None]:
+    """Hermes parity: ``--no-agent`` / ``--script`` script-only execution.
+
+    Runs a shell script under ``<profile_home>/scripts/<name>`` with a
+    timeout (``script_timeout_seconds`` per-job override, else
+    ``cron.script_timeout_seconds`` config, else
+    :data:`DEFAULT_SCRIPT_TIMEOUT_S`). No LLM invocation.
+
+    Returns ``(success, full_doc, response_text, error)`` matching the
+    agent-path return shape so ``_process_job`` doesn't need to branch.
+
+    Behavior:
+        Empty stdout (zero exit) → silent tick (``response_text =
+        SILENT_MARKER``). Caller suppresses delivery.
+        Non-empty stdout (zero exit) → response_text is stdout (rstripped).
+        Non-zero exit → ``success=False``, ``error`` includes exit code +
+        first 500 chars of stdout.
+        Timeout → ``success=False``, error includes timeout value.
+        Script not found → ``success=False``, error names the path.
+    """
+    from opencomputer.agent.config import _home
+
+    job_name = job.get("name", "?")
+    script_name = (job.get("script") or "").strip()
+    if not script_name:
+        error = "no_agent=True but no script supplied"
+        return False, _failed_doc(job, error), "", error
+
+    scripts_dir = _home() / "scripts"
+    script_path = scripts_dir / script_name
+    if not script_path.exists():
+        error = f"script {script_name!r} not found at {script_path}"
+        return False, _failed_doc(job, error), "", error
+
+    timeout = job.get("script_timeout_seconds")
+    if timeout is None:
+        try:
+            from opencomputer.agent.config_store import load_config
+            cfg = load_config()
+            timeout = getattr(cfg.cron, "script_timeout_seconds", DEFAULT_SCRIPT_TIMEOUT_S)
+        except Exception:  # noqa: BLE001
+            timeout = DEFAULT_SCRIPT_TIMEOUT_S
+
+    cwd = job.get("workdir") or None
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(script_path),
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    except OSError as exc:
+        error = f"failed to launch script {script_name!r}: {exc}"
+        return False, _failed_doc(job, error), "", error
+
+    try:
+        stdout_bytes, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=float(timeout)
+        )
+    except TimeoutError:
+        try:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            except TimeoutError:
+                proc.kill()
+        except ProcessLookupError:
+            pass
+        error = f"script {script_name!r} exceeded {timeout}s timeout"
+        logger.warning("Cron job '%s' (id=%s): %s", job_name, job["id"], error)
+        return False, _failed_doc(job, error), "", error
+
+    output_text = stdout_bytes.decode("utf-8", errors="replace").rstrip()
+    if proc.returncode != 0:
+        # Truncate the first 500 chars of output into the error to keep
+        # delivery messages readable.
+        snippet = output_text[:500]
+        error = f"script {script_name!r} exited {proc.returncode}: {snippet}"
+        logger.warning("Cron job '%s' (id=%s): %s", job_name, job["id"], error)
+        return False, _failed_doc(job, error), output_text, error
+
+    if not output_text.strip():
+        # Empty stdout = silent tick (Hermes pattern — common for watchdogs).
+        return True, _success_doc(job, f"[script: {script_name}]", "(silent tick)"), SILENT_MARKER, None
+
+    return True, _success_doc(job, f"[script: {script_name}]", output_text), output_text, None
 
 
 def _success_doc(job: dict[str, Any], prompt: str, response: str) -> str:
@@ -434,10 +587,29 @@ async def _process_job(job: dict[str, Any]) -> bool:
     try:
         success, full_doc, final_response, error = await _run_one_job(job)
 
-        out_file = save_job_output(job["id"], full_doc)
-        logger.info("Cron job '%s' output saved to %s", job["name"], out_file)
+        # full_doc may be empty for silent-tick paths (script-only empty
+        # stdout, wakeAgent: false agent response). Skip the file save in
+        # that case so we don't accumulate empty output dumps.
+        if full_doc:
+            out_file = save_job_output(job["id"], full_doc)
+            logger.info("Cron job '%s' output saved to %s", job["name"], out_file)
 
-        deliver_text = final_response if success else f"⚠️ Cron job '{job['name']}' failed:\n{error}"
+        # Hermes parity: cron.wrap_response controls delivery shape.
+        # Default False = raw response (existing OC behavior). True =
+        # delivered text wraps in the same Markdown header that the saved
+        # output file uses (job name, run time, schedule).
+        wrap_response = False
+        try:
+            from opencomputer.agent.config_store import load_config
+            cfg = load_config()
+            wrap_response = bool(getattr(cfg.cron, "wrap_response", False))
+        except Exception:  # noqa: BLE001
+            pass
+
+        if success:
+            deliver_text = full_doc if wrap_response else final_response
+        else:
+            deliver_text = f"⚠️ Cron job '{job['name']}' failed:\n{error}"
         delivery_error: str | None = None
 
         if deliver_text:
@@ -445,7 +617,8 @@ async def _process_job(job: dict[str, Any]) -> bool:
             if not silent:
                 delivery_error = await _deliver(job, deliver_text)
 
-        # Empty response = soft failure
+        # Empty response = soft failure (only for agent-path; script-path
+        # silent tick correctly carries SILENT_MARKER as final_response).
         if success and not final_response:
             success = False
             error = "agent ran but produced no response"
@@ -490,6 +663,7 @@ async def run_scheduler_loop(*, interval_s: int = DEFAULT_TICK_INTERVAL_S) -> No
 __all__ = [
     "DEFAULT_JOB_TIMEOUT_S",
     "DEFAULT_MAX_PARALLEL",
+    "DEFAULT_SCRIPT_TIMEOUT_S",
     "DEFAULT_TICK_INTERVAL_S",
     "SILENT_MARKER",
     "run_scheduler_loop",

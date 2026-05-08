@@ -125,6 +125,22 @@ _VALID_API_MODES: frozenset[str] = frozenset({"auto", "openai", "anthropic"})
 
 
 @dataclass(frozen=True, slots=True)
+class DelegationConfig:
+    """Hermes-parity (2026-05-08) subagent model/provider override.
+
+    All ``None`` (default) means subagents inherit the parent loop's
+    provider + model + credentials. Set any field to override. Useful
+    when delegating cheap work to a smaller/faster model — e.g.,
+    ``DelegationConfig(model="gemini-2.5-flash", provider="openrouter")``.
+    """
+
+    model: str | None = None
+    provider: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class LoopConfig:
     """Behavior of the main agent loop.
 
@@ -162,6 +178,31 @@ class LoopConfig:
     max_delegation_depth: int = 4  # 2026-05-05: doubled 2 → 4
     """Cap on `DelegateTool` recursion. 2 = parent (depth 0) → child (depth 1) → grandchild (depth 2) rejected.
     Mirrors Hermes `MAX_DEPTH = 2` from `sources/hermes-agent/tools/delegate_tool.py`."""
+    # Hermes parity (2026-05-08): batch concurrency + idle watchdog.
+    max_concurrent_children: int = 3
+    """Cap on concurrent subagents per ``delegate(tasks=[...])`` batch.
+
+    Override via ``DELEGATION_MAX_CONCURRENT_CHILDREN`` env var. Batches
+    larger than this return a tool error rather than silently truncating.
+    Hermes parity with ``delegation.max_concurrent_children``."""
+    child_timeout_seconds: int = 600
+    """Wall-clock cap on a single subagent's lifetime (seconds).
+
+    Hermes spec describes this as an idle watchdog (resets on each API/tool
+    call). v1 ships it as a wall-clock timeout — simpler, fail-safe.
+    Convert to per-activity reset when the child loop's tool/API hooks are
+    exposed. Diagnostic log written to
+    ``<profile_home>/logs/subagent-timeout-<ts>.log`` on expiry."""
+    # Hermes parity (2026-05-08): nested orchestrator + delegation override.
+    orchestrator_enabled: bool = True
+    """Master switch for ``role="orchestrator"`` delegations. When False,
+    every child is forced to leaf (cannot delegate further) regardless of
+    the caller's role argument. Hermes parity with
+    ``delegation.orchestrator_enabled``."""
+    delegation: DelegationConfig = field(default_factory=lambda: DelegationConfig())
+    """Subagent model/provider override. None values inherit parent.
+
+    Hermes parity with ``delegation.{model,provider,base_url,api_key}``."""
     context_engine: str = "compressor"
     """Tier-A item 10 — which :class:`ContextEngine` strategy the loop uses.
     ``"compressor"`` is the default (existing CompactionEngine, aux-LLM
@@ -371,6 +412,32 @@ class ToolsConfig:
     #: also call :meth:`ToolRegistry.is_denied` BEFORE construction to
     #: skip the factory work entirely.
     deny: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CronConfig:
+    """Cron-job behavior config (Hermes parity, 2026-05-08).
+
+    Attributes:
+        wrap_response: When True, wraps the delivered response with the
+            Markdown header (job name, run time, schedule) — matches what
+            ``save_job_output`` already saves to the output file. When False
+            (OC default), delivers the agent's raw response text only.
+
+            Note: this default DIFFERS from Hermes's ``wrap_response: true``
+            default. The OC default preserves existing behavior — cron
+            jobs have always delivered raw text. Users who want the
+            Hermes-style header/footer wrap can opt in via:
+              cron:
+                wrap_response: true
+        script_timeout_seconds: Default timeout for ``--no-agent`` script
+            jobs (seconds). Per-job override via the
+            ``script_timeout_seconds`` kwarg on ``create_job``. Hermes
+            parity with ``cron.script_timeout_seconds``. Default 120.
+    """
+
+    wrap_response: bool = False
+    script_timeout_seconds: int = 120
 
 
 @dataclass(frozen=True, slots=True)
@@ -635,6 +702,8 @@ class Config:
     #: Defaults to disabled (invisible). When enabled, the structured
     #: ``agent.log`` collector + optional menu-bar indicator activate.
     system_control: FullSystemControlConfig = field(default_factory=FullSystemControlConfig)
+    #: Hermes-parity cron knobs (2026-05-08). See :class:`CronConfig`.
+    cron: CronConfig = field(default_factory=CronConfig)
     home: Path = field(default_factory=_home)
 
 
@@ -666,6 +735,8 @@ def load_config_for_profile(profile_home: Path) -> Config:
 
 __all__ = [
     "Config",
+    "CronConfig",
+    "DelegationConfig",
     "ModelConfig",
     "LoopConfig",
     "SessionConfig",
