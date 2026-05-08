@@ -75,26 +75,40 @@ async def test_maybe_continue_goal_clears_goal_on_done(
 async def test_maybe_continue_goal_budget_exhausted_pauses(
     monkeypatch, tmp_path: Path,
 ):
+    """budget=N means N continuations; the (N+1)th call returns None
+    after firing the pause_budget banner — without re-judging."""
     db = SessionDB(tmp_path / "sessions.db")
     sid = "s_c"
     db.ensure_session(sid, platform="cli", model="x", cwd=None)
     db.set_session_goal(sid, text="x", budget=2)
-    # Use up 1 of 2 turns so the next continue tips over to budget=2.
-    db.update_session_goal(sid, turns_used=1)
+    db.update_session_goal(sid, turns_used=2, last_judge_reason="halfway")
+
+    judge_calls: list[str] = []
 
     async def fake_judge(*, goal_text, last_response):
-        return JudgeVerdict(done=False, reason="not yet")
+        judge_calls.append(last_response)
+        return JudgeVerdict(done=False, reason="should-not-be-called")
 
     monkeypatch.setattr("opencomputer.agent.goal.judge_goal", fake_judge)
 
+    fired: list[dict] = []
+
+    def cb(*, session_id, kind, verdict, goal):
+        fired.append({"kind": kind, "reason": verdict.reason})
+
     loop = _bare_loop(db)
+    loop.goal_banner_callback = cb
     cont = await loop._maybe_continue_goal(sid, "Some progress.")
-    assert cont is None  # budget hit → no continuation prompt
+    assert cont is None  # at budget → no continuation
+    assert judge_calls == []  # judge never called for an exhausted goal
+    assert len(fired) == 1
+    assert fired[0]["kind"] == "pause_budget"
+    assert fired[0]["reason"] == "halfway"  # uses persisted reason
 
     g = db.get_session_goal(sid)
     assert g is not None
-    assert g.turns_used == 2  # bumped, even though we won't continue
-    assert g.last_judge_reason == "not yet"
+    assert g.turns_used == 2
+    assert g.last_judge_reason == "halfway"
 
 
 @pytest.mark.asyncio

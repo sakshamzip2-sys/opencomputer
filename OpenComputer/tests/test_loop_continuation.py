@@ -1,9 +1,13 @@
-"""Tests for Ralph-loop continuation wiring — Wave 5 T2 closure.
+"""Tests for Ralph-loop continuation wiring — Wave 5 T2 + Kanban-Goals v2.
 
-The unit tests in test_goal.py cover the helpers (judge_satisfied,
-build_continuation_prompt, GoalState). These tests cover the
-``AgentLoop._maybe_continue_goal`` gate that wires those helpers into
-``run_conversation``'s end-of-turn return path.
+The unit tests in test_goal.py cover the helpers (judge_goal,
+build_continuation_prompt, GoalState, JudgeVerdict). These tests cover
+the ``AgentLoop._maybe_continue_goal`` gate that wires those helpers
+into ``run_conversation``'s end-of-turn return path.
+
+Updated 2026-05-08 for strict-JSON judge_goal: ``_call_judge_model``
+now returns JSON ``{"done": bool, "reason": str}`` rather than plain
+``SATISFIED`` / ``NOT_SATISFIED``.
 """
 
 from __future__ import annotations
@@ -74,7 +78,7 @@ async def test_judge_satisfied_clears_goal_returns_none(tmp_path, monkeypatch):
     loop.db.set_session_goal(sid, text="ship the wave")
 
     async def reply(prompt: str) -> str:
-        return "SATISFIED"
+        return '{"done": true, "reason": "we shipped it"}'
 
     monkeypatch.setattr("opencomputer.agent.goal._call_judge_model", reply)
     out = await loop._maybe_continue_goal(sid, "we shipped it")
@@ -90,16 +94,17 @@ async def test_judge_not_satisfied_returns_continuation(tmp_path, monkeypatch):
     loop.db.set_session_goal(sid, text="ship the wave", budget=10)
 
     async def reply(prompt: str) -> str:
-        return "NOT_SATISFIED"
+        return '{"done": false, "reason": "still working"}'
 
     monkeypatch.setattr("opencomputer.agent.goal._call_judge_model", reply)
     out = await loop._maybe_continue_goal(sid, "still working")
     assert out is not None
     assert "ship the wave" in out
-    # Counter incremented
+    # Counter incremented + reason persisted (v2)
     g = loop.db.get_session_goal(sid)
     assert g is not None
     assert g.turns_used == 1
+    assert g.last_judge_reason == "still working"
 
 
 @pytest.mark.asyncio
@@ -130,10 +135,11 @@ async def test_continuation_increments_to_budget_then_stops(tmp_path, monkeypatc
     loop.db.set_session_goal(sid, text="goal", budget=2)
 
     async def reply(prompt: str) -> str:
-        return "NOT_SATISFIED"
+        return '{"done": false, "reason": "still going"}'
 
     monkeypatch.setattr("opencomputer.agent.goal._call_judge_model", reply)
-    # 2 continuations used → 3rd call returns None (budget hit)
+    # budget=N allows N continuations; the (N+1)th call returns None
+    # (banner fires; gate refuses without re-judging).
     assert await loop._maybe_continue_goal(sid, "x") is not None
     assert await loop._maybe_continue_goal(sid, "x") is not None
     assert await loop._maybe_continue_goal(sid, "x") is None

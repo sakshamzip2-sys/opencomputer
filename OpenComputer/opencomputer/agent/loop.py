@@ -3120,7 +3120,23 @@ class AgentLoop:
         )
 
         goal = self.db.get_session_goal(sid)
-        if goal is None or not goal.should_continue():
+        if goal is None:
+            return None
+        if not goal.active:
+            return None  # paused — neither banner nor continuation
+        if goal.budget_exhausted():
+            # Active goal but already at budget — fire pause banner
+            # (idempotent; user sees it until they /goal resume or
+            # /goal clear) and stop without judging or bumping further.
+            stale = JudgeVerdict(
+                done=False,
+                reason=(
+                    goal.last_judge_reason or "budget reached"
+                ),
+            )
+            self._fire_goal_banner(
+                sid, kind="pause_budget", verdict=stale, goal=goal,
+            )
             return None
         try:
             verdict = await judge_goal(
@@ -3146,11 +3162,6 @@ class AgentLoop:
         next_goal = dataclasses.replace(
             goal, turns_used=new_turns, last_judge_reason=verdict.reason,
         )
-        if next_goal.budget_exhausted():
-            self._fire_goal_banner(
-                sid, kind="pause_budget", verdict=verdict, goal=next_goal,
-            )
-            return None
         self._fire_goal_banner(
             sid, kind="continue", verdict=verdict, goal=next_goal,
         )
