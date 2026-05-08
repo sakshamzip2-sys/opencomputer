@@ -912,9 +912,45 @@ class APIServerAdapter(BaseChannelAdapter):
             finally:
                 _CURRENT_PROFILE.reset(token)
 
+        # G1 (Hermes parity, 2026-05-09) — CORS middleware. Honors
+        # ``API_SERVER_CORS_ORIGINS`` (comma-separated). Default OFF
+        # when env unset (no regression for server-to-server users).
+        # Allows ``Idempotency-Key`` (G2) so dedup works from browsers.
+        @web.middleware
+        async def _cors_middleware(request, handler):
+            raw = os.environ.get("API_SERVER_CORS_ORIGINS", "")
+            origins = [o.strip() for o in raw.split(",") if o.strip()]
+            origin = request.headers.get("Origin", "")
+            if request.method == "OPTIONS" and origins:
+                if origin not in origins:
+                    return web.Response(status=200)
+                return web.Response(
+                    status=200,
+                    headers={
+                        "Access-Control-Allow-Origin": origin,
+                        "Access-Control-Allow-Methods": (
+                            "GET, POST, PATCH, DELETE, OPTIONS"
+                        ),
+                        "Access-Control-Allow-Headers": (
+                            "Authorization, Content-Type, "
+                            "Idempotency-Key, X-OC-Profile"
+                        ),
+                        "Access-Control-Max-Age": "600",
+                        "Access-Control-Allow-Credentials": "true",
+                    },
+                )
+            response = await handler(request)
+            if origin and origin in origins:
+                try:
+                    response.headers["Access-Control-Allow-Origin"] = origin
+                    response.headers["Access-Control-Allow-Credentials"] = "true"
+                except (AttributeError, RuntimeError):
+                    pass
+            return response
+
         app = web.Application(
             client_max_size=self.max_message_length,
-            middlewares=[_profile_middleware],
+            middlewares=[_cors_middleware, _profile_middleware],
         )
         app.router.add_post("/v1/chat", self._handle_chat)
         # T2 (tier-2 trio, 2026-05-04) — OpenAI Chat Completions compat.
