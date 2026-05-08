@@ -242,6 +242,10 @@ class SessionConfig:
     auto_prune_days: int = 0
     auto_prune_untitled_days: int = 0
     auto_prune_min_messages: int = 3
+    #: Hermes-v2 ``sessions.vacuum_after_prune`` — run ``VACUUM`` after
+    #: auto-prune so SQLite reclaims disk space (without VACUUM, deleted
+    #: rows leave free pages behind). Default true (Hermes spec).
+    vacuum_after_prune: bool = True
 
 
 @dataclass(frozen=True, slots=True)

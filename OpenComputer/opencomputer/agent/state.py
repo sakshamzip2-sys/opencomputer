@@ -1059,6 +1059,7 @@ class SessionDB:
         untitled_days: int,
         min_messages: int,
         cap: int = 200,
+        vacuum_after_prune: bool = False,
     ) -> int:
         """Delete stale sessions matching either of two policies.
 
@@ -1074,6 +1075,10 @@ class SessionDB:
 
         Caps deletion at ``cap`` rows per call to keep startup fast.
         Returns the count of sessions actually removed.
+
+        Hermes-v2: when ``vacuum_after_prune`` is True and at least one
+        row was deleted, runs ``VACUUM`` to reclaim disk space (SQLite
+        leaves free pages behind on plain DELETE).
         """
         if older_than_days <= 0 and untitled_days <= 0:
             return 0
@@ -1100,6 +1105,12 @@ class SessionDB:
         for (sid,) in rows:
             if self.delete_session(sid):
                 deleted += 1
+        if deleted > 0 and vacuum_after_prune:
+            # VACUUM cannot run inside an explicit transaction or with a
+            # cursor open; use a fresh connection at autocommit isolation.
+            with self._connect() as conn:
+                conn.isolation_level = None  # autocommit
+                conn.execute("VACUUM")
         return deleted
 
     # ─── A.4 mood thread (2026-04-27) ─────────────────────────────

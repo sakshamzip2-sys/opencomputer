@@ -433,6 +433,9 @@ def _maybe_run_auto_prune(db: SessionDB, cfg: Config) -> None:
     No-op when both ``auto_prune_days`` and ``auto_prune_untitled_days``
     are zero (the default — auto-prune is opt-in). Logs the count to
     stderr when something was actually pruned so the operator notices.
+
+    Hermes-v2: when ``cfg.session.vacuum_after_prune`` is True (default)
+    and at least one row was deleted, run ``VACUUM`` to reclaim disk.
     """
     sc = cfg.session
     if sc.auto_prune_days <= 0 and sc.auto_prune_untitled_days <= 0:
@@ -441,6 +444,7 @@ def _maybe_run_auto_prune(db: SessionDB, cfg: Config) -> None:
         older_than_days=sc.auto_prune_days,
         untitled_days=sc.auto_prune_untitled_days,
         min_messages=sc.auto_prune_min_messages,
+        vacuum_after_prune=sc.vacuum_after_prune,
     )
     if deleted:
         import sys as _sys
