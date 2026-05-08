@@ -34,7 +34,7 @@ from plugin_sdk.core import Message, ToolCall
 #: to NULL. v5 = Tier-A item 11 ``tool_usage`` table — per-tool-call
 #: telemetry for ``opencomputer insights`` (tool, duration_ms, error,
 #: model, ts). Existing data unaffected; the table starts empty.
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     goal_text         TEXT,            -- Wave 5 (2026-05-04): /goal persistent target
     goal_active       INTEGER DEFAULT 0,
     goal_turns_used   INTEGER DEFAULT 0,
-    goal_budget       INTEGER DEFAULT 20
+    goal_budget       INTEGER DEFAULT 20,
+    goal_last_judge_reason TEXT         -- Kanban-Goals v2 (2026-05-08): structured judge rationale
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -226,6 +227,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (10, 11): "_migrate_v10_to_v11",
     (11, 12): "_migrate_v11_to_v12",
     (12, 13): "_migrate_v12_to_v13",
+    (13, 14): "_migrate_v13_to_v14",
 }
 
 
@@ -613,6 +615,7 @@ _EXPECTED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("sessions", "vibe", "TEXT"),
     ("sessions", "vibe_updated", "REAL"),
     ("sessions", "cwd", "TEXT"),  # Plan 3 (2026-05-01) — profile-suggester input
+    ("sessions", "goal_last_judge_reason", "TEXT"),  # Kanban-Goals v2 (2026-05-08)
     ("episodic_events", "dreamed_into", "INTEGER"),
 )
 
@@ -771,6 +774,19 @@ def _migrate_v12_to_v13(conn: sqlite3.Connection) -> None:
             ON llm_calls(model);
         """
     )
+
+
+def _migrate_v13_to_v14(conn: sqlite3.Connection) -> None:
+    """Kanban-Goals v2 (2026-05-08) — add ``goal_last_judge_reason``.
+
+    Spec: docs/superpowers/specs/2026-05-08-kanban-goals-v2-design.md §6.
+    Additive nullable column; old goals read NULL → ``GoalState.last_judge_reason``
+    becomes ``None``. Self-heal-friendly: skip the ALTER if a column already
+    exists (e.g. mixed-version rollouts).
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "goal_last_judge_reason" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN goal_last_judge_reason TEXT")
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
@@ -1176,19 +1192,27 @@ class SessionDB:
     # ─── Wave 5 (2026-05-04) — /goal persistent cross-turn goals ────────
 
     def set_session_goal(
-        self, session_id: str, *, text: str, budget: int = 20
+        self, session_id: str, *, text: str, budget: int | None = None
     ) -> None:
         """Set or replace the goal for ``session_id``. Resets turns_used to 0.
 
         Mirrors hermes-agent ``265bd59c1``. ``budget`` is the maximum number of
         continuation turns the loop is allowed to inject before auto-stopping.
+        When ``budget`` is ``None`` the default is read from
+        :class:`opencomputer.agent.config.GoalsConfig` (Kanban-Goals v2).
+        Setting a fresh goal also nulls any prior ``goal_last_judge_reason``.
         """
+        if budget is None:
+            from opencomputer.agent.config import default_config
+
+            budget = default_config().goals.max_turns
         with self._txn() as conn:
             conn.execute(
                 """
                 UPDATE sessions
                    SET goal_text = ?, goal_active = 1,
-                       goal_turns_used = 0, goal_budget = ?
+                       goal_turns_used = 0, goal_budget = ?,
+                       goal_last_judge_reason = NULL
                  WHERE id = ?
                 """,
                 (text, int(budget), session_id),
@@ -1201,7 +1225,8 @@ class SessionDB:
         with self._txn() as conn:
             row = conn.execute(
                 """
-                SELECT goal_text, goal_active, goal_turns_used, goal_budget
+                SELECT goal_text, goal_active, goal_turns_used, goal_budget,
+                       goal_last_judge_reason
                   FROM sessions WHERE id = ?
                 """,
                 (session_id,),
@@ -1213,6 +1238,7 @@ class SessionDB:
             active=bool(row[1]),
             turns_used=int(row[2] or 0),
             budget=int(row[3] or 20),
+            last_judge_reason=row[4],
         )
 
     def update_session_goal(
@@ -1223,8 +1249,14 @@ class SessionDB:
         active: bool | None = None,
         turns_used: int | None = None,
         budget: int | None = None,
+        last_judge_reason: str | None = None,
+        clear_last_judge_reason: bool = False,
     ) -> None:
-        """Patch one or more goal fields. No-op if all kwargs are None."""
+        """Patch one or more goal fields. No-op if all kwargs are None.
+
+        ``last_judge_reason=None`` means "leave unchanged"; pass
+        ``clear_last_judge_reason=True`` to explicitly null the column.
+        """
         sets: list[str] = []
         params: list[object] = []
         if text is not None:
@@ -1239,6 +1271,11 @@ class SessionDB:
         if budget is not None:
             sets.append("goal_budget = ?")
             params.append(int(budget))
+        if last_judge_reason is not None:
+            sets.append("goal_last_judge_reason = ?")
+            params.append(last_judge_reason)
+        elif clear_last_judge_reason:
+            sets.append("goal_last_judge_reason = NULL")
         if not sets:
             return
         params.append(session_id)
@@ -1252,12 +1289,15 @@ class SessionDB:
 
         ``goal_budget`` is preserved so a subsequent ``set_session_goal``
         without an explicit budget falls back to the default.
+        ``goal_last_judge_reason`` is also nulled (a cleared goal has no
+        live judge history).
         """
         with self._txn() as conn:
             conn.execute(
                 """
                 UPDATE sessions
-                   SET goal_text = NULL, goal_active = 0, goal_turns_used = 0
+                   SET goal_text = NULL, goal_active = 0, goal_turns_used = 0,
+                       goal_last_judge_reason = NULL
                  WHERE id = ?
                 """,
                 (session_id,),

@@ -31,7 +31,8 @@ def test_schema_version_is_11():
     # v11 = Wave 5 T2 — /goal columns on the sessions table.
     # v12 = Wave 6.B — trigram FTS5 tokenizer for messages_fts.
     # v13 = Hermes B4 (2026-05-06) — llm_calls table for per-call cost recording.
-    assert SCHEMA_VERSION == 13
+    # v14 = Kanban-Goals v2 (2026-05-08) — goal_last_judge_reason column.
+    assert SCHEMA_VERSION == 14
 
 
 def test_apply_migrations_on_fresh_db_creates_all_tables():

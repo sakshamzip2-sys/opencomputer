@@ -1126,6 +1126,23 @@ def _run_chat_session(
     injection_engine.unregister("thinking_tags_fallback")
     injection_engine.register(ThinkingInjector())
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
+
+    # Kanban-Goals v2 (2026-05-08) — banner callback for the Ralph loop.
+    # AgentLoop._maybe_continue_goal fires this once per turn end with
+    # kind ∈ {"continue", "achieved", "pause_budget"}; the formatter
+    # lives in cli_ui.goal_banner so the same lines render identically
+    # whether a future gateway adapter forwards them to a chat channel
+    # or the CLI prints them inline.
+    def _print_goal_banner(*, session_id, kind, verdict, goal):  # noqa: D401
+        try:
+            from opencomputer.cli_ui.goal_banner import format_banner
+
+            console.print(format_banner(kind=kind, verdict=verdict, goal=goal))
+        except Exception:  # noqa: BLE001 — banner errors must never wedge the loop
+            pass
+
+    loop.goal_banner_callback = _print_goal_banner
+
     mcp_mgr = MCPManager(tool_registry=registry)
 
     # Wire the delegate factory so the model can spawn subagents

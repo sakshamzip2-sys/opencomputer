@@ -138,6 +138,14 @@ class SlashContext:
     on_sources_dispatch: Callable[[str], str] = lambda _args: (
         "/sources callback not wired"
     )
+    #: ``/goal <text>`` mid-run race-guard — returns True iff the AgentLoop
+    #: is currently streaming a turn for this session. The slash handler
+    #: refuses the SET form when this is True (status / pause / resume /
+    #: clear are still allowed). CLI input loop attaches a closure over
+    #: its in-flight flag; gateway path inserts its own check at dispatch
+    #: time. Default ``lambda: False`` keeps callers that don't care
+    #: about race-guarding agnostic.
+    is_running_agent: Callable[[], bool] = lambda: False
 
 
 def _split_args(text: str) -> tuple[str, list[str]]:
@@ -497,23 +505,40 @@ def _handle_steer(ctx: SlashContext, args: list[str]) -> SlashResult:
     return SlashResult(handled=True)
 
 
+_GOAL_SAFE_SUBCOMMANDS: frozenset[str] = frozenset(
+    {"status", "pause", "resume", "clear"}
+)
+
+
 def _handle_goal(ctx: SlashContext, args: list[str]) -> SlashResult:
     """``/goal [<text>|status|pause|resume|clear]`` — manage persistent goal.
 
-    No args / ``status``: show current goal.
-    ``pause``: stop continuation loop.
-    ``resume``: resume + reset turn counter.
-    ``clear``: drop the goal.
-    Anything else: set ``args`` joined with spaces as the new goal text.
+    v2 surface (Kanban-Goals v2, 2026-05-08):
 
-    Persists in the ``sessions`` table (schema v11+ ``goal_*`` columns).
-    Direct DB access bypasses callback wiring — db_path comes from
-    ``ctx.config.session.db_path`` so this handler is self-contained.
+    - Rich UX with icons: ``⊙`` set, ``↻`` resume/continue, ``✓`` achieved,
+      ``⏸`` paused, ``✗`` cleared.
+    - ``status`` surfaces ``GoalState.last_judge_reason`` (the most recent
+      judge rationale) when present.
+    - SET form (``/goal <new text>``) is refused while the AgentLoop is
+      streaming a turn — set form races with the in-flight continuation
+      prompt. Status / pause / resume / clear remain unrestricted because
+      they only touch the control plane.
+
+    Persists in the ``sessions`` table (schema v14 ``goal_*`` columns).
+    Direct DB access — db_path comes from ``ctx.config.session.db_path``.
     """
     from opencomputer.agent.state import SessionDB
 
     db = SessionDB(ctx.config.session.db_path)
     sub = (args[0].lower() if args else "status")
+    is_set_form = bool(args) and sub not in _GOAL_SAFE_SUBCOMMANDS
+
+    if is_set_form and ctx.is_running_agent():
+        ctx.console.print(
+            "[yellow]/goal: agent is currently running — "
+            "use [cyan]/stop[/cyan] first, then set the new goal.[/yellow]"
+        )
+        return SlashResult(handled=True)
 
     if sub == "status" or not args:
         g = db.get_session_goal(ctx.session_id)
@@ -523,11 +548,26 @@ def _handle_goal(ctx: SlashContext, args: list[str]) -> SlashResult:
                 "Use [cyan]/goal <text>[/cyan] to set one.[/dim]"
             )
             return SlashResult(handled=True)
+        if g.budget_exhausted():
+            ctx.console.print(
+                f"[yellow]⏸ goal paused — {g.turns_used}/{g.budget} "
+                f"turns used. Use [cyan]/goal resume[/cyan] to keep going, "
+                f"or [cyan]/goal clear[/cyan] to stop.[/yellow]\n"
+                f"  [bold]goal:[/bold] {g.text}"
+            )
+            if g.last_judge_reason:
+                ctx.console.print(
+                    f"  last judge: [dim]{g.last_judge_reason}[/dim]"
+                )
+            return SlashResult(handled=True)
         state = "[green]active[/green]" if g.active else "[yellow]paused[/yellow]"
-        ctx.console.print(
+        body = (
             f"[bold]goal:[/bold] {g.text}\n"
-            f"  status: {state}, turn {g.turns_used}/{g.budget}"
+            f"  status: {state} · turns {g.turns_used}/{g.budget}"
         )
+        if g.last_judge_reason:
+            body += f"\n  last judge: [dim]{g.last_judge_reason}[/dim]"
+        ctx.console.print(body)
         return SlashResult(handled=True)
 
     if sub == "pause":
@@ -535,15 +575,22 @@ def _handle_goal(ctx: SlashContext, args: list[str]) -> SlashResult:
             ctx.console.print("[red]no goal set.[/red]")
         else:
             db.update_session_goal(ctx.session_id, active=False)
-            ctx.console.print("[yellow]goal paused.[/yellow]")
+            ctx.console.print("[yellow]⏸ goal paused.[/yellow]")
         return SlashResult(handled=True)
 
     if sub == "resume":
         if db.get_session_goal(ctx.session_id) is None:
             ctx.console.print("[red]no goal set.[/red]")
         else:
-            db.update_session_goal(ctx.session_id, active=True, turns_used=0)
-            ctx.console.print("[green]goal resumed.[/green] (turn counter reset)")
+            db.update_session_goal(
+                ctx.session_id,
+                active=True,
+                turns_used=0,
+                clear_last_judge_reason=True,
+            )
+            ctx.console.print(
+                "[green]↻ goal resumed[/green] (turn counter reset to 0)."
+            )
         return SlashResult(handled=True)
 
     if sub == "clear":
@@ -551,19 +598,21 @@ def _handle_goal(ctx: SlashContext, args: list[str]) -> SlashResult:
             ctx.console.print("[dim]no goal to clear.[/dim]")
         else:
             db.clear_session_goal(ctx.session_id)
-            ctx.console.print("[green]goal cleared.[/green]")
+            ctx.console.print("[green]✗ goal cleared.[/green]")
         return SlashResult(handled=True)
 
-    # Otherwise, treat the full args as the new goal text
+    # SET form — args are the goal text.
     text = " ".join(args).strip()
     if not text:
         ctx.console.print("[red]/goal: empty text[/red]")
         return SlashResult(handled=True)
     db.set_session_goal(ctx.session_id, text=text)
+    g = db.get_session_goal(ctx.session_id)
+    budget = g.budget if g else 20
     preview = text if len(text) <= 80 else text[:77] + "..."
     ctx.console.print(
-        f"[green]goal set:[/green] {preview}\n"
-        f"  [dim]budget=20 continuations · use /goal status to check progress[/dim]"
+        f"[green]⊙ Goal set[/green] ({budget}-turn budget): {preview}\n"
+        f"  [dim]check progress with [cyan]/goal status[/cyan][/dim]"
     )
     return SlashResult(handled=True)
 

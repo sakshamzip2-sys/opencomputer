@@ -401,6 +401,12 @@ class Dispatch:
         # Backwards compat: tests + callers that read ``dispatch._locks``
         # see an empty dict; new code paths use ``self._queue_manager``.
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+        # Kanban-Goals v2 (2026-05-08) — set of session_ids currently
+        # inside a ``run_conversation`` call. Inspected by the
+        # /goal-set mid-run race-guard (``_goal_midrun_check``) so we
+        # can refuse a new goal when the agent is in flight rather than
+        # racing the current continuation prompt.
+        self._active_runs: set[str] = set()
         # Adapter reference (set by Gateway) so we can send typing indicators
         self._adapters_by_platform: dict = {}
         # Task I.9: the shared PluginAPI whose ``in_request`` we wrap
@@ -1185,6 +1191,7 @@ class Dispatch:
             except Exception:  # noqa: BLE001 — hook firing must never block
                 logger.debug("gateway agent:start fire failed", exc_info=True)
             try:
+                self._active_runs.add(session_id)
                 with set_profile(profile_home):
                     if self._plugin_api is not None:
                         with self._plugin_api.in_request(request_ctx):
@@ -1311,6 +1318,10 @@ class Dispatch:
                 outcome = ProcessingOutcome.FAILURE
                 return _format_user_facing_error(e)
             finally:
+                # Kanban-Goals v2 (2026-05-08) — release the active-run
+                # marker so /goal <text> dispatched in the next moment
+                # is no longer refused.
+                self._active_runs.discard(session_id)
                 heartbeat.cancel()
                 try:
                     await heartbeat
@@ -1452,6 +1463,18 @@ class Dispatch:
         cmd = _plugin_registry.slash_commands.get(name)
         if cmd is None:
             return None
+        # Kanban-Goals v2 (2026-05-08) — refuse /goal <text> when this
+        # session has a turn in flight; status / pause / resume / clear
+        # remain unrestricted. Checked before the bypass_running_guard
+        # gate so /goal-set is short-circuited even though /goal isn't
+        # itself a bypass command. Non-set /goal subcommands fall
+        # through to the normal locked dispatch path.
+        if name == "goal":
+            refused = await self._goal_midrun_check(
+                session_id=session_id, args=list(args),
+            )
+            if refused is not None:
+                return refused
         if not getattr(cmd, "bypass_running_guard", False):
             return None
         # Build a runtime context with channel info so the command can
@@ -1518,6 +1541,37 @@ class Dispatch:
             logger.exception("bypass slash %s raised", name)
             return f"/{name}: {type(exc).__name__}: {exc}"
         return result.output if result is not None else None
+
+    async def _goal_midrun_check(
+        self,
+        *,
+        session_id: str,
+        args: list[str],
+    ) -> str | None:
+        """Refuse `/goal <text>` when an agent run is already in flight.
+
+        Spec: docs/superpowers/specs/2026-05-08-kanban-goals-v2-design.md §3
+        Gap D. The set form races with the in-flight continuation prompt
+        ``_maybe_continue_goal`` is about to inject — refuse and tell
+        the user to /stop first. Status / pause / resume / clear only
+        touch control-plane state and remain unrestricted.
+
+        Returns the refusal string when the dispatcher should short-
+        circuit, otherwise None (caller proceeds normally).
+        """
+        if not args:
+            return None  # status form (no text)
+        sub = (args[0] or "").lower()
+        if sub in {"status", "pause", "resume", "clear"}:
+            return None
+        # SET form. Check the active-runs marker (instrumented around
+        # run_conversation in :meth:`_do_dispatch`).
+        if session_id in self._active_runs:
+            return (
+                "/goal: agent is currently running — use /stop first, "
+                "then set the new goal."
+            )
+        return None
 
     async def _typing_heartbeat(self, platform: str, chat_id: str) -> None:
         """Send typing indicator every 4s until cancelled."""
