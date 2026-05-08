@@ -94,3 +94,75 @@ def streaming_final_chunk(chunk_id: str, model: str, finish_reason: str = "stop"
         ],
     }
     return json.dumps(payload)
+
+
+def list_models(profile_name: str = "default", env_override: str | None = None) -> dict:
+    """Hermes parity (2026-05-08): advertise the active profile name as the model id.
+
+    Multi-profile setups run separate api-server instances per profile;
+    each advertises its profile name so Open WebUI sees them as distinct
+    "models". Override the advertised name via ``API_SERVER_MODEL_NAME``
+    env var (passed in as ``env_override`` for testability).
+
+    Args:
+        profile_name: The active profile (e.g., "default", "alice", "coding").
+        env_override: When non-empty, used as the model id (mirrors the
+            Hermes ``API_SERVER_MODEL_NAME`` env override).
+
+    Returns:
+        OpenAI-compatible /v1/models response shape.
+    """
+    if env_override and env_override.strip():
+        model_id = env_override.strip()
+    elif profile_name and profile_name.strip():
+        model_id = profile_name.strip()
+    else:
+        model_id = "opencomputer"
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": model_id,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "opencomputer",
+            }
+        ],
+    }
+
+
+def oc_response_to_responses_api(
+    text: str,
+    *,
+    model: str = "opencomputer",
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> dict:
+    """Hermes parity (2026-05-08): wrap a chat response in the OpenAI
+    Responses-API envelope.
+
+    Stub implementation — emits the simple ``response`` object shape that
+    Open WebUI's capability probe expects. True streaming SSE event
+    semantics (``function_call``, ``function_call_output``) are deferred
+    to demand. The route is opt-in via ``API_SERVER_API_TYPE=responses``.
+    """
+    return {
+        "id": f"resp-{uuid.uuid4().hex[:24]}",
+        "object": "response",
+        "created": int(time.time()),
+        "model": model,
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": text}
+                ],
+            }
+        ],
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    }
