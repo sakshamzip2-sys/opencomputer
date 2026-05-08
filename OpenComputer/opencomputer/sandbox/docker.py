@@ -131,10 +131,53 @@ class DockerStrategy(SandboxStrategy):
             cmd.extend(["-v", f"{p}:{p}:ro"])
         for p in config.write_paths:
             cmd.extend(["-v", f"{p}:{p}:rw"])
+        # P3.5 Hermes-parity: bind-mount each
+        # ``required_credential_files`` entry from the active profile
+        # read-only into ``/root/.opencomputer/<path>``. Skills that
+        # declare ``required_credential_files`` in SKILL.md frontmatter
+        # contribute via the global registry; missing files are
+        # skipped silently (logged at debug). All mounts ``:ro`` —
+        # the container can read but never overwrite.
+        try:
+            from opencomputer.profiles import (
+                profile_home_dir,
+                read_active_profile,
+            )
+            from opencomputer.security.env_passthrough import (
+                resolve_credential_file_paths,
+            )
+
+            active = read_active_profile()
+            if active:
+                profile_home = profile_home_dir(active)
+                for host, container in resolve_credential_file_paths(profile_home):
+                    cmd.extend(["-v", f"{host}:{container}:ro"])
+        except Exception:  # noqa: BLE001 — credential-mount failure must
+            # never starve a sandbox launch; the skill that declared the
+            # missing file will surface its own runtime error.
+            _log.debug("credential file mount resolution failed", exc_info=True)
         # Pass through allowed env vars. We use ``-e KEY=VALUE`` rather
         # than ``--env-file`` so the env stays purely in argv (easier to
         # audit + no temp file to clean up).
         env_pass = filtered_env(config)
+        # P3.4 Hermes-parity: union skill-declared env passthrough on
+        # top of config.allowed_env_vars. Skills declare names; the
+        # parent process supplies values via os.environ.
+        try:
+            import os as _os
+
+            from opencomputer.security.env_passthrough import (
+                get_passthrough_env_keys,
+            )
+
+            for key in get_passthrough_env_keys():
+                if key in env_pass:
+                    continue
+                val = _os.environ.get(key)
+                if val is not None:
+                    env_pass[key] = val
+        except Exception:  # noqa: BLE001
+            _log.debug("skill-declared env passthrough union failed", exc_info=True)
         for k, v in env_pass.items():
             cmd.extend(["-e", f"{k}={v}"])
         cmd.append(config.image)

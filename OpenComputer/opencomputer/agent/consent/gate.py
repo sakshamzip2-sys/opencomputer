@@ -109,7 +109,7 @@ class ConsentGate:
         # config file.
         self._approvals_config: _ApprovalsConfig | None = None
 
-    def _get_approvals_config(self) -> "_ApprovalsConfig":
+    def _get_approvals_config(self) -> _ApprovalsConfig:
         """Lazy-load + cache the active profile's ``security.approvals`` config.
 
         Imports inside the function so a circular-import on cold load
@@ -321,6 +321,65 @@ class ConsentGate:
                 tier_matched=claim.tier_required,
                 audit_event_id=audit_id,
             )
+
+        # Hermes-parity smart mode: when an aux-LLM verdict is
+        # available we let it short-circuit prompt or deny without
+        # bothering the user. Uncertain / medium → manual fallthrough.
+        # The aux call is best-effort — any failure inside
+        # ``assess_risk`` returns a fallback verdict that defers to the
+        # manual path. Hardline patterns NEVER reach this code path —
+        # they fire at tool entry.
+        if approvals_cfg.mode == "smart":
+            try:
+                from opencomputer.security.smart_mode import assess_risk
+
+                verdict = await assess_risk(
+                    capability_id=claim.capability_id,
+                    scope=scope,
+                    command=claim.human_description or claim.capability_id,
+                )
+            except Exception:  # noqa: BLE001
+                _log.warning(
+                    "smart-mode assess_risk crashed for session=%s "
+                    "capability=%s — falling back to manual prompt",
+                    session_id, claim.capability_id, exc_info=True,
+                )
+                verdict = None
+            if verdict is not None:
+                if verdict.auto_allow:
+                    audit_id = self._audit.append(AuditEvent(
+                        session_id=session_id, actor="smart_mode",
+                        action="approval_smart_allow",
+                        capability_id=claim.capability_id,
+                        tier=int(claim.tier_required),
+                        scope=scope,
+                        decision="allow",
+                        reason=f"smart-mode low-risk: {verdict.reason}"
+                        + (" (LLM-fallback)" if verdict.used_fallback else ""),
+                    ))
+                    return ConsentDecision(
+                        allowed=True,
+                        reason=f"smart-mode low-risk: {verdict.reason}",
+                        tier_matched=claim.tier_required,
+                        audit_event_id=audit_id,
+                    )
+                if verdict.auto_deny:
+                    audit_id = self._audit.append(AuditEvent(
+                        session_id=session_id, actor="smart_mode",
+                        action="approval_smart_deny",
+                        capability_id=claim.capability_id,
+                        tier=int(claim.tier_required),
+                        scope=scope,
+                        decision="deny",
+                        reason=f"smart-mode high-risk: {verdict.reason}",
+                    ))
+                    return ConsentDecision(
+                        allowed=False,
+                        reason=f"smart-mode high-risk: {verdict.reason}",
+                        tier_matched=None,
+                        audit_event_id=audit_id,
+                    )
+                # medium / uncertain → fall through to manual prompt.
 
         key = (session_id, claim.capability_id)
         event = asyncio.Event()

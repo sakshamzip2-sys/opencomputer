@@ -7,7 +7,7 @@ OpenComputer's idioms:
 |---|---|
 | ``manual`` (default) | standard consent gate flow (PER_ACTION tier prompts) |
 | ``off`` | equivalent to ``--auto``: auto-allow consent prompts at the session level |
-| ``smart`` | parsed but not yet implemented — falls back to ``manual`` and logs a one-shot warning |
+| ``smart`` | invokes :func:`opencomputer.security.smart_mode.assess_risk` for an LLM-based verdict; low-risk auto-allows, high-risk auto-denies, medium / uncertain fall through to the manual prompt |
 
 ``timeout`` overrides the consent gate's default 300s wait.
 
@@ -34,9 +34,11 @@ class ApprovalsConfig:
     """Resolved approvals settings — what callers consult.
 
     Attributes:
-        mode: one of ``manual``, ``smart``, ``off``. ``smart`` currently
-            falls back to ``manual`` (logged once); future PRs will wire
-            an auxiliary LLM risk assessor.
+        mode: one of ``manual``, ``smart``, ``off``. ``smart`` invokes
+            the auxiliary-LLM risk assessor (see
+            :mod:`opencomputer.security.smart_mode`); ``off`` auto-allows
+            all consent prompts (operator opt-in); ``manual`` is the
+            default user-prompted flow.
         timeout_s: seconds the consent gate waits for a user response
             before auto-denying. Mirrors the Hermes
             ``approvals.timeout`` knob.
@@ -87,13 +89,6 @@ def parse_mode(raw: object) -> str:
             raw, DEFAULT_MODE, ", ".join(sorted(VALID_MODES)),
         )
         return DEFAULT_MODE
-    if candidate == "smart":
-        logger.warning(
-            "security.approvals.mode=smart is recognised but not yet "
-            "wired — auxiliary LLM risk assessor lands in a future PR. "
-            "Falling back to 'manual' for this session.",
-        )
-        return "manual"
     return candidate
 
 

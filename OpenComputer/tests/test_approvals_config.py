@@ -23,11 +23,9 @@ def test_parse_mode_off():
     assert parse_mode("off") == "off"
 
 
-def test_parse_mode_smart_falls_back_to_manual(caplog):
-    """Smart mode is recognised but not yet implemented — falls back."""
-    with caplog.at_level("WARNING", logger="opencomputer.security.approvals"):
-        assert parse_mode("smart") == "manual"
-    assert "smart" in caplog.text.lower()
+def test_parse_mode_smart_now_recognised():
+    """Smart mode is now wired (P3.6) — kept as 'smart', not folded to 'manual'."""
+    assert parse_mode("smart") == "smart"
 
 
 def test_parse_mode_unknown_logs_and_falls_back(caplog):
