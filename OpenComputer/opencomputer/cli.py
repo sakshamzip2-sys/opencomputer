@@ -1931,6 +1931,21 @@ def chat(
             "recent, or `pick` for an interactive picker of the last 10."
         ),
     ),
+    cont: bool = typer.Option(
+        False,
+        "--continue",
+        "-c",
+        help="Resume the most recent session (alias for ``--resume last``).",
+    ),
+    query: str = typer.Option(
+        "",
+        "--query",
+        "-q",
+        help=(
+            "Run a single non-interactive turn with this prompt and exit "
+            "(alias for ``oc oneshot``)."
+        ),
+    ),
     plan: bool = typer.Option(
         False, "--plan", help="Plan mode — agent describes actions, refuses destructive tools."
     ),
@@ -1957,13 +1972,28 @@ def chat(
 
     ``oc chat`` starts fresh. ``oc chat resume`` opens the polished
     picker. ``oc chat <id-prefix>`` resumes that session directly.
+    ``oc chat -c`` resumes the most recent session.
+    ``oc chat -q "..."`` runs one non-interactive turn (Hermes-parity alias
+    for ``oc oneshot``).
     """
+    # ``-q "..."`` short-circuits the REPL — delegate to the shared oneshot
+    # helper. Hermes-parity alias for ``hermes chat -q``. Done before any
+    # session-resume munging. Calling the typer-decorated ``oneshot`` directly
+    # would pass OptionInfo objects in place of defaults, so we route through
+    # the shared helper that both ``oc oneshot`` and this branch use.
+    if query:
+        _run_oneshot_turn(query, plan=plan)
+        return
     if action == "resume":
         # Delegate to the picker flow.
         resume = "pick"
     elif action:
         # Treat as a session-id (or prefix) to resume directly.
         resume = action
+    # ``-c`` / ``--continue`` is sugar for ``--resume last`` and only applies
+    # when no explicit resume target was given.
+    if cont and not resume:
+        resume = "last"
     if yolo:
         _emit_yolo_deprecation()
         auto = True
@@ -2004,35 +2034,20 @@ def kanban(ctx: typer.Context) -> None:
     raise typer.Exit(rc or 0)
 
 
-@app.command(name="oneshot")
-def oneshot(
-    prompt: str = typer.Argument(
-        ..., help="The single user message to send. Wrap in quotes for multi-word prompts.",
-    ),
-    model: str = typer.Option(
-        "", "--model", "-m",
-        help="Override the configured model for this run.",
-    ),
-    provider_name: str = typer.Option(
-        "", "--provider", "-p",
-        help="Override the configured provider (anthropic, openai, openrouter, ...).",
-    ),
-    plan: bool = typer.Option(
-        False, "--plan", help="Plan mode (read-only / refuses destructive tools).",
-    ),
+def _run_oneshot_turn(
+    prompt: str,
+    *,
+    model: str = "",
+    provider_name: str = "",
+    plan: bool = False,
 ) -> None:
-    """Run a single agent turn non-interactively, print the response, exit.
+    """Single-turn non-interactive run shared by ``oc oneshot`` and ``oc chat -q``.
 
-    Wave 6.A — Hermes-port (7c8c031f6 ``hermes -z``). Non-interactive
-    one-shot mode for shell scripts, CI hooks, and quick "ask the agent"
-    invocations. Differs from ``oc chat`` by NOT entering the REPL: one
-    user turn, full agent loop (compaction + tools + hooks), final
-    assistant text printed to stdout, exit.
-
-    Examples:
-        oc oneshot "what's in the README?"
-        oc oneshot "summarise this file" --model anthropic:claude-opus-4-7
-        oc oneshot "describe a kanban board" --plan
+    Same flow Hermes uses for ``hermes -z``: configure → discover → run one
+    turn → drain fire-and-forget tasks → print final assistant text → exit.
+    Extracted so ``oc chat -q "..."`` can reuse this path without going through
+    Typer's command machinery (calling typer-decorated functions directly
+    would pass OptionInfo objects in place of defaults).
     """
     import asyncio as _asyncio
 
@@ -2121,6 +2136,41 @@ def oneshot(
         raise typer.Exit(130) from None
     if text:
         typer.echo(text)
+
+
+@app.command(name="oneshot")
+def oneshot(
+    prompt: str = typer.Argument(
+        ..., help="The single user message to send. Wrap in quotes for multi-word prompts.",
+    ),
+    model: str = typer.Option(
+        "", "--model", "-m",
+        help="Override the configured model for this run.",
+    ),
+    provider_name: str = typer.Option(
+        "", "--provider", "-p",
+        help="Override the configured provider (anthropic, openai, openrouter, ...).",
+    ),
+    plan: bool = typer.Option(
+        False, "--plan", help="Plan mode (read-only / refuses destructive tools).",
+    ),
+) -> None:
+    """Run a single agent turn non-interactively, print the response, exit.
+
+    Wave 6.A — Hermes-port (7c8c031f6 ``hermes -z``). Non-interactive
+    one-shot mode for shell scripts, CI hooks, and quick "ask the agent"
+    invocations. Differs from ``oc chat`` by NOT entering the REPL: one
+    user turn, full agent loop (compaction + tools + hooks), final
+    assistant text printed to stdout, exit.
+
+    Examples:
+        oc oneshot "what's in the README?"
+        oc oneshot "summarise this file" --model anthropic:claude-opus-4-7
+        oc oneshot "describe a kanban board" --plan
+
+    See also: ``oc chat -q "..."`` is a Hermes-parity alias for this command.
+    """
+    _run_oneshot_turn(prompt, model=model, provider_name=provider_name, plan=plan)
 
 
 @app.command()
