@@ -125,6 +125,83 @@ _VALID_API_MODES: frozenset[str] = frozenset({"auto", "openai", "anthropic"})
 
 
 @dataclass(frozen=True, slots=True)
+class CustomProviderModelOverride:
+    """Per-model override carried under ``custom_providers[].models[<id>]``.
+
+    Both fields are optional. When set, they take precedence over the
+    enclosing ``CustomProvider`` defaults / global resolution chain.
+
+    * ``context_length`` — manual context-window size in tokens; bypasses
+      the cached + probed lookup chain in ``compaction.resolve_context_length``.
+    * ``timeout_seconds`` — per-model HTTP timeout override; falls back to
+      the enclosing ``CustomProvider.request_timeout_seconds``.
+    """
+
+    context_length: int | None = None
+    timeout_seconds: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CustomProvider:
+    """A user-defined OpenAI-compatible (or Anthropic-compatible) endpoint.
+
+    Configured under top-level ``custom_providers:`` in ``config.yaml``.
+    Used via ``/model custom:<name>:<model_id>`` mid-session, or by setting
+    the model resolver's provider hint to ``custom:<name>``.
+
+    ``api_mode``:
+    - ``"auto"`` (default) probes the endpoint's ``/v1/models`` once on
+      first use and caches the inferred shape (openai vs anthropic).
+    - ``"openai"`` / ``"anthropic"`` skip the probe.
+
+    ``api_key`` (inline) wins over ``key_env`` (env var name lookup).
+    Missing both = no auth header (acceptable for local servers).
+    """
+
+    name: str = ""
+    base_url: str = ""
+    api_key: str | None = None
+    key_env: str | None = None
+    api_mode: str = "auto"
+    request_timeout_seconds: float = 60.0
+    models: dict[str, CustomProviderModelOverride] = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+    )
+
+    def __post_init__(self) -> None:
+        if self.api_mode not in _VALID_API_MODES:
+            raise ValueError(
+                f"api_mode must be one of {sorted(_VALID_API_MODES)!r}, "
+                f"got {self.api_mode!r}"
+            )
+        if self.request_timeout_seconds <= 0:
+            raise ValueError(
+                "request_timeout_seconds must be > 0, "
+                f"got {self.request_timeout_seconds}"
+            )
+        # YAML auto-parser delivers ``models`` as dict-of-dict; convert
+        # each value to ``CustomProviderModelOverride`` so callers get a
+        # uniform type. Frozen+slots requires ``object.__setattr__``.
+        converted: dict[str, CustomProviderModelOverride] = {}
+        changed = False
+        for key, value in self.models.items():
+            if isinstance(value, dict):
+                converted[key] = CustomProviderModelOverride(**value)
+                changed = True
+            elif isinstance(value, CustomProviderModelOverride):
+                converted[key] = value
+            else:
+                raise TypeError(
+                    f"custom_providers[{self.name!r}].models[{key!r}] must be "
+                    f"a dict or CustomProviderModelOverride, got {type(value).__name__}"
+                )
+        if changed:
+            object.__setattr__(self, "models", converted)
+
+
+@dataclass(frozen=True, slots=True)
 class DelegationConfig:
     """Hermes-parity (2026-05-08) subagent model/provider override.
 
@@ -724,6 +801,12 @@ class Config:
     system_control: FullSystemControlConfig = field(default_factory=FullSystemControlConfig)
     #: Hermes-parity cron knobs (2026-05-08). See :class:`CronConfig`.
     cron: CronConfig = field(default_factory=CronConfig)
+    #: Wave 3 (2026-05-08) — named OpenAI/Anthropic-compatible endpoints.
+    #: Each entry is a :class:`CustomProvider` reachable via
+    #: ``/model custom:<name>:<model_id>`` or by setting the model
+    #: resolver's provider hint to ``custom:<name>``. Empty by default;
+    #: backward compatible — pre-Wave-3 configs parse unchanged.
+    custom_providers: tuple[CustomProvider, ...] = ()
     home: Path = field(default_factory=_home)
 
 
@@ -756,6 +839,8 @@ def load_config_for_profile(profile_home: Path) -> Config:
 __all__ = [
     "Config",
     "CronConfig",
+    "CustomProvider",
+    "CustomProviderModelOverride",
     "DelegationConfig",
     "ModelConfig",
     "LoopConfig",

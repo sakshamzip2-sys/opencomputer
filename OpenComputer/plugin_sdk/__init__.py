@@ -113,6 +113,7 @@ from plugin_sdk.provider_contract import (
     ProviderCapabilities,
     ProviderResponse,
     StreamEvent,
+    StreamStaleException,
     Usage,
     VisionUnsupportedError,
 )
@@ -204,6 +205,7 @@ __all__ = [
     "ProviderCapabilities",
     "ProviderResponse",
     "StreamEvent",
+    "StreamStaleException",
     "Usage",
     "VisionUnsupportedError",
     "BaseChannelAdapter",

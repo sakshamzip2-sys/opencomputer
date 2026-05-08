@@ -180,6 +180,27 @@ class ProviderResponse:
     """
 
 
+class StreamStaleException(TimeoutError):
+    """Raised when a streaming response stalls.
+
+    The connection is alive but no new tokens have arrived in
+    ``stale_seconds``. Distinct from ``httpx.TimeoutException`` (which
+    fires on full-request timeout / dead connection). Caught by the
+    agent loop's stream consumer and may trigger fallback.
+
+    Wave 3 (2026-05-08) — see :attr:`BaseProvider.stale_timeout_seconds`.
+    """
+
+    def __init__(self, provider_name: str, stale_seconds: float):
+        self.provider_name = provider_name
+        self.stale_seconds = stale_seconds
+        super().__init__(
+            f"provider {provider_name!r} stream stalled (no tokens for "
+            f"{stale_seconds:.1f}s); increase stale_timeout_seconds or "
+            "check the upstream endpoint"
+        )
+
+
 class RateLimitedError(RuntimeError):  # noqa: N818 — public name is the load-bearing one
     """TS-T7 — provider is currently rate-limited (cross-session signal).
 
@@ -333,6 +354,19 @@ class BaseProvider(ABC):
     #: When non-None, the registry validates ``self.config`` against it
     #: at ``register_provider`` time.
     config_schema: type[BaseModel] | None = None
+    #: Wave 3 (2026-05-08) — per-provider HTTP request timeout in
+    #: seconds. Default 60.0 matches httpx's default. Subclasses override
+    #: via class attribute or ``__init__`` kwarg; per-call override
+    #: flows through ``runtime_extras["request_timeout_seconds"]``.
+    request_timeout_seconds: float = 60.0
+    #: Wave 3 (2026-05-08) — streaming inactivity watchdog in seconds.
+    #: ``None`` (default) disables the watchdog (current behavior).
+    #: When set, a stream that emits no chunk for this many seconds
+    #: raises :class:`StreamStaleException`. Distinct from
+    #: ``request_timeout_seconds`` which caps full-request wall time;
+    #: this catches *intra-stream* stalls (LLM hangs after producing
+    #: some tokens). Opt-in to avoid surprising existing users.
+    stale_timeout_seconds: float | None = None
 
     @abstractmethod
     async def complete(
