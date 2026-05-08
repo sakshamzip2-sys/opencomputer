@@ -125,6 +125,22 @@ _VALID_API_MODES: frozenset[str] = frozenset({"auto", "openai", "anthropic"})
 
 
 @dataclass(frozen=True, slots=True)
+class DelegationConfig:
+    """Hermes-parity (2026-05-08) subagent model/provider override.
+
+    All ``None`` (default) means subagents inherit the parent loop's
+    provider + model + credentials. Set any field to override. Useful
+    when delegating cheap work to a smaller/faster model — e.g.,
+    ``DelegationConfig(model="gemini-2.5-flash", provider="openrouter")``.
+    """
+
+    model: str | None = None
+    provider: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class LoopConfig:
     """Behavior of the main agent loop.
 
@@ -177,6 +193,16 @@ class LoopConfig:
     Convert to per-activity reset when the child loop's tool/API hooks are
     exposed. Diagnostic log written to
     ``<profile_home>/logs/subagent-timeout-<ts>.log`` on expiry."""
+    # Hermes parity (2026-05-08): nested orchestrator + delegation override.
+    orchestrator_enabled: bool = True
+    """Master switch for ``role="orchestrator"`` delegations. When False,
+    every child is forced to leaf (cannot delegate further) regardless of
+    the caller's role argument. Hermes parity with
+    ``delegation.orchestrator_enabled``."""
+    delegation: DelegationConfig = field(default_factory=lambda: DelegationConfig())
+    """Subagent model/provider override. None values inherit parent.
+
+    Hermes parity with ``delegation.{model,provider,base_url,api_key}``."""
     context_engine: str = "compressor"
     """Tier-A item 10 — which :class:`ContextEngine` strategy the loop uses.
     ``"compressor"`` is the default (existing CompactionEngine, aux-LLM
@@ -634,6 +660,7 @@ def load_config_for_profile(profile_home: Path) -> Config:
 __all__ = [
     "Config",
     "CronConfig",
+    "DelegationConfig",
     "ModelConfig",
     "LoopConfig",
     "SessionConfig",

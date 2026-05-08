@@ -214,6 +214,21 @@ class DelegateTool(BaseTool):
                             "a tool error rather than silently truncating."
                         ),
                     },
+                    # Hermes parity (2026-05-08): role-based nested delegation.
+                    "role": {
+                        "type": "string",
+                        "enum": ["leaf", "orchestrator"],
+                        "description": (
+                            "Hermes parity. 'leaf' (default) — subagent "
+                            "cannot delegate. 'orchestrator' — subagent "
+                            "retains the delegate tool, allowing nested "
+                            "delegation up to LoopConfig.max_delegation_depth. "
+                            "Requires LoopConfig.orchestrator_enabled=True. "
+                            "Cost warning: depth=3 + concurrency=3 yields up "
+                            "to 27 leaves; default depth=4 / concurrency=3 = "
+                            "up to 81. Use orchestrators sparingly."
+                        ),
+                    },
                 },
                 # `task` is no longer required when `tasks` is supplied — the
                 # execute() handler enforces mutual exclusion at runtime.
@@ -266,6 +281,37 @@ class DelegateTool(BaseTool):
                 ),
                 is_error=True,
             )
+
+        # Hermes parity (2026-05-08): role-based nested delegation.
+        # role="orchestrator" + orchestrator_enabled=True keeps `delegate` in
+        # the child's allowlist so the child can spawn its own leaves. At
+        # max_depth, promote orchestrator → leaf with a warning (no point
+        # giving an orchestrator role to a child that can't spawn anyway).
+        raw_role = (call.arguments.get("role") or "leaf").strip().lower()
+        if raw_role not in ("leaf", "orchestrator"):
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Error: 'role' must be 'leaf' or 'orchestrator' "
+                    f"(got {raw_role!r})."
+                ),
+                is_error=True,
+            )
+        orchestrator_enabled = True
+        if parent_loop is not None and hasattr(parent_loop, "config"):
+            orchestrator_enabled = getattr(
+                parent_loop.config.loop, "orchestrator_enabled", True
+            )
+        is_orchestrator = (raw_role == "orchestrator") and orchestrator_enabled
+        if is_orchestrator and self._current_runtime.delegation_depth + 1 >= max_depth:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "delegate role=orchestrator promoted to leaf "
+                "(child would be at max_depth=%d with no room to delegate)",
+                max_depth,
+            )
+            is_orchestrator = False
+
         # III.1: parse the allowlist input. ``None`` / missing → unrestricted
         # (parent's full registry); explicit ``[]`` → no tools at all; list
         # of strings → exactly those tool names.
@@ -287,9 +333,19 @@ class DelegateTool(BaseTool):
                 is_error=True,
             )
 
+        # Hermes parity: orchestrators keep `delegate` so they can spawn
+        # leaves of their own; leaves still strip it. The other entries in
+        # DELEGATE_BLOCKED_TOOLS (AskUserQuestion, Clarify, ExitPlanMode)
+        # remain unsafe regardless of role.
+        effective_blocked = (
+            DELEGATE_BLOCKED_TOOLS - {"delegate"}
+            if is_orchestrator
+            else DELEGATE_BLOCKED_TOOLS
+        )
+
         # T1.2: enforce blocklist regardless of allowlist mode
         if allowed is not None:
-            overlap = allowed & DELEGATE_BLOCKED_TOOLS
+            overlap = allowed & effective_blocked
             if overlap:
                 return ToolResult(
                     tool_call_id=call.id,
@@ -308,7 +364,7 @@ class DelegateTool(BaseTool):
             try:
                 from opencomputer.tools.registry import registry as _reg
                 all_names = frozenset(_reg.names())
-                allowed = all_names - DELEGATE_BLOCKED_TOOLS
+                allowed = all_names - effective_blocked
             except Exception:
                 # If registry isn't loaded (test/edge case), fall back to passing
                 # `None` to the child — the child loop's existing allowlist filter
