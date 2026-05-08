@@ -66,6 +66,162 @@ DESTRUCTIVE_PATTERNS: list[DestructivePattern] = [
         pattern=re.compile(r":\(\)\s*\{\s*:\|:&\s*\}\s*;\s*:"),
         reason="fork bomb pattern — exhausts process table and locks up the system",
     ),
+    # ─── Hermes-parity additions (2026-05-08) ────────────────────────────
+    # Self-termination — kill the agent process itself.
+    DestructivePattern(
+        pattern_id="self_terminate_pkill",
+        pattern=re.compile(
+            rf"{_STMT_START}(?:pkill|killall)\s+(?:-9\s+)?"
+            r"(?:opencomputer|oc|gateway|hermes)\b"
+        ),
+        reason="kills the agent's own process — self-termination",
+    ),
+    # kill -9 -1 — kill all processes the user owns.
+    DestructivePattern(
+        pattern_id="kill_all_signal_9",
+        pattern=re.compile(rf"{_STMT_START}kill\s+-9\s+-1\b"),
+        reason="`kill -9 -1` — terminates every process the user owns",
+    ),
+    # pkill -9 (broad force-kill).
+    DestructivePattern(
+        pattern_id="pkill_force",
+        pattern=re.compile(rf"{_STMT_START}pkill\s+-9\b"),
+        reason="`pkill -9` — force-terminates matching processes without cleanup",
+    ),
+    # systemctl stop/restart/disable/mask — service-level disruption.
+    DestructivePattern(
+        pattern_id="systemctl_disrupt",
+        pattern=re.compile(
+            rf"{_STMT_START}systemctl\s+(?:stop|restart|disable|mask)\b"
+        ),
+        reason="`systemctl stop|restart|disable|mask` — service-level disruption",
+    ),
+    # Recursive chown to root.
+    DestructivePattern(
+        pattern_id="chown_recursive_root",
+        pattern=re.compile(
+            rf"{_STMT_START}chown\s+(?:-R|--recursive)\s+root\b"
+        ),
+        reason="`chown -R root` — transfers ownership of an entire tree to root",
+    ),
+    # Recursive chmod with world-writable bits.
+    DestructivePattern(
+        pattern_id="chmod_recursive_world_writable",
+        pattern=re.compile(
+            rf"{_STMT_START}chmod\s+(?:-R|--recursive)\s+"
+            r"(?:0?(?:666|777)|[ugoa]*[+=][rwx]*w[rwx]*)\b"
+        ),
+        reason="`chmod -R` with world-writable bits — strips permission boundaries",
+    ),
+    # chmod 666 (non-recursive but still world-writable).
+    DestructivePattern(
+        pattern_id="chmod_666",
+        pattern=re.compile(rf"{_STMT_START}chmod\s+0?666\b"),
+        reason="`chmod 666` — file made world-writable",
+    ),
+    # chmod o+w / a+w — world-writable via symbolic mode.
+    DestructivePattern(
+        pattern_id="chmod_world_writable_symbolic",
+        pattern=re.compile(rf"{_STMT_START}chmod\s+[ugoa]*[+=][rwx]*w[rwx]*\s"),
+        reason="`chmod` symbolic mode adds world/other-writable bits",
+    ),
+    # Write to /dev/sd* via redirect (`> /dev/sd*`).
+    DestructivePattern(
+        pattern_id="redirect_to_disk_device",
+        pattern=re.compile(
+            r"(?<!>)>\s*/dev/(?:sd[a-z]|nvme\d+n\d+|hd[a-z]|xvd[a-z]|vd[a-z])"
+        ),
+        reason="redirect to a physical block device — destroys disk contents",
+    ),
+    # Shell exec via -c flag — model could embed an arbitrary script.
+    DestructivePattern(
+        pattern_id="shell_dash_c_exec",
+        pattern=re.compile(
+            rf"{_STMT_START}(?:bash|sh|zsh|ksh|dash)\s+(?:-[a-zA-Z]*c[a-zA-Z]*)\s+"
+        ),
+        reason="shell `-c` exec — runs an arbitrary command string in a fresh shell",
+    ),
+    # Script-language inline exec via -e/-c flags.
+    DestructivePattern(
+        pattern_id="script_inline_exec",
+        pattern=re.compile(
+            rf"{_STMT_START}(?:python|python3|perl|ruby|node)\s+"
+            r"(?:-[a-zA-Z]*[eEcC][a-zA-Z]*)\s+"
+        ),
+        reason="inline interpreter `-e`/`-c` exec — arbitrary script with no file audit",
+    ),
+    # Process substitution piping to shell (`bash <(curl ...)`).
+    DestructivePattern(
+        pattern_id="proc_subst_to_shell",
+        pattern=re.compile(
+            rf"{_STMT_START}(?:bash|sh|zsh)\s+<\(\s*(?:curl|wget)\b"
+        ),
+        reason="`bash <(curl ...)` — runs untrusted remote bytes via process substitution",
+    ),
+    # `xargs rm` — delete via xargs (often hides destructive intent).
+    DestructivePattern(
+        pattern_id="xargs_rm",
+        pattern=re.compile(rf"{_STMT_START}xargs\s+(?:-[a-zA-Z0-9]+\s+)*rm\b"),
+        reason="`xargs rm` — bulk-deletes paths streamed in from another command",
+    ),
+    # `find -exec rm` / `find -delete`.
+    DestructivePattern(
+        pattern_id="find_delete",
+        pattern=re.compile(
+            rf"{_STMT_START}find\s+.*?(?:-exec\s+rm\b|-delete\b)"
+        ),
+        reason="`find -exec rm` / `find -delete` — bulk-deletes traversal results",
+    ),
+    # `cp / mv / install` to /etc/. Allows flags between command and target.
+    DestructivePattern(
+        pattern_id="copy_to_etc",
+        pattern=re.compile(
+            rf"{_STMT_START}(?:cp|mv|install)\s+(?:[^\s]+\s+)+/etc/"
+        ),
+        reason="`cp/mv/install` into `/etc/` — overwrites system config",
+    ),
+    # `sed -i` on /etc/.
+    DestructivePattern(
+        pattern_id="sed_inplace_etc",
+        pattern=re.compile(
+            rf"{_STMT_START}sed\s+(?:-i|--in-place)(?:\s+\S+)*\s+/etc/"
+        ),
+        reason="in-place `sed` edit of `/etc/` — alters system config silently",
+    ),
+    # `tee` to sensitive file — overwrites .env / ssh keys / /etc/.
+    DestructivePattern(
+        pattern_id="tee_to_sensitive_file",
+        pattern=re.compile(
+            rf"{_STMT_START}tee\s+(?:-[a-zA-Z]+\s+)*"
+            r"(?:/etc/|~/\.ssh/|~/\.opencomputer/\.env|~/\.hermes/\.env)"
+        ),
+        reason="`tee` writes to /etc/ / ~/.ssh/ / .env — overwrites sensitive file",
+    ),
+    # Redirect to sensitive file (.env / .ssh / /etc/).
+    DestructivePattern(
+        pattern_id="redirect_to_sensitive_file",
+        pattern=re.compile(
+            r"(?<!>)>>?\s*"
+            r"(?:/etc/|~/\.ssh/|~/\.opencomputer/\.env|~/\.hermes/\.env)"
+        ),
+        reason="redirect into /etc/ / ~/.ssh/ / .env — overwrites sensitive file",
+    ),
+    # Background gateway with detach. Match either:
+    #   * <prefix> gateway <run|start> ... (& | disown | nohup | setsid) suffix
+    #   * (nohup | setsid) ... gateway <run|start>
+    # so a wrapper-prefix or trailing-detach both fire.
+    DestructivePattern(
+        pattern_id="gateway_run_backgrounded",
+        pattern=re.compile(
+            r"(?:"
+            rf"{_STMT_START}(?:nohup|setsid)\s+\S*\s*(?:oc|opencomputer|hermes)\s+gateway\s+(?:run|start)"
+            r"|"
+            rf"{_STMT_START}(?:oc|opencomputer|hermes)\s+gateway\s+"
+            r"(?:run|start)\b.*?(?:&\s*$|\bdisown\b|\bnohup\b|\bsetsid\b)"
+            r")"
+        ),
+        reason="gateway started outside the service manager — bypasses lifecycle controls",
+    ),
     # sudo-escalated destructive commands. Checked before plain `rm`/`dd` so the
     # reason string mentions privilege escalation.
     DestructivePattern(
