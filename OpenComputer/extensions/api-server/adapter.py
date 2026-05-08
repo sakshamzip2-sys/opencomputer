@@ -177,6 +177,17 @@ class APIServerAdapter(BaseChannelAdapter):
         # asyncio.Task. Cleared in _handle_chat's finally block on every
         # outcome (completion / error / cancel).
         self._active_runs: dict[str, asyncio.Task[Any]] = {}
+        # Hermes-doc /v1/responses chaining: ``previous_response_id`` +
+        # named conversation. LRU-bounded (max 100 entries) to match
+        # the Hermes spec. Each entry holds the rendered transcript so
+        # follow-up calls can prepend prior turns.
+        from collections import OrderedDict
+
+        self._responses_store: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._responses_max = 100
+        # name → response_id (latest in chain); allows
+        # ``conversation: "my-project"`` to auto-chain.
+        self._named_conversations: dict[str, str] = {}
 
     def set_handler(self, handler: ChatHandler) -> None:
         """Inject the per-request agent handler.
@@ -473,7 +484,7 @@ class APIServerAdapter(BaseChannelAdapter):
                 "tool_calls": True,
                 "vision": True,
                 "system_prompt": True,
-                "previous_response_id": False,
+                "previous_response_id": True,
                 "runs_api": False,
                 "jobs_api": False,
             },
@@ -559,13 +570,75 @@ class APIServerAdapter(BaseChannelAdapter):
             list_models(profile_name=profile, env_override=env_override)
         )
 
-    async def _handle_responses_stub(self, request: web.Request) -> web.Response:
-        """Hermes parity (2026-05-08): opt-in Responses-API stub.
+    def _store_response(
+        self,
+        *,
+        response_id: str,
+        user_text: str,
+        agent_text: str,
+        previous_response_id: str | None,
+        conversation: str | None,
+    ) -> None:
+        """Append a response to the LRU store (Hermes-doc parity).
 
-        Gated on ``API_SERVER_API_TYPE=responses`` env var; returns 404
-        otherwise. Stub builds a Responses-shaped envelope from the
-        chat-completions response. Full SSE event semantics
-        (``function_call``, ``function_call_output``) deferred to demand.
+        Entry shape: ``{user, agent, previous_response_id, conversation}``.
+        LRU-evicts when length exceeds ``_responses_max``.
+        """
+        self._responses_store[response_id] = {
+            "user": user_text,
+            "agent": agent_text,
+            "previous_response_id": previous_response_id,
+            "conversation": conversation,
+        }
+        # LRU: move to end (newest); evict oldest if over cap.
+        self._responses_store.move_to_end(response_id)
+        while len(self._responses_store) > self._responses_max:
+            self._responses_store.popitem(last=False)
+        if conversation:
+            self._named_conversations[conversation] = response_id
+
+    def _build_chained_input(
+        self,
+        *,
+        new_input: str,
+        previous_response_id: str | None,
+        conversation: str | None,
+    ) -> tuple[str, str | None]:
+        """Build the prompt by prepending prior turns from the chain.
+
+        Returns ``(rendered_input, resolved_previous_id)``. The
+        resolved id is the actual chain head used (may differ from the
+        client-supplied value when ``conversation`` is set without an
+        explicit previous_response_id).
+        """
+        chain_id = previous_response_id
+        if chain_id is None and conversation:
+            chain_id = self._named_conversations.get(conversation)
+        if chain_id is None or chain_id not in self._responses_store:
+            return new_input, None
+        # Walk back through the chain, accumulating turns.
+        turns: list[tuple[str, str]] = []
+        cursor: str | None = chain_id
+        seen: set[str] = set()
+        while cursor and cursor in self._responses_store and cursor not in seen:
+            seen.add(cursor)
+            entry = self._responses_store[cursor]
+            turns.append((entry["user"], entry["agent"]))
+            cursor = entry.get("previous_response_id")
+        turns.reverse()  # oldest → newest
+        rendered_parts: list[str] = []
+        for user, agent in turns:
+            rendered_parts.append(f"[user] {user}\n[assistant] {agent}")
+        rendered_parts.append(f"[user] {new_input}")
+        return "\n\n".join(rendered_parts), chain_id
+
+    async def _handle_responses_stub(self, request: web.Request) -> web.Response:
+        """Hermes-doc /v1/responses with previous_response_id chaining.
+
+        Gated on ``API_SERVER_API_TYPE=responses``. Supports:
+        - ``input``: str (Responses-API native) OR ``messages`` (chat-completions form)
+        - ``previous_response_id``: chain to a prior response by id
+        - ``conversation``: named-conversation auto-chain
         """
         if os.environ.get("API_SERVER_API_TYPE", "").lower() != "responses":
             return web.json_response(
@@ -590,8 +663,6 @@ class APIServerAdapter(BaseChannelAdapter):
                 {"error": {"message": "invalid json body"}}, status=400
             )
 
-        # Responses-API uses `input` (str) instead of chat-completions `messages`.
-        # Accept both for ergonomics.
         if isinstance(payload.get("input"), str):
             user_text = payload["input"]
         else:
@@ -606,6 +677,16 @@ class APIServerAdapter(BaseChannelAdapter):
                 f"[{m['role']}] {m['content']}" for m in oc_messages
             )
 
+        previous_response_id = payload.get("previous_response_id")
+        conversation = payload.get("conversation")
+        prompt_text, resolved_prev = self._build_chained_input(
+            new_input=user_text,
+            previous_response_id=(
+                previous_response_id if isinstance(previous_response_id, str) else None
+            ),
+            conversation=(conversation if isinstance(conversation, str) else None),
+        )
+
         if self._handler is None:
             return web.json_response(
                 {"error": {"message": "handler not configured"}}, status=503
@@ -613,7 +694,7 @@ class APIServerAdapter(BaseChannelAdapter):
 
         session_id = payload.get("session_id", "")
         try:
-            agent_text = await self._handler(user_text, session_id) or ""
+            agent_text = await self._handler(prompt_text, session_id) or ""
         except Exception as exc:  # noqa: BLE001
             logger.exception("api-server: responses-stub handler raised")
             return web.json_response(
@@ -621,14 +702,26 @@ class APIServerAdapter(BaseChannelAdapter):
             )
 
         model = payload.get("model") or "opencomputer"
-        return web.json_response(
-            oc_response_to_responses_api(
-                agent_text,
-                model=model,
-                input_tokens=len(user_text.split()),
-                output_tokens=len(agent_text.split()),
-            )
+        envelope = oc_response_to_responses_api(
+            agent_text,
+            model=model,
+            input_tokens=len(prompt_text.split()),
+            output_tokens=len(agent_text.split()),
         )
+        new_response_id = envelope["id"]
+        self._store_response(
+            response_id=new_response_id,
+            user_text=user_text,
+            agent_text=agent_text,
+            previous_response_id=resolved_prev,
+            conversation=(conversation if isinstance(conversation, str) else None),
+        )
+        # Echo previous_response_id when chained for client introspection.
+        if resolved_prev is not None:
+            envelope["previous_response_id"] = resolved_prev
+        if isinstance(conversation, str):
+            envelope["conversation"] = conversation
+        return web.json_response(envelope)
 
     async def connect(self) -> None:
         """Start the aiohttp server bound to host:port."""

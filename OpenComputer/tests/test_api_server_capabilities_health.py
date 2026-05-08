@@ -65,8 +65,8 @@ async def test_capabilities_returns_feature_dict(adapter_mod):
         assert features["chat_completions"] is True
         assert features["streaming"] is True
         assert features["tool_calls"] is True
-        # Honest deferrals
-        assert features["previous_response_id"] is False
+        # T57 — chaining shipped; runs/jobs honestly deferred.
+        assert features["previous_response_id"] is True
         assert features["runs_api"] is False
         assert features["jobs_api"] is False
 
