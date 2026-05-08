@@ -35,6 +35,7 @@ request/response surface, not a streaming chat channel.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import time
@@ -46,6 +47,24 @@ from aiohttp import web
 
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import Platform, SendResult
+
+# T61 — per-request profile contextvar. Populated by every endpoint
+# handler before invoking the registered agent handler; reset on the
+# way out. Async tasks spawned during the request inherit the value
+# via standard ``contextvars`` propagation.
+_CURRENT_PROFILE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "opencomputer_api_server_request_profile", default=None
+)
+
+
+def get_current_request_profile() -> str | None:
+    """Public helper — current request's resolved X-OC-Profile, or None.
+
+    Handlers registered via ``set_handler`` / ``set_streaming_handler*``
+    can call this to learn which OpenComputer profile the in-flight
+    request targets, without needing a backreference to the adapter.
+    """
+    return _CURRENT_PROFILE.get()
 
 # T3 — adapter start time for uptime computation. Module-level so the
 # value survives across requests + adapter rebuilds within a process.
@@ -860,7 +879,22 @@ class APIServerAdapter(BaseChannelAdapter):
     def _build_app(self) -> web.Application:
         # Limit per-request body size at the framework level so large
         # uploads don't even reach the handler.
-        app = web.Application(client_max_size=self.max_message_length)
+        # T61 — middleware sets `_CURRENT_PROFILE` from `X-OC-Profile`
+        # for the duration of every request. Handlers (and any tasks
+        # they spawn via `asyncio.create_task`) inherit the value via
+        # standard contextvars propagation.
+        @web.middleware
+        async def _profile_middleware(request, handler):
+            token = _CURRENT_PROFILE.set(self._resolve_request_profile(request))
+            try:
+                return await handler(request)
+            finally:
+                _CURRENT_PROFILE.reset(token)
+
+        app = web.Application(
+            client_max_size=self.max_message_length,
+            middlewares=[_profile_middleware],
+        )
         app.router.add_post("/v1/chat", self._handle_chat)
         # T2 (tier-2 trio, 2026-05-04) — OpenAI Chat Completions compat.
         app.router.add_post(
