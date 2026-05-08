@@ -114,3 +114,50 @@ def test_at_file_allows_normal_text_with_unicode(tmp_path: Path):
     out = expand(f"@file:{text}", ctx=_ctx(tmp_path))
     assert "[binary file not supported:" not in out
     assert "Épée" in out
+
+
+# ─── D2: text-extension bypass for null-byte sniff ────────────────
+
+
+def test_md_with_literal_null_is_NOT_flagged_binary(tmp_path: Path):
+    """A .md file containing a literal NUL is still text per Hermes v2.
+
+    Real-world case: PlantUML diagram embeds, JSON dumps inside fenced
+    code blocks, encoded text. Without the text-extension bypass the
+    null-byte sniff would wrongly reject these.
+    """
+    text = tmp_path / "diagram.md"
+    text.write_text("# Notes\n\nDiagram: \x00encoded\x00bytes\n", encoding="utf-8")
+    out = expand(f"@file:{text}", ctx=_ctx(tmp_path))
+    assert "[binary file not supported:" not in out
+
+
+def test_py_file_passes_even_with_unusual_bytes(tmp_path: Path):
+    """A .py file is text by extension contract; bypass null sniff."""
+    src = tmp_path / "weird.py"
+    src.write_bytes(b"# coding: utf-8\nVALUE = 'has\\x00null'\n")
+    out = expand(f"@file:{src}", ctx=_ctx(tmp_path))
+    assert "[binary file not supported:" not in out
+
+
+def test_yaml_json_toml_are_text(tmp_path: Path):
+    for name, body in [
+        ("config.yaml", "key: value\n"),
+        ("config.json", '{"key": "value"}\n'),
+        ("config.toml", 'key = "value"\n'),
+    ]:
+        f = tmp_path / name
+        f.write_text(body, encoding="utf-8")
+        out = expand(f"@file:{f}", ctx=_ctx(tmp_path))
+        assert "[binary file not supported:" not in out
+        assert "value" in out
+
+
+def test_zip_extension_blocks_without_io(tmp_path: Path):
+    """Binary-extension fast path doesn't even open the file."""
+    archive = tmp_path / "data.zip"
+    # Empty file — would have no null bytes if we sniffed; extension
+    # alone must catch it.
+    archive.write_bytes(b"")
+    out = expand(f"@file:{archive}", ctx=_ctx(tmp_path))
+    assert "[binary file not supported:" in out

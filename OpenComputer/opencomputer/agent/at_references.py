@@ -159,6 +159,33 @@ _BINARY_EXTENSIONS = frozenset({
     ".sqlite", ".db", ".sqlite3",
     ".woff", ".woff2", ".ttf", ".otf", ".eot",
 })
+# Hermes v2 spec D2: "Known text extensions (.py, .md, .json, .yaml,
+# etc.) bypass MIME-based detection." A .md file with a literal NUL
+# (rare but legitimate — diagram files, escaped text) shouldn't be
+# wrongly flagged as binary. The extension allowlist short-circuits the
+# null-byte sniff for common source/config formats.
+_TEXT_EXTENSIONS = frozenset({
+    # Source code
+    ".py", ".pyi", ".pyx", ".pxd",
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
+    ".rs", ".go", ".rb", ".java", ".kt", ".kts", ".scala", ".clj", ".cljs",
+    ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hxx",
+    ".swift", ".m", ".mm", ".pl", ".pm", ".lua", ".php", ".r", ".jl",
+    ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd",
+    ".sql", ".graphql", ".gql", ".proto",
+    # Config / data
+    ".json", ".json5", ".jsonc", ".jsonl", ".ndjson",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env",
+    ".xml", ".html", ".htm", ".xhtml", ".svg", ".css", ".scss", ".sass",
+    ".csv", ".tsv",
+    # Docs
+    ".md", ".markdown", ".rst", ".adoc", ".txt", ".text",
+    # Build / lockfiles
+    ".lock", ".dockerfile", ".gitignore", ".gitattributes",
+    ".editorconfig", ".prettierrc", ".eslintrc",
+    # Misc text-y formats
+    ".log", ".diff", ".patch",
+})
 
 
 def is_path_blocked(path: Path, *, home: Path) -> bool:
@@ -212,18 +239,24 @@ def _is_outside_workspace(path: Path, *, workspace_root: Path) -> bool:
 def _looks_binary(path: Path) -> bool:
     """Best-effort binary-file detection (Hermes v2 parity).
 
-    Two cheap signals in order:
+    Three signals applied in order:
 
-    1. Extension match against :data:`_BINARY_EXTENSIONS`.
-    2. Null-byte scan over the first 8KB of the file.
+    1. **Text-extension allowlist** — known source / config / docs
+       extensions (``.py``, ``.md``, ``.json``, ``.yaml`` etc.) bypass
+       further checks. Matches Hermes v2 spec verbatim: text extensions
+       skip the null-byte sniff.
+    2. **Binary-extension blocklist** — known binary formats
+       (``.png``, ``.zip``, etc.) short-circuit to True without I/O.
+    3. **Null-byte sniff** — first 8KB of the file. Fallback for
+       extensions we don't recognize.
 
     Returns ``False`` on any read error — the caller's ``read_text``
-    path will surface the underlying issue with a more specific
-    message. False positives on small text files containing a literal
-    NUL are extremely rare in practice (legitimate source files don't
-    contain NULs).
+    path will surface the underlying issue with a more specific message.
     """
-    if path.suffix.lower() in _BINARY_EXTENSIONS:
+    suffix = path.suffix.lower()
+    if suffix in _TEXT_EXTENSIONS:
+        return False  # explicit text bypass, no I/O
+    if suffix in _BINARY_EXTENSIONS:
         return True
     try:
         with path.open("rb") as fh:
