@@ -123,6 +123,108 @@ class ModelConfig:
 
 _VALID_API_MODES: frozenset[str] = frozenset({"auto", "openai", "anthropic"})
 
+#: Wave 3 — recognized OpenRouter `:nitro` / `:floor` routing suffixes
+#: that translate into ``provider: {sort: ...}`` body overrides. Other
+#: suffixes (e.g. tool-version markers) pass through verbatim.
+_OR_ROUTING_SUFFIXES: frozenset[str] = frozenset({"nitro", "floor"})
+
+#: Wave 3 — recognized HuggingFace Inference Providers routing
+#: suffixes. Per HF's docs, ``:fastest`` / ``:cheapest`` are auto-routed
+#: and a specific provider name (e.g. ``:groq``) pins to that backend.
+#: We don't transform the wire format — HF parses the suffix server-side
+#: when it appears in the ``model`` field. The set is exposed for
+#: client-side validation (warn on typos) and CLI completions.
+_KNOWN_HF_PROVIDERS: frozenset[str] = frozenset(
+    {"groq", "together", "fireworks", "replicate", "sambanova",
+     "hyperbolic", "novita", "cerebras"}
+)
+_HF_ROUTING_SUFFIXES: frozenset[str] = (
+    frozenset({"fastest", "cheapest"}) | _KNOWN_HF_PROVIDERS
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRoutingConfig:
+    """Wave 3 — OpenRouter-style provider routing knobs.
+
+    Configured under ``provider_routing:`` (top-level) in config.yaml.
+    Only meaningful when the active provider is OpenRouter; ignored
+    elsewhere. The :nitro / :floor model-name suffixes override
+    ``sort`` per-call.
+
+    See https://openrouter.ai/docs/provider-routing for upstream
+    semantics. All fields default to OpenRouter's own defaults — no
+    config block at all means no behavior change.
+    """
+
+    sort: str | None = None  # "price" | "throughput" | "latency"
+    only: tuple[str, ...] = ()
+    ignore: tuple[str, ...] = ()
+    order: tuple[str, ...] = ()
+    require_parameters: bool = False
+    data_collection: str | None = None  # "allow" | "deny"
+
+    def to_body_block(self) -> dict | None:
+        """Serialize to the ``provider: {...}`` body block OpenRouter expects.
+
+        Returns None when the config is fully default (so we don't emit
+        an empty ``"provider": {}`` block on every request).
+        """
+        block: dict = {}
+        if self.sort:
+            block["sort"] = self.sort
+        if self.only:
+            block["only"] = list(self.only)
+        if self.ignore:
+            block["ignore"] = list(self.ignore)
+        if self.order:
+            block["order"] = list(self.order)
+        if self.require_parameters:
+            block["require_parameters"] = True
+        if self.data_collection:
+            block["data_collection"] = self.data_collection
+        return block or None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.only, list):
+            object.__setattr__(self, "only", tuple(self.only))
+        if isinstance(self.ignore, list):
+            object.__setattr__(self, "ignore", tuple(self.ignore))
+        if isinstance(self.order, list):
+            object.__setattr__(self, "order", tuple(self.order))
+
+
+def split_or_routing_suffix(model: str) -> tuple[str, str | None]:
+    """Strip a recognized ``:nitro`` / ``:floor`` suffix from ``model``.
+
+    Returns ``(model_without_suffix, suffix_or_none)``. Unknown suffixes
+    (e.g. ``:beta`` on a model name that legitimately uses ``:`` for
+    something else) pass through verbatim — only the recognized set is
+    consumed.
+    """
+    if ":" not in model:
+        return model, None
+    prefix, _, suffix = model.rpartition(":")
+    if suffix in _OR_ROUTING_SUFFIXES:
+        return prefix, suffix
+    return model, None
+
+
+def split_hf_routing_suffix(model: str) -> tuple[str, str | None]:
+    """Strip a recognized HuggingFace routing suffix from ``model``.
+
+    Returns ``(model_without_suffix, suffix_or_none)``. Unknown suffixes
+    pass through verbatim. Caller decides whether to put the suffix
+    back on (HF's API parses it server-side) or use the known suffix
+    set for validation / CLI completion.
+    """
+    if ":" not in model:
+        return model, None
+    prefix, _, suffix = model.rpartition(":")
+    if suffix in _HF_ROUTING_SUFFIXES:
+        return prefix, suffix
+    return model, None
+
 
 @dataclass(frozen=True, slots=True)
 class CustomProviderModelOverride:
@@ -827,6 +929,9 @@ class Config:
     #: resolver's provider hint to ``custom:<name>``. Empty by default;
     #: backward compatible — pre-Wave-3 configs parse unchanged.
     custom_providers: tuple[CustomProvider, ...] = ()
+    #: Wave 3 (2026-05-08) — OpenRouter provider routing knobs. Only
+    #: applies when the active provider is OpenRouter; ignored otherwise.
+    provider_routing: ProviderRoutingConfig = field(default_factory=ProviderRoutingConfig)
     home: Path = field(default_factory=_home)
 
 
@@ -861,6 +966,9 @@ __all__ = [
     "CronConfig",
     "CustomProvider",
     "CustomProviderModelOverride",
+    "ProviderRoutingConfig",
+    "split_or_routing_suffix",
+    "split_hf_routing_suffix",
     "DelegationConfig",
     "ModelConfig",
     "LoopConfig",

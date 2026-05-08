@@ -37,6 +37,25 @@ OpenAIProvider = _mod.OpenAIProvider
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+#: Wave 3 (2026-05-08) — recognized OpenRouter routing-suffix sugar.
+#: ``:nitro`` => sort by throughput, ``:floor`` => sort by price.
+#: Inlined here (rather than imported from opencomputer.agent.config)
+#: because the plugin SDK boundary forbids ``from opencomputer.*``.
+_OR_ROUTING_SUFFIX_TO_SORT: dict[str, str] = {
+    "nitro": "throughput",
+    "floor": "price",
+}
+
+
+def _split_or_routing_suffix(model: str) -> tuple[str, str | None]:
+    """Strip a recognized ``:nitro`` / ``:floor`` suffix from ``model``."""
+    if ":" not in model:
+        return model, None
+    prefix, _, suffix = model.rpartition(":")
+    if suffix in _OR_ROUTING_SUFFIX_TO_SORT:
+        return prefix, suffix
+    return model, None
+
 # Wave 5 T5 — OpenRouter response-cache (Hermes 457c7b76c). Distinct
 # from prompt-caching: the response-cache caches the entire LLM response
 # across identical requests on OpenRouter's edge.
@@ -143,21 +162,88 @@ class OpenRouterProvider(OpenAIProvider):
             except Exception:  # noqa: BLE001 — best-effort observability
                 pass
 
-        if cache_headers:
-            import httpx as _httpx
-            from openai import AsyncOpenAI as _AsyncOpenAI
+        # Wave 3 (2026-05-08) — provider_routing body injection. We
+        # parse the OC config's top-level ``provider_routing:`` block
+        # and a model-name ``:nitro`` / ``:floor`` suffix, then mutate
+        # the chat/completions request body via an httpx request hook
+        # to add a ``provider: {...}`` field. Keeping this as a hook
+        # avoids overriding complete()/stream_complete() (which would
+        # duplicate the OpenAIProvider's request-building logic).
+        self._provider_routing_block = self._build_routing_block_from_cfg()
 
-            http_client = _httpx.AsyncClient(
-                event_hooks={"response": [_capture_cache_status]},
-            )
-            self.client = _AsyncOpenAI(
-                api_key=self._api_key,
-                base_url=self._base or resolved_base,
-                default_headers=cache_headers,
-                http_client=http_client,
-            )
+        async def _inject_routing(request):  # type: ignore[no-untyped-def]
+            try:
+                if not str(request.url).rstrip("/").endswith("/chat/completions"):
+                    return
+                if not request.content:
+                    return
+                import json as _json
+                body = _json.loads(request.content)
+                # Suffix sugar: :nitro → throughput, :floor → price.
+                # Suffix wins over the config block's sort.
+                model_name = body.get("model")
+                suffix_block: dict | None = None
+                if isinstance(model_name, str):
+                    new_model, suffix = _split_or_routing_suffix(model_name)
+                    if suffix is not None:
+                        body["model"] = new_model
+                        suffix_block = {"sort": _OR_ROUTING_SUFFIX_TO_SORT[suffix]}
+                # Merge config block (lower priority) with suffix block (wins).
+                merged: dict = {}
+                if self._provider_routing_block:
+                    merged.update(self._provider_routing_block)
+                if suffix_block:
+                    merged.update(suffix_block)
+                if merged:
+                    body["provider"] = merged
+                    request._content = _json.dumps(body).encode("utf-8")
+                    # Recompute Content-Length header.
+                    request.headers["content-length"] = str(len(request._content))
+            except Exception:  # noqa: BLE001 — never break the request path
+                pass
+
+        # Always rebuild the client with hooks (cache headers OR routing
+        # always trigger this — even with empty cache headers, the
+        # request hook is needed for routing).
+        import httpx as _httpx
+        from openai import AsyncOpenAI as _AsyncOpenAI
+
+        http_client = _httpx.AsyncClient(
+            event_hooks={
+                "response": [_capture_cache_status],
+                "request": [_inject_routing],
+            },
+        )
+        self.client = _AsyncOpenAI(
+            api_key=self._api_key,
+            base_url=self._base or resolved_base,
+            default_headers=cache_headers or None,
+            http_client=http_client,
+        )
         # Stash for tests / observability.
         self._or_cache_headers: dict[str, str] = cache_headers
+
+    def _build_routing_block_from_cfg(self) -> dict | None:
+        """Parse provider_routing: from the OC config; return body block or None."""
+        try:
+            data = self._load_or_cfg()
+            pr = data.get("provider_routing") if isinstance(data, dict) else None
+            if not isinstance(pr, dict):
+                return None
+            block: dict = {}
+            for key in ("sort", "data_collection"):
+                v = pr.get(key)
+                if v:
+                    block[key] = v
+            for key in ("only", "ignore", "order"):
+                v = pr.get(key)
+                if isinstance(v, list) and v:
+                    block[key] = v
+            if pr.get("require_parameters"):
+                block["require_parameters"] = True
+            return block or None
+        except Exception:  # noqa: BLE001
+            return None
 
     @staticmethod
     def _load_or_cfg() -> dict:
