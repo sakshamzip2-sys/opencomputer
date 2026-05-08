@@ -281,6 +281,39 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_archive = sub.add_parser("archive", help="Archive one or more tasks")
     p_archive.add_argument("task_ids", nargs="+")
 
+    # --- specify (Hermes Doc-2 parity, 2026-05-08) ---
+    p_specify = sub.add_parser(
+        "specify",
+        help=(
+            "Expand a triage task's title+body into a structured Markdown "
+            "spec via the auxiliary LLM and promote triage→todo. "
+            "(Hermes parity)"
+        ),
+    )
+    p_specify.add_argument(
+        "task_ids", nargs="*",
+        help=(
+            "Triage task ids to specify. Omit when --all is given. Multiple "
+            "ids are processed sequentially; one failure does not stop the rest."
+        ),
+    )
+    p_specify.add_argument(
+        "--all", action="store_true", dest="all_triage",
+        help="Specify every task currently in triage status.",
+    )
+    p_specify.add_argument(
+        "--promote-to", default="todo",
+        choices=("todo", "ready"),
+        help=(
+            "New status after specify (default: todo). Pick 'ready' to "
+            "skip the dispatcher's todo→ready promotion step."
+        ),
+    )
+    p_specify.add_argument(
+        "--json", action="store_true",
+        help="Emit one JSON object per task instead of human-readable text.",
+    )
+
     # --- tail ---
     p_tail = sub.add_parser("tail", help="Follow a task's event stream")
     p_tail.add_argument("task_id")
@@ -685,6 +718,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "orgchart": _cmd_orgchart,
         "remote":   _cmd_remote,
         "callback": _cmd_callback,
+        "specify":  _cmd_specify,
     }
     handler = handlers.get(action)
     if not handler:
@@ -1138,6 +1172,101 @@ def _cmd_archive(args: argparse.Namespace) -> int:
                 print(f"cannot archive {tid}", file=sys.stderr)
             else:
                 print(f"Archived {tid}")
+    return 0 if not failed else 1
+
+
+def _cmd_specify(args: argparse.Namespace) -> int:
+    """Triage→spec expansion via auxiliary LLM (Hermes Doc-2 parity).
+
+    Drives :func:`opencomputer.kanban.specify.specify_task` once per
+    target id. Failures on a single task are reported and the loop
+    continues — important for ``--all`` which may otherwise leave the
+    user stranded after one bad task.
+    """
+    import asyncio as _asyncio
+    import json as _json
+
+    from opencomputer.kanban.specify import (
+        SpecifyError as _SpecifyError,
+    )
+    from opencomputer.kanban.specify import (
+        specify_task as _specify_task,
+    )
+
+    ids = list(args.task_ids or [])
+    if args.all_triage:
+        if ids:
+            print(
+                "specify: pass either --all or explicit task_ids, not both",
+                file=sys.stderr,
+            )
+            return 2
+        with kb.connect() as conn:
+            triage_tasks = kb.list_tasks(conn, status="triage")
+        ids = [t.id for t in triage_tasks]
+        if not ids:
+            print("specify: no tasks in triage; nothing to do.")
+            return 0
+
+    if not ids:
+        print(
+            "specify: provide at least one task id, or pass --all "
+            "to specify every triage task.",
+            file=sys.stderr,
+        )
+        return 2
+
+    promote_to = args.promote_to
+    failed: list[str] = []
+
+    async def _run_one(tid: str) -> None:
+        with kb.connect() as conn:
+            try:
+                result = await _specify_task(
+                    conn, task_id=tid, promote_to=promote_to,
+                )
+            except _SpecifyError as exc:
+                failed.append(tid)
+                if args.json:
+                    print(_json.dumps({
+                        "task_id": tid, "ok": False, "error": str(exc),
+                    }))
+                else:
+                    print(f"specify {tid}: {exc}", file=sys.stderr)
+                return
+            except Exception as exc:  # noqa: BLE001 — model-level failure
+                failed.append(tid)
+                if args.json:
+                    print(_json.dumps({
+                        "task_id": tid, "ok": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }))
+                else:
+                    print(
+                        f"specify {tid}: model call failed — "
+                        f"{type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+                return
+        if args.json:
+            print(_json.dumps({
+                "task_id": result.task_id,
+                "ok": True,
+                "old_status": result.old_status,
+                "new_status": result.new_status,
+                "body_chars": len(result.expanded_body),
+                "truncated": result.truncated,
+            }))
+        else:
+            badge = " [truncated]" if result.truncated else ""
+            print(
+                f"specified {result.task_id}: triage → "
+                f"{result.new_status} ({len(result.expanded_body)} chars{badge})"
+            )
+
+    for tid in ids:
+        _asyncio.run(_run_one(tid))
+
     return 0 if not failed else 1
 
 

@@ -678,6 +678,76 @@ def add_comment(task_id: str, payload: CommentBody):
 
 
 # ---------------------------------------------------------------------------
+# Specify (Hermes Doc-2 parity, 2026-05-08) — triage→spec via aux LLM.
+# ---------------------------------------------------------------------------
+
+class SpecifyBody(BaseModel):
+    promote_to: str = "todo"  # or "ready"
+
+
+@router.post("/tasks/{task_id}/specify")
+async def specify_task_endpoint(task_id: str, payload: SpecifyBody | None = None):
+    """Expand a triage task's body via the auxiliary LLM and promote it.
+
+    Mirrors the ``oc kanban specify`` CLI command. Returns 409 when the
+    task is not in triage status (loud failure on accidental misuse),
+    404 when the task does not exist, 502 when the auxiliary model
+    fails (transport / provider issue), and 200 with the SpecifyResult
+    otherwise.
+
+    The dashboard's Triage column surfaces a ✨ "Specify" button per
+    task that POSTs here. The frontend should debounce — the LLM call
+    typically takes 5-15s.
+    """
+    from opencomputer.kanban.specify import (
+        SpecifyError,
+        specify_task,
+    )
+
+    promote_to = (payload.promote_to if payload else "todo").lower()
+    if promote_to not in ("todo", "ready"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"promote_to must be 'todo' or 'ready' (got {promote_to!r})",
+        )
+
+    conn = _conn()
+    try:
+        try:
+            result = await specify_task(
+                conn, task_id=task_id, promote_to=promote_to,
+            )
+        except SpecifyError as exc:
+            # Distinguish "not found" (404) from "wrong status" (409)
+            # by inspecting the error message — the SpecifyError class
+            # itself doesn't carry a typed code yet.
+            msg = str(exc)
+            if "not found" in msg:
+                raise HTTPException(status_code=404, detail=msg) from exc
+            raise HTTPException(status_code=409, detail=msg) from exc
+        except Exception as exc:  # noqa: BLE001 — provider transport failure
+            log.exception("kanban.specify aux call failed")
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"aux model call failed: {type(exc).__name__}: {exc}. "
+                    "Task left in triage."
+                ),
+            ) from exc
+    finally:
+        conn.close()
+
+    return {
+        "ok": True,
+        "task_id": result.task_id,
+        "old_status": result.old_status,
+        "new_status": result.new_status,
+        "expanded_body": result.expanded_body,
+        "truncated": result.truncated,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Links
 # ---------------------------------------------------------------------------
 
