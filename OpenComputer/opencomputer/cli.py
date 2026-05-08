@@ -1768,6 +1768,24 @@ def _run_chat_session(
                     return (False, str(e))
                 if not canonical or not isinstance(canonical, str):
                     return (False, f"invalid model id: {new_model!r}")
+                # Wave 3 (2026-05-08) — strip + warn on :nitro / :floor
+                # suffix when the active provider is NOT OpenRouter.
+                # Those suffixes are OR-specific routing sugar; passing
+                # them verbatim to (e.g.) Anthropic returns 404. Strip
+                # them here so the swap succeeds; emit a one-shot warning
+                # to alert the user that their preference is being
+                # ignored.
+                from opencomputer.agent.config import split_or_routing_suffix
+                _stripped, _suffix = split_or_routing_suffix(canonical)
+                if _suffix is not None and loop.config.model.provider != "openrouter":
+                    if not getattr(_on_model_swap, "_or_suffix_warned", False):
+                        console.print(
+                            f"[yellow]⚠[/yellow] :{_suffix} suffix is OpenRouter-only; "
+                            f"stripping and using {_stripped!r} on provider "
+                            f"{loop.config.model.provider!r}."
+                        )
+                        _on_model_swap._or_suffix_warned = True  # type: ignore[attr-defined]
+                    canonical = _stripped
                 new_model_cfg = _dc.replace(loop.config.model, model=canonical)
                 loop.config = _dc.replace(loop.config, model=new_model_cfg)
                 # Phase B: refresh native-thinking flag for the new model so

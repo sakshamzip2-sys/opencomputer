@@ -101,3 +101,72 @@ def test_build_missing_key_env_returns_empty(monkeypatch, caplog):
     result = _resolve_api_key(cp)
     assert result == ""
     assert any("ABSENT_VAR" in r.message for r in caplog.records)
+
+
+def test_probe_api_mode_openai_shape(monkeypatch):
+    """OpenAI-shaped /v1/models response => openai mode + cached."""
+    import httpx as _httpx
+
+    from opencomputer.agent import custom_provider_client as cpc
+
+    cpc._PROBE_CACHE.clear()
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"data": [{"id": "gpt-4"}]}
+
+    monkeypatch.setattr(_httpx, "get", lambda url, timeout=5.0: _Resp())
+    mode = cpc._probe_api_mode("http://x.local/v1")
+    assert mode == "openai"
+    # Cached for next call
+    assert cpc._PROBE_CACHE["http://x.local/v1"] == "openai"
+
+
+def test_probe_api_mode_anthropic_shape(monkeypatch):
+    import httpx as _httpx
+
+    from opencomputer.agent import custom_provider_client as cpc
+
+    cpc._PROBE_CACHE.clear()
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"models": [{"id": "claude", "type": "model"}]}
+
+    monkeypatch.setattr(_httpx, "get", lambda url, timeout=5.0: _Resp())
+    assert cpc._probe_api_mode("http://anth.local/v1") == "anthropic"
+
+
+def test_probe_api_mode_failure_falls_back_to_openai(monkeypatch):
+    import httpx as _httpx
+
+    from opencomputer.agent import custom_provider_client as cpc
+
+    cpc._PROBE_CACHE.clear()
+
+    def _raise(*a, **kw):
+        raise _httpx.ConnectError("refused")
+
+    monkeypatch.setattr(_httpx, "get", _raise)
+    assert cpc._probe_api_mode("http://dead.local/v1") == "openai"
+    assert cpc._PROBE_CACHE["http://dead.local/v1"] == "openai"
+
+
+def test_probe_api_mode_cache_short_circuits(monkeypatch):
+    """Second call against same base_url uses cache, doesn't re-probe."""
+    import httpx as _httpx
+
+    from opencomputer.agent import custom_provider_client as cpc
+
+    cpc._PROBE_CACHE["http://cached.local/v1"] = "anthropic"
+    call_count = {"n": 0}
+
+    def _bump(*a, **kw):
+        call_count["n"] += 1
+        raise AssertionError("should not be called when cache hit")
+
+    monkeypatch.setattr(_httpx, "get", _bump)
+    assert cpc._probe_api_mode("http://cached.local/v1") == "anthropic"
+    assert call_count["n"] == 0

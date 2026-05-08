@@ -13,15 +13,18 @@ Two-layer design:
 
 * :func:`build_custom_provider` — factory that resolves a
   :class:`CustomProvider` config entry into a fresh provider instance.
-  Picks ``OpenAIProvider`` for ``api_mode in {auto, openai}`` and
-  ``AnthropicProvider`` for ``api_mode == anthropic``. ``api_mode=auto``
-  is currently shipped as a synonym for ``openai`` — the eager probe
-  was descoped from this PR (would have added per-call latency or a
-  startup race condition); the lazy-probe-on-first-call path is a
-  follow-up. Most custom endpoints (Ollama, vLLM, llama.cpp, LM Studio,
-  LiteLLM proxies) are OpenAI-shaped so the synonym is correct in
-  practice; users with Anthropic-shaped proxies set ``api_mode:
-  anthropic`` explicitly.
+  ``api_mode`` selects the wire shape:
+
+  - ``"openai"`` — instantiate :class:`OpenAIProvider`.
+  - ``"anthropic"`` — instantiate :class:`AnthropicProvider`.
+  - ``"auto"`` (default) — probe the endpoint's ``/v1/models``
+    once, classify the response shape, and cache the inferred mode
+    on the in-memory ``_PROBE_CACHE`` for the lifetime of the
+    process so subsequent ``/model`` swaps and fallback routing
+    don't re-probe. Probe failure (network error, non-200, opaque
+    body) falls through to ``openai`` — the safe default since most
+    OpenAI-compat endpoints (Ollama, vLLM, llama.cpp, LM Studio,
+    LiteLLM proxies) match that shape.
 """
 
 from __future__ import annotations
@@ -32,6 +35,54 @@ import os
 from opencomputer.agent.config import Config, CustomProvider
 
 LOG = logging.getLogger(__name__)
+
+#: Per-process cache of probed api_modes keyed by base_url. Populated
+#: on first ``api_mode='auto'`` resolution and reused for every
+#: subsequent ``build_custom_provider`` call against the same URL —
+#: avoids hammering ``/v1/models`` on every ``/model`` swap or
+#: fallback dispatch. Entries don't expire; restart the process to
+#: re-probe.
+_PROBE_CACHE: dict[str, str] = {}
+
+
+def _probe_api_mode(base_url: str, *, timeout: float = 5.0) -> str:
+    """GET ``<base_url>/models`` and classify the response shape.
+
+    Returns ``"openai"`` (response has a ``data`` array) or
+    ``"anthropic"`` (response has a ``models`` array with ``type``
+    fields). Falls back to ``"openai"`` on any error — most local
+    endpoints are OpenAI-compatible, so this is the safe default.
+    """
+    cached = _PROBE_CACHE.get(base_url)
+    if cached:
+        return cached
+    try:
+        import httpx
+
+        url = f"{base_url.rstrip('/')}/models"
+        resp = httpx.get(url, timeout=timeout)
+        if resp.status_code == 200:
+            body = resp.json()
+            if isinstance(body, dict):
+                if "data" in body and isinstance(body["data"], list):
+                    _PROBE_CACHE[base_url] = "openai"
+                    return "openai"
+                if "models" in body and isinstance(body["models"], list):
+                    # Anthropic /v1/models shape: each entry has 'type': 'model'
+                    if any(
+                        isinstance(m, dict) and m.get("type") == "model"
+                        for m in body["models"]
+                    ):
+                        _PROBE_CACHE[base_url] = "anthropic"
+                        return "anthropic"
+        LOG.info(
+            "api_mode probe at %s returned status=%s; defaulting to openai",
+            url, resp.status_code,
+        )
+    except Exception as e:  # noqa: BLE001
+        LOG.info("api_mode probe at %s failed (%s); defaulting to openai", base_url, e)
+    _PROBE_CACHE[base_url] = "openai"
+    return "openai"
 
 
 def parse_custom_model_spec(spec: str) -> tuple[str, str]:
@@ -110,7 +161,14 @@ def build_custom_provider(name: str, config: Config):
     # inside the SDK boundary (no direct extensions/* imports here).
     from opencomputer.plugins.registry import registry
 
-    target_name = "anthropic" if cp.api_mode == "anthropic" else "openai"
+    # Wave 3 — resolve ``api_mode='auto'`` via lazy /v1/models probe.
+    # Cached per base_url for the lifetime of the process so subsequent
+    # /model swaps and fallback dispatch don't re-probe.
+    effective_mode = cp.api_mode
+    if effective_mode == "auto":
+        effective_mode = _probe_api_mode(cp.base_url)
+
+    target_name = "anthropic" if effective_mode == "anthropic" else "openai"
     provider_cls = registry.providers.get(target_name)
     if provider_cls is None:
         raise RuntimeError(
