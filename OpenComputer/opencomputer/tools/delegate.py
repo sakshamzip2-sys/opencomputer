@@ -189,13 +189,53 @@ class DelegateTool(BaseTool):
                             "Defaults to false when omitted."
                         ),
                     },
+                    # Hermes parity (2026-05-08): parallel batch shape.
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "properties": {
+                                "goal": {"type": "string"},
+                                "context": {"type": "string"},
+                                "toolsets": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                            },
+                            "required": ["goal"],
+                        },
+                        "description": (
+                            "Hermes parity: parallel batch. Mutually "
+                            "exclusive with `task`. Each entry runs in its "
+                            "own subagent with isolated context. Concurrency "
+                            "capped by LoopConfig.max_concurrent_children "
+                            "(default 3); batches larger than that cap return "
+                            "a tool error rather than silently truncating."
+                        ),
+                    },
                 },
-                "required": ["task"],
+                # `task` is no longer required when `tasks` is supplied — the
+                # execute() handler enforces mutual exclusion at runtime.
+                "required": [],
             },
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        task = call.arguments.get("task", "").strip()
+        # Hermes parity (2026-05-08): tasks=[...] parallel batch.
+        # Mutually exclusive with single-task `task` arg.
+        raw_tasks = call.arguments.get("tasks")
+        raw_task = (call.arguments.get("task") or "").strip()
+        if raw_tasks is not None and raw_task:
+            return ToolResult(
+                tool_call_id=call.id,
+                content="Error: supply either `task` OR `tasks`, not both.",
+                is_error=True,
+            )
+        if raw_tasks is not None:
+            return await self._execute_batch(call.id, raw_tasks)
+
+        task = raw_task
         if not task:
             return ToolResult(
                 tool_call_id=call.id,
@@ -450,6 +490,98 @@ class DelegateTool(BaseTool):
                 content=f"Error: {exc}",
                 is_error=True,
             )
+
+    async def _execute_batch(
+        self, call_id: str, tasks: list[dict[str, object]]
+    ) -> ToolResult:
+        """Hermes parity (2026-05-08): tasks=[...] parallel batch dispatch.
+
+        Each task is a dict with at least ``goal`` (Hermes naming). We map
+        ``goal`` → OC's single-task ``task`` field and re-enter ``execute``
+        per child via an asyncio.gather under a semaphore sized to
+        ``LoopConfig.max_concurrent_children`` (env override:
+        ``DELEGATION_MAX_CONCURRENT_CHILDREN``).
+
+        Batches larger than the cap return a tool error rather than silently
+        truncating — matches the Hermes documented behavior.
+        """
+        import asyncio as _asyncio
+        import os as _os
+
+        if not isinstance(tasks, list) or not tasks:
+            return ToolResult(
+                tool_call_id=call_id,
+                content="Error: `tasks` must be a non-empty list.",
+                is_error=True,
+            )
+
+        # Resolve cap (parent_loop.config takes precedence; env var is the
+        # operational override; default 3 mirrors Hermes).
+        parent_loop = getattr(self._factory, "__self__", None)
+        cap = 3
+        if parent_loop is not None and hasattr(parent_loop, "config"):
+            cap = getattr(parent_loop.config.loop, "max_concurrent_children", 3)
+        env_cap = _os.environ.get("DELEGATION_MAX_CONCURRENT_CHILDREN", "").strip()
+        if env_cap:
+            try:
+                cap = max(1, int(env_cap))
+            except ValueError:
+                pass
+
+        if len(tasks) > cap:
+            return ToolResult(
+                tool_call_id=call_id,
+                content=(
+                    f"Error: batch size {len(tasks)} exceeds "
+                    f"max_concurrent_children={cap}. Submit fewer tasks per call "
+                    f"or raise LoopConfig.max_concurrent_children."
+                ),
+                is_error=True,
+            )
+
+        sem = _asyncio.Semaphore(cap)
+
+        async def _run_one(idx: int, spec: dict[str, object]) -> str:
+            async with sem:
+                # Hermes uses `goal`; OC's existing single-task uses `task`.
+                # Map goal → task internally; preserve `toolsets` → `allowed_tools`.
+                goal = (spec.get("goal") or spec.get("task") or "")
+                if not isinstance(goal, str) or not goal.strip():
+                    return f"## Task {idx + 1}: ERROR\nempty/invalid goal in batch entry"
+                ctx = (spec.get("context") or "").strip() if isinstance(spec.get("context"), str) else ""
+                # Inline the optional context block into the task text.
+                task_text = f"{goal.strip()}\n\nContext:\n{ctx}" if ctx else goal.strip()
+                toolsets = spec.get("toolsets")
+                child_args: dict[str, object] = {"task": task_text}
+                if isinstance(toolsets, list):
+                    child_args["allowed_tools"] = toolsets
+                child_call = ToolCall(
+                    id=f"{call_id}-batch-{idx}",
+                    name="delegate",
+                    arguments=child_args,
+                )
+                res = await self.execute(child_call)
+                return res.content or ""
+
+        results = await _asyncio.gather(
+            *[_run_one(i, t) for i, t in enumerate(tasks)],
+            return_exceptions=True,
+        )
+        output_lines: list[str] = []
+        any_error = False
+        for i, r in enumerate(results):
+            if isinstance(r, BaseException):
+                any_error = True
+                output_lines.append(
+                    f"## Task {i + 1}: ERROR\n{type(r).__name__}: {r}"
+                )
+            else:
+                output_lines.append(f"## Task {i + 1}\n{r}")
+        return ToolResult(
+            tool_call_id=call_id,
+            content="\n\n".join(output_lines),
+            is_error=any_error,
+        )
 
 
 __all__ = ["DelegateTool", "DELEGATE_BLOCKED_TOOLS"]

@@ -162,6 +162,21 @@ class LoopConfig:
     max_delegation_depth: int = 4  # 2026-05-05: doubled 2 → 4
     """Cap on `DelegateTool` recursion. 2 = parent (depth 0) → child (depth 1) → grandchild (depth 2) rejected.
     Mirrors Hermes `MAX_DEPTH = 2` from `sources/hermes-agent/tools/delegate_tool.py`."""
+    # Hermes parity (2026-05-08): batch concurrency + idle watchdog.
+    max_concurrent_children: int = 3
+    """Cap on concurrent subagents per ``delegate(tasks=[...])`` batch.
+
+    Override via ``DELEGATION_MAX_CONCURRENT_CHILDREN`` env var. Batches
+    larger than this return a tool error rather than silently truncating.
+    Hermes parity with ``delegation.max_concurrent_children``."""
+    child_timeout_seconds: int = 600
+    """Wall-clock cap on a single subagent's lifetime (seconds).
+
+    Hermes spec describes this as an idle watchdog (resets on each API/tool
+    call). v1 ships it as a wall-clock timeout — simpler, fail-safe.
+    Convert to per-activity reset when the child loop's tool/API hooks are
+    exposed. Diagnostic log written to
+    ``<profile_home>/logs/subagent-timeout-<ts>.log`` on expiry."""
     context_engine: str = "compressor"
     """Tier-A item 10 — which :class:`ContextEngine` strategy the loop uses.
     ``"compressor"`` is the default (existing CompactionEngine, aux-LLM
