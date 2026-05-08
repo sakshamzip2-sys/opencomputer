@@ -24,6 +24,9 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool] = {}
         self._denylist: set[str] = set()
+        #: Hermes-v2 ``agent.disabled_toolsets``: prefix-match denylist.
+        #: Matches when tool name == prefix OR starts with prefix + ``_``.
+        self._deny_prefixes: tuple[str, ...] = ()
 
     def set_denylist(self, names: list[str] | tuple[str, ...]) -> None:
         """Replace the current denylist. Pass an empty iterable to clear.
@@ -36,18 +39,46 @@ class ToolRegistry:
         """
         self._denylist = set(names)
 
+    def set_deny_prefixes(self, prefixes: list[str] | tuple[str, ...]) -> None:
+        """Hermes-v2 ``agent.disabled_toolsets`` — replace the prefix denylist.
+
+        A tool's ``schema.name`` matches a prefix when:
+
+        - the name equals the prefix exactly, OR
+        - the name starts with ``prefix + "_"`` (word-boundary form).
+
+        ``memorial_helper`` is NOT matched by ``memory`` — only ``memory``
+        and ``memory_*`` are. This is conservative on purpose; users can
+        add an extra prefix if they need broader matches.
+        """
+        self._deny_prefixes = tuple(prefixes)
+
     def is_denied(self, name: str) -> bool:
         """True if the named tool would be skipped at :meth:`register` time."""
-        return name in self._denylist
+        return name in self._denylist or self.is_denied_prefix(name)
+
+    def is_denied_prefix(self, name: str) -> bool:
+        """True if ``name`` matches any prefix from :meth:`set_deny_prefixes`."""
+        for prefix in self._deny_prefixes:
+            if name == prefix or name.startswith(prefix + "_"):
+                return True
+        return False
 
     def register(self, tool: BaseTool) -> None:
         name = tool.schema.name
         if name in self._denylist:
             logger.debug("Tool %r skipped: in denylist", name)
             return  # silent skip — caller can check is_denied() first
+        if self.is_denied_prefix(name):
+            logger.debug("Tool %r skipped: matches deny prefix", name)
+            return
         if name in self._tools:
             raise ValueError(f"Tool '{name}' is already registered")
         self._tools[name] = tool
+
+    def all_tools(self) -> list[BaseTool]:
+        """Return all registered tools (post-filter). Hermes-v2 helper."""
+        return list(self._tools.values())
 
     def unregister(self, name: str) -> None:
         self._tools.pop(name, None)

@@ -177,6 +177,15 @@ class LoopConfig:
     """
 
     max_iterations: int = 100  # 2026-05-05: doubled 50 → 100
+    #: Hermes-v2 ``agent.disabled_toolsets`` — prefix-match deny list.
+    #: Tools whose ``schema.name`` matches a listed prefix (exact OR
+    #: ``<prefix>_*`` form) are skipped at registry build time.
+    #: Distinct from ``tools.deny`` which is exact-name match.
+    disabled_toolsets: tuple[str, ...] = ()
+    #: Hermes-v2 ``agent.api_max_retries`` — provider retry knob.
+    #: Default 2 (Hermes spec). Setting 0 = fail-fast to fallback chain
+    #: on first transient error. Plumbed into Anthropic SDK constructor.
+    api_max_retries: int = 2
     parallel_tools: bool = True
     inactivity_timeout_s: int = 600  # 2026-05-05: doubled 300 → 600 (10 min)
     iteration_timeout_s: int = 7200  # 2026-05-05: doubled 3600 → 7200 (2h)
