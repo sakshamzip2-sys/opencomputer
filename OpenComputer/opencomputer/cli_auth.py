@@ -29,9 +29,31 @@ from opencomputer.agent.config import _home
 console = Console()
 auth_app = typer.Typer(
     name="auth",
-    help="Manage credential pools (Hermes-doc parity).",
-    no_args_is_help=True,
+    help=(
+        "Show provider credential status (no args) or manage credential "
+        "pools (Hermes-doc parity)."
+    ),
+    invoke_without_command=True,
 )
+
+
+@auth_app.callback()
+def _auth_callback(ctx: typer.Context) -> None:
+    """Bare ``oc auth`` shows provider env-var status (Hermes parity)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    # Lazy import to avoid a cli ↔ cli_auth import cycle.
+    from opencomputer.cli import run_auth_status
+
+    run_auth_status()
+
+
+@auth_app.command("status")
+def status_cmd() -> None:
+    """Explicit alias for the no-args invocation — show provider env-var status."""
+    from opencomputer.cli import run_auth_status
+
+    run_auth_status()
 
 
 def _config_path() -> Path:

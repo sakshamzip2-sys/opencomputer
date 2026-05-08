@@ -44,6 +44,9 @@ from typing import Any
 
 from aiohttp import web
 
+from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
+from plugin_sdk.core import Platform, SendResult
+
 # T3 — adapter start time for uptime computation. Module-level so the
 # value survives across requests + adapter rebuilds within a process.
 _ADAPTER_START_TIME: float = time.monotonic()
@@ -96,9 +99,6 @@ def _process_memory_mb() -> float | None:
         return round(psutil.Process().memory_info().rss / (1024 * 1024), 1)
     except Exception:  # noqa: BLE001
         return None
-
-from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
-from plugin_sdk.core import Platform, SendResult
 
 
 def _load_openai_format():

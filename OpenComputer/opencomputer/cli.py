@@ -2873,8 +2873,7 @@ def doctor(
         raise typer.Exit(1)
 
 
-@app.command()
-def auth() -> None:
+def run_auth_status() -> None:
     """Show provider credential status — what's configured, what's missing.
 
     Hermes parity (``hermes auth status``). Read-only summary of every
@@ -2883,6 +2882,9 @@ def auth() -> None:
     set value — never the full token. Cleaner focused view than
     ``opencomputer doctor`` when you just want to answer "did I export
     the right key?".
+
+    Public (not name-mangled) so :mod:`opencomputer.cli_auth` can invoke
+    this as the no-subcommand callback for the ``oc auth`` Typer group.
     """
     candidates: list[tuple[str, str]] = []
     seen_env_vars: set[str] = set()

@@ -17,11 +17,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from opencomputer.mcp.client import (
+    _build_utility_tools,
     _MCPGetPromptTool,
     _MCPListPromptsTool,
     _MCPListResourcesTool,
     _MCPReadResourceTool,
-    _build_utility_tools,
 )
 from plugin_sdk.core import ToolCall
 
