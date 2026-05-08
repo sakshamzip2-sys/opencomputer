@@ -37,11 +37,65 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiohttp import web
+
+# T3 — adapter start time for uptime computation. Module-level so the
+# value survives across requests + adapter rebuilds within a process.
+_ADAPTER_START_TIME: float = time.monotonic()
+
+
+def _count_active_sessions() -> int | None:
+    """SELECT COUNT(*) FROM sessions WHERE ended_at IS NULL.
+
+    Returns None on any failure (DB missing, schema drift, contention).
+    """
+    try:
+        import sqlite3
+        from pathlib import Path
+
+        profile = os.environ.get("OPENCOMPUTER_PROFILE", "default")
+        db_path = Path.home() / ".opencomputer" / profile / "sessions.db"
+        if not db_path.exists():
+            return None
+        with sqlite3.connect(str(db_path)) as conn:
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE ended_at IS NULL"
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _count_total_sessions() -> int | None:
+    try:
+        import sqlite3
+        from pathlib import Path
+
+        profile = os.environ.get("OPENCOMPUTER_PROFILE", "default")
+        db_path = Path.home() / ".opencomputer" / profile / "sessions.db"
+        if not db_path.exists():
+            return None
+        with sqlite3.connect(str(db_path)) as conn:
+            cur = conn.execute("SELECT COUNT(*) FROM sessions")
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _process_memory_mb() -> float | None:
+    try:
+        import psutil
+
+        return round(psutil.Process().memory_info().rss / (1024 * 1024), 1)
+    except Exception:  # noqa: BLE001
+        return None
 
 from plugin_sdk.channel_contract import BaseChannelAdapter, ChannelCapabilities
 from plugin_sdk.core import Platform, SendResult
@@ -392,7 +446,89 @@ class APIServerAdapter(BaseChannelAdapter):
         app.router.add_post("/v1/responses", self._handle_responses_stub)
         # Wave 6.A — Hermes-port (0a15dbdc4) — POST /v1/runs/{id}/stop
         app.router.add_post("/v1/runs/{run_id}/stop", self._handle_run_stop)
+        # T2 — Hermes-doc parity. Public capability probe (no auth).
+        app.router.add_get("/v1/capabilities", self._handle_capabilities)
+        # T3 — Hermes-doc parity. Public detailed health probe (no auth).
+        app.router.add_get("/health/detailed", self._handle_health_detailed)
         return app
+
+    # ─── T2 — /v1/capabilities ──────────────────────────────────────
+
+    async def _handle_capabilities(self, request: web.Request) -> web.Response:
+        """Machine-readable feature flag dict (Hermes-doc parity).
+
+        Public — no Bearer token required, so frontends can probe
+        capability before negotiating auth. Honest about deferred items
+        (``runs_api`` / ``jobs_api`` / ``previous_response_id``).
+        """
+        profile = os.environ.get("OPENCOMPUTER_PROFILE", "default")
+        payload = {
+            "version": "1",
+            "model": profile,
+            "profile": profile,
+            "features": {
+                "chat_completions": True,
+                "responses": True,  # stub exists at /v1/responses
+                "streaming": True,
+                "tool_calls": True,
+                "vision": True,
+                "system_prompt": True,
+                "previous_response_id": False,
+                "runs_api": False,
+                "jobs_api": False,
+            },
+        }
+        return web.json_response(payload)
+
+    # ─── T3 — /health/detailed ──────────────────────────────────────
+
+    async def _handle_health_detailed(self, request: web.Request) -> web.Response:
+        """Detailed health probe — sessions / agents / uptime / memory.
+
+        Never returns 5xx. Sub-lookup failures surface as ``null`` fields
+        so monitoring agents don't false-alarm on transient DB contention.
+        """
+        # Read the helpers from the module namespace so monkeypatched
+        # versions in tests are honored. ``__name__`` resolves to the
+        # actual module (works whether loaded by package or by file path).
+        import importlib
+        mod = importlib.import_module(__name__)
+        try:
+            sessions_active = mod._count_active_sessions()
+        except Exception:  # noqa: BLE001
+            sessions_active = None
+        try:
+            sessions_total = mod._count_total_sessions()
+        except Exception:  # noqa: BLE001
+            sessions_total = None
+        try:
+            memory_mb = mod._process_memory_mb()
+        except Exception:  # noqa: BLE001
+            memory_mb = None
+
+        if sessions_active is None and sessions_total is None:
+            sessions_block: dict[str, Any] | None = None
+        else:
+            sessions_block = {"active": sessions_active, "total": sessions_total}
+
+        running_agents = (
+            len(self._active_runs) if hasattr(self, "_active_runs") else 0
+        )
+        uptime = max(0.0, time.monotonic() - _ADAPTER_START_TIME)
+
+        payload = {
+            "status": "ok",
+            "uptime_seconds": round(uptime, 1),
+            "sessions": sessions_block,
+            "running_agents": running_agents,
+            "memory_mb": memory_mb,
+            "api_server": {
+                "host": self._host,
+                "port": self._port,
+                "profile": os.environ.get("OPENCOMPUTER_PROFILE", "default"),
+            },
+        }
+        return web.json_response(payload)
 
     async def _handle_list_models(self, request: web.Request) -> web.Response:
         """Hermes parity (2026-05-08): advertise active profile as model id.
