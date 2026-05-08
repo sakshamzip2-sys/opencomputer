@@ -162,7 +162,13 @@ class Gateway:
         self.dispatch = Dispatch(
             router=router,
             plugin_api=plugin_registry.shared_api,
-            config={"photo_burst_window": self._config.photo_burst_window},
+            config={
+                "photo_burst_window": self._config.photo_burst_window,
+                # 2026-05-08: gate lifecycle reactions so the default-off
+                # invariant is enforced at the dispatcher (see
+                # GatewayConfig.lifecycle_reactions docstring).
+                "lifecycle_reactions": self._config.lifecycle_reactions,
+            },
             resolver=self._resolver,
         )
         # Pass-2 F7: now that Dispatch exists, register the consent

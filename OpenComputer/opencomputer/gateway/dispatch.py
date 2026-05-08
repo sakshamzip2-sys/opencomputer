@@ -401,6 +401,18 @@ class Dispatch:
         self._burst_window_seconds: float = float(
             cfg.get("photo_burst_window", 0.8)
         )
+        # 2026-05-08 — gate the Hermes-style 👀/✅ lifecycle reactions
+        # behind a config flag, default OFF. Default behavior in
+        # ``BaseChannelAdapter`` posts a 👀 reaction on every inbound
+        # message (and ✅ on completion); Telegram clients render that
+        # inline next to the user's message and it reads like the bot
+        # is replying with an emoji. Saksham's standing emoji-free
+        # preference (memory: ``user_oc_owns_all_channels.md``) means
+        # this MUST default off for him; users who explicitly want the
+        # indicator can opt in via ``gateway.lifecycle_reactions: true``.
+        self._lifecycle_reactions: bool = bool(
+            cfg.get("lifecycle_reactions", False)
+        )
         self._burst_pending: dict[str, MessageEvent] = {}
         self._burst_tasks: dict[str, asyncio.Task[None]] = {}
         # Joiners (subsequent pure-attachment events) await the same
@@ -730,12 +742,17 @@ class Dispatch:
         # sees the 👀 reaction even if the previous turn is still
         # holding the lock. Fire-and-forget — failures never affect
         # the reply path.
+        #
+        # 2026-05-08: gated on ``self._lifecycle_reactions`` (default
+        # off). Without the gate, Telegram clients render the reaction
+        # inline next to the user's message and it reads like the bot
+        # is auto-replying with 👀. See GatewayConfig.lifecycle_reactions.
         message_id: str | None = None
         if event.metadata:
             raw_id = event.metadata.get("message_id")
             if isinstance(raw_id, str | int) and raw_id != "":
                 message_id = str(raw_id)
-        if adapter is not None:
+        if adapter is not None and self._lifecycle_reactions:
             asyncio.create_task(
                 self._safe_lifecycle_hook(
                     adapter.on_processing_start(event.chat_id, message_id)
@@ -947,7 +964,11 @@ class Dispatch:
                 # on_processing_complete after the turn settles, with
                 # the outcome captured above. Fire-and-forget so a
                 # failing reaction send doesn't mask the actual reply.
-                if adapter is not None:
+                #
+                # 2026-05-08: gated on ``self._lifecycle_reactions``
+                # (default off) — paired with the on_processing_start
+                # gate above. See GatewayConfig.lifecycle_reactions.
+                if adapter is not None and self._lifecycle_reactions:
                     asyncio.create_task(
                         self._safe_lifecycle_hook(
                             adapter.on_processing_complete(
