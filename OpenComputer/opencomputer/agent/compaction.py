@@ -184,22 +184,28 @@ def context_window_with_overrides(
     model: str,
     custom_providers: tuple = (),
     model_context_overrides: dict | None = None,
+    *,
+    provider_hint: str = "",
+    enable_probe: bool = True,
 ) -> int:
-    """Wave 3 (2026-05-08) — resolve context length honoring per-model overrides.
+    """Resolve context length using the full multi-source chain.
 
     Resolution order (highest → lowest priority):
 
     1. ``model_context_overrides[<model>]`` — flat user-supplied
        per-model override that applies to *any* provider, including
-       bundled ones (Anthropic, OpenAI, OpenRouter). Set this in
-       ``config.yaml`` when the static :data:`DEFAULT_CONTEXT_WINDOWS`
-       is wrong or stale (e.g., a newer Opus model with 1M context
-       that the embedded table hasn't caught up to).
+       bundled ones (Anthropic, OpenAI, OpenRouter). Wins always so
+       a documented vendor value can correct probe drift.
     2. ``custom_providers[].models[<model>].context_length`` — same
-       intent but scoped to a named ``custom_providers`` entry; used
-       when the model id is unique to that endpoint (e.g., an Ollama
-       Modelfile name).
-    3. :func:`context_window_for` — the embedded static table +
+       intent but scoped to a named ``custom_providers`` entry.
+    3. **Persistent cache + dynamic probe chain** (Wave 3 follow-up,
+       2026-05-08) — :func:`context_window_probe.probe_context_window`
+       hits OpenRouter's free catalog, a local Ollama server, the
+       Anthropic API (when keyed), and the models.dev community
+       registry, in that order. Results cached 24h on disk. Pass
+       ``enable_probe=False`` to skip (used by hot-path renders that
+       must stay synchronous).
+    4. :func:`context_window_for` — the embedded static table +
        family-prefix rules + 64k conservative default.
 
     Both override layers are user-editable and survive across
@@ -216,6 +222,19 @@ def context_window_with_overrides(
             ctx_len = getattr(override, "context_length", None)
             if ctx_len is not None:
                 return int(ctx_len)
+    # Wave 3 follow-up — dynamic probe chain (cache + OR + Ollama +
+    # Anthropic + models.dev). Disabled on hot paths via the
+    # ``enable_probe`` kwarg; the cache layer keeps subsequent calls
+    # synchronous-fast.
+    if enable_probe:
+        try:
+            from opencomputer.agent.context_window_probe import probe_context_window
+
+            probed = probe_context_window(model, provider_hint=provider_hint)
+            if probed is not None:
+                return probed
+        except Exception:  # noqa: BLE001 — never let probe break resolution
+            pass
     return context_window_for(model)
 
 

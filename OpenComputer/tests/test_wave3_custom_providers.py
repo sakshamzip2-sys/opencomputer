@@ -153,9 +153,13 @@ def test_context_window_with_overrides_no_custom_providers():
         context_window_with_overrides,
     )
 
-    # Empty custom_providers → identical to context_window_for.
+    # Empty custom_providers + probe disabled → identical to
+    # context_window_for. (With the probe enabled, the resolver may
+    # pick up a freshly-probed value for live models — that's the
+    # whole point of the dynamic chain. See test_context_window_probe
+    # for end-to-end coverage of probe behavior.)
     assert (
-        context_window_with_overrides("claude-sonnet-4-6", ())
+        context_window_with_overrides("claude-sonnet-4-6", (), enable_probe=False)
         == context_window_for("claude-sonnet-4-6")
     )
 
