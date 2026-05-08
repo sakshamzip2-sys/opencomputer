@@ -65,7 +65,10 @@ Set form races with the in-flight continuation prompt — refuse with `/stop fir
 - **`hermes` → `oc` env var renaming.** Existing `OC_KANBAN_*` names are correct for OpenComputer; no change.
 - **Storage rewrite to a `state_meta` blob.** Schema v11+v14 columns work; rewriting to match spec wording would be destructive with zero user-visible benefit.
 - **Goal judge cost telemetry.** Future concern; not blocking parity.
-- **Gateway banner forwarding.** Reason persists in DB and is visible via `/goal status` on the channel; live banner-to-chat is a UX-only follow-up.
+
+## 4.1 Initially deferred, since shipped (Task 14 follow-through)
+
+- **Gateway banner forwarding.** Initially documented as a UX-only deferral in the first ship. Closed in the same PR via the per-session callback registry on `AgentLoop` (`set_goal_banner_callback` / `clear_goal_banner_callback`) and gateway-side `Dispatch._install_goal_banner_callback`, which uses `asyncio.run_coroutine_threadsafe` to schedule `adapter.send` against the event loop bound to the dispatch turn. Per-session keying isolates banners to the right chat when one AgentLoop serves multiple concurrent sessions on the same profile. The CLI's single global `goal_banner_callback` remains as the fallback so the existing CLI input-loop wiring stays untouched.
 
 ## 5. Schema migration
 

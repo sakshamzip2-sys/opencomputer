@@ -3177,18 +3177,51 @@ class AgentLoop:
     ) -> None:
         """Best-effort goal-banner emission.
 
-        Hosts (CLI input loop, gateway) can attach a callback to
-        ``self.goal_banner_callback`` matching:
-        ``cb(*, session_id: str, kind: str, verdict: JudgeVerdict, goal: GoalState)``.
+        Two registration surfaces:
+
+        - ``self._goal_banner_callbacks: dict[sid → cb]`` (preferred) —
+          per-session callbacks installed by the gateway around each
+          ``run_conversation`` so banners reach the correct chat when
+          one AgentLoop serves multiple sessions concurrently. Managed
+          via :meth:`set_goal_banner_callback` / :meth:`clear_goal_banner_callback`.
+        - ``self.goal_banner_callback`` (legacy / CLI) — single global
+          callback. Set directly by the CLI input loop where one
+          console serves the only session. Falls through when no
+          per-sid entry exists.
+
         Banner errors are swallowed — UX must never wedge the loop.
+        Callbacks should accept
+        ``cb(*, session_id: str, kind: str, verdict: JudgeVerdict, goal: GoalState)``.
         """
-        cb = getattr(self, "goal_banner_callback", None)
+        per_session = getattr(self, "_goal_banner_callbacks", None)
+        cb = None
+        if per_session is not None:
+            cb = per_session.get(sid)
+        if cb is None:
+            cb = getattr(self, "goal_banner_callback", None)
         if cb is None:
             return
         try:
             cb(session_id=sid, kind=kind, verdict=verdict, goal=goal)
         except Exception:  # noqa: BLE001
             pass
+
+    def set_goal_banner_callback(self, sid: str, cb) -> None:
+        """Register a per-session goal-banner callback.
+
+        Used by the gateway to route banners to the right chat when one
+        AgentLoop serves multiple sessions concurrently. Pair with
+        :meth:`clear_goal_banner_callback` in a try/finally.
+        """
+        if not hasattr(self, "_goal_banner_callbacks"):
+            self._goal_banner_callbacks = {}
+        self._goal_banner_callbacks[sid] = cb
+
+    def clear_goal_banner_callback(self, sid: str) -> None:
+        """Drop a per-session callback. Idempotent."""
+        bag = getattr(self, "_goal_banner_callbacks", None)
+        if bag is not None:
+            bag.pop(sid, None)
 
     def _ensure_session_persisted(self, sid: str) -> None:
         """Lazy-write the session row on first persistence demand.
