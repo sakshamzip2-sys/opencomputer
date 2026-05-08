@@ -397,6 +397,8 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
         "gateway": _encode(cfg.gateway),
         "system_control": _encode(cfg.system_control),
         "auxiliary": _encode(cfg.auxiliary),
+        "privacy": _encode(cfg.privacy),
+        "security": _encode(cfg.security),
         "timezone": cfg.timezone,
     }
     # III.6 — only serialise the hooks block when non-empty so default

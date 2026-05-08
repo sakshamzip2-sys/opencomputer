@@ -702,6 +702,32 @@ class CheckpointsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PrivacyConfig:
+    """Hermes config v2 — gateway-only privacy controls.
+
+    ``redact_pii`` hashes phone/user/chat IDs before they enter the LLM
+    context (deterministic — same ID always maps to same hash). Routing
+    and delivery still use the original values internally. Supported
+    adapters: WhatsApp, Signal, Telegram. Discord/Slack route IDs are
+    already opaque and not in scope.
+    """
+
+    redact_pii: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SecurityConfig:
+    """Hermes config v2 — security controls.
+
+    ``redact_secrets`` strips API-key patterns from tool output before
+    they enter conversation context AND before they land in logs. Off
+    by default to avoid false positives on legitimate file reads.
+    """
+
+    redact_secrets: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Root configuration — composed of small focused configs."""
 
@@ -732,6 +758,10 @@ class Config:
     cron: CronConfig = field(default_factory=CronConfig)
     #: Hermes-v2 — auxiliary model slots (compression, vision, etc.).
     auxiliary: AuxiliaryConfig = field(default_factory=AuxiliaryConfig)
+    #: Hermes-v2 — gateway-only PII hashing (off by default).
+    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
+    #: Hermes-v2 — strip API-key patterns from tool output (off by default).
+    security: SecurityConfig = field(default_factory=SecurityConfig)
     #: Hermes-v2 IANA timezone for system-prompt time injection, log
     #: timestamps, and cron scheduling. Empty string = server-local time
     #: (preserves existing behavior). Validated at ``load_config`` —
