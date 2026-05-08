@@ -116,6 +116,7 @@ Whether all three surfaces should consolidate long-term is an open design questi
 - New cron triggers for kanban (already covered by `oc cron` shipped earlier this week).
 - `oc kanban specify --reformat` to re-run on already-spec'd tasks (deliberate refusal — `SpecifyError` raises on non-triage, manual edit otherwise; if a re-spec workflow becomes a real ask, add a `--force` flag).
 - Goal-judge model swap to a dedicated cheap aux model (currently piggybacks on `aux_llm.complete_text` which already routes through whatever provider runs chat — re-add a `auxiliary.goal_judge.model` slot only when a user actually asks for it).
+- **Dashboard ✨ Specify button frontend.** The `POST /api/plugins/kanban/tasks/{id}/specify` backend endpoint is shipped and tested. The dashboard React/TS frontend that would render the button has no source files in the tree (the `manifest.json` references `dist/index.js`/`dist/style.css` but neither exists yet — the kanban plugin's frontend is a separate build pipeline). Adding the button is a 50–100 LOC React PR; it is not blocked by anything in this PR. Filed as a follow-up.
 
 ---
 
