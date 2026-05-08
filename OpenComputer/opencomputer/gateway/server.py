@@ -221,8 +221,61 @@ class Gateway:
         # Give Dispatch a handle so it can send typing indicators back out.
         self.dispatch.register_adapter(adapter.platform.value, adapter)
 
+    def _run_channel_ownership_preflight(self) -> None:
+        """Refuse to start if a non-OC channel handler is running on this box.
+
+        Per the 2026-05-08 directive (``user_oc_owns_all_channels.md``):
+        OpenComputer is the SOLE channel handler. If a competing process
+        (Claude Code's ``claude --channels plugin:telegram`` bun bridge,
+        Hermes daemon, rival ``oc gateway``, ...) is detected, behavior
+        depends on ``cfg.gateway.takeover_on_start``:
+
+        * ``False`` (default): raise :class:`ChannelOwnershipConflict`
+          with the offending PIDs + cmdlines + remediation steps.
+          Gateway boot aborts; launchd's KeepAlive=dict means the
+          service stays stopped until operator intervention.
+        * ``True``: terminate the competitors (SIGTERM with grace, then
+          SIGKILL), append to audit log, and proceed.
+
+        The audit log lives at
+        ``<profile_home>/audit/competitor-takeover.jsonl`` and is
+        append-only. Tests exercise both modes; see
+        ``tests/test_gateway_preflight.py``.
+        """
+        from opencomputer.agent.config import _home
+        from opencomputer.gateway.preflight import (
+            default_audit_path,
+            run_preflight,
+        )
+
+        cfg_gateway = getattr(self, "_config", None)
+        if cfg_gateway is None:
+            # Defensive: Gateway built without a config (test scaffolding
+            # via ``Gateway.__new__``) skips preflight rather than raising.
+            return
+
+        takeover_enabled = bool(getattr(cfg_gateway, "takeover_on_start", False))
+        grace = float(getattr(cfg_gateway, "takeover_grace_seconds", 5.0))
+        audit_path = default_audit_path(_home())
+
+        run_preflight(
+            takeover_on_start=takeover_enabled,
+            grace_seconds=grace,
+            audit_log=audit_path,
+        )
+
     async def start(self) -> None:
-        """Connect all adapters. Returns once they're all running."""
+        """Connect all adapters. Returns once they're all running.
+
+        Phase 0 (2026-05-08, ``user_oc_owns_all_channels.md`` directive):
+        run channel-ownership preflight before connecting any adapter.
+        OpenComputer is the sole channel handler; if competitors are
+        running and ``cfg.gateway.takeover_on_start`` is False, raise
+        :class:`ChannelOwnershipConflict` so the operator sees a loud
+        refusal rather than a silent reply blackhole.
+        """
+        self._run_channel_ownership_preflight()
+
         logger.info("gateway: starting %d adapters", len(self._adapters))
         results = await asyncio.gather(
             *(a.connect() for a in self._adapters), return_exceptions=True
