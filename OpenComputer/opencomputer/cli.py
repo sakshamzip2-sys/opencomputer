@@ -299,6 +299,11 @@ def _register_builtin_tools() -> None:
     registry.register(WriteTool())
     registry.register(BashTool())
     registry.register(PythonExec())
+    # 2026-05-08 — Hermes Doc-2 ``execute_code`` parity. Thin wrapper
+    # over PTC mode with broader default toolset + env scrub + stderr cap.
+    from opencomputer.tools.execute_code import ExecuteCode
+
+    registry.register(ExecuteCode())
     registry.register(GrepTool())
     registry.register(GlobTool())
     registry.register(SkillManageTool())
