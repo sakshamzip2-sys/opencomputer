@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-
 _XAI_PROVIDER_PATH = (
     Path(__file__).resolve().parents[1] / "extensions" / "xai-provider" / "provider.py"
 )

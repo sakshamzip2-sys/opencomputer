@@ -180,7 +180,7 @@ class ProviderResponse:
     """
 
 
-class StreamStaleException(TimeoutError):
+class StreamStaleError(TimeoutError):
     """Raised when a streaming response stalls.
 
     The connection is alive but no new tokens have arrived in
@@ -362,7 +362,7 @@ class BaseProvider(ABC):
     #: Wave 3 (2026-05-08) — streaming inactivity watchdog in seconds.
     #: ``None`` (default) disables the watchdog (current behavior).
     #: When set, a stream that emits no chunk for this many seconds
-    #: raises :class:`StreamStaleException`. Distinct from
+    #: raises :class:`StreamStaleError`. Distinct from
     #: ``request_timeout_seconds`` which caps full-request wall time;
     #: this catches *intra-stream* stalls (LLM hangs after producing
     #: some tokens). Opt-in to avoid surprising existing users.

@@ -87,12 +87,9 @@ def _passes_tool_filter(tool_name: str, cfg: MCPServerConfig) -> bool:
     Deny-list applies AFTER allow-list. ``tools_deny=()`` (default) is a
     no-op.
     """
-    if cfg.tools_allow is not None:
-        if tool_name not in cfg.tools_allow:
-            return False
-    if cfg.tools_deny and tool_name in cfg.tools_deny:
+    if cfg.tools_allow is not None and tool_name not in cfg.tools_allow:
         return False
-    return True
+    return not (cfg.tools_deny and tool_name in cfg.tools_deny)
 
 
 def _tool_is_internal(tool: Any) -> bool:

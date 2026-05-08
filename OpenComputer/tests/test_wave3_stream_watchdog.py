@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 import pytest
 
 from opencomputer.agent.stream_watchdog import stream_with_watchdog
-from plugin_sdk import BaseProvider, StreamStaleException
+from plugin_sdk import BaseProvider, StreamStaleError
 
 
 async def _quick_stream() -> AsyncIterator[int]:
@@ -46,7 +46,7 @@ async def test_watchdog_passes_through_quick_stream():
 @pytest.mark.asyncio
 async def test_watchdog_fires_on_stalled_stream():
     chunks = []
-    with pytest.raises(StreamStaleException) as exc_info:
+    with pytest.raises(StreamStaleError) as exc_info:
         async for chunk in stream_with_watchdog(
             _slow_stream(), stale_timeout_seconds=0.05, provider_name="testprov"
         ):
@@ -88,6 +88,6 @@ def test_baseprovider_subclass_can_override_timeouts():
 
 
 def test_streamstaleexception_message_format():
-    exc = StreamStaleException("my-provider", 12.5)
+    exc = StreamStaleError("my-provider", 12.5)
     assert "my-provider" in str(exc)
     assert "12.5s" in str(exc)
