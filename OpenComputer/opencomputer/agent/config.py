@@ -964,6 +964,15 @@ class Config:
         compare=False,
         hash=False,
     )
+    #: T6 — Hermes-doc credential pool rotation strategy per provider.
+    #: Maps provider name → strategy ("fill_first" / "round_robin" /
+    #: "random" / "least_used"). Unknown values fall back to
+    #: "least_used" with a warning at resolve time.
+    credential_pool_strategies: dict[str, str] = field(
+        default_factory=dict,
+        compare=False,
+        hash=False,
+    )
     #: Wave 3 (2026-05-08) — OpenRouter provider routing knobs. Only
     #: applies when the active provider is OpenRouter; ignored otherwise.
     provider_routing: ProviderRoutingConfig = field(default_factory=ProviderRoutingConfig)

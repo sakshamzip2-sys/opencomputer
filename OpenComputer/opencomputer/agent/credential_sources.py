@@ -4,12 +4,17 @@ Sources (in priority order):
 1. Numbered env vars: PREFIX_1, PREFIX_2, … (stops at first gap)
 2. Config YAML ``credential_pools:`` block
 3. OS keyring (service name → comma-separated keys)
+
+Also exposes :func:`resolve_pool_strategy` (T6 — Hermes-doc parity)
+which selects the rotation strategy for a given provider per
+``Config.credential_pool_strategies``.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +85,43 @@ def resolve_keys(
     return result
 
 
+def resolve_pool_strategy(cfg: Any, provider: str) -> str:
+    """Return the rotation strategy for ``provider`` per ``cfg``.
+
+    T6 — Hermes-doc parity. Reads
+    ``cfg.credential_pool_strategies`` (a dict) and returns the value
+    for ``provider``. Falls back to ``STRATEGY_LEAST_USED`` when:
+
+    * the key is missing
+    * the value is ``None``
+    * the value is not in ``SUPPORTED_STRATEGIES`` (logs a warning)
+    """
+    # Local import — credential_pool depends on this module via dispatch
+    # in some setups; avoid an unconditional import-time cycle.
+    from opencomputer.agent.credential_pool import (
+        STRATEGY_LEAST_USED,
+        SUPPORTED_STRATEGIES,
+    )
+
+    strategies = getattr(cfg, "credential_pool_strategies", None) or {}
+    candidate = strategies.get(provider)
+    if candidate is None:
+        return STRATEGY_LEAST_USED
+    if candidate not in SUPPORTED_STRATEGIES:
+        logger.warning(
+            "credential_pool_strategies[%s] = %r is unsupported; falling back to %s",
+            provider,
+            candidate,
+            STRATEGY_LEAST_USED,
+        )
+        return STRATEGY_LEAST_USED
+    return candidate
+
+
 __all__ = [
     "load_from_env",
     "load_from_config",
     "load_from_keyring",
     "resolve_keys",
+    "resolve_pool_strategy",
 ]

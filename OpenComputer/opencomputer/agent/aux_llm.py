@@ -1,4 +1,4 @@
-"""Provider-agnostic auxiliary LLM helpers.
+"""Auxiliary LLM helpers — provider-agnostic, with fallback (T68).
 
 Auxiliary code paths (the /btw slash command, vision_analyze tool, batch
 processing, profile bootstrap LLM extractor) historically called
@@ -33,16 +33,60 @@ def _resolve_provider() -> Any:
     so all auxiliary paths inherit the same auth + base URL config without
     new setup.
     """
-    from opencomputer.agent.config import default_config
+    from opencomputer.agent.config import default_config as _dc
     from opencomputer.plugins.registry import registry as plugin_registry
 
-    cfg = default_config()
+    cfg = _dc()
     provider_cls = plugin_registry.providers.get(cfg.model.provider)
     if provider_cls is None:
         raise RuntimeError(
             f"provider {cfg.model.provider!r} not registered; cannot run auxiliary call"
         )
     return provider_cls() if isinstance(provider_cls, type) else provider_cls
+
+
+def _resolve_fallback_provider(fp: Any) -> Any:
+    """T68 — resolve a :class:`FallbackProvider` to a provider instance.
+
+    Looks up the provider class in the plugin registry by ``fp.provider``,
+    instantiates it. ``fp.base_url`` / ``fp.key_env`` are advisory — the
+    provider class is expected to read its own env config, but callers
+    can override via attributes when needed.
+    """
+    from opencomputer.plugins.registry import registry as plugin_registry
+
+    provider_cls = plugin_registry.providers.get(fp.provider)
+    if provider_cls is None:
+        raise RuntimeError(
+            f"fallback provider {fp.provider!r} not registered"
+        )
+    return provider_cls() if isinstance(provider_cls, type) else provider_cls
+
+
+def default_config():  # re-export so tests can monkeypatch this single name
+    from opencomputer.agent.config import default_config as _dc
+
+    return _dc()
+
+
+_TRANSIENT_AUX_MARKERS: tuple[str, ...] = (
+    "rate limit",
+    "ratelimit",
+    "rate_limit",
+    "429",
+    "503",
+    "502",
+    "504",
+    "connection reset",
+    "connection error",
+    "timeout",
+    "temporarily unavailable",
+)
+
+
+def _is_transient_aux(exc: BaseException) -> bool:
+    msg = (str(exc) or "").lower()
+    return any(marker in msg for marker in _TRANSIENT_AUX_MARKERS)
 
 
 def _resolve_default_model() -> str:
@@ -79,21 +123,49 @@ async def complete_text(
     """
     from plugin_sdk.core import Message
 
-    provider = _resolve_provider()
     sdk_messages = [
         Message(role=m["role"], content=m.get("content"))
         for m in messages
     ]
     resolved_model = model or _resolve_default_model()
-    resp = await provider.complete(
-        model=resolved_model,
-        messages=sdk_messages,
-        system=system,
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
-    _record_aux_cost(provider, resolved_model, resp)
-    return resp.message.content if resp and resp.message else ""
+
+    async def _attempt(prov: Any, model_name: str) -> Any:
+        return await prov.complete(
+            model=model_name,
+            messages=sdk_messages,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+    primary = _resolve_provider()
+    last_exc: BaseException | None = None
+    try:
+        resp = await _attempt(primary, resolved_model)
+        _record_aux_cost(primary, resolved_model, resp)
+        return resp.message.content if resp and resp.message else ""
+    except Exception as exc:  # noqa: BLE001
+        last_exc = exc
+        if not _is_transient_aux(exc):
+            raise
+
+    # T68 — walk the configured cross-provider fallback chain. Same
+    # transient-vs-fatal classification as the chat-loop fallback;
+    # auth errors / bad requests have already short-circuited above.
+    cfg = default_config()
+    for fp in getattr(cfg, "fallback_providers", ()) or ():
+        try:
+            backup = _resolve_fallback_provider(fp)
+            backup_model = fp.model or resolved_model
+            resp = await _attempt(backup, backup_model)
+            _record_aux_cost(backup, backup_model, resp)
+            return resp.message.content if resp and resp.message else ""
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if not _is_transient_aux(exc):
+                raise
+    assert last_exc is not None
+    raise last_exc
 
 
 def complete_text_sync(

@@ -463,6 +463,18 @@ class DelegateTool(BaseTool):
         )
 
         subagent_loop = self._factory()
+        # T70 — share the parent's CredentialPool with the child so a
+        # quarantined key in one is quarantined for both. Best-effort:
+        # skip if either provider isn't pool-aware. Lookup is defensive
+        # in case the factory returned a mock without these attrs.
+        try:
+            parent_loop_for_pool = getattr(self._factory, "__self__", None)
+            parent_provider = getattr(parent_loop_for_pool, "provider", None)
+            child_provider = getattr(subagent_loop, "provider", None)
+            if parent_provider is not None and child_provider is not None:
+                inherit_credential_pool(parent_provider, child_provider)
+        except Exception:  # noqa: BLE001 — never break delegation on this
+            pass
         # II.1: cap the subagent's iteration budget at the parent's
         # ``delegation_max_iterations`` (default 50) instead of letting it
         # inherit the full ``max_iterations``. Mirrors Hermes's pattern
@@ -742,4 +754,38 @@ class DelegateTool(BaseTool):
         )
 
 
-__all__ = ["DelegateTool", "DELEGATE_BLOCKED_TOOLS"]
+def inherit_credential_pool(parent_provider, child_provider) -> None:
+    """T70 — share the parent's CredentialPool with the subagent's provider.
+
+    Without inheritance, the child instantiates a fresh pool from
+    config — quarantine state, current key selection, and JWT refresh
+    timing all diverge. Sharing the pool object unifies them.
+
+    Skip rules (in order):
+      1. Either provider lacks ``_credential_pool`` (not a pool-aware
+         provider) — leave both alone.
+      2. Parent has no pool (single-key provider, no rotation needed).
+      3. Child already has its own pool (operator opted out by passing
+         a fresh pool when constructing the child explicitly).
+      4. Provider classes differ (OpenAI parent must not hand keys to
+         an Anthropic child — they're scoped per provider).
+    """
+    if not hasattr(parent_provider, "_credential_pool") or not hasattr(
+        child_provider, "_credential_pool"
+    ):
+        return
+    parent_pool = parent_provider._credential_pool
+    if parent_pool is None:
+        return
+    if child_provider._credential_pool is not None:
+        return
+    if type(parent_provider) is not type(child_provider):
+        return
+    child_provider._credential_pool = parent_pool
+
+
+__all__ = [
+    "DelegateTool",
+    "DELEGATE_BLOCKED_TOOLS",
+    "inherit_credential_pool",
+]

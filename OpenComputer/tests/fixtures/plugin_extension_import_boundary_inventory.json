@@ -16,6 +16,9 @@
     "opencomputer.inference.pricing",
     "opencomputer.tools.schema_sanitizer"
   ],
+  "extensions/api-server/adapter.py": [
+    "opencomputer.cron"
+  ],
   "extensions/browser-bridge/adapter.py": [
     "opencomputer.ingestion.bus"
   ],
