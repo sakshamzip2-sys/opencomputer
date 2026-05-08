@@ -2,16 +2,46 @@ name: poseidon
 description: Deep blue + seafoam, trident register.
 
 colors:
+  # Banner
   banner_border:    "#0C4A6E"
   banner_title:     "#0EA5E9"
   banner_accent:    "#67E8F9"
+  banner_dim:       "#475569"
+  banner_text:      "#CFFAFE"
+  # UI semantic
+  ui_accent:        "#0EA5E9"
+  ui_label:         "#67E8F9"
+  ui_ok:            "#10B981"
+  ui_error:         "#F87171"
+  ui_warn:          "#FBBF24"
+  # Prompt + input area
   prompt:           "#7DD3FC"
+  input_rule:       "#0C4A6E"
+  # Agent response box
+  response_border:  "#0EA5E9"
+  # Session badge + border
+  session_label:    "#CFFAFE"
+  session_border:   "#475569"
+  # Status bars
+  status_bar_bg:    "#0C2E45"
+  status_bar_fg:    "#CFFAFE"
+  voice_status_bg:  "#0C4A6E"
+  # TUI selection highlight
+  selection_bg:     "#155E75"
+  # Completion menu panes
+  completion_menu_bg:               "#0C2E45"
+  completion_menu_current_bg:       "#0C4A6E"
+  completion_menu_meta_bg:          "#0A1F2F"
+  completion_menu_meta_current_bg:  "#155E75"
+  # Legacy / extra
   agent_text:       "#CFFAFE"
   agent_label:      "#0EA5E9"
 
 spinner:
   thinking_verbs: [diving, surfacing, currents-checking, depth-sounding]
   wings: [["≈", "≈"], ["⟆", "⟇"]]
+  waiting_faces: ["(≈‿≈)", "(~‿~)", "(∽‿∽)"]
+  thinking_faces: ["(◉‿◉)", "(◐‿◑)", "(◔‿◓)"]
 
 branding:
   agent_name: "Poseidon"

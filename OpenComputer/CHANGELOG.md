@@ -4,6 +4,23 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Hermes v2 production-grade closure (2026-05-08, "do them all")
+
+Closes every honest deferral / partial / YAGNI cut from PRs #510 + #512. With this PR the parity doc has zero remaining `⚠️ partial` / `❌ deferred` rows.
+
+- **D1 — 70/20/10 head/tail/marker truncation** (`prompt_builder._truncate_head_tail`): replaces head-only truncation with Hermes' canonical strategy. A 100KB-capped CLAUDE.md now keeps the first 70K + last 20K chars with a marker (`[...truncated CLAUDE.md: kept 70,000+20,000 of N chars. Use file tools to read the full file.]`) between them. Closing-section conventions no longer get silently dropped.
+- **D2 — text-extension bypass for binary detection** (`at_references._looks_binary`): `.py` / `.md` / `.json` / `.yaml` / `.toml` and ~50 other text extensions short-circuit the null-byte sniff per Hermes spec verbatim. A `.md` containing legitimate NULs (PlantUML, JSON dumps in fenced blocks) is no longer wrongly flagged binary.
+- **D3 — `.hermes.md` priority** (`prompt_builder.load_workspace_context`, `subdirectory_hints`): added between `OPENCOMPUTER.md` and `CLAUDE.md` in the discovery chain. `.hermes.md` and `HERMES.md` (uppercase) both supported. Users with Hermes-forked repos get parity without renaming.
+- **D4 — global SOUL.md fallback** (`MemoryManager.read_soul`, `global_soul_path` ctor arg): per-profile SOUL takes precedence; if missing/whitespace-only, falls back to `$OPENCOMPUTER_HOME/SOUL.md` (defaults to `~/.opencomputer/SOUL.md`). Restores HERMES_HOME-style identity sharing across profiles for users who want one voice everywhere.
+- **D5 — spinner waiting/thinking faces** (`SkinSpec.spinner_waiting_faces` + `spinner_thinking_faces`, all 9 built-in YAMLs, `apply.py` accessors): two distinct face cycles per skin — `waiting_faces` while awaiting the provider's first byte, `thinking_faces` once the model emits reasoning. Renderers opt in via `current_spinner_waiting_faces()` / `current_spinner_thinking_faces()`.
+- **D6 — full 22-key Hermes color palette** (every built-in skin YAML): `banner_*` (5 keys), `ui_*` (5 keys), `prompt`, `input_rule`, `response_border`, `session_label`, `session_border`, `status_bar_bg`, `voice_status_bg`, `selection_bg`, `completion_menu_*` (4 keys). Every key is defined in every built-in skin so Rich Theme + prompt-toolkit Style + status bar + completion menu can pull whichever they need without falling back to defaults.
+- **D7 — live TUI color repaint on `/skin`** (`cli.py` puts live Console under `runtime.custom["live_console"]`; `SkinCommand._apply_skin_with_live_console`): `/skin <name>` now hot-swaps the color theme without a session restart. Channel adapters / gateway gracefully fall back to throwaway-console + module-state updates when no live console is present. Reset, set, and load failures all handled.
+- **D8 — base.j2 slot order matches Hermes spec** (`agent/prompts/base.j2` reorganized): canonical order is now SOUL → working rules / tool-use → memory → skills → context-files → timestamp → /personality + active-persona overlay. Every conditional preserved; behavior identical for already-tested scenarios; 9 new tests pin every slot boundary so future template edits can't silently regress.
+
+24 new tests across `tests/test_truncation_head_tail.py` (8), `tests/test_at_references_followup.py` (5 new for D2), `tests/test_hermes_md_priority.py` (4), `tests/test_soul_global_fallback.py` (6), `tests/test_skin_spinner_faces.py` (9), `tests/test_skin_live_repaint.py` (8), `tests/test_prompt_slot_order.py` (9). Updated 4 existing tests to pin new behavior.
+
+The parity doc at `docs/refs/hermes-context-personality-skins-v2-parity.md` now shows every row as ✅ shipped except a single by-design divergence (OC quarantines poisoned context, Hermes blocks). All "honest deferrals" and "YAGNI cuts" sections from prior revisions removed because the work shipped.
+
 ### Added — Hermes Doc-2 residuals — Code Execution & Event Hooks closeout (2026-05-08)
 
 Closes the 5 verified residual gaps from the Hermes "Code Execution & Event Hooks" reference doc that PR #496 left out. Debug surfaces and protocol-parity gaps that pass the makes-sense filter.

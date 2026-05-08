@@ -23,6 +23,10 @@ _active_spec: SkinSpec | None = None
 _active_branding: dict[str, str] = {}
 _active_spinner_verbs: tuple[str, ...] = ("thinking",)
 _active_spinner_wings: tuple[tuple[str, str], ...] = (("⟨", "⟩"),)
+# Hermes v2 D5 (2026-05-08): distinct face cycles for the waiting
+# (network/API round-trip) and thinking (model reasoning) phases.
+_active_spinner_waiting_faces: tuple[str, ...] = ()
+_active_spinner_thinking_faces: tuple[str, ...] = ()
 _active_tool_emojis: dict[str, str] = {}
 _active_tool_prefix: str = "┊"
 
@@ -52,6 +56,7 @@ def apply_skin(spec: SkinSpec, console: Console) -> None:
     """
     global _active_spec, _active_branding
     global _active_spinner_verbs, _active_spinner_wings
+    global _active_spinner_waiting_faces, _active_spinner_thinking_faces
     global _active_tool_emojis, _active_tool_prefix
 
     with _lock:
@@ -69,6 +74,8 @@ def apply_skin(spec: SkinSpec, console: Console) -> None:
         }
         _active_spinner_verbs = tuple(spec.spinner_thinking_verbs)
         _active_spinner_wings = tuple(spec.spinner_wings)
+        _active_spinner_waiting_faces = tuple(spec.spinner_waiting_faces)
+        _active_spinner_thinking_faces = tuple(spec.spinner_thinking_faces)
         _active_tool_emojis = dict(spec.tool_emojis)
         _active_tool_prefix = spec.tool_prefix
 
@@ -89,6 +96,22 @@ def current_spinner_wings() -> tuple[tuple[str, str], ...]:
     return _active_spinner_wings
 
 
+def current_spinner_waiting_faces() -> tuple[str, ...]:
+    """Faces cycled while waiting for the provider's first byte.
+
+    Returns the active skin's ``spinner.waiting_faces`` tuple, or an
+    empty tuple when the active skin doesn't define any (renderers
+    should fall back to ``current_spinner_thinking_faces`` or the
+    legacy spinner-glyph machinery in that case).
+    """
+    return _active_spinner_waiting_faces
+
+
+def current_spinner_thinking_faces() -> tuple[str, ...]:
+    """Faces cycled once the model starts emitting reasoning content."""
+    return _active_spinner_thinking_faces
+
+
 def current_tool_emojis() -> dict[str, str]:
     return dict(_active_tool_emojis)
 
@@ -103,6 +126,8 @@ __all__ = [
     "current_branding",
     "current_spinner_verbs",
     "current_spinner_wings",
+    "current_spinner_waiting_faces",
+    "current_spinner_thinking_faces",
     "current_tool_emojis",
     "current_tool_prefix",
 ]

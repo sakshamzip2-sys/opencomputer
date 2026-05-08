@@ -2,10 +2,38 @@ name: daylight
 description: Light theme — for bright terminals.
 
 colors:
+  # Banner
   banner_border:    "#404040"
   banner_title:     "#1F2937"
   banner_accent:    "#4B5563"
+  banner_dim:       "#9CA3AF"
+  banner_text:      "#1F2937"
+  # UI semantic
+  ui_accent:        "#7C3AED"
+  ui_label:         "#0369A1"
+  ui_ok:            "#166534"
+  ui_error:         "#991B1B"
+  ui_warn:          "#92400E"
+  # Prompt + input area
   prompt:           "#1F2937"
+  input_rule:       "#404040"
+  # Agent response box
+  response_border:  "#7C3AED"
+  # Session badge + border
+  session_label:    "#1F2937"
+  session_border:   "#9CA3AF"
+  # Status bars
+  status_bar_bg:    "#F3F4F6"
+  status_bar_fg:    "#1F2937"
+  voice_status_bg:  "#EDE9FE"
+  # TUI selection highlight
+  selection_bg:     "#E5E7EB"
+  # Completion menu panes
+  completion_menu_bg:               "#F9FAFB"
+  completion_menu_current_bg:       "#E0E7FF"
+  completion_menu_meta_bg:          "#F3F4F6"
+  completion_menu_meta_current_bg:  "#DBEAFE"
+  # Legacy / extra
   user_text:        "#000000"
   agent_text:       "#1F2937"
   agent_label:      "#7C3AED"
@@ -15,12 +43,12 @@ colors:
   warning:          "#92400E"
   info:             "#1E40AF"
   dim:              "#9CA3AF"
-  status_bar_bg:    "#F3F4F6"
-  status_bar_fg:    "#1F2937"
 
 spinner:
   thinking_verbs: [thinking, working]
   wings: [["·", "·"]]
+  waiting_faces: ["(·_·)", "(•‿•)", "(◠‿◠)"]
+  thinking_faces: ["(•_•)", "(•ᴗ•)", "(˘ᴗ˘)"]
 
 branding:
   agent_name: "OpenComputer"
