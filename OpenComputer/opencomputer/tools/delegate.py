@@ -29,10 +29,18 @@ DELEGATE_BLOCKED_TOOLS: frozenset[str] = frozenset({
     "AskUserQuestion",   # subagent has no user
     "Clarify",           # subagent has no user (Sub-project 1.G — same reason as AskUserQuestion)
     "ExitPlanMode",      # subagent doesn't own plan mode
+    # Hermes spec parity (2026-05-08): subagents must not write to shared
+    # persistent memory, push messages cross-platform, or run arbitrary
+    # code. Each escape vector is closed individually since explicit
+    # allowlists from the parent could otherwise re-grant them.
+    "Memory",            # no writes to shared persistent memory
+    "SendMessage",       # no cross-platform side effects
+    "ExecuteCode",       # no escape via arbitrary code execution
 })
 """Tools the parent must NEVER pass to a subagent. Caller-supplied
 `allowed_tools` containing any of these is a hard error; implicit-inherit
-strips them. Mirrors Hermes `DELEGATE_BLOCKED_TOOLS`."""
+strips them. Mirrors Hermes `DELEGATE_BLOCKED_TOOLS` (extended 2026-05-08
+to include Memory / SendMessage / ExecuteCode per the Hermes spec)."""
 
 
 class DelegateTool(BaseTool):

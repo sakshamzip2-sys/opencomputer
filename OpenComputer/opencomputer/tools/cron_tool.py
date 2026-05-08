@@ -36,6 +36,7 @@ from opencomputer.cron.jobs import (
 from opencomputer.cron.threats import CronThreatBlocked
 from plugin_sdk.consent import CapabilityClaim, ConsentTier
 from plugin_sdk.core import ToolCall, ToolResult
+from plugin_sdk.runtime_context import DEFAULT_RUNTIME_CONTEXT, RuntimeContext
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -46,12 +47,40 @@ _VALID_ACTIONS = frozenset(
 )
 
 
+def _audit(action: str, **fields: object) -> None:
+    """Emit a structured audit-log line for cron mutations.
+
+    Production-grade (2026-05-09): mirrors the dashboard route's audit
+    discipline. Best-effort — import failure must never break the cron
+    tool. Call sites: create / pause / resume / trigger / remove from
+    the agent-callable CronTool. (CLI mutations log via Typer's --verbose
+    by convention; the dashboard route already emits its own audit.)
+    """
+    try:
+        from opencomputer.dashboard.routes._common import audit_log
+        audit_log(action, source="cron_tool", **fields)
+    except Exception:  # noqa: BLE001
+        # Audit must never break the user's request.
+        logger.debug("audit_log failed for %s", action, exc_info=True)
+
+
+# Hermes spec parity (2026-05-08): "Cron jobs CANNOT recursively create
+# more cron jobs — Hermes disables cron management tools inside cron
+# executions." Mutating actions are blocked when ``cron_session`` is True
+# in the active runtime. Read-only actions remain allowed.
+_MUTATING_ACTIONS = frozenset({"create", "pause", "resume", "trigger", "remove"})
+
+
 class CronTool(BaseTool):
     """Manage scheduled cron jobs from agent chat.
 
     Single-tool design: one tool, one ``action`` parameter, action-specific
     fields. Mirrors Hermes's ``cronjob`` tool to avoid schema/context bloat
     from exposing N separate tools.
+
+    Hermes spec parity (2026-05-08): mutating actions are refused when
+    invoked inside a cron run (``runtime.custom['cron_session'] is True``)
+    to prevent recursive job creation / fork-bombing the scheduler.
     """
 
     parallel_safe = False
@@ -60,6 +89,26 @@ class CronTool(BaseTool):
 
     strict_mode = True
     """Cron writes shared state (jobs.json); serialize tool calls."""
+
+    # Class-level "current runtime" set by AgentLoop before dispatching tool
+    # calls — same pattern as DelegateTool._current_runtime. Used to detect
+    # ``cron_session`` and block recursive cron management.
+    _current_runtime: RuntimeContext = DEFAULT_RUNTIME_CONTEXT
+
+    @classmethod
+    def set_runtime(cls, runtime: RuntimeContext) -> None:
+        """Set the runtime context. Called by AgentLoop alongside DelegateTool."""
+        cls._current_runtime = runtime
+
+    def _is_cron_session(self) -> bool:
+        """Return True when running inside a cron job's agent run.
+
+        The cron scheduler stamps ``runtime.custom['cron_session'] = True``
+        before calling ``loop.run_conversation``; this is the marker that
+        triggers the recursion block.
+        """
+        custom = getattr(self._current_runtime, "custom", None) or {}
+        return bool(custom.get("cron_session"))
 
     capability_claims: ClassVar[tuple[CapabilityClaim, ...]] = (
         CapabilityClaim(
@@ -132,6 +181,14 @@ class CronTool(BaseTool):
                         "type": "string",
                         "description": "Skill to invoke at run time (preferred over prompt).",
                     },
+                    "skills": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Hermes parity: invoke multiple skills together "
+                            "and combine into one report. Mutually exclusive with `skill`."
+                        ),
+                    },
                     "prompt": {
                         "type": "string",
                         "description": "Free-text prompt for the agent (threat-scanned). Ignored when skill is set.",
@@ -142,7 +199,13 @@ class CronTool(BaseTool):
                     },
                     "notify": {
                         "type": "string",
-                        "description": "Where to deliver output: 'telegram', 'discord', 'telegram:<chat_id>', or omit for local-only.",
+                        "description": (
+                            "Where to deliver output. Hermes parity (2026-05-08): "
+                            "any registered platform — 'telegram', 'discord', "
+                            "'slack:#chan', 'whatsapp:+15551234', etc. — plus "
+                            "'origin' to deliver back to the chat that created "
+                            "this job, or omit for local-only."
+                        ),
                     },
                     "plan_mode": {
                         "type": "boolean",
@@ -164,6 +227,21 @@ class CronTool(BaseTool):
     async def execute(self, call: ToolCall) -> ToolResult:
         args = call.arguments or {}
         action = (args.get("action") or "").strip().lower()
+
+        # Hermes spec parity (2026-05-08): block mutating cron actions
+        # while running INSIDE a cron job. Read-only list/get still work
+        # so the agent can introspect the schedule.
+        if action in _MUTATING_ACTIONS and self._is_cron_session():
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Error: cron action {action!r} is disabled inside cron runs. "
+                    "Cron jobs cannot recursively create or modify other cron "
+                    "jobs (Hermes spec). Read-only actions (list, get) remain available."
+                ),
+                is_error=True,
+            )
+
         if action not in _VALID_ACTIONS:
             return ToolResult(
                 tool_call_id=call.id,
@@ -200,43 +278,94 @@ class CronTool(BaseTool):
         if action == "create":
             schedule = _require(args, "schedule")
             skill = (args.get("skill") or "").strip() or None
+            skills_arg = args.get("skills")
+            skills = (
+                [s for s in skills_arg if isinstance(s, str) and s.strip()]
+                if isinstance(skills_arg, list)
+                else None
+            ) or None
             prompt = (args.get("prompt") or "").strip() or None
-            if not skill and not prompt:
-                raise ValueError("create requires either 'skill' or 'prompt'")
+            if not skill and not skills and not prompt:
+                raise ValueError(
+                    "create requires one of: 'skill', 'skills', or 'prompt'"
+                )
+
+            # Hermes parity (2026-05-08): capture origin from session_context
+            # so notify="origin" can route delivery back to the chat where
+            # this cron was created. Empty strings (CLI/non-chat origin)
+            # leave the fields as None — _deliver falls through to local.
+            from opencomputer.gateway.session_context import get_session_env
+
+            origin_platform = (
+                get_session_env("OPENCOMPUTER_SESSION_PLATFORM", "") or None
+            )
+            origin_chat_id = (
+                get_session_env("OPENCOMPUTER_SESSION_CHAT_ID", "") or None
+            )
+            origin_thread_id = (
+                get_session_env("OPENCOMPUTER_SESSION_THREAD_ID", "") or None
+            )
+
+            create_kwargs: dict[str, object] = {}
+            if skills:
+                create_kwargs["skills"] = skills
+            elif skill:
+                create_kwargs["skill"] = skill
+
             job = _create_job(
                 schedule=schedule,
                 name=args.get("name"),
                 prompt=prompt,
-                skill=skill,
                 repeat=args.get("repeat"),
                 notify=(args.get("notify") or None),
                 plan_mode=bool(args.get("plan_mode", True)),
+                origin_platform=origin_platform,
+                origin_chat_id=origin_chat_id,
+                origin_thread_id=origin_thread_id,
+                **create_kwargs,
+            )
+            _audit(
+                "cron.create",
+                job_id=job["id"],
+                schedule=job.get("schedule_display"),
+                has_prompt=bool(prompt),
+                skill_count=len(skills) if skills else (1 if skill else 0),
+                notify=(args.get("notify") or None),
+                origin_platform=origin_platform,
             )
             return {"action": "create", "job": _summarize(job)}
 
         if action == "pause":
-            job = pause_job(_require(args, "job_id"), args.get("reason"))
+            job_id = _require(args, "job_id")
+            job = pause_job(job_id, args.get("reason"))
             if not job:
-                raise KeyError(f"job_id={args.get('job_id')!r} not found")
+                raise KeyError(f"job_id={job_id!r} not found")
+            _audit("cron.pause", job_id=job_id, reason=args.get("reason"))
             return {"action": "pause", "job": _summarize(job)}
 
         if action == "resume":
-            job = resume_job(_require(args, "job_id"))
+            job_id = _require(args, "job_id")
+            job = resume_job(job_id)
             if not job:
-                raise KeyError(f"job_id={args.get('job_id')!r} not found")
+                raise KeyError(f"job_id={job_id!r} not found")
+            _audit("cron.resume", job_id=job_id)
             return {"action": "resume", "job": _summarize(job)}
 
         if action == "trigger":
-            job = trigger_job(_require(args, "job_id"))
+            job_id = _require(args, "job_id")
+            job = trigger_job(job_id)
             if not job:
-                raise KeyError(f"job_id={args.get('job_id')!r} not found")
+                raise KeyError(f"job_id={job_id!r} not found")
+            _audit("cron.trigger", job_id=job_id)
             return {"action": "trigger", "job": _summarize(job)}
 
         if action == "remove":
-            ok = remove_job(_require(args, "job_id"))
+            job_id = _require(args, "job_id")
+            ok = remove_job(job_id)
             if not ok:
-                raise KeyError(f"job_id={args.get('job_id')!r} not found")
-            return {"action": "remove", "job_id": args["job_id"], "removed": True}
+                raise KeyError(f"job_id={job_id!r} not found")
+            _audit("cron.remove", job_id=job_id)
+            return {"action": "remove", "job_id": job_id, "removed": True}
 
         raise ValueError(f"unhandled action {action!r}")
 

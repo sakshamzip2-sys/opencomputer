@@ -44,6 +44,50 @@ def _store():
 
 
 def _job_to_dict(job) -> dict:
+    """Serialize a cron job to a dict for the dashboard API.
+
+    Supports two job shapes:
+      - Object with attributes (legacy CronStore)
+      - Dict (current ``opencomputer.cron.jobs`` shape — what the system
+        actually uses today). Falls back to ``getattr`` for legacy shape.
+
+    Hermes parity (2026-05-09): exposes ``skill``, ``skills``, ``notify``,
+    ``plan_mode``, ``enabled_toolsets``, ``context_from``, ``workdir``,
+    ``no_agent``, ``script``, ``origin_platform``, ``origin_chat_id``,
+    ``origin_thread_id`` so dashboard UIs can render and edit them.
+    """
+    if isinstance(job, dict):
+        sched = job.get("schedule")
+        sched_display = job.get("schedule_display") or (
+            sched.get("display") if isinstance(sched, dict) else sched
+        )
+        return {
+            "id": job.get("id", ""),
+            "name": job.get("name", ""),
+            "schedule": sched_display or "",
+            "command": job.get("prompt") or "",
+            "prompt": job.get("prompt"),
+            "skill": job.get("skill"),
+            "skills": job.get("skills"),
+            "enabled": job.get("enabled", True),
+            "state": job.get("state"),
+            "last_run": job.get("last_run_at"),
+            "next_run": job.get("next_run_at"),
+            "last_status": job.get("last_status"),
+            "last_error": job.get("last_error"),
+            "notify": job.get("notify"),
+            "plan_mode": job.get("plan_mode", True),
+            "enabled_toolsets": job.get("enabled_toolsets"),
+            "context_from": job.get("context_from"),
+            "workdir": job.get("workdir"),
+            "no_agent": job.get("no_agent", False),
+            "script": job.get("script"),
+            "origin_platform": job.get("origin_platform"),
+            "origin_chat_id": job.get("origin_chat_id"),
+            "origin_thread_id": job.get("origin_thread_id"),
+            "repeat": job.get("repeat"),
+        }
+    # Fallback: legacy object shape.
     return {
         "id": getattr(job, "id", str(job)),
         "name": getattr(job, "name", ""),

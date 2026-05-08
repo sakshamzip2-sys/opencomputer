@@ -4,6 +4,49 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — Hermes Cron + Delegation long-tail finishers (2026-05-08 / 2026-05-09)
+
+Closes 11 honest gaps + 2 latent runtime bugs between the Hermes Cron & Delegation reference spec and OpenComputer. PR #494 already shipped no_agent / parallel-batch / multi-profile parity; this work picks up the long tail and hardens it to production-grade.
+
+**Cron — generalized delivery + new modes**
+
+- **Notify generalized to all 18 Platform-enum channels.** `_deliver` resolves any `<platform>:<chat_id>[:<thread_id>]` target through the `registry.channels` dict. Covers slack/whatsapp/signal/matrix/mattermost/email/sms/teams/dingtalk/feishu/wecom/weixin/qqbot/homeassistant/irc + telegram/discord/webhook. **Latent bug fixed alongside:** the prior code called `PluginRegistry.instance()` which doesn't exist (the singleton is the module-level `registry`); old code only manifested the bug when an unknown target was given.
+- **Telegram-topic threads** — `notify="telegram:-100123:17585"` and `notify="origin"` (with captured `origin_thread_id`) now forward `thread_id` as a kwarg when the adapter supports it; adapters without thread support get a clean two-arg call.
+- **`notify="origin"`** — when CronTool runs from a chat, captures `origin_platform` / `origin_chat_id` / `origin_thread_id` from `gateway.session_context` at create time and persists on the job. `_deliver` routes `notify="origin"` back to that chat. Falls through to local-save silently when origin context is absent (CLI-spawned jobs).
+- **Notify validated at create + edit** — invalid platforms fail fast at create (`ValueError`) instead of at first delivery.
+
+**Cron — multi-skill jobs + edit verb**
+
+- **`skills: list[str]` field** — single cron job invokes multiple skills; `_build_run_prompt` emits "Use these skills together and combine the results into one report" with bullets. Singular `skill` retained for back-compat; plural takes precedence (clears singular to avoid double-emission).
+- **`oc cron edit` CLI** — `--schedule` / `--prompt` / `--notify` / `--workdir` / `--repeat` plus skill mutations (`--skill` replaces, `--add-skill`, `--remove-skill`, `--clear-skills`). Re-runs the threat scanner on prompt edits and validates notify targets. Mutual exclusion: `--prompt X` clears stale skills; `--skill X` clears stale prompt — so the run reflects the edit instead of being silently shadowed.
+- **`oc cron create --skill`** is now repeatable (`--skill A --skill B` ⇒ multi-skill).
+- **`/cron` slash subcommand suite** — `/cron list/add/pause/resume/run/remove/edit/help`. **Bug fix:** the prior `/cron` handler imported a nonexistent `opencomputer.cron.store.CronStore` and silently failed. Multi-token schedules (`every 1h`, `0 9 * * *`) parse correctly through the real dispatcher.
+- **Threat re-scan on update** — `update_job(prompt=...)` re-runs `assert_cron_prompt_safe` so API-side edits can't bypass the create-time scanner.
+
+**Cron — runtime fixes (silent-gap closers)**
+
+- **`enabled_toolsets` actually applied at run time.** The field was stored on jobs since the context_from port but never threaded into the AgentLoop — cron jobs ignored their toolset allowlist. Now propagates: `None` ⇒ inherit, `[]` ⇒ no tools (pure-reasoning), list ⇒ allowlist.
+- **`_build_agent_loop` provider failure surfaces as `CronAgentLoopBuildError`** instead of returning a `SimpleNamespace` stub that crashed silently later — operators see the typed error in `last_error`.
+- **`Config.with_loop_overrides`** AttributeError fixed (uses `dataclasses.replace`); `AgentLoop(config=cfg)` now correctly receives the resolved provider.
+- **Cron-recursion-block** — Hermes spec mandates "cron jobs cannot recursively create more cron jobs." `CronTool` reads `runtime.custom['cron_session']` (set by the scheduler at the agent-loop boundary) and refuses mutating actions inside cron runs; read-only `list`/`get` remain available.
+
+**Subagent delegation hardening**
+
+- **`DELEGATE_BLOCKED_TOOLS` extended** with `Memory`, `SendMessage`, `ExecuteCode` (the three Hermes-spec gaps). Subagents cannot write to shared persistent memory, push messages cross-platform, or execute arbitrary code — even via explicit allowlist.
+- **`/agents` slash overlay** — read-only subagent tree grouped by parent, with `running/completed/failed/killed` icons + elapsed time.
+- **`/agents kill <id>`** — slash-dispatch cancel via the existing `SubagentRegistry.kill()` path, with prefix-id matching.
+
+**Audit + dashboard surfaces**
+
+- **`CronTool` emits audit-log lines** for every mutation (`cron.create/pause/resume/trigger/remove`) via the same `audit_log` helper used by dashboard routes. Read-only actions don't audit. Audit failures never break the action.
+- **Dashboard `/api/v1/cron/jobs` GET responses** now surface `skills`, `notify`, `plan_mode`, `enabled_toolsets`, `context_from`, `workdir`, `no_agent`, `script`, `origin_*`, `repeat`, `state`, `last_status`, `last_error`. Dual job-shape support: dict (current `cron.jobs`) + legacy object-attr.
+
+**Tests**
+
+73 new tests across 13 files (`test_cron_delivery_generic.py`, `test_cron_enabled_toolsets_runtime.py`, `test_cron_multi_skill.py`, `test_cron_edit_cli.py`, `test_cron_slash_subcommands.py`, `test_cron_slash_dispatcher_path.py`, `test_cron_origin_delivery.py`, `test_cron_recursion_block.py`, `test_cron_build_agent_loop_production.py`, `test_cron_audit_log.py`, `test_dashboard_cron_new_fields.py`, `test_delegate_blocklist_extended.py`, `test_agents_slash.py`). Production-path coverage uses mocked `_resolve_provider` to exercise the real `AgentLoop` construction, not just the test-friendly stub.
+
+Spec: `docs/superpowers/specs/2026-05-08-hermes-cron-delegation-finishers-design.md`. Plan: `docs/superpowers/plans/2026-05-08-hermes-cron-delegation-finishers.md`.
+
 ### Fixed — Hermes v2 D5/D6/D7 *real* renderer wiring (2026-05-09, "production-grade for real this time")
 
 PR #515 shipped the YAML data + accessor functions for spinner faces, the 22-key color palette, and the live console plumbing. But the actual renderers didn't consume any of it — the streaming spinner had hardcoded "Thinking…" text, Rich panel borders used literal hex like `"grey50"`, and the prompt-toolkit completion menu used a static `MENU_STYLE` dict. User asked for a brutally honest audit; this PR closes the consumer-side gaps that audit surfaced.

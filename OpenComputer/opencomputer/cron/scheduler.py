@@ -179,26 +179,77 @@ def _release_tick_lock(fd: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+class CronAgentLoopBuildError(RuntimeError):
+    """Raised when the cron scheduler cannot construct an AgentLoop.
+
+    Production-grade behavior: bubbles up to ``_run_one_job`` which
+    catches it and records the run as failed with the underlying error,
+    so the operator sees ``last_status=error`` + the reason in
+    ``last_error`` rather than a silent stub-runtime crash later.
+    """
+
+
 async def _build_agent_loop(job: dict[str, Any]) -> Any:
     """Construct a fresh :class:`AgentLoop` configured for a cron run.
 
     Cron jobs run in their own session, in plan mode by default, with a
     capped iteration budget. The loop inherits the active provider plugin
     from config — there's no per-job provider override.
+
+    Hermes parity (2026-05-08): ``enabled_toolsets`` on the job dict
+    becomes ``loop.allowed_tools``. ``None`` = inherit full tool set;
+    ``[]`` = no tools (pure-reasoning cron); list of names = only those
+    tools dispatchable. Closes the silent gap where the field was stored
+    on the job but never applied at run time.
+
+    Production-grade (2026-05-09): provider resolution failures raise
+    :class:`CronAgentLoopBuildError` instead of returning a silent stub.
+    The stub fallback hid runtime breakage; failing fast surfaces the
+    issue in ``last_error`` where operators can see it.
+
+    Two latent bugs fixed earlier:
+      1. ``Config.with_loop_overrides`` doesn't exist (Config is a frozen
+         dataclass) — uses ``dataclasses.replace`` instead.
+      2. ``AgentLoop(config=cfg)`` is missing the required ``provider``
+         arg — resolves via ``_resolve_provider`` like the rest of the
+         codebase.
     """
+    import dataclasses
+
     from opencomputer.agent.config_store import load_config
     from opencomputer.agent.loop import AgentLoop
 
     cfg = load_config()
 
     # Cron sessions are short-lived; cap iterations tighter than interactive default.
-    cfg = cfg.with_loop_overrides(max_iterations=min(cfg.loop.max_iterations, 30))
+    capped_iters = min(cfg.loop.max_iterations, 30)
+    if capped_iters != cfg.loop.max_iterations:
+        new_loop = dataclasses.replace(cfg.loop, max_iterations=capped_iters)
+        cfg = dataclasses.replace(cfg, loop=new_loop)
 
-    return AgentLoop(
-        config=cfg,
-        # plan_mode + yolo_mode are surfaced via RuntimeContext at run-time
-        # rather than baked into the loop itself.
-    )
+    try:
+        from opencomputer.cli import _resolve_provider
+        provider = _resolve_provider(cfg.model.provider)
+    except Exception as exc:
+        raise CronAgentLoopBuildError(
+            f"cron: cannot resolve provider {cfg.model.provider!r} "
+            f"({type(exc).__name__}: {exc}). Check plugin activation + config."
+        ) from exc
+
+    if provider is None:
+        raise CronAgentLoopBuildError(
+            f"cron: provider {cfg.model.provider!r} resolved to None. "
+            "The provider plugin may not be loaded in this profile."
+        )
+
+    loop = AgentLoop(provider=provider, config=cfg)
+
+    # Hermes parity: enabled_toolsets actually applied at run time.
+    toolsets = job.get("enabled_toolsets")
+    if toolsets is not None:
+        loop.allowed_tools = frozenset(toolsets)
+
+    return loop
 
 
 def _build_context_from_block(job: dict[str, Any]) -> str:
@@ -236,6 +287,11 @@ def _build_run_prompt(job: dict[str, Any]) -> str:
 
     For ``--prompt`` jobs: returns the prompt verbatim with a cron-context header.
     For ``--skill`` jobs: returns "use the X skill" so the agent self-invokes.
+
+    Hermes parity (2026-05-08): ``skills: list[str]`` takes precedence
+    over singular ``skill``. Multi-skill jobs ask the agent to chain the
+    skills and produce a combined report.
+
     Wave 6.A: ``context_from`` block (if any) is prepended after the cron
     hint and before the user prompt.
     """
@@ -247,8 +303,19 @@ def _build_run_prompt(job: dict[str, Any]) -> str:
         'exactly "[SILENT]" (nothing else) to suppress delivery.]\n\n'
     )
     upstream = _build_context_from_block(job)
-    if job.get("skill"):
-        return f"{cron_hint}{upstream}Use the `{job['skill']}` skill and report your findings."
+
+    # Hermes parity: prefer plural ``skills`` when present; fall back to
+    # singular ``skill`` for back-compat with pre-2026-05-08 jobs.json files.
+    skills = job.get("skills") or ([job["skill"]] if job.get("skill") else [])
+    if skills:
+        if len(skills) == 1:
+            return f"{cron_hint}{upstream}Use the `{skills[0]}` skill and report your findings."
+        bulleted = "\n".join(f"- `{s}`" for s in skills)
+        return (
+            f"{cron_hint}{upstream}Use these skills together and combine the "
+            f"results into one report:\n{bulleted}"
+        )
+
     return cron_hint + upstream + (job.get("prompt") or "")
 
 
@@ -476,55 +543,175 @@ def _failed_doc(job: dict[str, Any], error: str) -> str:
 async def _deliver(job: dict[str, Any], content: str) -> str | None:
     """Best-effort delivery of cron output to the configured channel.
 
-    Returns ``None`` on success or no-op (``notify=None``); returns an error
-    string on failure. Failures are logged but never raise — the job result
-    is already saved to the output file.
+    Hermes parity (2026-05-08, hardened 2026-05-09): any channel
+    registered with the plugin registry is a valid notify target — the
+    spec lists 17+ platforms (telegram, discord, slack, whatsapp,
+    signal, matrix, mattermost, email, sms, homeassistant, dingtalk,
+    feishu, wecom, weixin, qqbot, teams, irc, webhook, etc.). Lookup
+    goes through the module-level ``registry.channels`` dict (the
+    canonical singleton — there is no ``PluginRegistry.instance()``
+    classmethod; the prior code had a latent bug that only manifested
+    if an unknown target was provided).
+
+    Special targets:
+        ``"local"`` / ``""`` / ``None`` → no-op (saved locally only).
+        ``"origin"`` → use the originating chat captured at create time
+            (``origin_platform`` + ``origin_chat_id`` + optional
+            ``origin_thread_id`` for Telegram topic threads). Falls
+            through to local-save when origin context is absent.
+
+    Target format::
+
+        ``<platform>``                 — uses env-var fallback if any
+        ``<platform>:<chat_id>``       — explicit chat
+        ``<platform>:<chat_id>:<thread_id>`` — chat + topic thread
+                                         (Telegram forum topics)
+
+    The third segment is opaque to ``_deliver``; if the adapter's
+    ``send()`` accepts a ``thread_id`` keyword, we forward it. Adapters
+    without thread support ignore the kwarg.
+
+    Returns ``None`` on success / no-op; returns an error string on
+    failure. Failures are logged but never raise — the job's output
+    file is already saved.
     """
     target = (job.get("notify") or "").strip().lower()
     if not target or target == "local":
         return None
 
+    # Hermes parity: notify="origin" → resolve to platform:chat_id[:thread_id]
+    # captured at create time. Falls through to local-save (None) silently
+    # when the origin context is missing — matches Hermes behavior of
+    # "default to local for non-messaging-spawned jobs."
+    if target == "origin":
+        plat = (job.get("origin_platform") or "").strip().lower()
+        chat = (job.get("origin_chat_id") or "").strip()
+        thread = (job.get("origin_thread_id") or "").strip()
+        if not plat or not chat:
+            logger.info(
+                "Cron job %s notify=origin but origin context missing; "
+                "saving locally only",
+                job.get("id", "?"),
+            )
+            return None
+        target = f"{plat}:{chat}:{thread}" if thread else f"{plat}:{chat}"
+
     try:
-        from opencomputer.plugins.registry import PluginRegistry
+        from opencomputer.plugins.registry import registry as plugin_registry
         from plugin_sdk.core import Platform
 
-        registry = PluginRegistry.instance()
-        platform_map = {"telegram": Platform.TELEGRAM, "discord": Platform.DISCORD}
-        platform = platform_map.get(target.split(":", 1)[0])
-        if platform is None:
-            return f"unknown notify target {target!r}"
+        plat_str, sep, suffix = target.partition(":")
 
-        adapter = registry.get_channel_adapter(platform)
+        try:
+            Platform(plat_str)  # validates against the enum
+        except ValueError:
+            return f"unknown notify target {target!r} (not in Platform enum)"
+
+        adapter = plugin_registry.channels.get(plat_str)
         if adapter is None:
-            return f"channel plugin {target!r} not enabled in this profile"
+            return f"channel plugin {plat_str!r} not enabled in this profile"
 
-        chat_id = _resolve_chat_id(target)
+        # Split optional thread_id (third colon-delimited segment).
+        thread_id: str | None = None
+        if ":" in suffix:
+            chat_id_raw, _, thread_id_raw = suffix.partition(":")
+            chat_id = chat_id_raw.strip() or None
+            thread_id = thread_id_raw.strip() or None
+        else:
+            chat_id = suffix.strip() or None
+
         if not chat_id:
-            return f"no chat_id resolved for {target!r}"
+            chat_id = _resolve_default_chat_id(plat_str)
+        if not chat_id:
+            return f"no chat_id resolved for {target!r}; use {plat_str}:<chat_id>"
 
-        await adapter.send(chat_id, content)
+        # Forward thread_id when the adapter accepts it, else fall back to
+        # the two-arg signature. ``inspect`` is local-only on send() so we
+        # only pay the cost on cron deliveries (not the hot path).
+        send_kwargs: dict[str, Any] = {}
+        if thread_id:
+            try:
+                import inspect
+                sig = inspect.signature(adapter.send)
+                if "thread_id" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                ):
+                    send_kwargs["thread_id"] = thread_id
+                else:
+                    logger.debug(
+                        "adapter %s.send() lacks thread_id support; "
+                        "delivering without thread context",
+                        plat_str,
+                    )
+            except (TypeError, ValueError):
+                pass  # signature inspection failed — call without kwarg
+
+        await adapter.send(chat_id, content, **send_kwargs)
         return None
     except Exception as exc:  # noqa: BLE001
         logger.warning("Cron delivery to %s failed: %s", target, exc)
         return str(exc)
 
 
-def _resolve_chat_id(target: str) -> str | None:
-    """Resolve a notify target string to a concrete chat_id.
+def _resolve_default_chat_id(platform: str) -> str | None:
+    """Resolve a bare ``"telegram"`` / ``"discord"`` to its env-var fallback.
 
-    ``"telegram"`` → reads ``TELEGRAM_CRON_CHAT_ID`` env var.
-    ``"telegram:12345"`` → returns ``"12345"``.
+    Other platforms have no env shortcut — callers must use the
+    ``<platform>:<chat_id>`` form. Returns ``None`` when no shortcut
+    is registered for the platform; ``_deliver`` then surfaces a clear
+    "use platform:<chat_id>" hint.
     """
-    if ":" in target:
-        return target.split(":", 1)[1].strip()
     env_map = {
         "telegram": "TELEGRAM_CRON_CHAT_ID",
         "discord": "DISCORD_CRON_CHANNEL",
     }
-    var = env_map.get(target.lower())
+    var = env_map.get(platform.lower())
     if not var:
         return None
     return os.environ.get(var, "").strip() or None
+
+
+def validate_notify_target(target: str | None) -> None:
+    """Validate a ``notify=`` target at create/edit time (production-grade).
+
+    Accepts:
+        * ``None`` / empty string / ``"local"`` (no-op delivery)
+        * ``"origin"`` (delivers back to originating chat at run time)
+        * ``"<platform>"`` for platforms with env-var shortcuts (telegram, discord)
+        * ``"<platform>:<chat_id>"`` for any registered Platform
+        * ``"<platform>:<chat_id>:<thread_id>"`` (Telegram topics)
+
+    Raises ``ValueError`` with a helpful message on invalid input.
+    Plugin-presence is NOT checked here (the channel may load later in
+    the daemon's lifecycle); only the platform name is validated against
+    the ``Platform`` enum.
+    """
+    if not target:
+        return
+    target_norm = target.strip().lower()
+    if target_norm in ("local", "origin"):
+        return
+
+    from plugin_sdk.core import Platform
+
+    plat_str, _, suffix = target_norm.partition(":")
+    try:
+        Platform(plat_str)
+    except ValueError as exc:
+        valid = ", ".join(sorted(p.value for p in Platform))
+        raise ValueError(
+            f"notify target {target!r} has unknown platform {plat_str!r}. "
+            f"Valid platforms: {valid}. Or use 'local' / 'origin'."
+        ) from exc
+
+    # Telegram & discord allow bare form (env-var fallback at delivery).
+    # Other platforms require an explicit chat_id.
+    if not suffix and plat_str not in {"telegram", "discord"}:
+        raise ValueError(
+            f"notify target {target!r} requires a chat_id; "
+            f"use {plat_str}:<chat_id>[:<thread_id>]"
+        )
 
 
 # ---------------------------------------------------------------------------
