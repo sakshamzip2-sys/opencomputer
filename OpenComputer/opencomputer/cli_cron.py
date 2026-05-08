@@ -107,10 +107,10 @@ def cron_list(
 def cron_create(
     schedule: Annotated[str, typer.Option("--schedule", "-s", help="Schedule expression (e.g. '0 9 * * *', 'every 30m', '2h').")],
     name: Annotated[str | None, typer.Option("--name", "-n", help="Friendly name.")] = None,
-    skill: Annotated[str | None, typer.Option("--skill", help="Skill to invoke at run-time. Preferred over --prompt.")] = None,
+    skill: Annotated[list[str] | None, typer.Option("--skill", help="Skill to invoke at run-time. Repeat for multiple skills (Hermes parity).")] = None,
     prompt: Annotated[str | None, typer.Option("--prompt", "-p", help="Free-text prompt (threat-scanned).")] = None,
     repeat: Annotated[int | None, typer.Option("--repeat", help="Run N times then auto-remove. Omit for infinite.")] = None,
-    notify: Annotated[str | None, typer.Option("--notify", help="Where to deliver: 'telegram', 'discord', 'telegram:<chat_id>', or omit.")] = None,
+    notify: Annotated[str | None, typer.Option("--notify", help="Where to deliver: 'telegram', 'discord', 'origin', 'slack:#chan', etc.")] = None,
     auto: Annotated[bool, typer.Option("--auto", help="Disable plan_mode (USE WITH CAUTION — destructive tools run unguarded).")] = False,
     yolo: Annotated[bool, typer.Option("--yolo", help="[deprecated] Alias for --auto.")] = False,
     no_agent: Annotated[bool, typer.Option("--no-agent", help="Run a script instead of invoking the agent (Hermes parity).")] = False,
@@ -126,15 +126,20 @@ def cron_create(
     Hermes parity: --no-agent --script <name> runs a shell script under
     ~/.opencomputer/<profile>/scripts/ with no LLM invocation. Empty stdout
     = silent tick (watchdog pattern); non-zero exit = error notification.
+
+    Repeatable --skill creates a multi-skill cron job (the agent invokes
+    each skill in turn and combines the results into one report).
     """
+    skills = list(skill) if skill else None
+
     if no_agent:
         if not script:
             typer.secho("Error: --no-agent requires --script <name>", fg="red", err=True)
             raise typer.Exit(2)
-        if skill or prompt:
+        if skills or prompt:
             typer.secho("Error: --no-agent is exclusive with --skill/--prompt", fg="red", err=True)
             raise typer.Exit(2)
-    elif not skill and not prompt:
+    elif not skills and not prompt:
         typer.secho("Error: must supply --skill or --prompt (or --no-agent --script)", fg="red", err=True)
         raise typer.Exit(2)
 
@@ -143,11 +148,18 @@ def cron_create(
         _emit_yolo_deprecation()
         auto = True
 
+    # Pass skills as singular when length 1, plural when >1 — matches
+    # create_job's normalization.
+    create_kwargs: dict = {}
+    if skills and len(skills) == 1:
+        create_kwargs["skill"] = skills[0]
+    elif skills:
+        create_kwargs["skills"] = skills
+
     try:
         job = create_job(
             schedule=schedule,
             name=name,
-            skill=skill,
             prompt=prompt,
             repeat=repeat,
             notify=notify,
@@ -155,6 +167,7 @@ def cron_create(
             no_agent=no_agent,
             script=script,
             script_timeout_seconds=script_timeout,
+            **create_kwargs,
         )
     except CronThreatBlocked as exc:
         typer.secho(f"Blocked by threat scan: {exc}", fg="red", err=True)
@@ -168,6 +181,10 @@ def cron_create(
     typer.echo(f"  next_run_at: {job.get('next_run_at') or 'n/a'}")
     typer.echo(f"  notify:      {job.get('notify') or 'local'}")
     typer.echo(f"  plan_mode:   {job.get('plan_mode')}")
+    if job.get("skills"):
+        typer.echo(f"  skills:      {job['skills']}")
+    elif job.get("skill"):
+        typer.echo(f"  skill:       {job['skill']}")
     if job.get("no_agent"):
         typer.echo(f"  script:      {job.get('script')}")
         typer.echo("  no_agent:    True")
@@ -309,6 +326,114 @@ def cron_status() -> None:
             )
     else:
         typer.echo("\n  No runs yet.")
+
+
+# ---------------------------------------------------------------------------
+# edit (Hermes parity, 2026-05-08)
+# ---------------------------------------------------------------------------
+
+
+@cron_app.command("edit")
+def cron_edit(
+    job_id: Annotated[str, typer.Argument(help="Job id.")],
+    schedule: Annotated[str | None, typer.Option("--schedule", "-s", help="New schedule expression.")] = None,
+    prompt: Annotated[str | None, typer.Option("--prompt", "-p", help="New prompt (re-scanned for threats).")] = None,
+    skill: Annotated[list[str] | None, typer.Option("--skill", help="REPLACE the skill list with these. Repeat for multiple.")] = None,
+    add_skill: Annotated[list[str] | None, typer.Option("--add-skill", help="Append a skill to the list.")] = None,
+    remove_skill: Annotated[list[str] | None, typer.Option("--remove-skill", help="Remove a skill from the list.")] = None,
+    clear_skills: Annotated[bool, typer.Option("--clear-skills", help="Remove all skills.")] = False,
+    notify: Annotated[str | None, typer.Option("--notify", help="New delivery target. Pass empty string to clear.")] = None,
+    workdir: Annotated[str | None, typer.Option("--workdir", help="New working directory. Empty string clears.")] = None,
+    repeat: Annotated[int | None, typer.Option("--repeat", help="New repeat count (>0 = N runs, ≤0 = infinite).")] = None,
+) -> None:
+    """Edit an existing cron job (Hermes parity).
+
+    Skill mutation order: --clear-skills → --skill (replace) → --add-skill → --remove-skill.
+    When the resulting list is empty the singular skill field is also cleared.
+    """
+    from opencomputer.cron.jobs import update_job
+    from opencomputer.cron.threats import assert_cron_prompt_safe
+
+    job = get_job(job_id)
+    if not job:
+        typer.secho(f"job_id={job_id!r} not found", fg="red", err=True)
+        raise typer.Exit(2)
+
+    updates: dict[str, object] = {}
+    if schedule is not None:
+        updates["schedule"] = schedule  # update_job re-parses the string
+    if prompt is not None:
+        try:
+            assert_cron_prompt_safe(prompt)
+        except CronThreatBlocked as exc:
+            typer.secho(f"Blocked by threat scan: {exc}", fg="red", err=True)
+            raise typer.Exit(2) from exc
+        updates["prompt"] = prompt
+    if notify is not None:
+        updates["notify"] = notify or None
+    if workdir is not None:
+        updates["workdir"] = workdir or None
+    if repeat is not None:
+        rep = job.get("repeat") or {"times": None, "completed": 0}
+        rep["times"] = repeat if repeat > 0 else None
+        updates["repeat"] = rep
+
+    # Skill mutation. Order: clear → set → add → remove.
+    new_skills = list(
+        job.get("skills") or ([job["skill"]] if job.get("skill") else [])
+    )
+    skill_touched = False
+    if clear_skills:
+        new_skills = []
+        skill_touched = True
+    if skill:
+        new_skills = list(skill)
+        skill_touched = True
+    if add_skill:
+        for s in add_skill:
+            if s not in new_skills:
+                new_skills.append(s)
+        skill_touched = True
+    if remove_skill:
+        new_skills = [s for s in new_skills if s not in set(remove_skill)]
+        skill_touched = True
+
+    if skill_touched:
+        # Always store as plural list when ≥1 entry; clear singular so the
+        # back-compat shim in _build_run_prompt doesn't double-emit.
+        if not new_skills:
+            updates["skills"] = None
+            updates["skill"] = None
+        else:
+            updates["skills"] = new_skills
+            updates["skill"] = None
+
+    if not updates:
+        typer.secho(
+            "Nothing to update. Pass at least one of --schedule/--prompt/--skill/etc.",
+            fg="yellow",
+            err=True,
+        )
+        raise typer.Exit(0)
+
+    try:
+        updated = update_job(job_id, updates)
+    except ValueError as exc:
+        typer.secho(f"Error: {exc}", fg="red", err=True)
+        raise typer.Exit(2) from exc
+
+    if updated is None:
+        typer.secho(f"job_id={job_id!r} not found (race?)", fg="red", err=True)
+        raise typer.Exit(2)
+
+    typer.secho(f"Updated cron job {updated['id']} '{updated['name']}'", fg="green")
+    typer.echo(f"  schedule:    {updated['schedule_display']}")
+    if updated.get("skills"):
+        typer.echo(f"  skills:      {updated['skills']}")
+    elif updated.get("skill"):
+        typer.echo(f"  skill:       {updated['skill']}")
+    if updated.get("notify"):
+        typer.echo(f"  notify:      {updated['notify']}")
 
 
 __all__ = ["cron_app"]
