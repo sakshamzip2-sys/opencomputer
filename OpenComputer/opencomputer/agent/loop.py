@@ -3092,41 +3092,92 @@ class AgentLoop:
     async def _maybe_continue_goal(
         self, sid: str, last_assistant_text: str
     ) -> str | None:
-        """Wave 5 T2 closure — Ralph-loop continuation gate.
+        """Ralph-loop continuation gate (Kanban-Goals v2 wiring).
 
         Reads the active goal (if any), asks the auxiliary judge whether
-        it's satisfied, and returns a continuation user-prompt to feed
-        the next turn — or ``None`` to exit normally. The judge fails
-        OPEN (treated as NOT_SATISFIED) so a flaky aux model never
-        wedges progress; ``goal.budget`` is the real backstop.
+        it's satisfied, persists the structured rationale on the goal
+        row, and returns a continuation user-prompt to feed the next
+        turn — or ``None`` to exit normally.
+
+        The judge fails OPEN (treated as not-done) so a flaky aux model
+        never wedges progress; ``goal.budget`` is the real backstop.
+
+        Banner emission (continue / achieved / pause_budget) is delegated
+        to :attr:`goal_banner_callback` if set by the host (CLI input
+        loop); gateway path leaves it ``None`` until that wiring lands.
 
         Returns:
             Continuation prompt string when the loop should re-enter;
-            None when the goal is unset, paused, satisfied, or
+            ``None`` when the goal is unset, paused, satisfied, or
             budget-exhausted.
         """
+        import dataclasses
+
+        from opencomputer.agent.goal import (
+            JudgeVerdict,
+            build_continuation_prompt,
+            judge_goal,
+        )
+
         goal = self.db.get_session_goal(sid)
         if goal is None or not goal.should_continue():
             return None
         try:
-            from opencomputer.agent.goal import (
-                build_continuation_prompt,
-                judge_satisfied,
-            )
-
-            satisfied = await judge_satisfied(
-                goal_text=goal.text, last_response=last_assistant_text or "",
+            verdict = await judge_goal(
+                goal_text=goal.text,
+                last_response=last_assistant_text or "",
             )
         except Exception:  # noqa: BLE001 — fail-open
-            satisfied = False
-        if satisfied:
-            # Goal complete — clear it so we don't re-judge on the next user
-            # message. Keep the conversation around (don't end_session).
+            verdict = JudgeVerdict(
+                done=False, reason="(judge raised inside loop)"
+            )
+
+        if verdict.done:
+            self._fire_goal_banner(
+                sid, kind="achieved", verdict=verdict, goal=goal,
+            )
             self.db.clear_session_goal(sid)
             return None
-        # Not satisfied; bump turn counter and return a continuation prompt.
-        self.db.update_session_goal(sid, turns_used=goal.turns_used + 1)
+
+        new_turns = goal.turns_used + 1
+        self.db.update_session_goal(
+            sid, turns_used=new_turns, last_judge_reason=verdict.reason,
+        )
+        next_goal = dataclasses.replace(
+            goal, turns_used=new_turns, last_judge_reason=verdict.reason,
+        )
+        if next_goal.budget_exhausted():
+            self._fire_goal_banner(
+                sid, kind="pause_budget", verdict=verdict, goal=next_goal,
+            )
+            return None
+        self._fire_goal_banner(
+            sid, kind="continue", verdict=verdict, goal=next_goal,
+        )
         return build_continuation_prompt(goal.text)
+
+    def _fire_goal_banner(
+        self,
+        sid: str,
+        *,
+        kind: str,
+        verdict: object,
+        goal: object,
+    ) -> None:
+        """Best-effort goal-banner emission.
+
+        Hosts (CLI input loop, gateway) can attach a callback to
+        ``self.goal_banner_callback`` matching:
+        ``cb(*, session_id: str, kind: str, verdict: JudgeVerdict, goal: GoalState)``.
+        Banner errors are swallowed — UX must never wedge the loop.
+        """
+        cb = getattr(self, "goal_banner_callback", None)
+        if cb is None:
+            return
+        try:
+            cb(session_id=sid, kind=kind, verdict=verdict, goal=goal)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _ensure_session_persisted(self, sid: str) -> None:
         """Lazy-write the session row on first persistence demand.
