@@ -103,7 +103,7 @@ These rows survived verification. File:line evidence on each.
 | `hermes chat -c` / `--continue` | `oc chat -c` / `--continue` — sugar for `--resume last` (`cli.py` chat function) |
 | `hermes chat -q "query"` | `oc chat -q "query"` — alias for `oc oneshot`; refactored body into `_run_oneshot_turn` helper so both paths share the same flow |
 | `HERMES_TUI_RESUME` env var | `OPENCOMPUTER_TUI_RESUME` env var with values `1`/`true`/`yes`→`last` (auto-resume latest), or literal session id; precedence `--resume <id>` > `--continue` > env var. Plus matching `oc tui --continue` / `--resume <id>` flags. Ink/React TUI side reads `OC_TUI_RESUME` and seeds `sessionId.current` so subsequent `client.chat()` calls route into that session |
-| `/background <prompt>` slash | New `BackgroundJobRegistry` (thread-safe in-memory, daemon-thread workers, fresh AgentLoop per job via factory) + `BackgroundCommand` slash with `start <prompt>` (or bare prompt) / `list` / `show <id>`. Inherits model+provider+toolsets via factory; new session id per job (no shared history). MVP excludes push-on-completion to the originating channel |
+| `/background <prompt>` slash | New `BackgroundJobRegistry` (thread-safe in-memory, daemon-thread workers, fresh AgentLoop per job via factory, time-based retention default 24h, FIFO eviction at `max_jobs=200`) + `BackgroundCommand` slash with `start <prompt>` (or bare prompt) / `list` / `show <id>`. Inherits model+provider+toolsets via factory; new session id per job (no shared history). **Push-on-completion shipped**: CLI prints a Rich panel; gateway routes the result back to the originating chat via `Dispatch._session_channels` lookup + `asyncio.run_coroutine_threadsafe(adapter.send(chat_id, ...))` on the gateway's main loop. Notifier exceptions are logged and swallowed so a misbehaving renderer can't tear down the worker thread |
 
 ---
 
@@ -167,7 +167,6 @@ These were initially listed as "parity ✓" in the first draft but the parallel 
 | `display.platforms.<channel>.tool_progress` overrides | A multi-channel gateway user wants per-channel verbosity. |
 | Docker sandbox hardening flags (`--cap-drop ALL` etc.) | Security review or operator request. |
 | Per-provider API timeouts | Long-running provider call surfaces a stall users can't address. |
-| Push-on-completion for `/background` jobs | A user develops a workflow that needs the result auto-pushed back to the originating channel. |
 
 ---
 
