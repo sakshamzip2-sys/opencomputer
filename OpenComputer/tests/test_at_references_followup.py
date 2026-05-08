@@ -119,7 +119,7 @@ def test_at_file_allows_normal_text_with_unicode(tmp_path: Path):
 # ─── D2: text-extension bypass for null-byte sniff ────────────────
 
 
-def test_md_with_literal_null_is_NOT_flagged_binary(tmp_path: Path):
+def test_md_with_literal_null_is_not_flagged_binary(tmp_path: Path):  # noqa: N802
     """A .md file containing a literal NUL is still text per Hermes v2.
 
     Real-world case: PlantUML diagram embeds, JSON dumps inside fenced

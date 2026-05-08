@@ -46,7 +46,7 @@ def test_hermes_md_in_subdir_picked_up_by_tracker(tmp_path: Path):
     assert ".hermes.md" in out
 
 
-def test_uppercase_HERMES_md_picked_up_by_tracker(tmp_path: Path):
+def test_uppercase_hermes_md_picked_up_by_tracker(tmp_path: Path):
     sub = tmp_path / "lib"
     sub.mkdir()
     (sub / "HERMES.md").write_text(

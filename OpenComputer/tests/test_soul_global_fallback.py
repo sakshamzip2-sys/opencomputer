@@ -83,7 +83,7 @@ def test_global_soul_whitespace_returns_empty(tmp_path: Path):
     assert mem.read_soul() == ""
 
 
-def test_default_global_soul_path_uses_OPENCOMPUTER_HOME(tmp_path: Path, monkeypatch):
+def test_default_global_soul_path_uses_opencomputer_home(tmp_path: Path, monkeypatch):  # noqa: N802
     """No explicit global_soul_path → derived from OPENCOMPUTER_HOME."""
     profile = tmp_path / "alt-profile"
     profile.mkdir()

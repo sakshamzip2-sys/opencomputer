@@ -18,7 +18,6 @@ from opencomputer.agent.prompt_builder import (
     load_workspace_context,
 )
 
-
 # ─── unit tests for the helpers ───────────────────────────────────
 
 
