@@ -224,6 +224,7 @@ class ExecuteCode(BaseTool):
 
         # Resolve env passthrough from config.yaml: code_execution.terminal.env_passthrough
         passthrough: tuple[str, ...] = ()
+        config_max_tool_calls: int | None = None
         try:
             from opencomputer.agent.config import default_config
 
@@ -235,6 +236,10 @@ class ExecuteCode(BaseTool):
                     pt = terminal_cfg.get("env_passthrough")
                     if isinstance(pt, list):
                         passthrough = tuple(str(x) for x in pt)
+                # 2026-05-08 G5 — Hermes Doc-2 max_tool_calls config slot.
+                mtc = getattr(ce, "max_tool_calls", None)
+                if isinstance(mtc, int) and mtc > 0:
+                    config_max_tool_calls = mtc
         except Exception:  # noqa: BLE001 — config absence must not block exec
             pass
 
@@ -252,6 +257,7 @@ class ExecuteCode(BaseTool):
                 stderr_cap=_MAX_STDERR_BYTES,
                 cwd=cwd,
                 python_executable=python_executable,
+                max_tool_calls=config_max_tool_calls,
             )
         finally:
             # strict mode created a tempdir — clean it up.

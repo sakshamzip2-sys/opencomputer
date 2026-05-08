@@ -157,10 +157,19 @@ def _pack_msg(payload: dict[str, Any]) -> bytes:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _build_prologue(allowed: tuple[str, ...]) -> str:
+def _build_prologue(
+    allowed: tuple[str, ...],
+    max_tool_calls: int = _MAX_RPC_CALLS,
+) -> str:
     """Generate the small RPC client + tool-stub functions.
 
     ``allowed`` is the ordered list of tool names to expose.
+
+    ``max_tool_calls`` is the per-script RPC cap (Hermes Doc-2 G5,
+    2026-05-08). Defaults to ``_MAX_RPC_CALLS`` (50) for callers that
+    haven't been threaded through with config. Pass an override to
+    apply a custom cap from ``code_execution.max_tool_calls`` in
+    ``config.yaml``.
 
     Stubs map ``ToolName(**kwargs) -> str`` — the result text. Tool
     errors raise ``RuntimeError`` so a script ``try/except`` block
@@ -184,7 +193,7 @@ def _build_prologue(allowed: tuple[str, ...]) -> str:
         "_ptc_sock = _ptc_socket.socket(_ptc_socket.AF_UNIX)",
         "_ptc_sock.connect(_ptc_os.environ['OC_PTC_SOCKET'])",
         "_ptc_call_count = 0",
-        f"_ptc_max_calls = {_MAX_RPC_CALLS}",
+        f"_ptc_max_calls = {max_tool_calls}",
         "",
         "def _ptc_call(tool, arguments):",
         "    global _ptc_call_count",
@@ -424,6 +433,7 @@ async def run_ptc(
     cwd: str | None = None,
     python_executable: str | None = None,
     parent_env: dict[str, str] | None = None,
+    max_tool_calls: int | None = None,
 ) -> PTCResult:
     """Run a PTC script end-to-end.
 
@@ -491,7 +501,14 @@ async def run_ptc(
     server = PTCServer(registry, config)
     await server.start()
 
-    prologue = _build_prologue(allowed)
+    # 2026-05-08 G5 — let callers override the in-script RPC cap from
+    # ``code_execution.max_tool_calls`` config. None preserves the
+    # historic _MAX_RPC_CALLS=50 default.
+    effective_max_calls = (
+        max_tool_calls if isinstance(max_tool_calls, int) and max_tool_calls > 0
+        else _MAX_RPC_CALLS
+    )
+    prologue = _build_prologue(allowed, max_tool_calls=effective_max_calls)
     full_script = prologue + "\n" + code
 
     with tempfile.NamedTemporaryFile(
