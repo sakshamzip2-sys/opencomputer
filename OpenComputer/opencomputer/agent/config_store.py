@@ -233,6 +233,69 @@ def _parse_hooks_block(block: Any) -> tuple[HookCommandConfig, ...]:
     return ()
 
 
+class ConfigYAMLError(Exception):
+    """Raised when a YAML config file cannot be parsed or has the wrong shape.
+
+    Centralizes the failure surface for :func:`load_yaml_dict`. Carries
+    the offending ``path`` and a short cause string so CLI surfaces can
+    render a user-facing message without re-formatting an exception.
+    """
+
+    def __init__(self, path: Path, cause: str | Exception) -> None:
+        self.path = path
+        self.cause = str(cause)
+        super().__init__(f"{path}: {self.cause}")
+
+
+def load_yaml_dict(
+    path: Path,
+    *,
+    encoding: str = "utf-8",
+    missing_ok: bool = True,
+) -> dict[str, Any]:
+    """Read a YAML file and return its top-level mapping.
+
+    M1.2 — single canonical YAML→dict loader for profile.yaml /
+    config.yaml. Replaces the scattered
+    ``yaml.safe_load(path.read_text()) or {}`` boilerplate so error
+    paths (missing file, parse failure, non-mapping top level) behave
+    the same everywhere a config file is read.
+
+    Behavior:
+        * ``missing_ok=True`` (default) and the file does not exist →
+          returns ``{}``. Mirrors the prior implicit behavior of
+          ``or {}`` after a missing-file ``not exists()`` check.
+        * ``missing_ok=False`` and the file does not exist → raises
+          :class:`FileNotFoundError`.
+        * Empty file → returns ``{}``.
+        * Parse failure → raises :class:`ConfigYAMLError` (chained from
+          ``yaml.YAMLError``).
+        * Top-level value is not a mapping (list, scalar, etc.) →
+          raises :class:`ConfigYAMLError`.
+
+    Callers add their own schema validation on top of the returned
+    dict. This helper deliberately does NOT validate keys, since
+    profile.yaml has both a strict consumer (``load_config``) and
+    lenient consumers (the ``oc plugin enable`` / ``oc profile
+    env-template`` paths) that share one parse but differ on what
+    they accept.
+    """
+    if not path.exists():
+        if missing_ok:
+            return {}
+        raise FileNotFoundError(path)
+    try:
+        raw = yaml.safe_load(path.read_text(encoding=encoding)) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigYAMLError(path, exc) from exc
+    if not isinstance(raw, dict):
+        raise ConfigYAMLError(
+            path,
+            f"top-level YAML must be a mapping, got {type(raw).__name__}",
+        )
+    return raw
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load config from YAML, applying overrides on top of defaults.
 
@@ -243,14 +306,12 @@ def load_config(path: Path | None = None) -> Config:
     """
     cfg_path = path or config_file_path()
     base = default_config()
-    if not cfg_path.exists():
-        return base
     try:
-        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as e:
-        raise RuntimeError(f"Failed to parse {cfg_path}: {e}") from e
-    if not isinstance(raw, dict):
-        raise RuntimeError(f"Config file {cfg_path} must be a YAML mapping")
+        raw = load_yaml_dict(cfg_path)
+    except ConfigYAMLError as exc:
+        raise RuntimeError(f"Failed to parse {cfg_path}: {exc.cause}") from exc
+    if not raw:
+        return base
 
     # Extract and parse the hooks block before applying regular overrides
     # (so the nested/list shape doesn't go through _apply_overrides, which
@@ -388,10 +449,12 @@ def set_value(cfg: Config, key: str, value: Any) -> Config:
 
 
 __all__ = [
+    "ConfigYAMLError",
     "config_file_path",
-    "load_config",
-    "save_config",
     "get_value",
+    "load_config",
+    "load_yaml_dict",
+    "save_config",
     "set_value",
     "_parse_hooks_block",
 ]

@@ -4,6 +4,17 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Changed — v1.1 Plan-1 M1.2: unify profile.yaml parse paths (2026-05-09)
+
+Closes the strict-vs-lenient profile.yaml parser divergence flagged in `2026-05-08-v1-1-plan-1-foundation-and-cleanup.md` M1.2. Previously `cli_plugin._read_and_validate_profile_yaml` (strict, schema-validated) and the `cli_profile.env-template` / `cli_profile.env-init` lenient readers each open-coded `yaml.safe_load(path.read_text()) or {}` with subtly different error handling — a malformed profile.yaml could fail through one consumer and pass through another.
+
+- New `opencomputer.agent.config_store.load_yaml_dict(path, *, missing_ok=True)` — single canonical YAML→dict loader. Uniform missing-file semantics, typed `ConfigYAMLError` on parse failure or non-mapping top level.
+- `load_config` now goes through `load_yaml_dict` (same parse code path as the lenient consumers).
+- `cli_plugin._read_and_validate_profile_yaml` migrated; `cli_plugin` no longer imports `yaml` directly.
+- New private helper `cli_profile._read_enabled_plugin_ids(profile_yaml)` — both `env-template` and `env-init` go through it, and through `load_yaml_dict` underneath. Preserves the load-bearing `None` (file absent → "include everything") vs `set()` (explicit empty list) distinction.
+- 22 new tests in `tests/test_yaml_parse_unified.py` pinning the contract + a regression guard against re-introducing raw `yaml.safe_load` in the migrated modules.
+
+Out of scope: ~25 other `yaml.safe_load` callsites (skin loader, persona registry, allowlists, security policies, custom-providers reload) parse different schemas and have their own migration paths — not the divergence M1.2 was scoped against.
 ### Added — Hermes Cron + Delegation long-tail finishers (2026-05-08 / 2026-05-09)
 
 Closes 11 honest gaps + 2 latent runtime bugs between the Hermes Cron & Delegation reference spec and OpenComputer. PR #494 already shipped no_agent / parallel-batch / multi-profile parity; this work picks up the long tail and hardens it to production-grade.
