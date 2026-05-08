@@ -299,6 +299,7 @@ def create_job(
     name: str | None = None,
     prompt: str | None = None,
     skill: str | None = None,
+    skills: list[str] | None = None,
     repeat: int | None = None,
     notify: str | None = None,
     plan_mode: bool = True,
@@ -309,46 +310,67 @@ def create_job(
     no_agent: bool = False,
     script: str | None = None,
     script_timeout_seconds: int | None = None,
+    # Hermes parity (2026-05-08): origin context for notify="origin".
+    origin_platform: str | None = None,
+    origin_chat_id: str | None = None,
+    origin_thread_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a new cron job.
 
-    Either ``prompt`` or ``skill`` must be supplied. ``--skill`` is the
-    preferred entry path because skills are vetted code; ``--prompt``
-    requires the threat scanner to pass.
+    One of ``prompt`` / ``skill`` / ``skills`` must be supplied (or
+    ``--no-agent --script`` for script-only mode). ``skill``/``skills``
+    are the preferred entry paths because skills are vetted code;
+    ``prompt`` requires the threat scanner to pass.
+
+    Hermes parity (2026-05-08):
+    - ``skills: list[str]`` lets a single job invoke multiple skills and
+      combine the results. When supplied, takes precedence over singular
+      ``skill`` (which is set to ``None`` to avoid double-mention in the
+      run prompt).
+    - ``origin_platform``/``origin_chat_id``/``origin_thread_id`` capture
+      the chat the job was created from so ``notify="origin"`` can route
+      output back there.
 
     Args:
         schedule: Schedule string (see :func:`parse_schedule`).
-        name: Optional friendly name (defaults to first chars of prompt/skill).
+        name: Optional friendly name.
         prompt: Free-text prompt fed to the agent. Threat-scanned.
-        skill: Name of an installed skill. Skill content is loaded at run time.
+        skill: Name of an installed skill (singular form).
+        skills: List of installed skills (plural form, Hermes parity).
         repeat: How many times to run; ``None`` = forever (default for
-            recurring schedules), ``1`` = once (default for one-shot schedules).
-        notify: Where to deliver output. ``None`` = save locally only.
-            Channel names: ``"telegram"``, ``"discord"``, ``"webhook:<token>"``.
-        plan_mode: When True (default), the cron run starts in plan mode so
-            destructive tools require explicit consent. Set False with
-            ``--yolo`` only for trusted skills.
-        enabled_toolsets: Optional toolset allowlist. ``None`` = all default tools.
+            recurring schedules), ``1`` = once (default for one-shot).
+        notify: Where to deliver. Pass ``"origin"`` to deliver back to
+            the chat where the job was created (requires ``origin_*``).
+        plan_mode: Default True; set False with ``--yolo`` only for
+            trusted skills.
+        enabled_toolsets: Optional toolset allowlist (None = full set).
 
     Returns:
         The created job dict.
 
     Raises:
-        ValueError: schedule unparseable or neither ``prompt`` nor ``skill`` set.
+        ValueError: schedule unparseable or no goal supplied.
         CronThreatBlocked: prompt failed the threat scan.
     """
+    # Normalize skills list — empty list treated same as None.
+    effective_skills = list(skills) if skills else None
+
     # Hermes parity: script-only jobs are mutually exclusive with prompt/skill.
     if no_agent:
         if not script:
             raise ValueError("create_job: --no-agent requires --script <name>")
-        if prompt or skill:
+        if prompt or skill or effective_skills:
             raise ValueError(
-                "create_job: --no-agent is exclusive with --prompt/--skill"
+                "create_job: --no-agent is exclusive with --prompt/--skill/--skills"
             )
-    elif not prompt and not skill:
-        raise ValueError("create_job requires either prompt= or skill=")
+    elif not prompt and not skill and not effective_skills:
+        raise ValueError("create_job requires one of: prompt=, skill=, or skills=")
     if prompt:
         assert_cron_prompt_safe(prompt)
+
+    # When skills list is supplied, clear singular skill to avoid double-emission
+    # in run prompt. Plural takes precedence (matches Hermes spec).
+    effective_skill = None if effective_skills else skill
 
     parsed = parse_schedule(schedule)
 
@@ -360,14 +382,21 @@ def create_job(
     job_id = uuid.uuid4().hex[:12]
     now_iso = _now().isoformat()
     # For script-only jobs, surface the script name in the auto-generated label.
-    label_source = prompt or skill or (f"[script: {script}]" if script else None) or "cron job"
+    label_source = (
+        prompt
+        or (effective_skills[0] if effective_skills else None)
+        or skill
+        or (f"[script: {script}]" if script else None)
+        or "cron job"
+    )
     label = label_source[:50].strip()
 
     job = {
         "id": job_id,
         "name": name or label,
         "prompt": prompt,
-        "skill": skill,
+        "skill": effective_skill,
+        "skills": effective_skills,
         "schedule": parsed,
         "schedule_display": parsed["display"],
         "repeat": {"times": repeat, "completed": 0},
@@ -399,6 +428,10 @@ def create_job(
         "no_agent": bool(no_agent),
         "script": script,
         "script_timeout_seconds": script_timeout_seconds,
+        # Hermes parity (2026-05-08): origin context for notify="origin".
+        "origin_platform": origin_platform,
+        "origin_chat_id": origin_chat_id,
+        "origin_thread_id": origin_thread_id,
     }
 
     with _jobs_lock:

@@ -281,6 +281,11 @@ def _build_run_prompt(job: dict[str, Any]) -> str:
 
     For ``--prompt`` jobs: returns the prompt verbatim with a cron-context header.
     For ``--skill`` jobs: returns "use the X skill" so the agent self-invokes.
+
+    Hermes parity (2026-05-08): ``skills: list[str]`` takes precedence
+    over singular ``skill``. Multi-skill jobs ask the agent to chain the
+    skills and produce a combined report.
+
     Wave 6.A: ``context_from`` block (if any) is prepended after the cron
     hint and before the user prompt.
     """
@@ -292,8 +297,19 @@ def _build_run_prompt(job: dict[str, Any]) -> str:
         'exactly "[SILENT]" (nothing else) to suppress delivery.]\n\n'
     )
     upstream = _build_context_from_block(job)
-    if job.get("skill"):
-        return f"{cron_hint}{upstream}Use the `{job['skill']}` skill and report your findings."
+
+    # Hermes parity: prefer plural ``skills`` when present; fall back to
+    # singular ``skill`` for back-compat with pre-2026-05-08 jobs.json files.
+    skills = job.get("skills") or ([job["skill"]] if job.get("skill") else [])
+    if skills:
+        if len(skills) == 1:
+            return f"{cron_hint}{upstream}Use the `{skills[0]}` skill and report your findings."
+        bulleted = "\n".join(f"- `{s}`" for s in skills)
+        return (
+            f"{cron_hint}{upstream}Use these skills together and combine the "
+            f"results into one report:\n{bulleted}"
+        )
+
     return cron_hint + upstream + (job.get("prompt") or "")
 
 
