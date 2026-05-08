@@ -231,6 +231,81 @@ def test_should_auto_prune_after_window_true(tmp_path: Path) -> None:
     assert store.should_auto_prune(min_interval_hours=24) is True
 
 
+def test_should_auto_prune_returns_false_when_in_flight(tmp_path: Path) -> None:
+    """While a prune is in flight on this instance, should_auto_prune is False."""
+    store = RewindStore(tmp_path / "rw", workspace_root=tmp_path)
+    assert store.should_auto_prune() is True
+    store.mark_prune_started()
+    assert store.should_auto_prune() is False
+    store.mark_prune_finished(success=True)
+    # success → marker written → should_auto_prune is False (within window).
+    assert store.should_auto_prune(min_interval_hours=24) is False
+
+
+def test_mark_prune_finished_failure_does_not_write_marker(tmp_path: Path) -> None:
+    """Failed prune must NOT persist .last_prune — next call retries."""
+    store = RewindStore(tmp_path / "rw", workspace_root=tmp_path)
+    store.mark_prune_started()
+    store.mark_prune_finished(success=False)
+    assert not (store.root / RewindStore.LAST_PRUNE_MARKER).exists()
+    # In-flight cleared so next call can retry.
+    assert store.should_auto_prune() is True
+
+
+def test_mark_prune_finished_success_persists_marker(tmp_path: Path) -> None:
+    """Successful prune writes .last_prune so 24h window applies."""
+    store = RewindStore(tmp_path / "rw", workspace_root=tmp_path)
+    store.mark_prune_started()
+    store.mark_prune_finished(success=True)
+    assert (store.root / RewindStore.LAST_PRUNE_MARKER).exists()
+    assert store.should_auto_prune(min_interval_hours=24) is False
+
+
+def test_iter_metadata_does_not_load_blobs(tmp_path: Path) -> None:
+    """_iter_metadata must read meta.json only, not file blobs."""
+    store = RewindStore(tmp_path / "rw", workspace_root=tmp_path)
+    big = b"x" * (10 * 1024 * 1024)  # 10 MB
+    cp = Checkpoint.from_files({"big.bin": big}, label="huge")
+    store.save(cp)
+    metas = list(store._iter_metadata())
+    assert len(metas) == 1
+    cid, created, path, size = metas[0]
+    assert cid == cp.id
+    assert created == cp.created_at
+    assert path == store.root / cp.id
+    # size_bytes is reported via stat (no blob load).
+    assert size >= len(big)
+
+
+def test_save_eviction_uses_metadata_only(tmp_path: Path) -> None:
+    """save() with max_total_bytes evicts via _iter_metadata, not blob loads.
+
+    Smoke test: with many large checkpoints, save() should evict
+    correctly without throwing OOM-like patterns. We're not measuring
+    memory here; the regression test is that the code path runs to
+    completion and the eviction picks the oldest by created_at.
+    """
+    store = RewindStore(tmp_path / "rw", workspace_root=tmp_path)
+    # 5 checkpoints, each 1 MB
+    cps = []
+    for i in range(5):
+        cp = Checkpoint.from_files(
+            {f"f{i}": b"x" * (1024 * 1024)}, label=f"l{i}"
+        )
+        store.save(cp)
+        cps.append(cp)
+        time.sleep(0.005)
+
+    # Now save a 6th with a 3 MB cap → should evict ~3 oldest.
+    cp6 = Checkpoint.from_files({"f6": b"x" * (1024 * 1024)}, label="l6")
+    store.save(cp6, max_total_bytes=3 * 1024 * 1024)
+
+    remaining_ids = {c.id for c in store.list()}
+    assert cp6.id in remaining_ids
+    # cp[0] (oldest) MUST be evicted.
+    assert cps[0].id not in remaining_ids
+
+
 def test_save_evicts_oldest_when_capped(tmp_path: Path) -> None:
     store = RewindStore(tmp_path / "rw", workspace_root=tmp_path)
     cp_a = Checkpoint.from_files({"a": b"x" * 5000}, label="a")

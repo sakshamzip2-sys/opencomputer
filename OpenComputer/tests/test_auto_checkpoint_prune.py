@@ -45,12 +45,28 @@ class _FakeHookCtx:
         self.tool_call = tool_call
 
 
+async def _run_and_drain(spec, hook_ctx) -> None:
+    """Run the handler then await background tasks (the prune fan-out)."""
+    await spec.handler(hook_ctx)
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
 def test_first_fire_triggers_prune(tmp_path: Path) -> None:
-    """First save should mark the auto-prune marker."""
+    """First fire schedules a prune that completes and writes .last_prune.
+
+    After the new mark-on-success semantics, the marker is only written
+    by the background ``_background_prune`` task on success. The test
+    drains pending tasks before asserting.
+    """
     ctx = _FakeHarnessCtx(tmp_path / "rw")
     spec = build_auto_checkpoint_hook_spec(harness_ctx=ctx)
-    asyncio.run(spec.handler(_FakeHookCtx(_FakeToolCall("Edit", {"path": "x"}))))
+    asyncio.run(_run_and_drain(spec, _FakeHookCtx(_FakeToolCall("Edit", {"path": "x"}))))
+    # After background prune completes successfully, marker exists.
     assert (ctx.rewind_store.root / RewindStore.LAST_PRUNE_MARKER).exists()
+    # And in-flight slot is released.
+    assert ctx.rewind_store._prune_in_flight is False
 
 
 def test_within_min_interval_skips(tmp_path: Path) -> None:
@@ -69,7 +85,7 @@ def test_within_min_interval_skips(tmp_path: Path) -> None:
 def test_failure_does_not_block_save(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If prune raises, the save path still runs."""
+    """If prune raises, the save path still runs and next call retries."""
     ctx = _FakeHarnessCtx(tmp_path / "rw")
 
     def _boom(**_kw):
@@ -78,7 +94,13 @@ def test_failure_does_not_block_save(
     monkeypatch.setattr(ctx.rewind_store, "prune", _boom)
     spec = build_auto_checkpoint_hook_spec(harness_ctx=ctx)
     # Should NOT raise — failure is swallowed + logged.
-    asyncio.run(spec.handler(_FakeHookCtx(_FakeToolCall("Edit", {"path": "x"}))))
+    asyncio.run(_run_and_drain(spec, _FakeHookCtx(_FakeToolCall("Edit", {"path": "x"}))))
+    # Marker NOT written (because success=False) — next call can retry.
+    assert not (ctx.rewind_store.root / RewindStore.LAST_PRUNE_MARKER).exists()
+    # In-flight slot was released even on failure.
+    assert ctx.rewind_store._prune_in_flight is False
+    # And next should_auto_prune returns True (retry allowed).
+    assert ctx.rewind_store.should_auto_prune() is True
 
 
 def test_non_destructive_tool_skips(tmp_path: Path) -> None:

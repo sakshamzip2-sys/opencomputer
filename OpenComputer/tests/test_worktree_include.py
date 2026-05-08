@@ -324,3 +324,32 @@ def test_session_worktree_applies_include(tmp_path: Path) -> None:
         assert (wt / ".env").read_text() == "API=KEY"
         assert (wt / "README.md").exists()
 
+
+def test_session_worktree_dry_run_does_not_copy(tmp_path: Path) -> None:
+    """Fix 6: include_dry_run=True must NOT copy files into the worktree."""
+    from opencomputer.worktree import session_worktree
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    (repo / "README.md").write_text("# r")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "init")
+
+    (repo / ".env").write_text("SECRET=1")
+    (repo / ".gitignore").write_text(".env\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-m", "ignore")
+
+    (repo / ".worktreeinclude").write_text(".env\n")
+    _git(repo, "add", ".worktreeinclude")
+    _git(repo, "commit", "-m", "manifest")
+
+    with session_worktree(repo, session_id="dryrunwt", include_dry_run=True) as wt:
+        # Worktree exists (git worktree add ran).
+        assert wt.is_dir()
+        # README is from HEAD — present.
+        assert (wt / "README.md").exists()
+        # But .env (gitignored) was NOT copied because dry_run.
+        assert not (wt / ".env").exists()
+

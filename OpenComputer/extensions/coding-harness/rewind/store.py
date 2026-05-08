@@ -69,6 +69,10 @@ class RewindStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.workspace_root = Path(workspace_root) if workspace_root else Path.cwd()
         self.subagent_id = subagent_id
+        # Per-instance flag preventing concurrent auto-prune fires within
+        # the same process. See should_auto_prune / mark_prune_started /
+        # mark_prune_finished.
+        self._prune_in_flight = False
 
     # ─── save / load ────────────────────────────────────────────
 
@@ -77,17 +81,23 @@ class RewindStore:
 
         Eviction is in-line (not via :meth:`prune`) so it's guaranteed
         to run synchronously before the new checkpoint lands.
+
+        Eviction reads metadata only (not file blobs) so the cost is
+        O(N file-stat calls) per save, not O(N × blob_bytes loaded into RAM).
         """
         if max_total_bytes is not None:
             cp_size_estimate = sum(len(b) for b in cp.files.values()) + 1024
+            running_total = self.total_size_bytes(include_subagents=False)
+            metas = sorted(self._iter_metadata(), key=lambda t: t[1])
+            i = 0
             while (
-                self.total_size_bytes(include_subagents=False) + cp_size_estimate
-                > max_total_bytes
+                running_total + cp_size_estimate > max_total_bytes
+                and i < len(metas)
             ):
-                evicted = self.oldest()
-                if evicted is None:
-                    break
-                shutil.rmtree(self.root / evicted.id, ignore_errors=True)
+                _cid, _created, oldest_path, oldest_size = metas[i]
+                shutil.rmtree(oldest_path, ignore_errors=True)
+                running_total -= oldest_size
+                i += 1
 
         cp_dir = self.root / cp.id
         cp_dir.mkdir(exist_ok=True)
@@ -212,14 +222,58 @@ class RewindStore:
                 total += 1
         return total
 
+    def _iter_metadata(self):
+        """Yield ``(id, created_at_iso, dir_path, size_bytes)`` per checkpoint.
+
+        Reads ``meta.json`` only — does NOT load file blobs into RAM.
+        Used by :meth:`save` eviction and :meth:`oldest` / :meth:`newest`
+        to avoid O(N × blob_bytes) memory thrash on large stores.
+        """
+        if not self.root.exists():
+            return
+        for child in self.root.iterdir():
+            if child.name in (self.PENDING_DELETE_DIR, "subagents"):
+                continue
+            if child.name.startswith("."):
+                continue
+            if not child.is_dir():
+                continue
+            meta_path = child / "meta.json"
+            if not meta_path.exists():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text())
+            except (ValueError, OSError):
+                continue
+            cid = str(meta.get("id", ""))
+            created = str(meta.get("created_at", ""))
+            try:
+                size = sum(p.stat().st_size for p in child.rglob("*") if p.is_file())
+            except OSError:
+                size = 0
+            yield (cid, created, child, size)
+
     def oldest(self) -> Checkpoint | None:
-        """Oldest valid checkpoint by ``created_at``."""
-        cps = self.list()
-        return cps[-1] if cps else None  # list() returns newest-first
+        """Oldest valid checkpoint by ``created_at``.
+
+        Loads ONLY the chosen checkpoint's blobs (not all blobs).
+        """
+        metas = list(self._iter_metadata())
+        if not metas:
+            return None
+        metas.sort(key=lambda t: t[1])  # ascending → oldest first
+        return self.load(metas[0][0])
 
     def newest(self) -> Checkpoint | None:
-        cps = self.list()
-        return cps[0] if cps else None
+        """Newest valid checkpoint by ``created_at``.
+
+        Loads ONLY the chosen checkpoint's blobs (not all blobs).
+        """
+        metas = list(self._iter_metadata())
+        if not metas:
+            return None
+        metas.sort(key=lambda t: t[1], reverse=True)
+        return self.load(metas[0][0])
 
     # ─── prune + clear ─────────────────────────────────────────
 
@@ -393,7 +447,22 @@ class RewindStore:
     # ─── auto-prune cooperation ─────────────────────────────────
 
     def should_auto_prune(self, *, min_interval_hours: int = 24) -> bool:
-        """True iff ``.last_prune`` is missing or older than ``min_interval_hours``."""
+        """True iff a prune is due AND not already in flight on this instance.
+
+        Checks two things:
+
+        1. The in-process ``_prune_in_flight`` flag — prevents two
+           concurrent fires within the same process from both scheduling
+           a prune.
+        2. The on-disk ``.last_prune`` marker — if present and younger
+           than ``min_interval_hours``, prune is not due yet.
+
+        Returns False if EITHER (1) or (2) say "no" — i.e. only returns
+        True when this instance currently holds no prune AND the
+        on-disk record says enough time has elapsed.
+        """
+        if self._prune_in_flight:
+            return False
         marker = self.root / self.LAST_PRUNE_MARKER
         if not marker.exists():
             return True
@@ -403,8 +472,34 @@ class RewindStore:
             return True
         return age_h >= min_interval_hours
 
+    def mark_prune_started(self) -> None:
+        """Claim the auto-prune slot for THIS instance.
+
+        Sets ``_prune_in_flight = True`` so concurrent ``should_auto_prune``
+        calls return False until :meth:`mark_prune_finished` runs.
+        """
+        self._prune_in_flight = True
+
+    def mark_prune_finished(self, *, success: bool) -> None:
+        """Release the in-flight slot. Persist ``.last_prune`` ONLY on success.
+
+        The on-disk marker is the cooperative cross-call signal. Writing
+        it on failure would block the next 24h of retries despite the
+        prune never having actually run. Writing only on success means
+        a transient failure (e.g. permission denied) is naturally
+        retried on the next handler invocation.
+        """
+        self._prune_in_flight = False
+        if success:
+            self.mark_pruned()
+
     def mark_pruned(self) -> None:
-        """Touch ``.last_prune`` atomically."""
+        """Touch ``.last_prune`` atomically.
+
+        Public so manual ``oc checkpoints prune`` invocations can record
+        their own completion. The auto-prune path goes through
+        :meth:`mark_prune_finished` instead.
+        """
         self.root.mkdir(parents=True, exist_ok=True)
         marker = self.root / self.LAST_PRUNE_MARKER
         tmp = self.root / f".last_prune.tmp.{secrets.token_hex(4)}"

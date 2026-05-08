@@ -61,7 +61,14 @@ def _config_or_defaults() -> dict:
 
 
 async def _background_prune(store, cfg: dict) -> None:
-    """Run :meth:`RewindStore.prune` in a thread; swallow + log on failure."""
+    """Run :meth:`RewindStore.prune` in a thread; swallow + log on failure.
+
+    Marks ``.last_prune`` only on success — a transient failure
+    (permission denied, disk full mid-rmtree) is naturally retried on
+    the next handler invocation rather than blocking 24h of retries.
+    Always releases the in-flight slot so concurrent callers can proceed.
+    """
+    success = False
     try:
         await asyncio.to_thread(
             store.prune,
@@ -71,8 +78,11 @@ async def _background_prune(store, cfg: dict) -> None:
             delete_orphans=cfg["delete_orphans"],
             dry_run=False,
         )
+        success = True
     except Exception as exc:  # noqa: BLE001
         logger.warning("auto-prune failed (non-fatal): %s", exc)
+    finally:
+        store.mark_prune_finished(success=success)
 
 
 def build_auto_checkpoint_hook_spec(*, harness_ctx) -> HookSpec:
@@ -84,17 +94,20 @@ def build_auto_checkpoint_hook_spec(*, harness_ctx) -> HookSpec:
         if ctx.tool_call.name not in DESTRUCTIVE_TOOLS:
             return None
 
-        # ── Decide prune intent EAGERLY (before save). We mark the
-        # auto-prune slot consumed so concurrent handlers don't race;
-        # the actual prune work is deferred until AFTER save lands so
-        # the two operations don't fight over the store directory.
+        # ── Decide prune intent EAGERLY (before save). We claim the
+        # in-flight slot so concurrent handlers don't double-schedule;
+        # actual prune work is deferred until AFTER save lands so the
+        # two operations don't fight over the store directory. The
+        # on-disk ``.last_prune`` marker is written by
+        # ``_background_prune`` ONLY on success, so a failed prune
+        # naturally retries on the next handler invocation.
         schedule_prune = False
         if cfg["enabled"] and cfg["auto_prune"]:
             try:
                 if harness_ctx.rewind_store.should_auto_prune(
                     min_interval_hours=cfg["min_interval_hours"],
                 ):
-                    harness_ctx.rewind_store.mark_pruned()
+                    harness_ctx.rewind_store.mark_prune_started()
                     schedule_prune = True
             except Exception as exc:  # noqa: BLE001
                 logger.warning("auto-prune scheduling failed (non-fatal): %s", exc)
