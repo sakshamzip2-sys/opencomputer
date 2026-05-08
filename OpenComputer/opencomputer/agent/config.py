@@ -374,6 +374,32 @@ class ToolsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class CronConfig:
+    """Cron-job behavior config (Hermes parity, 2026-05-08).
+
+    Attributes:
+        wrap_response: When True, wraps the delivered response with the
+            Markdown header (job name, run time, schedule) — matches what
+            ``save_job_output`` already saves to the output file. When False
+            (OC default), delivers the agent's raw response text only.
+
+            Note: this default DIFFERS from Hermes's ``wrap_response: true``
+            default. The OC default preserves existing behavior — cron
+            jobs have always delivered raw text. Users who want the
+            Hermes-style header/footer wrap can opt in via:
+              cron:
+                wrap_response: true
+        script_timeout_seconds: Default timeout for ``--no-agent`` script
+            jobs (seconds). Per-job override via the
+            ``script_timeout_seconds`` kwarg on ``create_job``. Hermes
+            parity with ``cron.script_timeout_seconds``. Default 120.
+    """
+
+    wrap_response: bool = False
+    script_timeout_seconds: int = 120
+
+
+@dataclass(frozen=True, slots=True)
 class FullSystemControlConfig:
     """3.F — master enable/disable for autonomous full-system-control mode.
 
@@ -559,6 +585,8 @@ class Config:
     #: Defaults to disabled (invisible). When enabled, the structured
     #: ``agent.log`` collector + optional menu-bar indicator activate.
     system_control: FullSystemControlConfig = field(default_factory=FullSystemControlConfig)
+    #: Hermes-parity cron knobs (2026-05-08). See :class:`CronConfig`.
+    cron: CronConfig = field(default_factory=CronConfig)
     home: Path = field(default_factory=_home)
 
 
@@ -590,6 +618,7 @@ def load_config_for_profile(profile_home: Path) -> Config:
 
 __all__ = [
     "Config",
+    "CronConfig",
     "ModelConfig",
     "LoopConfig",
     "SessionConfig",
