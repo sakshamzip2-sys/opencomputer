@@ -28,6 +28,8 @@ __all__ = [
     "atomic_write_yaml",
     "modify_yaml_locked",
     "load_yaml",
+    "set_default_personality",
+    "set_display_skin",
 ]
 
 
@@ -76,3 +78,43 @@ def modify_yaml_locked(path: Path, mutate) -> dict[str, Any]:
         mutate(data)
         atomic_write_yaml(path, data)
     return data
+
+
+def set_default_personality(config_path: Path, name: str) -> None:
+    """Persist ``agent.default_personality: name`` to the profile config.
+
+    Empty ``name`` removes the key (so resolution falls back to the
+    built-in 'helpful'). Uses :func:`modify_yaml_locked` so concurrent
+    writers serialize cleanly.
+    """
+    def _mutate(data: dict[str, Any]) -> None:
+        agent = data.setdefault("agent", {})
+        if not isinstance(agent, dict):
+            agent = {}
+            data["agent"] = agent
+        if name:
+            agent["default_personality"] = name
+        else:
+            agent.pop("default_personality", None)
+
+    modify_yaml_locked(config_path, _mutate)
+
+
+def set_display_skin(config_path: Path, name: str) -> None:
+    """Persist ``display.skin: name`` to the profile config.
+
+    Empty ``name`` removes the key (so resolution falls back to the
+    built-in 'default' skin). Uses :func:`modify_yaml_locked` so
+    concurrent writers serialize cleanly.
+    """
+    def _mutate(data: dict[str, Any]) -> None:
+        display = data.setdefault("display", {})
+        if not isinstance(display, dict):
+            display = {}
+            data["display"] = display
+        if name:
+            display["skin"] = name
+        else:
+            display.pop("skin", None)
+
+    modify_yaml_locked(config_path, _mutate)

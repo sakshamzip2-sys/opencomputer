@@ -62,3 +62,61 @@ def test_personality_dataclass_is_frozen():
     p = resolve("helpful", custom={})
     with pytest.raises(Exception):
         p.body = "no"  # type: ignore[misc]
+
+
+def test_set_default_personality_persists(tmp_path):
+    """``set_default_personality`` writes to agent.default_personality."""
+    from opencomputer.agent.profile_yaml import (
+        load_yaml,
+        set_default_personality,
+    )
+
+    cfg = tmp_path / "config.yaml"
+
+    set_default_personality(cfg, "concise")
+    data = load_yaml(cfg)
+    assert data["agent"]["default_personality"] == "concise"
+
+    set_default_personality(cfg, "")
+    data = load_yaml(cfg)
+    # empty string clears the key
+    assert "default_personality" not in (data.get("agent") or {})
+
+
+def test_set_display_skin_persists(tmp_path):
+    """``set_display_skin`` writes to display.skin."""
+    from opencomputer.agent.profile_yaml import (
+        load_yaml,
+        set_display_skin,
+    )
+
+    cfg = tmp_path / "config.yaml"
+
+    set_display_skin(cfg, "ares")
+    data = load_yaml(cfg)
+    assert data["display"]["skin"] == "ares"
+
+    set_display_skin(cfg, "")
+    data = load_yaml(cfg)
+    assert "skin" not in (data.get("display") or {})
+
+
+def test_personality_threads_through_promptbuilder_factory(tmp_path):
+    """A custom personality declared in config reaches the prompt."""
+    from opencomputer.agent.profile_yaml import load_yaml
+    from opencomputer.agent.prompt_builder import PromptBuilder
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "agent:\n"
+        "  personalities:\n"
+        "    codereviewer: |\n"
+        "      MARKER-CODE-REVIEW-XYZ\n"
+    )
+    loaded = load_yaml(cfg)
+    custom = (loaded.get("agent") or {}).get("personalities") or {}
+    assert "codereviewer" in custom
+
+    pb = PromptBuilder()
+    prompt = pb.build(personality="codereviewer", custom_personalities=custom)
+    assert "MARKER-CODE-REVIEW-XYZ" in prompt
