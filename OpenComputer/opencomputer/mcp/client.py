@@ -234,6 +234,12 @@ class MCPTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
+        # Hermes-parity MCP credential redaction. MCP server output and
+        # exception strings can contain GitHub PATs, OpenAI-style keys,
+        # bearer tokens, postgres URLs etc. Pipe everything through the
+        # central redaction module BEFORE returning to the LLM.
+        from opencomputer.security.redact import redact_runtime_text
+
         try:
             result = await self.session.call_tool(name=self.tool_name, arguments=call.arguments)
             # Convert MCP result to our string format — concatenate text blocks
@@ -246,15 +252,20 @@ class MCPTool(BaseTool):
                     parts.append("[image]")
                 else:
                     parts.append(str(block))
+            content = "\n".join(parts) or "[empty MCP response]"
             return ToolResult(
                 tool_call_id=call.id,
-                content="\n".join(parts) or "[empty MCP response]",
+                content=redact_runtime_text(content),
                 is_error=is_error,
             )
         except Exception as e:  # noqa: BLE001
+            err = (
+                f"MCP error from {self.server_name}.{self.tool_name}: "
+                f"{type(e).__name__}: {e}"
+            )
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"MCP error from {self.server_name}.{self.tool_name}: {type(e).__name__}: {e}",
+                content=redact_runtime_text(err),
                 is_error=True,
             )
 
@@ -314,18 +325,21 @@ class _MCPListResourcesTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
+        from opencomputer.security.redact import redact_runtime_text
+
         try:
             result = await self._session.list_resources()
             payload = [_serialize_resource(r) for r in (getattr(result, "resources", None) or [])]
             return ToolResult(
                 tool_call_id=call.id,
-                content=json.dumps(payload),
+                content=redact_runtime_text(json.dumps(payload)),
                 is_error=False,
             )
         except Exception as e:  # noqa: BLE001
+            err = f"MCP utility error from {self._server_name}.list_resources: {type(e).__name__}: {e}"
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"MCP utility error from {self._server_name}.list_resources: {type(e).__name__}: {e}",
+                content=redact_runtime_text(err),
                 is_error=True,
             )
 
@@ -354,6 +368,8 @@ class _MCPReadResourceTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
+        from opencomputer.security.redact import redact_runtime_text
+
         uri = call.arguments.get("uri")
         if not uri:
             return ToolResult(
@@ -372,13 +388,14 @@ class _MCPReadResourceTool(BaseTool):
             }
             return ToolResult(
                 tool_call_id=call.id,
-                content=json.dumps(payload),
+                content=redact_runtime_text(json.dumps(payload)),
                 is_error=False,
             )
         except Exception as e:  # noqa: BLE001
+            err = f"MCP utility error from {self._server_name}.read_resource: {type(e).__name__}: {e}"
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"MCP utility error from {self._server_name}.read_resource: {type(e).__name__}: {e}",
+                content=redact_runtime_text(err),
                 is_error=True,
             )
 
@@ -404,18 +421,21 @@ class _MCPListPromptsTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
+        from opencomputer.security.redact import redact_runtime_text
+
         try:
             result = await self._session.list_prompts()
             payload = [_serialize_prompt(p) for p in (getattr(result, "prompts", None) or [])]
             return ToolResult(
                 tool_call_id=call.id,
-                content=json.dumps(payload),
+                content=redact_runtime_text(json.dumps(payload)),
                 is_error=False,
             )
         except Exception as e:  # noqa: BLE001
+            err = f"MCP utility error from {self._server_name}.list_prompts: {type(e).__name__}: {e}"
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"MCP utility error from {self._server_name}.list_prompts: {type(e).__name__}: {e}",
+                content=redact_runtime_text(err),
                 is_error=True,
             )
 
@@ -448,6 +468,8 @@ class _MCPGetPromptTool(BaseTool):
         )
 
     async def execute(self, call: ToolCall) -> ToolResult:
+        from opencomputer.security.redact import redact_runtime_text
+
         name = call.arguments.get("name")
         if not name:
             return ToolResult(
@@ -462,13 +484,14 @@ class _MCPGetPromptTool(BaseTool):
             payload = {"messages": [m if isinstance(m, dict) else dict(m) for m in messages]}
             return ToolResult(
                 tool_call_id=call.id,
-                content=json.dumps(payload, default=str),
+                content=redact_runtime_text(json.dumps(payload, default=str)),
                 is_error=False,
             )
         except Exception as e:  # noqa: BLE001
+            err = f"MCP utility error from {self._server_name}.get_prompt: {type(e).__name__}: {e}"
             return ToolResult(
                 tool_call_id=call.id,
-                content=f"MCP utility error from {self._server_name}.get_prompt: {type(e).__name__}: {e}",
+                content=redact_runtime_text(err),
                 is_error=True,
             )
 

@@ -24,6 +24,14 @@ the WebFetch tool) pipe their payloads through
 
 from __future__ import annotations
 
+from opencomputer.security.approval_keywords import (
+    ReplyClassification,
+    classify_reply,
+)
+from opencomputer.security.approvals import (
+    ApprovalsConfig,
+    load_approvals_from_active_config,
+)
 from opencomputer.security.context_scan import scan_workspace_context_content
 from opencomputer.security.hardline import (
     HARDLINE_PATTERNS,
@@ -58,15 +66,19 @@ from opencomputer.security.website_blocklist import (
 )
 
 __all__ = [
+    "ApprovalsConfig",
     "DetectionVerdict",
     "HARDLINE_PATTERNS",
     "HardlinePattern",
     "InstructionDetector",
     "InstructionDetectorConfig",
+    "ReplyClassification",
     "WebsiteBlocklistPolicy",
     "check_hardline_command",
+    "classify_reply",
     "default_detector",
     "is_url_blocked",
+    "load_approvals_from_active_config",
     "redact_is_enabled",
     "redact_runtime_mapping",
     "redact_runtime_text",
