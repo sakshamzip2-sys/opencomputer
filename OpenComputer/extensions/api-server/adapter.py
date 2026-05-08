@@ -311,6 +311,142 @@ class APIServerAdapter(BaseChannelAdapter):
             {"session_id": session_id, "run_id": run_id, "response": reply}
         )
 
+    # T60 — Hermes-doc /api/jobs (cron management) ──────────────────
+
+    def _auth_check(self, request: web.Request) -> web.Response | None:
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth[len("Bearer "):] != self._token:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return None
+
+    async def _handle_jobs_list(self, request: web.Request) -> web.Response:
+        deny = self._auth_check(request)
+        if deny is not None:
+            return deny
+        from opencomputer.cron import jobs as cron_jobs
+
+        try:
+            jobs = cron_jobs.list_jobs(include_disabled=True)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=500)
+        return web.json_response({"jobs": jobs})
+
+    async def _handle_jobs_create(self, request: web.Request) -> web.Response:
+        deny = self._auth_check(request)
+        if deny is not None:
+            return deny
+        from opencomputer.cron import jobs as cron_jobs
+
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"error": "invalid json"}, status=400)
+        schedule = payload.get("schedule")
+        if not isinstance(schedule, str) or not schedule.strip():
+            return web.json_response({"error": "schedule required"}, status=400)
+        try:
+            job = cron_jobs.create_job(
+                schedule=schedule,
+                name=payload.get("name"),
+                prompt=payload.get("prompt"),
+                skill=payload.get("skill"),
+                repeat=payload.get("repeat"),
+                notify=payload.get("notify"),
+                plan_mode=bool(payload.get("plan_mode", True)),
+                enabled_toolsets=payload.get("enabled_toolsets"),
+                context_from=payload.get("context_from"),
+                workdir=payload.get("workdir"),
+                no_agent=bool(payload.get("no_agent", False)),
+                script=payload.get("script"),
+                script_timeout_seconds=payload.get("script_timeout_seconds"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response(job, status=201)
+
+    async def _handle_jobs_get(self, request: web.Request) -> web.Response:
+        deny = self._auth_check(request)
+        if deny is not None:
+            return deny
+        from opencomputer.cron import jobs as cron_jobs
+
+        job_id = request.match_info["job_id"]
+        job = cron_jobs.get_job(job_id)
+        if job is None:
+            return web.json_response({"error": "job not found"}, status=404)
+        return web.json_response(job)
+
+    async def _handle_jobs_patch(self, request: web.Request) -> web.Response:
+        deny = self._auth_check(request)
+        if deny is not None:
+            return deny
+        from opencomputer.cron import jobs as cron_jobs
+
+        job_id = request.match_info["job_id"]
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"error": "invalid json"}, status=400)
+        if not isinstance(payload, dict):
+            return web.json_response({"error": "object body required"}, status=400)
+        job = cron_jobs.update_job(job_id, payload)
+        if job is None:
+            return web.json_response({"error": "job not found"}, status=404)
+        return web.json_response(job)
+
+    async def _handle_jobs_delete(self, request: web.Request) -> web.Response:
+        deny = self._auth_check(request)
+        if deny is not None:
+            return deny
+        from opencomputer.cron import jobs as cron_jobs
+
+        job_id = request.match_info["job_id"]
+        ok = cron_jobs.remove_job(job_id)
+        if not ok:
+            return web.json_response({"error": "job not found"}, status=404)
+        return web.json_response({"deleted": True, "job_id": job_id})
+
+    async def _handle_jobs_pause(self, request: web.Request) -> web.Response:
+        deny = self._auth_check(request)
+        if deny is not None:
+            return deny
+        from opencomputer.cron import jobs as cron_jobs
+
+        job_id = request.match_info["job_id"]
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        reason = payload.get("reason") if isinstance(payload, dict) else None
+        job = cron_jobs.pause_job(job_id, reason=reason)
+        if job is None:
+            return web.json_response({"error": "job not found"}, status=404)
+        return web.json_response(job)
+
+    async def _handle_jobs_resume(self, request: web.Request) -> web.Response:
+        deny = self._auth_check(request)
+        if deny is not None:
+            return deny
+        from opencomputer.cron import jobs as cron_jobs
+
+        job_id = request.match_info["job_id"]
+        job = cron_jobs.resume_job(job_id)
+        if job is None:
+            return web.json_response({"error": "job not found"}, status=404)
+        return web.json_response(job)
+
+    async def _handle_jobs_run(self, request: web.Request) -> web.Response:
+        deny = self._auth_check(request)
+        if deny is not None:
+            return deny
+        from opencomputer.cron import jobs as cron_jobs
+
+        job_id = request.match_info["job_id"]
+        job = cron_jobs.trigger_job(job_id)
+        if job is None:
+            return web.json_response({"error": "job not found"}, status=404)
+        return web.json_response(job)
+
     # T59 — Hermes-doc /v1/runs full API ─────────────────────────────
 
     async def _handle_run_create(self, request: web.Request) -> web.Response:
@@ -723,6 +859,15 @@ class APIServerAdapter(BaseChannelAdapter):
         app.router.add_post("/v1/runs", self._handle_run_create)
         app.router.add_get("/v1/runs/{run_id}", self._handle_run_get)
         app.router.add_get("/v1/runs/{run_id}/events", self._handle_run_events)
+        # T60 — Hermes-doc Jobs API (cron management). All routes auth-required.
+        app.router.add_get("/api/jobs", self._handle_jobs_list)
+        app.router.add_post("/api/jobs", self._handle_jobs_create)
+        app.router.add_get("/api/jobs/{job_id}", self._handle_jobs_get)
+        app.router.add_patch("/api/jobs/{job_id}", self._handle_jobs_patch)
+        app.router.add_delete("/api/jobs/{job_id}", self._handle_jobs_delete)
+        app.router.add_post("/api/jobs/{job_id}/pause", self._handle_jobs_pause)
+        app.router.add_post("/api/jobs/{job_id}/resume", self._handle_jobs_resume)
+        app.router.add_post("/api/jobs/{job_id}/run", self._handle_jobs_run)
         # T2 — Hermes-doc parity. Public capability probe (no auth).
         app.router.add_get("/v1/capabilities", self._handle_capabilities)
         # T3 — Hermes-doc parity. Public detailed health probe (no auth).
@@ -752,7 +897,7 @@ class APIServerAdapter(BaseChannelAdapter):
                 "system_prompt": True,
                 "previous_response_id": True,
                 "runs_api": True,
-                "jobs_api": False,
+                "jobs_api": True,
             },
         }
         return web.json_response(payload)
