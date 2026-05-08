@@ -1023,4 +1023,31 @@ async def read_user_input(
     )
 
     text = await app.run_async()
-    return _strip_trailing_whitespace(text or "")
+    text = _strip_trailing_whitespace(text or "")
+    text = _maybe_expand_at_refs(text)
+    return text
+
+
+def _maybe_expand_at_refs(text: str) -> str:
+    """Expand ``@file:``/``@folder:``/``@diff``/``@staged``/``@git:N``/``@url:``
+    references in user input. CLI-only — channel adapters do not call this.
+
+    Failures are non-fatal; the original text is returned on any error
+    so the user's send is never blocked by an expander glitch.
+    """
+    if "@" not in text:
+        return text
+    try:
+        import os
+
+        from opencomputer.agent.at_references import AtRefContext, expand
+        return expand(
+            text,
+            ctx=AtRefContext(
+                cwd=os.getcwd(),
+                home=str(Path.home()),
+                context_window_chars=200_000,
+            ),
+        )
+    except Exception:  # noqa: BLE001 — never block send on expander
+        return text
