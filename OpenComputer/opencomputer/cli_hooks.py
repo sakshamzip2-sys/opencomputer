@@ -31,6 +31,7 @@ from opencomputer.agent.hook_history import (
     clear_history,
     iter_history,
 )
+from plugin_sdk.hooks import HookEvent
 
 hooks_app = typer.Typer(help="Inspect and manage agent hooks.")
 _console = Console()
@@ -44,8 +45,6 @@ def _profile_dir() -> Path:
 def _known_events() -> list[str]:
     """Return all declared HookEvent values, falling back to history keys."""
     try:
-        from plugin_sdk.hooks import HookEvent
-
         return sorted(e.value for e in HookEvent)
     except Exception:  # noqa: BLE001
         return sorted(all_events())
@@ -453,24 +452,159 @@ def cmd_doctor(
             }
         )
 
-    # 3. Recent fire history — surface staleness
+    # 3. Plugin hook registrations (Python register_hook callbacks).
     try:
+        from opencomputer.hooks.engine import engine as _hk_engine
+
+        per_event = {
+            ev.value: len(_hk_engine._ordered_specs(ev))  # noqa: SLF001
+            for ev in HookEvent
+        }
+        total = sum(per_event.values())
+        non_zero = {k: v for k, v in per_event.items() if v > 0}
+        if total == 0:
+            rows.append(
+                {
+                    "severity": "INFO",
+                    "check": "plugin-hooks-count",
+                    "detail": "0 plugin/settings hooks registered (any event)",
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "severity": "OK",
+                    "check": "plugin-hooks-count",
+                    "detail": f"{total} handler(s) across {len(non_zero)} event(s)",
+                }
+            )
+            for ev_name, n in sorted(non_zero.items()):
+                rows.append(
+                    {
+                        "severity": "OK",
+                        "check": f"plugin-hooks:{ev_name}",
+                        "detail": f"{n} handler(s)",
+                    }
+                )
+    except Exception as exc:  # noqa: BLE001
+        rows.append(
+            {
+                "severity": "WARN",
+                "check": "plugin-hooks-count",
+                "detail": f"engine inspection raised: {type(exc).__name__}",
+            }
+        )
+
+    # 4. Settings-hook script mtime drift — flag if a configured hook
+    # script was modified within the last hour OR is older than 90 days.
+    # Hermes' `hermes hooks doctor` flags this so users notice when a
+    # CI-deployed script silently changed.
+    try:
+        import time as _time
+
+        from opencomputer.agent.config_store import load_config
+
+        cfg = load_config()
+        sh = getattr(cfg, "hooks", None)
+        if sh:
+            now = _time.time()
+            for cmd_config in sh:
+                cmd = getattr(cmd_config, "command", "") or ""
+                parts = cmd.split()
+                exe = parts[0] if parts else ""
+                if exe.startswith("/") and os.path.exists(exe):
+                    age_s = now - os.path.getmtime(exe)
+                    age_days = age_s / 86400.0
+                    if age_s < 3600:
+                        rows.append(
+                            {
+                                "severity": "WARN",
+                                "check": f"hook-mtime:{exe}",
+                                "detail": (
+                                    f"modified {int(age_s)}s ago — "
+                                    "verify it still does what you expect"
+                                ),
+                            }
+                        )
+                    elif age_days > 90:
+                        rows.append(
+                            {
+                                "severity": "INFO",
+                                "check": f"hook-mtime:{exe}",
+                                "detail": f"unchanged for {int(age_days)} days",
+                            }
+                        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 5. Recent fire history — surface staleness for events that should
+    # fire often. We treat PreToolUse and PostToolUse as canary events:
+    # if the engine has handlers but no fires in the last 24h, flag it.
+    try:
+        import time as _time2
+
         events_with_fires = list(all_events())
+        STALENESS_THRESHOLD_S = 86400.0  # 24h
+        canary_events = ("PreToolUse", "PostToolUse")
+        now2 = _time2.time()
         if events_with_fires:
             for event_name in events_with_fires[:5]:
                 records = list(iter_history(event_name))
                 if records:
                     last = records[-1]
+                    age_s = now2 - last.ts_utc
+                    severity = "OK" if last.ok else "WARN"
                     rows.append(
                         {
-                            "severity": "OK" if last.ok else "WARN",
+                            "severity": severity,
                             "check": f"recent-fire:{event_name}",
                             "detail": (
-                                f"{last.ts_utc:.0f} src={last.source_id[:40]} "
+                                f"{int(age_s)}s ago src={last.source_id[:40]} "
                                 f"ok={last.ok}"
                             ),
                         }
                     )
+            # Staleness check: if a canary event has handlers registered
+            # but the last fire was >24h ago, that's suspicious.
+            try:
+                from opencomputer.hooks.engine import engine as _hk_engine_st
+
+                for canary in canary_events:
+                    try:
+                        ev = HookEvent(canary)
+                    except ValueError:
+                        continue
+                    n_handlers = len(
+                        _hk_engine_st._ordered_specs(ev)  # noqa: SLF001
+                    )
+                    if n_handlers == 0:
+                        continue
+                    canary_records = list(iter_history(canary))
+                    if not canary_records:
+                        rows.append(
+                            {
+                                "severity": "WARN",
+                                "check": f"staleness:{canary}",
+                                "detail": (
+                                    f"{n_handlers} handler(s) registered but "
+                                    f"never fired"
+                                ),
+                            }
+                        )
+                    else:
+                        age_s = now2 - canary_records[-1].ts_utc
+                        if age_s > STALENESS_THRESHOLD_S:
+                            rows.append(
+                                {
+                                    "severity": "WARN",
+                                    "check": f"staleness:{canary}",
+                                    "detail": (
+                                        f"last fire {age_s / 3600.0:.1f}h ago"
+                                    ),
+                                }
+                            )
+            except Exception:  # noqa: BLE001
+                pass
         else:
             rows.append(
                 {
@@ -482,7 +616,7 @@ def cmd_doctor(
     except Exception:  # noqa: BLE001
         pass
 
-    # 4. Note: OC has no shell-hook allowlist by design
+    # 6. Note: OC has no shell-hook allowlist by design
     rows.append(
         {
             "severity": "INFO",

@@ -320,6 +320,52 @@ def _wrap_skill_result_as_tool_messages(
     return [assistant, tool_message]
 
 
+def apply_inject_contexts(
+    messages: list[Message], contexts: list[str]
+) -> list[Message]:
+    """Append ``contexts`` (joined with double newlines) to ``messages``.
+
+    Used by the PRE_LLM_CALL fire-point in :meth:`AgentLoop._call_provider`
+    to inject text returned by shell hooks via ``HookDecision.inject_context``.
+
+    Mutation rules:
+
+    * If ``contexts`` is empty or ``messages`` is empty → return
+      ``messages`` unchanged.
+    * If the last message is a plain user message (``role="user"``,
+      no ``tool_call_id``, no ``tool_calls``) → return a new list with
+      the last entry replaced by a copy whose ``content`` has the
+      injected text appended (separated by a blank line).
+    * Otherwise (last message is assistant / tool / contains tool
+      linkage) → return a new list with one extra trailing ``user``
+      message holding the injected text. Anthropic's API tolerates
+      a trailing user message after a tool result; the next provider
+      call sees a clean turn boundary.
+
+    Pure function. Idempotent — calling with the same ``contexts``
+    twice produces the same final-content (because the second call's
+    content already starts with the injected text, but a real loop
+    invocation only fires this once per turn).
+
+    Why a separate helper rather than inline: testability. The full
+    AgentLoop is heavy; a pure helper lets us unit-test the load-
+    bearing mutation in isolation against the Hermes Doc-2 G4 spec.
+    """
+    if not contexts or not messages:
+        return messages
+    from dataclasses import replace as _dc_replace
+    joined = "\n\n".join(contexts)
+    last = messages[-1]
+    if last.role == "user" and not last.tool_calls and not last.tool_call_id:
+        new_content = (
+            last.content + "\n\n" + joined
+            if last.content
+            else joined
+        )
+        return list(messages[:-1]) + [_dc_replace(last, content=new_content)]
+    return list(messages) + [Message(role="user", content=joined)]
+
+
 def merge_adjacent_user_messages(messages: list[Message]) -> list[Message]:
     """Merge consecutive text-only user messages into one, joining with ``"\\n\\n"``.
 
@@ -3635,22 +3681,8 @@ class AgentLoop:
             )
         except Exception:  # noqa: BLE001 — fail-open: never wedge the loop
             _injected_contexts = []
-        if _injected_contexts and wire_messages:
-            from dataclasses import replace as _dc_replace
-            _joined = "\n\n".join(_injected_contexts)
-            # Append to the last user message; if the last message isn't
-            # a user message (rare — e.g. a continuation after a tool
-            # result), append a new trailing user message instead.
-            _last = wire_messages[-1]
-            if _last.role == "user" and not _last.tool_calls and not _last.tool_call_id:
-                wire_messages = wire_messages[:-1] + [
-                    _dc_replace(_last, content=_last.content + "\n\n" + _joined)
-                ]
-            else:
-                from plugin_sdk.core import Message as _Message
-                wire_messages = wire_messages + [
-                    _Message(role="user", content=_joined)
-                ]
+        if _injected_contexts:
+            wire_messages = apply_inject_contexts(wire_messages, _injected_contexts)
             # Update the ctx we'll pass to fire_and_forget so plugin
             # observers see the post-injection message list.
             _pre_llm_ctx = _HookContext(

@@ -959,10 +959,13 @@ class CodeExecutionConfig:
     the Hermes reference doc values:
 
     * ``timeout_seconds`` — wallclock cap per script (Hermes default 300).
+      Must be > 0; ValueError raised on construction otherwise so a bad
+      config.yaml fails loudly at load time rather than silently bricking
+      ExecuteCode at first use.
     * ``max_tool_calls`` — RPC call cap per script (Hermes default 50).
-      Closes the silent footgun where a buggy ``while True: read_file()``
-      script could consume API quota until the timeout fired (the cap was
-      previously hardcoded — not configurable).
+      Must be > 0. Closes the silent footgun where a buggy
+      ``while True: read_file()`` script could consume API quota until the
+      timeout fired (the cap was previously hardcoded — not configurable).
     * ``terminal`` — pre-existing free-form dict slot. Honours
       ``terminal.env_passthrough`` (list[str]) — env var names whose
       values pass through to the subprocess despite the KEY/TOKEN/SECRET/
@@ -972,6 +975,18 @@ class CodeExecutionConfig:
     timeout_seconds: float = 300.0
     max_tool_calls: int = 50
     terminal: dict[str, object] = field(default_factory=dict, compare=False, hash=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.timeout_seconds, int | float) or self.timeout_seconds <= 0:
+            raise ValueError(
+                f"code_execution.timeout_seconds must be > 0; "
+                f"got {self.timeout_seconds!r}"
+            )
+        if not isinstance(self.max_tool_calls, int) or self.max_tool_calls <= 0:
+            raise ValueError(
+                f"code_execution.max_tool_calls must be a positive int; "
+                f"got {self.max_tool_calls!r}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
