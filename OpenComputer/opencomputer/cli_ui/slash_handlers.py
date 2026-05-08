@@ -286,11 +286,33 @@ def _handle_sessions(ctx: SlashContext, args: list[str]) -> SlashResult:
         return SlashResult(handled=True)
     table = Table(title="Recent sessions", show_header=True)
     table.add_column("id", style="cyan")
-    table.add_column("started_at")
+    table.add_column("title")
+    table.add_column("msgs", justify="right")
+    table.add_column("started")
     for s in sessions[:20]:
-        table.add_row(s.get("id", "?"), str(s.get("started_at", "?")))
+        sid = str(s.get("id") or "?")
+        title = str(s.get("title") or "[untitled]")
+        message_count = str(s.get("message_count") or 0)
+        table.add_row(
+            sid[:8],
+            title,
+            message_count,
+            _format_session_started_at(s.get("started_at")),
+        )
     ctx.console.print(table)
     return SlashResult(handled=True)
+
+
+def _format_session_started_at(value: object) -> str:
+    if value in (None, ""):
+        return "unknown"
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value)).strftime("%Y-%m-%d %H:%M")
+    text = str(value)
+    try:
+        return datetime.fromtimestamp(float(text)).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return text.replace("T", " ")[:16]
 
 
 def _handle_rename(ctx: SlashContext, args: list[str]) -> SlashResult:

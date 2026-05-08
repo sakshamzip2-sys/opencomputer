@@ -1870,7 +1870,12 @@ def _run_chat_session(
             db = SessionDB(profile_home / "sessions.db")
             rows = db.list_sessions(limit=20)
             return [
-                {"id": r.get("id", "?"), "started_at": r.get("started_at", "?")}
+                {
+                    "id": r.get("id", "?"),
+                    "title": r.get("title") or "",
+                    "message_count": int(r.get("message_count", 0) or 0),
+                    "started_at": r.get("started_at", "?"),
+                }
                 for r in rows
             ]
         except Exception:

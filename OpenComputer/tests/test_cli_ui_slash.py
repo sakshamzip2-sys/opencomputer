@@ -87,7 +87,14 @@ def _make_ctx(console: Console | None = None) -> SlashContext:
         config=MagicMock(model=MagicMock(model="claude-3-5", provider="anthropic")),
         on_clear=lambda: None,
         get_cost_summary=lambda: {"in": 100, "out": 200},
-        get_session_list=lambda: [{"id": "s1", "started_at": "2026-01-01T00:00:00"}],
+        get_session_list=lambda: [
+            {
+                "id": "s1",
+                "title": "First Debug Session",
+                "message_count": 3,
+                "started_at": "2026-01-01T00:00:00",
+            }
+        ],
     )
 
 
@@ -189,6 +196,8 @@ def test_dispatch_sessions_lists_session_ids():
     assert r.handled is True
     out = console.export_text()
     assert "s1" in out
+    assert "First Debug Session" in out
+    assert "3" in out
     assert "2026-01-01" in out
 
 
