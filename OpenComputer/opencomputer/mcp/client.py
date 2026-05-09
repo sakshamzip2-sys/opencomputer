@@ -314,6 +314,16 @@ class MCPAliasTool(BaseTool):
         self._canonical = canonical
 
     @property
+    def server_name(self) -> str:
+        """Forward ``server_name`` so callers iterating mixed lists work."""
+        return self._canonical.server_name
+
+    @property
+    def tool_name(self) -> str:
+        """Forward ``tool_name`` so callers iterating mixed lists work."""
+        return self._canonical.tool_name
+
+    @property
     def schema(self) -> ToolSchema:
         base = self._canonical.schema
         return ToolSchema(

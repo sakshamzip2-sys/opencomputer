@@ -158,7 +158,8 @@ def test_events_poll_no_db_returns_empty(tmp_path, monkeypatch):
     server = build_server()
     fn = _get_tool_fn(server, "events_poll")
     out = fn(since_message_id=0)
-    assert out == {"messages": [], "next_cursor": 0}
+    # G14 (Hermes parity, 2026-05-09): now also returns "approvals" key.
+    assert out == {"messages": [], "next_cursor": 0, "approvals": []}
 
 
 # ──────────────────────────── helper ────────────────────────────
