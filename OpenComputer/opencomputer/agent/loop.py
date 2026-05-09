@@ -1407,8 +1407,65 @@ class AgentLoop:
                 injected_volatile + "\n\n" + block if injected_volatile else block
             )
 
+        # v1.1 plan-3 M6.3 — MEMORY.md hybrid retrieval (BM25 + vector via RRF).
+        # Order per the M6.1 brainstorm carry-forward note:
+        #   [base + injected mode] + [Honcho prefetch] (above)
+        #                         + [MEMORY.md retrieval]   ← THIS BLOCK
+        #                         + [SessionDB FTS5 active memory]  (below)
+        # Honcho first because its corpus is most variable; MEMORY.md
+        # second because it changes only on explicit Memory tool writes;
+        # FTS5 active memory third because it's per-session-episodic and
+        # most volatile.  Default ON; gracefully degrades when MEMORY.md
+        # is empty or the active provider lacks embeddings.
+        if getattr(self.config.memory, "memory_md_retrieval_enabled", True):
+            try:
+                from opencomputer.agent.memory_md_retrieval import (
+                    MemoryMdRetriever,
+                )
+
+                # The active provider's embed() is the embed_fn.  When the
+                # provider lacks one (raises EmbeddingsUnsupportedError),
+                # the retriever falls back to BM25-only with a one-time
+                # WARNING log.
+                embed_fn = None
+                provider = getattr(self, "provider", None)
+                if provider is not None and hasattr(provider, "embed"):
+                    embed_fn = provider.embed
+
+                retriever = MemoryMdRetriever(
+                    self.memory,
+                    embed_fn=embed_fn,
+                    per_source_k=int(
+                        getattr(
+                            self.config.memory,
+                            "memory_md_retrieval_per_source_k",
+                            20,
+                        )
+                    ),
+                    top_k=int(
+                        getattr(
+                            self.config.memory,
+                            "memory_md_retrieval_top_k",
+                            5,
+                        )
+                    ),
+                )
+                hits = await retriever.retrieve(user_message)
+                md_block = retriever.inject_block(hits)
+                if md_block:
+                    volatile_memory_blocks.append(md_block)
+                    system = system + "\n\n" + md_block
+                    injected_volatile = (
+                        injected_volatile + "\n\n" + md_block
+                        if injected_volatile
+                        else md_block
+                    )
+            except Exception as exc:  # noqa: BLE001 — never crash the loop on retrieval
+                _log.warning("MEMORY.md retrieval failed: %s", exc)
+
         # OpenClaw 1.B-alt — local-FTS5 proactive recall prepend.
-        # Composes with Honcho prefetch above; gated by config flag (default OFF).
+        # Composes with Honcho prefetch above + MEMORY.md retrieval block;
+        # gated by config flag (default OFF).
         # Both append to the per-turn ``system`` so the prefix cache stays warm.
         if getattr(self.config.memory, "active_memory_enabled", False):
             from opencomputer.agent.active_memory import (
