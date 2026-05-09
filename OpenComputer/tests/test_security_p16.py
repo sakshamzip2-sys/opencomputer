@@ -315,7 +315,14 @@ async def test_d_e_connect_filters_internal_tools_from_registry() -> None:
         session_cls.return_value = session_cm
         ok = await conn.connect(osv_check_enabled=False)
     assert ok
-    tool_names = [t.tool_name for t in conn.tools]
+    # G8 (Hermes parity, 2026-05-09) — conn.tools also contains
+    # MCPAliasTool wrappers next to canonical MCPTool entries.
+    # Filter to canonical only for the registration-deduping assertion.
+    from opencomputer.mcp.client import MCPTool
+
+    tool_names = [
+        t.tool_name for t in conn.tools if isinstance(t, MCPTool)
+    ]
     assert tool_names == ["public_tool"]
     assert "hidden_internal" not in tool_names
     assert "hidden_admin" not in tool_names

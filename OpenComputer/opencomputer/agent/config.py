@@ -557,6 +557,23 @@ class MCPServerConfig:
     #: Wave 3 (2026-05-08) — per-server tool blacklist. Applied AFTER
     #: ``tools_allow``. Default empty tuple = no exclusions.
     tools_deny: tuple[str, ...] = ()
+    #: Hermes parity G9 (2026-05-09) — suppress per-server MCP prompt
+    #: utility tools (``<server>__list_prompts`` / ``__get_prompt``).
+    #: Default ``True`` keeps every utility tool the server publishes;
+    #: setting ``False`` drops just the prompt utility tools.
+    prompts_enabled: bool = True
+    #: Hermes parity G9 (2026-05-09) — suppress per-server MCP resource
+    #: utility tools (``<server>__list_resources`` / ``__read_resource``).
+    resources_enabled: bool = True
+    #: Hermes parity G10 (2026-05-09) — per-server tool-call timeout (s).
+    #: Wraps ``ClientSession.call_tool`` with ``asyncio.wait_for``. The
+    #: 30 s default matches Hermes spec; lower values catch hung MCP
+    #: tools before they wedge the agent loop.
+    timeout: float = 30.0
+    #: Initial-connect timeout (s). Applies to the ``stdio_client`` /
+    #: ``streamablehttp_client`` / ``sse_client`` connect path. Same
+    #: 30 s default; lower values fail-fast a slow remote MCP host.
+    connect_timeout: float = 30.0
 
     def __post_init__(self) -> None:
         # YAML auto-parser delivers list-typed fields as Python ``list``;
@@ -600,6 +617,31 @@ class MCPConfig:
     # explicit arg → OC_MCP_CATALOG_URL env → this field → bundled default.
     # Empty string / None means "use the default".
     catalog_url: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MCPSamplingCaps:
+    """Hermes parity G11 (2026-05-09) — per-server sampling caps.
+
+    Bounds applied when an MCP server uses ``sampling/createMessage`` to
+    reach back into Hermes' LLM. Without caps, a server could trivially
+    exhaust the operator's quota (high ``maxTokens``, runaway multi-turn)
+    or pick a more expensive model than the operator intends.
+
+    * ``max_tokens_cap`` — clip ``params.maxTokens`` to this ceiling.
+    * ``max_rpm`` — soft per-server RPM throttle (token-bucket; warn).
+    * ``max_tool_rounds`` — cap on multi-turn tool-use rounds within
+      one sampling request (reserved; enforcement deferred to the
+      sampling-loop driver when added).
+    * ``allowed_models`` — when non-empty, reject any request whose
+      ``modelPreferences.hints[*].name`` is outside the list. Empty
+      tuple means "no model restriction".
+    """
+
+    max_tokens_cap: int = 4096
+    max_rpm: int = 60
+    max_tool_rounds: int = 5
+    allowed_models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -207,6 +207,10 @@ class MCPTool(BaseTool):
     """Tool that dispatches calls to an MCP session."""
 
     parallel_safe = False  # conservative — each server has its own state
+    #: G10 (Hermes parity, 2026-05-09) class-level default. Survives
+    #: ``MCPTool.__new__(MCPTool)`` constructions used by some test
+    #: doubles, so ``execute`` always finds a usable timeout value.
+    timeout: float = 30.0
 
     def __init__(
         self,
@@ -215,12 +219,15 @@ class MCPTool(BaseTool):
         description: str,
         parameters: dict[str, Any],
         session: ClientSession,
+        timeout: float = 30.0,
     ) -> None:
         self.server_name = server_name
         self.tool_name = tool_name
         self.description = description
         self.parameters = parameters
         self.session = session
+        # G10 (Hermes parity, 2026-05-09): per-tool-call timeout cap.
+        self.timeout = timeout
 
     @property
     def schema(self) -> ToolSchema:
@@ -241,7 +248,14 @@ class MCPTool(BaseTool):
         from opencomputer.security.redact import redact_runtime_text
 
         try:
-            result = await self.session.call_tool(name=self.tool_name, arguments=call.arguments)
+            # G10 (Hermes parity, 2026-05-09): cap the per-tool-call wait
+            # so a wedged MCP server can't block the agent loop forever.
+            result = await asyncio.wait_for(
+                self.session.call_tool(
+                    name=self.tool_name, arguments=call.arguments
+                ),
+                timeout=self.timeout,
+            )
             # Convert MCP result to our string format — concatenate text blocks
             parts: list[str] = []
             is_error = bool(getattr(result, "isError", False))
@@ -268,6 +282,60 @@ class MCPTool(BaseTool):
                 content=redact_runtime_text(err),
                 is_error=True,
             )
+
+
+def hermes_alias_name(server_name: str, tool_name: str) -> str:
+    """Hermes-spec MCP tool name: ``mcp_<server>_<tool>`` (G8 — 2026-05-09).
+
+    OpenComputer's canonical form is ``<server>__<tool>`` (double underscore,
+    set in :class:`MCPTool.schema`). This helper produces the Hermes-spec
+    form for clients that key off it. Both names are registered side-by-side
+    via :class:`MCPAliasTool`, which keeps third-party tools written against
+    either spec discovering the toolset correctly.
+    """
+    return f"mcp_{server_name}_{tool_name}"
+
+
+class MCPAliasTool(BaseTool):
+    """Hermes-spec name alias for an :class:`MCPTool` (G8 — 2026-05-09).
+
+    Re-publishes a canonical :class:`MCPTool` under the Hermes-spec name
+    (``mcp_<server>_<tool>``) without duplicating the underlying MCP
+    session call. ``execute`` is a thin pass-through to the canonical
+    tool's dispatch path; both names invoke the same MCP server tool.
+
+    Avoids :class:`ToolRegistry` ``schema_name`` collision because each
+    alias has a distinct schema name from its canonical sibling.
+    """
+
+    parallel_safe = False  # mirrors MCPTool's conservative posture
+
+    def __init__(self, canonical: MCPTool) -> None:
+        self._canonical = canonical
+
+    @property
+    def server_name(self) -> str:
+        """Forward ``server_name`` so callers iterating mixed lists work."""
+        return self._canonical.server_name
+
+    @property
+    def tool_name(self) -> str:
+        """Forward ``tool_name`` so callers iterating mixed lists work."""
+        return self._canonical.tool_name
+
+    @property
+    def schema(self) -> ToolSchema:
+        base = self._canonical.schema
+        return ToolSchema(
+            name=hermes_alias_name(
+                self._canonical.server_name, self._canonical.tool_name
+            ),
+            description=base.description,
+            parameters=base.parameters,
+        )
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        return await self._canonical.execute(call)
 
 
 # ─── T1 — MCP utility tools (resources / prompts) ─────────────────
@@ -500,12 +568,20 @@ def _build_utility_tools(
     server_name: str,
     session: Any,
     capabilities: dict[str, Any] | None,
+    *,
+    prompts_enabled: bool = True,
+    resources_enabled: bool = True,
 ) -> list[BaseTool]:
     """Return MCP resource/prompt utility tools, capability-gated.
 
     ``capabilities`` is the ``capabilities`` block of the MCP server's
     ``initialize`` reply (or ``None`` / empty dict when nothing was
     advertised). Each present capability adds 2 tools.
+
+    G9 (Hermes parity, 2026-05-09): per-server ``prompts_enabled`` /
+    ``resources_enabled`` suppress the corresponding utility tools even
+    when the server advertises the capability. Default is to register
+    both, matching the prior behavior.
     """
     tools: list[BaseTool] = []
     if not capabilities:
@@ -513,10 +589,10 @@ def _build_utility_tools(
     # An MCP capability is "advertised" when its key is present with a
     # non-None value (the spec uses an empty object ``{}`` to mean
     # "supported, no sub-features").
-    if capabilities.get("resources") is not None:
+    if resources_enabled and capabilities.get("resources") is not None:
         tools.append(_MCPListResourcesTool(server_name=server_name, session=session))
         tools.append(_MCPReadResourceTool(server_name=server_name, session=session))
-    if capabilities.get("prompts") is not None:
+    if prompts_enabled and capabilities.get("prompts") is not None:
         tools.append(_MCPListPromptsTool(server_name=server_name, session=session))
         tools.append(_MCPGetPromptTool(server_name=server_name, session=session))
     return tools
@@ -767,15 +843,18 @@ class MCPConnection:
                         t.name,
                     )
                     continue
-                self.tools.append(
-                    MCPTool(
-                        server_name=self.config.name,
-                        tool_name=t.name,
-                        description=t.description or "",
-                        parameters=t.inputSchema or {"type": "object", "properties": {}},
-                        session=session,
-                    )
+                tool_obj = MCPTool(
+                    server_name=self.config.name,
+                    tool_name=t.name,
+                    description=t.description or "",
+                    parameters=t.inputSchema or {"type": "object", "properties": {}},
+                    session=session,
+                    timeout=self.config.timeout,
                 )
+                self.tools.append(tool_obj)
+                # G8 (Hermes parity, 2026-05-09): also register the
+                # spec-named ``mcp_<server>_<tool>`` alias as a sibling.
+                self.tools.append(MCPAliasTool(tool_obj))
             if hidden:
                 logger.info(
                     "MCP server '%s' suppressed %d internal tool(s)",
@@ -799,7 +878,13 @@ class MCPConnection:
                     "resources": getattr(caps_obj, "resources", None),
                     "prompts": getattr(caps_obj, "prompts", None),
                 }
-                for utility in _build_utility_tools(self.config.name, session, cap_dict):
+                for utility in _build_utility_tools(
+                    self.config.name,
+                    session,
+                    cap_dict,
+                    prompts_enabled=self.config.prompts_enabled,
+                    resources_enabled=self.config.resources_enabled,
+                ):
                     self.tools.append(utility)
             except Exception:  # noqa: BLE001
                 logger.debug(
@@ -890,6 +975,7 @@ class MCPConnection:
                 description=t.description or "",
                 parameters=t.inputSchema or {"type": "object", "properties": {}},
                 session=self.session,
+                timeout=self.config.timeout,
             )
         old_tools_by_name = {tool.tool_name: tool for tool in self.tools if isinstance(tool, MCPTool)}
         added_names = set(new_tools_by_name) - set(old_tools_by_name)
@@ -898,12 +984,21 @@ class MCPConnection:
         removed = [old_tools_by_name[n] for n in removed_names]
         # Update self.tools — preserve utility tools (resources/prompts)
         # because list_changed only signals tool-list changes.
-        utility_tools = [t for t in self.tools if not isinstance(t, MCPTool)]
+        # G8 (2026-05-09): MCPAliasTool entries are regenerated below
+        # so they always point at the live canonical MCPTool.
+        utility_tools = [
+            t
+            for t in self.tools
+            if not isinstance(t, (MCPTool, MCPAliasTool))
+        ]
         # Keep tools that survived (in old + new) plus the new ones.
         survivors = [
             old_tools_by_name[n] for n in (set(old_tools_by_name) & set(new_tools_by_name))
         ]
-        self.tools = survivors + added + utility_tools
+        canonical_after = survivors + added
+        # G8: re-issue Hermes-spec aliases for every canonical tool.
+        aliases = [MCPAliasTool(t) for t in canonical_after]
+        self.tools = canonical_after + aliases + utility_tools
         if added or removed:
             logger.info(
                 "MCP server '%s' tools/list_changed: +%d -%d",

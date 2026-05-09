@@ -233,6 +233,42 @@ def _parse_hooks_block(block: Any) -> tuple[HookCommandConfig, ...]:
     return ()
 
 
+def _normalize_mcp_server_dict(raw: dict) -> dict:
+    """Convert Hermes-spec nested MCP-server YAML to flat ``MCPServerConfig`` fields.
+
+    Hermes spec form::
+
+        mcp_servers:
+          github:
+            tools:
+              include: [create_issue, list_issues]
+              prompts: false
+              resources: false
+
+    Maps to OC dataclass fields ``tools_allow``, ``tools_deny``,
+    ``prompts_enabled``, ``resources_enabled``. The flat OC-native form
+    is left unchanged.
+
+    G9 (Hermes parity, 2026-05-09).
+    """
+    out = dict(raw)
+    tools = out.pop("tools", None)
+    if isinstance(tools, dict):
+        if "include" in tools:
+            out["tools_allow"] = list(tools["include"])
+        if "exclude" in tools:
+            out["tools_deny"] = list(tools["exclude"])
+        if "prompts" in tools:
+            out["prompts_enabled"] = bool(tools["prompts"])
+        if "resources" in tools:
+            out["resources_enabled"] = bool(tools["resources"])
+    elif tools is not None:
+        # Non-dict (e.g. a stray list) — restore so the caller sees the
+        # original shape and can complain about it.
+        out["tools"] = tools
+    return out
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load config from YAML, applying overrides on top of defaults.
 
@@ -257,6 +293,18 @@ def load_config(path: Path | None = None) -> Config:
     # only knows about flat tuple-of-dataclasses).
     hooks_block = raw.pop("hooks", None)
     parsed_hooks = _parse_hooks_block(hooks_block)
+
+    # G9 (Hermes parity, 2026-05-09) — normalize the nested
+    # ``tools: {include, exclude, prompts, resources}`` form into the
+    # flat dataclass-field form before _apply_overrides walks it.
+    mcp_block = raw.get("mcp")
+    if isinstance(mcp_block, dict):
+        servers_block = mcp_block.get("servers")
+        if isinstance(servers_block, list):
+            mcp_block["servers"] = [
+                _normalize_mcp_server_dict(s) if isinstance(s, dict) else s
+                for s in servers_block
+            ]
 
     cfg = _apply_overrides(base, raw)
     if parsed_hooks:
