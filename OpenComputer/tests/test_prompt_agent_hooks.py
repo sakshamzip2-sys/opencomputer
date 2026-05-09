@@ -409,3 +409,38 @@ class TestAgentHandlerFailOpen:
         ctx = HookContext(event=HookEvent.PRE_TOOL_USE, session_id="test")
         decision = _run(handler(ctx))
         assert decision.decision == "pass"
+
+    def test_delegate_not_initialized_returns_pass(self) -> None:
+        """Gap-3 amend (PR #533): when DelegateTool.set_factory hasn't been
+        called yet (e.g. settings-hook fires at gateway startup before any
+        AgentLoop wired the factory), DelegateTool().execute() returns a
+        ToolResult with is_error=True and content 'Error: delegate is not
+        initialized...'. The handler must fail-open per CLAUDE.md §7,
+        not propagate the error to the agent loop."""
+        from plugin_sdk.core import ToolResult
+        from plugin_sdk.hooks import HookContext, HookEvent
+
+        cfg = HookAgentConfig(event="PreToolUse", agent="x", prompt="y")
+        handler = make_agent_hook_handler(cfg)
+
+        class _UninitializedDelegate:
+            async def execute(self, _call):
+                # Mirror DelegateTool's actual behavior when
+                # _factory is None (see tools/delegate.py L268-276)
+                return ToolResult(
+                    tool_call_id=_call.id,
+                    content=(
+                        "Error: delegate is not initialized. "
+                        "CLI bootstrapping must call DelegateTool.set_factory(...)."
+                    ),
+                    is_error=True,
+                )
+
+        with patch(
+            "opencomputer.tools.delegate.DelegateTool",
+            return_value=_UninitializedDelegate(),
+        ):
+            ctx = HookContext(event=HookEvent.PRE_TOOL_USE, session_id="test")
+            decision = _run(handler(ctx))
+
+        assert decision.decision == "pass"
