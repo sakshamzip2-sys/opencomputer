@@ -601,6 +601,10 @@ def _register_settings_hooks(cfg: Config) -> int:
     :func:`opencomputer.hooks.shell_handlers.make_shell_hook_handler`)
     then registers it against the global hook engine.
 
+    v1.1 plan-2 M8.1 (2026-05-09) — also iterates ``cfg.prompt_hooks``
+    and registers each :class:`HookPromptConfig` via
+    :func:`opencomputer.hooks.prompt_handlers.make_prompt_hook_handler`.
+
     Settings-declared hooks run AFTER plugin-declared hooks because
     plugins call ``api.register_hook`` at plugin-load time (which is
     earlier than this CLI-time call). Coexistence is by design — both
@@ -610,8 +614,6 @@ def _register_settings_hooks(cfg: Config) -> int:
     so a single bad entry can't wedge CLI startup. Returns the count
     successfully registered (used by the chat banner).
     """
-    if not cfg.hooks:
-        return 0
     registered = 0
     for h in cfg.hooks:
         try:
@@ -638,6 +640,60 @@ def _register_settings_hooks(cfg: Config) -> int:
             )
         )
         registered += 1
+
+    # v1.1 plan-2 M8.1 — prompt hooks. Lazy import so command-only
+    # configs don't pay for the aux-LLM module load at CLI start.
+    if getattr(cfg, "prompt_hooks", ()):
+        from opencomputer.hooks.prompt_handlers import (  # noqa: PLC0415
+            make_prompt_hook_handler,
+        )
+
+        for ph in cfg.prompt_hooks:
+            try:
+                event = HookEvent(ph.event)
+            except ValueError:
+                _log.warning(
+                    "prompt hook: unknown event %r; skipping",
+                    ph.event,
+                )
+                continue
+            fire_and_forget = (event != HookEvent.PRE_LLM_CALL)
+            hook_engine.register(
+                HookSpec(
+                    event=event,
+                    handler=make_prompt_hook_handler(ph),
+                    matcher=ph.matcher,
+                    fire_and_forget=fire_and_forget,
+                )
+            )
+            registered += 1
+
+    # v1.1 plan-2 M8.2 — agent hooks. Same lazy-import pattern; pulls in
+    # the delegate tool only when the user actually configured one.
+    if getattr(cfg, "agent_hooks", ()):
+        from opencomputer.hooks.agent_handlers import (  # noqa: PLC0415
+            make_agent_hook_handler,
+        )
+
+        for ah in cfg.agent_hooks:
+            try:
+                event = HookEvent(ah.event)
+            except ValueError:
+                _log.warning(
+                    "agent hook: unknown event %r; skipping",
+                    ah.event,
+                )
+                continue
+            fire_and_forget = (event != HookEvent.PRE_LLM_CALL)
+            hook_engine.register(
+                HookSpec(
+                    event=event,
+                    handler=make_agent_hook_handler(ah),
+                    matcher=ah.matcher,
+                    fire_and_forget=fire_and_forget,
+                )
+            )
+            registered += 1
     return registered
 
 
@@ -1139,6 +1195,27 @@ def _run_chat_session(
     from opencomputer.agent.thinking_injector import ThinkingInjector
     injection_engine.unregister("thinking_tags_fallback")
     injection_engine.register(ThinkingInjector())
+
+    # v1.1 plan-2 M7 (2026-05-09) — register the path-glob rules
+    # injector so .opencomputer/rules/*.md fire on the next turn after
+    # any path-touching tool call. Empty rules list → provider stays
+    # registered but contributes nothing (cheap no-op per turn).
+    try:
+        from opencomputer.agent.path_rules_injection import (
+            PathGlobRulesProvider,
+            load_rules_for_active_profile,
+        )
+
+        injection_engine.unregister("path_glob_rules")
+        injection_engine.register(
+            PathGlobRulesProvider(rules=load_rules_for_active_profile())
+        )
+    except Exception:  # noqa: BLE001 — never break loop boot on rules load fail
+        import logging as _log_mod
+        _log_mod.getLogger("opencomputer.cli").debug(
+            "path-glob rules registration failed (suppressed)", exc_info=True
+        )
+
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
 
     # Kanban-Goals v2 (2026-05-08) — banner callback for the Ralph loop.
@@ -3467,10 +3544,14 @@ app.add_typer(tui_app, name="tui")
 
 # 2026-05-08 — `.worktreeinclude` + checkpoint hygiene CLIs.
 from opencomputer.cli_checkpoints import checkpoints_app  # noqa: E402
+
+# 2026-05-09 — v1.1 plan-2 M7: path-glob rules CLI.
+from opencomputer.cli_rules import rules_app  # noqa: E402
 from opencomputer.cli_worktrees import worktrees_app  # noqa: E402
 
 app.add_typer(checkpoints_app, name="checkpoints")
 app.add_typer(worktrees_app, name="worktrees")
+app.add_typer(rules_app, name="rules")
 
 # ─── service (cross-platform always-on daemon) ────────────────────────
 service_app = typer.Typer(

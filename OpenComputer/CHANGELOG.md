@@ -15,6 +15,174 @@ Closes the strict-vs-lenient profile.yaml parser divergence flagged in `2026-05-
 - 22 new tests in `tests/test_yaml_parse_unified.py` pinning the contract + a regression guard against re-introducing raw `yaml.safe_load` in the migrated modules.
 
 Out of scope: ~25 other `yaml.safe_load` callsites (skin loader, persona registry, allowlists, security policies, custom-providers reload) parse different schemas and have their own migration paths — not the divergence M1.2 was scoped against.
+
+### Added — v1.1 Plan-2 M8.2: `type: agent` settings hooks (2026-05-09)
+
+Closes the last unshipped plan-2 item. Subagent-spawning hooks declared in the same `hooks:` YAML block as command + prompt hooks:
+
+```yaml
+hooks:
+  PreToolUse:
+    - type: agent
+      matcher: "Bash"
+      prompt: |
+        Inspect the proposed Bash command. If it would permanently
+        delete data or send credentials over the wire, reply
+        "block: <reason>". Otherwise reply "allow".
+      agent: code-reviewer       # optional registered AgentTemplate name
+      isolation: copy            # "none" | "worktree" | "copy" — default copy
+      max_turns: 5
+      timeout_seconds: 60
+      returns: allow_block       # or "structured" for richer reports
+      token_budget_total: 5000
+```
+
+**Why**: `type: prompt` (M8.1) is one aux-LLM call; `type: agent` is heavier but more capable — the spawned child can run its own tool calls (Read / Grep / Bash via its allowlist) before returning a decision. That lets a hook reason over actual file contents, not just the rendered HookContext.
+
+**How**: a new `HookAgentConfig` dataclass + parallel `_parse_agent_hooks_block` parser sniffs `type: agent` from the same YAML block; entries land in the new `Config.agent_hooks` field. The handler factory `make_agent_hook_handler` synthesises a `delegate(task=prompt+context, isolation=..., agent=...)` ToolCall and dispatches it via `DelegateTool`. Default `isolation: copy` so an ill-behaved hook subagent can't trash the parent's tree (uses M4.1's filesystem sandbox under the hood).
+
+**Five fail-open paths** (matches the M8.1 + shell-hook contracts): timeout, delegate exception, delegate `is_error=True` response, ambiguous response, estimated-input-over-budget. A wedged or expensive subagent never wedges or bankrupts the loop.
+
+**With this PR, every plan-2 item is shipped or explicitly skipped.**
+
+| Item | Status |
+|---|---|
+| M4.1 + M4.2 delegate isolation | ✅ PR #528 |
+| M4.3 + M4.4 SKILL.md fork + tools | ✅ PR #529 |
+| M4.5 worktrees prune | ✅ already on main as `oc worktrees clean` |
+| M5.1 oc session checkpoints | ✅ PR #526 |
+| M5.2 + M5.3 per-prompt checkpoint + rewind | ✅ PR #530 |
+| M5.4 plan-mode post-approval | ✅ PR #531 |
+| M7 path-glob rules + CLI | ✅ PR #527 |
+| M8.1 type: prompt hooks | ✅ PR #532 |
+| **M8.2 type: agent hooks** | ✅ this PR |
+| M8.3 PostCompact | ✅ already on main as `HookEvent.AFTER_COMPACTION` |
+
+**Tests**: 19 new tests in `test_agent_hook_v1_1.py` covering `HookAgentConfig` defaults + `_parse_agent_hooks_block` extraction + `_render_context` + response parsing + handler integration (mocked DelegateTool, agent-template threading, structured mode, timeout fail-open, token-cap pre-spawn refusal, exception fail-open, `is_error=True` fail-open) + full `load_config` round-trip.
+
+### Added — v1.1 Plan-2 M5.1: `oc session checkpoints <id>` (2026-05-09)
+
+New per-session view of the on-disk RewindStore data. The cross-session admin (`oc checkpoints status / prune / clear`) already existed; this fills the gap when you want to pick a checkpoint by id for one specific session.
+
+```bash
+oc session checkpoints abc1234           # Rich table, newest-first
+oc session checkpoints abc1234 --json    # machine-readable
+oc session checkpoints abc1234 --limit 10
+```
+
+Reads `~/.opencomputer/harness/<session_id>/rewind/<checkpoint_id>/` via the existing `RewindStore.list()`. No new storage. 6 new tests in `test_session_checkpoints_cli.py` covering happy path, JSON mode, `--limit`, missing session, empty rewind dir, and the no-checkpoints-recorded edge case.
+
+Refined plan doc at `docs/superpowers/plans/2026-05-09-v1-1-plan-2-refined-execution.md` records the audit findings (M4.5 already shipped as `oc worktrees clean`; M8.3 already shipped as `HookEvent.AFTER_COMPACTION`) and the deferral rationale for the larger Tier-B + Tier-C items (M4.1-4.4 subagent isolation, M5.2-5.4 checkpoints + rewind + plan-mode v2, M8.1-8.2 prompt + agent hook types).
+
+### Added — v1.1 Plan-2 M7: path-glob rules + `oc rules` CLI (2026-05-09)
+
+Operators can now drop `*.md` files into `.opencomputer/rules/` (workspace-local) or `~/.opencomputer/<profile>/rules/` (cross-project) and the agent picks them up automatically when it edits files matching the rule's `paths:` glob list.
+
+```yaml
+# .opencomputer/rules/python.md
+---
+paths:
+  - "**/*.py"
+priority: 50
+---
+Use type hints. Prefer `from __future__ import annotations`.
+```
+
+The next time the agent runs `Read` / `Edit` / `Write` / `MultiEdit` / `Glob` / `Grep` / `NotebookEdit` against a `.py` file, the rule body is appended to the system prompt as an `[Active Rules]` block via the existing `DynamicInjectionProvider` mechanism. Frozen base prompt + InjectionEngine = no prefix-cache invalidation.
+
+- New `opencomputer.agent.rules_loader` — `Rule` dataclass + `load_rules()` + `merged_rules()` (workspace-shadows-profile) + `active_rules_for()` + `format_rules_block()` + `extract_paths_from_tool_call()`. Glob matching uses `PurePosixPath.full_match()` on Python 3.13+ and falls back to a regex translator on 3.12 (both honor `**` as zero-or-more path segments). Per-rule body cap of 4 KB.
+- New `opencomputer.agent.path_rules_injection.PathGlobRulesProvider` — DynamicInjectionProvider implementation registered at loop boot in `cli.py`. Walks the message history backwards to find the LAST assistant turn's tool calls; emits the rule block once per turn that touches matching files. Idle turns contribute nothing.
+- New `oc rules` CLI subapp:
+  - `oc rules list [--json]` — every loaded rule from workspace + profile.
+  - `oc rules check <path> [--json]` — debugging: which rules match `<path>`.
+  - `oc rules show <name>` — full body + frontmatter of one rule.
+- Bootstrapping is fail-open: an unparseable rule file is logged + skipped; the rules dir not existing is a no-op.
+
+42 new tests in `test_path_glob_rules.py` (loader / merger / matcher / formatter / extractor / injection provider / `load_rules_for_active_profile`) and `test_cli_rules.py` (3 subcommands × table+JSON modes).
+
+### Added — v1.1 Plan-2 M4.1 + M4.2: delegate isolation (2026-05-09)
+
+`delegate(isolation=...)` gains two opt-in modes for per-subagent filesystem sandboxing:
+
+- `"worktree"` — git worktree under `<repo_root>/.opencomputer-worktrees/delegate-<uuid>/` on a fresh `oc-delegate-<uuid>` branch. Cleaned on success when `git status` is clean; **persisted** when uncommitted changes exist (operator runs `oc worktrees clean` to recover). Raises `WorktreeNotAvailable` outside a git repo so callers can fall back to `copy`.
+- `"copy"` — `shutil.copytree` to a `tempfile.mkdtemp` sandbox. Honors `.opencomputer/sandbox.ignore` for skipping heavy dirs (defaults already exclude `.git`, `node_modules`, `.venv`, `target`, `build`, `dist`). Always cleaned on context exit.
+- `"none"` (default) — unchanged behavior; child runs in parent's cwd.
+
+Cleanup posture also covers parent-process exits via `atexit` sweep — one handler tracks both pending worktrees + pending copies and tries to remove them on shutdown. SIGKILL bypasses atexit; operator uses `oc worktrees clean` for those leftovers.
+
+Two typed exceptions: `WorktreeNotAvailable` (right tool, wrong cwd — switch to `copy`) and `IsolationFailed` (right tool, infra failed — see preceding logs). Both are caught inside `DelegateTool.execute()` and surfaced as ToolResult errors with `is_error=True` instead of raising back to the model.
+
+Sandbox cwd flows to the child via `runtime.custom["delegate_isolation_cwd"]` + `runtime.custom["delegate_isolation_mode"]` so the child loop can chdir before tool dispatch (RuntimeContext is frozen — custom dict is the back-channel).
+
+11 new tests in `test_delegate_isolation.py` cover all 3 modes, worktree clean-vs-dirty cleanup posture, copy sandbox isolation + ignore-file honoring, non-git error path, and the schema's `isolation` enum.
+
+### Added — v1.1 Plan-2 M4.3 + M4.4: SKILL.md `context: fork` + tools allowlist (2026-05-09)
+
+`SkillTool` now reads structured frontmatter and dispatches accordingly:
+
+- `context: fork` — synthesises a `delegate(task=body, agent=..., allowed_tools=..., isolation=...)` call; only the subagent's final summary returns to the parent. Pollution-free heavy exploration without a context-window hit on the parent.
+- `context: inline` (default) — current behavior. Optional `tools:` field is rendered as a `[Skill Tools Constraint]` advisory directive (model is asked to honor; not enforced — hard enforcement requires `context: fork`).
+- `model:` field with `context: inline` raises `SkillModelOverrideRequiresForkError` so a SKILL.md author can't accidentally configure a no-op provider override.
+- `isolation: none|worktree|copy` — for `fork`, threaded into the synthesised delegate (M4.1/M4.2 sandbox).
+
+11 new tests in `test_skill_context_fork.py` cover all 4 frontmatter fields × inline/fork dispatch, the model-without-fork error, unknown context, isolation passthrough, and bad isolation values.
+
+Honest deferral: hard enforcement of `tools:` under `context: inline` would require per-skill state on the agent loop's tool dispatcher (the skill body becomes text the parent loop executes — there's no ambient "skill is active" surface). The advisory directive is a pragmatic best-effort; users wanting hard enforcement set `context: fork`.
+
+### Added — v1.1 Plan-2 M8.1: `type: prompt` settings hooks (2026-05-09)
+
+The fifth-of-fourteen plan-2 item the parallel session's PR series (#526-#531) didn't pick up. PR-scope shrunk to M8.1-only after #528 / #529 / #531 landed in parallel and absorbed M4.1+M4.2 / M4.3+M4.4 / M5.4 respectively.
+
+LLM-prompt hooks declared in the same `hooks:` YAML block as command hooks:
+
+```yaml
+hooks:
+  PreToolUse:
+    - type: prompt
+      matcher: "Bash"
+      system: |
+        Reply 'block: <reason>' or 'allow' based on this command's danger.
+      model: auto                      # or specific model id
+      returns: allow_block             # or "score" with score_threshold
+      timeout_seconds: 5
+      token_budget_input: 500          # refuses to call when exceeded
+      token_budget_output: 100
+```
+
+**Why**: the existing `hooks:` block only knew `type: command`, requiring a shell-out to invoke any LLM judgement. Inline `type: prompt` lets users declare risk-rating / policy-classification hooks without writing an external script.
+
+**How**: a new `HookPromptConfig` dataclass + parallel `_parse_prompt_hooks_block` parser scans the same YAML block as the existing command-hook parser; entries with `type: prompt` land in `Config.prompt_hooks`, entries with `type: command` (or no `type`) land in the existing `Config.hooks`. The parsed prompt-hook spec is wrapped in an async handler via `make_prompt_hook_handler` and registered alongside command hooks at CLI bootstrap. Five fail-open paths (timeout, LLM error, ambiguous response, no-numeric-in-score-mode, estimated-input-over-budget) so a wedged or expensive aux-LLM never wedges or bankrupts the loop.
+
+**Skipped (covered by parallel-session PRs)**
+
+- M4.1+M4.2 (`delegate(isolation="worktree"|"copy")`) → PR #528.
+- M4.3+M4.4 (SKILL.md frontmatter `context: fork` + `tools:`) → PR #529.
+- M5.4 (`ExitPlanMode` `next_mode`) → PR #531.
+- M5.1 (`oc session checkpoints <id>`) → PR #526.
+- M5.2+M5.3 (per-prompt checkpoint + rewind picker) → PR #530.
+- M7 (path-glob rules) → PR #527.
+- M4.5 + M8.3 already on main as `oc worktrees clean` + `HookEvent.AFTER_COMPACTION`.
+
+**Tests**
+
+22 new tests covering `HookPromptConfig` defaults + `_parse_prompt_hooks_block` extraction (nested + flat-list shapes, malformed entries skipped) + `_render_context` + response parsing (`allow_block` + `score`) + handler integration (mocked aux-LLM, timeout fail-open, error fail-open, token-cap pre-call refusal). One semantic update to `tests/test_settings_hooks.py::test_parse_hooks_unsupported_type_skipped` because `type: prompt` is no longer "unsupported" — replaced with `type: embedding` to keep exercising the warn-and-skip branch.
+
+Plan: `docs/superpowers/plans/2026-05-09-v1-1-plan-2-tier-b-execution.md` (the 9-lens audit).
+Original spec: `docs/superpowers/plans/2026-05-08-v1-1-plan-2-architecture-features.md`.
+
+### Added — v1.1 Plan-2 M5.3: `oc session rewind <id>` (2026-05-09)
+
+New CLI surface for restoring a session's working tree to a saved checkpoint:
+
+```bash
+oc session rewind sess-abc12345                 # interactive picker
+oc session rewind sess-abc12345 --at cp00 --yes # non-interactive
+```
+
+Reads the on-disk RewindStore that the existing `auto_checkpoint` PreToolUse hook (coding-harness) writes for every destructive tool call. Newest-first picker with id-prefix matching (4+ chars). Confirmation prompt unless `--yes`. Non-TTY without `--at` returns a friendly error pointing to `--at <checkpoint_id>`. 11 new tests in `test_session_rewind_cli.py`.
+
+`--mode files` (default) restores file contents. `--mode conv_only` / `summarize_from` return clear "not yet implemented" errors — those need M5.2 per-prompt message-history checkpoint surface (shipped separately).
+
 ### Added — Hermes Cron + Delegation long-tail finishers (2026-05-08 / 2026-05-09)
 
 Closes 11 honest gaps + 2 latent runtime bugs between the Hermes Cron & Delegation reference spec and OpenComputer. PR #494 already shipped no_agent / parallel-batch / multi-profile parity; this work picks up the long tail and hardens it to production-grade.
