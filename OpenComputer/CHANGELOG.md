@@ -2,6 +2,19 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
+## [v2026.5.9] — 2026-05-09
+
+The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEASE.md`, on tag push (`git tag v2026.5.9 && git push origin v2026.5.9`) the `release.yml` workflow publishes to PyPI via OIDC trusted publishing.
+
+**What's new since v2026.5.5** (see the per-PR stanzas below this header):
+
+- v1.1 plan-1: profile.yaml parser unification (PR #520), opt-in aux-LLM response cache (#521), `oc oneshot --output text|json|stream-json` (#522), wire `permission.request` + `permission.response` + per-session ring buffer (#523).
+- v1.1 plan-2: `oc session checkpoints` (#526), path-glob rules + `oc rules` CLI (#527), delegate `isolation=worktree|copy` (#528), SKILL.md `context: fork` + tools allowlist (#529), `oc session rewind` (#530), ExitPlanMode `next_mode` proposal slot (#531) + loop mutation follow-up (#534), `type: prompt` + `type: agent` settings hooks (#532), per-prompt message-history checkpoints schema v15 (#535), SKILL.md inline tools hard-enforce (#537), plugin-loader sibling-subpackage isolation fix (#538).
+- Hermes parity / security-v2 / dashboard production-grade rolls (PRs #496-#519).
+- Plans 3-6 audited; M12 (`/btw`) confirmed already shipped pre-release; the rest are demand-gated per their own preambles (`docs/superpowers/plans/2026-05-09-v1-1-plans-3-to-6-audit.md`).
+
+**Stability commitment:** the `plugin_sdk/*` surface is the contract. Date-versioning does not weaken that — any breaking change to `plugin_sdk/*` is announced explicitly here regardless of date.
+
 ## [Unreleased]
 
 ### Added — v1.1 Plan-3 M10.1 + M10.4: per-channel routing schema + `oc routing` CLI (2026-05-09)
@@ -71,6 +84,107 @@ exact peer (chat_id) → guild + role → guild → team → account → channel
 - `tests/test_routing_default_fallback.py` — 3 tests: no rules → default fires; rules present but none match → default; default agent defaults to "default".
 - `tests/test_routing_yaml_round_trip.py` — 8 tests: minimal block parses; full block with profile parses; empty block returns None (Config.routing untouched); rule missing `agent` is skipped with WARNING; unknown match dimension dropped with WARNING; channel `#foo` normalizes to `foo`; full Config → YAML → reload round-trips with most-specific-first ordering preserved; config without `routing:` block leaves Config.routing at default.
 - `tests/test_cli_routing.py` — 8 tests: `list` text + JSON; no rules listed; `test` matches security channel + admin role; falls through to default; JSON output; `#channel` normalization at the CLI flag layer.
+
+### Added — v1.1 Plan-4 M13: plugin-authored top-level CLI subcommands (2026-05-09)
+
+Closes the long-standing audit gap that plugins could register tools, providers, channels, hooks, slash commands, MCPs, agent templates, and skills, but could **not** ship `oc <plugin-id> <subcommand>` Typer subcommands. Slash commands were the in-session workaround; CLI workflows had no equivalent.
+
+**SDK surface (additive — `plugin_sdk` consumers untouched):**
+
+```python
+# In your plugin's register(api):
+import typer
+from plugin_sdk import PluginManifest
+
+jira_app = typer.Typer(help="Jira ops from the CLI.")
+
+@jira_app.command()
+def create(title: str, project: str = "OPS") -> None:
+    ...
+
+@jira_app.command()
+def list(status: str = "open") -> None:
+    ...
+
+def manifest():
+    return PluginManifest(
+        id="jira-plugin",
+        name="Jira",
+        version="1.0.0",
+        entry="plugin",
+        cli_commands=("jira",),                  # advertise without loading
+        cli_commands_profiles=("work",),         # optional — restrict to a profile
+    )
+
+def register(api):
+    api.register_cli_command("jira", jira_app)   # core hard-fails on collisions
+```
+
+End user gets `oc jira create --title "ship M13" --project OPS` — the plugin loads only on the first invocation; `oc --help` lists `jira` after a cheap manifest scan that imports nothing.
+
+**Conflict resolution (three layers):**
+
+1. **Core vs plugin** — `cli_commands` containing a name in `CORE_RESERVED_CLI_NAMES` (the ~50 verbs core ships: `chat`, `gateway`, `wire`, `doctor`, `setup`, `plugin`, `profile`, `preset`, `mcp`, `cron`, `consent`, `skills`, `session`, `checkpoints`, `worktrees`, `rules`, `hooks`, …) is **always** fatal — `replace=True` does not bypass.
+2. **Plugin vs plugin** — first registration wins; second raises `PluginCLINameCollision` unless `replace=True`. Authors coordinate via the `<plugin-id>-<verb>` prefix convention.
+3. **Profile-scoped** — `cli_commands_profiles: ["work"]` hides the command under any other active profile. Empty / `None` = exposed under every profile.
+
+**Why this is M13 and not M12:** M12 (`/btw` post-turn skill suggestion) had already shipped via `slash_commands_impl/btw_cmd.py` before this plan was written; the plan-4 audit caught that and dropped it. M13 was the only remaining unshipped plan-4 item.
+
+**Files:**
+
+- `plugin_sdk/core.py` — `PluginManifest.cli_commands: tuple[str, ...]` + `cli_commands_profiles: tuple[str, ...] | None` (additive; defaults preserve every existing manifest).
+- `opencomputer/plugins/manifest_validator.py` — pydantic schema + shell-safe identifier validator (rejects `--evil`, `""`).
+- `opencomputer/plugins/discovery.py` — threads the new fields through `_build_manifest`.
+- `opencomputer/plugins/loader.py` — `PluginAPI.register_cli_command(name, app, *, replace=False)` + `PluginCLINameCollision` exception + shared `_cli_commands` table on `PluginAPI`.
+- `opencomputer/plugins/registry.py` — `PluginRegistry.cli_commands: dict[str, Any]` + threaded through `api()`.
+- `opencomputer/plugins/cli_registry.py` (NEW) — `CORE_RESERVED_CLI_NAMES` constant + `register_plugin_cli_commands(typer_app)` lazy-attacher + `_attach_lazy_command(...)` placeholder.
+- `opencomputer/cli.py` — `main()` calls `register_plugin_cli_commands(app)` after profile / env setup, before `app()`.
+
+**Tests (29 new across 3 files):**
+
+- `tests/test_plugin_cli_register.py` — happy path register; duplicate raises; `replace=True` overrides; lazy dispatch into real Typer; missing `register_cli_command()` errors clearly; manifest schema accepts `cli_commands`; rejects `--` prefix and empty entries.
+- `tests/test_plugin_cli_core_collision.py` — parametrized over 13 core verbs; `replace=True` does not bypass core-collision; sanity check that the spec's reserved set is in `CORE_RESERVED_CLI_NAMES`.
+- `tests/test_plugin_cli_help_listing.py` — `--help` lists advertised name; `load_plugin` is called **zero** times during `--help`; actual invocation triggers load + dispatches; profile-scoped commands hidden under inactive profile, visible under active profile.
+
+### Added — v1.1 Plan-3 M6.1: `MEMORY.md` BM25 index (2026-05-09)
+
+Foundation for v1.1 plan-3 M6 Active Memory work. Adds
+`opencomputer.agent.memory_index.BM25Index`, a profile-scoped, lazily
+built, cache-backed BM25 retrieval index over `MEMORY.md`.
+
+```python
+mm = MemoryManager(declarative_path=..., skills_path=...)
+mm.append_declarative("user prefers postgresql for OLTP")
+hits = mm.bm25_index.query("postgresql", top_k=5)
+# -> [QueryHit(entry=IndexedEntry(raw="user prefers postgresql for OLTP", ...), score=..., rank=0)]
+```
+
+**Cache integrity** — pickle file at `<profile_home>/cache/memory_bm25.idx`
+self-validates on load via a `(format_version, corpus_sha256, entry_count, mtime_ns, built_at)`
+header. Mismatch (truncation, garbage, schema skew, external `MEMORY.md` edit
+without `MemoryManager` involvement) triggers a transparent rebuild — never
+a silent stale-result return.
+
+**Invalidation** — `MemoryManager.append_declarative`, `replace_declarative`,
+`remove_declarative`, and `restore_backup(which="memory")` each call
+`bm25_index.invalidate()` after a successful write. `rebind_to_profile`
+swaps the index along with the declarative paths so per-profile
+isolation holds.
+
+**Audit findings folded in** —
+- Cache-integrity check (Plan 3 said "pickle the corpus"; this PR adds the header validation).
+- FTS5-vs-pickle architectural choice documented in the spec.
+
+**Carry-forward audit notes** (NOT in this PR — for the next sub-milestones):
+- M9.2 fail-closed default on classifier error/timeout.
+- M6.4 Dreaming cron-miss catch-up policy.
+- M6.3 + Honcho prompt ordering: `[Honcho prefetch] → [Active Memory] → [user content]`.
+- `BaseProvider.embed()` contract for M6.6: `EmbeddingBatch(vectors, dimensionality, model_id, cost_estimate_usd)` with batch ≤100.
+
+44 new tests across 9 files (tokenizer, segmentation, basic query, persist,
+invalidate, corpus-change-detection, corrupt-cache, format-version-skew,
+integration, perf). Cold build of a 4KB synthetic MEMORY.md is <250ms;
+warm query <50ms.
 
 ### Added — v1.1 Plan-1 M3.1 + M3.3: wire-protocol completeness (2026-05-09)
 

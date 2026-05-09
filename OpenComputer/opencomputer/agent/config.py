@@ -499,6 +499,25 @@ class MemoryConfig:
     active_memory_top_n: int = 3
     """Cap on combined episodic + message hits prepended."""
 
+    # v1.1 plan-3 M6.3 — MEMORY.md hybrid retrieval (BM25 + vector via RRF).
+    # Distinct from active_memory_enabled above which retrieves from
+    # SessionDB FTS5; this one retrieves from MEMORY.md (the declarative
+    # markdown file).  Both can be enabled simultaneously.
+    memory_md_retrieval_enabled: bool = True
+    """When True, the agent loop runs hybrid BM25+vector retrieval over
+    MEMORY.md before each turn and appends a system-prompt block with
+    the top-K most relevant entries.  Composes with Honcho prefetch and
+    the FTS5 active-memory layer.  Default ON: it is graceful (skips
+    silently when MEMORY.md is empty / no embedding provider available)
+    and the upside (the agent recalls user-stated preferences across
+    sessions) is the headline reason MEMORY.md exists."""
+    memory_md_retrieval_top_k: int = 5
+    """Number of fused hits returned per turn from MEMORY.md retrieval."""
+    memory_md_retrieval_per_source_k: int = 20
+    """Per-source recall before RRF fusion.  Higher values give RRF more
+    candidates to combine; production tuning has shown ~20 is the
+    sweet-spot for MEMORY.md sizes seen in practice (≤256 entries)."""
+
 
 @dataclass(frozen=True, slots=True)
 class HookCommandConfig:

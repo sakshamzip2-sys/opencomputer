@@ -26,6 +26,22 @@ if str(_EXT_PATH) not in sys.path:
 @pytest.fixture
 def harness(tmp_path: Path):
     """Build a real RewindStore + minimal HarnessContext-shaped namespace."""
+    # Defensive: another test's load_plugin call may have pushed
+    # coding-harness off sys.path[0]. Re-prepend so this fixture's
+    # bare imports resolve against the right plugin.
+    if str(_EXT_PATH) in sys.path:
+        sys.path.remove(str(_EXT_PATH))
+    sys.path.insert(0, str(_EXT_PATH))
+    # Also clear any cached sibling-subpackage modules so the import
+    # below re-resolves against coding-harness, not whatever was loaded
+    # last by load_plugin.
+    for _name in list(sys.modules):
+        if (
+            _name == "slash_commands" or _name.startswith("slash_commands.")
+            or _name == "rewind" or _name.startswith("rewind.")
+        ):
+            sys.modules.pop(_name, None)
+
     from rewind.checkpoint import Checkpoint  # type: ignore[import-not-found]
     from rewind.store import RewindStore  # type: ignore[import-not-found]
     from slash_commands.rollback import RollbackCommand  # type: ignore[import-not-found]

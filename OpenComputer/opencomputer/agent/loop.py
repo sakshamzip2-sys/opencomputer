@@ -1407,8 +1407,65 @@ class AgentLoop:
                 injected_volatile + "\n\n" + block if injected_volatile else block
             )
 
+        # v1.1 plan-3 M6.3 — MEMORY.md hybrid retrieval (BM25 + vector via RRF).
+        # Order per the M6.1 brainstorm carry-forward note:
+        #   [base + injected mode] + [Honcho prefetch] (above)
+        #                         + [MEMORY.md retrieval]   ← THIS BLOCK
+        #                         + [SessionDB FTS5 active memory]  (below)
+        # Honcho first because its corpus is most variable; MEMORY.md
+        # second because it changes only on explicit Memory tool writes;
+        # FTS5 active memory third because it's per-session-episodic and
+        # most volatile.  Default ON; gracefully degrades when MEMORY.md
+        # is empty or the active provider lacks embeddings.
+        if getattr(self.config.memory, "memory_md_retrieval_enabled", True):
+            try:
+                from opencomputer.agent.memory_md_retrieval import (
+                    MemoryMdRetriever,
+                )
+
+                # The active provider's embed() is the embed_fn.  When the
+                # provider lacks one (raises EmbeddingsUnsupportedError),
+                # the retriever falls back to BM25-only with a one-time
+                # WARNING log.
+                embed_fn = None
+                provider = getattr(self, "provider", None)
+                if provider is not None and hasattr(provider, "embed"):
+                    embed_fn = provider.embed
+
+                retriever = MemoryMdRetriever(
+                    self.memory,
+                    embed_fn=embed_fn,
+                    per_source_k=int(
+                        getattr(
+                            self.config.memory,
+                            "memory_md_retrieval_per_source_k",
+                            20,
+                        )
+                    ),
+                    top_k=int(
+                        getattr(
+                            self.config.memory,
+                            "memory_md_retrieval_top_k",
+                            5,
+                        )
+                    ),
+                )
+                hits = await retriever.retrieve(user_message)
+                md_block = retriever.inject_block(hits)
+                if md_block:
+                    volatile_memory_blocks.append(md_block)
+                    system = system + "\n\n" + md_block
+                    injected_volatile = (
+                        injected_volatile + "\n\n" + md_block
+                        if injected_volatile
+                        else md_block
+                    )
+            except Exception as exc:  # noqa: BLE001 — never crash the loop on retrieval
+                _log.warning("MEMORY.md retrieval failed: %s", exc)
+
         # OpenClaw 1.B-alt — local-FTS5 proactive recall prepend.
-        # Composes with Honcho prefetch above; gated by config flag (default OFF).
+        # Composes with Honcho prefetch above + MEMORY.md retrieval block;
+        # gated by config flag (default OFF).
         # Both append to the per-turn ``system`` so the prefix cache stays warm.
         if getattr(self.config.memory, "active_memory_enabled", False):
             from opencomputer.agent.active_memory import (
@@ -2286,6 +2343,15 @@ class AgentLoop:
                             system_prompt_override=system_prompt_override,
                         )
                     self.db.end_session(sid)
+                    # M4.4: clear any active skill tool filter on END_TURN so
+                    # subsequent turns aren't constrained.
+                    try:
+                        from opencomputer.agent.skill_tools_filter import (
+                            clear_active_filter,
+                        )
+                        clear_active_filter()
+                    except Exception:  # noqa: BLE001
+                        pass
                     # 2026-05-08 — Hermes Doc-2 parity: TRANSFORM_LLM_OUTPUT
                     # fires once per turn after the final response is
                     # assembled, before delivery. Handlers may return
@@ -4099,6 +4165,30 @@ class AgentLoop:
         from plugin_sdk.hooks import HookContext, HookEvent
 
         blocked: dict[str, str] = {}  # call.id → block reason
+
+        # v1.1 plan-2 M4.4 hard enforcement (2026-05-09): when an inline
+        # SkillTool has set an active tool filter, block any call whose
+        # tool name isn't in the skill's allowlist. The Skill itself
+        # is implicitly allowed (so the skill body's request to read
+        # other tools doesn't recursively self-block).
+        try:
+            from opencomputer.agent.skill_tools_filter import (
+                get_active_filter,
+                is_tool_allowed,
+            )
+
+            _skill_filter = get_active_filter()
+        except Exception:  # noqa: BLE001
+            _skill_filter = None
+        if _skill_filter is not None:
+            for c in calls:
+                if c.name == "Skill":
+                    # Always allow re-invoking the Skill tool (lets the
+                    # model swap to a different skill if needed).
+                    continue
+                allowed, reason = is_tool_allowed(c.name)
+                if not allowed and reason is not None:
+                    blocked.setdefault(c.id, reason)
 
         if self._consent_gate is not None:
             from opencomputer.agent.consent.bypass import BypassManager
