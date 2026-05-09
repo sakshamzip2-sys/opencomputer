@@ -17,6 +17,20 @@ The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEAS
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-3 M11.2: `/batch` parallel N-agent migrations + DelegateTool wiring + slash command (2026-05-09)
+
+Three-PR arc closing the M11.2 deliverable:
+
+1. **Engine** (`opencomputer/agent/batch_orchestrator.py`) — pure orchestration. `run_batch(units, spawn_fn=...)` fans out N units in parallel via `asyncio.Semaphore` + per-unit `asyncio.wait_for`; failures of individual units don't abort siblings. Validates against duplicate ids, empty descriptions, nested-`/batch` strings, and a hard MAX_BATCH_SIZE=30 cap.
+2. **Production wiring** (`opencomputer/agent/batch_runner.py`) — `make_delegate_spawn_fn(delegate_tool, ...)` builds a `SpawnSubagentFn` that calls `DelegateTool.execute(...)` with `isolation="worktree"` + `role="leaf"` (defence in depth — batch units cannot spawn their own batches even if a buggy `allowed_tools` list lets Delegate through). PR URLs are extracted from the subagent's final response via regex; `MissingPRUrlError` is tracked separately so observability can distinguish "subagent never opened a PR" from "subagent crashed".
+3. **Slash command** (`opencomputer/agent/slash_commands_impl/batch_cmd.py`) — operator-facing `/batch [{json-list-of-units}]` invocation. Validates units, refuses cleanly when no DelegateTool factory is set, runs `run_batch_via_delegate`, pretty-prints success/failure/timeout bands with PR URLs.
+
+Tool-allowlist for batch leaves: Read, Edit, MultiEdit, Write, Grep, Glob, Bash, TodoWrite. Excludes Delegate / WebFetch / WebSearch — supply-chain narrowing on top of `role="leaf"`.
+
+51 new tests across the three layers (orchestrator + runner + slash). Ruff clean.
+
+The chat-mode `/batch` flow per `opencomputer/skills/batch/SKILL.md` (model decomposes the parent task and emits the JSON unit list) drives the slash command path. Programmatic callers (scripts) call `run_batch_via_delegate` directly.
+
 ### Added — v1.1 Plan-3 M6.4: Dreaming v2 cron + CLI production wiring (2026-05-09)
 
 The DreamingPipeline engine (three-gate consolidation INTO MEMORY.md) shipped in the prior commit; this PR closes the cron + CLI deferral so it actually runs.
