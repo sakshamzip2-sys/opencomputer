@@ -527,7 +527,62 @@ class HookCommandConfig:
     command: str = ""  # shell command to run (env-var substitution allowed)
     matcher: str | None = None  # regex over tool name (PreToolUse / PostToolUse only)
     timeout_seconds: float = 10.0
-    # "type": only "command" is supported (no LLM-prompt hooks yet)
+    # "type": "command" entries land here; "prompt" entries land in HookPromptConfig.
+
+
+@dataclass(frozen=True, slots=True)
+class HookPromptConfig:
+    """One LLM-prompt hook entry declared in config.yaml (v1.1 plan-2 M8.1).
+
+    Settings-declared hook that asks an aux-LLM whether a tool call /
+    user message / etc should be allowed. The user writes a system prompt
+    describing the policy; on each event fire we render the
+    :class:`HookContext` into a user message, call the aux-LLM, parse the
+    response and turn it into a :class:`HookDecision`.
+
+    The settings-format block looks like::
+
+        hooks:
+          PreToolUse:
+            - type: prompt
+              matcher: "Bash"
+              system: |
+                Rate the danger of this Bash command on a 1-10 scale.
+                Reply with one line: "block: <reason>" or "allow".
+              model: auto       # use cheap-route default
+              returns: allow_block
+              timeout_seconds: 5
+              token_budget_input: 500
+              token_budget_output: 100
+
+    Attributes:
+        event: Hook event name (must match ``HookEvent`` enum).
+        system: System prompt sent to the aux-LLM. The user's task /
+            tool call / message is inlined as the user message.
+        model: Aux-LLM model id, or the literal ``"auto"`` to defer to
+            the existing cheap-route picker. Empty string == ``"auto"``.
+        returns: ``"allow_block"`` (default) → response is parsed for
+            an ``allow``/``block`` token. ``"score"`` → response is
+            expected to contain a numeric risk score and the threshold
+            in ``score_threshold`` decides allow vs block.
+        matcher: Optional regex over tool name (Pre/PostToolUse only).
+        timeout_seconds: Wall-clock cap; exceeded → fail-open + warn.
+        token_budget_input: Estimated-input cap; exceeded → refuse to
+            invoke the LLM and fail-open + warn.
+        token_budget_output: Output max_tokens cap on the LLM call.
+        score_threshold: Used only when ``returns="score"``. Score
+            >= threshold → block.
+    """
+
+    event: str = ""
+    system: str = ""
+    model: str = "auto"
+    returns: str = "allow_block"  # "allow_block" | "score"
+    matcher: str | None = None
+    timeout_seconds: float = 5.0
+    token_budget_input: int = 500
+    token_budget_output: int = 100
+    score_threshold: float = 7.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1054,6 +1109,13 @@ class Config:
     #: :func:`opencomputer.agent.config_store._parse_hooks_block` and
     #: registered into the global :class:`HookEngine` at CLI startup.
     hooks: tuple[HookCommandConfig, ...] = ()
+    #: v1.1 plan-2 M8.1 (2026-05-09) — settings-declared LLM-prompt hooks.
+    #: Parsed from the same top-level ``hooks:`` YAML block; entries with
+    #: ``type: prompt`` land here, entries with ``type: command`` (or no
+    #: ``type``) land in :attr:`hooks` above. Rendered into ``HookSpec``s
+    #: at CLI startup via
+    #: :func:`opencomputer.hooks.prompt_handlers.make_prompt_hook_handler`.
+    prompt_hooks: tuple[HookPromptConfig, ...] = ()
     #: 3.F — master enable/disable for autonomous full-system-control mode.
     #: Defaults to disabled (invisible). When enabled, the structured
     #: ``agent.log`` collector + optional menu-bar indicator activate.
@@ -1155,6 +1217,7 @@ __all__ = [
     "MCPConfig",
     "MCPServerConfig",
     "HookCommandConfig",
+    "HookPromptConfig",
     "ToolsConfig",
     "WebSearchConfig",
     "FullSystemControlConfig",

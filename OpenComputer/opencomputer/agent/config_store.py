@@ -144,12 +144,16 @@ def _parse_hooks_block(block: Any) -> tuple[HookCommandConfig, ...]:
     valid_events = {e.value for e in HookEvent}
 
     def _coerce(raw: dict, default_event: str | None = None) -> HookCommandConfig | None:
-        # Support both "type": "command" and no-type-field entries; reject
-        # anything else (LLM-prompt hooks aren't wired in OpenComputer yet).
+        # Support both "type": "command" and no-type-field entries.
+        # "type": "prompt" entries are valid (M8.1) but parsed by
+        # _parse_prompt_hooks_block — silently skip them here so the
+        # same YAML block can mix command and prompt hooks.
         hook_type = raw.get("type", "command")
+        if hook_type == "prompt":
+            return None
         if hook_type != "command":
             _log.warning(
-                "hooks: skipping entry with unsupported type %r (only 'command' is supported): %r",
+                "hooks: skipping entry with unsupported type %r (expected 'command' or 'prompt'): %r",
                 hook_type,
                 raw,
             )
@@ -233,6 +237,139 @@ def _parse_hooks_block(block: Any) -> tuple[HookCommandConfig, ...]:
     return ()
 
 
+def _parse_prompt_hooks_block(block: Any) -> tuple[Any, ...]:
+    """Convert the top-level ``hooks:`` YAML block into a flat tuple of
+    :class:`HookPromptConfig`.
+
+    v1.1 plan-2 M8.1 (2026-05-09). Scans the same YAML block as
+    :func:`_parse_hooks_block` but only consumes entries with
+    ``type: prompt``. Entries without a ``type`` field, or with
+    ``type: command``, are silently skipped (the command parser
+    picks them up).
+
+    The frontmatter shape (per-entry) is::
+
+        - type: prompt
+          matcher: "Bash"          # optional regex over tool name
+          system: |                # required — the policy prompt
+            Reply 'block' if dangerous, 'allow' otherwise.
+          model: auto              # optional — auto = cheap-route default
+          returns: allow_block     # optional — allow_block | score
+          timeout_seconds: 5
+          token_budget_input: 500
+          token_budget_output: 100
+          score_threshold: 7.0     # only used when returns=score
+
+    Malformed entries (missing ``system`` body, unknown event, wrong
+    types) are logged at WARNING and skipped — one bad hook can't
+    brick the CLI.
+    """
+    from opencomputer.agent.config import HookPromptConfig
+    from plugin_sdk.hooks import HookEvent
+
+    if block is None:
+        return ()
+    valid_events = {e.value for e in HookEvent}
+    valid_returns = {"allow_block", "score"}
+
+    def _coerce(raw: dict, default_event: str | None = None):
+        if raw.get("type") != "prompt":
+            return None
+        event_name = raw.get("event", default_event)
+        if not isinstance(event_name, str) or not event_name:
+            _log.warning("prompt hooks: skipping entry missing event name: %r", raw)
+            return None
+        if event_name not in valid_events:
+            _log.warning(
+                "prompt hooks: skipping entry with unknown event %r (expected one of %s)",
+                event_name, sorted(valid_events),
+            )
+            return None
+        system = raw.get("system")
+        if not isinstance(system, str) or not system.strip():
+            _log.warning(
+                "prompt hooks: skipping entry missing 'system' body: %r", raw,
+            )
+            return None
+        matcher_value = raw.get("matcher")
+        if matcher_value is not None and not isinstance(matcher_value, str):
+            _log.warning(
+                "prompt hooks: skipping entry with non-string matcher: %r", raw,
+            )
+            return None
+        model = raw.get("model", "auto")
+        if not isinstance(model, str) or not model.strip():
+            model = "auto"
+        returns = raw.get("returns", "allow_block")
+        if returns not in valid_returns:
+            _log.warning(
+                "prompt hooks: skipping entry with unknown returns=%r "
+                "(expected %s)",
+                returns, sorted(valid_returns),
+            )
+            return None
+        try:
+            timeout_seconds = float(raw.get("timeout_seconds", 5.0))
+        except (TypeError, ValueError):
+            _log.warning(
+                "prompt hooks: skipping entry with non-numeric timeout: %r", raw,
+            )
+            return None
+        try:
+            token_budget_input = int(raw.get("token_budget_input", 500))
+            token_budget_output = int(raw.get("token_budget_output", 100))
+        except (TypeError, ValueError):
+            _log.warning(
+                "prompt hooks: skipping entry with non-integer token budgets: %r",
+                raw,
+            )
+            return None
+        try:
+            score_threshold = float(raw.get("score_threshold", 7.0))
+        except (TypeError, ValueError):
+            _log.warning(
+                "prompt hooks: skipping entry with non-numeric score_threshold: %r",
+                raw,
+            )
+            return None
+        return HookPromptConfig(
+            event=event_name,
+            system=system,
+            model=model,
+            returns=returns,
+            matcher=matcher_value,
+            timeout_seconds=timeout_seconds,
+            token_budget_input=token_budget_input,
+            token_budget_output=token_budget_output,
+            score_threshold=score_threshold,
+        )
+
+    parsed: list = []
+
+    if isinstance(block, list):
+        for entry in block:
+            if not isinstance(entry, dict):
+                continue
+            spec = _coerce(entry)
+            if spec is not None:
+                parsed.append(spec)
+        return tuple(parsed)
+
+    if isinstance(block, dict):
+        for event_name, entries in block.items():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                spec = _coerce(entry, default_event=event_name)
+                if spec is not None:
+                    parsed.append(spec)
+        return tuple(parsed)
+
+    return ()
+
+
 def _normalize_mcp_server_dict(raw: dict) -> dict:
     """Convert Hermes-spec nested MCP-server YAML to flat ``MCPServerConfig`` fields.
 
@@ -293,6 +430,10 @@ def load_config(path: Path | None = None) -> Config:
     # only knows about flat tuple-of-dataclasses).
     hooks_block = raw.pop("hooks", None)
     parsed_hooks = _parse_hooks_block(hooks_block)
+    # v1.1 plan-2 M8.1 (2026-05-09) — same YAML block also feeds prompt
+    # hooks. Each parser sniffs `type:` and only consumes entries it
+    # understands.
+    parsed_prompt_hooks = _parse_prompt_hooks_block(hooks_block)
 
     # G9 (Hermes parity, 2026-05-09) — normalize the nested
     # ``tools: {include, exclude, prompts, resources}`` form into the
@@ -307,9 +448,12 @@ def load_config(path: Path | None = None) -> Config:
             ]
 
     cfg = _apply_overrides(base, raw)
-    if parsed_hooks:
+    if parsed_hooks or parsed_prompt_hooks:
         kwargs = {f.name: getattr(cfg, f.name) for f in fields(cfg)}
-        kwargs["hooks"] = parsed_hooks
+        if parsed_hooks:
+            kwargs["hooks"] = parsed_hooks
+        if parsed_prompt_hooks:
+            kwargs["prompt_hooks"] = parsed_prompt_hooks
         cfg = Config(**kwargs)
     return cfg
 
