@@ -36,6 +36,7 @@ from opencomputer.agent.policy_audit_key import get_policy_audit_hmac_key
 from opencomputer.agent.state import SessionDB
 from opencomputer.cron.auto_revert import run_auto_revert_due
 from opencomputer.cron.decay_sweep import run_decay_sweep
+from opencomputer.cron.dreaming_v2_tick import run_dreaming_v2_tick
 from opencomputer.cron.policy_digest import run_policy_digest
 from opencomputer.cron.policy_engine_tick import run_engine_tick
 from opencomputer.cron.prune_turn_outcomes import run_prune_turn_outcomes
@@ -117,6 +118,16 @@ def run_system_tick() -> dict[str, str | int]:
         "prune_turn_outcomes",
         lambda: run_prune_turn_outcomes(db=db, flags=flags),
     )
+
+    # v1.1 plan-3 M6.4 — Dreaming v2 (default OFF, opt-in via
+    # ``cfg.memory.dreaming_v2_enabled = True``).
+    dream_result = _safe_call("dreaming_v2", run_dreaming_v2_tick)
+    if isinstance(dream_result, dict):
+        summary["dreaming_v2_promoted"] = int(dream_result.get("promoted", 0))
+        summary["dreaming_v2_held"] = int(dream_result.get("held", 0))
+        summary["dreaming_v2_dropped"] = int(dream_result.get("dropped", 0))
+    else:
+        summary["dreaming_v2"] = dream_result
 
     logger.info("system_tick summary: %s", summary)
     return summary
