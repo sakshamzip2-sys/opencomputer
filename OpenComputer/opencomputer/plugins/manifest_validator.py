@@ -224,6 +224,28 @@ class PluginManifestSchema(BaseModel):
     # Sub-project G (openclaw-parity) Task 2 — manifest-declared
     # activation triggers; None = legacy tool_names inference.
     activation: PluginActivationSchema | None = Field(default=None)
+    # v1.1 plan-4 M13 — top-level CLI command names this plugin
+    # advertises (lazy-loaded on `oc <name>` invocation). default_factory
+    # keeps existing manifests valid under extra="forbid". Validated as
+    # POSIX-shell-safe non-empty strings below.
+    cli_commands: list[str] = Field(default_factory=list)
+    cli_commands_profiles: list[str] | None = Field(default=None)
+
+    @field_validator("cli_commands")
+    @classmethod
+    def _cli_commands_shell_safe(cls, v: list[str]) -> list[str]:
+        for name in v:
+            if not name or not name.replace("-", "").replace("_", "").isalnum():
+                raise ValueError(
+                    f"cli_commands entry {name!r} must be a non-empty "
+                    "alphanumeric/dash/underscore identifier"
+                )
+            if name.startswith("-"):
+                raise ValueError(
+                    f"cli_commands entry {name!r} must not start with '-' "
+                    "(would collide with global flags)"
+                )
+        return v
 
     @field_validator("min_host_version")
     @classmethod

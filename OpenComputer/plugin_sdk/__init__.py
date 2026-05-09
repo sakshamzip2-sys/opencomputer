@@ -54,6 +54,13 @@ from plugin_sdk.doctor import (
     HealthStatus,
     RepairResult,
 )
+from plugin_sdk.embeddings import (
+    MAX_BATCH_SIZE as MAX_EMBED_BATCH_SIZE,
+)
+from plugin_sdk.embeddings import (
+    EmbeddingBatch,
+    EmbeddingsUnsupportedError,
+)
 from plugin_sdk.hooks import (
     ALL_HOOK_EVENTS,
     HookContext,
@@ -208,6 +215,10 @@ __all__ = [
     "StreamStaleError",
     "Usage",
     "VisionUnsupportedError",
+    # embeddings (v1.1 plan-3 M6.6)
+    "EmbeddingBatch",
+    "EmbeddingsUnsupportedError",
+    "MAX_EMBED_BATCH_SIZE",
     "BaseChannelAdapter",
     "ChannelCapabilities",
     # classifier abstraction (2026-04-28)

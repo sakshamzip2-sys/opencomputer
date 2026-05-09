@@ -35,6 +35,7 @@ import frontmatter
 
 if TYPE_CHECKING:
     from opencomputer.agent.memory_index import BM25Index
+    from opencomputer.agent.memory_vec_index import VectorIndex
 
 logger = logging.getLogger("opencomputer.agent.memory")
 
@@ -436,10 +437,25 @@ class MemoryManager:
 
         self._bm25_index = BM25Index(self.declarative_path.parent)
 
+        # v1.1 plan-3 M6.2 — Vector retrieval index over MEMORY.md.
+        # Lazy-built on first query; cache lives under
+        # <profile_home>/cache/.  Invalidated on every successful
+        # declarative write below.  The provider's embed() function is
+        # injected at query() time, not at construction (the active
+        # provider isn't necessarily resolved when MemoryManager is built).
+        from opencomputer.agent.memory_vec_index import VectorIndex
+
+        self._vector_index = VectorIndex(self.declarative_path.parent)
+
     @property
     def bm25_index(self) -> BM25Index:
         """BM25 retrieval index over MEMORY.md (v1.1 plan-3 M6.1)."""
         return self._bm25_index
+
+    @property
+    def vector_index(self) -> VectorIndex:
+        """Vector retrieval index over MEMORY.md (v1.1 plan-3 M6.2)."""
+        return self._vector_index
 
     def rebind_to_profile(self, profile_home: Path) -> None:
         """Re-resolve declarative_path / user_path / soul_path to point at
@@ -451,16 +467,18 @@ class MemoryManager:
         are NOT rebound — skill roots and the global SOUL fallback are
         shared across profiles, not per-profile.
 
-        The per-profile BM25 index is swapped to point at the new home so
-        retrieval isolates cleanly across profiles.
+        Both per-profile indexes (BM25 and vector) are swapped to point
+        at the new home so retrieval isolates cleanly across profiles.
         """
         self.declarative_path = profile_home / "MEMORY.md"
         self.user_path = profile_home / "USER.md"
         self.soul_path = profile_home / "SOUL.md"
 
         from opencomputer.agent.memory_index import BM25Index
+        from opencomputer.agent.memory_vec_index import VectorIndex
 
         self._bm25_index = BM25Index(profile_home)
+        self._vector_index = VectorIndex(profile_home)
 
     # ─── declarative (MEMORY.md) ───────────────────────────────────
 
@@ -477,6 +495,7 @@ class MemoryManager:
             kind="memory",
         )
         self._bm25_index.invalidate()
+        self._vector_index.invalidate()
 
     def replace_declarative(self, old: str, new: str) -> bool:
         changed = self._replace(
@@ -488,12 +507,14 @@ class MemoryManager:
         )
         if changed:
             self._bm25_index.invalidate()
+            self._vector_index.invalidate()
         return changed
 
     def remove_declarative(self, block: str) -> bool:
         changed = self._remove(self.declarative_path, block, kind="memory")
         if changed:
             self._bm25_index.invalidate()
+            self._vector_index.invalidate()
         return changed
 
     # ─── user profile (USER.md) ────────────────────────────────────
@@ -573,6 +594,7 @@ class MemoryManager:
             shutil.copy2(backup, target)
         if which == "memory":
             self._bm25_index.invalidate()
+            self._vector_index.invalidate()
         return True
 
     # ─── stats ─────────────────────────────────────────────────────

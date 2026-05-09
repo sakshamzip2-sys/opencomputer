@@ -235,6 +235,14 @@ def _parse_manifest(manifest_path: Path) -> PluginManifest | None:
         min_host_version=schema.min_host_version,
         # Sub-project G (openclaw-parity) Task 2 — activation triggers.
         activation=activation,
+        # v1.1 plan-4 M13 — top-level CLI command surface advertised by
+        # the manifest; loader resolves on `oc <name>` invocation.
+        cli_commands=tuple(schema.cli_commands),
+        cli_commands_profiles=(
+            tuple(schema.cli_commands_profiles)
+            if schema.cli_commands_profiles is not None
+            else None
+        ),
     )
 
 
