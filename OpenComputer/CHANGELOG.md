@@ -17,6 +17,67 @@ The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEAS
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-3 M10.3: per-rule profile rebind (2026-05-09)
+
+Closes the last open M10 deferral. When a routing rule sets `profile: <name>`, the dispatcher now swaps to the named profile's `AgentLoop` (memory + agent templates + MCP servers) for the remainder of dispatch. Same Telegram bot can serve two chats and route each to a different profile.
+
+```yaml
+# config.yaml — schema unchanged from M10.1
+routing:
+  rules:
+    - match: {platform: telegram, peer: "12345"}
+      agent: executive
+      profile: work          # ← M10.3: this swap now actually happens
+    - match: {platform: telegram, peer: "67890"}
+      agent: family-helper
+      profile: personal
+  default:
+    agent: default
+```
+
+Now an inbound Telegram message from `12345` runs through the **work** profile's loop (work's memory, work's agent templates, work's MCP servers); the same bot's message from `67890` runs through **personal** instead — even though the gateway only has one bot token.
+
+**Verified prerequisite — M1.4 per-profile env IS shipped.** Earlier M10.3 audit notes claimed it was a blocker; checking `opencomputer/security/env_loader.py:217` showed `load_for_profile` exists and is wired into `cli.py:5048`. M10.3 is unblocked today.
+
+**Composition matrix:**
+
+| Concern | Where it composes |
+|---|---|
+| Initial profile pick (BindingResolver) | `Dispatch._do_dispatch` — runs first |
+| **M10.3 routing-driven rebind** | `Dispatch._do_dispatch` — runs immediately after, before adapter wiring |
+| M10.2 system_prompt resolution | `Dispatch.handle_message` — runs against the **rebound** loop's `cfg.routing` |
+| F1 ConsentGate / M9.2 classifier | `_dispatch_tool_calls` — runs against the rebound profile |
+
+**Honest scope notes:**
+
+- **Per-profile env per-message reload** — `load_for_profile` runs at CLI startup based on the active profile. M10.3 mid-process rebinds use the rebound profile's loop (constructed against its own `profile_home`), so memory / agent templates / MCP servers are profile-scoped. Per-message env-var swap (so a credential-isolated rebind picks up `~/.opencomputer/profiles/work/.env` mid-dispatch) is a follow-up if real workloads need it; currently the source-profile env wins.
+- **Loop construction cost** — `AgentRouter.get_or_load(target)` builds the rebound profile's loop on first invocation and caches it. First-message latency for a new rebound profile is the cost of one `AgentLoop` construction; subsequent dispatches are just a dict lookup.
+
+**Defensive contract** — any failure in the rebind path logs at WARNING and falls through to source-profile dispatch:
+
+- `loop.config.routing` missing → fall through (no rules to match)
+- `discover_agents()` raises → fall through (router can't resolve template)
+- `resolve_template_for_event` raises → fall through
+- Target profile unknown to `AgentRouter` (`KeyError` from `get_or_load`) → fall through with WARNING
+- Target profile loop construction fails → fall through
+
+A stale routing rule must NEVER break message dispatch.
+
+**Files:**
+
+- `opencomputer/gateway/dispatch.py:_do_dispatch` — between `_router.get_or_load(profile_id)` and adapter binding, consult source-profile routing for a `profile_rebind` and swap `loop` / `profile_home` / `profile_id` if matched.
+
+**Tests (6 new in `tests/test_routing_profile_rebind.py`):**
+
+- `ResolvedTemplate.profile_rebind` carries the `profile:` field through `resolve_template_for_event`
+- Empty `profile_rebind` when rule omits `profile:`
+- Dispatcher rebind block swaps `loop` / `profile_home` / `profile_id` to target on match
+- No swap when target equals source (no-op)
+- Falls through (no swap, no crash) when target is unknown to the router
+- Composition pin: M10.3 swap → M10.2 resolution against rebound loop's routing rules produces the right `ResolvedTemplate`
+
+39 prior M10 tests still green; 190 dispatch + gateway tests still green — no regressions.
+
 ### Added — v1.1 Plan-3 M9.2: auto-mode tool-call safety classifier (2026-05-09)
 
 The security-critical heart of plan-3 M9. When `permission_mode = "auto"` is active, every pending tool call now passes through `ToolCallClassifier.classify` BEFORE the F1 ConsentGate. The classifier returns one of three verdicts:
@@ -329,6 +390,74 @@ isolation holds.
 invalidate, corpus-change-detection, corrupt-cache, format-version-skew,
 integration, perf). Cold build of a 4KB synthetic MEMORY.md is <250ms;
 warm query <50ms.
+
+### Added — v1.1 Plan-3 M10.1 + M10.4: per-channel routing schema + `oc routing` CLI (2026-05-09)
+
+Schema-and-dry-run slice of plan-3 M10. Operators can now declare routing rules in their `config.yaml` and inspect them with `oc routing list` / `oc routing test` — without the gateway dispatcher actually consuming them yet (M10.2/M10.3 land separately). The schema is the load-bearing piece; the CLI is what makes the schema reviewable.
+
+```yaml
+# ~/.opencomputer/<profile>/config.yaml
+routing:
+  rules:
+    - match: {platform: slack, channel: "#security-alerts"}
+      agent: security-reviewer
+    - match: {platform: telegram, peer: "12345"}
+      agent: executive
+      profile: work
+    - match: {platform: discord, guild: myguild, role: admin}
+      agent: admin-only
+    - match: {platform: discord, guild: myguild}
+      agent: guild-default
+  default:
+    agent: fallback
+```
+
+```
+$ oc routing list
+Routing rules (4 — most-specific first):
+  1. [spec=1001] platform='telegram', chat_id='12345', peer='12345' → agent='executive', profile='work'
+  2. [spec=301]  platform='discord', guild='myguild', role='admin' → agent='admin-only'
+  3. [spec=141]  platform='slack', channel='security-alerts' → agent='security-reviewer'
+  4. [spec=101]  platform='discord', guild='myguild' → agent='guild-default'
+
+Default: agent='fallback'
+
+$ oc routing test discord U777 --guild myguild --role admin
+Input: platform='discord', chat_id='U777', guild='myguild', role='admin'
+→ Matched rule (specificity=301): agent='admin-only'
+
+$ oc routing test matrix U999
+Input: platform='matrix', chat_id='U999'
+→ DEFAULT (no rule matched). agent='fallback'
+```
+
+**Most-specific-wins precedence (OpenClaw chain):**
+
+```
+exact peer (chat_id) → guild + role → guild → team → account → channel → platform → default
+```
+
+`peer:` is honored as an alias for `chat_id:` so YAML copy-pasted from OpenClaw works without renaming. `#channel` is normalized to `channel` so Slack-flavored configs match Discord-flavored event metadata identically. Authors can list rules in any order — the parser sorts them by `_match_specificity` so a less-specific rule listed first never eclipses a more-specific one.
+
+**What's deferred (intentional honest scope):**
+
+* **M10.2 — dispatcher integration** (gateway reads rules → applies agent template per inbound message). The plan-3 doc has this as a separate 1-2 day item. Schema is in place so M10.2 only needs to flip the `Dispatch.handle_message` lookup.
+* **M10.3 — per-rule profile rebind** (`profile:` field on a rule swaps the gateway's per-message context to that profile's memory + creds). Requires plan-1 M1.4 (per-profile env). Schema honors `profile:` today and round-trips it through YAML; the gateway plumbing is the M10.3 work.
+
+**Files:**
+
+- `opencomputer/agent/config.py` — `RoutingMatch`, `RoutingRule`, `RoutingDefault`, `RoutingConfig` dataclasses + `Config.routing` field (additive default; existing configs unchanged).
+- `opencomputer/agent/routing.py` (NEW) — `_match_specificity` + `sort_rules_by_specificity` + `match_rule` + `resolve_routing_rule(event)` + `resolve_routing_rule_by_fields(dict)` (the CLI's entry point — no MessageEvent dep).
+- `opencomputer/agent/config_store.py` — `_parse_routing_block` parser + `load_config` plumb-through; `_to_yaml_dict` writer for round-trip. Drops unknown match dimensions with a WARNING (forward-compat for un-ported OpenClaw fields); rejects rules missing `agent`.
+- `opencomputer/cli_routing.py` (NEW) — `routing_app` Typer with `list` + `test` commands. Both support `--output text|json` for scripting / piping to jq.
+- `opencomputer/cli.py` — `app.add_typer(routing_app, name="routing")`.
+
+**Tests (30 new across 4 files, all green):**
+
+- `tests/test_routing_precedence.py` — 11 tests covering every step of the precedence chain (chat_id beats guild+channel; peer alias matches chat_id; guild+role beats guild alone; channel beats platform; team beats channel; account beats channel; guild beats team beats account; sort is order-independent + stable for equal specificity).
+- `tests/test_routing_default_fallback.py` — 3 tests: no rules → default fires; rules present but none match → default; default agent defaults to "default".
+- `tests/test_routing_yaml_round_trip.py` — 8 tests: minimal block parses; full block with profile parses; empty block returns None (Config.routing untouched); rule missing `agent` is skipped with WARNING; unknown match dimension dropped with WARNING; channel `#foo` normalizes to `foo`; full Config → YAML → reload round-trips with most-specific-first ordering preserved; config without `routing:` block leaves Config.routing at default.
+- `tests/test_cli_routing.py` — 8 tests: `list` text + JSON; no rules listed; `test` matches security channel + admin role; falls through to default; JSON output; `#channel` normalization at the CLI flag layer.
 
 ### Added — v1.1 Plan-1 M3.1 + M3.3: wire-protocol completeness (2026-05-09)
 
