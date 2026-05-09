@@ -32,6 +32,9 @@ def test_register_logs_warning_and_skips_when_provider_already_registered(
     plugin must log a WARNING and return — NOT propagate the exception.
     """
     monkeypatch.setenv("OPENCOMPUTER_PROFILE", "default")
+    # MEM0_API_KEY must be set for register() to reach the register-provider
+    # call; without it the plugin short-circuits silently (M1.B1 follow-up).
+    monkeypatch.setenv("MEM0_API_KEY", "fake-test-key")
     plugin = _load_plugin_module()
 
     api = MagicMock()
@@ -45,3 +48,24 @@ def test_register_logs_warning_and_skips_when_provider_already_registered(
     msgs = [r.getMessage() for r in caplog.records if r.name == "memory-mem0"]
     assert any("already" in m.lower() for m in msgs), msgs
     api.register_memory_provider.assert_called_once()
+
+
+def test_register_silently_skips_when_no_credentials(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When neither MEM0_API_KEY nor MEM0_BASE_URL is set, the plugin must
+    return without calling register_memory_provider AND without logging
+    any warning. Closes the residual warning-spam Saksham flagged when
+    his .env had no MEM0_API_KEY (2026-05-10)."""
+    monkeypatch.delenv("MEM0_API_KEY", raising=False)
+    monkeypatch.delenv("MEM0_BASE_URL", raising=False)
+    plugin = _load_plugin_module()
+
+    api = MagicMock()
+
+    with caplog.at_level(logging.WARNING, logger="memory-mem0"):
+        plugin.register(api)
+
+    api.register_memory_provider.assert_not_called()
+    msgs = [r.getMessage() for r in caplog.records if r.name == "memory-mem0"]
+    assert not msgs, f"expected silent skip, got log lines: {msgs}"
