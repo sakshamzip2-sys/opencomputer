@@ -275,9 +275,11 @@ def build_server() -> FastMCP:
 
     @server.tool()
     def events_poll(
-        since_message_id: int = 0, limit: int = 50
+        since_message_id: int = 0,
+        after_cursor: int | None = None,
+        limit: int = 50,
     ) -> dict[str, Any]:
-        """Incremental poll for messages that arrived after a cursor.
+        """Incremental poll for messages and approval events.
 
         External MCP clients (Claude Code, Cursor) call this on a timer
         to pick up newly-received Telegram/Discord messages without
@@ -285,32 +287,40 @@ def build_server() -> FastMCP:
         the next cursor; clients should re-poll with ``next_cursor`` to
         continue the stream.
 
+        Hermes parity G14 (2026-05-09):
+
+        * Accepts ``after_cursor`` as a Hermes-spec alias for
+          ``since_message_id`` (when both are supplied, ``after_cursor``
+          wins).
+        * Surfaces F1 ``audit_log`` entries newer than the cursor under
+          a separate ``approvals`` key with ``type``
+          (``approval_requested`` / ``approval_resolved``) so MCP
+          clients can react to consent grants/revocations elsewhere.
+          Empty when the ``audit_log`` table is absent.
+
         Args:
-            since_message_id: Cursor — return only messages whose row id
-                is strictly greater than this. Use ``0`` on first call;
-                use the returned ``next_cursor`` thereafter.
-            limit: Max messages to return per call (default 50, max 500).
+            since_message_id: Cursor (legacy OC). Use ``after_cursor``
+                instead for new code.
+            after_cursor: Hermes-spec cursor name. Wins when both are set.
+            limit: Max messages and approvals returned (default 50, max 500).
 
         Returns:
-            Dict with ``messages`` (list of newest-N rows from the
-            messages table joined with their session's platform / chat
-            id) and ``next_cursor`` (the highest row id returned, or
-            ``since_message_id`` if no new rows). Re-poll with that
-            cursor to get the next slice.
+            Dict with ``messages`` (list of newest-N message rows joined
+            with their session's platform), ``next_cursor`` (the highest
+            message id returned), and ``approvals`` (list of newer-than-
+            cursor audit_log entries with ``type`` set).
         """
+        cursor = after_cursor if after_cursor is not None else since_message_id
         bounded = max(1, min(limit, 500))
         db_path = _home() / "sessions.db"
         if not db_path.exists():
-            return {"messages": [], "next_cursor": since_message_id}
+            return {"messages": [], "next_cursor": cursor, "approvals": []}
 
+        out_messages: list[dict[str, Any]] = []
+        out_approvals: list[dict[str, Any]] = []
         with sqlite3.connect(str(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             try:
-                # Join messages → sessions so the caller learns the
-                # platform without a follow-up ``session_get`` per row.
-                # Chat id is encoded into ``session_id`` by the gateway —
-                # callers that need a structured (platform, chat_id)
-                # tuple should call ``session_get`` for resolution.
                 rows = conn.execute(
                     "SELECT m.id, m.session_id, m.role, m.content, "
                     "m.timestamp, s.platform "
@@ -318,15 +328,39 @@ def build_server() -> FastMCP:
                     "JOIN sessions s ON m.session_id = s.id "
                     "WHERE m.id > ? "
                     "ORDER BY m.id ASC LIMIT ?",
-                    (since_message_id, bounded),
+                    (cursor, bounded),
                 ).fetchall()
             except sqlite3.OperationalError:
                 # Pre-migration DB or missing column; return empty.
-                return {"messages": [], "next_cursor": since_message_id}
+                rows = []
+            out_messages = [dict(r) for r in rows]
 
-        messages = [dict(r) for r in rows]
-        next_cursor = messages[-1]["id"] if messages else since_message_id
-        return {"messages": messages, "next_cursor": next_cursor}
+            # G14: surface approval events from audit_log when present.
+            try:
+                a_rows = conn.execute(
+                    "SELECT id, ts, capability_id, action, tier, scope, "
+                    "granted_by FROM audit_log WHERE id > ? "
+                    "ORDER BY id ASC LIMIT ?",
+                    (cursor, bounded),
+                ).fetchall()
+                for r in a_rows:
+                    rd = dict(r)
+                    rd["type"] = (
+                        "approval_resolved"
+                        if rd["action"] in ("granted", "revoked")
+                        else "approval_requested"
+                    )
+                    out_approvals.append(rd)
+            except sqlite3.OperationalError:
+                # Pre-F1 profile or fresh DB — silently skip.
+                pass
+
+        next_cursor = out_messages[-1]["id"] if out_messages else cursor
+        return {
+            "messages": out_messages,
+            "next_cursor": next_cursor,
+            "approvals": out_approvals,
+        }
 
     @server.tool()
     def consent_history(capability: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
