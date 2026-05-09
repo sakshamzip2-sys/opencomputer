@@ -23,52 +23,27 @@ Safe to run in parallel — no side effects beyond producing output.
 
 from __future__ import annotations
 
-import threading
-from dataclasses import dataclass
 from typing import Literal
 
+# v1.1 plan-2 M5.4 follow-up (2026-05-09): proposal slot moved to
+# opencomputer.agent.exit_plan_proposal so the tool (in extension)
+# and the agent loop (in core) share ONE module identity. The prior
+# in-extension slot caused a module-identity trap when the same
+# file was loaded under different sys.path routes (the loader's
+# synthetic name vs. core's bare-name import).
+from opencomputer.agent.exit_plan_proposal import (
+    PROPOSED_EXIT_MODES,
+    ExitPlanProposal,
+    get_last_proposal,
+    pop_last_proposal,
+)
+from opencomputer.agent.exit_plan_proposal import (
+    record_proposal as _record_proposal,
+)
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
-#: Allowed values for the ``next_mode`` parameter. Subset of canonical
-#: PermissionMode enum + a "keep" sentinel meaning "stay in plan mode
-#: and continue iterating". Mirrors the plan's 4-route flow.
-PROPOSED_EXIT_MODES: tuple[str, ...] = ("auto", "acceptEdits", "manual", "keep")
 ProposedExitMode = Literal["auto", "acceptEdits", "manual", "keep"]
-
-
-@dataclass(frozen=True, slots=True)
-class ExitPlanProposal:
-    """Most-recent plan + suggested next_mode emitted by ExitPlanMode."""
-
-    plan: str
-    next_mode: str  # one of PROPOSED_EXIT_MODES
-
-
-_PROPOSAL_LOCK = threading.Lock()
-_LAST_PROPOSAL: ExitPlanProposal | None = None
-
-
-def get_last_proposal() -> ExitPlanProposal | None:
-    """Return the most recent proposal without consuming it. Read-only."""
-    with _PROPOSAL_LOCK:
-        return _LAST_PROPOSAL
-
-
-def pop_last_proposal() -> ExitPlanProposal | None:
-    """Return + clear the most recent proposal. Use after the consuming
-    surface routes the decision back to the runtime."""
-    global _LAST_PROPOSAL  # noqa: PLW0603
-    with _PROPOSAL_LOCK:
-        out = _LAST_PROPOSAL
-        _LAST_PROPOSAL = None
-        return out
-
-
-def _record_proposal(plan: str, next_mode: str) -> None:
-    global _LAST_PROPOSAL  # noqa: PLW0603
-    with _PROPOSAL_LOCK:
-        _LAST_PROPOSAL = ExitPlanProposal(plan=plan, next_mode=next_mode)
 
 
 class ExitPlanModeTool(BaseTool):

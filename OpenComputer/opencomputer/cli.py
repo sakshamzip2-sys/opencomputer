@@ -2451,6 +2451,7 @@ def _run_oneshot_turn(
     model: str = "",
     provider_name: str = "",
     plan: bool = False,
+    output: str = "text",
 ) -> None:
     """Single-turn non-interactive run shared by ``oc oneshot`` and ``oc chat -q``.
 
@@ -2459,12 +2460,36 @@ def _run_oneshot_turn(
     Extracted so ``oc chat -q "..."`` can reuse this path without going through
     Typer's command machinery (calling typer-decorated functions directly
     would pass OptionInfo objects in place of defaults).
+
+    ``output`` (v1.1 plan-1 M2.2, 2026-05-09) controls stdout shape:
+
+    * ``"text"`` (default) — prints the assistant's final message.
+    * ``"json"`` — emits one summary JSON object at end of run.
+    * ``"stream-json"`` — emits one NDJSON line per LLM call as the
+      run proceeds, plus a final ``{"event": "summary", ...}`` line.
+
+    Modes other than text route stdout through
+    :mod:`opencomputer.oneshot_output` and the
+    :mod:`opencomputer.inference.observability` subscriber bus.
     """
     import asyncio as _asyncio
 
     from opencomputer.agent.loop import AgentLoop as _AgentLoop
+    from opencomputer.headless import parse_output_mode as _parse_output_mode
+    from opencomputer.oneshot_output import (
+        OneshotResult as _OneshotResult,
+    )
+    from opencomputer.oneshot_output import (
+        emit_final as _emit_final,
+    )
+    from opencomputer.oneshot_output import (
+        stream_subscriber as _stream_subscriber,
+    )
     from opencomputer.tools.delegate import DelegateTool as _DelegateTool
     from plugin_sdk.runtime_context import RuntimeContext as _RuntimeContext
+
+    output_mode = _parse_output_mode(output)
+    oneshot_result = _OneshotResult()
 
     _configure_logging_once()
     cfg = load_config()
@@ -2520,9 +2545,10 @@ def _run_oneshot_turn(
     permission_mode = _derive_permission_mode(plan=plan, auto=False, accept_edits=False)
     runtime = _RuntimeContext(plan_mode=plan, permission_mode=permission_mode)
 
-    async def _run() -> str:
+    async def _run() -> tuple[str, str]:
         result = await loop.run_conversation(prompt, runtime=runtime)
         msg = getattr(result, "final_message", None)
+        sid = getattr(result, "session_id", "") or ""
         # Drain fire-and-forget tasks (e.g. social-traces post-task
         # distill+submit) before this coroutine returns, otherwise
         # ``asyncio.run`` cancels them when its event loop tears down.
@@ -2537,16 +2563,20 @@ def _run_oneshot_turn(
         except Exception:  # noqa: BLE001
             pass
         if msg is None:
-            return ""
+            return "", str(sid)
         content = getattr(msg, "content", "")
-        return content if isinstance(content, str) else ""
+        return (content if isinstance(content, str) else ""), str(sid)
 
     try:
-        text = _asyncio.run(_run())
+        with _stream_subscriber(oneshot_result, output_mode):
+            text, session_id = _asyncio.run(_run())
     except KeyboardInterrupt:
         raise typer.Exit(130) from None
-    if text:
-        typer.echo(text)
+
+    oneshot_result.final_message = text or ""
+    oneshot_result.session_id = session_id
+
+    _emit_final(oneshot_result, output_mode)
 
 
 @app.command(name="oneshot")
@@ -2565,6 +2595,19 @@ def oneshot(
     plan: bool = typer.Option(
         False, "--plan", help="Plan mode (read-only / refuses destructive tools).",
     ),
+    output: str = typer.Option(
+        "text",
+        "--output",
+        "-o",
+        help=(
+            "Output mode for stdout. 'text' (default) prints the assistant's "
+            "final message. 'json' emits one summary JSON object at end of run "
+            "(session_id, num_turns, total_*_tokens, total_cost_usd, "
+            "final_message). 'stream-json' emits one NDJSON line per LLM call "
+            "as it fires plus a final {\"event\":\"summary\",...} line. "
+            "(v1.1 plan-1 M2.2)"
+        ),
+    ),
 ) -> None:
     """Run a single agent turn non-interactively, print the response, exit.
 
@@ -2578,10 +2621,18 @@ def oneshot(
         oc oneshot "what's in the README?"
         oc oneshot "summarise this file" --model anthropic:claude-opus-4-7
         oc oneshot "describe a kanban board" --plan
+        oc oneshot "say hi" --output json | jq .session_id
+        oc oneshot "do 3 things" --output stream-json | jq -c .event
 
     See also: ``oc chat -q "..."`` is a Hermes-parity alias for this command.
     """
-    _run_oneshot_turn(prompt, model=model, provider_name=provider_name, plan=plan)
+    _run_oneshot_turn(
+        prompt,
+        model=model,
+        provider_name=provider_name,
+        plan=plan,
+        output=output,
+    )
 
 
 @app.command()

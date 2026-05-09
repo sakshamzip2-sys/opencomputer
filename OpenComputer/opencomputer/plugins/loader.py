@@ -105,12 +105,49 @@ _PLUGIN_LOCAL_NAMES = (
     "hooks",
     "realtime",          # openai-provider, gemini-provider, future Anthropic
     "realtime_helpers",  # ditto — pure-helpers sidecar per realtime bridge
+    # 2026-05-09 — subpackages that appear in MULTIPLE plugin dirs
+    # (e.g. coding-harness/slash_commands/ AND voice-mode/slash_commands/).
+    # Without clearing, the first-loaded plugin's version of the
+    # subpackage gets cached and subsequent plugins' bare imports
+    # find the wrong directory. Caught via test_phase12b4_exit_plan_mode
+    # which failed under pytest because conftest's voice-mode alias
+    # cached slash_commands → coding-harness's accept_edits couldn't
+    # be found.
+    "slash_commands",
+    "tools",
+    "modes",
+    "permissions",
+    "rewind",
+    "introspection",
+    "state",  # coding-harness has state/ pkg; others have state.py module
+    "memory",
+    "context",
+    "config",
+    "router",
+    "session",
+    "tools_core",
+    "server_context",
+    "redactor",
 )
 
 
 def _clear_plugin_local_cache() -> None:
+    """Pop shared sibling subpackage names from sys.modules.
+
+    Called before each plugin's entry-module exec so the plugin's own
+    siblings (which live under the just-prepended plugin_root in
+    sys.path) win the import resolution instead of returning a cached
+    pointer at a different plugin's directory.
+    """
     for name in _PLUGIN_LOCAL_NAMES:
         sys.modules.pop(name, None)
+        # Also pop any nested submodules under these top-level names
+        # (e.g. ``slash_commands.accept_edits``) so the next exec_module
+        # call sees a clean namespace at every depth.
+        prefix = f"{name}."
+        for cached in list(sys.modules):
+            if cached.startswith(prefix):
+                sys.modules.pop(cached, None)
 
 
 # ─── single_instance lock (Phase 12b.2, Task B6) ──────────────────────
@@ -1257,8 +1294,20 @@ def load_plugin(
 
     plugin_root = candidate.root_dir.resolve()
     plugin_root_str = str(plugin_root)
-    if plugin_root_str not in sys.path:
-        sys.path.insert(0, plugin_root_str)
+    # 2026-05-09 — the plugin_root MUST sit at sys.path[0] for the
+    # duration of this exec_module so its sibling subpackages
+    # (slash_commands/, tools/, modes/, ...) win resolution against
+    # other plugins that have an identically-named subpackage on
+    # sys.path. Earlier "if not in sys.path" left the plugin_root at
+    # whatever index pytest's conftest registered it at — voice-mode
+    # at 0, coding-harness at 2 — so coding-harness's bare import of
+    # `from slash_commands.accept_edits` resolved against voice-mode's
+    # slash_commands/ (which has no accept_edits.py). Move it to 0
+    # unconditionally; harmless dup is fine since the duplicate gets
+    # skipped on second visit.
+    while plugin_root_str in sys.path:
+        sys.path.remove(plugin_root_str)
+    sys.path.insert(0, plugin_root_str)
 
     entry_path = plugin_root / f"{entry}.py"
     if not entry_path.exists():

@@ -2,6 +2,19 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
+## [v2026.5.9] — 2026-05-09
+
+The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEASE.md`, on tag push (`git tag v2026.5.9 && git push origin v2026.5.9`) the `release.yml` workflow publishes to PyPI via OIDC trusted publishing.
+
+**What's new since v2026.5.5** (see the per-PR stanzas below this header):
+
+- v1.1 plan-1: profile.yaml parser unification (PR #520), opt-in aux-LLM response cache (#521), `oc oneshot --output text|json|stream-json` (#522), wire `permission.request` + `permission.response` + per-session ring buffer (#523).
+- v1.1 plan-2: `oc session checkpoints` (#526), path-glob rules + `oc rules` CLI (#527), delegate `isolation=worktree|copy` (#528), SKILL.md `context: fork` + tools allowlist (#529), `oc session rewind` (#530), ExitPlanMode `next_mode` proposal slot (#531) + loop mutation follow-up (#534), `type: prompt` + `type: agent` settings hooks (#532), per-prompt message-history checkpoints schema v15 (#535), SKILL.md inline tools hard-enforce (#537), plugin-loader sibling-subpackage isolation fix (#538).
+- Hermes parity / security-v2 / dashboard production-grade rolls (PRs #496-#519).
+- Plans 3-6 audited; M12 (`/btw`) confirmed already shipped pre-release; the rest are demand-gated per their own preambles (`docs/superpowers/plans/2026-05-09-v1-1-plans-3-to-6-audit.md`).
+
+**Stability commitment:** the `plugin_sdk/*` surface is the contract. Date-versioning does not weaken that — any breaking change to `plugin_sdk/*` is announced explicitly here regardless of date.
+
 ## [Unreleased]
 
 ### Added — v1.1 Plan-4 M13: plugin-authored top-level CLI subcommands (2026-05-09)
@@ -64,6 +77,114 @@ End user gets `oc jira create --title "ship M13" --project OPS` — the plugin l
 - `tests/test_plugin_cli_register.py` — happy path register; duplicate raises; `replace=True` overrides; lazy dispatch into real Typer; missing `register_cli_command()` errors clearly; manifest schema accepts `cli_commands`; rejects `--` prefix and empty entries.
 - `tests/test_plugin_cli_core_collision.py` — parametrized over 13 core verbs; `replace=True` does not bypass core-collision; sanity check that the spec's reserved set is in `CORE_RESERVED_CLI_NAMES`.
 - `tests/test_plugin_cli_help_listing.py` — `--help` lists advertised name; `load_plugin` is called **zero** times during `--help`; actual invocation triggers load + dispatches; profile-scoped commands hidden under inactive profile, visible under active profile.
+
+### Added — v1.1 Plan-3 M6.1: `MEMORY.md` BM25 index (2026-05-09)
+
+Foundation for v1.1 plan-3 M6 Active Memory work. Adds
+`opencomputer.agent.memory_index.BM25Index`, a profile-scoped, lazily
+built, cache-backed BM25 retrieval index over `MEMORY.md`.
+
+```python
+mm = MemoryManager(declarative_path=..., skills_path=...)
+mm.append_declarative("user prefers postgresql for OLTP")
+hits = mm.bm25_index.query("postgresql", top_k=5)
+# -> [QueryHit(entry=IndexedEntry(raw="user prefers postgresql for OLTP", ...), score=..., rank=0)]
+```
+
+**Cache integrity** — pickle file at `<profile_home>/cache/memory_bm25.idx`
+self-validates on load via a `(format_version, corpus_sha256, entry_count, mtime_ns, built_at)`
+header. Mismatch (truncation, garbage, schema skew, external `MEMORY.md` edit
+without `MemoryManager` involvement) triggers a transparent rebuild — never
+a silent stale-result return.
+
+**Invalidation** — `MemoryManager.append_declarative`, `replace_declarative`,
+`remove_declarative`, and `restore_backup(which="memory")` each call
+`bm25_index.invalidate()` after a successful write. `rebind_to_profile`
+swaps the index along with the declarative paths so per-profile
+isolation holds.
+
+**Audit findings folded in** —
+- Cache-integrity check (Plan 3 said "pickle the corpus"; this PR adds the header validation).
+- FTS5-vs-pickle architectural choice documented in the spec.
+
+**Carry-forward audit notes** (NOT in this PR — for the next sub-milestones):
+- M9.2 fail-closed default on classifier error/timeout.
+- M6.4 Dreaming cron-miss catch-up policy.
+- M6.3 + Honcho prompt ordering: `[Honcho prefetch] → [Active Memory] → [user content]`.
+- `BaseProvider.embed()` contract for M6.6: `EmbeddingBatch(vectors, dimensionality, model_id, cost_estimate_usd)` with batch ≤100.
+
+44 new tests across 9 files (tokenizer, segmentation, basic query, persist,
+invalidate, corpus-change-detection, corrupt-cache, format-version-skew,
+integration, perf). Cold build of a 4KB synthetic MEMORY.md is <250ms;
+warm query <50ms.
+
+### Added — v1.1 Plan-1 M3.1 + M3.3: wire-protocol completeness (2026-05-09)
+
+Closes the two remaining wire-protocol gaps from `2026-05-09-v1-1-plan-1-refined-execution.md`. Same files (`gateway/protocol.py`, `gateway/protocol_v2.py`, `gateway/wire_server.py`); shipped together for atomic-bisect. M3.2 transfer-token session handoff stays deferred per YAGNI (no current wire client demands it).
+
+**M3.1 — permission.request event + permission.response RPC**
+
+A wire client can now approve a Tier-2 capability without the agent owning a Telegram bot. New protocol surface:
+
+- `EVENT_PERMISSION_REQUEST = "permission.request"` — server → client. Payload: `request_id`, `session_id`, `capability_id`, `scope`, `context`, `timeout_s` (typed `PermissionRequestPayload` in `protocol_v2`).
+- `METHOD_PERMISSION_RESPONSE = "permission.response"` — client → server. Params: `request_id`, `session_id`, `capability_id`, `decision: Literal["allow_once","allow_always","deny"]` (typed `PermissionResponseParams`/`PermissionResponseResult`).
+- New `WireServer.broadcast_permission_request(...)` helper — emits `permission.request` to every wire client currently registered on a session. First responder wins; later responders see `resolved=False` since the gate's pending registry is keyed on `(session_id, capability_id)`. Per-client send failures are swallowed (one stale client doesn't block the rest).
+- `WireServer._handle_client` now tracks per-session WS connections so the broadcast helper can find them; cleanup on disconnect drops the connection from the registry.
+- `METHOD_PERMISSION_RESPONSE` handler in `_dispatch` routes the decision into `AgentLoop._consent_gate.resolve_pending`. The existing 300s `ConsentGate` timeout still applies — no response within that window auto-denies and audits, just like the Telegram path.
+
+**M3.3 — wire reconnect ring buffer**
+
+Disconnects during a long turn no longer cost the client visibility into intermediate tool calls. New protocol surface:
+
+- `WireEvent.seq: int | None = None` — monotonic per-session sequence number. Optional, default `None`, so old clients that built or decoded events without it keep working.
+- `HelloParams.session_id: str | None = None` + `last_event_seq: int | None = None` — opt-in replay request on reconnect.
+- `HelloResult.gap_warning: bool = False` + `server_last_event_seq: int | None = None` — server tells the client whether the requested replay window covered everything (gap_warning=True means some events fell off the end of the buffer).
+- `WireServer` keeps per-session `collections.deque(maxlen=200)` of the last 200 events plus a per-session `_session_seq` counter. `_send_event` stamps `seq` and appends to the ring. The `hello` handler echoes `(server_last_event_seq, gap_warning)` and replays `seq > last_event_seq` events immediately after the HelloResult.
+
+23 new tests in `test_wire_protocol_completeness.py` covering protocol-surface constants, schema validation (Literal decision rejection, optional scope), ring-buffer monotonic stamping, eviction at `RING_BUFFER_MAX = 200`, replay-after-hello (caught up / partial / overflow / unknown session), broadcast helper (registered clients / no clients / stale-client tolerance), and `HelloParams`/`HelloResult` shape.
+
+### Added — v1.1 Plan-1 M2.2: `oc oneshot --output text|json|stream-json` (2026-05-09)
+
+`oc oneshot` (and the `oc chat -q "..."` Hermes-parity alias) gain a `--output` / `-o` flag for CI-friendly stdout shapes:
+
+- `text` (default): unchanged — prints the assistant's final message.
+- `json`: emits one summary JSON object on stdout at end of run with `session_id`, `num_turns`, `total_input_tokens`, `total_output_tokens`, `total_cache_creation_tokens`, `total_cache_read_tokens`, `total_cost_usd`, `final_message`, optional `error`.
+- `stream-json`: NDJSON — one `{"event":"llm_call",...}` line per LLM call as it fires, plus a final `{"event":"summary",...}` line. The existing `~/.opencomputer/<profile>/llm_events.jsonl` write is untouched; stream-json is an *additional* sink registered through `inference.observability.register_subscriber`.
+
+New types in `opencomputer.headless`: `OutputMode` (str enum) + `parse_output_mode(value)` with friendly errors. Per-mode emission lives in `opencomputer.oneshot_output` (`OneshotResult`, `emit_final`, `stream_subscriber`) so the formatter can be tested without spinning up a provider. 18 new tests in `test_output_modes.py`.
+
+```bash
+oc oneshot "say hi" --output json | jq .session_id
+oc oneshot "do 3 things" --output stream-json | jq -c .event
+```
+
+The original v1.1 plan-1 acceptance referenced `oc chat --bare --headless --once --output ...` but the actual non-interactive CLI surface in OpenComputer is `oc oneshot` (or `oc chat -q "..."`). Wired against the existing surface; `--bare` and `--once` are not needed.
+
+### Added — v1.1 Plan-1 M1.3: opt-in aux-LLM response cache (2026-05-09)
+
+Wires `AgentCache` into a real production caller after Phase 12a left it unwired. The original plan's premise — wrap a v2 LLM-backed post-response reviewer — was stale (the reviewer is still v1 rule-based, no LLM call), so this lands the cache against the actual deterministic aux-LLM caller that benefits: `security.smart_mode.assess_command_risk`, which runs at temperature=0.0 with a fixed system prompt.
+
+- New `opencomputer.agent.aux_llm.complete_text(..., use_cache=False)` opt-in kwarg (mirrored on `complete_text_sync`). Cache key via `aux_response_signature(provider, model, system, messages, max_tokens, temperature)` — sha256 over `(system, messages)` so the key stays fixed-size. `temperature` IS part of the key; callers SHOULD NOT opt in at temperature > 0 unless they explicitly want sample re-use.
+- New `aux_cache_stats() -> dict[str, int]` and `clear_aux_response_cache()` exposed for observability + test isolation.
+- `AgentCache` docstring updated to acknowledge both production use cases (AgentLoop instance cache via `AgentRouter`; aux-response cache via `aux_llm`).
+- `security.smart_mode.assess_command_risk` opted in with `use_cache=True`. An agent that retries the same `(command, capability_id, scope)` 10 times now pays for the LLM verdict once.
+- Default cache size `DEFAULT_AUX_RESPONSE_CACHE_MAX = 256` entries × ~8KB ≈ 2MB worst case.
+
+13 new tests in `test_aux_llm_response_cache.py` pin the contract: opt-in vs default, cache-key sensitivity to system/messages/temperature/max_tokens, LRU eviction at capacity, clear+stats, and a regression guard that smart_mode keeps the `use_cache=True` opt-in.
+
+Honest deferral: surfacing cache hit/miss stats in `oc usage` is a follow-up (the data is exposed via `aux_cache_stats()` but `cli_usage.py` integration is not in this PR).
+
+### Changed — v1.1 Plan-1 M1.2: unify profile.yaml parse paths (2026-05-09)
+
+Closes the strict-vs-lenient profile.yaml parser divergence flagged in `2026-05-08-v1-1-plan-1-foundation-and-cleanup.md` M1.2. Previously `cli_plugin._read_and_validate_profile_yaml` (strict, schema-validated) and the `cli_profile.env-template` / `cli_profile.env-init` lenient readers each open-coded `yaml.safe_load(path.read_text()) or {}` with subtly different error handling — a malformed profile.yaml could fail through one consumer and pass through another.
+
+- New `opencomputer.agent.config_store.load_yaml_dict(path, *, missing_ok=True)` — single canonical YAML→dict loader. Uniform missing-file semantics, typed `ConfigYAMLError` on parse failure or non-mapping top level.
+- `load_config` now goes through `load_yaml_dict` (same parse code path as the lenient consumers).
+- `cli_plugin._read_and_validate_profile_yaml` migrated; `cli_plugin` no longer imports `yaml` directly.
+- New private helper `cli_profile._read_enabled_plugin_ids(profile_yaml)` — both `env-template` and `env-init` go through it, and through `load_yaml_dict` underneath. Preserves the load-bearing `None` (file absent → "include everything") vs `set()` (explicit empty list) distinction.
+- 22 new tests in `tests/test_yaml_parse_unified.py` pinning the contract + a regression guard against re-introducing raw `yaml.safe_load` in the migrated modules.
+
+Out of scope: ~25 other `yaml.safe_load` callsites (skin loader, persona registry, allowlists, security policies, custom-providers reload) parse different schemas and have their own migration paths — not the divergence M1.2 was scoped against.
 
 ### Added — v1.1 Plan-2 M8.2: `type: agent` settings hooks (2026-05-09)
 
