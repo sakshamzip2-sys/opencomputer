@@ -434,6 +434,21 @@ class PluginManifest:
     # activation triggers. None = legacy tool_names-only inference path
     # (Sub-project E). When set, activation_planner reads it instead.
     activation: PluginActivation | None = None
+    # v1.1 plan-4 M13 — CLI command names this plugin advertises so
+    # `oc <name> ...` can lazy-load the plugin and dispatch into a
+    # `typer.Typer` it registers via `api.register_cli_command(name, app)`.
+    # Empty tuple (default) = plugin exposes no top-level CLI command.
+    # Discovery is cheap; the plugin is loaded only on actual `oc <name>`
+    # invocation. Names collide with core verbs (e.g. `chat`, `gateway`,
+    # `wire`, `doctor`, `setup`, `plugin`, `profile`) → PluginCLINameCollision.
+    cli_commands: tuple[str, ...] = ()
+    # v1.1 plan-4 M13 — gate `cli_commands` advertisement to specific
+    # profiles. None or empty = exposed under every profile (most
+    # permissive default; backwards-compatible). Mirrors `profiles` field
+    # but applies only to the CLI surface, so a plugin shipping channel
+    # adapters under any profile can still keep its `oc <name>` subcommand
+    # restricted to a working profile.
+    cli_commands_profiles: tuple[str, ...] | None = None
 
 
 # ─── Plugin activation source (Task I.7) ───────────────────────────────

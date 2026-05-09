@@ -49,6 +49,18 @@ class PluginIncompatibleError(RuntimeError):
     """
 
 
+class PluginCLINameCollision(RuntimeError):  # noqa: N818 — spec-mandated name from v1.1 plan-4 M13
+    """Raised when a plugin tries to register an `oc <name>` subcommand
+    that collides with a core verb (always fatal) or another plugin's
+    command (fatal unless ``replace=True``). v1.1 plan-4 M13.
+
+    Caught by ``load_plugin`` so one bad plugin's collision doesn't break
+    the rest of the registry — the plugin's load is logged + skipped, the
+    rest continue. Authors fix by renaming via the documented
+    ``cli_commands`` prefix convention (e.g. ``<plugin-id>-<verb>``).
+    """
+
+
 def _check_min_host_version(
     *, plugin_id: str, min_host_version: str, host_version: str
 ) -> None:
@@ -93,12 +105,49 @@ _PLUGIN_LOCAL_NAMES = (
     "hooks",
     "realtime",          # openai-provider, gemini-provider, future Anthropic
     "realtime_helpers",  # ditto — pure-helpers sidecar per realtime bridge
+    # 2026-05-09 — subpackages that appear in MULTIPLE plugin dirs
+    # (e.g. coding-harness/slash_commands/ AND voice-mode/slash_commands/).
+    # Without clearing, the first-loaded plugin's version of the
+    # subpackage gets cached and subsequent plugins' bare imports
+    # find the wrong directory. Caught via test_phase12b4_exit_plan_mode
+    # which failed under pytest because conftest's voice-mode alias
+    # cached slash_commands → coding-harness's accept_edits couldn't
+    # be found.
+    "slash_commands",
+    "tools",
+    "modes",
+    "permissions",
+    "rewind",
+    "introspection",
+    "state",  # coding-harness has state/ pkg; others have state.py module
+    "memory",
+    "context",
+    "config",
+    "router",
+    "session",
+    "tools_core",
+    "server_context",
+    "redactor",
 )
 
 
 def _clear_plugin_local_cache() -> None:
+    """Pop shared sibling subpackage names from sys.modules.
+
+    Called before each plugin's entry-module exec so the plugin's own
+    siblings (which live under the just-prepended plugin_root in
+    sys.path) win the import resolution instead of returning a cached
+    pointer at a different plugin's directory.
+    """
     for name in _PLUGIN_LOCAL_NAMES:
         sys.modules.pop(name, None)
+        # Also pop any nested submodules under these top-level names
+        # (e.g. ``slash_commands.accept_edits``) so the next exec_module
+        # call sees a clean namespace at every depth.
+        prefix = f"{name}."
+        for cached in list(sys.modules):
+            if cached.startswith(prefix):
+                sys.modules.pop(cached, None)
 
 
 # ─── single_instance lock (Phase 12b.2, Task B6) ──────────────────────
@@ -687,6 +736,7 @@ class PluginAPI:
         slash_commands: dict[str, Any] | None = None,
         activation_source: PluginActivationSource = "bundled",
         outgoing_queue: Any = None,
+        cli_commands: dict[str, Any] | None = None,
     ) -> None:
         self.tools = tool_registry
         self.hooks = hook_engine
@@ -715,6 +765,15 @@ class PluginAPI:
         # same table. Keyed by command name (no leading slash).
         self.slash_commands: dict[str, Any] = (
             slash_commands if slash_commands is not None else {}
+        )
+        # v1.1 plan-4 M13: plugin-authored top-level CLI subcommands.
+        # Threaded in from PluginRegistry so all plugins register into one
+        # table. Keyed by command name. Values are typer.Typer instances
+        # (loose-typed at the loader boundary so we don't import typer
+        # here). The CLI's lazy-load placeholder reads this dict after
+        # firing the plugin's register(api).
+        self._cli_commands: dict[str, Any] = (
+            cli_commands if cli_commands is not None else {}
         )
         # Task I.7: why this plugin was activated. Exposed to plugin code
         # via the ``activation_source`` property so ``register(api)`` can
@@ -1129,6 +1188,52 @@ class PluginAPI:
         """
         self.doctor_contributions.append(contribution)
 
+    def register_cli_command(
+        self,
+        name: str,
+        app: Any,  # typer.Typer at runtime; loose-typed so loader needn't import typer
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Register a top-level `oc <name> ...` Typer subcommand (v1.1 plan-4 M13).
+
+        The CLI's plugin loader reads the plugin manifest's
+        ``cli_commands`` array at startup and pre-attaches a lazy
+        placeholder; on actual ``oc <name>`` invocation the plugin's
+        ``register(api)`` runs, this method captures the real Typer app,
+        and the placeholder dispatches into it.
+
+        Three layers of conflict resolution:
+
+        * **Core vs plugin** — names in
+          :data:`opencomputer.plugins.cli_registry.CORE_RESERVED_CLI_NAMES`
+          (the verbs core ships) are always fatal — the plugin cannot
+          shadow them. Raises :class:`PluginCLINameCollision`.
+        * **Plugin vs plugin** — first registration wins; the second
+          raises :class:`PluginCLINameCollision`. Pass ``replace=True``
+          only for documented core-blessed overrides.
+        * **Profile-scoped** — the manifest's ``cli_commands_profiles``
+          is enforced at the CLI loader; this method does not need to
+          re-check (a profile-excluded plugin would not have been
+          activated and so this method would never run).
+        """
+        from opencomputer.plugins.cli_registry import CORE_RESERVED_CLI_NAMES
+
+        if name in CORE_RESERVED_CLI_NAMES:
+            raise PluginCLINameCollision(
+                f"plugin tried to register CLI command {name!r} which is "
+                "a reserved core verb; rename via the cli_commands prefix "
+                "convention (e.g. <plugin-id>-<verb>)."
+            )
+        if name in self._cli_commands and not replace:
+            raise PluginCLINameCollision(
+                f"plugin CLI command {name!r} is already registered by "
+                "another plugin; rename via the cli_commands prefix "
+                "convention (e.g. <plugin-id>-<verb>) or, for documented "
+                "core-blessed overrides, pass replace=True."
+            )
+        self._cli_commands[name] = app
+
 
 def load_plugin(
     candidate: PluginCandidate,
@@ -1189,8 +1294,20 @@ def load_plugin(
 
     plugin_root = candidate.root_dir.resolve()
     plugin_root_str = str(plugin_root)
-    if plugin_root_str not in sys.path:
-        sys.path.insert(0, plugin_root_str)
+    # 2026-05-09 — the plugin_root MUST sit at sys.path[0] for the
+    # duration of this exec_module so its sibling subpackages
+    # (slash_commands/, tools/, modes/, ...) win resolution against
+    # other plugins that have an identically-named subpackage on
+    # sys.path. Earlier "if not in sys.path" left the plugin_root at
+    # whatever index pytest's conftest registered it at — voice-mode
+    # at 0, coding-harness at 2 — so coding-harness's bare import of
+    # `from slash_commands.accept_edits` resolved against voice-mode's
+    # slash_commands/ (which has no accept_edits.py). Move it to 0
+    # unconditionally; harmless dup is fine since the duplicate gets
+    # skipped on second visit.
+    while plugin_root_str in sys.path:
+        sys.path.remove(plugin_root_str)
+    sys.path.insert(0, plugin_root_str)
 
     entry_path = plugin_root / f"{entry}.py"
     if not entry_path.exists():
