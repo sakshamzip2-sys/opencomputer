@@ -17,6 +17,71 @@ The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEAS
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-3 M10.2: gateway dispatcher routing integration (2026-05-09)
+
+Wires the M10.1 routing schema into `Dispatch.handle_message`. Inbound `MessageEvent`s now resolve through the active profile's `routing.rules`; on a non-default match, the named `AgentTemplate`'s `system_prompt` is applied to that turn via the same `system_prompt_override` plumbing `DelegateTool` already uses for `agent: ...` delegation.
+
+```yaml
+# config.yaml — same schema M10.1 shipped
+routing:
+  rules:
+    - match: {platform: slack, channel: "#security-alerts"}
+      agent: security-reviewer       # an AgentTemplate at home/agents/security-reviewer.md
+  default:
+    agent: default
+```
+
+Now an inbound Slack message in `#security-alerts` runs through the agent loop with `security-reviewer.md`'s system prompt installed; everywhere else uses the active profile's normal default. Previously the rules were operator-visible (`oc routing list/test`) but had zero runtime effect.
+
+**Resolution helper** at `opencomputer/agent/routing.py`:
+
+```python
+@dataclass(frozen=True, slots=True)
+class ResolvedTemplate:
+    template_name: str
+    system_prompt: str
+    profile_rebind: str = ""    # M10.3 hook (not consumed yet)
+
+
+def resolve_template_for_event(
+    routing: RoutingConfig,
+    event: MessageEvent,
+    templates: dict[str, object],
+) -> ResolvedTemplate | None: ...
+```
+
+Returns `None` (caller falls through to default dispatch) when:
+- `routing.rules` is empty
+- No rule matches the inbound event
+- The matched rule names a template that isn't in `discover_agents()` output (with a WARNING in the dispatcher)
+- The matched template's `system_prompt` is empty
+
+The dispatcher wraps the call in try/except — any routing failure (template parse error, config access bug, etc.) logs at WARNING and falls through to default behavior. **A stale routing rule must never break message dispatch.**
+
+**Honest deferrals (carried from M10.1):**
+
+- **Tool allowlist enforcement** — `template.tools` is read by `DelegateTool` at child-loop construction time. Per-message tool filtering on the long-lived gateway loop needs additional plumbing (likely a process-wide `set_active_filter`-style slot like skill_tools_filter, or a per-call kwarg on `run_conversation`). **Deferred** — M10.2 ships system-prompt routing only, which is the load-bearing piece for "different agents per channel."
+- **M10.3 — per-rule profile rebind** — `ResolvedTemplate.profile_rebind` carries the `profile:` field through, but the dispatcher does not yet swap profile context per-message. Requires plan-1 M1.4 (per-profile env). When it lands, the consumer is one block in `Dispatch.handle_message` reading `resolved.profile_rebind`.
+
+**Files:**
+
+- `opencomputer/agent/routing.py` — `ResolvedTemplate` + `resolve_template_for_event` helper.
+- `opencomputer/gateway/dispatch.py` — call the helper before `loop.run_conversation`; pass `system_prompt_override=resolved.system_prompt`.
+
+**Tests (9 new in `tests/test_routing_dispatcher.py`):**
+
+- Matched rule + registered template → `ResolvedTemplate` carrying the system prompt
+- Matched rule + `profile:` field → `profile_rebind` non-empty (M10.3 hook)
+- Matched rule + unknown template → `None` (caller falls through)
+- Matched rule + template with empty `system_prompt` → `None` (degraded fall-through)
+- No rules at all → `None`
+- Default-only config → `None`
+- Rules present but none match → `None`
+- Most-specific-wins survives integration (admin rule beats guild rule)
+- `MessageEvent.metadata` extraction pin (channel/guild/role)
+
+185 dispatcher / gateway tests still pass — no regressions in the Dispatch path.
+
 ### Added — v1.1 Plan-3 M6.1: `MEMORY.md` BM25 index (2026-05-09)
 
 Foundation for v1.1 plan-3 M6 Active Memory work. Adds
