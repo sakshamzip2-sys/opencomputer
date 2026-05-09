@@ -71,6 +71,12 @@ def status_cmd() -> None:
     )
 
 
+@checkpoints_app.command("list")
+def list_cmd() -> None:
+    """Alias for ``oc checkpoints status`` — print checkpoint store stats (M1.B4)."""
+    status_cmd()
+
+
 @checkpoints_app.command("prune")
 def prune_cmd(
     older_than: Annotated[
