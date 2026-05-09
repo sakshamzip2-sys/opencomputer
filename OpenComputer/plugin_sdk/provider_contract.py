@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from plugin_sdk.core import Message
+from plugin_sdk.embeddings import EmbeddingBatch, EmbeddingsUnsupportedError
 from plugin_sdk.tool_contract import ToolSchema
 
 
@@ -515,6 +516,41 @@ class BaseProvider(ABC):
         """
         raise BatchUnsupportedError(
             f"{self.name} does not support batch processing"
+        )
+
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        model: str | None = None,
+    ) -> EmbeddingBatch:
+        """Compute embedding vectors for a list of texts.
+
+        v1.1 plan-3 M6.6 contract.  Used by the M6.2 vector index over
+        ``MEMORY.md``.  Other future callers (M6.4 Dreaming diversity
+        check, semantic skill discovery) consume the same shape.
+
+        Returns an :class:`EmbeddingBatch` with ``len(vectors) == len(texts)``
+        in the same order.  Implementations should chunk internally if
+        ``len(texts) > MAX_EMBED_BATCH_SIZE`` rather than rejecting.
+
+        Args:
+            texts: list of strings to embed.  Empty strings are
+                permitted; their embedding is implementation-defined
+                but must be a vector of the same dimensionality.
+            model: optional model id.  ``None`` means use the
+                provider's default embedding model (e.g.
+                ``text-embedding-3-small`` for OpenAI).
+
+        Default raises :class:`EmbeddingsUnsupportedError`.  Providers
+        without an embeddings endpoint (most local-LLM shims, the
+        Anthropic chat API itself absent a Voyage key) do not override
+        this.  Callers (notably :class:`opencomputer.agent.memory_index`'s
+        future vector-index sibling) catch this and fall back to BM25-only
+        retrieval.
+        """
+        raise EmbeddingsUnsupportedError(
+            f"{self.name} does not support embeddings"
         )
 
     async def get_batch_results(self, batch_id: str) -> list[BatchResult]:
