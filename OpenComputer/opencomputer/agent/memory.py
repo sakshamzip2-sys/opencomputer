@@ -29,9 +29,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import frontmatter
+
+if TYPE_CHECKING:
+    from opencomputer.agent.memory_vec_index import VectorIndex
 
 logger = logging.getLogger("opencomputer.agent.memory")
 
@@ -426,6 +429,21 @@ class MemoryManager:
             bundled_skills_paths = [bundled] if bundled.exists() else []
         self.bundled_skills_paths = bundled_skills_paths
 
+        # v1.1 plan-3 M6.2 — Vector retrieval index over MEMORY.md.
+        # Lazy-built on first query; cache lives under
+        # <profile_home>/cache/.  Invalidated on every successful
+        # declarative write below.  The provider's embed() function is
+        # injected at query() time, not at construction (the active
+        # provider isn't necessarily resolved when MemoryManager is built).
+        from opencomputer.agent.memory_vec_index import VectorIndex
+
+        self._vector_index = VectorIndex(self.declarative_path.parent)
+
+    @property
+    def vector_index(self) -> VectorIndex:
+        """Vector retrieval index over MEMORY.md (v1.1 plan-3 M6.2)."""
+        return self._vector_index
+
     def rebind_to_profile(self, profile_home: Path) -> None:
         """Re-resolve declarative_path / user_path / soul_path to point at
         a new profile's home directory. Used by the Ctrl+P profile-swap
@@ -435,10 +453,17 @@ class MemoryManager:
         ``skills_path``, bundled-skills paths, and ``global_soul_path``
         are NOT rebound — skill roots and the global SOUL fallback are
         shared across profiles, not per-profile.
+
+        The per-profile vector index is also swapped to point at the new
+        home so retrieval isolates cleanly across profiles.
         """
         self.declarative_path = profile_home / "MEMORY.md"
         self.user_path = profile_home / "USER.md"
         self.soul_path = profile_home / "SOUL.md"
+
+        from opencomputer.agent.memory_vec_index import VectorIndex
+
+        self._vector_index = VectorIndex(profile_home)
 
     # ─── declarative (MEMORY.md) ───────────────────────────────────
 
@@ -454,18 +479,25 @@ class MemoryManager:
             limit=self.memory_char_limit,
             kind="memory",
         )
+        self._vector_index.invalidate()
 
     def replace_declarative(self, old: str, new: str) -> bool:
-        return self._replace(
+        changed = self._replace(
             self.declarative_path,
             old,
             new,
             limit=self.memory_char_limit,
             kind="memory",
         )
+        if changed:
+            self._vector_index.invalidate()
+        return changed
 
     def remove_declarative(self, block: str) -> bool:
-        return self._remove(self.declarative_path, block, kind="memory")
+        changed = self._remove(self.declarative_path, block, kind="memory")
+        if changed:
+            self._vector_index.invalidate()
+        return changed
 
     # ─── user profile (USER.md) ────────────────────────────────────
 
@@ -542,6 +574,8 @@ class MemoryManager:
             return False
         with _file_lock(target):
             shutil.copy2(backup, target)
+        if which == "memory":
+            self._vector_index.invalidate()
         return True
 
     # ─── stats ─────────────────────────────────────────────────────
