@@ -16,8 +16,12 @@ triggers a transparent rebuild, never a silent stale-result return.
 
 from __future__ import annotations
 
+import hashlib
+import os
+import pickle
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from rank_bm25 import BM25Okapi
@@ -60,7 +64,10 @@ class BM25Index:
 
     def query(self, text: str, top_k: int = 5) -> list[QueryHit]:
         if not self._loaded:
-            self._build()
+            if not self._load_cache():
+                self._build()
+                if self._entries:  # only persist non-empty corpora
+                    self._save_cache()
 
         if not self._entries or self._bm25 is None:
             return []
@@ -82,6 +89,61 @@ class BM25Index:
 
     def invalidate(self) -> None:
         raise NotImplementedError  # implemented in Task 6
+
+    # ─── cache I/O ─────────────────────────────────────────────────────
+
+    def _current_sha256(self) -> str:
+        if not self._memory_path.exists():
+            return hashlib.sha256(b"").hexdigest()
+        return hashlib.sha256(self._memory_path.read_bytes()).hexdigest()
+
+    def _load_cache(self) -> bool:
+        if not self._cache_path.exists():
+            return False
+        try:
+            with self._cache_path.open("rb") as f:
+                data = pickle.load(f)
+            header = data["header"]
+            if not isinstance(header, dict):
+                return False
+            if header.get("format_version") != self.FORMAT_VERSION:
+                return False
+            if header.get("corpus_sha256") != self._current_sha256():
+                return False
+            entries = data["entries"]
+            tokens = data["tokens"]
+            bm25 = data["bm25"]
+        except (pickle.UnpicklingError, KeyError, EOFError, OSError, AttributeError, ValueError):
+            return False
+
+        self._entries = entries
+        self._tokens = tokens
+        self._bm25 = bm25
+        self._loaded = True
+        return True
+
+    def _save_cache(self) -> None:
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "header": {
+                "format_version": self.FORMAT_VERSION,
+                "corpus_sha256": self._current_sha256(),
+                "entry_count": len(self._entries),
+                "mtime_ns": (
+                    self._memory_path.stat().st_mtime_ns
+                    if self._memory_path.exists()
+                    else 0
+                ),
+                "built_at": datetime.now(tz=timezone.utc).isoformat(),
+            },
+            "entries": self._entries,
+            "tokens": self._tokens,
+            "bm25": self._bm25,
+        }
+        tmp_path = self._cache_path.with_suffix(".tmp")
+        with tmp_path.open("wb") as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp_path, self._cache_path)
 
     # ─── build ─────────────────────────────────────────────────────────
 
