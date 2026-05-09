@@ -78,6 +78,54 @@ Mirrors the Hermes "Production Checklist" with OC paths.
       Containers that need a dropped capability back should raise a
       feature request rather than patching the constant.
 
+- [ ] **Lock down implicit container state.** Add to `config.yaml`:
+
+      ```yaml
+      sandbox:
+        strategy: docker
+        # container_persistent: true   # default — implicit container fs untouched
+        container_persistent: false   # tmpfs /workspace + /root — explicit ephemeral
+      ```
+
+      Set `false` for cron jobs, one-shot agents, or any deployment
+      where you want explicit guarantees that nothing under
+      `/workspace` or `/root` can persist between calls. User-declared
+      `read_paths` / `write_paths` still bind-mount in either mode —
+      the toggle controls only the implicit container layer.
+
+## Approval flow (manual mode)
+
+When the consent gate fires a manual prompt, four verbs are available:
+
+| Verb | Meaning | Storage |
+|---|---|---|
+| `once` (`y`) | Allow this single execution | Ephemeral — no state written |
+| `session` | Allow until session ends (SESSION_FINALIZE) | In-memory dict, not persisted |
+| `always` | Allow indefinitely | Permanent grant in `consent.db` |
+| `deny` (`N`, default) | Block this execution | Ephemeral; user can re-prompt next call |
+
+For chat-driven approvals (Telegram / Slack), four buttons render. The
+matrix adapter does not currently expose `send_approval_request` and
+therefore matrix-bound consent prompts auto-deny — operators who want
+matrix-side approvals can use the matrix adapter's separate
+`request_approval` flow (`extensions/matrix/approval.py`) which is a
+2-emoji allow/deny surface.
+
+## Tirith pre-exec scan
+
+OpenComputer runs Tirith on every Bash command and ExecuteCode block
+after the hardline blocklist. Three verdicts:
+
+| Verdict | Behaviour |
+|---|---|
+| `allow` | Command runs normally |
+| `warn` | Command runs; findings prefixed to tool output |
+| `block` | Command refused; findings returned as error result |
+
+When Tirith's binary is unavailable + `tirith_fail_open: true` (default),
+all commands reach `allow`. Set `tirith_fail_open: false` for
+strict-deny when the scanner is unreachable.
+
 ## Filesystem hygiene
 
 - [ ] **`chmod 600 ~/.opencomputer/<profile>/.env`** — never let it be
