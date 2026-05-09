@@ -267,11 +267,157 @@ def _verify_via_git(
         )
 
 
+@dataclass(frozen=True)
+class SigstoreVerifyReport:
+    """Outcome of re-verifying an install's recorded sigstore signature.
+
+    Returned by :func:`verify_plugin_signature`.  ``has_signature``
+    is False when no sidecar was recorded at install time (pre-M11.3
+    install or operator never opted into sigstore).
+    """
+
+    plugin_id: str
+    has_signature: bool
+    verified: bool = False
+    cosign_version: str = ""
+    cert_identity: str = ""
+    cert_oidc_issuer: str = ""
+    error: str = ""
+
+
+def verify_plugin_signature(
+    plugin_id: str,
+    *,
+    dest_root: Path,
+    refetch_artifact_fn: Callable[[InstalledRecord], bytes] = _refetch_default,
+) -> SigstoreVerifyReport:
+    """Re-verify the recorded sigstore signature for a plugin.
+
+    Reads the sidecar at ``<dest_root>/.sigstore/<plugin_id>.json``.
+    When present, re-fetches the source artifact and runs cosign
+    against the recorded signature URL + identity/issuer claims.
+
+    Returns a :class:`SigstoreVerifyReport` with ``has_signature=False``
+    when no sidecar exists; the caller decides whether that's a hard
+    failure (operator policy) or a warning.
+    """
+    import json
+
+    sidecar = dest_root / ".sigstore" / f"{plugin_id}.json"
+    if not sidecar.exists():
+        return SigstoreVerifyReport(
+            plugin_id=plugin_id, has_signature=False
+        )
+
+    try:
+        record = json.loads(sidecar.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return SigstoreVerifyReport(
+            plugin_id=plugin_id,
+            has_signature=True,
+            verified=False,
+            error=f"sidecar malformed: {exc}",
+        )
+
+    rec = find_record(dest_root / ".installed_index.json", plugin_id)
+    if rec is None:
+        return SigstoreVerifyReport(
+            plugin_id=plugin_id,
+            has_signature=True,
+            verified=False,
+            error="installed-index entry missing; can't refetch artifact",
+        )
+
+    signature_value = record.get("signature", "")
+    if signature_value.startswith("<inline:"):
+        return SigstoreVerifyReport(
+            plugin_id=plugin_id,
+            has_signature=True,
+            verified=False,
+            error=(
+                "signature was provided inline at install time; the "
+                "raw bytes are not retained for re-verification."
+            ),
+        )
+
+    # Re-fetch artifact; verify cosign against recorded signature URL.
+    try:
+        raw = refetch_artifact_fn(rec)
+    except SourceUnreachableError as exc:
+        return SigstoreVerifyReport(
+            plugin_id=plugin_id,
+            has_signature=True,
+            verified=False,
+            error=f"refetch failed: {exc}",
+        )
+
+    import tempfile
+
+    from opencomputer.plugins.sigstore_verify import (
+        SigstoreUnavailableError,
+        SigstoreVerificationFailedError,
+        verify_blob,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="oc-verify-sig-") as tmp:
+        tmp_path = Path(tmp)
+        artifact_path = tmp_path / "artifact"
+        artifact_path.write_bytes(raw)
+        sig_path = tmp_path / "artifact.sig"
+        # Refetch the signature blob — same URL the install recorded.
+        from opencomputer.plugins.remote_install import _http_get_bytes
+
+        try:
+            sig_path.write_bytes(
+                _http_get_bytes(signature_value, max_bytes=64 * 1024)
+            )
+        except Exception as exc:  # noqa: BLE001
+            return SigstoreVerifyReport(
+                plugin_id=plugin_id,
+                has_signature=True,
+                verified=False,
+                error=f"signature refetch failed: {exc}",
+            )
+
+        try:
+            v = verify_blob(
+                artifact_path,
+                signature_path=sig_path,
+                cert_identity=record.get("cert_identity") or None,
+                cert_oidc_issuer=record.get("cert_oidc_issuer") or None,
+            )
+        except SigstoreUnavailableError as exc:
+            return SigstoreVerifyReport(
+                plugin_id=plugin_id,
+                has_signature=True,
+                verified=False,
+                error=str(exc),
+            )
+        except SigstoreVerificationFailedError as exc:
+            return SigstoreVerifyReport(
+                plugin_id=plugin_id,
+                has_signature=True,
+                verified=False,
+                error=str(exc),
+            )
+
+    return SigstoreVerifyReport(
+        plugin_id=plugin_id,
+        has_signature=True,
+        verified=True,
+        cosign_version=v.cosign_version,
+        cert_identity=record.get("cert_identity", ""),
+        cert_oidc_issuer=record.get("cert_oidc_issuer", ""),
+    )
+
+
 __all__ = [
     "DriftReport",
     "FileDifference",
     "IntegrityError",
     "NotInstalledError",
+    "SigstoreVerifyReport",
     "SourceUnreachableError",
     "verify_plugin",
+    "verify_plugin_signature",
 ]
