@@ -239,17 +239,19 @@ def _check_telegram_polling_conflict() -> list[Check]:
 
     # WARN, not fail: even if another gateway is running, it might
     # use a DIFFERENT bot token. The user is the only one who knows
-    # for certain. We give them the PIDs.
-    descs = "; ".join(f"PID {pid}: {args[:50]}" for pid, args in suspects[:3])
-    if len(suspects) > 3:
-        descs += f" (+{len(suspects) - 3} more)"
+    # for certain. We give them actionable `kill <PID>` lines so a
+    # quick paste into the shell ends the conflict.
+    kill_lines = "\n  ".join(f"kill {pid}  # {args[:60]}" for pid, args in suspects[:5])
+    overflow = ""
+    if len(suspects) > 5:
+        overflow = f"\n  (+{len(suspects) - 5} more — re-run with TELEGRAM_BOT_TOKEN unset to silence)"
     return [Check(
         "telegram polling slot",
         "warn",
         (
             f"{len(suspects)} other gateway process(es) running — "
             f"if any uses the same bot token, only one will receive "
-            f"replies. {descs}"
+            f"replies. To stop them:\n  {kill_lines}{overflow}"
         ),
     )]
 
