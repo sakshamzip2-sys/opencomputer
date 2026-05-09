@@ -2920,27 +2920,19 @@ def _default_spawn(task: Task, workspace: str) -> int | None:
     cmd = [
         *_resolve_oc_executable(),
         "-p", task.assignee,
-        # Auto-load the kanban-worker skill so every dispatched worker
-        # has the pattern library (good summary/metadata shapes, retry
-        # diagnostics, block-reason examples) in its context, even if
-        # the profile hasn't wired it into skills config. The MANDATORY
-        # lifecycle is already in the system prompt via KANBAN_GUIDANCE;
-        # this skill is the deeper reference. Users can point a profile
-        # at a different/additional skill via config if they want —
-        # --skills is additive to the profile's default skill set.
-        "--skills", "kanban-worker",
     ]
-    # Per-task force-loaded skills. Each name goes in its own
-    # `--skills X` pair rather than a single comma-joined arg: the CLI
-    # accepts both forms (action='append' + comma-split), but
-    # per-name pairs are easier to read in `ps` output and avoid any
-    # quoting ambiguity if a skill name ever contains unusual chars.
-    # Dedupe against the built-in so we don't double-load kanban-worker
-    # if a task author asks for it explicitly.
-    if task.skills:
-        for sk in task.skills:
-            if sk and sk != "kanban-worker":
-                cmd.extend(["--skills", sk])
+    # NOTE: a previous iteration of this dispatcher passed `--skills
+    # kanban-worker` (and per-task `task.skills` entries) to inject
+    # extra skill payloads into the worker's system prompt. That CLI
+    # flag was never wired (`oc chat --help` has no `--skills` option,
+    # nor does the top-level `oc` command), so spawn invocations exited
+    # immediately with `Error: No such option: --skills`. The KANBAN_GUIDANCE
+    # block in the system prompt already carries the kanban-worker
+    # lifecycle, so dropping the flag does NOT remove behavior — it
+    # just stops poisoning the spawn argv. If skill auto-loading per
+    # spawn is wanted, add a real CLI flag first and re-introduce it
+    # here. ``task.skills`` is dropped from the spawn argv for the same
+    # reason; we keep the field in the schema for forward compat.
     cmd.extend([
         "chat",
         "-q", prompt,
