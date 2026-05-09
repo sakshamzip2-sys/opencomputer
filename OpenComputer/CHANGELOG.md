@@ -158,6 +158,19 @@ hooks:
 Plan: `docs/superpowers/plans/2026-05-09-v1-1-plan-2-tier-b-execution.md` (the 9-lens audit).
 Original spec: `docs/superpowers/plans/2026-05-08-v1-1-plan-2-architecture-features.md`.
 
+### Added — v1.1 Plan-2 M5.3: `oc session rewind <id>` (2026-05-09)
+
+New CLI surface for restoring a session's working tree to a saved checkpoint:
+
+```bash
+oc session rewind sess-abc12345                 # interactive picker
+oc session rewind sess-abc12345 --at cp00 --yes # non-interactive
+```
+
+Reads the on-disk RewindStore that the existing `auto_checkpoint` PreToolUse hook (coding-harness) writes for every destructive tool call. Newest-first picker with id-prefix matching (4+ chars). Confirmation prompt unless `--yes`. Non-TTY without `--at` returns a friendly error pointing to `--at <checkpoint_id>`. 11 new tests in `test_session_rewind_cli.py`.
+
+`--mode files` (default) restores file contents. `--mode conv_only` / `summarize_from` return clear "not yet implemented" errors — those need M5.2 per-prompt message-history checkpoint surface (shipped separately).
+
 ### Added — Hermes Cron + Delegation long-tail finishers (2026-05-08 / 2026-05-09)
 
 Closes 11 honest gaps + 2 latent runtime bugs between the Hermes Cron & Delegation reference spec and OpenComputer. PR #494 already shipped no_agent / parallel-batch / multi-profile parity; this work picks up the long tail and hardens it to production-grade.
