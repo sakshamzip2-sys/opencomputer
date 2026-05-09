@@ -4,6 +4,50 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-2 M8.2: `type: agent` settings hooks (2026-05-09)
+
+Closes the last unshipped plan-2 item. Subagent-spawning hooks declared in the same `hooks:` YAML block as command + prompt hooks:
+
+```yaml
+hooks:
+  PreToolUse:
+    - type: agent
+      matcher: "Bash"
+      prompt: |
+        Inspect the proposed Bash command. If it would permanently
+        delete data or send credentials over the wire, reply
+        "block: <reason>". Otherwise reply "allow".
+      agent: code-reviewer       # optional registered AgentTemplate name
+      isolation: copy            # "none" | "worktree" | "copy" — default copy
+      max_turns: 5
+      timeout_seconds: 60
+      returns: allow_block       # or "structured" for richer reports
+      token_budget_total: 5000
+```
+
+**Why**: `type: prompt` (M8.1) is one aux-LLM call; `type: agent` is heavier but more capable — the spawned child can run its own tool calls (Read / Grep / Bash via its allowlist) before returning a decision. That lets a hook reason over actual file contents, not just the rendered HookContext.
+
+**How**: a new `HookAgentConfig` dataclass + parallel `_parse_agent_hooks_block` parser sniffs `type: agent` from the same YAML block; entries land in the new `Config.agent_hooks` field. The handler factory `make_agent_hook_handler` synthesises a `delegate(task=prompt+context, isolation=..., agent=...)` ToolCall and dispatches it via `DelegateTool`. Default `isolation: copy` so an ill-behaved hook subagent can't trash the parent's tree (uses M4.1's filesystem sandbox under the hood).
+
+**Five fail-open paths** (matches the M8.1 + shell-hook contracts): timeout, delegate exception, delegate `is_error=True` response, ambiguous response, estimated-input-over-budget. A wedged or expensive subagent never wedges or bankrupts the loop.
+
+**With this PR, every plan-2 item is shipped or explicitly skipped.**
+
+| Item | Status |
+|---|---|
+| M4.1 + M4.2 delegate isolation | ✅ PR #528 |
+| M4.3 + M4.4 SKILL.md fork + tools | ✅ PR #529 |
+| M4.5 worktrees prune | ✅ already on main as `oc worktrees clean` |
+| M5.1 oc session checkpoints | ✅ PR #526 |
+| M5.2 + M5.3 per-prompt checkpoint + rewind | ✅ PR #530 |
+| M5.4 plan-mode post-approval | ✅ PR #531 |
+| M7 path-glob rules + CLI | ✅ PR #527 |
+| M8.1 type: prompt hooks | ✅ PR #532 |
+| **M8.2 type: agent hooks** | ✅ this PR |
+| M8.3 PostCompact | ✅ already on main as `HookEvent.AFTER_COMPACTION` |
+
+**Tests**: 19 new tests in `test_agent_hook_v1_1.py` covering `HookAgentConfig` defaults + `_parse_agent_hooks_block` extraction + `_render_context` + response parsing + handler integration (mocked DelegateTool, agent-template threading, structured mode, timeout fail-open, token-cap pre-spawn refusal, exception fail-open, `is_error=True` fail-open) + full `load_config` round-trip.
+
 ### Added — v1.1 Plan-2 M5.1: `oc session checkpoints <id>` (2026-05-09)
 
 New per-session view of the on-disk RewindStore data. The cross-session admin (`oc checkpoints status / prune / clear`) already existed; this fills the gap when you want to pick a checkpoint by id for one specific session.
