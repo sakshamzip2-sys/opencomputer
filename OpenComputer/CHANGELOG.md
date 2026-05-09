@@ -60,6 +60,19 @@ Sandbox cwd flows to the child via `runtime.custom["delegate_isolation_cwd"]` + 
 
 11 new tests in `test_delegate_isolation.py` cover all 3 modes, worktree clean-vs-dirty cleanup posture, copy sandbox isolation + ignore-file honoring, non-git error path, and the schema's `isolation` enum.
 
+### Added — v1.1 Plan-2 M4.3 + M4.4: SKILL.md `context: fork` + tools allowlist (2026-05-09)
+
+`SkillTool` now reads structured frontmatter and dispatches accordingly:
+
+- `context: fork` — synthesises a `delegate(task=body, agent=..., allowed_tools=..., isolation=...)` call; only the subagent's final summary returns to the parent. Pollution-free heavy exploration without a context-window hit on the parent.
+- `context: inline` (default) — current behavior. Optional `tools:` field is rendered as a `[Skill Tools Constraint]` advisory directive (model is asked to honor; not enforced — hard enforcement requires `context: fork`).
+- `model:` field with `context: inline` raises `SkillModelOverrideRequiresForkError` so a SKILL.md author can't accidentally configure a no-op provider override.
+- `isolation: none|worktree|copy` — for `fork`, threaded into the synthesised delegate (M4.1/M4.2 sandbox).
+
+11 new tests in `test_skill_context_fork.py` cover all 4 frontmatter fields × inline/fork dispatch, the model-without-fork error, unknown context, isolation passthrough, and bad isolation values.
+
+Honest deferral: hard enforcement of `tools:` under `context: inline` would require per-skill state on the agent loop's tool dispatcher (the skill body becomes text the parent loop executes — there's no ambient "skill is active" surface). The advisory directive is a pragmatic best-effort; users wanting hard enforcement set `context: fork`.
+
 ### Added — Hermes Cron + Delegation long-tail finishers (2026-05-08 / 2026-05-09)
 
 Closes 11 honest gaps + 2 latent runtime bugs between the Hermes Cron & Delegation reference spec and OpenComputer. PR #494 already shipped no_agent / parallel-batch / multi-profile parity; this work picks up the long tail and hardens it to production-grade.
