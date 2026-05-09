@@ -44,6 +44,22 @@ The next time the agent runs `Read` / `Edit` / `Write` / `MultiEdit` / `Glob` / 
 
 42 new tests in `test_path_glob_rules.py` (loader / merger / matcher / formatter / extractor / injection provider / `load_rules_for_active_profile`) and `test_cli_rules.py` (3 subcommands × table+JSON modes).
 
+### Added — v1.1 Plan-2 M4.1 + M4.2: delegate isolation (2026-05-09)
+
+`delegate(isolation=...)` gains two opt-in modes for per-subagent filesystem sandboxing:
+
+- `"worktree"` — git worktree under `<repo_root>/.opencomputer-worktrees/delegate-<uuid>/` on a fresh `oc-delegate-<uuid>` branch. Cleaned on success when `git status` is clean; **persisted** when uncommitted changes exist (operator runs `oc worktrees clean` to recover). Raises `WorktreeNotAvailable` outside a git repo so callers can fall back to `copy`.
+- `"copy"` — `shutil.copytree` to a `tempfile.mkdtemp` sandbox. Honors `.opencomputer/sandbox.ignore` for skipping heavy dirs (defaults already exclude `.git`, `node_modules`, `.venv`, `target`, `build`, `dist`). Always cleaned on context exit.
+- `"none"` (default) — unchanged behavior; child runs in parent's cwd.
+
+Cleanup posture also covers parent-process exits via `atexit` sweep — one handler tracks both pending worktrees + pending copies and tries to remove them on shutdown. SIGKILL bypasses atexit; operator uses `oc worktrees clean` for those leftovers.
+
+Two typed exceptions: `WorktreeNotAvailable` (right tool, wrong cwd — switch to `copy`) and `IsolationFailed` (right tool, infra failed — see preceding logs). Both are caught inside `DelegateTool.execute()` and surfaced as ToolResult errors with `is_error=True` instead of raising back to the model.
+
+Sandbox cwd flows to the child via `runtime.custom["delegate_isolation_cwd"]` + `runtime.custom["delegate_isolation_mode"]` so the child loop can chdir before tool dispatch (RuntimeContext is frozen — custom dict is the back-channel).
+
+11 new tests in `test_delegate_isolation.py` cover all 3 modes, worktree clean-vs-dirty cleanup posture, copy sandbox isolation + ignore-file honoring, non-git error path, and the schema's `isolation` enum.
+
 ### Added — Hermes Cron + Delegation long-tail finishers (2026-05-08 / 2026-05-09)
 
 Closes 11 honest gaps + 2 latent runtime bugs between the Hermes Cron & Delegation reference spec and OpenComputer. PR #494 already shipped no_agent / parallel-batch / multi-profile parity; this work picks up the long tail and hardens it to production-grade.
