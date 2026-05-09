@@ -4,6 +4,20 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-2 M5.1: `oc session checkpoints <id>` (2026-05-09)
+
+New per-session view of the on-disk RewindStore data. The cross-session admin (`oc checkpoints status / prune / clear`) already existed; this fills the gap when you want to pick a checkpoint by id for one specific session.
+
+```bash
+oc session checkpoints abc1234           # Rich table, newest-first
+oc session checkpoints abc1234 --json    # machine-readable
+oc session checkpoints abc1234 --limit 10
+```
+
+Reads `~/.opencomputer/harness/<session_id>/rewind/<checkpoint_id>/` via the existing `RewindStore.list()`. No new storage. 6 new tests in `test_session_checkpoints_cli.py` covering happy path, JSON mode, `--limit`, missing session, empty rewind dir, and the no-checkpoints-recorded edge case.
+
+Refined plan doc at `docs/superpowers/plans/2026-05-09-v1-1-plan-2-refined-execution.md` records the audit findings (M4.5 already shipped as `oc worktrees clean`; M8.3 already shipped as `HookEvent.AFTER_COMPACTION`) and the deferral rationale for the larger Tier-B + Tier-C items (M4.1-4.4 subagent isolation, M5.2-5.4 checkpoints + rewind + plan-mode v2, M8.1-8.2 prompt + agent hook types).
+
 ### Added — Hermes Cron + Delegation long-tail finishers (2026-05-08 / 2026-05-09)
 
 Closes 11 honest gaps + 2 latent runtime bugs between the Hermes Cron & Delegation reference spec and OpenComputer. PR #494 already shipped no_agent / parallel-batch / multi-profile parity; this work picks up the long tail and hardens it to production-grade.
