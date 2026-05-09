@@ -46,8 +46,8 @@ def _setup_gate() -> tuple[ConsentGate, ConsentStore, AuditLogger]:
 # ─── Wire format ─────────────────────────────────────────────────────
 
 
-async def test_send_approval_request_emits_three_inline_buttons() -> None:
-    """The outbound sendMessage payload carries the ``[once, always, deny]`` row."""
+async def test_send_approval_request_emits_four_inline_buttons() -> None:
+    """The outbound sendMessage payload carries the ``[once, session, always, deny]`` (Hermes parity)."""
     adapter = _make_adapter()
     fake_resp = MagicMock()
     fake_resp.status_code = 200
@@ -56,7 +56,7 @@ async def test_send_approval_request_emits_three_inline_buttons() -> None:
 
     result = await adapter.send_approval_request(
         chat_id="5555",
-        prompt_text="Allow read_files.metadata on /tmp/x? [y/N/always]",
+        prompt_text="Allow read_files.metadata on /tmp/x? [y/N/session/always]",
         request_token="abc123",
     )
     assert isinstance(result, SendResult)
@@ -74,14 +74,16 @@ async def test_send_approval_request_emits_three_inline_buttons() -> None:
     assert "metadata" in payload["text"]
     assert payload.get("parse_mode") == "MarkdownV2"
     keyboard = payload["reply_markup"]["inline_keyboard"]
-    assert len(keyboard) == 1
-    row = keyboard[0]
-    assert len(row) == 3
-    assert [b["text"] for b in row] == [
-        "✓ Allow once", "✓ Allow always", "✗ Deny",
+    # Hermes parity: 4 buttons in 2 rows ([once, session] / [always, deny]).
+    assert len(keyboard) == 2
+    flat = [b for row in keyboard for b in row]
+    assert len(flat) == 4
+    assert [b["text"] for b in flat] == [
+        "✓ Allow once", "🕒 Session", "✓ Allow always", "✗ Deny",
     ]
-    assert [b["callback_data"] for b in row] == [
+    assert [b["callback_data"] for b in flat] == [
         "oc:approve:once:abc123",
+        "oc:approve:session:abc123",
         "oc:approve:always:abc123",
         "oc:approve:deny:abc123",
     ]

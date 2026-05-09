@@ -661,6 +661,39 @@ def rename_cmd(
 # ─── path ────────────────────────────────────────────────────────────────
 
 
+def _read_enabled_plugin_ids(profile_yaml: Path) -> set[str] | None:
+    """Best-effort read of ``plugins.enabled`` from a profile.yaml file.
+
+    Returns the set of plugin ids on success, or ``None`` when the file
+    is **absent** / **unreadable** / **malformed**. Lenient contract used by
+    ``env-template`` and ``env-init`` callers — they treat ``None`` as
+    "include everything" (the file simply hasn't been written yet) and
+    an empty ``set()`` as "explicit empty enabled list" (the user
+    deliberately disabled everything).
+
+    Preserving the ``None`` vs ``set()`` distinction is load-bearing —
+    downstream :func:`render_env_template` and
+    :func:`collect_env_var_specs` filter differently in the two cases.
+
+    Goes through the canonical
+    :func:`opencomputer.agent.config_store.load_yaml_dict` parser so
+    the strict and lenient profile.yaml consumers share one parse path.
+    """
+    from opencomputer.agent.config_store import ConfigYAMLError, load_yaml_dict
+
+    if not profile_yaml.exists():
+        return None
+    try:
+        data = load_yaml_dict(profile_yaml)
+    except (ConfigYAMLError, OSError):
+        return None
+    plugins_block = data.get("plugins") or {}
+    enabled_list = plugins_block.get("enabled") or []
+    if not isinstance(enabled_list, list):
+        return None
+    return {str(p) for p in enabled_list}
+
+
 @profile_app.command("env-template")
 def env_template_cmd(
     write: bool = typer.Option(
@@ -699,18 +732,8 @@ def env_template_cmd(
 
     # Read enabled plugin ids from profile.yaml (best-effort — None
     # means "include everything" if the file is absent or malformed).
-    enabled_ids: set[str] | None = None
     profile_yaml = profile_home / "profile.yaml"
-    if profile_yaml.exists():
-        try:
-            import yaml as _yaml
-            data = _yaml.safe_load(profile_yaml.read_text()) or {}
-            plugins_block = data.get("plugins") or {}
-            enabled_list = plugins_block.get("enabled") or []
-            if isinstance(enabled_list, list):
-                enabled_ids = {str(p) for p in enabled_list}
-        except Exception:  # noqa: BLE001
-            enabled_ids = None
+    enabled_ids = _read_enabled_plugin_ids(profile_yaml)
 
     rendered = render_env_template(
         candidates,
@@ -784,18 +807,8 @@ def env_init_cmd(
 
     candidates = discover(standard_search_paths())
 
-    enabled_ids: set[str] | None = None
     profile_yaml = profile_home / "profile.yaml"
-    if profile_yaml.exists():
-        try:
-            import yaml as _yaml
-            data = _yaml.safe_load(profile_yaml.read_text()) or {}
-            plugins_block = data.get("plugins") or {}
-            enabled_list = plugins_block.get("enabled") or []
-            if isinstance(enabled_list, list):
-                enabled_ids = {str(p) for p in enabled_list}
-        except Exception:  # noqa: BLE001
-            enabled_ids = None
+    enabled_ids = _read_enabled_plugin_ids(profile_yaml)
 
     specs = collect_env_var_specs(candidates, enabled_ids=enabled_ids)
     if not specs:

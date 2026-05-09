@@ -73,6 +73,12 @@ class SandboxConfig:
     rlimit support — document loudly so callers don't assume otherwise."""
     network_allowed: bool = False
     """When False, the sandbox blocks outbound network. Default deny."""
+    container_persistent: bool = True
+    """Hermes parity: when ``False``, the Docker strategy adds explicit
+    ``--tmpfs /workspace`` + ``--tmpfs /root`` flags so implicit state
+    inside the container can't be persisted by accident. ``True``
+    (default) preserves existing behaviour — no extra tmpfs mounts.
+    Only honoured by the ``docker`` strategy; other strategies ignore."""
     read_paths: tuple[str, ...] = ()
     """Extra paths the sandboxed process may read. Each strategy ships a
     minimal base profile (``/usr/lib``, ``/usr/bin``, ``/bin``,

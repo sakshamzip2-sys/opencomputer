@@ -36,10 +36,12 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import logging
 import os
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -69,6 +71,38 @@ def get_current_request_profile() -> str | None:
 # T3 — adapter start time for uptime computation. Module-level so the
 # value survives across requests + adapter rebuilds within a process.
 _ADAPTER_START_TIME: float = time.monotonic()
+
+
+# G2 (Hermes parity, 2026-05-09) — Idempotency-Key dedup cache.
+# Process-wide bounded LRU. TTL = 5 min. Key shape: (token-hash, key).
+# Cap = 256 to prevent runaway-client OOM.
+_IDEMPOTENCY_CACHE: OrderedDict[tuple[str, str], _CachedResponse] = OrderedDict()
+_IDEMPOTENCY_CACHE_MAX = 256
+_IDEMPOTENCY_TTL_S = 300.0
+
+
+class _CachedResponse:
+    """One entry in the Idempotency-Key LRU.
+
+    Plain class (not a dataclass) so it survives test loaders that
+    skip ``sys.modules`` registration — `typing.get_type_hints` on
+    a dataclass requires the module to be importable by name. See
+    `test_api_server_run_stop.py` for an example of such a loader.
+    """
+
+    __slots__ = ("body", "status", "headers", "expires_at")
+
+    def __init__(
+        self,
+        body: bytes,
+        status: int,
+        headers: dict,
+        expires_at: float,
+    ) -> None:
+        self.body = body
+        self.status = status
+        self.headers = headers
+        self.expires_at = expires_at
 
 
 def _count_active_sessions() -> int | None:
@@ -912,9 +946,96 @@ class APIServerAdapter(BaseChannelAdapter):
             finally:
                 _CURRENT_PROFILE.reset(token)
 
+        # G2 (Hermes parity, 2026-05-09) — Idempotency-Key dedup
+        # middleware. Caches POST responses by (token-hash, key) for 5
+        # min so retried requests get the original answer instead of
+        # re-running the agent. No-op when the header is absent.
+        @web.middleware
+        async def _idempotency_middleware(request, handler):
+            key = request.headers.get("Idempotency-Key", "").strip()
+            if not key or request.method != "POST":
+                return await handler(request)
+            auth = request.headers.get("Authorization", "")
+            token_hash = hashlib.sha256(auth.encode()).hexdigest()[:16]
+            cache_key = (token_hash, key)
+            now = time.monotonic()
+            cached = _IDEMPOTENCY_CACHE.get(cache_key)
+            if cached is not None:
+                if cached.expires_at > now:
+                    _IDEMPOTENCY_CACHE.move_to_end(cache_key)
+                    return web.Response(
+                        body=cached.body,
+                        status=cached.status,
+                        headers={
+                            **cached.headers,
+                            "X-Idempotent-Replay": "1",
+                        },
+                    )
+                # Expired — fall through to live handler.
+                del _IDEMPOTENCY_CACHE[cache_key]
+            response = await handler(request)
+            # Skip caching streaming responses (StreamResponse without
+            # a fully-buffered body) — replaying SSE is not supported.
+            if not isinstance(response, web.Response):
+                return response
+            body = response.body if isinstance(response.body, bytes) else b""
+            _IDEMPOTENCY_CACHE[cache_key] = _CachedResponse(
+                body=body,
+                status=response.status,
+                headers={
+                    k: v
+                    for k, v in response.headers.items()
+                    if k.lower() not in {"date", "content-length"}
+                },
+                expires_at=now + _IDEMPOTENCY_TTL_S,
+            )
+            while len(_IDEMPOTENCY_CACHE) > _IDEMPOTENCY_CACHE_MAX:
+                _IDEMPOTENCY_CACHE.popitem(last=False)
+            return response
+
+        # G1 (Hermes parity, 2026-05-09) — CORS middleware. Honors
+        # ``API_SERVER_CORS_ORIGINS`` (comma-separated). Default OFF
+        # when env unset (no regression for server-to-server users).
+        # Allows ``Idempotency-Key`` (G2) so dedup works from browsers.
+        @web.middleware
+        async def _cors_middleware(request, handler):
+            raw = os.environ.get("API_SERVER_CORS_ORIGINS", "")
+            origins = [o.strip() for o in raw.split(",") if o.strip()]
+            origin = request.headers.get("Origin", "")
+            if request.method == "OPTIONS" and origins:
+                if origin not in origins:
+                    return web.Response(status=200)
+                return web.Response(
+                    status=200,
+                    headers={
+                        "Access-Control-Allow-Origin": origin,
+                        "Access-Control-Allow-Methods": (
+                            "GET, POST, PATCH, DELETE, OPTIONS"
+                        ),
+                        "Access-Control-Allow-Headers": (
+                            "Authorization, Content-Type, "
+                            "Idempotency-Key, X-OC-Profile"
+                        ),
+                        "Access-Control-Max-Age": "600",
+                        "Access-Control-Allow-Credentials": "true",
+                    },
+                )
+            response = await handler(request)
+            if origin and origin in origins:
+                try:
+                    response.headers["Access-Control-Allow-Origin"] = origin
+                    response.headers["Access-Control-Allow-Credentials"] = "true"
+                except (AttributeError, RuntimeError):
+                    pass
+            return response
+
         app = web.Application(
             client_max_size=self.max_message_length,
-            middlewares=[_profile_middleware],
+            middlewares=[
+                _cors_middleware,
+                _idempotency_middleware,
+                _profile_middleware,
+            ],
         )
         app.router.add_post("/v1/chat", self._handle_chat)
         # T2 (tier-2 trio, 2026-05-04) — OpenAI Chat Completions compat.
@@ -924,9 +1045,15 @@ class APIServerAdapter(BaseChannelAdapter):
         # Hermes parity (2026-05-08) — Open-WebUI multi-profile model
         # discovery via GET /v1/models. Auth-required.
         app.router.add_get("/v1/models", self._handle_list_models)
-        # Hermes parity (2026-05-08) — opt-in Responses-API stub.
-        # Returns 404 unless API_SERVER_API_TYPE=responses.
+        # Hermes parity G3 (2026-05-09) — Responses API default-on.
         app.router.add_post("/v1/responses", self._handle_responses_stub)
+        # Hermes parity G4 (2026-05-09) — GET / DELETE individual response.
+        app.router.add_get(
+            "/v1/responses/{response_id}", self._handle_response_get
+        )
+        app.router.add_delete(
+            "/v1/responses/{response_id}", self._handle_response_delete
+        )
         # Wave 6.A — Hermes-port (0a15dbdc4) — POST /v1/runs/{id}/stop
         app.router.add_post("/v1/runs/{run_id}/stop", self._handle_run_stop)
         # T59 — Hermes-doc Runs API. Create / status / SSE-events.
@@ -946,7 +1073,20 @@ class APIServerAdapter(BaseChannelAdapter):
         app.router.add_get("/v1/capabilities", self._handle_capabilities)
         # T3 — Hermes-doc parity. Public detailed health probe (no auth).
         app.router.add_get("/health/detailed", self._handle_health_detailed)
+        # G5 (Hermes parity, 2026-05-09) — minimal /health probe + /v1/health alias.
+        app.router.add_get("/health", self._handle_health)
+        app.router.add_get("/v1/health", self._handle_health)
         return app
+
+    # ─── G5 — minimal health (Hermes spec 2026-05-09) ───────────────
+
+    async def _handle_health(self, request: web.Request) -> web.Response:
+        """Hermes parity G5: ``GET /health`` and ``GET /v1/health`` → 200 ok.
+
+        Public — no Bearer token required, so frontends + load balancers
+        can probe liveness without negotiating auth.
+        """
+        return web.json_response({"status": "ok"})
 
     # ─── T2 — /v1/capabilities ──────────────────────────────────────
 
@@ -1093,6 +1233,63 @@ class APIServerAdapter(BaseChannelAdapter):
         if conversation:
             self._named_conversations[conversation] = response_id
 
+    # ─── G4 — GET + DELETE /v1/responses/{id} (Hermes parity 2026-05-09) ──
+
+    async def _handle_response_get(
+        self, request: web.Request
+    ) -> web.Response:
+        """Hermes parity G4: GET /v1/responses/{id} — fetch stored response."""
+        err = self._auth_check(request)
+        if err is not None:
+            return err
+        response_id = request.match_info.get("response_id", "")
+        entry = self._responses_store.get(response_id)
+        if entry is None:
+            return web.json_response(
+                {"error": {"message": f"response {response_id!r} not found"}},
+                status=404,
+            )
+        payload = {
+            "id": response_id,
+            "object": "response",
+            "status": "completed",
+            "input": entry.get("user", ""),
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": entry.get("agent", "")},
+                    ],
+                },
+            ],
+            "previous_response_id": entry.get("previous_response_id"),
+            "conversation": entry.get("conversation"),
+        }
+        return web.json_response(payload)
+
+    async def _handle_response_delete(
+        self, request: web.Request
+    ) -> web.Response:
+        """Hermes parity G4: DELETE /v1/responses/{id} — remove stored response."""
+        err = self._auth_check(request)
+        if err is not None:
+            return err
+        response_id = request.match_info.get("response_id", "")
+        if response_id not in self._responses_store:
+            return web.json_response(
+                {"error": {"message": f"response {response_id!r} not found"}},
+                status=404,
+            )
+        del self._responses_store[response_id]
+        return web.json_response(
+            {
+                "id": response_id,
+                "deleted": True,
+                "object": "response.deleted",
+            }
+        )
+
     def _build_chained_input(
         self,
         *,
@@ -1136,11 +1333,9 @@ class APIServerAdapter(BaseChannelAdapter):
         - ``previous_response_id``: chain to a prior response by id
         - ``conversation``: named-conversation auto-chain
         """
-        if os.environ.get("API_SERVER_API_TYPE", "").lower() != "responses":
-            return web.json_response(
-                {"error": {"message": "Responses API disabled. Set API_SERVER_API_TYPE=responses to enable."}},
-                status=404,
-            )
+        # G3 (Hermes parity, 2026-05-09): /v1/responses is default-on.
+        # ``API_SERVER_API_TYPE`` env retained as a no-op alias for
+        # back-compat — setting it to anything still works.
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer ") or auth[len("Bearer "):] != self._token:
             return web.json_response(
