@@ -2387,6 +2387,20 @@ class AgentLoop:
                 # the loop terminates cleanly via END_TURN.
                 if any(getattr(r, "is_error", False) for r in tool_results):
                     _session_had_errors = True
+
+                # v1.1 plan-2 M5.4 follow-up (2026-05-09): if any of the
+                # just-dispatched tool calls was ExitPlanMode AND it left
+                # a next_mode proposal in the slot, mutate this loop's
+                # RuntimeContext.permission_mode now so subsequent turns
+                # in the same session pick up the new mode without the
+                # user having to run `/exit-plan <mode>` manually.
+                # ``keep`` means stay in plan mode — leave runtime alone.
+                _exit_plan_called = any(
+                    (getattr(_tc, "name", "") == "ExitPlanMode")
+                    for _tc in (step.assistant_message.tool_calls or [])
+                )
+                if _exit_plan_called:
+                    self._maybe_apply_exit_plan_proposal()
                 # Round 2B P-3: tool dispatch finished — count both successful and
                 # error results as activity (the agent did *something*, that's
                 # what the inactivity timer cares about). ``_dispatch_tool_calls``
@@ -4806,6 +4820,66 @@ class AgentLoop:
                 exc_info=True,
             )
             return _NoOpDemandTracker()
+
+    def _maybe_apply_exit_plan_proposal(self) -> None:
+        """v1.1 plan-2 M5.4 follow-up — consume the ExitPlanMode proposal slot.
+
+        Called after every loop iteration that dispatched an
+        ``ExitPlanMode`` tool call. Reads the process-wide proposal slot
+        set by the tool's ``execute()`` (when the agent passed
+        ``next_mode``), and mutates ``self._runtime`` to switch the
+        permission_mode for the rest of this session.
+
+        - ``next_mode == "keep"`` → leave runtime alone (agent stays in
+          plan mode and continues iterating).
+        - ``next_mode in {"auto","acceptEdits","manual"}`` → rebuild
+          runtime with that mode and clear plan_mode.
+        - No proposal → no-op (the agent called ExitPlanMode without
+          a next_mode suggestion).
+
+        Slot reads from :mod:`opencomputer.agent.exit_plan_proposal`
+        (a core module so the tool's writer and this reader share
+        identity even when the tool's file is loaded under a
+        synthetic plugin-loader name).
+        """
+        from opencomputer.agent.exit_plan_proposal import pop_last_proposal
+
+        try:
+            proposal = pop_last_proposal()
+        except Exception:  # noqa: BLE001
+            _log.debug("M5.4: pop_last_proposal failed", exc_info=True)
+            return
+
+        if proposal is None:
+            return
+        if proposal.next_mode == "keep":
+            _log.info(
+                "M5.4: ExitPlanMode proposal next_mode=keep — staying in plan mode"
+            )
+            return
+        if proposal.next_mode not in ("auto", "acceptEdits", "manual"):
+            _log.warning(
+                "M5.4: ExitPlanMode proposal had unknown next_mode=%r; ignoring",
+                proposal.next_mode,
+            )
+            return
+
+        try:
+            self._runtime = replace(
+                self._runtime,
+                plan_mode=False,
+                permission_mode=proposal.next_mode,
+            )
+            _log.info(
+                "M5.4: applied ExitPlanMode proposal — permission_mode now %r",
+                proposal.next_mode,
+            )
+        except Exception:  # noqa: BLE001
+            _log.warning(
+                "M5.4: failed to mutate runtime for next_mode=%r",
+                proposal.next_mode,
+                exc_info=True,
+            )
 
 
 async def _maybe_transform_tool_result(
