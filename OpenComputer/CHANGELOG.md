@@ -17,6 +17,67 @@ The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEAS
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-4 M13: plugin-authored top-level CLI subcommands (2026-05-09)
+
+Closes the long-standing audit gap that plugins could register tools, providers, channels, hooks, slash commands, MCPs, agent templates, and skills, but could **not** ship `oc <plugin-id> <subcommand>` Typer subcommands. Slash commands were the in-session workaround; CLI workflows had no equivalent.
+
+**SDK surface (additive — `plugin_sdk` consumers untouched):**
+
+```python
+# In your plugin's register(api):
+import typer
+from plugin_sdk import PluginManifest
+
+jira_app = typer.Typer(help="Jira ops from the CLI.")
+
+@jira_app.command()
+def create(title: str, project: str = "OPS") -> None:
+    ...
+
+@jira_app.command()
+def list(status: str = "open") -> None:
+    ...
+
+def manifest():
+    return PluginManifest(
+        id="jira-plugin",
+        name="Jira",
+        version="1.0.0",
+        entry="plugin",
+        cli_commands=("jira",),                  # advertise without loading
+        cli_commands_profiles=("work",),         # optional — restrict to a profile
+    )
+
+def register(api):
+    api.register_cli_command("jira", jira_app)   # core hard-fails on collisions
+```
+
+End user gets `oc jira create --title "ship M13" --project OPS` — the plugin loads only on the first invocation; `oc --help` lists `jira` after a cheap manifest scan that imports nothing.
+
+**Conflict resolution (three layers):**
+
+1. **Core vs plugin** — `cli_commands` containing a name in `CORE_RESERVED_CLI_NAMES` (the ~50 verbs core ships: `chat`, `gateway`, `wire`, `doctor`, `setup`, `plugin`, `profile`, `preset`, `mcp`, `cron`, `consent`, `skills`, `session`, `checkpoints`, `worktrees`, `rules`, `hooks`, …) is **always** fatal — `replace=True` does not bypass.
+2. **Plugin vs plugin** — first registration wins; second raises `PluginCLINameCollision` unless `replace=True`. Authors coordinate via the `<plugin-id>-<verb>` prefix convention.
+3. **Profile-scoped** — `cli_commands_profiles: ["work"]` hides the command under any other active profile. Empty / `None` = exposed under every profile.
+
+**Why this is M13 and not M12:** M12 (`/btw` post-turn skill suggestion) had already shipped via `slash_commands_impl/btw_cmd.py` before this plan was written; the plan-4 audit caught that and dropped it. M13 was the only remaining unshipped plan-4 item.
+
+**Files:**
+
+- `plugin_sdk/core.py` — `PluginManifest.cli_commands: tuple[str, ...]` + `cli_commands_profiles: tuple[str, ...] | None` (additive; defaults preserve every existing manifest).
+- `opencomputer/plugins/manifest_validator.py` — pydantic schema + shell-safe identifier validator (rejects `--evil`, `""`).
+- `opencomputer/plugins/discovery.py` — threads the new fields through `_build_manifest`.
+- `opencomputer/plugins/loader.py` — `PluginAPI.register_cli_command(name, app, *, replace=False)` + `PluginCLINameCollision` exception + shared `_cli_commands` table on `PluginAPI`.
+- `opencomputer/plugins/registry.py` — `PluginRegistry.cli_commands: dict[str, Any]` + threaded through `api()`.
+- `opencomputer/plugins/cli_registry.py` (NEW) — `CORE_RESERVED_CLI_NAMES` constant + `register_plugin_cli_commands(typer_app)` lazy-attacher + `_attach_lazy_command(...)` placeholder.
+- `opencomputer/cli.py` — `main()` calls `register_plugin_cli_commands(app)` after profile / env setup, before `app()`.
+
+**Tests (29 new across 3 files):**
+
+- `tests/test_plugin_cli_register.py` — happy path register; duplicate raises; `replace=True` overrides; lazy dispatch into real Typer; missing `register_cli_command()` errors clearly; manifest schema accepts `cli_commands`; rejects `--` prefix and empty entries.
+- `tests/test_plugin_cli_core_collision.py` — parametrized over 13 core verbs; `replace=True` does not bypass core-collision; sanity check that the spec's reserved set is in `CORE_RESERVED_CLI_NAMES`.
+- `tests/test_plugin_cli_help_listing.py` — `--help` lists advertised name; `load_plugin` is called **zero** times during `--help`; actual invocation triggers load + dispatches; profile-scoped commands hidden under inactive profile, visible under active profile.
+
 ### Added — v1.1 Plan-3 M6.1: `MEMORY.md` BM25 index (2026-05-09)
 
 Foundation for v1.1 plan-3 M6 Active Memory work. Adds
