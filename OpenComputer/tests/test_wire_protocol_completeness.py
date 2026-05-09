@@ -314,3 +314,84 @@ class TestHelloParamsHelloResult:
         r = HelloResult(server="oc", capabilities=())
         assert r.gap_warning is False
         assert r.server_last_event_seq is None
+
+
+# ─── chat dispatch session_clients registration (PR #523 amend) ──────────
+
+
+class TestChatRegistersSessionClients:
+    """Verify _handle_chat populates _session_clients so a Tier-2 deny
+    mid-turn can reach the wire client even when the client never
+    called `hello` with a session_id (e.g. fresh connection that
+    immediately calls chat)."""
+
+    @pytest.mark.asyncio
+    async def test_chat_with_session_id_registers_ws(
+        self, server: WireServer
+    ) -> None:
+        # Stub the router so we don't need a real AgentLoop
+        from unittest.mock import AsyncMock as _AsyncMock
+
+        class _StubResult:
+            class _Msg:
+                content = "ok"
+
+            final_message = _Msg()
+            session_id = "sess-chat-123"
+            iterations = 1
+            input_tokens = 5
+            output_tokens = 3
+
+        loop_stub = MagicMock()
+        loop_stub.run_conversation = _AsyncMock(return_value=_StubResult())
+        server._router.get_or_load = _AsyncMock(return_value=loop_stub)
+        server._router._profile_home_resolver = lambda pid: __import__("pathlib").Path("/tmp")
+
+        from opencomputer.gateway.protocol import WireRequest
+
+        ws = _fake_ws()
+        req = WireRequest(
+            id="r1",
+            method="chat",
+            params={"message": "hi", "session_id": "sess-chat-123"},
+        )
+        await server._handle_chat(ws, req)
+
+        # ws should now be in the session_clients set
+        assert ws in server._session_clients["sess-chat-123"]
+
+    @pytest.mark.asyncio
+    async def test_chat_without_session_id_skips_registration(
+        self, server: WireServer
+    ) -> None:
+        # When the chat call doesn't carry a session_id (fresh session),
+        # we don't have a key to bucket under — skip registration.
+        from unittest.mock import AsyncMock as _AsyncMock
+
+        class _StubResult:
+            class _Msg:
+                content = "ok"
+
+            final_message = _Msg()
+            session_id = "sess-fresh-456"
+            iterations = 1
+            input_tokens = 5
+            output_tokens = 3
+
+        loop_stub = MagicMock()
+        loop_stub.run_conversation = _AsyncMock(return_value=_StubResult())
+        server._router.get_or_load = _AsyncMock(return_value=loop_stub)
+        server._router._profile_home_resolver = lambda pid: __import__("pathlib").Path("/tmp")
+
+        from opencomputer.gateway.protocol import WireRequest
+
+        ws = _fake_ws()
+        req = WireRequest(
+            id="r1",
+            method="chat",
+            params={"message": "hi"},  # no session_id
+        )
+        await server._handle_chat(ws, req)
+
+        # No registration happened — _session_clients stays empty for any key
+        assert all(ws not in conns for conns in server._session_clients.values())

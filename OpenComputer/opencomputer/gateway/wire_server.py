@@ -444,6 +444,15 @@ class WireServer:
             )
             return
 
+        # M3.1 follow-up (PR #523 amend): also register the wire ws in
+        # _session_clients on chat dispatch — not just in hello — so a
+        # client that connects, immediately calls chat, and hits a
+        # Tier-2 capability mid-turn is reachable for permission
+        # broadcast. Idempotent: ws already registered via hello stays
+        # in the set. Cleanup happens in _handle_client.finally.
+        if session_id:
+            self._session_clients.setdefault(str(session_id), set()).add(ws)
+
         # Announce turn begin
         await self._send_event(
             ws, EVENT_TURN_BEGIN, {"request_id": req.id}
