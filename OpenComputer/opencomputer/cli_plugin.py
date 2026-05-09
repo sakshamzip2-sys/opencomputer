@@ -116,6 +116,58 @@ def _install_from_url(url: str, **kwargs):
     return install_from_url(url, **kwargs)
 
 
+def _install_from_pypi(spec: str, **kwargs):
+    """Indirection for install_from_pypi — patchable in tests."""
+    from opencomputer.plugins.remote_install import install_from_pypi
+
+    return install_from_pypi(spec, **kwargs)
+
+
+def _enforce_source_policy(source_str: str) -> None:
+    """Run M11.3 source policy on the install argument.
+
+    Loads the active profile's policy from
+    ``~/.opencomputer/<profile>/config.yaml::plugins.sources``.  Raises
+    :class:`typer.Exit(2)` when the source is denied.  Silent on
+    allow.
+    """
+    from opencomputer.plugins.source_policy import (
+        PolicyDeniedError,
+        load_policy_from_active_profile,
+        parse_source,
+    )
+
+    try:
+        src = parse_source(source_str)
+    except ValueError as exc:
+        _console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=2) from None
+
+    try:
+        policy = load_policy_from_active_profile()
+    except Exception as exc:  # noqa: BLE001 — log & fail-open on bad policy
+        _console.print(
+            f"[yellow]warning:[/yellow] could not load source policy ({exc}); "
+            "proceeding with default deny-by-default-on-network policy."
+        )
+        from opencomputer.plugins.source_policy import PluginSourcePolicy
+
+        policy = PluginSourcePolicy()
+
+    try:
+        policy.assert_allowed(src)
+    except PolicyDeniedError as exc:
+        _console.print(
+            f"[red]error:[/red] {exc}\n\n"
+            "This source kind is denied by default for plugin installs. "
+            "To allow it, edit ~/.opencomputer/<profile>/config.yaml and add:\n\n"
+            f"    plugins:\n      sources:\n        {src.kind.value}:\n"
+            f"          allow:\n            - <pattern>\n"
+        )
+        raise typer.Exit(code=2) from None
+
+
+
 def _verify_plugin(*args, **kwargs):
     """Indirection for verify_plugin — patchable in tests."""
     from opencomputer.plugins.integrity import verify_plugin
@@ -202,8 +254,52 @@ def install(
         help="Pin a specific git sha/tag/branch (only with git+ source).",
     ),
 ) -> None:
-    """Install a plugin from a local directory, remote catalog, git, or URL."""
+    """Install a plugin from a local directory, remote catalog, git, URL, or PyPI."""
+    # v1.1 plan-3 M11.3 — every install path runs through the typed
+    # source-policy gate before any network IO.  Deny-by-default for
+    # network kinds keeps the supply-chain surface narrow.
+    _enforce_source_policy(source)
+
     # Phase 1 (2026-05-06) — URL-scheme-routed install paths.
+    if source.startswith(("pypi:", "PyPI:", "PYPI:")):
+        if plugin_id_hint is None:
+            _console.print(
+                "[red]error:[/red] pypi installs require --id <plugin-id> "
+                "(must match the sdist's plugin.json id field)"
+            )
+            raise typer.Exit(code=2)
+        from opencomputer.plugins.remote_install import (
+            CatalogError,
+            PypiDownloadError,
+            PypiNotFoundError,
+        )
+
+        package_spec = source.split(":", 1)[1].strip()
+        if not package_spec:
+            _console.print(
+                "[red]error:[/red] empty PyPI package spec (use "
+                "'pypi:<name>' or 'pypi:<name>==<version>')"
+            )
+            raise typer.Exit(code=2)
+        dest_root = _resolve_destination_root(profile, is_global)
+        dest_root.mkdir(parents=True, exist_ok=True)
+        try:
+            result = _install_from_pypi(
+                package_spec,
+                dest_root=dest_root,
+                plugin_id_hint=plugin_id_hint,
+                force=force,
+                before_install_hook=_composed_before_install_hook,
+            )
+        except (PypiNotFoundError, PypiDownloadError, CatalogError) as e:
+            _console.print(f"[red]error:[/red] {e}")
+            raise typer.Exit(code=1) from None
+        _console.print(
+            f"[green]installed:[/green] '{result.plugin_id}' "
+            f"v{result.version} (pypi) → {result.install_path}"
+        )
+        return
+
     if _is_git_arg(source):
         if plugin_id_hint is None:
             _console.print(

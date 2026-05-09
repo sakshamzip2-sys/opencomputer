@@ -49,6 +49,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import time
@@ -373,20 +374,62 @@ def download_and_verify(
     return raw
 
 
-def extract_tarball(raw: bytes, *, dest: Path) -> Path:
+def extract_tarball(
+    raw: bytes,
+    *,
+    dest: Path,
+    strip_top_level: bool = False,
+) -> Path:
     """Safely extract a gzipped tarball to ``dest``. Returns the dest path.
 
     Uses ``filter='data'`` (Python 3.12+) which rejects absolute paths,
     symlink escapes, and device files. ``dest`` is created fresh — if it
     already exists, the caller is expected to have handled it (force flag
     on the install command).
+
+    ``strip_top_level=True`` flattens a PEP-643-style top-level directory
+    wrapper (``<name>-<version>/foo`` → ``foo``) when EVERY entry in the
+    archive shares the same first path component.  PyPI sdists need this;
+    catalog tarballs typically do not.  When the archive is already flat
+    or members disagree on the wrapper, falls back to the standard
+    extraction so the strip flag is safe to enable opportunistically.
     """
     import io
 
     dest.mkdir(parents=True, exist_ok=False)
     try:
         with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-            tar.extractall(path=dest, filter="data")
+            members = tar.getmembers()
+            top_level: str | None = None
+            should_strip = False
+            if strip_top_level and members:
+                top_level = members[0].name.split("/", 1)[0]
+                should_strip = bool(top_level) and all(
+                    m.name == top_level
+                    or m.name.startswith(top_level + "/")
+                    for m in members
+                )
+            if should_strip and top_level is not None:
+                prefix = top_level + "/"
+                for m in members:
+                    if m.name == top_level:
+                        # The wrapper directory itself — drop it.
+                        continue
+                    stripped_name = m.name[len(prefix):]
+                    if not stripped_name:
+                        continue
+                    if m.isreg():
+                        f = tar.extractfile(m)
+                        if f is None:
+                            continue
+                        target_path = dest / stripped_name
+                        target_path.parent.mkdir(parents=True, exist_ok=True)
+                        target_path.write_bytes(f.read())
+                    elif m.isdir():
+                        (dest / stripped_name).mkdir(parents=True, exist_ok=True)
+                    # Other types (symlinks, etc.) skipped under strip.
+            else:
+                tar.extractall(path=dest, filter="data")
     except Exception:
         # Roll back the dest dir on extraction failure so we don't leave
         # a half-populated plugin directory behind.
@@ -761,6 +804,212 @@ def install_from_url(
     )
 
 
+class PypiNotFoundError(CatalogError):
+    """Pip executable not found on PATH (or PEP 668 environment lockdown)."""
+
+
+class PypiDownloadError(CatalogError):
+    """Pip download failed (network, version not found, etc.)."""
+
+
+def _pip_path() -> str | None:
+    """Locate the pip binary. Mirrors :func:`_git_path` for testability.
+
+    Prefers ``python -m pip`` over a bare ``pip`` to avoid the
+    cross-Python-version PATH ambiguity Linux distros suffer from.
+    Returns the python interpreter path; callers run
+    ``[python, -m, pip, ...]``.
+    """
+    return shutil.which("python3") or shutil.which("python")
+
+
+def install_from_pypi(
+    package_spec: str,
+    *,
+    dest_root: Path,
+    plugin_id_hint: str,
+    force: bool = False,
+    before_install_hook: BeforeInstallHook | None = None,
+    skip_scan: bool = False,
+    pip_download_fn: Callable[[str, Path], Path] | None = None,
+) -> InstallResult:
+    """Install a plugin via ``pip download`` of its source dist.
+
+    Strategy: ``pip download --no-deps --no-binary :all: <pkg>`` into a
+    temp directory, then feed the resulting .tar.gz through the
+    existing tarball-extract pipeline.  This keeps the install model
+    self-contained (one plugin = one directory under ``dest_root``)
+    rather than spilling into site-packages.
+
+    Args:
+        package_spec: PyPI spec, e.g. ``"opencomputer-plugin-foo"`` or
+            ``"opencomputer-plugin-foo==1.2.3"``.
+        dest_root: parent directory where the plugin folder lands.
+        plugin_id_hint: must match ``plugin.json``'s ``id`` field
+            inside the downloaded sdist.  Refused if mismatched.
+        force: overwrite existing install.
+        before_install_hook: same contract as the other installers.
+        pip_download_fn: test injection point.  Returns the path to
+            the downloaded sdist tarball.  Default invokes
+            ``python3 -m pip download`` in a subprocess.
+
+    Returns:
+        :class:`InstallResult` with ``source="pypi"`` recorded in the
+        installed-index for ``oc plugin verify``.
+
+    Raises:
+        :class:`PypiNotFoundError`: ``python3`` / ``pip`` unavailable.
+        :class:`PypiDownloadError`: pip subprocess failed.
+        :class:`UnsupportedTarballFormatError`: pip returned a wheel
+            instead of an sdist (we explicitly disabled binaries).
+        :class:`PluginIdMismatchError`: sdist's plugin.json id ≠ hint.
+    """
+    plugin_dir = dest_root / plugin_id_hint
+    if plugin_dir.exists():
+        if not force:
+            raise CatalogError(
+                f"plugin '{plugin_id_hint}' already installed at {plugin_dir}. "
+                "Use --force to overwrite."
+            )
+        shutil.rmtree(plugin_dir)
+
+    download_fn = pip_download_fn or _default_pip_download
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="oc-pypi-") as tmp:
+        tmp_path = Path(tmp)
+        try:
+            sdist_path = download_fn(package_spec, tmp_path)
+        except FileNotFoundError as e:
+            raise PypiNotFoundError(
+                f"pip / python3 not on PATH: {e}"
+            ) from e
+        except subprocess.CalledProcessError as e:
+            raise PypiDownloadError(
+                f"pip download failed: {e.stderr or e.stdout or e}"
+            ) from e
+
+        if not sdist_path.exists():
+            raise PypiDownloadError(
+                f"pip download claimed success but sdist file missing: "
+                f"{sdist_path}"
+            )
+
+        raw = sdist_path.read_bytes()
+        if not raw.startswith(_TARBALL_GZIP_MAGIC):
+            raise UnsupportedTarballFormatError(
+                f"pip returned {sdist_path.name!r} which is not a "
+                "gzip sdist (wheels and binary distributions are not "
+                "supported — pin the source dist)."
+            )
+
+        actual_sha = hashlib.sha256(raw).hexdigest()
+
+        # PyPI sdists have a top-level ``<name>-<version>/`` directory
+        # wrapper (PEP 643).  Extract through it so plugin.json lands
+        # at plugin_dir/plugin.json without the wrapper prefix.
+        extract_tarball(raw, dest=plugin_dir, strip_top_level=True)
+
+    manifest_path = plugin_dir / "plugin.json"
+    if not manifest_path.exists():
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        raise CatalogParseError(
+            f"PyPI sdist for {package_spec!r} has no plugin.json at "
+            "the root after stripping the top-level wrapper."
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as e:
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        raise CatalogParseError(f"plugin.json is not valid JSON: {e}") from e
+
+    actual_id = str(manifest.get("id", ""))
+    if actual_id != plugin_id_hint:
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        raise PluginIdMismatchError(
+            f"plugin.json says id={actual_id!r} but install argument "
+            f"was {plugin_id_hint!r}"
+        )
+    version = str(manifest.get("version", ""))
+
+    try:
+        _post_extract_gate(
+            plugin_dir=plugin_dir,
+            install_source="pypi",
+            install_url=package_spec,
+            install_plugin_id=plugin_id_hint,
+            before_install_hook=before_install_hook,
+            skip_scan=skip_scan,
+        )
+    except Exception:
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        raise
+
+    from opencomputer.plugins.installed_index import (
+        InstalledRecord,
+        record_install,
+    )
+
+    record_install(
+        dest_root / ".installed_index.json",
+        InstalledRecord(
+            plugin_id=plugin_id_hint,
+            version=version,
+            source="pypi",
+            source_url=package_spec,
+            source_ref=None,
+            tarball_sha256=actual_sha,
+            installed_at=int(time.time()),
+        ),
+    )
+
+    return InstallResult(
+        plugin_id=plugin_id_hint, version=version, install_path=plugin_dir
+    )
+
+
+def _default_pip_download(package_spec: str, dest_dir: Path) -> Path:
+    """Run ``python3 -m pip download`` to fetch the sdist.
+
+    Returns the path to the downloaded sdist file.  Caller is
+    responsible for cleanup of ``dest_dir``.
+    """
+    python = _pip_path()
+    if python is None:
+        raise FileNotFoundError(
+            "neither python3 nor python found on PATH"
+        )
+    cmd = [
+        python,
+        "-m",
+        "pip",
+        "download",
+        "--no-deps",
+        "--no-binary",
+        ":all:",
+        "--dest",
+        str(dest_dir),
+        package_spec,
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+    # pip writes the sdist as <name>-<version>.tar.gz (or .zip — we
+    # reject zip for consistency with other installers).
+    candidates = sorted(dest_dir.glob("*.tar.gz"))
+    if not candidates:
+        zip_files = list(dest_dir.glob("*.zip"))
+        if zip_files:
+            raise UnsupportedTarballFormatError(
+                f"pip returned a zip sdist ({zip_files[0].name}); only "
+                ".tar.gz sdists are supported."
+            )
+        raise PypiDownloadError(
+            f"pip download produced no .tar.gz file in {dest_dir}"
+        )
+    return candidates[0]
+
+
 def _post_extract_gate(
     *,
     plugin_dir: Path,
@@ -829,7 +1078,10 @@ __all__ = [
     "find_entry",
     "install_from_catalog",
     "install_from_git",
+    "install_from_pypi",
     "install_from_url",
+    "PypiNotFoundError",
+    "PypiDownloadError",
     "read_cache",
     "resolve_catalog_url",
     "write_cache",

@@ -238,9 +238,7 @@ class PluginSourcePolicy:
             return any(fnmatch.fnmatch(target, p) for p in kind_rules.allow)
 
         # No allow list → fall back to default-by-kind.
-        if source.kind == PluginSourceKind.DIRECTORY:
-            return True
-        return False
+        return source.kind == PluginSourceKind.DIRECTORY
 
     def assert_allowed(self, source: PluginSource) -> None:
         """Raise :class:`PolicyDeniedError` if not allowed."""
@@ -326,11 +324,44 @@ def _string_list(value: Any, *, where: str) -> list[str]:
     return out
 
 
+def load_policy_from_active_profile() -> PluginSourcePolicy:
+    """Load the source-install policy from the active profile.
+
+    Reads ``~/.opencomputer/<profile>/config.yaml::plugins.sources``.
+    Falls back to a default deny-by-default-on-network policy when the
+    file is absent or the ``plugins`` block isn't present.
+
+    Raises any :class:`ValueError` from :func:`load_policy` so a
+    malformed policy surfaces immediately rather than silently
+    becoming a permissive fallback.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    from opencomputer.agent.config import _home
+
+    cfg_path: Path = _home() / "config.yaml"
+    if not cfg_path.exists():
+        return PluginSourcePolicy()
+    try:
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(
+            f"could not parse {cfg_path}: {exc}"
+        ) from exc
+    plugins_block = raw.get("plugins") or {}
+    if not isinstance(plugins_block, dict):
+        return PluginSourcePolicy()
+    return load_policy(plugins_block)
+
+
 __all__ = [
     "PluginSource",
     "PluginSourceKind",
     "PluginSourcePolicy",
     "PolicyDeniedError",
     "load_policy",
+    "load_policy_from_active_profile",
     "parse_source",
 ]
