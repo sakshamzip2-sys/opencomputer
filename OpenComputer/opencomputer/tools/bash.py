@@ -5,6 +5,13 @@ from __future__ import annotations
 import asyncio
 import os
 
+from opencomputer.security.tirith import (
+    TirithResult,
+    format_findings_for_user,
+)
+from opencomputer.security.tirith import (
+    check_command as tirith_check_command,
+)
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
@@ -139,6 +146,44 @@ class BashTool(BaseTool):
                 ),
                 is_error=True,
             )
+
+        # Hermes parity: Tirith pre-exec scan. Subprocess call is
+        # synchronous — wrapped in to_thread so the agent loop's async
+        # dispatch isn't blocked. fail_open default per Tirith config;
+        # binary absent → action='allow' under fail_open and is a no-op.
+        try:
+            tirith_result: TirithResult = await asyncio.to_thread(
+                tirith_check_command, cmd,
+            )
+        except Exception:  # noqa: BLE001 — never let scan break exec
+            tirith_result = TirithResult(action="allow")
+
+        if tirith_result.action == "block":
+            findings_text = (
+                format_findings_for_user(tirith_result)
+                or tirith_result.summary
+                or "blocked by Tirith"
+            )
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    "Refused: Tirith pre-exec scan flagged this command.\n"
+                    f"{findings_text}"
+                ),
+                is_error=True,
+            )
+
+        # warn: don't refuse, but surface findings as a prefix to the
+        # tool result so the model + user see them. allow: silent.
+        warn_prefix = ""
+        if tirith_result.action == "warn":
+            findings_text = format_findings_for_user(tirith_result)
+            if findings_text:
+                warn_prefix = (
+                    "[Tirith warning — command allowed but flagged]\n"
+                    f"{findings_text}\n---\n"
+                )
+
         # Scope HOME / XDG_* to the active profile's home/ subdir so
         # spawned subprocesses (git, ssh, npm, etc.) get per-profile
         # tool-config isolation for credentials and caches. The parent
@@ -248,5 +293,7 @@ class BashTool(BaseTool):
             + (f"\n--- stderr ---\n{err}" if err else "")
         )
         return ToolResult(
-            tool_call_id=call.id, content=combined, is_error=exit_code != 0
+            tool_call_id=call.id,
+            content=warn_prefix + combined,
+            is_error=exit_code != 0,
         )

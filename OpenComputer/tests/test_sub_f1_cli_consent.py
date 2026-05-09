@@ -46,6 +46,49 @@ def test_consent_history_shows_events(tmp_path, monkeypatch):
     assert "revoke" in r.output
 
 
+def test_consent_session_grants_empty_with_helpful_message(tmp_path, monkeypatch):
+    """Hermes parity: session-grants subcommand shows helpful empty state."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    r = runner.invoke(app, ["consent", "session-grants"])
+    assert r.exit_code == 0, r.output
+    assert "session" in r.output.lower()
+    # Empty audit-log surfaces the helpful "in-memory on running gateway" hint.
+    assert "in-memory" in r.output or "no session" in r.output.lower()
+
+
+def test_consent_session_grants_after_synthetic_event(tmp_path, monkeypatch):
+    """When the audit log records an approval_allow_session event, session-grants surfaces it."""
+    import sqlite3
+
+    from opencomputer.agent.consent.audit import AuditEvent, AuditLogger
+    from opencomputer.agent.consent.store import ConsentStore
+    from opencomputer.agent.state import apply_migrations
+
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+
+    # Seed an audit row directly. CLI uses sessions.db at OPENCOMPUTER_HOME root.
+    db_path = tmp_path / "sessions.db"
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    apply_migrations(conn)
+    ConsentStore(conn)  # ensure store schema present
+    log = AuditLogger(conn, hmac_key=b"k" * 16)
+    log.append(AuditEvent(
+        session_id="sess-abc-123",
+        actor="user", action="approval_allow_session",
+        capability_id="execute_code.run",
+        tier=2, scope=None,
+        decision="allow",
+        reason="user clicked allow session",
+    ))
+    conn.commit()
+    conn.close()
+
+    r = runner.invoke(app, ["consent", "session-grants"])
+    assert r.exit_code == 0, r.output
+    assert "execute_code.run" in r.output
+    assert "sess-abc-123" in r.output
+
+
 def test_consent_verify_chain_ok(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
     runner.invoke(app, ["consent", "grant", "x", "--tier", "1"])

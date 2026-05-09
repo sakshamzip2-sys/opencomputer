@@ -4062,11 +4062,58 @@ class AgentLoop:
             from opencomputer.agent.consent.bypass import BypassManager
             from plugin_sdk.consent import ConsentTier
             if not BypassManager.is_active(self._runtime):
+                # Hermes parity: pre-consent Tirith scan. For tools that
+                # ship a "command" or "code" argument, we scan it BEFORE
+                # the consent gate fires so any findings can surface in
+                # the user prompt. block verdicts skip the consent gate
+                # entirely; warn verdicts pass findings through to the
+                # prompt; allow verdicts are no-ops.
+                tirith_per_call: dict[str, tuple[str, str]] = {}
+                # call.id -> (action, findings_text)
+                _TIRITH_TARGETS: dict[str, str] = {
+                    "ExecuteCode": "code",
+                    "Bash": "command",
+                }
+                for c in calls:
+                    arg_key = _TIRITH_TARGETS.get(c.name)
+                    if arg_key is None:
+                        continue
+                    try:
+                        target = (c.arguments or {}).get(arg_key) or ""
+                    except (AttributeError, TypeError):
+                        target = ""
+                    if not isinstance(target, str) or not target.strip():
+                        continue
+                    try:
+                        from opencomputer.security.tirith import (
+                            check_command as _tirith_check,
+                        )
+                        from opencomputer.security.tirith import (
+                            format_findings_for_user as _format_findings,
+                        )
+                        verdict = await asyncio.to_thread(_tirith_check, target)
+                    except Exception:  # noqa: BLE001 — never let scan break dispatch
+                        continue
+                    if verdict.action in ("warn", "block"):
+                        text = _format_findings(verdict) or verdict.summary or ""
+                        if text:
+                            tirith_per_call[c.id] = (verdict.action, text)
+
                 for c in calls:
                     tool = registry.get(c.name)
                     if tool is None:
                         continue
                     claims = getattr(tool, "capability_claims", ())
+                    # Pre-emptive Tirith block — refuse before consent
+                    # gate fires. Mirrors BashTool's in-tool block path
+                    # but at the dispatch layer so even tools without
+                    # claims get the same protection.
+                    if c.id in tirith_per_call and tirith_per_call[c.id][0] == "block":
+                        blocked[c.id] = (
+                            "Tirith pre-exec scan blocked: "
+                            + tirith_per_call[c.id][1]
+                        )
+                        continue
                     for claim in claims:
                         scope = _extract_scope(c)
                         decision = self._consent_gate.check(
@@ -4088,11 +4135,18 @@ class AgentLoop:
                             and self._consent_gate._prompt_handler is not None
                             and session_id is not None
                         ):
+                            # Hermes parity: thread Tirith warn-findings
+                            # into the prompt so the user decides with
+                            # full security context.
+                            findings_text = None
+                            if c.id in tirith_per_call:
+                                findings_text = tirith_per_call[c.id][1]
                             try:
                                 approval = await self._consent_gate.request_approval(
                                     claim=claim,
                                     scope=scope,
                                     session_id=session_id,
+                                    tirith_findings_text=findings_text,
                                 )
                             except Exception as exc:  # noqa: BLE001
                                 _log.warning(

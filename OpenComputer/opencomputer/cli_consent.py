@@ -206,6 +206,59 @@ def consent_history(
         typer.echo(f"{when}  {r[1]:<8}  {r[2]:<12}  {r[3]:<6}  {r[4]}")
 
 
+@consent_app.command("session-grants")
+def consent_session_grants(
+    session_id: Annotated[
+        str | None,
+        typer.Option(
+            "--session-id",
+            help="Filter to one session id. Omit for all sessions.",
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Max audit entries to show (default 50)."),
+    ] = 50,
+) -> None:
+    """Show recent session-scoped grant events from the audit log.
+
+    Hermes-security-v2 parity. Session-scoped grants live in-memory on
+    the running gateway's ``ConsentGate._session_grants`` and are
+    cleared on ``SESSION_FINALIZE``. The on-disk audit log records
+    every grant event under ``approval_allow_session``; this command
+    surfaces them so operators can see what was approved in this or a
+    given session. Note: a row here doesn't mean the grant is still
+    active — gateway restarts and SessionFinalize both clear the cache
+    without leaving an explicit revoke row.
+    """
+    conn, _, _ = _open_consent_db()
+    if session_id:
+        rows = conn.execute(
+            "SELECT timestamp, session_id, capability_id, scope, reason "
+            "FROM audit_log WHERE action='approval_allow_session' "
+            "AND session_id=? ORDER BY id DESC LIMIT ?",
+            (session_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT timestamp, session_id, capability_id, scope, reason "
+            "FROM audit_log WHERE action='approval_allow_session' "
+            "ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    if not rows:
+        typer.echo(
+            "(no session-scoped grants recorded — session grants live "
+            "in-memory on the running gateway)"
+        )
+        return
+    for r in rows:
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r[0]))
+        sid = (r[1] or "<unknown>")[:12]
+        scope = r[3] or "*"
+        typer.echo(f"{when}  session={sid:<12}  {r[2]}  scope={scope}")
+
+
 @consent_app.command("verify-chain")
 def consent_verify_chain() -> None:
     """Verify HMAC chain integrity over the audit log."""

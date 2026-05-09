@@ -167,7 +167,7 @@ def test_render_prompt_includes_scope_when_present():
     assert "read_files.metadata" in msg
     assert "/Users/saksham/Projects/foo.py" in msg
     assert " on " in msg
-    assert "[y/N/always]" in msg
+    assert "[y/N/session/always]" in msg
 
 
 def test_render_prompt_falls_back_when_no_scope():
@@ -178,7 +178,7 @@ def test_render_prompt_falls_back_when_no_scope():
         "read_files.metadata", ConsentTier.PER_ACTION, "",
     )
     msg = render_prompt_message(claim, None)
-    assert msg == "Allow read_files.metadata? [y/N/always]"
+    assert msg == "Allow read_files.metadata? [y/N/session/always]"
 
 
 def test_check_deny_reason_includes_scope_aware_prompt_text():
