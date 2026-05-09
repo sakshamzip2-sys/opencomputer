@@ -4,6 +4,23 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-1 M2.2: `oc oneshot --output text|json|stream-json` (2026-05-09)
+
+`oc oneshot` (and the `oc chat -q "..."` Hermes-parity alias) gain a `--output` / `-o` flag for CI-friendly stdout shapes:
+
+- `text` (default): unchanged — prints the assistant's final message.
+- `json`: emits one summary JSON object on stdout at end of run with `session_id`, `num_turns`, `total_input_tokens`, `total_output_tokens`, `total_cache_creation_tokens`, `total_cache_read_tokens`, `total_cost_usd`, `final_message`, optional `error`.
+- `stream-json`: NDJSON — one `{"event":"llm_call",...}` line per LLM call as it fires, plus a final `{"event":"summary",...}` line. The existing `~/.opencomputer/<profile>/llm_events.jsonl` write is untouched; stream-json is an *additional* sink registered through `inference.observability.register_subscriber`.
+
+New types in `opencomputer.headless`: `OutputMode` (str enum) + `parse_output_mode(value)` with friendly errors. Per-mode emission lives in `opencomputer.oneshot_output` (`OneshotResult`, `emit_final`, `stream_subscriber`) so the formatter can be tested without spinning up a provider. 18 new tests in `test_output_modes.py`.
+
+```bash
+oc oneshot "say hi" --output json | jq .session_id
+oc oneshot "do 3 things" --output stream-json | jq -c .event
+```
+
+The original v1.1 plan-1 acceptance referenced `oc chat --bare --headless --once --output ...` but the actual non-interactive CLI surface in OpenComputer is `oc oneshot` (or `oc chat -q "..."`). Wired against the existing surface; `--bare` and `--once` are not needed.
+
 ### Added — v1.1 Plan-1 M1.3: opt-in aux-LLM response cache (2026-05-09)
 
 Wires `AgentCache` into a real production caller after Phase 12a left it unwired. The original plan's premise — wrap a v2 LLM-backed post-response reviewer — was stale (the reviewer is still v1 rule-based, no LLM call), so this lands the cache against the actual deterministic aux-LLM caller that benefits: `security.smart_mode.assess_command_risk`, which runs at temperature=0.0 with a fixed system prompt.
