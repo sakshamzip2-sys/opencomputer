@@ -4,7 +4,6 @@ from pathlib import Path
 
 from opencomputer.agent.memory_index import BM25Index
 
-
 _CORPUS_5 = (
     "alpha cats\n\n"
     "beta dogs\n\n"

@@ -21,7 +21,7 @@ import os
 import pickle
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from rank_bm25 import BM25Okapi
@@ -147,7 +147,7 @@ class BM25Index:
                     if self._memory_path.exists()
                     else 0
                 ),
-                "built_at": datetime.now(tz=timezone.utc).isoformat(),
+                "built_at": datetime.now(tz=UTC).isoformat(),
             },
             "entries": self._entries,
             "tokens": self._tokens,

@@ -29,9 +29,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import frontmatter
+
+if TYPE_CHECKING:
+    from opencomputer.agent.memory_index import BM25Index
 
 logger = logging.getLogger("opencomputer.agent.memory")
 
@@ -434,7 +437,7 @@ class MemoryManager:
         self._bm25_index = BM25Index(self.declarative_path.parent)
 
     @property
-    def bm25_index(self) -> "BM25Index":  # type: ignore[name-defined]  # forward-ref string keeps the import lazy
+    def bm25_index(self) -> BM25Index:
         """BM25 retrieval index over MEMORY.md (v1.1 plan-3 M6.1)."""
         return self._bm25_index
 

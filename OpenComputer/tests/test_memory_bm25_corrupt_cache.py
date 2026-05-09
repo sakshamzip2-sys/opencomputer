@@ -4,7 +4,6 @@ from pathlib import Path
 
 from opencomputer.agent.memory_index import BM25Index
 
-
 # BM25 needs a corpus with more than ~2 docs to score reliably (IDF on a
 # 2-doc corpus where every doc shares a term collapses to 0).  These
 # fixtures use 5 docs to keep the cache-integrity behavior testable
