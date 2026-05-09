@@ -17,6 +17,67 @@ The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEAS
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-3 M10.3: per-rule profile rebind (2026-05-09)
+
+Closes the last open M10 deferral. When a routing rule sets `profile: <name>`, the dispatcher now swaps to the named profile's `AgentLoop` (memory + agent templates + MCP servers) for the remainder of dispatch. Same Telegram bot can serve two chats and route each to a different profile.
+
+```yaml
+# config.yaml — schema unchanged from M10.1
+routing:
+  rules:
+    - match: {platform: telegram, peer: "12345"}
+      agent: executive
+      profile: work          # ← M10.3: this swap now actually happens
+    - match: {platform: telegram, peer: "67890"}
+      agent: family-helper
+      profile: personal
+  default:
+    agent: default
+```
+
+Now an inbound Telegram message from `12345` runs through the **work** profile's loop (work's memory, work's agent templates, work's MCP servers); the same bot's message from `67890` runs through **personal** instead — even though the gateway only has one bot token.
+
+**Verified prerequisite — M1.4 per-profile env IS shipped.** Earlier M10.3 audit notes claimed it was a blocker; checking `opencomputer/security/env_loader.py:217` showed `load_for_profile` exists and is wired into `cli.py:5048`. M10.3 is unblocked today.
+
+**Composition matrix:**
+
+| Concern | Where it composes |
+|---|---|
+| Initial profile pick (BindingResolver) | `Dispatch._do_dispatch` — runs first |
+| **M10.3 routing-driven rebind** | `Dispatch._do_dispatch` — runs immediately after, before adapter wiring |
+| M10.2 system_prompt resolution | `Dispatch.handle_message` — runs against the **rebound** loop's `cfg.routing` |
+| F1 ConsentGate / M9.2 classifier | `_dispatch_tool_calls` — runs against the rebound profile |
+
+**Honest scope notes:**
+
+- **Per-profile env per-message reload** — `load_for_profile` runs at CLI startup based on the active profile. M10.3 mid-process rebinds use the rebound profile's loop (constructed against its own `profile_home`), so memory / agent templates / MCP servers are profile-scoped. Per-message env-var swap (so a credential-isolated rebind picks up `~/.opencomputer/profiles/work/.env` mid-dispatch) is a follow-up if real workloads need it; currently the source-profile env wins.
+- **Loop construction cost** — `AgentRouter.get_or_load(target)` builds the rebound profile's loop on first invocation and caches it. First-message latency for a new rebound profile is the cost of one `AgentLoop` construction; subsequent dispatches are just a dict lookup.
+
+**Defensive contract** — any failure in the rebind path logs at WARNING and falls through to source-profile dispatch:
+
+- `loop.config.routing` missing → fall through (no rules to match)
+- `discover_agents()` raises → fall through (router can't resolve template)
+- `resolve_template_for_event` raises → fall through
+- Target profile unknown to `AgentRouter` (`KeyError` from `get_or_load`) → fall through with WARNING
+- Target profile loop construction fails → fall through
+
+A stale routing rule must NEVER break message dispatch.
+
+**Files:**
+
+- `opencomputer/gateway/dispatch.py:_do_dispatch` — between `_router.get_or_load(profile_id)` and adapter binding, consult source-profile routing for a `profile_rebind` and swap `loop` / `profile_home` / `profile_id` if matched.
+
+**Tests (6 new in `tests/test_routing_profile_rebind.py`):**
+
+- `ResolvedTemplate.profile_rebind` carries the `profile:` field through `resolve_template_for_event`
+- Empty `profile_rebind` when rule omits `profile:`
+- Dispatcher rebind block swaps `loop` / `profile_home` / `profile_id` to target on match
+- No swap when target equals source (no-op)
+- Falls through (no swap, no crash) when target is unknown to the router
+- Composition pin: M10.3 swap → M10.2 resolution against rebound loop's routing rules produces the right `ResolvedTemplate`
+
+39 prior M10 tests still green; 190 dispatch + gateway tests still green — no regressions.
+
 ### Added — v1.1 Plan-3 M10.2: gateway dispatcher routing integration (2026-05-09)
 
 Wires the M10.1 routing schema into `Dispatch.handle_message`. Inbound `MessageEvent`s now resolve through the active profile's `routing.rules`; on a non-default match, the named `AgentTemplate`'s `system_prompt` is applied to that turn via the same `system_prompt_override` plumbing `DelegateTool` already uses for `agent: ...` delegation.
