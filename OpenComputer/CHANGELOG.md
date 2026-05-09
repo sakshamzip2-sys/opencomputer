@@ -17,6 +17,15 @@ The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEAS
 
 ## [Unreleased]
 
+<<<<<<< HEAD
+### Added — v1.1 Plan-3 M9.1: `permission_mode = "auto"` equivalence pin (2026-05-09)
+
+Schema-and-pin slice of plan-3 M9. The `auto` `PermissionMode` value, the `--auto` CLI flag, the `/auto` slash command, and the wire `ChatParams.permission_mode = "auto"` were already in place individually; this PR adds `tests/test_auto_mode_runtime.py` (13 tests) which pins the M9 acceptance criterion: setting auto via CLI / slash / wire / legacy `--yolo` all surface the SAME `effective_permission_mode`. Catches drift if any single entry point is rewritten without the others.
+
+**Why this is a tiny PR**: every M9.1 surface listed in `docs/superpowers/plans/2026-05-08-v1-1-plan-3-heavy-features-and-parked.md` was already shipped piecemeal (CLI flag at `cli.py:2342`, slash command at `agent/slash_commands_impl/auto_cmd.py`, wire param at `gateway/protocol_v2.py:118`, helper at `plugin_sdk/permission_mode.py`). The audit caught only one missing piece — the dedicated equivalence test the plan calls for. Shipping it as the M9.1 closure rather than re-deriving the surface from scratch.
+
+**M9.2 (the `ToolCallClassifier` that intercepts tool calls in auto mode) remains the security-critical multi-day item** — it stays separate per its own plan-3 preamble. M9.1's `auto` mode today simply skips the F1 ConsentGate (same as legacy `--yolo`); M9.2 is what makes auto mode actually safe via per-call adversarial classification.
+=======
 ### Added — v1.1 Plan-3 M10.1 + M10.4: per-channel routing schema + `oc routing` CLI (2026-05-09)
 
 Schema-and-dry-run slice of plan-3 M10. Operators can now declare routing rules in their `config.yaml` and inspect them with `oc routing list` / `oc routing test` — without the gateway dispatcher actually consuming them yet (M10.2/M10.3 land separately). The schema is the load-bearing piece; the CLI is what makes the schema reviewable.
