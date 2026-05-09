@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def make_sampling_callback(caps: "MCPSamplingCaps | None" = None):
+def make_sampling_callback(caps: MCPSamplingCaps | None = None):
     """Return an MCP ``SamplingFnT`` that drives the host LLM via aux_llm.
 
     Lazy-imports MCP types so this module loads cleanly even when the

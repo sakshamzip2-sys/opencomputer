@@ -43,7 +43,6 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from typing import Any
 
 from aiohttp import web
@@ -77,19 +76,33 @@ _ADAPTER_START_TIME: float = time.monotonic()
 # G2 (Hermes parity, 2026-05-09) — Idempotency-Key dedup cache.
 # Process-wide bounded LRU. TTL = 5 min. Key shape: (token-hash, key).
 # Cap = 256 to prevent runaway-client OOM.
-_IDEMPOTENCY_CACHE: "OrderedDict[tuple[str, str], _CachedResponse]" = OrderedDict()
+_IDEMPOTENCY_CACHE: OrderedDict[tuple[str, str], _CachedResponse] = OrderedDict()
 _IDEMPOTENCY_CACHE_MAX = 256
 _IDEMPOTENCY_TTL_S = 300.0
 
 
-@dataclass(frozen=True, slots=True)
 class _CachedResponse:
-    """One entry in the Idempotency-Key LRU."""
+    """One entry in the Idempotency-Key LRU.
 
-    body: bytes
-    status: int
-    headers: dict[str, str]
-    expires_at: float
+    Plain class (not a dataclass) so it survives test loaders that
+    skip ``sys.modules`` registration — `typing.get_type_hints` on
+    a dataclass requires the module to be importable by name. See
+    `test_api_server_run_stop.py` for an example of such a loader.
+    """
+
+    __slots__ = ("body", "status", "headers", "expires_at")
+
+    def __init__(
+        self,
+        body: bytes,
+        status: int,
+        headers: dict,
+        expires_at: float,
+    ) -> None:
+        self.body = body
+        self.status = status
+        self.headers = headers
+        self.expires_at = expires_at
 
 
 def _count_active_sessions() -> int | None:

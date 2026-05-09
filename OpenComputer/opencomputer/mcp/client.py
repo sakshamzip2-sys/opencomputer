@@ -207,6 +207,10 @@ class MCPTool(BaseTool):
     """Tool that dispatches calls to an MCP session."""
 
     parallel_safe = False  # conservative — each server has its own state
+    #: G10 (Hermes parity, 2026-05-09) class-level default. Survives
+    #: ``MCPTool.__new__(MCPTool)`` constructions used by some test
+    #: doubles, so ``execute`` always finds a usable timeout value.
+    timeout: float = 30.0
 
     def __init__(
         self,
@@ -306,7 +310,7 @@ class MCPAliasTool(BaseTool):
 
     parallel_safe = False  # mirrors MCPTool's conservative posture
 
-    def __init__(self, canonical: "MCPTool") -> None:
+    def __init__(self, canonical: MCPTool) -> None:
         self._canonical = canonical
 
     @property

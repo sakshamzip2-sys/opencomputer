@@ -56,7 +56,7 @@ def test_ensure_agent_json_handles_existing_directory(isolated_home):
 
 def test_ensure_agent_json_returns_path_when_present(isolated_home):
     """Even when a user-edited file exists, return its Path."""
-    from opencomputer.cli import _ensure_agent_json, _default_agent_json_path
+    from opencomputer.cli import _default_agent_json_path, _ensure_agent_json
 
     target = _default_agent_json_path()
     target.parent.mkdir(parents=True, exist_ok=True)
