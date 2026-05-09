@@ -101,7 +101,7 @@ def test_set_approval_callback_registers_handler() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_approval_request_emits_block_kit_with_three_buttons() -> None:
+async def test_send_approval_request_emits_block_kit_with_four_buttons() -> None:
     a = _make_adapter()
     fake_resp = MagicMock()
     fake_resp.json.return_value = {"ok": True, "ts": "1234567890.123456"}
@@ -129,28 +129,35 @@ async def test_send_approval_request_emits_block_kit_with_three_buttons() -> Non
     assert blocks[0]["type"] == "section"
     assert "Allow read_files.metadata" in blocks[0]["text"]["text"]
 
-    # Second block is an actions row with three buttons.
+    # Hermes parity: 4 buttons (once / session / always / deny).
     actions = blocks[1]
     assert actions["type"] == "actions"
     elements = actions["elements"]
-    assert len(elements) == 3
+    assert len(elements) == 4
 
     expected_values = [
         "oc:approve:once:abc123",
+        "oc:approve:session:abc123",
         "oc:approve:always:abc123",
         "oc:approve:deny:abc123",
     ]
     expected_action_ids = [
         "oc_approve_once_abc123",
+        "oc_approve_session_abc123",
         "oc_approve_always_abc123",
         "oc_approve_deny_abc123",
     ]
-    expected_styles = ["primary", "primary", "danger"]
+    # The session button has no style (neutral); once/always = primary, deny = danger.
+    expected_styles = ["primary", None, "primary", "danger"]
     for i, el in enumerate(elements):
         assert el["type"] == "button"
         assert el["value"] == expected_values[i]
         assert el["action_id"] == expected_action_ids[i]
-        assert el["style"] == expected_styles[i]
+        # Session has no 'style' key (neutral); once/always/deny do.
+        if expected_styles[i] is None:
+            assert "style" not in el
+        else:
+            assert el["style"] == expected_styles[i]
 
     # Token registered for inbound resolution lookup.
     assert "abc123" in a._approval_tokens
