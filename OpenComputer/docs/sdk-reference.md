@@ -1716,6 +1716,59 @@ incompatible versions cleanly.
 
 ---
 
+## Embeddings (v1.1 plan-3 M6.6)
+
+The active provider may optionally implement `BaseProvider.embed()` to
+return vector embeddings for a list of texts.  The contract is opt-in:
+providers without an embedding endpoint raise
+`EmbeddingsUnsupportedError`, and callers (Active Memory hybrid retrieval,
+Dreaming v2 diversity gate, etc.) gracefully skip the vector path when
+that's surfaced.
+
+### `EmbeddingBatch`
+
+```python
+@dataclass(frozen=True, slots=True)
+class EmbeddingBatch:
+    model_id: str
+    vectors: tuple[tuple[float, ...], ...]
+```
+
+The return shape of `BaseProvider.embed(texts=...)`.
+
+- `model_id` — provider-specific embedding model identifier (e.g.
+  `"text-embedding-3-small"`, `"voyage-3"`).  Recorded by callers so
+  cached vectors can be invalidated on model change.
+- `vectors` — one tuple per input text, in the same order.
+  `len(vectors) == len(texts)` is contract-guaranteed; providers that
+  partially fail must raise rather than return a short batch.
+
+### `EmbeddingsUnsupportedError`
+
+```python
+class EmbeddingsUnsupportedError(NotImplementedError):
+    ...
+```
+
+Raised by `BaseProvider.embed()` when the provider has no embedding
+endpoint.  Callers catch this and fall back to non-vector retrieval
+paths (BM25-only, FTS5-only) without surfacing the error to the user.
+The default `BaseProvider.embed()` raises this so providers that
+inherit don't accidentally appear to support embeddings.
+
+### `MAX_EMBED_BATCH_SIZE`
+
+```python
+MAX_EMBED_BATCH_SIZE: Final[int] = 100
+```
+
+The maximum number of texts per `embed(texts=...)` call.  Callers
+chunk above this cap; provider implementations may refuse larger
+batches with a `ValueError`.  Sized for typical OpenAI / Voyage
+quotas while keeping any single call cheap.
+
+---
+
 ## See also
 
 - [`plugin-authors.md`](./plugin-authors.md) — the guided 30-minute
