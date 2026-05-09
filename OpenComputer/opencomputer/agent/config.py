@@ -518,6 +518,22 @@ class MemoryConfig:
     candidates to combine; production tuning has shown ~20 is the
     sweet-spot for MEMORY.md sizes seen in practice (≤256 entries)."""
 
+    # v1.1 plan-3 M6.4 — Dreaming v2 three-gate consolidation INTO MEMORY.md.
+    # Distinct from `dreaming_enabled` above (Round 2A P-18 in-DB
+    # episodic clustering).  Default OFF; opt-in via config.yaml.
+    dreaming_v2_enabled: bool = False
+    """When True, ``opencomputer.cron.dreaming_v2_tick.run_dreaming_v2_tick``
+    fires inside the system cron tick and ``oc memory dream-v2`` is wired
+    to the same engine.  Promotes high-signal episodic events into
+    MEMORY.md via the score / recall-count / diversity gates."""
+    dreaming_v2_score_threshold: float = 0.65
+    dreaming_v2_min_recall_count: int = 2
+    dreaming_v2_diversity_threshold: float = 0.8
+    dreaming_v2_max_promotions_per_run: int = 20
+    dreaming_v2_dreams_md_max_bytes: int = 16384
+    dreaming_v2_candidate_fetch_limit: int = 50
+    """How many recent un-dreamed episodic events to score per tick."""
+
 
 @dataclass(frozen=True, slots=True)
 class HookCommandConfig:
@@ -1127,10 +1143,47 @@ class GoalJudgeConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolClassifierConfig:
+    """Auxiliary classifier-model override for v1.1 plan-3 M9.2.
+
+    The :class:`opencomputer.agent.tool_call_classifier.ToolCallClassifier`
+    runs in auto mode (``permission_mode=auto``) before the F1 ConsentGate
+    on every tool call. With both fields unset (the default) the
+    classifier falls back to the chat provider via
+    :func:`opencomputer.agent.aux_llm.complete_text` — same plumbing the
+    goal judge uses.
+
+    Setting both routes the classifier through a dedicated provider —
+    typically a cheap-but-capable model (e.g. a small Anthropic Haiku or
+    OpenAI GPT-4o-mini) so the per-tool-call latency cost stays bounded.
+    Spend is tracked separately in :func:`opencomputer.agent.usage_pricing`
+    so ``oc usage`` shows classifier cost as its own line.
+    """
+
+    provider: str | None = None
+    model: str | None = None
+    #: Hard ceiling on classifier wall-clock latency per call. The
+    #: classifier fail-closes (treats the tool call as ``BLOCK``) if this
+    #: timeout fires, so a wedged auxiliary provider can't waste a
+    #: slow-classifier budget OR silently fall through to ALLOW. Default
+    #: 8s — enough for Haiku-scale models on Anthropic, fast enough that
+    #: an interactive user notices instead of waiting forever.
+    timeout_seconds: float = 8.0
+    #: Hard cap on classifier output tokens. The decision is a single
+    #: token plus a short rationale; 256 leaves slack for verbose models
+    #: without burning quota on runaway generations.
+    max_tokens: int = 256
+
+
+@dataclass(frozen=True, slots=True)
 class AuxiliaryConfig:
     """Bundle of auxiliary-model overrides. Goal judge is the first slot."""
 
     goal_judge: GoalJudgeConfig = field(default_factory=GoalJudgeConfig)
+    #: v1.1 plan-3 M9.2 — auto-mode tool-call classifier knobs. Defaults
+    #: leave the feature dormant until the user opts into auto mode AND
+    #: the classifier has a registered provider available.
+    tool_classifier: ToolClassifierConfig = field(default_factory=ToolClassifierConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1169,6 +1222,105 @@ class CodeExecutionConfig:
                 f"code_execution.max_tool_calls must be a positive int; "
                 f"got {self.max_tool_calls!r}"
             )
+
+
+# ─── v1.1 plan-3 M10 — per-channel routing ────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingMatch:
+    """Match-criteria for a single :class:`RoutingRule`.
+
+    Each non-empty field tightens the match. The dispatcher resolves the
+    most-specific-wins precedence chain (see
+    :func:`opencomputer.agent.routing.resolve_routing_rule`):
+
+        exact peer → parent peer → guild + roles → guild → team →
+        account → channel → default
+
+    All fields default to empty string so authors only set the dimensions
+    that matter for a given rule. Unset fields are wildcards.
+    """
+
+    platform: str = ""
+    """Match :attr:`MessageEvent.platform.value` (e.g. "slack", "telegram")."""
+
+    chat_id: str = ""
+    """Exact peer / chat / DM identifier (highest precedence)."""
+
+    channel: str = ""
+    """Slack / Discord channel name (e.g. "#security-alerts")."""
+
+    guild: str = ""
+    """Discord guild / server id (or Slack workspace, Matrix server)."""
+
+    team: str = ""
+    """Slack team / Matrix room namespace."""
+
+    account: str = ""
+    """Bot / app account id (when one daemon serves several bots)."""
+
+    role: str = ""
+    """Discord member role (must match a role on the inbound user)."""
+
+    peer: str = ""
+    """Alias for :attr:`chat_id` mirroring OpenClaw's vocabulary.
+
+    Authors typically set one or the other; both are honored at match
+    time so config copy-pasted from OpenClaw works without renaming.
+    """
+
+    def __post_init__(self) -> None:
+        # Normalize to non-leading-hash channel form so "#foo" matches "foo"
+        # and vice versa (Slack vs Discord vs Matrix conventions diverge).
+        if self.channel.startswith("#"):
+            object.__setattr__(self, "channel", self.channel.lstrip("#"))
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingRule:
+    """One routing rule — a match criterion + an agent template binding.
+
+    ``profile`` is optional cross-profile re-bind (M10.3 — not used by
+    M10.1's schema layer; recorded so the rule round-trips through YAML).
+    """
+
+    match: RoutingMatch = field(default_factory=RoutingMatch)
+    agent: str = ""
+    profile: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.agent:
+            raise ValueError("routing rule missing required `agent` field")
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingDefault:
+    """Fallback when no rule matches.
+
+    Same shape as a rule's tail (``agent`` + optional ``profile``) but no
+    ``match`` block — it always fires when the rule list is exhausted.
+    """
+
+    agent: str = "default"
+    profile: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingConfig:
+    """Per-channel routing rules — top-level ``routing:`` config block.
+
+    Rules are evaluated in order; the first match wins. Within a single
+    rule, the :class:`RoutingMatch` block fully constrains the match —
+    every set field must match the inbound :class:`MessageEvent`.
+
+    Most-specific-wins is enforced by sorting rules at parse time using
+    :func:`_specificity` so authors can list rules in any order without
+    a less-specific rule eclipsing a more-specific one.
+    """
+
+    rules: tuple[RoutingRule, ...] = ()
+    default: RoutingDefault = field(default_factory=RoutingDefault)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1258,6 +1410,11 @@ class Config:
     #: ``ExecuteCode.execute`` reads ``code_execution.terminal.env_passthrough``;
     #: G5 adds the ``max_tool_calls`` cap as a configurable slot.
     code_execution: CodeExecutionConfig = field(default_factory=CodeExecutionConfig)
+    #: v1.1 plan-3 M10.1 (2026-05-09) — per-channel routing rules. Empty
+    #: tuple of rules + default agent "default" means "no routing" — the
+    #: dispatcher falls through to the active profile's default agent
+    #: template (current behavior, fully backwards-compatible).
+    routing: RoutingConfig = field(default_factory=RoutingConfig)
     home: Path = field(default_factory=_home)
 
 
@@ -1288,15 +1445,21 @@ def load_config_for_profile(profile_home: Path) -> Config:
 
 
 __all__ = [
+    "AuxiliaryConfig",
     "Config",
     "CronConfig",
     "CustomProvider",
     "CustomProviderModelOverride",
     "FallbackProvider",
     "ProviderRoutingConfig",
+    "RoutingConfig",
+    "RoutingDefault",
+    "RoutingMatch",
+    "RoutingRule",
     "split_or_routing_suffix",
     "split_hf_routing_suffix",
     "DelegationConfig",
+    "GoalJudgeConfig",
     "ModelConfig",
     "LoopConfig",
     "SessionConfig",
@@ -1309,6 +1472,7 @@ __all__ = [
     "HookCommandConfig",
     "HookPromptConfig",
     "ToolsConfig",
+    "ToolClassifierConfig",
     "WebSearchConfig",
     "FullSystemControlConfig",
     "default_config",

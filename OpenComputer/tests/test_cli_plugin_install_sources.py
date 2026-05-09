@@ -12,11 +12,30 @@ from opencomputer.cli_plugin import plugin_app
 from tests._helpers.install_fixtures import make_tarball as _make_tarball
 
 
+def _write_permissive_policy(home: Path) -> None:
+    """v1.1 plan-3 M11.3: every install path runs through
+    ``_enforce_source_policy``.  Pre-M11.3 tests that call install with
+    git+/https://... arguments need to opt into the new policy world by
+    writing a permissive config.yaml.  Without this every install would
+    be denied by the deny-by-default-on-network policy."""
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text(
+        "plugins:\n"
+        "  sources:\n"
+        "    git: {allow: ['*']}\n"
+        "    url: {allow: ['*']}\n"
+        "    github: {allow: ['*']}\n"
+        "    pypi: {allow: ['*']}\n",
+        encoding="utf-8",
+    )
+
+
 def test_install_arg_starting_with_git_routes_to_git(
     tmp_path: Path, monkeypatch
 ):
     """`oc plugin install git+https://...` calls install_from_git, not local copy."""
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path / "home"))
+    _write_permissive_policy(tmp_path / "home")
     captured: dict = {}
 
     def fake_git_install(url, *, dest_root, plugin_id_hint, **kwargs):
@@ -49,6 +68,7 @@ def test_install_arg_starting_with_git_routes_to_git(
 
 def test_install_git_without_id_errors(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path / "home"))
+    _write_permissive_policy(tmp_path / "home")
     runner = CliRunner()
     result = runner.invoke(
         plugin_app, ["install", "git+https://github.com/example/foo.git"]
@@ -61,6 +81,7 @@ def test_install_arg_starting_with_https_routes_to_url(
     tmp_path: Path, monkeypatch
 ):
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path / "home"))
+    _write_permissive_policy(tmp_path / "home")
     raw = _make_tarball("urlcli")
     sha = hashlib.sha256(raw).hexdigest()
 
@@ -94,6 +115,7 @@ def test_install_arg_starting_with_https_routes_to_url(
 
 def test_install_url_without_sha256_errors(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path / "home"))
+    _write_permissive_policy(tmp_path / "home")
     runner = CliRunner()
     result = runner.invoke(
         plugin_app,
@@ -105,6 +127,7 @@ def test_install_url_without_sha256_errors(tmp_path: Path, monkeypatch):
 
 def test_verify_subcommand_prints_clean_report(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path / "home"))
+    _write_permissive_policy(tmp_path / "home")
 
     from opencomputer.plugins.installed_index import (
         InstalledRecord,
@@ -160,6 +183,7 @@ def test_verify_subcommand_unknown_plugin_errors(
     tmp_path: Path, monkeypatch
 ):
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path / "home"))
+    _write_permissive_policy(tmp_path / "home")
     plugins_dir = tmp_path / "plugins"
     plugins_dir.mkdir()
 

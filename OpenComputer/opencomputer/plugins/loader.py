@@ -822,6 +822,16 @@ class PluginAPI:
         # dispatch + ``_PROVIDER_DEFAULTS`` table in cli_voice.py.
         self._realtime_bridge_registrations: dict[str, _RealtimeBridgeRegistration] = {}
 
+        # v1.1 plan-3 M11.5 — Plugin-authored CLI subcommands.  Each
+        # entry is a typer.Typer (or any object with ``add_typer``-
+        # compatible shape) that the CLI bootstrapper mounts as
+        # ``oc <name> <subcommand> ...`` after plugin loading completes.
+        # Keyed by short namespace name; a plugin SHOULD pick a name
+        # that matches its plugin id to avoid collisions.  Re-registering
+        # an existing name raises ``ValueError`` so a typo doesn't
+        # silently shadow another plugin's commands.
+        self._cli_command_registrations: dict[str, Any] = {}
+
     @property
     def activation_source(self) -> PluginActivationSource:
         """Why this plugin was activated — see ``PluginActivationSource``.
@@ -1101,6 +1111,98 @@ class PluginAPI:
         """List registered realtime-voice bridge names."""
         return sorted(self._realtime_bridge_registrations)
 
+    # ─── plugin-authored CLI subcommands (v1.1 plan-3 M11.5) ──────────
+
+    def register_cli_subcommand(
+        self,
+        typer_app: Any,
+        *,
+        name: str | None = None,
+    ) -> None:
+        """Register a typer.Typer subcommand tree under ``oc <name>``.
+
+        v1.1 plan-3 M11.5.  Lets plugins expose their own porcelain CLI
+        commands without modifying ``opencomputer.cli`` directly.
+
+        Renamed from ``register_cli_command`` (2026-05-09 audit) to
+        avoid a method-name collision with the v1.1 plan-4 M13
+        ``register_cli_command(name, app, replace=)`` API which lives
+        on the same class but stores its registrations in a different
+        bucket (``_cli_commands`` vs ``_cli_command_registrations``).
+        Both APIs cover the same conceptual feature; the M13 form is
+        the canonical name for plugin-author code, the M11.5 form
+        keeps the subcommand-tree wording for callers that already
+        adopted it.
+
+        Args:
+            typer_app: a ``typer.Typer`` instance (or any object with the
+                same ``add_typer``-compatible shape) carrying the
+                plugin's commands.
+            name: top-level namespace under which the subcommands mount.
+                Default falls back to the lowercase plugin id passed at
+                ``register(api)`` time — set ``name`` explicitly when
+                the plugin id is verbose or contains characters typer
+                rejects (currently typer accepts most ASCII).
+
+        Raises:
+            ValueError: if ``name`` is empty / None when no plugin id is
+                available, or if ``name`` is already registered (so a
+                typo can't silently shadow another plugin's commands).
+
+        Plugin example:
+
+            import typer
+            my_app = typer.Typer(help="My plugin commands")
+
+            @my_app.command()
+            def hello(who: str):
+                typer.echo(f"hello {who}")
+
+            def register(api):
+                api.register_cli_subcommand(my_app, name="myplugin")
+
+        After ``oc`` startup the subcommands are reachable as
+        ``oc myplugin hello world``.
+        """
+        if name is None:
+            # Fall back to the plugin id captured at load time.  Loader
+            # sets _current_plugin_id on this instance just before
+            # invoking register(api); if absent (e.g. test path that
+            # constructs a bare PluginAPI), the caller MUST pass name.
+            name = getattr(self, "_current_plugin_id", None)
+        if not name:
+            raise ValueError(
+                "register_cli_subcommand(name=...) is required when called "
+                "outside a register(api) context"
+            )
+        if name in self._cli_command_registrations:
+            raise ValueError(
+                f"CLI command namespace {name!r} already registered by "
+                f"another plugin"
+            )
+        self._cli_command_registrations[name] = typer_app
+
+    def cli_command_names(self) -> list[str]:
+        """List of plugin-registered CLI command namespaces."""
+        return sorted(self._cli_command_registrations)
+
+    def get_cli_command(self, name: str) -> Any:
+        """Return the typer app registered under ``name``.
+
+        Raises ``KeyError`` if no plugin registered the namespace.
+        """
+        try:
+            return self._cli_command_registrations[name]
+        except KeyError as exc:
+            available = self.cli_command_names()
+            raise KeyError(
+                f"no CLI command registered for {name!r}; available: {available}"
+            ) from exc
+
+    def all_cli_commands(self) -> dict[str, Any]:
+        """Return a defensive copy of the full CLI registrations map."""
+        return dict(self._cli_command_registrations)
+
     def register_injection_provider(self, provider: Any) -> None:
         """Register a DynamicInjectionProvider (plan mode, yolo mode, etc.)."""
         if self.injection is None:
@@ -1367,6 +1469,12 @@ def load_plugin(
     # cheap (set copies + int count); cost is paid once per plugin load.
     before_snapshot = _snapshot_registrations(api)
 
+    # v1.1 plan-3 M11.5 — set the current plugin id on the api so
+    # ``register_cli_command`` can fall back to it when the plugin
+    # author omits the ``name=`` kwarg.  Cleared in the finally below.
+    prior_plugin_id = getattr(api, "_current_plugin_id", None)
+    api._current_plugin_id = manifest.id
+
     try:
         register_fn(api)
     except Exception as e:  # noqa: BLE001
@@ -1375,6 +1483,7 @@ def load_plugin(
     finally:
         if prior_source is not None:
             api._activation_source = prior_source
+        api._current_plugin_id = prior_plugin_id
 
     # Task I.5: compare post-register state against manifest claims.
     # Emits WARNINGs on mismatch — never blocks load. Intentionally

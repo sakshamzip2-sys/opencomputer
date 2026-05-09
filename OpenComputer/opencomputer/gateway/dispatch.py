@@ -1046,6 +1046,81 @@ class Dispatch:
         loop = await self._router.get_or_load(profile_id)
         profile_home = self._router._profile_home_resolver(profile_id)
 
+        # v1.1 plan-3 M10.3 — per-rule profile rebind. After the
+        # BindingResolver picks the source profile and we load its loop,
+        # consult the source profile's routing.rules for THIS event. If
+        # a matched rule sets `profile: <name>` (carried as
+        # ``ResolvedTemplate.profile_rebind`` from M10.2), swap to the
+        # named profile's loop for the remainder of dispatch.
+        #
+        # Composition with M10.2 (system_prompt routing): after this
+        # swap, the M10.2 resolution inside ``_dispatch_tool_calls``
+        # consults the REBOUND profile's routing rules. If the rebound
+        # profile lists the same rule (typical setup — source profile
+        # routes to specialised profiles), the agent template + system
+        # prompt resolve again on the rebound profile and apply
+        # identically.
+        #
+        # Composition with M1.4 (per-profile env): per-profile .env
+        # files are loaded at CLI startup based on the active profile.
+        # Mid-process rebinds via M10.3 use the rebound profile's loop
+        # which was constructed against its own profile_home, so its
+        # cached resources (memory, agent templates, MCP servers) cover
+        # the common case. Re-loading per-profile env per-message is a
+        # follow-up if real workloads need credential isolation per
+        # rebound dispatch (currently the source-profile env wins).
+        #
+        # Defensive: any failure logs WARNING and falls through to the
+        # source profile — a stale rule must NEVER break message dispatch.
+        try:
+            cfg_obj_for_rebind = getattr(loop, "config", None)
+            routing_cfg_for_rebind = getattr(cfg_obj_for_rebind, "routing", None)
+            if routing_cfg_for_rebind is not None and routing_cfg_for_rebind.rules:
+                from opencomputer.agent.agent_templates import (
+                    discover_agents as _discover_for_rebind,
+                )
+                from opencomputer.agent.routing import (
+                    resolve_template_for_event as _resolve_for_rebind,
+                )
+
+                _templates_for_rebind = _discover_for_rebind()
+                _resolved_for_rebind = _resolve_for_rebind(
+                    routing_cfg_for_rebind, event, _templates_for_rebind
+                )
+                if (
+                    _resolved_for_rebind is not None
+                    and _resolved_for_rebind.profile_rebind
+                    and _resolved_for_rebind.profile_rebind != profile_id
+                ):
+                    _new_pid = _resolved_for_rebind.profile_rebind
+                    try:
+                        _new_loop = await self._router.get_or_load(_new_pid)
+                        _new_home = self._router._profile_home_resolver(_new_pid)
+                        logger.info(
+                            "M10.3 routing rebind: %s:%s → profile=%r "
+                            "(source=%r, agent=%r)",
+                            event.platform.value if event.platform else "?",
+                            event.chat_id,
+                            _new_pid,
+                            profile_id,
+                            _resolved_for_rebind.template_name,
+                        )
+                        loop = _new_loop
+                        profile_home = _new_home
+                        profile_id = _new_pid
+                    except Exception as _exc:  # noqa: BLE001
+                        logger.warning(
+                            "M10.3 routing rebind to %r failed (%s) — "
+                            "continuing on source profile %r",
+                            _new_pid, _exc, profile_id,
+                        )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "M10.3 routing rebind resolution failed: %s — "
+                "continuing on source profile",
+                e,
+            )
+
         # Round 2a P-5 — record the (adapter, chat_id) binding so a
         # consent prompt later in this turn can find the right surface
         # to ask the user on. Best-effort: missing adapter = legacy
@@ -1233,6 +1308,49 @@ class Dispatch:
                         adapter=adapter,
                         chat_id=event.chat_id,
                     )
+                # v1.1 plan-3 M10.2 — per-channel routing dispatcher
+                # integration. ``resolve_template_for_event`` returns the
+                # matched template (system prompt + maybe profile rebind)
+                # or None if no rule matches / the named template isn't
+                # registered. We pass the system prompt through the same
+                # ``system_prompt_override`` plumbing that ``DelegateTool``
+                # already uses for ``agent: ...``. Tool allowlist
+                # enforcement is a follow-up (AgentLoop's
+                # ``allowed_tools`` is constructor-bound; per-message
+                # filtering needs more plumbing).
+                #
+                # Wrapped defensively: any routing failure logs at WARNING
+                # and falls through to the default behavior — a stale
+                # routing rule must NEVER break message dispatch.
+                routing_system_override: str | None = None
+                try:
+                    cfg_obj = getattr(loop, "config", None)
+                    routing_cfg = getattr(cfg_obj, "routing", None)
+                    if routing_cfg is not None and routing_cfg.rules:
+                        from opencomputer.agent.agent_templates import (
+                            discover_agents as _discover_agents,
+                        )
+                        from opencomputer.agent.routing import (
+                            resolve_template_for_event as _rs_template,
+                        )
+
+                        templates = _discover_agents()
+                        resolved = _rs_template(routing_cfg, event, templates)
+                        if resolved is not None:
+                            routing_system_override = resolved.system_prompt
+                            logger.info(
+                                "M10.2 routing: %s:%s → agent=%r",
+                                event.platform.value if event.platform else "?",
+                                event.chat_id,
+                                resolved.template_name,
+                            )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "M10.2 routing resolution failed (falling through "
+                        "to default dispatch): %s",
+                        e,
+                    )
+
                 with set_profile(profile_home):
                     if self._plugin_api is not None:
                         with self._plugin_api.in_request(request_ctx):
@@ -1241,6 +1359,7 @@ class Dispatch:
                                 session_id=session_id,
                                 images=images,
                                 runtime=runtime,
+                                system_prompt_override=routing_system_override,
                             )
                     else:
                         result = await loop.run_conversation(
@@ -1248,6 +1367,7 @@ class Dispatch:
                             session_id=session_id,
                             images=images,
                             runtime=runtime,
+                            system_prompt_override=routing_system_override,
                         )
                 # 2026-05-08 — Hermes Doc-2 gateway hooks: agent:end +
                 # session:end. Hermes spec: session:end fires per
