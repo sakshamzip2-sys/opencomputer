@@ -90,12 +90,21 @@ class ConsentGate:
         # Round 2a P-5 — pending-approval registry. Key is
         # ``(session_id, capability_id)``. The Event is set by
         # :meth:`resolve_pending` once the user clicks; the decision
-        # tuple ``(allowed, persist)`` carries the click meaning back
-        # to the caller (``persist=True`` -> ``allow_always``,
-        # ``persist=False`` + ``allowed=True`` -> ``allow_once``,
-        # ``allowed=False`` -> deny).
+        # 3-tuple ``(allowed, persist, session_scoped)`` carries the
+        # click meaning back to the caller. Hermes-parity 4-verb
+        # encoding:
+        #   (True,  False, False) -> allow_once
+        #   (True,  False, True)  -> allow_session (in-memory only)
+        #   (True,  True,  False) -> allow_always (persistent grant)
+        #   (False, _,     _)     -> deny
         self._pending_requests: dict[tuple[str, str], asyncio.Event] = {}
-        self._pending_decisions: dict[tuple[str, str], tuple[bool, bool]] = {}
+        self._pending_decisions: dict[
+            tuple[str, str], tuple[bool, bool, bool]
+        ] = {}
+        # Hermes parity: session-scoped grants. Cleared on
+        # SESSION_FINALIZE via :meth:`on_session_finalize`. NOT persisted
+        # to ConsentStore — a session that ends loses its grants.
+        self._session_grants: dict[tuple[str, str], ConsentGrant] = {}
         # Channel-side prompt handler (set by the gateway / dispatch
         # when a channel adapter is available). When None,
         # :meth:`request_approval` immediately auto-denies because there
@@ -191,6 +200,28 @@ class ConsentGate:
                 tier_matched=claim.tier_required,
                 audit_event_id=audit_id,
             )
+
+        # Hermes parity: session-scoped grant short-circuits before the
+        # persistent-store lookup. Session grants live in-memory only
+        # and are cleared on SESSION_FINALIZE via on_session_finalize.
+        if session_id is not None:
+            sg = self._session_grants.get((session_id, claim.capability_id))
+            if sg is not None and sg.tier >= claim.tier_required:
+                audit_id = self._audit.append(AuditEvent(
+                    session_id=session_id, actor="hook",
+                    action="check_session_grant",
+                    capability_id=claim.capability_id,
+                    tier=int(sg.tier),
+                    scope=scope,
+                    decision="allow",
+                    reason="session_grant matched",
+                ))
+                return ConsentDecision(
+                    allowed=True,
+                    reason="session_grant matched",
+                    tier_matched=sg.tier,
+                    audit_event_id=audit_id,
+                )
 
         grant = None
         # 1. Exact scope match (if caller has a concrete scope)
@@ -482,9 +513,23 @@ class ConsentGate:
                 audit_event_id=audit_id,
             )
 
-        decision = self._pending_decisions.pop(key, (False, False))
+        # 3-tuple migration (Hermes session-verb parity). resolve_pending
+        # always writes a 3-tuple; the default fills session_scoped=False.
+        decision = self._pending_decisions.pop(key, (False, False, False))
         self._pending_requests.pop(key, None)
-        allowed, persist = decision
+        allowed, persist, session_scoped = decision
+
+        if allowed and session_scoped:
+            # Hermes parity: session-scoped grant. In-memory only;
+            # cleared on SESSION_FINALIZE. Tier == claim's required tier.
+            self._session_grants[(session_id, claim.capability_id)] = ConsentGrant(
+                capability_id=claim.capability_id,
+                tier=claim.tier_required,
+                scope_filter=scope,
+                granted_at=time.time(),
+                expires_at=None,
+                granted_by="user",
+            )
 
         if allowed and persist:
             # allow_always — persist a non-expiring grant scoped to this
@@ -501,11 +546,13 @@ class ConsentGate:
 
         action = (
             "approval_allow_always" if (allowed and persist)
+            else "approval_allow_session" if (allowed and session_scoped)
             else "approval_allow_once" if allowed
             else "approval_deny"
         )
         reason = (
             "user clicked allow always" if (allowed and persist)
+            else "user clicked allow session" if (allowed and session_scoped)
             else "user clicked allow once" if allowed
             else "user clicked deny"
         )
@@ -523,6 +570,7 @@ class ConsentGate:
         # timeout (handled in the timeout branch above) writes "timeout".
         _choice = (
             "always" if (allowed and persist)
+            else "session" if (allowed and session_scoped)
             else "once" if allowed
             else "deny"
         )
@@ -555,13 +603,23 @@ class ConsentGate:
         capability_id: str,
         decision: bool,
         persist: bool,
+        session_scoped: bool = False,
     ) -> bool:
         """Mark a pending approval as resolved with the given decision.
 
         Called by the channel adapter's callback handler when the user
-        clicks an inline button. ``decision`` is the boolean allow/deny
-        outcome; ``persist`` is True only for "allow always" clicks
-        (causing :meth:`request_approval` to write a stored grant).
+        clicks an inline button. Hermes-parity 4-verb encoding:
+
+        | decision | persist | session_scoped | meaning |
+        |----------|---------|----------------|---------|
+        | True     | False   | False          | allow_once |
+        | True     | False   | True           | allow_session (in-memory only) |
+        | True     | True    | False          | allow_always (persistent grant) |
+        | False    | _       | _              | deny |
+
+        ``session_scoped`` defaults False so existing callers (telegram /
+        slack / matrix dispatch handlers and text-reply path) keep
+        working unchanged.
 
         Returns True if a pending request existed and was resolved;
         False if no matching key was registered (stale callback after
@@ -575,9 +633,44 @@ class ConsentGate:
             # resolved (double-click). Don't overwrite; signal to the
             # caller so it can log "stale callback ignored".
             return False
-        self._pending_decisions[key] = (decision, persist)
+        self._pending_decisions[key] = (decision, persist, session_scoped)
         event.set()
         return True
+
+    # ─── Hermes parity: SESSION_FINALIZE cleanup ──────────────────────
+
+    def on_session_finalize(self, *, session_id: str) -> None:
+        """Drop session-scoped grants for an ending session.
+
+        Called from the hook engine when ``HookEvent.SESSION_FINALIZE``
+        fires. Idempotent on unknown ``session_id`` — a session that
+        never created a grant passes through silently.
+        """
+        keys = [k for k in self._session_grants if k[0] == session_id]
+        for k in keys:
+            self._session_grants.pop(k, None)
+
+    def register_session_finalize_handler(self) -> None:
+        """Subscribe ``on_session_finalize`` to ``HookEvent.SESSION_FINALIZE``.
+
+        Idempotent — safe to call multiple times. Caller is responsible
+        for invoking this exactly once (typically from the gate factory
+        in the agent loop's __init__ path). Best-effort: hook subscribe
+        failures (e.g. test-time engine substitution) are swallowed so
+        the gate works without hooks.
+        """
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine
+            from plugin_sdk.hooks import HookEvent
+
+            async def _handler(ctx):
+                sid = getattr(ctx, "session_id", None)
+                if sid:
+                    self.on_session_finalize(session_id=sid)
+
+            _hook_engine.subscribe(HookEvent.SESSION_FINALIZE, _handler)
+        except Exception:  # noqa: BLE001 — observer-only; gate must work without hooks
+            pass
 
     def has_pending_request(
         self,

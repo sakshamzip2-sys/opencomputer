@@ -74,8 +74,8 @@ def test_resolve_approve_consumes_yes() -> None:
         session_id="s1", text="yes",
     ))
     assert consumed is True
-    # Decision recorded as approve / once.
-    assert gate._pending_decisions[("s1", "cap.x")] == (True, False)
+    # Decision recorded as approve / once. 3-tuple after Hermes session-verb migration.
+    assert gate._pending_decisions[("s1", "cap.x")] == (True, False, False)
     # Event triggered so a waiting request_approval would unblock.
     assert gate._pending_requests[("s1", "cap.x")].is_set()
 
@@ -88,7 +88,7 @@ def test_resolve_deny_consumes_no() -> None:
         session_id="s1", text="no",
     ))
     assert consumed is True
-    assert gate._pending_decisions[("s1", "cap.x")] == (False, False)
+    assert gate._pending_decisions[("s1", "cap.x")] == (False, False, False)
 
 
 def test_resolve_handles_multiple_pending() -> None:
@@ -101,8 +101,8 @@ def test_resolve_handles_multiple_pending() -> None:
         session_id="s1", text="approve",
     ))
     assert consumed is True
-    assert gate._pending_decisions[("s1", "cap.x")] == (True, False)
-    assert gate._pending_decisions[("s1", "cap.y")] == (True, False)
+    assert gate._pending_decisions[("s1", "cap.x")] == (True, False, False)
+    assert gate._pending_decisions[("s1", "cap.y")] == (True, False, False)
 
 
 def test_resolve_does_not_match_other_session() -> None:
