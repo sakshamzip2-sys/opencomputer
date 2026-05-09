@@ -17,6 +17,65 @@ The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEAS
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-3 M9.3 + M9.4: block budget + audit chain for auto-mode classifier (2026-05-09)
+
+Closes the two M9.2 follow-ups that the security-critical PR honestly deferred. Both ride on top of `ToolCallClassifier` from PR #555.
+
+**M9.3 — Block budget** (`tool_call_classifier.py:get_block_budget` / `record_classifier_decision` / `is_paused` / `reset_block_budget`):
+
+Per-session counters track classifier verdicts. The budget trips when EITHER:
+
+- 3 consecutive `BLOCK` decisions (`CONSECUTIVE_BLOCK_LIMIT`), OR
+- 20 total `BLOCK` decisions across the session (`TOTAL_BLOCK_LIMIT`)
+
+`ALLOW` and `ASK` reset the consecutive counter; the total counter monotonically increases. When the budget trips, the dispatcher mutates `runtime.custom["permission_mode"] = "default"` so the consent gate's PER_ACTION path takes over for subsequent calls. The user explicitly resumes via `/auto on`, which calls `reset_block_budget` for the paused session (the slash command reads `runtime.custom["m9_3_paused_session"]` to know which session to clear).
+
+**M9.4 — Audit chain** (`tool_call_classifier.py:audit_classifier_decision`):
+
+Every classifier decision (allow / block / ask) lands in the existing F1 HMAC-chained `audit_log` table via `AuditLogger.append`. Schema:
+
+| Column | Value |
+|---|---|
+| `actor` | `"classifier"` (distinguishes from `"consent_gate"` rows so operators can filter) |
+| `action` | `"classify"` |
+| `capability_id` | tool name (e.g. `"Bash"`) |
+| `tier` | 0 (classifier runs pre-tier, before consent gate) |
+| `decision` | `"allow"` / `"block"` / `"ask"` |
+| `reason` | classifier rationale (truncated to 500 chars) + `[fail-closed]` suffix when applicable |
+
+The HMAC chain integrity holds across mixed classifier + consent-gate rows; `oc audit verify --chain` validates them all together. Audit failures NEVER raise — the helper returns `None` so a wedged audit logger can't block dispatch.
+
+**Files:**
+
+- `opencomputer/agent/tool_call_classifier.py` — `BlockBudget` dataclass + 4 budget functions + `audit_classifier_decision` helper. ~150 LOC additive.
+- `opencomputer/agent/loop.py:_dispatch_tool_calls` — within the M9.2 classifier block, call `record_classifier_decision` after every verdict; on trip, mutate runtime to "default" + log WARNING. Audit every decision via `_m94_audit` (try/except wrapped).
+- `opencomputer/agent/slash_commands_impl/auto_cmd.py` — `/auto on` clears `runtime.custom["m9_3_paused_session"]` and calls `reset_block_budget` so the user's explicit re-arm is the resume signal.
+
+**Tests (18 new across 2 files, all green):**
+
+`tests/test_auto_mode_block_budget.py` (10 tests):
+- 3 consecutive blocks trips
+- 2 blocks + allow + 2 blocks does NOT trip (consecutive reset)
+- ASK also resets consecutive counter
+- 20 total blocks (interleaved with allows) trips
+- `TOTAL_BLOCK_LIMIT == 20` and `CONSECUTIVE_BLOCK_LIMIT == 3` (magic-number pins)
+- `reset_block_budget` clears counters + paused flag
+- Resetting an unknown session is a safe no-op
+- `paused_at` set once per pause (not bumped by additional blocks)
+- `/auto on` integration: budget reset via runtime sentinel
+
+`tests/test_auto_mode_audit_chain.py` (8 tests):
+- `audit_classifier_decision` writes a row, returns row id
+- Actor field is `"classifier"`; action / capability_id / decision / reason set correctly
+- `[fail-closed]` suffix appears in `reason` when applicable
+- Actor distinguishable from `"consent_gate"` rows
+- HMAC chain intact when classifier + gate rows interleave
+- `audit_classifier_decision(None, ...)` returns None (no-op when no logger)
+- Logger raise → returns None (defensive)
+- Long rationale (5KB) truncated to under 700 chars
+
+Composition with M9.5: the wiring composition is verified end-to-end by the M9.2 PR's tests + the existing 35 consent / dispatch tests (all still pass — no regressions). Dedicated `test_auto_mode_consent_gate_still_fires` + `test_auto_mode_classifier_first` pin tests from the M9.5 spec are skipped because the parallel session has them in PR #560 — avoiding double-coverage of the same composition.
+
 ### Added — v1.1 Plan-3 M9.2: auto-mode tool-call safety classifier (2026-05-09)
 
 The security-critical heart of plan-3 M9. When `permission_mode = "auto"` is active, every pending tool call now passes through `ToolCallClassifier.classify` BEFORE the F1 ConsentGate. The classifier returns one of three verdicts:

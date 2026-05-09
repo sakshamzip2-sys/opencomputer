@@ -365,12 +365,146 @@ class ToolCallClassifier:
         return _parse_decision(raw)
 
 
+# ─── M9.3: block budget ──────────────────────────────────────────────────
+
+
+# Per-spec defaults from plan-3 M9.3:
+#   3 consecutive blocks OR 20 total blocks → pause auto mode.
+CONSECUTIVE_BLOCK_LIMIT: int = 3
+TOTAL_BLOCK_LIMIT: int = 20
+
+
+@dataclass(frozen=False, slots=True)
+class BlockBudget:
+    """Per-session classifier-block counters.
+
+    Lives on a process-wide dict keyed by session_id (see
+    :func:`get_block_budget`). Resets via :func:`reset_block_budget` —
+    called from `oc resume` and the wire `mode.resume` RPC follow-up.
+    """
+
+    consecutive_blocks: int = 0
+    total_blocks: int = 0
+    paused_at: float | None = None
+    """Unix timestamp the budget tripped. ``None`` = budget healthy."""
+
+
+_BLOCK_BUDGETS: dict[str, BlockBudget] = {}
+
+
+def get_block_budget(session_id: str) -> BlockBudget:
+    """Return (or lazily create) the per-session :class:`BlockBudget`."""
+    budget = _BLOCK_BUDGETS.get(session_id)
+    if budget is None:
+        budget = BlockBudget()
+        _BLOCK_BUDGETS[session_id] = budget
+    return budget
+
+
+def reset_block_budget(session_id: str) -> None:
+    """Clear all counters for ``session_id`` — called by ``/auto on``,
+    ``oc resume``, and the wire ``mode.resume`` RPC. The user explicitly
+    re-arming auto mode is the resume signal."""
+    _BLOCK_BUDGETS.pop(session_id, None)
+
+
+def record_classifier_decision(
+    session_id: str, decision: ClassifierDecision
+) -> bool:
+    """Update the per-session budget for one classifier verdict.
+
+    Returns True when the budget tripped on THIS call (caller should
+    pause auto mode). Returns False otherwise.
+
+    Allow/Ask reset ``consecutive_blocks`` to zero — only an unbroken
+    run of BLOCK verdicts trips the consecutive budget. The total
+    counter monotonically increases.
+    """
+    import time as _time
+
+    budget = get_block_budget(session_id)
+    if decision.decision == Decision.BLOCK:
+        budget.consecutive_blocks += 1
+        budget.total_blocks += 1
+    else:
+        budget.consecutive_blocks = 0
+
+    if (
+        budget.paused_at is None
+        and (
+            budget.consecutive_blocks >= CONSECUTIVE_BLOCK_LIMIT
+            or budget.total_blocks >= TOTAL_BLOCK_LIMIT
+        )
+    ):
+        budget.paused_at = _time.time()
+        return True
+    return False
+
+
+def is_paused(session_id: str) -> bool:
+    """True when the session's budget has tripped and auto mode should
+    NOT be re-applied until the user explicitly resumes."""
+    budget = _BLOCK_BUDGETS.get(session_id)
+    return budget is not None and budget.paused_at is not None
+
+
+# ─── M9.4: audit chain integration ───────────────────────────────────────
+
+
+def audit_classifier_decision(
+    audit_logger: Any,
+    session_id: str | None,
+    pending: ToolCall,
+    decision: ClassifierDecision,
+) -> int | None:
+    """Log a classifier decision to the existing F1 HMAC-chained audit log.
+
+    Reuses :class:`opencomputer.agent.consent.audit.AuditLogger` so the
+    same `oc audit verify --chain` command audits classifier decisions
+    alongside consent gate decisions. The actor field distinguishes
+    classifier rows (``"classifier"``) from gate rows
+    (``"consent_gate"``) so operators can filter.
+
+    Returns the new row id, or ``None`` if no logger was supplied (the
+    no-op path — the loop wraps the call in try/except so a missing /
+    broken audit logger never breaks dispatch).
+    """
+    if audit_logger is None:
+        return None
+    try:
+        from opencomputer.agent.consent.audit import AuditEvent
+
+        evt = AuditEvent(
+            session_id=session_id,
+            actor="classifier",
+            action="classify",
+            capability_id=pending.name,
+            tier=0,  # classifier decisions are pre-tier (run before consent gate)
+            scope=None,
+            decision=decision.decision.value,
+            reason=(
+                decision.rationale[:500] if decision.rationale else ""
+            ) + (" [fail-closed]" if decision.failed_closed else ""),
+        )
+        return audit_logger.append(evt)
+    except Exception:  # noqa: BLE001 — audit failure must not block dispatch
+        return None
+
+
 __all__ = [
+    "BlockBudget",
+    "CONSECUTIVE_BLOCK_LIMIT",
     "ClassifierDecision",
     "Decision",
     "PoisonResistanceViolation",
+    "TOTAL_BLOCK_LIMIT",
     "ToolCallClassifier",
+    "audit_classifier_decision",
     "_build_classifier_input",
     "_parse_decision",
+    "get_block_budget",
+    "is_paused",
+    "record_classifier_decision",
+    "reset_block_budget",
     "_summarize_args",
 ]
