@@ -4,6 +4,46 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-3 M6.1: `MEMORY.md` BM25 index (2026-05-09)
+
+Foundation for v1.1 plan-3 M6 Active Memory work. Adds
+`opencomputer.agent.memory_index.BM25Index`, a profile-scoped, lazily
+built, cache-backed BM25 retrieval index over `MEMORY.md`.
+
+```python
+mm = MemoryManager(declarative_path=..., skills_path=...)
+mm.append_declarative("user prefers postgresql for OLTP")
+hits = mm.bm25_index.query("postgresql", top_k=5)
+# -> [QueryHit(entry=IndexedEntry(raw="user prefers postgresql for OLTP", ...), score=..., rank=0)]
+```
+
+**Cache integrity** — pickle file at `<profile_home>/cache/memory_bm25.idx`
+self-validates on load via a `(format_version, corpus_sha256, entry_count, mtime_ns, built_at)`
+header. Mismatch (truncation, garbage, schema skew, external `MEMORY.md` edit
+without `MemoryManager` involvement) triggers a transparent rebuild — never
+a silent stale-result return.
+
+**Invalidation** — `MemoryManager.append_declarative`, `replace_declarative`,
+`remove_declarative`, and `restore_backup(which="memory")` each call
+`bm25_index.invalidate()` after a successful write. `rebind_to_profile`
+swaps the index along with the declarative paths so per-profile
+isolation holds.
+
+**Audit findings folded in** —
+- Cache-integrity check (Plan 3 said "pickle the corpus"; this PR adds the header validation).
+- FTS5-vs-pickle architectural choice documented in the spec.
+
+**Carry-forward audit notes** (NOT in this PR — for the next sub-milestones):
+- M9.2 fail-closed default on classifier error/timeout.
+- M6.4 Dreaming cron-miss catch-up policy.
+- M6.3 + Honcho prompt ordering: `[Honcho prefetch] → [Active Memory] → [user content]`.
+- `BaseProvider.embed()` contract for M6.6: `EmbeddingBatch(vectors, dimensionality, model_id, cost_estimate_usd)` with batch ≤100.
+
+44 new tests across 9 files (tokenizer, segmentation, basic query, persist,
+invalidate, corpus-change-detection, corrupt-cache, format-version-skew,
+integration, perf). Cold build of a 4KB synthetic MEMORY.md is <250ms;
+warm query <50ms.
+
 ### Added — v1.1 Plan-1 M3.1 + M3.3: wire-protocol completeness (2026-05-09)
 
 Closes the two remaining wire-protocol gaps from `2026-05-09-v1-1-plan-1-refined-execution.md`. Same files (`gateway/protocol.py`, `gateway/protocol_v2.py`, `gateway/wire_server.py`); shipped together for atomic-bisect. M3.2 transfer-token session handoff stays deferred per YAGNI (no current wire client demands it).
