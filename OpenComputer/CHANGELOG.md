@@ -4,6 +4,31 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-1 M3.1 + M3.3: wire-protocol completeness (2026-05-09)
+
+Closes the two remaining wire-protocol gaps from `2026-05-09-v1-1-plan-1-refined-execution.md`. Same files (`gateway/protocol.py`, `gateway/protocol_v2.py`, `gateway/wire_server.py`); shipped together for atomic-bisect. M3.2 transfer-token session handoff stays deferred per YAGNI (no current wire client demands it).
+
+**M3.1 — permission.request event + permission.response RPC**
+
+A wire client can now approve a Tier-2 capability without the agent owning a Telegram bot. New protocol surface:
+
+- `EVENT_PERMISSION_REQUEST = "permission.request"` — server → client. Payload: `request_id`, `session_id`, `capability_id`, `scope`, `context`, `timeout_s` (typed `PermissionRequestPayload` in `protocol_v2`).
+- `METHOD_PERMISSION_RESPONSE = "permission.response"` — client → server. Params: `request_id`, `session_id`, `capability_id`, `decision: Literal["allow_once","allow_always","deny"]` (typed `PermissionResponseParams`/`PermissionResponseResult`).
+- New `WireServer.broadcast_permission_request(...)` helper — emits `permission.request` to every wire client currently registered on a session. First responder wins; later responders see `resolved=False` since the gate's pending registry is keyed on `(session_id, capability_id)`. Per-client send failures are swallowed (one stale client doesn't block the rest).
+- `WireServer._handle_client` now tracks per-session WS connections so the broadcast helper can find them; cleanup on disconnect drops the connection from the registry.
+- `METHOD_PERMISSION_RESPONSE` handler in `_dispatch` routes the decision into `AgentLoop._consent_gate.resolve_pending`. The existing 300s `ConsentGate` timeout still applies — no response within that window auto-denies and audits, just like the Telegram path.
+
+**M3.3 — wire reconnect ring buffer**
+
+Disconnects during a long turn no longer cost the client visibility into intermediate tool calls. New protocol surface:
+
+- `WireEvent.seq: int | None = None` — monotonic per-session sequence number. Optional, default `None`, so old clients that built or decoded events without it keep working.
+- `HelloParams.session_id: str | None = None` + `last_event_seq: int | None = None` — opt-in replay request on reconnect.
+- `HelloResult.gap_warning: bool = False` + `server_last_event_seq: int | None = None` — server tells the client whether the requested replay window covered everything (gap_warning=True means some events fell off the end of the buffer).
+- `WireServer` keeps per-session `collections.deque(maxlen=200)` of the last 200 events plus a per-session `_session_seq` counter. `_send_event` stamps `seq` and appends to the ring. The `hello` handler echoes `(server_last_event_seq, gap_warning)` and replays `seq > last_event_seq` events immediately after the HelloResult.
+
+23 new tests in `test_wire_protocol_completeness.py` covering protocol-surface constants, schema validation (Literal decision rejection, optional scope), ring-buffer monotonic stamping, eviction at `RING_BUFFER_MAX = 200`, replay-after-hello (caught up / partial / overflow / unknown session), broadcast helper (registered clients / no clients / stale-client tolerance), and `HelloParams`/`HelloResult` shape.
+
 ### Added — Hermes Cron + Delegation long-tail finishers (2026-05-08 / 2026-05-09)
 
 Closes 11 honest gaps + 2 latent runtime bugs between the Hermes Cron & Delegation reference spec and OpenComputer. PR #494 already shipped no_agent / parallel-batch / multi-profile parity; this work picks up the long tail and hardens it to production-grade.
