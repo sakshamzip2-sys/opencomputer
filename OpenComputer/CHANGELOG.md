@@ -39,6 +39,26 @@ What ships:
 
 29 new tests (`tests/test_dreaming_v2_tick.py`): candidate fetch (undreamed-only / limit / empty-summary), recall_count_fn against real schema, promote_fn invalidates BM25 + vector indices, hold_fn FIFO eviction + atomic write, paragraph splitting, state ledger round-trip, pipeline assembly with/without provider, end-to-end async runs (high-quality promote, idempotent skip, disabled returns empty, `dreamed_into` flip), CLI happy paths, and four config round-trip integration tests pinning that the seven `cfg.memory.dreaming_v2_*` knobs survive YAML override → `load_config` → `build_production_dependencies` → `DreamingV2Config` end-to-end. 73-test broader sweep (dreaming + system_tick + cli_memory) all green.
 
+### Added — v1.1 Plan-3 M10.2: gateway dispatcher routing integration (2026-05-09)
+
+Wires the M10.1 routing schema into `Dispatch.handle_message`. Inbound `MessageEvent`s now resolve through the active profile's `routing.rules`; on a non-default match, the named `AgentTemplate`'s `system_prompt` is applied to that turn via the same `system_prompt_override` plumbing `DelegateTool` already uses for `agent: ...` delegation.
+
+```yaml
+# config.yaml — same schema M10.1 shipped
+routing:
+  rules:
+    - match: {platform: slack, channel: "#security-alerts"}
+      agent: security-reviewer       # AgentTemplate at home/agents/security-reviewer.md
+  default:
+    agent: default
+```
+
+Now an inbound Slack message in `#security-alerts` runs through the agent loop with `security-reviewer.md`'s system prompt installed; everywhere else uses the active profile's normal default. Previously the rules were operator-visible (`oc routing list/test`) but had zero runtime effect.
+
+`opencomputer/agent/routing.py:resolve_template_for_event` returns a frozen `ResolvedTemplate(template_name, system_prompt, profile_rebind)` or None on default-match / unknown template / empty system prompt. M10.3 cross-profile rebind hook is plumbed but not consumed (waits on plan-1 M1.4 per-profile env).
+
+9 new tests in `tests/test_routing_dispatcher.py`. 39/39 routing tests pass; 185 existing dispatcher / gateway tests still pass.
+
 ### Added — v1.1 Plan-3 M9.1: `permission_mode = "auto"` equivalence pin (2026-05-09)
 
 Schema-and-pin slice of plan-3 M9. The `auto` `PermissionMode` value, the `--auto` CLI flag, the `/auto` slash command, and the wire `ChatParams.permission_mode = "auto"` were already in place individually; this PR adds `tests/test_auto_mode_runtime.py` (13 tests) which pins the M9 acceptance criterion: setting auto via CLI / slash / wire / legacy `--yolo` all surface the SAME `effective_permission_mode`. Catches drift if any single entry point is rewritten without the others.

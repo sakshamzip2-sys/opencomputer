@@ -1233,6 +1233,49 @@ class Dispatch:
                         adapter=adapter,
                         chat_id=event.chat_id,
                     )
+                # v1.1 plan-3 M10.2 — per-channel routing dispatcher
+                # integration. ``resolve_template_for_event`` returns the
+                # matched template (system prompt + maybe profile rebind)
+                # or None if no rule matches / the named template isn't
+                # registered. We pass the system prompt through the same
+                # ``system_prompt_override`` plumbing that ``DelegateTool``
+                # already uses for ``agent: ...``. Tool allowlist
+                # enforcement is a follow-up (AgentLoop's
+                # ``allowed_tools`` is constructor-bound; per-message
+                # filtering needs more plumbing).
+                #
+                # Wrapped defensively: any routing failure logs at WARNING
+                # and falls through to the default behavior — a stale
+                # routing rule must NEVER break message dispatch.
+                routing_system_override: str | None = None
+                try:
+                    cfg_obj = getattr(loop, "config", None)
+                    routing_cfg = getattr(cfg_obj, "routing", None)
+                    if routing_cfg is not None and routing_cfg.rules:
+                        from opencomputer.agent.agent_templates import (
+                            discover_agents as _discover_agents,
+                        )
+                        from opencomputer.agent.routing import (
+                            resolve_template_for_event as _rs_template,
+                        )
+
+                        templates = _discover_agents()
+                        resolved = _rs_template(routing_cfg, event, templates)
+                        if resolved is not None:
+                            routing_system_override = resolved.system_prompt
+                            logger.info(
+                                "M10.2 routing: %s:%s → agent=%r",
+                                event.platform.value if event.platform else "?",
+                                event.chat_id,
+                                resolved.template_name,
+                            )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "M10.2 routing resolution failed (falling through "
+                        "to default dispatch): %s",
+                        e,
+                    )
+
                 with set_profile(profile_home):
                     if self._plugin_api is not None:
                         with self._plugin_api.in_request(request_ctx):
@@ -1241,6 +1284,7 @@ class Dispatch:
                                 session_id=session_id,
                                 images=images,
                                 runtime=runtime,
+                                system_prompt_override=routing_system_override,
                             )
                     else:
                         result = await loop.run_conversation(
@@ -1248,6 +1292,7 @@ class Dispatch:
                             session_id=session_id,
                             images=images,
                             runtime=runtime,
+                            system_prompt_override=routing_system_override,
                         )
                 # 2026-05-08 — Hermes Doc-2 gateway hooks: agent:end +
                 # session:end. Hermes spec: session:end fires per
