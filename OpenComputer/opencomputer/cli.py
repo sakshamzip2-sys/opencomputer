@@ -542,7 +542,51 @@ def _discover_plugins() -> int:
     search_paths = standard_search_paths()
     enabled = _resolve_plugin_filter()
     loaded = plugin_registry.load_all(search_paths, enabled_ids=enabled)
+
+    # v1.1 plan-3 M11.5 — Mount any plugin-registered CLI subcommand
+    # trees into the main typer app.  Idempotent: typer.Typer.add_typer
+    # accepts the same plugin's app once; re-running plugin discovery
+    # in tests doesn't add the same registration twice because the
+    # plugin's register(api) call is also gated by the registry.
+    try:
+        api = plugin_registry.api()
+        registered = getattr(api, "all_cli_commands", lambda: {})()
+        for ns, sub_app in registered.items():
+            # Skip if this namespace was already mounted (test re-runs).
+            if ns in _MOUNTED_PLUGIN_CLI_NAMESPACES:
+                continue
+            try:
+                app.add_typer(sub_app, name=ns)
+                _MOUNTED_PLUGIN_CLI_NAMESPACES.add(ns)
+            except Exception as exc:  # noqa: BLE001
+                # A bad plugin must NEVER prevent the CLI from starting.
+                _log_cli_mount_failure(ns, exc)
+    except Exception as exc:  # noqa: BLE001
+        # Defensive — extremely unlikely (registry.api always returns).
+        # If something pathological happens, log + proceed; the rest of
+        # the CLI must still work.
+        _log_cli_mount_failure("<plugin-cli-discovery>", exc)
+
     return len(loaded)
+
+
+# v1.1 plan-3 M11.5 — process-wide set of mounted plugin CLI namespaces.
+# Idempotent across multiple ``_discover_plugins()`` calls so test runs +
+# multi-profile dispatch don't double-mount.
+_MOUNTED_PLUGIN_CLI_NAMESPACES: set[str] = set()
+
+
+def _log_cli_mount_failure(namespace: str, exc: Exception) -> None:
+    """Log a plugin-CLI mount failure without crashing the CLI."""
+    import logging
+
+    logging.getLogger("opencomputer.cli").warning(
+        "Failed to mount plugin CLI subcommands for %r (%s: %s); "
+        "the rest of the CLI is unaffected",
+        namespace,
+        type(exc).__name__,
+        exc,
+    )
 
 
 def _apply_model_overrides() -> int:
@@ -5052,6 +5096,17 @@ def main() -> None:
         load_for_profile(read_active_profile())
     except Exception as e:  # noqa: BLE001 — never crash startup on env load
         _log.debug("per-profile env load failed: %s", e)
+    # v1.1 plan-4 M13 — attach plugin-advertised top-level CLI subcommands
+    # as lazy placeholders. Discovery is cheap (manifest JSON only); the
+    # owning plugin loads only when the user actually invokes `oc <name>`.
+    try:
+        from opencomputer.plugins.cli_registry import (
+            register_plugin_cli_commands,
+        )
+
+        register_plugin_cli_commands(app)
+    except Exception as e:  # noqa: BLE001 — never crash startup on plugin scan
+        _log.debug("M13 plugin CLI registration failed: %s", e)
     app()
 
 

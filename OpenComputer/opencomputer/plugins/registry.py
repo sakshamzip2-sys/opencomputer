@@ -63,6 +63,11 @@ class PluginRegistry:
     # Phase 12b.6 Task D8: plugin-authored slash commands. Shared across
     # all plugins; threaded into PluginAPI via ``api()``.
     slash_commands: dict[str, Any] = field(default_factory=dict)
+    # v1.1 plan-4 M13: plugin-authored top-level CLI subcommands.
+    # Shared across all plugins; threaded into PluginAPI via ``api()``.
+    # Read by ``opencomputer.plugins.cli_registry._make_lazy_plugin_cli``
+    # after firing the owning plugin's ``register(api)``.
+    cli_commands: dict[str, Any] = field(default_factory=dict)
     # Task I.9: the most-recent ``PluginAPI`` handed out by ``load_all``.
     # Gateway ``Dispatch`` reads this to wrap each request in
     # ``api.in_request(ctx)`` so plugins can query their per-request
@@ -105,6 +110,7 @@ class PluginRegistry:
             doctor_contributions=self.doctor_contributions,
             slash_commands=self.slash_commands,
             outgoing_queue=self.outgoing_queue,
+            cli_commands=self.cli_commands,
         )
 
     def load_all(

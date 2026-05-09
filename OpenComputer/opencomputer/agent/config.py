@@ -499,6 +499,41 @@ class MemoryConfig:
     active_memory_top_n: int = 3
     """Cap on combined episodic + message hits prepended."""
 
+    # v1.1 plan-3 M6.3 — MEMORY.md hybrid retrieval (BM25 + vector via RRF).
+    # Distinct from active_memory_enabled above which retrieves from
+    # SessionDB FTS5; this one retrieves from MEMORY.md (the declarative
+    # markdown file).  Both can be enabled simultaneously.
+    memory_md_retrieval_enabled: bool = True
+    """When True, the agent loop runs hybrid BM25+vector retrieval over
+    MEMORY.md before each turn and appends a system-prompt block with
+    the top-K most relevant entries.  Composes with Honcho prefetch and
+    the FTS5 active-memory layer.  Default ON: it is graceful (skips
+    silently when MEMORY.md is empty / no embedding provider available)
+    and the upside (the agent recalls user-stated preferences across
+    sessions) is the headline reason MEMORY.md exists."""
+    memory_md_retrieval_top_k: int = 5
+    """Number of fused hits returned per turn from MEMORY.md retrieval."""
+    memory_md_retrieval_per_source_k: int = 20
+    """Per-source recall before RRF fusion.  Higher values give RRF more
+    candidates to combine; production tuning has shown ~20 is the
+    sweet-spot for MEMORY.md sizes seen in practice (≤256 entries)."""
+
+    # v1.1 plan-3 M6.4 — Dreaming v2 three-gate consolidation INTO MEMORY.md.
+    # Distinct from `dreaming_enabled` above (Round 2A P-18 in-DB
+    # episodic clustering).  Default OFF; opt-in via config.yaml.
+    dreaming_v2_enabled: bool = False
+    """When True, ``opencomputer.cron.dreaming_v2_tick.run_dreaming_v2_tick``
+    fires inside the system cron tick and ``oc memory dream-v2`` is wired
+    to the same engine.  Promotes high-signal episodic events into
+    MEMORY.md via the score / recall-count / diversity gates."""
+    dreaming_v2_score_threshold: float = 0.65
+    dreaming_v2_min_recall_count: int = 2
+    dreaming_v2_diversity_threshold: float = 0.8
+    dreaming_v2_max_promotions_per_run: int = 20
+    dreaming_v2_dreams_md_max_bytes: int = 16384
+    dreaming_v2_candidate_fetch_limit: int = 50
+    """How many recent un-dreamed episodic events to score per tick."""
+
 
 @dataclass(frozen=True, slots=True)
 class HookCommandConfig:

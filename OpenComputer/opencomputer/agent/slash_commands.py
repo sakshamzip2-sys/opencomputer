@@ -27,6 +27,7 @@ from typing import Any
 from opencomputer.agent.slash_commands_impl.agents_cmd import AgentsCommand
 from opencomputer.agent.slash_commands_impl.auto_cmd import AutoCommand, YoloCommand
 from opencomputer.agent.slash_commands_impl.background_cmd import BackgroundCommand
+from opencomputer.agent.slash_commands_impl.batch_cmd import BatchCommand
 from opencomputer.agent.slash_commands_impl.bell_cmd import BellCommand
 from opencomputer.agent.slash_commands_impl.branch_cmd import BranchCommand
 from opencomputer.agent.slash_commands_impl.btw_cmd import BtwCommand
@@ -127,6 +128,8 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     # 2026-05-08 — Hermes-parity /background <prompt>. Spawns isolated
     # AgentLoop on a daemon thread, captures result for `/background show`.
     BackgroundCommand,
+    # v1.1 plan-3 M11.2 — /batch fan-out via DelegateTool isolation=worktree.
+    BatchCommand,
     # Hermes CLI/TUI/Sessions v2 parity (2026-05-08):
     # B1 /rollback [N], B2 /busy [interrupt|queue|steer|status],
     # B3 /details [section] [mode], D5 /mouse [on|off|toggle|status].
