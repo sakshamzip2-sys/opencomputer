@@ -28,6 +28,17 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Set up Node.js
+        # Required for the dashboard SPA + TUI bundle build steps below.
+        # pyproject.toml force-includes opencomputer/dashboard/static/spa
+        # and opencomputer/ui-tui/dist; both are produced by
+        # scripts/build-dashboard.sh and scripts/build-tui.sh and are
+        # NOT committed to git. Without this, the wheel build raises
+        # FileNotFoundError on those force-included paths.
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Install build tooling
         run: python -m pip install --upgrade pip build
 
@@ -41,6 +52,12 @@ jobs:
             echo "::error::Git tag v$TAG_VERSION does not match pyproject.toml version $PY_VERSION"
             exit 1
           fi
+
+      - name: Build dashboard SPA
+        run: ./scripts/build-dashboard.sh
+
+      - name: Build TUI bundle
+        run: ./scripts/build-tui.sh
 
       - name: Build sdist + wheel
         run: python -m build
