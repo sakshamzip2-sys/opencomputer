@@ -85,6 +85,16 @@ def register(api: Any) -> None:
     Tolerates missing ``mem0ai`` SDK; the provider self-degrades to a
     no-op (see :class:`Mem0Provider._ensure_client`).
     """
+    # Short-circuit: if neither MEM0_API_KEY nor MEM0_BASE_URL is set,
+    # the user hasn't opted in. Skip silently — no provider to register,
+    # no warning to spam. Matches the langfuse-plugin "env-keys-present"
+    # gating pattern. (M1.B1 follow-up — closes the residual warning
+    # spam Saksham flagged 2026-05-10.)
+    api_key = os.environ.get("MEM0_API_KEY", "").strip()
+    base_url = os.environ.get("MEM0_BASE_URL", "").strip()
+    if not api_key and not base_url:
+        return
+
     _install_module_alias()
     from extensions.memory_mem0.provider import Mem0Provider
 
