@@ -156,9 +156,11 @@ def test_parse_hooks_unknown_event_in_flat_list_skipped(
 
 
 def test_parse_hooks_unsupported_type_skipped(caplog: pytest.LogCaptureFixture) -> None:
+    # v1.1 plan-2 M8.1+M8.2 (2026-05-09): 'prompt' and 'agent' are now
+    # supported types. Use a truly-unknown sentinel for this test.
     block = {
         "PreToolUse": [
-            {"type": "prompt", "command": "hi", "prompt": "..."},  # unsupported
+            {"type": "magic", "command": "hi"},  # unsupported
             {"type": "command", "command": "python3 /tmp/ok.py"},
         ]
     }

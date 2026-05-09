@@ -4,6 +4,36 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-2 M8.1 + M8.2: prompt + agent hook types (2026-05-09)
+
+Settings-declared hooks (top-level `hooks:` in `~/.opencomputer/<profile>/config.yaml`) now support two new types beyond `command`:
+
+- **`type: prompt`** — aux-LLM-backed verdict. Sends `system` + an event description to the configured aux LLM (`model: auto` picks via cheap_route) with hard wall-clock + token budget caps. Reply is parsed per `returns: allow|block|score`.
+- **`type: agent`** — delegate-spawn-backed verdict. Spawns a fresh subagent via `DelegateTool` with `isolation="copy"` (M4.2 sandbox) so its tool calls don't pollute the working tree. `max_turns` + `timeout_seconds` + `token_budget` cap the run; final-message text is parsed per `returns: allow|block`.
+
+Example:
+
+```yaml
+hooks:
+  PreToolUse:
+    - type: prompt
+      system: "Decide allow/block for this command. Reply 'allow' or 'block'."
+      returns: allow
+      timeout_seconds: 5
+      token_budget: 600
+    - type: agent
+      agent: code-reviewer
+      prompt: "Inspect this Bash invocation for risk and reply allow/block."
+      max_turns: 3
+      timeout_seconds: 30
+```
+
+Both hooks register with `fire_and_forget=False` so the engine actually waits on the verdict (a fire-and-forget prompt-hook would discard its decision). Fail-open posture matches the existing shell-hook contract: any timeout / exception / over-budget estimate → `HookDecision(decision="pass")` + a WARNING log. Mirrors CLAUDE.md §7's "a wedged hook must never wedge the loop."
+
+New types in `opencomputer.agent.config`: `HookPromptConfig` + `HookAgentConfig`. New `Config.hooks_prompt` + `Config.hooks_agent` fields. Parser dispatches on `type:` and routes to the right dataclass; load_config buckets parsed entries into the right field. New modules `opencomputer.hooks.prompt_handlers` + `opencomputer.hooks.agent_handlers` carry the runtime bridges.
+
+30 new tests in `test_prompt_agent_hooks.py` cover: parser shapes (minimal + with overrides + missing-required + invalid-returns), heterogeneous mix, load_config bucketing, `_parse_returns` for both helpers (parametrized), and the fail-open posture (timeout / exception / over-budget) for both handlers. The pre-existing `test_settings_hooks::test_parse_hooks_unsupported_type_skipped` was updated to use a truly-unknown type sentinel since `prompt` and `agent` are now valid.
+
 ### Added — Hermes Cron + Delegation long-tail finishers (2026-05-08 / 2026-05-09)
 
 Closes 11 honest gaps + 2 latent runtime bugs between the Hermes Cron & Delegation reference spec and OpenComputer. PR #494 already shipped no_agent / parallel-batch / multi-profile parity; this work picks up the long tail and hardens it to production-grade.

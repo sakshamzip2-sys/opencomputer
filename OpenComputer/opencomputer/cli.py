@@ -610,10 +610,8 @@ def _register_settings_hooks(cfg: Config) -> int:
     so a single bad entry can't wedge CLI startup. Returns the count
     successfully registered (used by the chat banner).
     """
-    if not cfg.hooks:
-        return 0
     registered = 0
-    for h in cfg.hooks:
+    for h in cfg.hooks or ():
         try:
             event = HookEvent(h.event)
         except ValueError:
@@ -635,6 +633,52 @@ def _register_settings_hooks(cfg: Config) -> int:
                 handler=make_shell_hook_handler(h),
                 matcher=h.matcher,
                 fire_and_forget=fire_and_forget,
+            )
+        )
+        registered += 1
+
+    # v1.1 plan-2 M8.1 (2026-05-09) — register prompt-hook entries
+    # (aux-LLM-backed). These ALWAYS register with fire_and_forget=False
+    # because the whole point of a prompt-hook is its allow/block verdict
+    # — fire-and-forget would discard the decision.
+    for hp in getattr(cfg, "hooks_prompt", ()) or ():
+        try:
+            event = HookEvent(hp.event)
+        except ValueError:
+            _log.warning(
+                "settings prompt-hook: unknown event %r; skipping", hp.event
+            )
+            continue
+        from opencomputer.hooks.prompt_handlers import make_prompt_hook_handler
+
+        hook_engine.register(
+            HookSpec(
+                event=event,
+                handler=make_prompt_hook_handler(hp),
+                matcher=hp.matcher,
+                fire_and_forget=False,
+            )
+        )
+        registered += 1
+
+    # v1.1 plan-2 M8.2 (2026-05-09) — register agent-hook entries
+    # (delegate-spawn-backed). Same fire_and_forget=False rationale.
+    for ha in getattr(cfg, "hooks_agent", ()) or ():
+        try:
+            event = HookEvent(ha.event)
+        except ValueError:
+            _log.warning(
+                "settings agent-hook: unknown event %r; skipping", ha.event
+            )
+            continue
+        from opencomputer.hooks.agent_handlers import make_agent_hook_handler
+
+        hook_engine.register(
+            HookSpec(
+                event=event,
+                handler=make_agent_hook_handler(ha),
+                matcher=ha.matcher,
+                fire_and_forget=False,
             )
         )
         registered += 1

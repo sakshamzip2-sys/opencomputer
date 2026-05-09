@@ -143,13 +143,15 @@ def _parse_hooks_block(block: Any) -> tuple[HookCommandConfig, ...]:
         return ()
     valid_events = {e.value for e in HookEvent}
 
-    def _coerce(raw: dict, default_event: str | None = None) -> HookCommandConfig | None:
-        # Support both "type": "command" and no-type-field entries; reject
-        # anything else (LLM-prompt hooks aren't wired in OpenComputer yet).
+    def _coerce(raw: dict, default_event: str | None = None):  # noqa: ANN202
+        # v1.1 plan-2 M8.1 + M8.2 (2026-05-09): also accept type: prompt
+        # and type: agent. Defaults to 'command' for back-compat. Other
+        # values are still rejected with a warning.
         hook_type = raw.get("type", "command")
-        if hook_type != "command":
+        if hook_type not in ("command", "prompt", "agent"):
             _log.warning(
-                "hooks: skipping entry with unsupported type %r (only 'command' is supported): %r",
+                "hooks: skipping entry with unsupported type %r "
+                "(expected 'command' / 'prompt' / 'agent'): %r",
                 hook_type,
                 raw,
             )
@@ -165,23 +167,107 @@ def _parse_hooks_block(block: Any) -> tuple[HookCommandConfig, ...]:
                 sorted(valid_events),
             )
             return None
-        command = raw.get("command")
-        if not isinstance(command, str) or not command.strip():
-            _log.warning("hooks: skipping entry missing command: %r", raw)
-            return None
         matcher_value = raw.get("matcher")
         if matcher_value is not None and not isinstance(matcher_value, str):
             _log.warning("hooks: skipping entry with non-string matcher: %r", raw)
             return None
-        timeout_value = raw.get("timeout_seconds", raw.get("timeout", 10.0))
-        try:
-            timeout_seconds = float(timeout_value)
-        except (TypeError, ValueError):
-            _log.warning(
-                "hooks: skipping entry with non-numeric timeout_seconds=%r: %r",
-                timeout_value,
-                raw,
+
+        if hook_type == "prompt":
+            from opencomputer.agent.config import HookPromptConfig
+
+            system = raw.get("system", "")
+            if not isinstance(system, str) or not system.strip():
+                _log.warning(
+                    "hooks: skipping prompt-hook missing 'system': %r", raw
+                )
+                return None
+            returns = str(raw.get("returns", "allow")).strip().lower()
+            if returns not in ("allow", "block", "score"):
+                _log.warning(
+                    "hooks: skipping prompt-hook with invalid returns=%r: %r",
+                    returns,
+                    raw,
+                )
+                return None
+            timeout_seconds = _coerce_timeout(raw, default=5.0)
+            if timeout_seconds is None:
+                return None
+            try:
+                token_budget = int(raw.get("token_budget", 600))
+            except (TypeError, ValueError):
+                _log.warning(
+                    "hooks: skipping prompt-hook with non-int token_budget: %r", raw
+                )
+                return None
+            model = str(raw.get("model", "auto"))
+            return HookPromptConfig(
+                event=event_name,
+                system=system,
+                model=model,
+                returns=returns,
+                timeout_seconds=timeout_seconds,
+                token_budget=token_budget,
+                matcher=matcher_value,
             )
+
+        if hook_type == "agent":
+            from opencomputer.agent.config import HookAgentConfig
+
+            agent = raw.get("agent", "")
+            if not isinstance(agent, str) or not agent.strip():
+                _log.warning(
+                    "hooks: skipping agent-hook missing 'agent': %r", raw
+                )
+                return None
+            prompt = raw.get("prompt", "")
+            if not isinstance(prompt, str) or not prompt.strip():
+                _log.warning(
+                    "hooks: skipping agent-hook missing 'prompt': %r", raw
+                )
+                return None
+            returns = str(raw.get("returns", "allow")).strip().lower()
+            if returns not in ("allow", "block"):
+                _log.warning(
+                    "hooks: skipping agent-hook with invalid returns=%r: %r",
+                    returns,
+                    raw,
+                )
+                return None
+            timeout_seconds = _coerce_timeout(raw, default=60.0)
+            if timeout_seconds is None:
+                return None
+            try:
+                max_turns = int(raw.get("max_turns", 5))
+            except (TypeError, ValueError):
+                _log.warning(
+                    "hooks: skipping agent-hook with non-int max_turns: %r", raw
+                )
+                return None
+            try:
+                token_budget = int(raw.get("token_budget", 5000))
+            except (TypeError, ValueError):
+                _log.warning(
+                    "hooks: skipping agent-hook with non-int token_budget: %r", raw
+                )
+                return None
+            return HookAgentConfig(
+                event=event_name,
+                agent=agent,
+                prompt=prompt,
+                max_turns=max_turns,
+                timeout_seconds=timeout_seconds,
+                token_budget=token_budget,
+                returns=returns,
+                matcher=matcher_value,
+            )
+
+        # type == "command" — original path
+        command = raw.get("command")
+        if not isinstance(command, str) or not command.strip():
+            _log.warning("hooks: skipping entry missing command: %r", raw)
+            return None
+        timeout_seconds = _coerce_timeout(raw, default=10.0)
+        if timeout_seconds is None:
             return None
         return HookCommandConfig(
             event=event_name,
@@ -189,6 +275,18 @@ def _parse_hooks_block(block: Any) -> tuple[HookCommandConfig, ...]:
             matcher=matcher_value,
             timeout_seconds=timeout_seconds,
         )
+
+    def _coerce_timeout(raw: dict, *, default: float) -> float | None:
+        timeout_value = raw.get("timeout_seconds", raw.get("timeout", default))
+        try:
+            return float(timeout_value)
+        except (TypeError, ValueError):
+            _log.warning(
+                "hooks: skipping entry with non-numeric timeout_seconds=%r: %r",
+                timeout_value,
+                raw,
+            )
+            return None
 
     parsed: list[HookCommandConfig] = []
 
@@ -308,8 +406,30 @@ def load_config(path: Path | None = None) -> Config:
 
     cfg = _apply_overrides(base, raw)
     if parsed_hooks:
+        # M8.1 + M8.2 (2026-05-09): _parse_hooks_block now returns a
+        # heterogeneous tuple. Bucket by type so each Config field stays
+        # homogeneous.
+        from opencomputer.agent.config import (
+            HookAgentConfig as _HookAgentConfig,
+        )
+        from opencomputer.agent.config import (
+            HookCommandConfig as _HookCommandConfig,
+        )
+        from opencomputer.agent.config import (
+            HookPromptConfig as _HookPromptConfig,
+        )
+
+        hooks_cmd = tuple(h for h in parsed_hooks if isinstance(h, _HookCommandConfig))
+        hooks_prompt = tuple(
+            h for h in parsed_hooks if isinstance(h, _HookPromptConfig)
+        )
+        hooks_agent = tuple(
+            h for h in parsed_hooks if isinstance(h, _HookAgentConfig)
+        )
         kwargs = {f.name: getattr(cfg, f.name) for f in fields(cfg)}
-        kwargs["hooks"] = parsed_hooks
+        kwargs["hooks"] = hooks_cmd
+        kwargs["hooks_prompt"] = hooks_prompt
+        kwargs["hooks_agent"] = hooks_agent
         cfg = Config(**kwargs)
     return cfg
 

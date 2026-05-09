@@ -531,6 +531,58 @@ class HookCommandConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class HookPromptConfig:
+    """One aux-LLM-backed hook entry declared in config.yaml.
+
+    v1.1 plan-2 M8.1 (2026-05-09). The hook prompt is sent to the
+    configured aux LLM (``model: auto`` picks via cheap_route) with
+    a hard wall-clock + token budget. The model's reply is parsed
+    based on ``returns``:
+
+    * ``allow``  — text starting with "allow" / "ok" → pass; else block.
+    * ``block``  — text starting with "block" → block; else pass.
+    * ``score``  — first numeric token → injected as
+      ``HookDecision.modified_message`` for downstream consumers.
+
+    Hard caps fail-open per the existing shell-hook contract: if the
+    aux LLM hangs / hits its budget / errors, the engine logs a
+    warning and treats the hook as ``pass`` (CLAUDE.md §7).
+    """
+
+    event: str = ""
+    system: str = ""
+    model: str = "auto"  # "auto" → cheap_route picks
+    returns: str = "allow"  # "allow" | "block" | "score"
+    timeout_seconds: float = 5.0
+    token_budget: int = 600  # input + output cap (sum)
+    matcher: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HookAgentConfig:
+    """One delegate-spawn-backed hook entry declared in config.yaml.
+
+    v1.1 plan-2 M8.2 (2026-05-09). The hook spawns a fresh subagent
+    via ``DelegateTool`` with ``isolation="copy"`` so its tool calls
+    don't pollute the parent's working tree. The subagent runs up to
+    ``max_turns`` iterations with the aggregate ``token_budget``
+    cap and ``timeout_seconds`` wall-clock cap; the final assistant
+    message is parsed for the decision token per ``returns``.
+
+    Same fail-open posture as :class:`HookPromptConfig`.
+    """
+
+    event: str = ""
+    agent: str = ""  # registered agent template name
+    prompt: str = ""  # user message handed to the subagent
+    max_turns: int = 5
+    timeout_seconds: float = 60.0
+    token_budget: int = 5000
+    returns: str = "allow"  # "allow" | "block"
+    matcher: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MCPServerConfig:
     """One MCP server the agent should connect to.
 
@@ -1054,6 +1106,10 @@ class Config:
     #: :func:`opencomputer.agent.config_store._parse_hooks_block` and
     #: registered into the global :class:`HookEngine` at CLI startup.
     hooks: tuple[HookCommandConfig, ...] = ()
+    #: v1.1 plan-2 M8.1 (2026-05-09) — aux-LLM-backed hook entries.
+    hooks_prompt: tuple[HookPromptConfig, ...] = ()
+    #: v1.1 plan-2 M8.2 (2026-05-09) — delegate-spawn-backed hook entries.
+    hooks_agent: tuple[HookAgentConfig, ...] = ()
     #: 3.F — master enable/disable for autonomous full-system-control mode.
     #: Defaults to disabled (invisible). When enabled, the structured
     #: ``agent.log`` collector + optional menu-bar indicator activate.
