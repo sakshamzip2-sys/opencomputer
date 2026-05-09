@@ -2917,12 +2917,82 @@ def sessions(limit: int = typer.Option(10, "--limit", "-n")) -> None:
         console.print(f"[dim]{r['id'][:8]}…[/dim] msgs={r['message_count']:<3} {title}")
 
 
+def _detach_to_background(*, pidfile_name: str, log_name: str) -> bool:
+    """Fork the current process into the background.
+
+    Writes ``<profile_home>/<pidfile_name>`` with the child PID and
+    redirects stdout/stderr to ``<profile_home>/<log_name>``. Returns
+    ``True`` in the parent (which should exit immediately) and
+    ``False`` in the child (which should continue running).
+
+    Uses os.fork — Linux/macOS only. On platforms without fork (Windows),
+    the function refuses and prints an actionable hint.
+    """
+    import os
+    import sys
+
+    from opencomputer.agent.config import _home
+
+    if not hasattr(os, "fork"):
+        typer.echo(
+            "--detach not supported on this platform (no os.fork). "
+            "Run without --detach in a terminal multiplexer (tmux/screen) instead.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    profile_home = _home()
+    profile_home.mkdir(parents=True, exist_ok=True)
+    pidfile = profile_home / pidfile_name
+    log_path = profile_home / log_name
+
+    if pidfile.exists():
+        try:
+            existing_pid = int(pidfile.read_text().strip())
+            os.kill(existing_pid, 0)
+            typer.echo(f"already running: pid {existing_pid} (pidfile {pidfile})")
+            raise typer.Exit(0)
+        except (OSError, ValueError):
+            pidfile.unlink(missing_ok=True)
+
+    pid = os.fork()
+    if pid > 0:
+        # Parent — wait briefly for child to write pidfile, then exit.
+        import time as _time
+        for _ in range(20):  # ~2s
+            if pidfile.exists():
+                break
+            _time.sleep(0.1)
+        if pidfile.exists():
+            typer.echo(f"detached: pid {pidfile.read_text().strip()} (logs: {log_path})")
+        else:
+            typer.echo(f"detached (pidfile not yet visible at {pidfile})")
+        return True
+
+    # Child — detach from controlling terminal, redirect stdio.
+    os.setsid()
+    pidfile.write_text(str(os.getpid()))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # NOTE: intentionally not closed — its fd backs stdout/stderr for
+    # the lifetime of the daemon. A context manager would close on
+    # exit and invalidate the redirect.
+    log_fh = open(log_path, "ab", buffering=0)  # noqa: SIM115
+    os.dup2(log_fh.fileno(), sys.stdout.fileno())
+    os.dup2(log_fh.fileno(), sys.stderr.fileno())
+    return False
+
+
 @app.command()
 def wire(
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(18789, "--port"),
+    detach: bool = typer.Option(False, "--detach", "-d", help="Run in background; write pid + logs under profile home (M4)."),
 ) -> None:
     """Run the wire server — JSON-over-WebSocket API for TUI / IDE / web clients."""
+    if detach:
+        if _detach_to_background(pidfile_name="wire.pid", log_name="wire.log"):
+            return
     _configure_logging_once()
     from opencomputer.gateway.wire_server import WireServer
 
@@ -3721,22 +3791,54 @@ def _service_uninstall() -> None:
         typer.echo(f"note: {note}")
 
 
+def _format_service_status_line(s, backend_name: str) -> str:  # noqa: ANN001
+    """Format a backend status object into a one-line user-facing string."""
+    if s.running:
+        pid_str = f" (pid={s.pid})" if s.pid else ""
+        return f"running{pid_str} [{backend_name}]"
+    if s.enabled:
+        return f"enabled but not running [{backend_name}]"
+    if s.file_present:
+        return f"installed but not enabled [{backend_name}]"
+    return f"not installed [{backend_name}]"
+
+
 @service_app.command("status")
-def _service_status() -> None:
-    """Report whether the service is enabled + running (cross-platform)."""
+def _service_status(
+    watch: bool = typer.Option(False, "--watch", "-w", help="Poll status every 2s; exits when status changes (M4)."),
+    interval: float = typer.Option(2.0, "--interval", help="Poll interval in seconds (only meaningful with --watch)."),
+    timeout: float = typer.Option(60.0, "--timeout", help="Max seconds to watch before exiting non-zero. 0 = no timeout."),
+) -> None:
+    """Report whether the service is enabled + running (cross-platform).
+
+    With ``--watch``, the command polls until the status STRING changes
+    (e.g. "running" → "enabled but not running" or vice versa) and then
+    exits 0. Useful after ``oc service start`` to wait for the daemon
+    to actually come online.
+    """
+    import time
+
     from opencomputer.service.factory import get_backend
 
     backend = get_backend()
-    s = backend.status()
-    if s.running:
-        pid_str = f" (pid={s.pid})" if s.pid else ""
-        typer.echo(f"running{pid_str} [{s.backend}]")
-    elif s.enabled:
-        typer.echo(f"enabled but not running [{s.backend}]")
-    elif s.file_present:
-        typer.echo(f"installed but not enabled [{s.backend}]")
-    else:
-        typer.echo(f"not installed [{s.backend}]")
+    initial_status = backend.status()
+    initial_line = _format_service_status_line(initial_status, getattr(backend, "NAME", "?"))
+    typer.echo(initial_line)
+
+    if not watch:
+        return
+
+    deadline = time.monotonic() + timeout if timeout > 0 else None
+    while True:
+        time.sleep(interval)
+        status = backend.status()
+        line = _format_service_status_line(status, getattr(backend, "NAME", "?"))
+        if line != initial_line:
+            typer.echo(line)
+            return
+        if deadline is not None and time.monotonic() > deadline:
+            typer.echo(f"(timed out after {timeout}s — status unchanged)", err=True)
+            raise typer.Exit(1)
 
 
 # ─── new: cross-platform start / stop / logs / doctor ────────────────
