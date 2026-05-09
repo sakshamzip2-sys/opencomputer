@@ -467,8 +467,8 @@ class MemoryManager:
         are NOT rebound — skill roots and the global SOUL fallback are
         shared across profiles, not per-profile.
 
-        The per-profile BM25 + vector indices are swapped to point at the
-        new home so retrieval isolates cleanly across profiles.
+        Both per-profile indexes (BM25 and vector) are swapped to point
+        at the new home so retrieval isolates cleanly across profiles.
         """
         self.declarative_path = profile_home / "MEMORY.md"
         self.user_path = profile_home / "USER.md"
