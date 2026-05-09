@@ -123,10 +123,14 @@ def test_default_spawn_no_slash_assignee_falls_through_to_local(
         pid = db._default_spawn(task, str(kanban_home))
 
     assert pid == 9999
-    # Popen was called with `oc -p local-profile ... chat -q ...`
+    # Popen was called with `<oc-resolver> -p local-profile ... chat -q ...`
+    # The resolver returns either ["oc"]-shaped (PATH lookup), a sibling
+    # of sys.executable, or [sys.executable, "-m", "opencomputer"] —
+    # check the trailing argv shape rather than cmd[0] which now varies.
     cmd = popen.call_args.args[0]
-    assert cmd[0] == "oc"
     assert "local-profile" in cmd
+    assert "chat" in cmd
+    assert "-p" in cmd
 
 
 def test_default_spawn_propagates_remote_dispatch_error(kanban_home: Path):
