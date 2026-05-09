@@ -144,12 +144,16 @@ def _parse_hooks_block(block: Any) -> tuple[HookCommandConfig, ...]:
     valid_events = {e.value for e in HookEvent}
 
     def _coerce(raw: dict, default_event: str | None = None) -> HookCommandConfig | None:
-        # Support both "type": "command" and no-type-field entries; reject
-        # anything else (LLM-prompt hooks aren't wired in OpenComputer yet).
+        # Support both "type": "command" and no-type-field entries.
+        # "type": "prompt" (M8.1) and "type": "agent" (M8.2) are valid
+        # types parsed by sibling helpers — silently skip them here so
+        # the same YAML block can mix command, prompt, and agent hooks.
         hook_type = raw.get("type", "command")
+        if hook_type in ("prompt", "agent"):
+            return None
         if hook_type != "command":
             _log.warning(
-                "hooks: skipping entry with unsupported type %r (only 'command' is supported): %r",
+                "hooks: skipping entry with unsupported type %r (expected 'command', 'prompt', or 'agent'): %r",
                 hook_type,
                 raw,
             )
@@ -233,6 +237,371 @@ def _parse_hooks_block(block: Any) -> tuple[HookCommandConfig, ...]:
     return ()
 
 
+class ConfigYAMLError(Exception):
+    """Raised when a YAML config file cannot be parsed or has the wrong shape.
+
+    Centralizes the failure surface for :func:`load_yaml_dict`. Carries
+    the offending ``path`` and a short cause string so CLI surfaces can
+    render a user-facing message without re-formatting an exception.
+    """
+
+    def __init__(self, path: Path, cause: str | Exception) -> None:
+        self.path = path
+        self.cause = str(cause)
+        super().__init__(f"{path}: {self.cause}")
+
+
+def load_yaml_dict(
+    path: Path,
+    *,
+    encoding: str = "utf-8",
+    missing_ok: bool = True,
+) -> dict[str, Any]:
+    """Read a YAML file and return its top-level mapping.
+
+    M1.2 — single canonical YAML→dict loader for profile.yaml /
+    config.yaml. Replaces the scattered
+    ``yaml.safe_load(path.read_text()) or {}`` boilerplate so error
+    paths (missing file, parse failure, non-mapping top level) behave
+    the same everywhere a config file is read.
+
+    Behavior:
+        * ``missing_ok=True`` (default) and the file does not exist →
+          returns ``{}``. Mirrors the prior implicit behavior of
+          ``or {}`` after a missing-file ``not exists()`` check.
+        * ``missing_ok=False`` and the file does not exist → raises
+          :class:`FileNotFoundError`.
+        * Empty file → returns ``{}``.
+        * Parse failure → raises :class:`ConfigYAMLError` (chained from
+          ``yaml.YAMLError``).
+        * Top-level value is not a mapping (list, scalar, etc.) →
+          raises :class:`ConfigYAMLError`.
+
+    Callers add their own schema validation on top of the returned
+    dict. This helper deliberately does NOT validate keys, since
+    profile.yaml has both a strict consumer (``load_config``) and
+    lenient consumers (the ``oc plugin enable`` / ``oc profile
+    env-template`` paths) that share one parse but differ on what
+    they accept.
+    """
+    if not path.exists():
+        if missing_ok:
+            return {}
+        raise FileNotFoundError(path)
+    try:
+        raw = yaml.safe_load(path.read_text(encoding=encoding)) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigYAMLError(path, exc) from exc
+    if not isinstance(raw, dict):
+        raise ConfigYAMLError(
+            path,
+            f"top-level YAML must be a mapping, got {type(raw).__name__}",
+        )
+    return raw
+
+
+def _parse_prompt_hooks_block(block: Any) -> tuple[Any, ...]:
+    """Convert the top-level ``hooks:`` YAML block into a flat tuple of
+    :class:`HookPromptConfig`.
+
+    v1.1 plan-2 M8.1 (2026-05-09). Scans the same YAML block as
+    :func:`_parse_hooks_block` but only consumes entries with
+    ``type: prompt``. Entries without a ``type`` field, or with
+    ``type: command``, are silently skipped (the command parser
+    picks them up).
+
+    The frontmatter shape (per-entry) is::
+
+        - type: prompt
+          matcher: "Bash"          # optional regex over tool name
+          system: |                # required — the policy prompt
+            Reply 'block' if dangerous, 'allow' otherwise.
+          model: auto              # optional — auto = cheap-route default
+          returns: allow_block     # optional — allow_block | score
+          timeout_seconds: 5
+          token_budget_input: 500
+          token_budget_output: 100
+          score_threshold: 7.0     # only used when returns=score
+
+    Malformed entries (missing ``system`` body, unknown event, wrong
+    types) are logged at WARNING and skipped — one bad hook can't
+    brick the CLI.
+    """
+    from opencomputer.agent.config import HookPromptConfig
+    from plugin_sdk.hooks import HookEvent
+
+    if block is None:
+        return ()
+    valid_events = {e.value for e in HookEvent}
+    valid_returns = {"allow_block", "score"}
+
+    def _coerce(raw: dict, default_event: str | None = None):
+        if raw.get("type") != "prompt":
+            return None
+        event_name = raw.get("event", default_event)
+        if not isinstance(event_name, str) or not event_name:
+            _log.warning("prompt hooks: skipping entry missing event name: %r", raw)
+            return None
+        if event_name not in valid_events:
+            _log.warning(
+                "prompt hooks: skipping entry with unknown event %r (expected one of %s)",
+                event_name, sorted(valid_events),
+            )
+            return None
+        system = raw.get("system")
+        if not isinstance(system, str) or not system.strip():
+            _log.warning(
+                "prompt hooks: skipping entry missing 'system' body: %r", raw,
+            )
+            return None
+        matcher_value = raw.get("matcher")
+        if matcher_value is not None and not isinstance(matcher_value, str):
+            _log.warning(
+                "prompt hooks: skipping entry with non-string matcher: %r", raw,
+            )
+            return None
+        model = raw.get("model", "auto")
+        if not isinstance(model, str) or not model.strip():
+            model = "auto"
+        returns = raw.get("returns", "allow_block")
+        if returns not in valid_returns:
+            _log.warning(
+                "prompt hooks: skipping entry with unknown returns=%r "
+                "(expected %s)",
+                returns, sorted(valid_returns),
+            )
+            return None
+        try:
+            timeout_seconds = float(raw.get("timeout_seconds", 5.0))
+        except (TypeError, ValueError):
+            _log.warning(
+                "prompt hooks: skipping entry with non-numeric timeout: %r", raw,
+            )
+            return None
+        try:
+            token_budget_input = int(raw.get("token_budget_input", 500))
+            token_budget_output = int(raw.get("token_budget_output", 100))
+        except (TypeError, ValueError):
+            _log.warning(
+                "prompt hooks: skipping entry with non-integer token budgets: %r",
+                raw,
+            )
+            return None
+        try:
+            score_threshold = float(raw.get("score_threshold", 7.0))
+        except (TypeError, ValueError):
+            _log.warning(
+                "prompt hooks: skipping entry with non-numeric score_threshold: %r",
+                raw,
+            )
+            return None
+        return HookPromptConfig(
+            event=event_name,
+            system=system,
+            model=model,
+            returns=returns,
+            matcher=matcher_value,
+            timeout_seconds=timeout_seconds,
+            token_budget_input=token_budget_input,
+            token_budget_output=token_budget_output,
+            score_threshold=score_threshold,
+        )
+
+    parsed: list = []
+
+    if isinstance(block, list):
+        for entry in block:
+            if not isinstance(entry, dict):
+                continue
+            spec = _coerce(entry)
+            if spec is not None:
+                parsed.append(spec)
+        return tuple(parsed)
+
+    if isinstance(block, dict):
+        for event_name, entries in block.items():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                spec = _coerce(entry, default_event=event_name)
+                if spec is not None:
+                    parsed.append(spec)
+        return tuple(parsed)
+
+    return ()
+
+
+def _parse_agent_hooks_block(block: Any) -> tuple[Any, ...]:
+    """Convert the top-level ``hooks:`` YAML block into a flat tuple of
+    :class:`HookAgentConfig`.
+
+    v1.1 plan-2 M8.2 (2026-05-09). Sibling to
+    :func:`_parse_prompt_hooks_block`; consumes only entries with
+    ``type: agent``. The same YAML block can carry ``type: command``,
+    ``type: prompt``, and ``type: agent`` entries side-by-side; each
+    parser claims the entries that match its discriminator and silently
+    ignores the others.
+
+    Frontmatter shape::
+
+        - type: agent
+          matcher: "Bash"
+          prompt: |                  # required
+            Inspect the command and reply 'block: <reason>' or 'allow'.
+          agent: code-reviewer       # optional registered template
+          isolation: copy            # none | worktree | copy (default copy)
+          max_turns: 5
+          timeout_seconds: 60
+          returns: allow_block       # or 'structured'
+          token_budget_total: 5000
+
+    Malformed entries (missing ``prompt`` body, unknown event /
+    isolation / returns) are logged at WARNING and skipped.
+    """
+    from opencomputer.agent.config import HookAgentConfig
+    from plugin_sdk.hooks import HookEvent
+
+    if block is None:
+        return ()
+    valid_events = {e.value for e in HookEvent}
+    valid_isolations = {"none", "worktree", "copy"}
+    valid_returns = {"allow_block", "structured"}
+
+    def _coerce(raw: dict, default_event: str | None = None):
+        if raw.get("type") != "agent":
+            return None
+        event_name = raw.get("event", default_event)
+        if not isinstance(event_name, str) or not event_name:
+            _log.warning("agent hooks: skipping entry missing event: %r", raw)
+            return None
+        if event_name not in valid_events:
+            _log.warning(
+                "agent hooks: skipping entry with unknown event %r (expected one of %s)",
+                event_name, sorted(valid_events),
+            )
+            return None
+        prompt = raw.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            _log.warning(
+                "agent hooks: skipping entry missing 'prompt' body: %r", raw,
+            )
+            return None
+        matcher_value = raw.get("matcher")
+        if matcher_value is not None and not isinstance(matcher_value, str):
+            _log.warning(
+                "agent hooks: skipping entry with non-string matcher: %r", raw,
+            )
+            return None
+        agent = raw.get("agent", "")
+        if not isinstance(agent, str):
+            _log.warning(
+                "agent hooks: skipping entry with non-string agent: %r", raw,
+            )
+            return None
+        isolation = raw.get("isolation", "copy")
+        if isolation not in valid_isolations:
+            _log.warning(
+                "agent hooks: skipping entry with unknown isolation=%r "
+                "(expected one of %s)",
+                isolation, sorted(valid_isolations),
+            )
+            return None
+        returns = raw.get("returns", "allow_block")
+        if returns not in valid_returns:
+            _log.warning(
+                "agent hooks: skipping entry with unknown returns=%r "
+                "(expected one of %s)",
+                returns, sorted(valid_returns),
+            )
+            return None
+        try:
+            max_turns = int(raw.get("max_turns", 5))
+            timeout_seconds = float(raw.get("timeout_seconds", 60.0))
+            token_budget_total = int(raw.get("token_budget_total", 5000))
+        except (TypeError, ValueError):
+            _log.warning(
+                "agent hooks: skipping entry with non-numeric budgets: %r", raw,
+            )
+            return None
+        if max_turns < 1:
+            _log.warning(
+                "agent hooks: skipping entry with non-positive max_turns: %r", raw,
+            )
+            return None
+        return HookAgentConfig(
+            event=event_name,
+            prompt=prompt,
+            agent=agent.strip(),
+            isolation=isolation,
+            returns=returns,
+            matcher=matcher_value,
+            max_turns=max_turns,
+            timeout_seconds=timeout_seconds,
+            token_budget_total=token_budget_total,
+        )
+
+    parsed: list = []
+    if isinstance(block, list):
+        for entry in block:
+            if not isinstance(entry, dict):
+                continue
+            spec = _coerce(entry)
+            if spec is not None:
+                parsed.append(spec)
+        return tuple(parsed)
+
+    if isinstance(block, dict):
+        for event_name, entries in block.items():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                spec = _coerce(entry, default_event=event_name)
+                if spec is not None:
+                    parsed.append(spec)
+        return tuple(parsed)
+    return ()
+
+
+def _normalize_mcp_server_dict(raw: dict) -> dict:
+    """Convert Hermes-spec nested MCP-server YAML to flat ``MCPServerConfig`` fields.
+
+    Hermes spec form::
+
+        mcp_servers:
+          github:
+            tools:
+              include: [create_issue, list_issues]
+              prompts: false
+              resources: false
+
+    Maps to OC dataclass fields ``tools_allow``, ``tools_deny``,
+    ``prompts_enabled``, ``resources_enabled``. The flat OC-native form
+    is left unchanged.
+
+    G9 (Hermes parity, 2026-05-09).
+    """
+    out = dict(raw)
+    tools = out.pop("tools", None)
+    if isinstance(tools, dict):
+        if "include" in tools:
+            out["tools_allow"] = list(tools["include"])
+        if "exclude" in tools:
+            out["tools_deny"] = list(tools["exclude"])
+        if "prompts" in tools:
+            out["prompts_enabled"] = bool(tools["prompts"])
+        if "resources" in tools:
+            out["resources_enabled"] = bool(tools["resources"])
+    elif tools is not None:
+        # Non-dict (e.g. a stray list) — restore so the caller sees the
+        # original shape and can complain about it.
+        out["tools"] = tools
+    return out
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load config from YAML, applying overrides on top of defaults.
 
@@ -243,25 +612,46 @@ def load_config(path: Path | None = None) -> Config:
     """
     cfg_path = path or config_file_path()
     base = default_config()
-    if not cfg_path.exists():
-        return base
     try:
-        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as e:
-        raise RuntimeError(f"Failed to parse {cfg_path}: {e}") from e
-    if not isinstance(raw, dict):
-        raise RuntimeError(f"Config file {cfg_path} must be a YAML mapping")
+        raw = load_yaml_dict(cfg_path)
+    except ConfigYAMLError as exc:
+        raise RuntimeError(f"Failed to parse {cfg_path}: {exc.cause}") from exc
+    if not raw:
+        return base
 
     # Extract and parse the hooks block before applying regular overrides
     # (so the nested/list shape doesn't go through _apply_overrides, which
     # only knows about flat tuple-of-dataclasses).
     hooks_block = raw.pop("hooks", None)
     parsed_hooks = _parse_hooks_block(hooks_block)
+    # v1.1 plan-2 M8.1 (2026-05-09) — same YAML block also feeds prompt
+    # hooks. Each parser sniffs `type:` and only consumes entries it
+    # understands.
+    parsed_prompt_hooks = _parse_prompt_hooks_block(hooks_block)
+    # v1.1 plan-2 M8.2 (2026-05-09) — and agent hooks.
+    parsed_agent_hooks = _parse_agent_hooks_block(hooks_block)
+
+    # G9 (Hermes parity, 2026-05-09) — normalize the nested
+    # ``tools: {include, exclude, prompts, resources}`` form into the
+    # flat dataclass-field form before _apply_overrides walks it.
+    mcp_block = raw.get("mcp")
+    if isinstance(mcp_block, dict):
+        servers_block = mcp_block.get("servers")
+        if isinstance(servers_block, list):
+            mcp_block["servers"] = [
+                _normalize_mcp_server_dict(s) if isinstance(s, dict) else s
+                for s in servers_block
+            ]
 
     cfg = _apply_overrides(base, raw)
-    if parsed_hooks:
+    if parsed_hooks or parsed_prompt_hooks or parsed_agent_hooks:
         kwargs = {f.name: getattr(cfg, f.name) for f in fields(cfg)}
-        kwargs["hooks"] = parsed_hooks
+        if parsed_hooks:
+            kwargs["hooks"] = parsed_hooks
+        if parsed_prompt_hooks:
+            kwargs["prompt_hooks"] = parsed_prompt_hooks
+        if parsed_agent_hooks:
+            kwargs["agent_hooks"] = parsed_agent_hooks
         cfg = Config(**kwargs)
     return cfg
 
@@ -388,10 +778,12 @@ def set_value(cfg: Config, key: str, value: Any) -> Config:
 
 
 __all__ = [
+    "ConfigYAMLError",
     "config_file_path",
-    "load_config",
-    "save_config",
     "get_value",
+    "load_config",
+    "load_yaml_dict",
+    "save_config",
     "set_value",
     "_parse_hooks_block",
 ]

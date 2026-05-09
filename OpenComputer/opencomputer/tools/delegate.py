@@ -197,6 +197,25 @@ class DelegateTool(BaseTool):
                             "Defaults to false when omitted."
                         ),
                     },
+                    # v1.1 plan-2 M4.1 + M4.2 (2026-05-09): per-subagent
+                    # filesystem isolation. 'none' (default) shares parent
+                    # cwd. 'worktree' = git worktree on a fresh branch
+                    # (parent must be in a git repo). 'copy' = shutil.copytree
+                    # to a tmpdir (works on non-git cwd; honours
+                    # .opencomputer/sandbox.ignore for skipping node_modules).
+                    "isolation": {
+                        "type": "string",
+                        "enum": ["none", "worktree", "copy"],
+                        "description": (
+                            "Per-subagent filesystem isolation. 'none' (default) "
+                            "= share parent cwd. 'worktree' = git worktree on a "
+                            "fresh branch (parent must be in a git repo). "
+                            "'copy' = shutil.copytree to a tmpdir. Use 'worktree' "
+                            "for parallel agents editing the same files; 'copy' "
+                            "for one-shot exploration that mustn't touch the "
+                            "working tree."
+                        ),
+                    },
                     # Hermes parity (2026-05-08): parallel batch shape.
                     "tasks": {
                         "type": "array",
@@ -557,78 +576,154 @@ class DelegateTool(BaseTool):
         except Exception:
             _registry_record = None
 
+        # v1.1 plan-2 M4.1 + M4.2 (2026-05-09): isolation sandbox for
+        # the child. 'none' (default) is a no-op — equivalent to the
+        # pre-M4 behavior.
+        raw_isolation = (call.arguments.get("isolation") or "none").strip().lower()
+        if raw_isolation not in ("none", "worktree", "copy"):
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    f"Error: 'isolation' must be one of "
+                    f"none / worktree / copy (got {raw_isolation!r})."
+                ),
+                is_error=True,
+            )
+
+        from opencomputer.agent.delegate_isolation import (
+            IsolationFailed,
+            WorktreeNotAvailable,
+            acquire_isolation,
+        )
+
         coordinator = get_default_coordinator()
         try:
-            async with coordinator.acquire_paths(raw_paths):
-                # Propagate the parent's runtime context — plan mode, yolo mode,
-                # etc. must apply to subagents too, otherwise delegating becomes
-                # an escape hatch.
-                # III.5: pass the template's system_prompt to the child loop.
-                # When ``template is None`` the kwarg is ``None`` and the child
-                # builds its usual declarative + skills + memory + SOUL prompt
-                # (existing behavior). With a template, the template BODY is the
-                # whole prompt — no further injection on top.
-                result = await subagent_loop.run_conversation(
-                    user_message=task,
-                    runtime=child_runtime,   # ← was self._current_runtime
-                    system_prompt_override=(
-                        template.system_prompt if template is not None else None
-                    ),
-                    initial_messages=child_initial_messages or None,
-                )
-                # D7: emit SubagentStop hook when the delegated subagent finishes
-                # so plugins can log / summarize / react. Fire-and-forget.
-                try:
-                    from opencomputer.hooks.engine import engine as _hook_engine
-                    from plugin_sdk.hooks import HookContext, HookEvent
-
-                    _hook_engine.fire_and_forget(
-                        HookContext(
-                            event=HookEvent.SUBAGENT_STOP,
-                            session_id=result.session_id,
-                            runtime=child_runtime,
-                        )
+            async with acquire_isolation(raw_isolation) as _iso_ctx:
+                # When the sandbox switched the cwd, propagate it into the
+                # child loop via runtime.custom. RuntimeContext is frozen
+                # so we rebuild it; existing custom keys are preserved.
+                if raw_isolation != "none":
+                    _child_custom = dict(child_runtime.custom or {})
+                    _child_custom["delegate_isolation_cwd"] = str(_iso_ctx.cwd)
+                    _child_custom["delegate_isolation_mode"] = raw_isolation
+                    child_runtime = dataclasses.replace(
+                        child_runtime, custom=_child_custom
                     )
-                except Exception:
-                    # Hook emission must never break the main delegate flow.
-                    pass
 
-                # T3.2 (PR-8): publish DelegationCompleteEvent so MemoryBridge
-                # subscribers (and any other bus listener) can react. Best-effort.
-                try:
-                    from opencomputer.ingestion.bus import default_bus as _bus
-                    from plugin_sdk.ingestion import DelegationCompleteEvent
-
-                    _child_outcome = "failure" if result.final_message.content is None else "success"
-                    _bus.publish(DelegationCompleteEvent(
-                        session_id=call.id,  # parent tool-call id as session context
-                        source="agent_loop",
-                        parent_session_id="",  # parent session_id unavailable here; set to empty
-                        child_session_id=result.session_id,
-                        child_outcome=_child_outcome,
-                    ))
-                except Exception:
-                    pass
-
-                # Hermes parity: mark the subagent record completed.
-                if _registry_record is not None:
+                async with coordinator.acquire_paths(raw_paths):
+                    # Propagate the parent's runtime context — plan mode, yolo mode,
+                    # etc. must apply to subagents too, otherwise delegating becomes
+                    # an escape hatch.
+                    # III.5: pass the template's system_prompt to the child loop.
+                    # When ``template is None`` the kwarg is ``None`` and the child
+                    # builds its usual declarative + skills + memory + SOUL prompt
+                    # (existing behavior). With a template, the template BODY is the
+                    # whole prompt — no further injection on top.
+                    result = await subagent_loop.run_conversation(
+                        user_message=task,
+                        runtime=child_runtime,   # ← was self._current_runtime
+                        system_prompt_override=(
+                            template.system_prompt if template is not None else None
+                        ),
+                        initial_messages=child_initial_messages or None,
+                    )
+                    # D7: emit SubagentStop hook when the delegated subagent finishes
+                    # so plugins can log / summarize / react. Fire-and-forget.
                     try:
-                        from datetime import UTC
-                        from datetime import datetime as _dt
+                        from opencomputer.hooks.engine import engine as _hook_engine
+                        from plugin_sdk.hooks import HookContext, HookEvent
 
-                        from opencomputer.agent.subagent_registry import SubagentRegistry
-                        SubagentRegistry.instance().update(
-                            _registry_record.agent_id,
-                            state="completed",
-                            ended_at=_dt.now(UTC),
+                        _hook_engine.fire_and_forget(
+                            HookContext(
+                                event=HookEvent.SUBAGENT_STOP,
+                                session_id=result.session_id,
+                                runtime=child_runtime,
+                            )
                         )
+                    except Exception:
+                        # Hook emission must never break the main delegate flow.
+                        pass
+
+                    # T3.2 (PR-8): publish DelegationCompleteEvent so MemoryBridge
+                    # subscribers (and any other bus listener) can react. Best-effort.
+                    try:
+                        from opencomputer.ingestion.bus import default_bus as _bus
+                        from plugin_sdk.ingestion import DelegationCompleteEvent
+
+                        _child_outcome = "failure" if result.final_message.content is None else "success"
+                        _bus.publish(DelegationCompleteEvent(
+                            session_id=call.id,  # parent tool-call id as session context
+                            source="agent_loop",
+                            parent_session_id="",  # parent session_id unavailable here; set to empty
+                            child_session_id=result.session_id,
+                            child_outcome=_child_outcome,
+                        ))
                     except Exception:
                         pass
 
-                return ToolResult(
-                    tool_call_id=call.id,
-                    content=result.final_message.content,
-                )
+                    # Hermes parity: mark the subagent record completed.
+                    if _registry_record is not None:
+                        try:
+                            from datetime import UTC
+                            from datetime import datetime as _dt
+
+                            from opencomputer.agent.subagent_registry import SubagentRegistry
+                            SubagentRegistry.instance().update(
+                                _registry_record.agent_id,
+                                state="completed",
+                                ended_at=_dt.now(UTC),
+                            )
+                        except Exception:
+                            pass
+
+                    return ToolResult(
+                        tool_call_id=call.id,
+                        content=result.final_message.content,
+                    )
+        except WorktreeNotAvailable as exc:
+            # M4.1: parent cwd isn't a git repo. Surface a clean error so
+            # the caller can switch to isolation='copy' or omit isolation.
+            if _registry_record is not None:
+                try:
+                    from datetime import UTC
+                    from datetime import datetime as _dt
+
+                    from opencomputer.agent.subagent_registry import SubagentRegistry
+                    SubagentRegistry.instance().update(
+                        _registry_record.agent_id,
+                        state="failed",
+                        ended_at=_dt.now(UTC),
+                        error=str(exc)[:200],
+                    )
+                except Exception:
+                    pass
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"Error: {exc}",
+                is_error=True,
+            )
+        except IsolationFailed as exc:
+            # M4.1 + M4.2: sandbox creation failed (e.g. git worktree
+            # add returned non-zero, or copytree raised OSError).
+            if _registry_record is not None:
+                try:
+                    from datetime import UTC
+                    from datetime import datetime as _dt
+
+                    from opencomputer.agent.subagent_registry import SubagentRegistry
+                    SubagentRegistry.instance().update(
+                        _registry_record.agent_id,
+                        state="failed",
+                        ended_at=_dt.now(UTC),
+                        error=str(exc)[:200],
+                    )
+                except Exception:
+                    pass
+            return ToolResult(
+                tool_call_id=call.id,
+                content=f"Error: {exc}",
+                is_error=True,
+            )
         except DelegationLockTimeout as exc:
             # Hermes parity: mark the subagent record failed on lock timeout.
             if _registry_record is not None:

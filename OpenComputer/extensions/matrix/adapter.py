@@ -110,6 +110,12 @@ class MatrixAdapter(BaseChannelAdapter):
         self._inbound_enabled: bool = bool(
             config.get("inbound_sync", config.get("enable_sync", False)),
         )
+        # Hermes-security-v2 parity: consent-gate approval surface.
+        # Distinct from approval_queue (which is the matrix-native
+        # 2-emoji allow/deny). Maps target-event-id → request_token so
+        # inbound reactions can be mapped back to verbs and dispatched.
+        self._consent_approval_targets: dict[str, str] = {}
+        self._approval_callback: Any = None  # async (verb, token) -> None
 
     async def connect(self) -> bool:
         """Verify the access token via ``GET /_matrix/client/v3/account/whoami``."""
@@ -476,6 +482,103 @@ class MatrixAdapter(BaseChannelAdapter):
                         "matrix approval: %s reacted with %r → resolved %s",
                         evt.get("sender", "?"), emoji, target,
                     )
+                    continue
+
+                # Hermes-security-v2 parity: consent-gate approval via
+                # 4-emoji reaction. Distinct from approval_queue above.
+                token = self._consent_approval_targets.get(target)
+                if token and self._approval_callback is not None:
+                    verb = self._CONSENT_REACTION_VERBS.get(emoji)
+                    if verb is not None:
+                        # Drop the target so a second tap can't re-fire.
+                        self._consent_approval_targets.pop(target, None)
+                        try:
+                            asyncio.create_task(
+                                self._approval_callback(verb, token),
+                                name="matrix-consent-approval-cb",
+                            )
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "matrix consent approval callback failed",
+                            )
+                        logger.info(
+                            "matrix consent approval: %s reacted %r "
+                            "→ verb=%s token=%s",
+                            evt.get("sender", "?"), emoji, verb, token[:6],
+                        )
+
+
+    # ------------------------------------------------------------------
+    # Hermes-security-v2 parity — consent-gate approval surface
+    # ------------------------------------------------------------------
+
+    #: Emoji → verb map for consent-gate approvals via matrix reactions.
+    #: Distinct from ``approval_queue`` (the 2-emoji allow/deny surface).
+    _CONSENT_REACTION_VERBS: dict[str, str] = {
+        "✅": "once",
+        "🕒": "session",
+        "🔒": "always",
+        "❌": "deny",
+    }
+
+    def set_approval_callback(self, cb: Any) -> None:
+        """Register an async callable ``(verb: str, token: str) -> None``.
+
+        Called by the inbound-reaction loop when a user reacts to a
+        consent-gate approval prompt with one of the 4 known emoji.
+        """
+        self._approval_callback = cb
+
+    async def send_approval_request(
+        self,
+        *,
+        chat_id: str,
+        prompt_text: str,
+        request_token: str,
+    ) -> SendResult:
+        """Post a consent-gate approval prompt + seed 4 emoji reactions.
+
+        Hermes parity for the gateway approval flow on Matrix. Mirrors
+        :meth:`TelegramAdapter.send_approval_request` and Slack's
+        equivalent — the user reacts with one of ✅ / 🕒 / 🔒 / ❌ and
+        ``_handle_sync_response`` maps the reaction to a verb +
+        ``approval_callback(verb, request_token)``.
+
+        Returns the SendResult of the prompt-message send. The 4 self-
+        reactions are best-effort — failure to seed buttons doesn't
+        block the prompt itself.
+        """
+        body = (
+            f"{prompt_text}\n\n"
+            "React with: ✅ once  •  🕒 session  •  🔒 always  •  ❌ deny"
+        )
+        result = await self.send(chat_id, body)
+        if not result.success:
+            return result
+
+        target_event_id = result.message_id
+        if not target_event_id:
+            logger.warning(
+                "matrix send_approval_request: post succeeded but no "
+                "event_id in metadata — cannot wire reactions",
+            )
+            return result
+
+        self._consent_approval_targets[target_event_id] = request_token
+
+        # Best-effort seed of the 4 self-reactions so users can tap
+        # rather than type the emoji. Failure is logged but doesn't
+        # invalidate the approval flow — the user can still react.
+        for emoji in ("✅", "🕒", "🔒", "❌"):
+            try:
+                await self.send_reaction(chat_id, target_event_id, emoji)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "matrix send_approval_request: failed to seed %s",
+                    emoji, exc_info=True,
+                )
+
+        return result
 
 
 __all__ = ["MatrixAdapter"]
