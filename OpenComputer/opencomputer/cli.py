@@ -3936,6 +3936,11 @@ app.add_typer(session_app, name="sessions")
 app.add_typer(voice_app, name="voice")
 app.add_typer(webhook_app, name="webhook")
 
+# Dormant-feature activation wizard (M2)
+from opencomputer.cli_activate import activate_app  # noqa: E402
+
+app.add_typer(activate_app, name="activate")
+
 # Hermes channel-port (PR 5.4) — Telegram DM Topics CLI
 from opencomputer.cli_telegram import telegram_app  # noqa: E402
 
