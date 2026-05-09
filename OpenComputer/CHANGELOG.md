@@ -17,6 +17,168 @@ The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEAS
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-3 M9.5: `ToolCallClassifier` wired into the agent loop (2026-05-09)
+
+The M9.2 classifier engine (with poison-resistance + block-budget) shipped in PR #555; this PR plumbs it into `AgentLoop` so it actually fires before each tool call when `effective_permission_mode == "auto"`.
+
+```python
+# agent/loop.py — before consent gate
+if _eff_mode == "auto" and self._tool_call_classifier is not None:
+    decision = await self._tool_call_classifier.classify(
+        session_id=session_id,
+        user_messages=[m for m in messages if m.role == "user"],
+        tool_calls_so_far=prior_calls,
+        pending=c,
+    )
+    if decision.verdict == ClassifierVerdict.BLOCK:
+        blocked.setdefault(c.id, f"auto-mode classifier blocked: {decision.rationale}")
+```
+
+Wiring details:
+- New `tool_call_classifier: Any = None` kwarg on `AgentLoop.__init__` so the bootstrapper can inject it without breaking old constructors.
+- `_dispatch_tool_calls` accepts `messages` so the classifier can build its own (poison-resistant, no `tool_result` content) input view.
+- Block-budget exhaustion logs a WARN telling the operator to resume via `/auto off + /auto`.
+- Classifier failures wrap in try/except so a buggy classifier never breaks the loop.
+
+7 new wiring tests + 27 pre-existing classifier engine tests = 34/34 pass. Pairs with PR #555 (engine) and PR #561 (block budget + audit chain).
+
+### Added — v1.1 Plan-3 M9.1: `permission_mode = "auto"` equivalence pin (2026-05-09)
+
+Schema-and-pin slice of plan-3 M9. The `auto` `PermissionMode` value, the `--auto` CLI flag, the `/auto` slash command, and the wire `ChatParams.permission_mode = "auto"` were already in place individually; this PR adds `tests/test_auto_mode_runtime.py` (13 tests) which pins the M9 acceptance criterion: setting auto via CLI / slash / wire / legacy `--yolo` all surface the SAME `effective_permission_mode`. Catches drift if any single entry point is rewritten without the others.
+
+**Why this is a tiny PR**: every M9.1 surface listed in `docs/superpowers/plans/2026-05-08-v1-1-plan-3-heavy-features-and-parked.md` was already shipped piecemeal (CLI flag at `cli.py:2342`, slash command at `agent/slash_commands_impl/auto_cmd.py`, wire param at `gateway/protocol_v2.py:118`, helper at `plugin_sdk/permission_mode.py`). The audit caught only one missing piece — the dedicated equivalence test the plan calls for. Shipping it as the M9.1 closure rather than re-deriving the surface from scratch.
+
+**M9.2 (the `ToolCallClassifier` that intercepts tool calls in auto mode) remains the security-critical multi-day item** — it stays separate per its own plan-3 preamble. M9.1's `auto` mode today simply skips the F1 ConsentGate (same as legacy `--yolo`); M9.2 is what makes auto mode actually safe via per-call adversarial classification.
+
+### Added — v1.1 Plan-3 M10.1 + M10.4: per-channel routing schema + `oc routing` CLI (2026-05-09)
+
+Schema-and-dry-run slice of plan-3 M10. Operators can now declare routing rules in their `config.yaml` and inspect them with `oc routing list` / `oc routing test` — without the gateway dispatcher actually consuming them yet (M10.2/M10.3 land separately). The schema is the load-bearing piece; the CLI is what makes the schema reviewable.
+
+```yaml
+# ~/.opencomputer/<profile>/config.yaml
+routing:
+  rules:
+    - match: {platform: slack, channel: "#security-alerts"}
+      agent: security-reviewer
+    - match: {platform: telegram, peer: "12345"}
+      agent: executive
+      profile: work
+    - match: {platform: discord, guild: myguild, role: admin}
+      agent: admin-only
+    - match: {platform: discord, guild: myguild}
+      agent: guild-default
+  default:
+    agent: fallback
+```
+
+```
+$ oc routing list
+Routing rules (4 — most-specific first):
+  1. [spec=1001] platform='telegram', chat_id='12345', peer='12345' → agent='executive', profile='work'
+  2. [spec=301]  platform='discord', guild='myguild', role='admin' → agent='admin-only'
+  3. [spec=141]  platform='slack', channel='security-alerts' → agent='security-reviewer'
+  4. [spec=101]  platform='discord', guild='myguild' → agent='guild-default'
+
+Default: agent='fallback'
+
+$ oc routing test discord U777 --guild myguild --role admin
+Input: platform='discord', chat_id='U777', guild='myguild', role='admin'
+→ Matched rule (specificity=301): agent='admin-only'
+
+$ oc routing test matrix U999
+Input: platform='matrix', chat_id='U999'
+→ DEFAULT (no rule matched). agent='fallback'
+```
+
+**Most-specific-wins precedence (OpenClaw chain):**
+
+```
+exact peer (chat_id) → guild + role → guild → team → account → channel → platform → default
+```
+
+`peer:` is honored as an alias for `chat_id:` so YAML copy-pasted from OpenClaw works without renaming. `#channel` is normalized to `channel` so Slack-flavored configs match Discord-flavored event metadata identically. Authors can list rules in any order — the parser sorts them by `_match_specificity` so a less-specific rule listed first never eclipses a more-specific one.
+
+**What's deferred (intentional honest scope):**
+
+* **M10.2 — dispatcher integration** (gateway reads rules → applies agent template per inbound message). The plan-3 doc has this as a separate 1-2 day item. Schema is in place so M10.2 only needs to flip the `Dispatch.handle_message` lookup.
+* **M10.3 — per-rule profile rebind** (`profile:` field on a rule swaps the gateway's per-message context to that profile's memory + creds). Requires plan-1 M1.4 (per-profile env). Schema honors `profile:` today and round-trips it through YAML; the gateway plumbing is the M10.3 work.
+
+**Files:**
+
+- `opencomputer/agent/config.py` — `RoutingMatch`, `RoutingRule`, `RoutingDefault`, `RoutingConfig` dataclasses + `Config.routing` field (additive default; existing configs unchanged).
+- `opencomputer/agent/routing.py` (NEW) — `_match_specificity` + `sort_rules_by_specificity` + `match_rule` + `resolve_routing_rule(event)` + `resolve_routing_rule_by_fields(dict)` (the CLI's entry point — no MessageEvent dep).
+- `opencomputer/agent/config_store.py` — `_parse_routing_block` parser + `load_config` plumb-through; `_to_yaml_dict` writer for round-trip. Drops unknown match dimensions with a WARNING (forward-compat for un-ported OpenClaw fields); rejects rules missing `agent`.
+- `opencomputer/cli_routing.py` (NEW) — `routing_app` Typer with `list` + `test` commands. Both support `--output text|json` for scripting / piping to jq.
+- `opencomputer/cli.py` — `app.add_typer(routing_app, name="routing")`.
+
+**Tests (30 new across 4 files, all green):**
+
+- `tests/test_routing_precedence.py` — 11 tests covering every step of the precedence chain (chat_id beats guild+channel; peer alias matches chat_id; guild+role beats guild alone; channel beats platform; team beats channel; account beats channel; guild beats team beats account; sort is order-independent + stable for equal specificity).
+- `tests/test_routing_default_fallback.py` — 3 tests: no rules → default fires; rules present but none match → default; default agent defaults to "default".
+- `tests/test_routing_yaml_round_trip.py` — 8 tests: minimal block parses; full block with profile parses; empty block returns None (Config.routing untouched); rule missing `agent` is skipped with WARNING; unknown match dimension dropped with WARNING; channel `#foo` normalizes to `foo`; full Config → YAML → reload round-trips with most-specific-first ordering preserved; config without `routing:` block leaves Config.routing at default.
+- `tests/test_cli_routing.py` — 8 tests: `list` text + JSON; no rules listed; `test` matches security channel + admin role; falls through to default; JSON output; `#channel` normalization at the CLI flag layer.
+
+### Added — v1.1 Plan-4 M13: plugin-authored top-level CLI subcommands (2026-05-09)
+
+Closes the long-standing audit gap that plugins could register tools, providers, channels, hooks, slash commands, MCPs, agent templates, and skills, but could **not** ship `oc <plugin-id> <subcommand>` Typer subcommands. Slash commands were the in-session workaround; CLI workflows had no equivalent.
+
+**SDK surface (additive — `plugin_sdk` consumers untouched):**
+
+```python
+# In your plugin's register(api):
+import typer
+from plugin_sdk import PluginManifest
+
+jira_app = typer.Typer(help="Jira ops from the CLI.")
+
+@jira_app.command()
+def create(title: str, project: str = "OPS") -> None:
+    ...
+
+@jira_app.command()
+def list(status: str = "open") -> None:
+    ...
+
+def manifest():
+    return PluginManifest(
+        id="jira-plugin",
+        name="Jira",
+        version="1.0.0",
+        entry="plugin",
+        cli_commands=("jira",),                  # advertise without loading
+        cli_commands_profiles=("work",),         # optional — restrict to a profile
+    )
+
+def register(api):
+    api.register_cli_command("jira", jira_app)   # core hard-fails on collisions
+```
+
+End user gets `oc jira create --title "ship M13" --project OPS` — the plugin loads only on the first invocation; `oc --help` lists `jira` after a cheap manifest scan that imports nothing.
+
+**Conflict resolution (three layers):**
+
+1. **Core vs plugin** — `cli_commands` containing a name in `CORE_RESERVED_CLI_NAMES` (the ~50 verbs core ships: `chat`, `gateway`, `wire`, `doctor`, `setup`, `plugin`, `profile`, `preset`, `mcp`, `cron`, `consent`, `skills`, `session`, `checkpoints`, `worktrees`, `rules`, `hooks`, …) is **always** fatal — `replace=True` does not bypass.
+2. **Plugin vs plugin** — first registration wins; second raises `PluginCLINameCollision` unless `replace=True`. Authors coordinate via the `<plugin-id>-<verb>` prefix convention.
+3. **Profile-scoped** — `cli_commands_profiles: ["work"]` hides the command under any other active profile. Empty / `None` = exposed under every profile.
+
+**Why this is M13 and not M12:** M12 (`/btw` post-turn skill suggestion) had already shipped via `slash_commands_impl/btw_cmd.py` before this plan was written; the plan-4 audit caught that and dropped it. M13 was the only remaining unshipped plan-4 item.
+
+**Files:**
+
+- `plugin_sdk/core.py` — `PluginManifest.cli_commands: tuple[str, ...]` + `cli_commands_profiles: tuple[str, ...] | None` (additive; defaults preserve every existing manifest).
+- `opencomputer/plugins/manifest_validator.py` — pydantic schema + shell-safe identifier validator (rejects `--evil`, `""`).
+- `opencomputer/plugins/discovery.py` — threads the new fields through `_build_manifest`.
+- `opencomputer/plugins/loader.py` — `PluginAPI.register_cli_command(name, app, *, replace=False)` + `PluginCLINameCollision` exception + shared `_cli_commands` table on `PluginAPI`.
+- `opencomputer/plugins/registry.py` — `PluginRegistry.cli_commands: dict[str, Any]` + threaded through `api()`.
+- `opencomputer/plugins/cli_registry.py` (NEW) — `CORE_RESERVED_CLI_NAMES` constant + `register_plugin_cli_commands(typer_app)` lazy-attacher + `_attach_lazy_command(...)` placeholder.
+- `opencomputer/cli.py` — `main()` calls `register_plugin_cli_commands(app)` after profile / env setup, before `app()`.
+
+**Tests (29 new across 3 files):**
+
+- `tests/test_plugin_cli_register.py` — happy path register; duplicate raises; `replace=True` overrides; lazy dispatch into real Typer; missing `register_cli_command()` errors clearly; manifest schema accepts `cli_commands`; rejects `--` prefix and empty entries.
+- `tests/test_plugin_cli_core_collision.py` — parametrized over 13 core verbs; `replace=True` does not bypass core-collision; sanity check that the spec's reserved set is in `CORE_RESERVED_CLI_NAMES`.
+- `tests/test_plugin_cli_help_listing.py` — `--help` lists advertised name; `load_plugin` is called **zero** times during `--help`; actual invocation triggers load + dispatches; profile-scoped commands hidden under inactive profile, visible under active profile.
+
 ### Added — v1.1 Plan-3 M6.1: `MEMORY.md` BM25 index (2026-05-09)
 
 Foundation for v1.1 plan-3 M6 Active Memory work. Adds

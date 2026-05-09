@@ -566,6 +566,11 @@ class AgentLoop:
         is_reviewer: bool = False,
         allowed_tools: frozenset[str] | None = None,
         consent_gate: Any = None,  # F1: opencomputer.agent.consent.ConsentGate | None
+        tool_call_classifier: Any = None,
+        # v1.1 plan-3 M9.5: opencomputer.agent.tool_call_classifier
+        # .ToolCallClassifier | None.  Active only when permission_mode
+        # == "auto"; ignored otherwise.  Callers (CLI, gateway, wire)
+        # build the classifier once at session start and pass it in.
     ) -> None:
         self.provider = provider
         self.config = config
@@ -745,6 +750,12 @@ class AgentLoop:
         # pre-empting the security boundary. When None, gate is disabled
         # (back-compat: tools without claims are unaffected either way).
         self._consent_gate = consent_gate
+
+        # v1.1 plan-3 M9.5: auto-mode tool-call classifier.  Active only
+        # when permission_mode == "auto"; the loop checks
+        # ``effective_permission_mode(runtime)`` per turn to decide
+        # whether to consult the classifier.  None disables.
+        self._tool_call_classifier = tool_call_classifier
 
         # TS-T5: progressive subdirectory hint discovery. Watches tool
         # calls for paths into NEW subdirectories and lazily loads
@@ -1407,8 +1418,65 @@ class AgentLoop:
                 injected_volatile + "\n\n" + block if injected_volatile else block
             )
 
+        # v1.1 plan-3 M6.3 — MEMORY.md hybrid retrieval (BM25 + vector via RRF).
+        # Order per the M6.1 brainstorm carry-forward note:
+        #   [base + injected mode] + [Honcho prefetch] (above)
+        #                         + [MEMORY.md retrieval]   ← THIS BLOCK
+        #                         + [SessionDB FTS5 active memory]  (below)
+        # Honcho first because its corpus is most variable; MEMORY.md
+        # second because it changes only on explicit Memory tool writes;
+        # FTS5 active memory third because it's per-session-episodic and
+        # most volatile.  Default ON; gracefully degrades when MEMORY.md
+        # is empty or the active provider lacks embeddings.
+        if getattr(self.config.memory, "memory_md_retrieval_enabled", True):
+            try:
+                from opencomputer.agent.memory_md_retrieval import (
+                    MemoryMdRetriever,
+                )
+
+                # The active provider's embed() is the embed_fn.  When the
+                # provider lacks one (raises EmbeddingsUnsupportedError),
+                # the retriever falls back to BM25-only with a one-time
+                # WARNING log.
+                embed_fn = None
+                provider = getattr(self, "provider", None)
+                if provider is not None and hasattr(provider, "embed"):
+                    embed_fn = provider.embed
+
+                retriever = MemoryMdRetriever(
+                    self.memory,
+                    embed_fn=embed_fn,
+                    per_source_k=int(
+                        getattr(
+                            self.config.memory,
+                            "memory_md_retrieval_per_source_k",
+                            20,
+                        )
+                    ),
+                    top_k=int(
+                        getattr(
+                            self.config.memory,
+                            "memory_md_retrieval_top_k",
+                            5,
+                        )
+                    ),
+                )
+                hits = await retriever.retrieve(user_message)
+                md_block = retriever.inject_block(hits)
+                if md_block:
+                    volatile_memory_blocks.append(md_block)
+                    system = system + "\n\n" + md_block
+                    injected_volatile = (
+                        injected_volatile + "\n\n" + md_block
+                        if injected_volatile
+                        else md_block
+                    )
+            except Exception as exc:  # noqa: BLE001 — never crash the loop on retrieval
+                _log.warning("MEMORY.md retrieval failed: %s", exc)
+
         # OpenClaw 1.B-alt — local-FTS5 proactive recall prepend.
-        # Composes with Honcho prefetch above; gated by config flag (default OFF).
+        # Composes with Honcho prefetch above + MEMORY.md retrieval block;
+        # gated by config flag (default OFF).
         # Both append to the per-turn ``system`` so the prefix cache stays warm.
         if getattr(self.config.memory, "active_memory_enabled", False):
             from opencomputer.agent.active_memory import (
@@ -2418,6 +2486,7 @@ class AgentLoop:
                     step.assistant_message.tool_calls or [],
                     session_id=sid,
                     turn_index=iterations,
+                    messages=messages,
                 )
                 # T1 of auto-skill-evolution plan — observe is_error flags
                 # so SessionEndEvent.had_errors reflects the truth even when
@@ -4088,14 +4157,28 @@ class AgentLoop:
     # ─── tool dispatch ─────────────────────────────────────────────
 
     async def _dispatch_tool_calls(
-        self, calls: list[ToolCall], session_id: str = "", turn_index: int = 0
+        self,
+        calls: list[ToolCall],
+        session_id: str = "",
+        turn_index: int = 0,
+        messages: list[Message] | None = None,
     ) -> list[Message]:
         """Run all tool calls — in parallel where safe — and return result Messages.
 
         Fires PreToolUse hooks before each tool runs. If a hook blocks, the tool
         is skipped and an error ToolResult is synthesized. Runtime context flows
         to hooks so plan_mode_block etc. can read it.
+
+        ``messages`` is the in-flight conversation history.  Used by the
+        v1.1 plan-3 M9.5 auto-mode classifier to compare the user's
+        original ask against the model's proposed call.  Optional for
+        backward compat with direct callers (tests, harness hooks)
+        that don't have a message list — the classifier path then
+        runs against an empty user-message list and behaves like
+        every-call-is-novel.
         """
+        if messages is None:
+            messages = []
         if not calls:
             return []
 
@@ -4132,6 +4215,59 @@ class AgentLoop:
                 allowed, reason = is_tool_allowed(c.name)
                 if not allowed and reason is not None:
                     blocked.setdefault(c.id, reason)
+
+        # v1.1 plan-3 M9.5 — Auto-mode classifier (composition with consent gate).
+        # When permission_mode == "auto", every pending tool call is
+        # classified by an aux-LLM BEFORE the consent gate fires. The
+        # classifier is poison-resistant (never sees tool_result content)
+        # and fail-closed by default (timeouts + errors → BLOCK).
+        # The consent gate ALSO fires afterward — auto mode does NOT skip
+        # consent. Either layer denying the call denies it.
+        try:
+            from plugin_sdk.permission_mode import effective_permission_mode
+            _eff_mode = effective_permission_mode(self._runtime)
+        except Exception:  # noqa: BLE001
+            _eff_mode = None
+        if _eff_mode == "auto" and getattr(self, "_tool_call_classifier", None) is not None:
+            try:
+                from opencomputer.agent.tool_call_classifier import (
+                    ClassifierVerdict,
+                )
+                # Build the (poison-resistant) input set: user messages
+                # + prior tool calls (names only, no args) + the pending call.
+                user_msgs = [m for m in messages if m.role == "user"]
+                prior_calls: list = []
+                for m in messages:
+                    if m.role == "assistant" and m.tool_calls:
+                        prior_calls.extend(m.tool_calls)
+                for c in calls:
+                    if c.id in blocked:
+                        continue
+                    decision = await self._tool_call_classifier.classify(
+                        session_id=session_id or "",
+                        user_messages=user_msgs,
+                        tool_calls_so_far=prior_calls,
+                        pending=c,
+                    )
+                    if decision.verdict == ClassifierVerdict.BLOCK:
+                        blocked.setdefault(
+                            c.id,
+                            f"auto-mode classifier blocked: {decision.rationale}",
+                        )
+                # Block-budget honoring: if the classifier paused auto mode,
+                # log a clear marker.  Caller (CLI / wire) can call
+                # ``classifier.budget.reset()`` after user re-confirmation.
+                if self._tool_call_classifier.budget.is_paused():
+                    _log.warning(
+                        "auto-mode block budget exceeded; demoting to "
+                        "PER_ACTION until user resumes via /auto off + /auto"
+                    )
+            except Exception as exc:  # noqa: BLE001 — never crash the loop on classifier
+                _log.warning(
+                    "auto-mode classifier raised %s: %s; falling through to consent gate",
+                    type(exc).__name__,
+                    exc,
+                )
 
         if self._consent_gate is not None:
             from opencomputer.agent.consent.bypass import BypassManager
