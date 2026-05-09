@@ -122,7 +122,9 @@ def adapter_list() -> None:
     """
     _bootstrap_adapter_runner_namespace()
     try:
-        from extensions.adapter_runner._discovery import discover_adapters  # type: ignore[import-not-found]
+        from extensions.adapter_runner._discovery import (
+            discover_adapters,  # type: ignore[import-not-found]
+        )
     except Exception as exc:  # noqa: BLE001
         typer.echo(f"adapter-runner not available: {exc}")
         raise typer.Exit(1) from exc
