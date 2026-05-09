@@ -1113,7 +1113,7 @@ class PluginAPI:
 
     # ─── plugin-authored CLI subcommands (v1.1 plan-3 M11.5) ──────────
 
-    def register_cli_command(
+    def register_cli_subcommand(
         self,
         typer_app: Any,
         *,
@@ -1123,6 +1123,16 @@ class PluginAPI:
 
         v1.1 plan-3 M11.5.  Lets plugins expose their own porcelain CLI
         commands without modifying ``opencomputer.cli`` directly.
+
+        Renamed from ``register_cli_command`` (2026-05-09 audit) to
+        avoid a method-name collision with the v1.1 plan-4 M13
+        ``register_cli_command(name, app, replace=)`` API which lives
+        on the same class but stores its registrations in a different
+        bucket (``_cli_commands`` vs ``_cli_command_registrations``).
+        Both APIs cover the same conceptual feature; the M13 form is
+        the canonical name for plugin-author code, the M11.5 form
+        keeps the subcommand-tree wording for callers that already
+        adopted it.
 
         Args:
             typer_app: a ``typer.Typer`` instance (or any object with the
@@ -1149,7 +1159,7 @@ class PluginAPI:
                 typer.echo(f"hello {who}")
 
             def register(api):
-                api.register_cli_command(my_app, name="myplugin")
+                api.register_cli_subcommand(my_app, name="myplugin")
 
         After ``oc`` startup the subcommands are reachable as
         ``oc myplugin hello world``.
@@ -1162,7 +1172,7 @@ class PluginAPI:
             name = getattr(self, "_current_plugin_id", None)
         if not name:
             raise ValueError(
-                "register_cli_command(name=...) is required when called "
+                "register_cli_subcommand(name=...) is required when called "
                 "outside a register(api) context"
             )
         if name in self._cli_command_registrations:

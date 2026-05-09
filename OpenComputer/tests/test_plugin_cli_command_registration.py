@@ -29,7 +29,7 @@ def _make_api() -> PluginAPI:
 def test_register_cli_command_with_name() -> None:
     api = _make_api()
     sub = typer.Typer()
-    api.register_cli_command(sub, name="myplugin")
+    api.register_cli_subcommand(sub, name="myplugin")
     assert api.cli_command_names() == ["myplugin"]
     assert api.get_cli_command("myplugin") is sub
 
@@ -38,24 +38,24 @@ def test_register_cli_command_falls_back_to_plugin_id() -> None:
     api = _make_api()
     api._current_plugin_id = "auto-id-plugin"
     sub = typer.Typer()
-    api.register_cli_command(sub)
+    api.register_cli_subcommand(sub)
     assert api.cli_command_names() == ["auto-id-plugin"]
 
 
 def test_register_cli_command_requires_name_outside_register_context() -> None:
     api = _make_api()
     sub = typer.Typer()
-    with pytest.raises(ValueError, match="register_cli_command.*required"):
-        api.register_cli_command(sub)
+    with pytest.raises(ValueError, match="register_cli_subcommand.*required"):
+        api.register_cli_subcommand(sub)
 
 
 def test_register_cli_command_collision_raises() -> None:
     api = _make_api()
     sub_a = typer.Typer()
     sub_b = typer.Typer()
-    api.register_cli_command(sub_a, name="dup")
+    api.register_cli_subcommand(sub_a, name="dup")
     with pytest.raises(ValueError, match="dup.*already registered"):
-        api.register_cli_command(sub_b, name="dup")
+        api.register_cli_subcommand(sub_b, name="dup")
 
 
 def test_get_cli_command_unknown_raises_keyerror() -> None:
@@ -67,7 +67,7 @@ def test_get_cli_command_unknown_raises_keyerror() -> None:
 def test_all_cli_commands_returns_defensive_copy() -> None:
     api = _make_api()
     sub = typer.Typer()
-    api.register_cli_command(sub, name="x")
+    api.register_cli_subcommand(sub, name="x")
     snapshot = api.all_cli_commands()
     snapshot["evil"] = "tampered"
     # Original registry must be untouched
@@ -78,8 +78,8 @@ def test_register_two_distinct_namespaces() -> None:
     api = _make_api()
     a = typer.Typer()
     b = typer.Typer()
-    api.register_cli_command(a, name="alpha")
-    api.register_cli_command(b, name="beta")
+    api.register_cli_subcommand(a, name="alpha")
+    api.register_cli_subcommand(b, name="beta")
     assert api.cli_command_names() == ["alpha", "beta"]
 
 
@@ -122,7 +122,7 @@ def test_register_cli_command_supports_register_context_pattern() -> None:
             pass
 
         # Mimics a plugin author who omits the ``name=`` kwarg.
-        api.register_cli_command(sub)
+        api.register_cli_subcommand(sub)
 
     # Loader-side scope:
     api._current_plugin_id = "the-plugin-id"
@@ -136,7 +136,7 @@ def test_register_cli_command_supports_register_context_pattern() -> None:
     # call without name MUST raise — the context is closed.
     sub2 = typer.Typer()
     with pytest.raises(ValueError, match="required"):
-        api.register_cli_command(sub2)
+        api.register_cli_subcommand(sub2)
 
 
 def test_two_plugins_register_distinct_namespaces_no_conflict() -> None:
@@ -144,11 +144,11 @@ def test_two_plugins_register_distinct_namespaces_no_conflict() -> None:
 
     def plugin_a_register(api: PluginAPI) -> None:
         sub = typer.Typer()
-        api.register_cli_command(sub)
+        api.register_cli_subcommand(sub)
 
     def plugin_b_register(api: PluginAPI) -> None:
         sub = typer.Typer()
-        api.register_cli_command(sub)
+        api.register_cli_subcommand(sub)
 
     api._current_plugin_id = "plugin-a"
     plugin_a_register(api)
@@ -161,9 +161,9 @@ def test_two_plugins_register_distinct_namespaces_no_conflict() -> None:
 
 def test_two_plugins_picking_same_explicit_name_collide() -> None:
     api = _make_api()
-    api.register_cli_command(typer.Typer(), name="same")
+    api.register_cli_subcommand(typer.Typer(), name="same")
     with pytest.raises(ValueError, match="already registered"):
-        api.register_cli_command(typer.Typer(), name="same")
+        api.register_cli_subcommand(typer.Typer(), name="same")
 
 
 def test_register_cli_command_accepts_typer_subclass_or_duck_type() -> None:
@@ -177,5 +177,5 @@ def test_register_cli_command_accepts_typer_subclass_or_duck_type() -> None:
         care, it just stores the object."""
 
     duck = _DuckTyper()
-    api.register_cli_command(duck, name="duck-plugin")
+    api.register_cli_subcommand(duck, name="duck-plugin")
     assert api.get_cli_command("duck-plugin") is duck
