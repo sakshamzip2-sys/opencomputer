@@ -17,6 +17,18 @@ The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEAS
 
 ## [Unreleased]
 
+### Security + Added — v1.1 Plan-3 M11.3: typed plugin sources + allow/deny policy + PyPI/GitHub installers + sigstore (2026-05-09)
+
+Three-PR arc closing M11.3:
+
+1. **Data model + policy** — typed `PluginSource` (5 kinds: `pypi`/`github`/`git`/`directory`/`url`), canonical `parse_source`, `PluginSourcePolicy` enforcing per-source allow/deny rules with deny-by-default for network kinds. `oc plugin install` runs `_enforce_source_policy(source)` BEFORE any network IO on every install path.
+2. **Production wiring** — `install_from_pypi` (`pip download --no-deps --no-binary :all:` → existing tarball pipeline; PEP-643 wrapper stripped via `extract_tarball(strip_top_level=True)`); GitHub shorthand support (`gh:owner/repo`, `gh:owner/repo@v1.2.3`, `https://github.com/owner/repo`, `https://github.com/owner/repo/tree/<ref>`).
+3. **Sigstore wrapper** (`opencomputer/plugins/sigstore_verify.py`) — `verify_blob` shells out to `cosign verify-blob`; `verify_or_warn` is the convenience wrapper installers call. `OC_PLUGIN_REQUIRE_SIGSTORE=1` forces fail-closed mode. Wired into `install_from_pypi` (signature_url / signature_bytes / require_sigstore / cert_identity / cert_oidc_issuer kwargs). New `verify_plugin_signature` re-verifies the recorded signature on `oc plugin verify` (sidecar at `<dest_root>/.sigstore/<plugin_id>.json` keeps cosign claims out-of-band of the InstalledRecord schema).
+
+**SECURITY FIX**: the `extract_tarball(strip_top_level=True)` path was rolling its own file-by-file extraction without going through tarfile's `filter='data'` guard. A malicious sdist with a member named `foo-1.0/../../../etc/passwd` would write outside `dest`. Fixed by rebuilding a synthetic in-memory archive with the wrapper stripped, then re-extracting via `filter='data'` so CPython's vetted path-traversal / symlink-escape / device-file rejection applies uniformly. Two new SECURITY tests prove the rejection.
+
+82 new tests across data model + policy + installers + sigstore + path-traversal. Ruff clean.
+
 ### Added — v1.1 Plan-3 M11.2: `/batch` parallel N-agent migrations + DelegateTool wiring + slash command (2026-05-09)
 
 Three-PR arc closing the M11.2 deliverable:
