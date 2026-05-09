@@ -4347,10 +4347,41 @@ def _build_agent_manifest() -> dict:
     }
 
 
+def _default_agent_json_path():
+    """Hermes parity G15 (2026-05-09): canonical ACP discovery path.
+
+    Returns ``<profile_home>/acp_registry/agent.json`` — the path
+    JetBrains and other IDEs probe for ACP-compatible agents.
+    """
+    from pathlib import Path as _Path
+
+    from opencomputer.agent.config import _home
+
+    _ = _Path  # keep import local; satisfy linters that want explicit use
+    return _home() / "acp_registry" / "agent.json"
+
+
+def _ensure_agent_json():
+    """Write ``agent.json`` at the canonical path if absent. No-op otherwise.
+
+    The user can hand-edit the file; we never overwrite. Returns the
+    path either way so callers can log it. G15 (Hermes parity, 2026-05-09).
+    """
+    import json as _json
+
+    p = _default_agent_json_path()
+    if not p.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        payload = _build_agent_manifest()
+        p.write_text(_json.dumps(payload, indent=2) + "\n")
+    return p
+
+
 @acp_app.callback(invoke_without_command=True)
 def acp_main(ctx: typer.Context) -> None:
     """Bare ``oc acp`` (no subcommand) defaults to serve — backwards compat."""
     if ctx.invoked_subcommand is None:
+        _ensure_agent_json()
         _run_acp_stdio()
 
 
@@ -4361,9 +4392,14 @@ def acp_serve() -> None:
     OpenComputer becomes the agent backend for ACP-aware IDEs (Zed,
     VS Code with the ACP extension, Cursor, Claude Desktop).
 
+    Hermes parity G15 (2026-05-09): ensures ``agent.json`` exists at
+    ``~/.opencomputer/<profile>/acp_registry/agent.json`` so JetBrains
+    and other IDEs can auto-discover this profile's agent.
+
     PR-D of ~/.claude/plans/replicated-purring-dewdrop.md.
     See docs/acp.md for IDE setup instructions.
     """
+    _ensure_agent_json()
     _run_acp_stdio()
 
 
