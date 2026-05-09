@@ -129,12 +129,11 @@ The class is per-profile-home. `MemoryManager` owns one instance and forwards `i
 ### Segmentation rules
 
 1. Read `MEMORY.md` as UTF-8.
-2. Split on **2-or-more consecutive blank lines** OR on top-level headings (`^# `, `^## `, `^### `).
-3. Strip leading/trailing blank lines from each entry.
-4. Drop empty entries.
-5. Each entry retains its raw text including any inline markdown (links, code spans).
+2. Split on **1-or-more blank lines** OR on markdown headings (`^#{1,6}\s`).
+3. Drop empty entries.
+4. Each entry retains its raw text including any inline markdown (links, code spans).
 
-Rationale: this matches how MEMORY.md is conventionally written (see `~/.claude/projects/.../MEMORY.md` examples in the user's profile — entries are 1–3 paragraphs separated by blank lines under `## Section` headers).
+Rationale: typical agent-written MEMORY.md uses heading-bounded sections separated by single blank lines. A stricter "2+ blank lines" rule would collapse adjacent topics into one entry, hurting BM25 ranking precision. The trade-off: tightly-packed bullet lists (e.g., a "Memory Index" with no blank lines between bullets) collapse into one entry; this is acceptable for v1 because such structures are rare in the agent's own writes, and BM25 still surfaces them as a single high-recall hit.
 
 ### Tokenization
 
