@@ -105,6 +105,11 @@ class ConsentGate:
         # SESSION_FINALIZE via :meth:`on_session_finalize`. NOT persisted
         # to ConsentStore — a session that ends loses its grants.
         self._session_grants: dict[tuple[str, str], ConsentGrant] = {}
+        # Hermes parity: Tirith findings stashed by the loop pre-consent
+        # so :meth:`render_prompt` can surface them in the user prompt.
+        # Keyed (session_id, capability_id); cleared by request_approval
+        # in its finally block so a stale entry can't bleed across calls.
+        self._pending_tirith_findings: dict[tuple[str, str], str] = {}
         # Channel-side prompt handler (set by the gateway / dispatch
         # when a channel adapter is available). When None,
         # :meth:`request_approval` immediately auto-denies because there
@@ -158,17 +163,36 @@ class ConsentGate:
         """
         self._prompt_handler = handler
 
-    @staticmethod
     def render_prompt(
-        claim: CapabilityClaim, scope: str | None,
+        self,
+        claim: CapabilityClaim,
+        scope: str | None,
+        session_id: str | None = None,
     ) -> str:
-        """Public alias for :func:`render_prompt_message`.
+        """Public alias for :func:`render_prompt_message` (with Tirith findings).
 
         Surfaced as a method so callers (TUI, wire server, AgentLoop's
         consent-prompt path) can ask the gate to format the prompt
         without importing the module-level helper directly.
+
+        When ``session_id`` is provided AND the loop has stashed Tirith
+        findings via :meth:`request_approval(... tirith_findings_text=...)`,
+        the findings are appended to the prompt so the user can decide
+        with full security context. This is the Hermes-parity flow:
+        suspicious commands surface their Tirith verdict to the user
+        BEFORE approval, not after.
         """
-        return render_prompt_message(claim, scope)
+        base = render_prompt_message(claim, scope)
+        if session_id is not None:
+            findings = self._pending_tirith_findings.get(
+                (session_id, claim.capability_id)
+            )
+            if findings:
+                base = (
+                    f"{base}\n\n  ⚠ Tirith pre-exec scan flagged this command:\n"
+                    f"{findings}"
+                )
+        return base
 
     def check(
         self,
@@ -299,6 +323,7 @@ class ConsentGate:
         scope: str | None,
         session_id: str,
         timeout_s: float = _TIMEOUT_FROM_CONFIG,
+        tirith_findings_text: str | None = None,
     ) -> ConsentDecision:
         """Block until a channel callback resolves the request, or timeout.
 
@@ -424,6 +449,12 @@ class ConsentGate:
         else:
             event = self._pending_requests[key]
 
+        # Hermes parity: stash Tirith findings BEFORE the prompt fires
+        # so render_prompt(... session_id=session_id) can surface them.
+        # Cleared in the finally-block below regardless of outcome.
+        if tirith_findings_text:
+            self._pending_tirith_findings[key] = tirith_findings_text
+
         # Fire the channel-side prompt FIRST so the user actually sees
         # something. If no handler is registered or the handler reports
         # the channel is unavailable, auto-deny without waiting (we
@@ -431,6 +462,7 @@ class ConsentGate:
         # burn the timeout for no reason).
         if self._prompt_handler is None:
             self._pending_requests.pop(key, None)
+            self._pending_tirith_findings.pop(key, None)
             audit_id = self._audit.append(AuditEvent(
                 session_id=session_id, actor="system", action="approval_no_channel",
                 capability_id=claim.capability_id,
@@ -473,6 +505,7 @@ class ConsentGate:
             prompted = False
         if not prompted:
             self._pending_requests.pop(key, None)
+            self._pending_tirith_findings.pop(key, None)
             audit_id = self._audit.append(AuditEvent(
                 session_id=session_id, actor="system", action="approval_no_channel",
                 capability_id=claim.capability_id,
@@ -493,6 +526,7 @@ class ConsentGate:
         except TimeoutError:
             self._pending_requests.pop(key, None)
             self._pending_decisions.pop(key, None)
+            self._pending_tirith_findings.pop(key, None)
             _log.warning(
                 "consent.request_approval timeout after %.0fs for "
                 "session=%s capability=%s — auto-denying",
@@ -517,6 +551,7 @@ class ConsentGate:
         # always writes a 3-tuple; the default fills session_scoped=False.
         decision = self._pending_decisions.pop(key, (False, False, False))
         self._pending_requests.pop(key, None)
+        self._pending_tirith_findings.pop(key, None)
         allowed, persist, session_scoped = decision
 
         if allowed and session_scoped:
@@ -651,24 +686,34 @@ class ConsentGate:
             self._session_grants.pop(k, None)
 
     def register_session_finalize_handler(self) -> None:
-        """Subscribe ``on_session_finalize`` to ``HookEvent.SESSION_FINALIZE``.
+        """Register ``on_session_finalize`` as a SESSION_FINALIZE HookSpec.
 
-        Idempotent — safe to call multiple times. Caller is responsible
-        for invoking this exactly once (typically from the gate factory
-        in the agent loop's __init__ path). Best-effort: hook subscribe
-        failures (e.g. test-time engine substitution) are swallowed so
-        the gate works without hooks.
+        Called from the consent-gate factory (profile_bootstrap.orchestrator)
+        once per gate. The handler receives ``HookContext`` and clears any
+        in-memory ``_session_grants`` keyed on the ending session.
+
+        Idempotent at the engine level — duplicate registrations would
+        just fire twice (no-op effect). Best-effort: hook-engine import
+        failure is swallowed so the gate works without hooks (e.g. test
+        fixtures that build a gate directly).
         """
         try:
             from opencomputer.hooks.engine import engine as _hook_engine
-            from plugin_sdk.hooks import HookEvent
+            from plugin_sdk.hooks import HookEvent, HookSpec
 
-            async def _handler(ctx):
+            async def _on_session_finalize(ctx):
                 sid = getattr(ctx, "session_id", None)
                 if sid:
                     self.on_session_finalize(session_id=sid)
+                return None  # observer-only — never block
 
-            _hook_engine.subscribe(HookEvent.SESSION_FINALIZE, _handler)
+            _hook_engine.register(HookSpec(
+                event=HookEvent.SESSION_FINALIZE,
+                handler=_on_session_finalize,
+                # Run early in the SESSION_FINALIZE bucket so subsequent
+                # hooks see a clean grant cache.
+                priority=10,
+            ))
         except Exception:  # noqa: BLE001 — observer-only; gate must work without hooks
             pass
 

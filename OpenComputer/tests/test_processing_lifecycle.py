@@ -267,7 +267,7 @@ async def test_processing_lifecycle_during_consent_prompt() -> None:
             self._prompt_handler = handler
 
         @staticmethod
-        def render_prompt(claim, scope) -> str:
+        def render_prompt(claim, scope, session_id: str | None = None) -> str:
             return f"Allow {claim} on {scope}?"
 
         def resolve_pending(

@@ -1764,7 +1764,9 @@ class Dispatch:
             return False
 
         token = uuid.uuid4().hex[:24]
-        prompt_text = gate.render_prompt(claim, scope)
+        # Hermes parity: pass session_id so render_prompt can surface
+        # any Tirith findings stashed by the loop's pre-consent scan.
+        prompt_text = gate.render_prompt(claim, scope, session_id=session_id)
         try:
             result = await adapter.send_approval_request(
                 chat_id=chat_id,
