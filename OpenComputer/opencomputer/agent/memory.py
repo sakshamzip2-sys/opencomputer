@@ -20,6 +20,7 @@ Write-path invariants for MEMORY.md / USER.md:
 
 from __future__ import annotations
 
+import datetime as _dt
 import logging
 import os
 import re
@@ -42,7 +43,9 @@ logger = logging.getLogger("opencomputer.agent.memory")
 
 
 class MemoryTooLargeError(ValueError):
-    """Raised when a write would exceed the configured character limit."""
+    """Raised when a write would exceed the configured character limit
+    AND graceful compaction (v1.1 plan-3 M6.5) cannot fit the new
+    content even after dropping all older entries."""
 
     def __init__(self, kind: str, would_be: int, limit: int) -> None:
         self.kind = kind
@@ -50,8 +53,189 @@ class MemoryTooLargeError(ValueError):
         self.limit = limit
         super().__init__(
             f"{kind} write would make file {would_be} chars (limit {limit}). "
+            f"The new entry alone exceeds the cap; even compaction cannot help. "
             f"Use Memory(action='remove',...) or `opencomputer memory prune` first."
         )
+
+
+# ─── M6.5 compaction helpers (v1.1 plan-3) ─────────────────────────
+
+
+# Matches the heading line only.
+_COMPACTION_HEADING_RE = re.compile(
+    r"^## Older notes \(\d+ entries compacted on \d{4}-\d{2}-\d{2}\)\s*$",
+    re.MULTILINE,
+)
+# Matches the italic explanatory line that follows the heading.
+_COMPACTION_BODY_RE = re.compile(
+    r"^_Older entries were removed automatically to fit the configured cap\."
+    r" See git history of MEMORY\.md for the full record\.\s*$",
+    re.MULTILINE,
+)
+
+
+def _strip_prior_compaction_header(text: str) -> str:
+    """Remove any ``## Older notes`` heading + the legacy italic body line.
+
+    Idempotent.  Strips both pieces independently so a partial header
+    (e.g. body without heading after a manual edit, or a stale body
+    line from a previous header format) is also cleaned.
+    """
+    text = _COMPACTION_HEADING_RE.sub("", text)
+    text = _COMPACTION_BODY_RE.sub("", text)
+    return text
+
+
+def _segment_paragraphs(text: str) -> list[str]:
+    """Split a markdown body on paragraph boundaries (1+ blank lines).
+
+    Used by M6.5 compaction to identify drop-able units.  Mirrors the
+    BM25Index/VectorIndex segmentation rule (1+ blank line OR top-
+    level heading) so user-visible "entries" are consistent across
+    retrieval and compaction.
+    """
+    if not text or not text.strip():
+        return []
+    parts: list[str] = []
+    current: list[str] = []
+
+    def flush() -> None:
+        block = "\n".join(current).strip()
+        if block:
+            parts.append(block)
+        current.clear()
+
+    blank_run = 0
+    for line in text.splitlines():
+        if not line.strip():
+            blank_run += 1
+            if blank_run >= 1:
+                flush()
+            continue
+        blank_run = 0
+        current.append(line)
+    flush()
+    return parts
+
+
+def _compaction_header(dropped_count: int) -> str:
+    """One-line note that records the dropped entries.
+
+    Intentionally short (~40 chars) so a small ``memory_char_limit``
+    still leaves room for actual entries.  Users who want full history
+    can consult git log for ``MEMORY.md``.
+    """
+    today = _dt.date.today().isoformat()
+    return f"## Older notes ({dropped_count} entries compacted on {today})"
+
+
+def _extract_prior_compaction_count(text: str) -> int:
+    """Read the count from a prior ``## Older notes (N entries...)``
+    heading.  Returns 0 if no header present.  This is summed into the
+    new compaction count so a re-compaction reports cumulative drops."""
+    m = re.search(
+        r"^## Older notes \((\d+) entries compacted on \d{4}-\d{2}-\d{2}\)",
+        text,
+        flags=re.MULTILINE,
+    )
+    if not m:
+        return 0
+    try:
+        return int(m.group(1))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _compact_under_cap(existing: str, new_block: str, limit: int) -> str | None:
+    """Drop oldest paragraphs from ``existing`` until appending
+    ``new_block`` fits under ``limit``.
+
+    Returns the new full content (with compaction header prepended) if
+    the result fits, or ``None`` if even the new_block alone exceeds
+    the limit (caller should raise MemoryTooLargeError).
+
+    Idempotent across repeated calls: if ``existing`` already contains
+    a compaction header, the new header replaces it (no nested compaction
+    notes accumulate) and the count is accumulated.
+    """
+    new_block = new_block.rstrip() + "\n"
+
+    # Sanity: a single new_block bigger than the cap is impossible.
+    if len(new_block) > limit:
+        return None
+
+    # Detect any prior compaction so the new header can report the
+    # total cumulative count rather than just this round's drops.
+    prior_count = _extract_prior_compaction_count(existing)
+    existing_clean = _strip_prior_compaction_header(existing).strip()
+
+    # Drop the leading paragraph until it fits.  We deliberately drop
+    # from the FRONT (oldest); MEMORY.md convention places fresh
+    # entries at the bottom.
+    paragraphs = _segment_paragraphs(existing_clean)
+    new_drops = 0  # drops in THIS round
+    initial_paragraphs_len = len(paragraphs)
+
+    while True:
+        body = "\n\n".join(paragraphs).strip()
+        # If we're operating on a previously-compacted file (prior_count > 0)
+        # OR we've dropped at least one paragraph in this round, the result
+        # MUST carry a compaction header so the user sees what happened.
+        cumulative_dropped = prior_count + new_drops
+        needs_header = cumulative_dropped > 0
+        if needs_header:
+            header = _compaction_header(cumulative_dropped)
+            sep = "\n\n" if body else ""
+            candidate = header + sep + body + ("\n\n" + new_block if body else "\n\n" + new_block)
+        else:
+            sep = "\n\n" if body else ""
+            candidate = body + sep + new_block
+
+        if len(candidate) <= limit:
+            return candidate
+
+        if not paragraphs:
+            # Nothing left to drop; only the new_block + maybe header remains.
+            # If the new_block alone fits, we'd have returned above; signal
+            # impossible.
+            return None
+        # Drop the oldest paragraph and try again.
+        paragraphs.pop(0)
+        new_drops += 1
+        # Sanity bound — prevents infinite loops on pathological input.
+        if new_drops > initial_paragraphs_len + 1:
+            return None
+
+
+def _compact_replace_under_cap(candidate: str, limit: int) -> str | None:
+    """Compact a post-replace ``candidate`` until it fits ``limit``.
+
+    Different from :func:`_compact_under_cap`: there is no separate
+    new-block to preserve.  We simply drop oldest paragraphs from the
+    full text until it fits, prepending a compaction header.
+    """
+    if len(candidate) <= limit:
+        return candidate
+
+    cleaned = _strip_prior_compaction_header(candidate).strip()
+    paragraphs = _segment_paragraphs(cleaned)
+    dropped = 0
+    while paragraphs:
+        body = "\n\n".join(paragraphs).strip()
+        if dropped > 0:
+            header = _compaction_header(dropped)
+            full = header + ("\n\n" + body if body else "")
+        else:
+            full = body
+        if len(full) <= limit:
+            return full
+        paragraphs.pop(0)
+        dropped += 1
+    # Even an all-empty paragraph list with header alone might not fit
+    # if the limit is pathologically small.  Signal impossible.
+    if dropped > 0 and len(_compaction_header(dropped)) <= limit:
+        return _compaction_header(dropped)
+    return None
 
 
 # ─── dataclasses ──────────────────────────────────────────────────────
@@ -595,7 +779,19 @@ class MemoryManager:
             separator = "\n\n" if existing and not existing.endswith("\n\n") else ""
             new_text = existing + separator + text.strip() + "\n"
             if len(new_text) > limit:
-                raise MemoryTooLargeError(kind, len(new_text), limit)
+                # v1.1 plan-3 M6.5 — graceful inline compaction.  Drop
+                # the oldest paragraph-delimited entries (front of the
+                # file) until the new content fits.  The dropped
+                # entries are summarized by a one-line header so the
+                # user sees what happened.  Only the new entry alone
+                # exceeding the cap is genuinely impossible — falls
+                # through to MemoryTooLargeError as before.
+                compacted = _compact_under_cap(
+                    existing, text.strip() + "\n", limit
+                )
+                if compacted is None:
+                    raise MemoryTooLargeError(kind, len(new_text), limit)
+                new_text = compacted
             # Backup current state before mutating.
             if path.exists():
                 shutil.copy2(path, _backup_path(path))
@@ -617,7 +813,13 @@ class MemoryManager:
                 return False
             candidate = existing.replace(old, new)
             if len(candidate) > limit:
-                raise MemoryTooLargeError(kind, len(candidate), limit)
+                # M6.5 — try graceful compaction.  We treat the
+                # post-replace text as the candidate to fit; compaction
+                # drops oldest entries until it fits or proves impossible.
+                compacted = _compact_replace_under_cap(candidate, limit)
+                if compacted is None:
+                    raise MemoryTooLargeError(kind, len(candidate), limit)
+                candidate = compacted
             shutil.copy2(path, _backup_path(path))
             _write_atomic(path, candidate)
             replaced = True
