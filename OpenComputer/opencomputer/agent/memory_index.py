@@ -10,21 +10,55 @@ Public API:
     - BM25Index.invalidate() -> None
 
 The cache file lives at ``<profile_home>/cache/memory_bm25.idx`` and
-self-validates on load (format_version + corpus sha256).  A mismatch
-triggers a transparent rebuild, never a silent stale-result return.
+self-validates on load (format_version + corpus sha256 + rank_bm25 version).
+A mismatch triggers a transparent rebuild, never a silent stale-result return.
+Cache failures are logged at WARNING; the rebuild path is taken silently
+from the caller's perspective.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import pickle
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 from rank_bm25 import BM25Okapi
+
+logger = logging.getLogger("opencomputer.agent.memory_index")
+
+# Pickle protocol 5 is universally available on Python 3.12+ (the project's
+# minimum interpreter) and is forward-compatible with newer Pythons.  Pinning
+# to a stable protocol means a cache file written by one Python version is
+# readable by another, removing one common cache-bust trigger.
+PICKLE_PROTOCOL: int = 5
+
+
+def _resolve_rank_bm25_version() -> str:
+    """rank_bm25 has no public ``__version__`` attribute on every release.
+
+    Resolve via ``importlib.metadata`` so the cache header records the
+    installed wheel version regardless.  Returns ``"unknown"`` only if the
+    distribution metadata is missing entirely (very unusual; would indicate
+    a hand-installed source tree).  An ``"unknown"`` value still works —
+    cache invalidates whenever the recorded value changes from the previous
+    build, which means the first cache built with metadata-resolved version
+    will not load against a previous "unknown" build.  Acceptable: rebuild
+    is sub-second.
+    """
+    try:
+        return _pkg_version("rank_bm25")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+_RANK_BM25_VERSION: str = _resolve_rank_bm25_version()
 
 
 @dataclass(frozen=True)
@@ -57,7 +91,7 @@ class BM25Index:
 
         self._entries: list[IndexedEntry] = []
         self._tokens: list[list[str]] = []
-        self._bm25: object | None = None  # rank_bm25.BM25Okapi at runtime
+        self._bm25: BM25Okapi | None = None
         self._loaded: bool = False
 
     # ─── public ────────────────────────────────────────────────────────
@@ -118,15 +152,63 @@ class BM25Index:
                 data = pickle.load(f)
             header = data["header"]
             if not isinstance(header, dict):
+                logger.warning(
+                    "BM25 cache header malformed at %s; rebuilding", self._cache_path
+                )
                 return False
             if header.get("format_version") != self.FORMAT_VERSION:
+                logger.info(
+                    "BM25 cache format_version=%r != expected %d at %s; rebuilding",
+                    header.get("format_version"),
+                    self.FORMAT_VERSION,
+                    self._cache_path,
+                )
+                return False
+            if header.get("rank_bm25_version") != _RANK_BM25_VERSION:
+                logger.info(
+                    "BM25 cache rank_bm25_version=%r != current %s at %s; rebuilding",
+                    header.get("rank_bm25_version"),
+                    _RANK_BM25_VERSION,
+                    self._cache_path,
+                )
                 return False
             if header.get("corpus_sha256") != self._current_sha256():
+                logger.debug(
+                    "BM25 cache corpus_sha256 mismatch at %s; rebuilding",
+                    self._cache_path,
+                )
                 return False
             entries = data["entries"]
             tokens = data["tokens"]
             bm25 = data["bm25"]
-        except (pickle.UnpicklingError, KeyError, EOFError, OSError, AttributeError, ValueError):
+            if not isinstance(entries, list) or not isinstance(tokens, list):
+                logger.warning(
+                    "BM25 cache entries/tokens shape unexpected at %s; rebuilding",
+                    self._cache_path,
+                )
+                return False
+            if not isinstance(bm25, BM25Okapi):
+                logger.warning(
+                    "BM25 cache bm25 object not a BM25Okapi at %s; rebuilding",
+                    self._cache_path,
+                )
+                return False
+        except (
+            pickle.UnpicklingError,
+            KeyError,
+            EOFError,
+            OSError,
+            AttributeError,
+            ValueError,
+            ImportError,
+            TypeError,
+        ) as exc:
+            logger.warning(
+                "BM25 cache load failed (%s: %s) at %s; rebuilding",
+                type(exc).__name__,
+                exc,
+                self._cache_path,
+            )
             return False
 
         self._entries = entries
@@ -136,10 +218,19 @@ class BM25Index:
         return True
 
     def _save_cache(self) -> None:
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "BM25 cache dir create failed (%s); retrieval will rebuild on next call",
+                exc,
+            )
+            return
+
         data = {
             "header": {
                 "format_version": self.FORMAT_VERSION,
+                "rank_bm25_version": _RANK_BM25_VERSION,
                 "corpus_sha256": self._current_sha256(),
                 "entry_count": len(self._entries),
                 "mtime_ns": (
@@ -154,9 +245,20 @@ class BM25Index:
             "bm25": self._bm25,
         }
         tmp_path = self._cache_path.with_suffix(".tmp")
-        with tmp_path.open("wb") as f:
-            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-        os.replace(tmp_path, self._cache_path)
+        try:
+            with tmp_path.open("wb") as f:
+                pickle.dump(data, f, protocol=PICKLE_PROTOCOL)
+            os.replace(tmp_path, self._cache_path)
+        except OSError as exc:
+            # disk full / permission denied / etc.  Retrieval still works
+            # from in-memory state; next process will rebuild.  Don't raise.
+            logger.warning(
+                "BM25 cache save failed (%s); next call will rebuild", exc
+            )
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
 
     # ─── build ─────────────────────────────────────────────────────────
 
