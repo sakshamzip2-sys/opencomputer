@@ -4,6 +4,23 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-1 M2.2: `oc oneshot --output text|json|stream-json` (2026-05-09)
+
+`oc oneshot` (and the `oc chat -q "..."` Hermes-parity alias) gain a `--output` / `-o` flag for CI-friendly stdout shapes:
+
+- `text` (default): unchanged — prints the assistant's final message.
+- `json`: emits one summary JSON object on stdout at end of run with `session_id`, `num_turns`, `total_input_tokens`, `total_output_tokens`, `total_cache_creation_tokens`, `total_cache_read_tokens`, `total_cost_usd`, `final_message`, optional `error`.
+- `stream-json`: NDJSON — one `{"event":"llm_call",...}` line per LLM call as it fires, plus a final `{"event":"summary",...}` line. The existing `~/.opencomputer/<profile>/llm_events.jsonl` write is untouched; stream-json is an *additional* sink registered through `inference.observability.register_subscriber`.
+
+New types in `opencomputer.headless`: `OutputMode` (str enum) + `parse_output_mode(value)` with friendly errors. Per-mode emission lives in `opencomputer.oneshot_output` (`OneshotResult`, `emit_final`, `stream_subscriber`) so the formatter can be tested without spinning up a provider. 18 new tests in `test_output_modes.py`.
+
+```bash
+oc oneshot "say hi" --output json | jq .session_id
+oc oneshot "do 3 things" --output stream-json | jq -c .event
+```
+
+The original v1.1 plan-1 acceptance referenced `oc chat --bare --headless --once --output ...` but the actual non-interactive CLI surface in OpenComputer is `oc oneshot` (or `oc chat -q "..."`). Wired against the existing surface; `--bare` and `--once` are not needed.
+
 ### Added — Hermes Cron + Delegation long-tail finishers (2026-05-08 / 2026-05-09)
 
 Closes 11 honest gaps + 2 latent runtime bugs between the Hermes Cron & Delegation reference spec and OpenComputer. PR #494 already shipped no_agent / parallel-batch / multi-profile parity; this work picks up the long tail and hardens it to production-grade.
