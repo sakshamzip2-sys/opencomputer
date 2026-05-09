@@ -602,6 +602,122 @@ def _normalize_mcp_server_dict(raw: dict) -> dict:
     return out
 
 
+def _parse_routing_block(block: Any) -> Any:  # RoutingConfig | None at runtime
+    """Convert the top-level ``routing:`` YAML block into :class:`RoutingConfig`.
+
+    v1.1 plan-3 M10.1 (2026-05-09). Shape::
+
+        routing:
+          rules:
+            - match: {platform: slack, channel: "#security-alerts"}
+              agent: security-reviewer
+            - match: {platform: telegram, peer: "<chat_id>"}
+              agent: executive-assistant
+              profile: executive
+          default:
+            agent: default
+
+    Returns ``None`` when ``block`` is empty / missing — caller leaves
+    the default :attr:`Config.routing` untouched. Returns
+    :class:`RoutingConfig` on success. Malformed entries (rule missing
+    ``agent``) are logged at WARNING and skipped.
+    """
+    from opencomputer.agent.config import (
+        RoutingConfig,
+        RoutingDefault,
+        RoutingMatch,
+        RoutingRule,
+    )
+    from opencomputer.agent.routing import sort_rules_by_specificity
+
+    if not block:
+        return None
+    if not isinstance(block, dict):
+        _log.warning("routing: top-level block must be a mapping; got %r", type(block))
+        return None
+
+    parsed_rules: list[RoutingRule] = []
+    rules_raw = block.get("rules")
+    if rules_raw is None:
+        rules_iter = []
+    elif isinstance(rules_raw, list):
+        rules_iter = rules_raw
+    else:
+        _log.warning(
+            "routing.rules: expected a list, got %r — ignoring", type(rules_raw)
+        )
+        rules_iter = []
+
+    valid_match_keys = {
+        "platform", "chat_id", "channel", "guild", "team",
+        "account", "role", "peer",
+    }
+
+    for raw_rule in rules_iter:
+        if not isinstance(raw_rule, dict):
+            _log.warning("routing.rules: skipping non-dict entry %r", raw_rule)
+            continue
+        agent = raw_rule.get("agent")
+        if not isinstance(agent, str) or not agent:
+            _log.warning(
+                "routing.rules: skipping entry missing required `agent`: %r",
+                raw_rule,
+            )
+            continue
+        match_dict = raw_rule.get("match", {}) or {}
+        if not isinstance(match_dict, dict):
+            _log.warning(
+                "routing.rules: `match` must be a mapping; got %r — skipping",
+                type(match_dict),
+            )
+            continue
+        # Drop unknown match dimensions with a warning rather than a hard
+        # error — keeps forward-compat for OpenClaw fields we haven't
+        # ported yet (and keeps a typo from bricking the whole config).
+        clean_match = {}
+        for k, v in match_dict.items():
+            if k not in valid_match_keys:
+                _log.warning(
+                    "routing.rules: unknown match dimension %r in rule %r — ignored",
+                    k, raw_rule,
+                )
+                continue
+            clean_match[k] = str(v) if v is not None else ""
+        try:
+            match_obj = RoutingMatch(**clean_match)
+        except TypeError as e:
+            _log.warning("routing.rules: invalid match block %r: %s", match_dict, e)
+            continue
+        try:
+            rule_obj = RoutingRule(
+                match=match_obj,
+                agent=agent,
+                profile=str(raw_rule.get("profile", "")),
+            )
+        except ValueError as e:
+            _log.warning("routing.rules: invalid rule %r: %s", raw_rule, e)
+            continue
+        parsed_rules.append(rule_obj)
+
+    default_block = block.get("default") or {}
+    if not isinstance(default_block, dict):
+        _log.warning(
+            "routing.default: expected mapping, got %r — using built-in default",
+            type(default_block),
+        )
+        default_obj = RoutingDefault()
+    else:
+        default_obj = RoutingDefault(
+            agent=str(default_block.get("agent", "default")) or "default",
+            profile=str(default_block.get("profile", "")),
+        )
+
+    return RoutingConfig(
+        rules=sort_rules_by_specificity(tuple(parsed_rules)),
+        default=default_obj,
+    )
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load config from YAML, applying overrides on top of defaults.
 
@@ -630,6 +746,9 @@ def load_config(path: Path | None = None) -> Config:
     parsed_prompt_hooks = _parse_prompt_hooks_block(hooks_block)
     # v1.1 plan-2 M8.2 (2026-05-09) — and agent hooks.
     parsed_agent_hooks = _parse_agent_hooks_block(hooks_block)
+    # v1.1 plan-3 M10.1 (2026-05-09) — top-level `routing:` block.
+    routing_block = raw.pop("routing", None)
+    parsed_routing = _parse_routing_block(routing_block)
 
     # G9 (Hermes parity, 2026-05-09) — normalize the nested
     # ``tools: {include, exclude, prompts, resources}`` form into the
@@ -644,7 +763,7 @@ def load_config(path: Path | None = None) -> Config:
             ]
 
     cfg = _apply_overrides(base, raw)
-    if parsed_hooks or parsed_prompt_hooks or parsed_agent_hooks:
+    if parsed_hooks or parsed_prompt_hooks or parsed_agent_hooks or parsed_routing:
         kwargs = {f.name: getattr(cfg, f.name) for f in fields(cfg)}
         if parsed_hooks:
             kwargs["hooks"] = parsed_hooks
@@ -652,6 +771,8 @@ def load_config(path: Path | None = None) -> Config:
             kwargs["prompt_hooks"] = parsed_prompt_hooks
         if parsed_agent_hooks:
             kwargs["agent_hooks"] = parsed_agent_hooks
+        if parsed_routing is not None:
+            kwargs["routing"] = parsed_routing
         cfg = Config(**kwargs)
     return cfg
 
@@ -716,6 +837,38 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
     # non-empty so default configs stay tidy.
     if getattr(cfg, "credential_pool_strategies", None):
         result["credential_pool_strategies"] = dict(cfg.credential_pool_strategies)
+    # v1.1 plan-3 M10.1 — routing rules. Round-trips through
+    # _parse_routing_block. Only emit when non-default so existing
+    # configs stay clean.
+    routing = getattr(cfg, "routing", None)
+    if routing is not None and (
+        routing.rules or routing.default != type(routing.default)()
+    ):
+        routing_dict: dict[str, Any] = {}
+        if routing.rules:
+            rules_out = []
+            for r in routing.rules:
+                m = r.match
+                match_dict = {
+                    k: getattr(m, k)
+                    for k in ("platform", "chat_id", "channel", "guild",
+                              "team", "account", "role", "peer")
+                    if getattr(m, k)
+                }
+                rule_out: dict[str, Any] = {"agent": r.agent}
+                if match_dict:
+                    rule_out["match"] = match_dict
+                if r.profile:
+                    rule_out["profile"] = r.profile
+                rules_out.append(rule_out)
+            routing_dict["rules"] = rules_out
+        if routing.default != type(routing.default)():
+            default_out: dict[str, Any] = {"agent": routing.default.agent}
+            if routing.default.profile:
+                default_out["profile"] = routing.default.profile
+            routing_dict["default"] = default_out
+        if routing_dict:
+            result["routing"] = routing_dict
     return result
 
 
