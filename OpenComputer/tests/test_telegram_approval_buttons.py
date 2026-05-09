@@ -56,7 +56,7 @@ async def test_send_approval_request_emits_three_inline_buttons() -> None:
 
     result = await adapter.send_approval_request(
         chat_id="5555",
-        prompt_text="Allow read_files.metadata on /tmp/x? [y/N/always]",
+        prompt_text="Allow read_files.metadata on /tmp/x? [y/N/session/always]",
         request_token="abc123",
     )
     assert isinstance(result, SendResult)

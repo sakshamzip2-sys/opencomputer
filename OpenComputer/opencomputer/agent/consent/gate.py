@@ -67,14 +67,14 @@ def render_prompt_message(claim: CapabilityClaim, scope: str | None) -> str:
 
     Examples:
         render_prompt_message(claim, "/Users/x/foo.py")
-        → "Allow read_files.metadata on /Users/x/foo.py? [y/N/always]"
+        → "Allow read_files.metadata on /Users/x/foo.py? [y/N/session/always]"
         render_prompt_message(claim, None)
-        → "Allow read_files.metadata? [y/N/always]"
+        → "Allow read_files.metadata? [y/N/session/always]"
     """
     cap = claim.capability_id
     if scope:
-        return f"Allow {cap} on {scope}? [y/N/always]"
-    return f"Allow {cap}? [y/N/always]"
+        return f"Allow {cap} on {scope}? [y/N/session/always]"
+    return f"Allow {cap}? [y/N/session/always]"
 
 
 #: Sentinel value for ``request_approval(timeout_s=...)`` so we can
