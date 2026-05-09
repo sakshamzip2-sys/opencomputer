@@ -1534,12 +1534,21 @@ class TelegramAdapter(BaseChannelAdapter):
         # Compose buttons. Each button's callback_data is opaque; the
         # gateway maps token → (session_id, capability_id) via its own
         # registry. We never put the session id on the wire.
+        # Hermes parity: 4-verb keyboard. The "session" button writes an
+        # in-memory grant cleared on SESSION_FINALIZE. Verb is opaque on
+        # the wire — the dispatch verb-mapping handles routing.
         keyboard = [
             [
                 {
                     "text": "✓ Allow once",
                     "callback_data": f"{_APPROVAL_CALLBACK_PREFIX}once:{request_token}",
                 },
+                {
+                    "text": "🕒 Session",
+                    "callback_data": f"{_APPROVAL_CALLBACK_PREFIX}session:{request_token}",
+                },
+            ],
+            [
                 {
                     "text": "✓ Allow always",
                     "callback_data": f"{_APPROVAL_CALLBACK_PREFIX}always:{request_token}",
@@ -1548,7 +1557,7 @@ class TelegramAdapter(BaseChannelAdapter):
                     "text": "✗ Deny",
                     "callback_data": f"{_APPROVAL_CALLBACK_PREFIX}deny:{request_token}",
                 },
-            ]
+            ],
         ]
         try:
             # PR 3a.2 — MarkdownV2 + parse-error fallback for approval prompt.

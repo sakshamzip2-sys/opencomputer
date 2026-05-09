@@ -47,12 +47,19 @@ Why a thin wrapper, not a fork:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
 import tempfile
 from typing import ClassVar
 
+from opencomputer.security.tirith import (
+    check_command as tirith_check_command,
+)
+from opencomputer.security.tirith import (
+    format_findings_for_user,
+)
 from opencomputer.tools.ptc import (
     _MAX_STDERR_BYTES,
     _RECURSION_GUARD_ENV,
@@ -206,6 +213,31 @@ class ExecuteCode(BaseTool):
                     f"Refused: {_hardline_hit.reason} "
                     f"(hardline pattern '{_hardline_hit.pattern_id}'). "
                     f"This pattern is non-bypassable."
+                ),
+                is_error=True,
+            )
+
+        # Hermes parity: Tirith pre-exec scan on the code body. Sync
+        # subprocess call wrapped in to_thread to avoid blocking the
+        # event loop. fail_open default per Tirith config.
+        try:
+            tirith_result = await asyncio.to_thread(
+                tirith_check_command, code,
+            )
+        except Exception:  # noqa: BLE001 — never let scan break exec
+            tirith_result = None
+
+        if tirith_result is not None and tirith_result.action == "block":
+            findings_text = (
+                format_findings_for_user(tirith_result)
+                or tirith_result.summary
+                or "blocked by Tirith"
+            )
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    "Refused: Tirith pre-exec scan flagged this code.\n"
+                    f"{findings_text}"
                 ),
                 is_error=True,
             )
