@@ -70,6 +70,92 @@ def adapter_new(
     )
 
 
+def _bootstrap_adapter_runner_namespace() -> None:
+    """Make ``extensions.adapter_runner`` importable from the hyphenated dir.
+
+    Mirrors the helper in ``extensions/browser-control/_tool.py`` —
+    kept self-contained so the CLI works even when the adapter-runner
+    plugin hasn't been loaded yet.
+    """
+    import sys
+    import types
+    from pathlib import Path
+
+    extensions_root = Path(__file__).resolve().parent.parent / "extensions"
+    plugin_root = extensions_root / "adapter-runner"
+    if not plugin_root.is_dir():
+        return
+
+    extensions_root_str = str(extensions_root)
+    if extensions_root_str not in sys.path:
+        sys.path.insert(0, extensions_root_str)
+    if "extensions" not in sys.modules:
+        parent = types.ModuleType("extensions")
+        parent.__path__ = [extensions_root_str]
+        parent.__package__ = "extensions"
+        sys.modules["extensions"] = parent
+    pkg = sys.modules.get("extensions.adapter_runner")
+    if pkg is None:
+        pkg = types.ModuleType("extensions.adapter_runner")
+        pkg.__path__ = [str(plugin_root)]
+        pkg.__package__ = "extensions.adapter_runner"
+        sys.modules["extensions.adapter_runner"] = pkg
+        sys.modules["extensions"].adapter_runner = pkg  # type: ignore[attr-defined]
+    if not hasattr(pkg, "adapter"):
+        init_file = plugin_root / "__init__.py"
+        if init_file.is_file():
+            try:
+                source = init_file.read_text(encoding="utf-8")
+                code = compile(source, str(init_file), "exec")
+                exec(code, pkg.__dict__)
+            except Exception:
+                pass  # Discovery will surface specifics below
+
+
+@adapter_app.command("list")
+def adapter_list() -> None:
+    """List discovered synthetic-tool adapters (browser-control + adapter-pack plugins) (M1.B4).
+
+    Adapters here are the @adapter decorator's discovered functions
+    (extensions/adapter-runner/), not channel adapters. For channel
+    adapters, see ``opencomputer plugins`` filtered by ``kind=channel``.
+    """
+    _bootstrap_adapter_runner_namespace()
+    try:
+        from extensions.adapter_runner._discovery import (
+            discover_adapters,  # type: ignore[import-not-found]
+        )
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"adapter-runner not available: {exc}")
+        raise typer.Exit(1) from exc
+
+    result = discover_adapters()
+    if not result.specs:
+        typer.echo("No adapters discovered.")
+        if result.errors:
+            typer.echo("\nDiscovery errors:")
+            for e in result.errors:
+                typer.echo(f"  - {e}")
+        return
+
+    table = Table(title=f"Discovered adapters ({len(result.specs)})")
+    table.add_column("Tool", style="cyan", no_wrap=True)
+    table.add_column("Site", style="yellow")
+    table.add_column("Strategy")
+    table.add_column("Description")
+
+    for spec in result.specs:
+        table.add_row(
+            spec.tool_name,
+            spec.site,
+            getattr(spec.strategy, "name", str(spec.strategy)),
+            (spec.description or "—")[:80],
+        )
+    _console.print(table)
+    if result.errors:
+        _console.print(f"\n[dim red]{len(result.errors)} discovery error(s) — re-run with `oc doctor` for details[/dim red]")
+
+
 @adapter_app.command("capabilities")
 def adapter_capabilities() -> None:
     """List all ``ChannelCapabilities`` flags with one-line descriptions.

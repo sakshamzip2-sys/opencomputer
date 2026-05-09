@@ -98,4 +98,18 @@ def register(api: Any) -> None:
             "installed but inactive. Upgrade OpenComputer to schema_v3+."
         )
         return
-    register_fn(provider)
+    try:
+        register_fn(provider)
+    except ValueError as exc:
+        # Another external memory provider (typically memory-honcho) already
+        # won registration. By design only ONE external provider may be
+        # active — honcho-as-default is the documented choice. Skip gracefully
+        # so `oc doctor` doesn't spew a traceback on every invocation.
+        import logging
+
+        logging.getLogger("memory-mem0").warning(
+            "Mem0 plugin enabled but another memory provider is already "
+            "active (%s); skipping registration. Disable the conflicting "
+            "provider to use Mem0.",
+            exc,
+        )

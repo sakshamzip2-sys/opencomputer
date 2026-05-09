@@ -3935,6 +3935,7 @@ app.add_typer(session_app, name="session")
 app.add_typer(session_app, name="sessions")
 app.add_typer(voice_app, name="voice")
 app.add_typer(webhook_app, name="webhook")
+app.add_typer(webhook_app, name="webhooks")  # plural alias — UX parity (M1.B4)
 
 # Hermes channel-port (PR 5.4) — Telegram DM Topics CLI
 from opencomputer.cli_telegram import telegram_app  # noqa: E402

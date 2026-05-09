@@ -244,6 +244,81 @@ def cron_run(job_id: Annotated[str, typer.Argument(help="Job id.")]) -> None:
     typer.echo("Run will fire on next scheduler tick. Run `opencomputer cron tick` to fire now.")
 
 
+def _render_schedule(sched) -> str:  # noqa: ANN001
+    """Render a possibly-dict schedule into a short human display string."""
+    if isinstance(sched, dict):
+        return str(sched.get("display") or sched.get("kind", ""))[:20]
+    return str(sched or "")[:20]
+
+
+@cron_app.command("prune")
+def cron_prune(
+    noise: Annotated[bool, typer.Option("--noise", help="Flag short-named (<4 chars) and exact-duplicate jobs.")] = False,
+    apply_changes: Annotated[bool, typer.Option("--apply", help="Actually delete flagged jobs (default is dry-run).")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip interactive confirmation prompt.")] = False,
+) -> None:
+    """Identify and (optionally) remove cron-job noise.
+
+    Heuristic for "noise":
+    - Job name length < 4 characters (test/garbage names like "a", "x", "T", "b").
+    - Exact duplicate of a previously-seen (name, schedule, prompt) tuple.
+
+    Default is DRY RUN — flagged jobs are listed only.
+    Pair ``--apply`` with ``--yes`` to delete non-interactively.
+    """
+    if not noise:
+        typer.echo("No filter selected. Use --noise to flag short-named + duplicate jobs.")
+        return
+
+    from opencomputer.cron.jobs import load_jobs
+
+    jobs = load_jobs()
+    flagged: list[dict] = []
+    seen: dict[tuple[str, str, str], dict] = {}
+    for j in jobs:
+        name = (j.get("name") or "").strip()
+        sched = str(j.get("schedule", ""))
+        # Prompt may be a dict (skill-based jobs) — stringify for dedup key.
+        prompt = json.dumps(j.get("prompt"), sort_keys=True, default=str)
+        key = (name, sched, prompt)
+        if len(name) < 4:
+            flagged.append(j)
+            continue
+        if key in seen:
+            flagged.append(j)
+            continue
+        seen[key] = j
+
+    if not flagged:
+        typer.echo("No noise jobs found.")
+        return
+
+    typer.echo(f"{len(flagged)} noise job(s) flagged:")
+    for j in flagged:
+        # Prefer the rendered schedule_display when present (cron_list pattern);
+        # raw `schedule` may be a dict for interval/cron-kind jobs.
+        sched_display = j.get("schedule_display") or _render_schedule(j.get("schedule"))
+        typer.echo(
+            f"  {j.get('id', '?')[:8]:<10} {(j.get('name') or '')[:20]:<20} {sched_display:<20}"
+        )
+
+    if not apply_changes:
+        typer.echo("\n(dry run — pass --apply to delete)")
+        return
+
+    if not yes:
+        if not typer.confirm("Delete these jobs?", default=False):
+            typer.echo("Cancelled.")
+            return
+
+    deleted = 0
+    for j in flagged:
+        if remove_job(j["id"]):
+            deleted += 1
+    remaining = len(load_jobs())
+    typer.echo(f"deleted {deleted} noise job(s); {remaining} remain.")
+
+
 @cron_app.command("remove")
 def cron_remove(
     job_id: Annotated[str, typer.Argument(help="Job id.")],
