@@ -34,7 +34,7 @@ from plugin_sdk.core import Message, ToolCall
 #: to NULL. v5 = Tier-A item 11 ``tool_usage`` table — per-tool-call
 #: telemetry for ``opencomputer insights`` (tool, duration_ms, error,
 #: model, ts). Existing data unaffected; the table starts empty.
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -208,6 +208,26 @@ CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
 BEFORE DELETE ON audit_log BEGIN
     SELECT RAISE(ABORT, 'audit_log is append-only');
 END;
+
+-- v1.1 plan-2 M5.2 (2026-05-09): per-prompt message-history checkpoints.
+-- The agent loop fires CheckpointManager.create() before each tool_use
+-- block so `oc session rewind` can restore message state at a chosen
+-- prior point. files_snapshot_json is NULL by default (opt-in via
+-- checkpoints.snapshot_files config); messages_snapshot_json carries
+-- the JSON-serialized message history at that point.
+CREATE TABLE IF NOT EXISTS prompt_checkpoints (
+    id                       TEXT PRIMARY KEY,
+    session_id               TEXT NOT NULL,
+    prompt_index             INTEGER NOT NULL,
+    messages_snapshot_json   TEXT NOT NULL,
+    files_snapshot_json      TEXT,
+    label                    TEXT NOT NULL,
+    created_at               REAL NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_checkpoints_session
+    ON prompt_checkpoints(session_id, created_at);
 """
 
 
@@ -228,6 +248,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (11, 12): "_migrate_v11_to_v12",
     (12, 13): "_migrate_v12_to_v13",
     (13, 14): "_migrate_v13_to_v14",
+    (14, 15): "_migrate_v14_to_v15",
 }
 
 
@@ -787,6 +808,36 @@ def _migrate_v13_to_v14(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
     if "goal_last_judge_reason" not in cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN goal_last_judge_reason TEXT")
+
+
+def _migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
+    """v1.1 plan-2 M5.2 (2026-05-09) — per-prompt message-history checkpoints.
+
+    The DDL above already declares ``prompt_checkpoints`` with
+    ``CREATE TABLE IF NOT EXISTS`` so fresh DBs get the table at v0→v1
+    via the baseline DDL. Legacy DBs (v14) need an explicit create
+    here so the table appears without re-running baseline DDL.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS prompt_checkpoints (
+            id                       TEXT PRIMARY KEY,
+            session_id               TEXT NOT NULL,
+            prompt_index             INTEGER NOT NULL,
+            messages_snapshot_json   TEXT NOT NULL,
+            files_snapshot_json      TEXT,
+            label                    TEXT NOT NULL,
+            created_at               REAL NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_prompt_checkpoints_session
+            ON prompt_checkpoints(session_id, created_at)
+        """
+    )
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:

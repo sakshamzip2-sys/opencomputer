@@ -2373,6 +2373,34 @@ class AgentLoop:
                 except Exception:
                     pass  # cron tool may not be registered in some contexts
 
+                # v1.1 plan-2 M5.2 (2026-05-09): snapshot the message
+                # history BEFORE dispatching this tool block so a later
+                # `oc session rewind --mode conv_only` can restore state
+                # at this exact point. Best-effort — checkpoint failures
+                # never wedge the loop. Skipped on the first iteration
+                # if the session is fresh (no messages yet — nothing to
+                # restore TO).
+                if step.assistant_message.tool_calls and messages:
+                    try:
+                        from opencomputer.agent.checkpoint_manager import (
+                            CheckpointManager,
+                        )
+
+                        _cp_mgr = CheckpointManager(self.db)
+                        _msg_dicts = [
+                            _msg_to_dict(m) for m in messages
+                        ]
+                        _cp_mgr.create(
+                            session_id=sid,
+                            messages=_msg_dicts,
+                            label=f"before tool_use turn={iterations}",
+                        )
+                    except Exception:  # noqa: BLE001
+                        _log.debug(
+                            "M5.2: checkpoint create failed (suppressed)",
+                            exc_info=True,
+                        )
+
                 # Dispatch tools BEFORE persisting the assistant message. If we saved
                 # it first and then got cancelled mid-dispatch, the DB would hold a
                 # tool_use with no matching tool_result — Anthropic 400s on resume.
@@ -4880,6 +4908,36 @@ class AgentLoop:
                 proposal.next_mode,
                 exc_info=True,
             )
+
+
+def _msg_to_dict(msg: Any) -> dict[str, Any]:
+    """v1.1 plan-2 M5.2 (2026-05-09) — minimal Message-to-dict for checkpoints.
+
+    Strips fields that aren't JSON-serialisable (large bytes, custom
+    objects). Captures role + content + tool_calls + tool_call_id +
+    name so a restored session can recreate a working message list.
+    """
+    out: dict[str, Any] = {
+        "role": getattr(msg, "role", "user"),
+        "content": getattr(msg, "content", ""),
+    }
+    if getattr(msg, "tool_calls", None):
+        try:
+            out["tool_calls"] = [
+                {
+                    "id": getattr(tc, "id", ""),
+                    "name": getattr(tc, "name", ""),
+                    "arguments": getattr(tc, "arguments", {}) or {},
+                }
+                for tc in msg.tool_calls
+            ]
+        except Exception:  # noqa: BLE001
+            out["tool_calls"] = []
+    if getattr(msg, "tool_call_id", None):
+        out["tool_call_id"] = msg.tool_call_id
+    if getattr(msg, "name", None):
+        out["name"] = msg.name
+    return out
 
 
 async def _maybe_transform_tool_result(
