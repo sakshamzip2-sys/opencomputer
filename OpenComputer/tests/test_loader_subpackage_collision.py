@@ -91,9 +91,7 @@ class TestPluginRootMovesToFront:
     test_phase12b4)."""
 
     def test_loader_uses_remove_then_insert_pattern(self) -> None:
-        from pathlib import Path as _P
-
-        loader_src = _P("opencomputer/plugins/loader.py").read_text()
+        loader_src = Path("opencomputer/plugins/loader.py").read_text()
         # The fix uses ``while plugin_root_str in sys.path: sys.path.remove(...)``
         # followed by ``sys.path.insert(0, ...)`` — both lines must be present.
         assert "while plugin_root_str in sys.path:" in loader_src

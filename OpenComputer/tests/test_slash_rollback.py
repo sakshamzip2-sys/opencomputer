@@ -36,9 +36,10 @@ def harness(tmp_path: Path):
     # below re-resolves against coding-harness, not whatever was loaded
     # last by load_plugin.
     for _name in list(sys.modules):
-        if _name == "slash_commands" or _name.startswith("slash_commands."):
-            sys.modules.pop(_name, None)
-        elif _name == "rewind" or _name.startswith("rewind."):
+        if (
+            _name == "slash_commands" or _name.startswith("slash_commands.")
+            or _name == "rewind" or _name.startswith("rewind.")
+        ):
             sys.modules.pop(_name, None)
 
     from rewind.checkpoint import Checkpoint  # type: ignore[import-not-found]
