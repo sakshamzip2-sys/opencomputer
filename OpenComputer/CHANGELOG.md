@@ -4,6 +4,74 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-3 M10.1 + M10.4: per-channel routing schema + `oc routing` CLI (2026-05-09)
+
+Schema-and-dry-run slice of plan-3 M10. Operators can now declare routing rules in their `config.yaml` and inspect them with `oc routing list` / `oc routing test` — without the gateway dispatcher actually consuming them yet (M10.2/M10.3 land separately). The schema is the load-bearing piece; the CLI is what makes the schema reviewable.
+
+```yaml
+# ~/.opencomputer/<profile>/config.yaml
+routing:
+  rules:
+    - match: {platform: slack, channel: "#security-alerts"}
+      agent: security-reviewer
+    - match: {platform: telegram, peer: "12345"}
+      agent: executive
+      profile: work
+    - match: {platform: discord, guild: myguild, role: admin}
+      agent: admin-only
+    - match: {platform: discord, guild: myguild}
+      agent: guild-default
+  default:
+    agent: fallback
+```
+
+```
+$ oc routing list
+Routing rules (4 — most-specific first):
+  1. [spec=1001] platform='telegram', chat_id='12345', peer='12345' → agent='executive', profile='work'
+  2. [spec=301]  platform='discord', guild='myguild', role='admin' → agent='admin-only'
+  3. [spec=141]  platform='slack', channel='security-alerts' → agent='security-reviewer'
+  4. [spec=101]  platform='discord', guild='myguild' → agent='guild-default'
+
+Default: agent='fallback'
+
+$ oc routing test discord U777 --guild myguild --role admin
+Input: platform='discord', chat_id='U777', guild='myguild', role='admin'
+→ Matched rule (specificity=301): agent='admin-only'
+
+$ oc routing test matrix U999
+Input: platform='matrix', chat_id='U999'
+→ DEFAULT (no rule matched). agent='fallback'
+```
+
+**Most-specific-wins precedence (OpenClaw chain):**
+
+```
+exact peer (chat_id) → guild + role → guild → team → account → channel → platform → default
+```
+
+`peer:` is honored as an alias for `chat_id:` so YAML copy-pasted from OpenClaw works without renaming. `#channel` is normalized to `channel` so Slack-flavored configs match Discord-flavored event metadata identically. Authors can list rules in any order — the parser sorts them by `_match_specificity` so a less-specific rule listed first never eclipses a more-specific one.
+
+**What's deferred (intentional honest scope):**
+
+* **M10.2 — dispatcher integration** (gateway reads rules → applies agent template per inbound message). The plan-3 doc has this as a separate 1-2 day item. Schema is in place so M10.2 only needs to flip the `Dispatch.handle_message` lookup.
+* **M10.3 — per-rule profile rebind** (`profile:` field on a rule swaps the gateway's per-message context to that profile's memory + creds). Requires plan-1 M1.4 (per-profile env). Schema honors `profile:` today and round-trips it through YAML; the gateway plumbing is the M10.3 work.
+
+**Files:**
+
+- `opencomputer/agent/config.py` — `RoutingMatch`, `RoutingRule`, `RoutingDefault`, `RoutingConfig` dataclasses + `Config.routing` field (additive default; existing configs unchanged).
+- `opencomputer/agent/routing.py` (NEW) — `_match_specificity` + `sort_rules_by_specificity` + `match_rule` + `resolve_routing_rule(event)` + `resolve_routing_rule_by_fields(dict)` (the CLI's entry point — no MessageEvent dep).
+- `opencomputer/agent/config_store.py` — `_parse_routing_block` parser + `load_config` plumb-through; `_to_yaml_dict` writer for round-trip. Drops unknown match dimensions with a WARNING (forward-compat for un-ported OpenClaw fields); rejects rules missing `agent`.
+- `opencomputer/cli_routing.py` (NEW) — `routing_app` Typer with `list` + `test` commands. Both support `--output text|json` for scripting / piping to jq.
+- `opencomputer/cli.py` — `app.add_typer(routing_app, name="routing")`.
+
+**Tests (30 new across 4 files, all green):**
+
+- `tests/test_routing_precedence.py` — 11 tests covering every step of the precedence chain (chat_id beats guild+channel; peer alias matches chat_id; guild+role beats guild alone; channel beats platform; team beats channel; account beats channel; guild beats team beats account; sort is order-independent + stable for equal specificity).
+- `tests/test_routing_default_fallback.py` — 3 tests: no rules → default fires; rules present but none match → default; default agent defaults to "default".
+- `tests/test_routing_yaml_round_trip.py` — 8 tests: minimal block parses; full block with profile parses; empty block returns None (Config.routing untouched); rule missing `agent` is skipped with WARNING; unknown match dimension dropped with WARNING; channel `#foo` normalizes to `foo`; full Config → YAML → reload round-trips with most-specific-first ordering preserved; config without `routing:` block leaves Config.routing at default.
+- `tests/test_cli_routing.py` — 8 tests: `list` text + JSON; no rules listed; `test` matches security channel + admin role; falls through to default; JSON output; `#channel` normalization at the CLI flag layer.
+
 ### Added — v1.1 Plan-1 M3.1 + M3.3: wire-protocol completeness (2026-05-09)
 
 Closes the two remaining wire-protocol gaps from `2026-05-09-v1-1-plan-1-refined-execution.md`. Same files (`gateway/protocol.py`, `gateway/protocol_v2.py`, `gateway/wire_server.py`); shipped together for atomic-bisect. M3.2 transfer-token session handoff stays deferred per YAGNI (no current wire client demands it).
