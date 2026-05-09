@@ -31,12 +31,22 @@ def run(
     wire_url: Annotated[
         str, typer.Option(help="WebSocket URL of the wire server.")
     ] = "ws://127.0.0.1:18789",
+    detach: Annotated[
+        bool, typer.Option("--detach", "-d", help="Run in background; pid + logs under profile home (M4).")
+    ] = False,
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
 
     if host != "127.0.0.1":
         _check_external_bind_consent_or_exit(host)
+
+    if detach:
+        # Local import — `_detach_to_background` lives in cli.py to avoid
+        # a circular import at module-load time on the dashboard side.
+        from opencomputer.cli import _detach_to_background
+        if _detach_to_background(pidfile_name="dashboard.pid", log_name="dashboard.log"):
+            return
 
     server = DashboardServer(host=host, port=port, wire_url=wire_url)
     try:
