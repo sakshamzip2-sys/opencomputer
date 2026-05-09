@@ -601,6 +601,10 @@ def _register_settings_hooks(cfg: Config) -> int:
     :func:`opencomputer.hooks.shell_handlers.make_shell_hook_handler`)
     then registers it against the global hook engine.
 
+    v1.1 plan-2 M8.1 (2026-05-09) — also iterates ``cfg.prompt_hooks``
+    and registers each :class:`HookPromptConfig` via
+    :func:`opencomputer.hooks.prompt_handlers.make_prompt_hook_handler`.
+
     Settings-declared hooks run AFTER plugin-declared hooks because
     plugins call ``api.register_hook`` at plugin-load time (which is
     earlier than this CLI-time call). Coexistence is by design — both
@@ -610,8 +614,6 @@ def _register_settings_hooks(cfg: Config) -> int:
     so a single bad entry can't wedge CLI startup. Returns the count
     successfully registered (used by the chat banner).
     """
-    if not cfg.hooks:
-        return 0
     registered = 0
     for h in cfg.hooks:
         try:
@@ -638,6 +640,60 @@ def _register_settings_hooks(cfg: Config) -> int:
             )
         )
         registered += 1
+
+    # v1.1 plan-2 M8.1 — prompt hooks. Lazy import so command-only
+    # configs don't pay for the aux-LLM module load at CLI start.
+    if getattr(cfg, "prompt_hooks", ()):
+        from opencomputer.hooks.prompt_handlers import (  # noqa: PLC0415
+            make_prompt_hook_handler,
+        )
+
+        for ph in cfg.prompt_hooks:
+            try:
+                event = HookEvent(ph.event)
+            except ValueError:
+                _log.warning(
+                    "prompt hook: unknown event %r; skipping",
+                    ph.event,
+                )
+                continue
+            fire_and_forget = (event != HookEvent.PRE_LLM_CALL)
+            hook_engine.register(
+                HookSpec(
+                    event=event,
+                    handler=make_prompt_hook_handler(ph),
+                    matcher=ph.matcher,
+                    fire_and_forget=fire_and_forget,
+                )
+            )
+            registered += 1
+
+    # v1.1 plan-2 M8.2 — agent hooks. Same lazy-import pattern; pulls in
+    # the delegate tool only when the user actually configured one.
+    if getattr(cfg, "agent_hooks", ()):
+        from opencomputer.hooks.agent_handlers import (  # noqa: PLC0415
+            make_agent_hook_handler,
+        )
+
+        for ah in cfg.agent_hooks:
+            try:
+                event = HookEvent(ah.event)
+            except ValueError:
+                _log.warning(
+                    "agent hook: unknown event %r; skipping",
+                    ah.event,
+                )
+                continue
+            fire_and_forget = (event != HookEvent.PRE_LLM_CALL)
+            hook_engine.register(
+                HookSpec(
+                    event=event,
+                    handler=make_agent_hook_handler(ah),
+                    matcher=ah.matcher,
+                    fire_and_forget=fire_and_forget,
+                )
+            )
+            registered += 1
     return registered
 
 
@@ -1139,6 +1195,27 @@ def _run_chat_session(
     from opencomputer.agent.thinking_injector import ThinkingInjector
     injection_engine.unregister("thinking_tags_fallback")
     injection_engine.register(ThinkingInjector())
+
+    # v1.1 plan-2 M7 (2026-05-09) — register the path-glob rules
+    # injector so .opencomputer/rules/*.md fire on the next turn after
+    # any path-touching tool call. Empty rules list → provider stays
+    # registered but contributes nothing (cheap no-op per turn).
+    try:
+        from opencomputer.agent.path_rules_injection import (
+            PathGlobRulesProvider,
+            load_rules_for_active_profile,
+        )
+
+        injection_engine.unregister("path_glob_rules")
+        injection_engine.register(
+            PathGlobRulesProvider(rules=load_rules_for_active_profile())
+        )
+    except Exception:  # noqa: BLE001 — never break loop boot on rules load fail
+        import logging as _log_mod
+        _log_mod.getLogger("opencomputer.cli").debug(
+            "path-glob rules registration failed (suppressed)", exc_info=True
+        )
+
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
 
     # Kanban-Goals v2 (2026-05-08) — banner callback for the Ralph loop.
@@ -2374,6 +2451,7 @@ def _run_oneshot_turn(
     model: str = "",
     provider_name: str = "",
     plan: bool = False,
+    output: str = "text",
 ) -> None:
     """Single-turn non-interactive run shared by ``oc oneshot`` and ``oc chat -q``.
 
@@ -2382,12 +2460,36 @@ def _run_oneshot_turn(
     Extracted so ``oc chat -q "..."`` can reuse this path without going through
     Typer's command machinery (calling typer-decorated functions directly
     would pass OptionInfo objects in place of defaults).
+
+    ``output`` (v1.1 plan-1 M2.2, 2026-05-09) controls stdout shape:
+
+    * ``"text"`` (default) — prints the assistant's final message.
+    * ``"json"`` — emits one summary JSON object at end of run.
+    * ``"stream-json"`` — emits one NDJSON line per LLM call as the
+      run proceeds, plus a final ``{"event": "summary", ...}`` line.
+
+    Modes other than text route stdout through
+    :mod:`opencomputer.oneshot_output` and the
+    :mod:`opencomputer.inference.observability` subscriber bus.
     """
     import asyncio as _asyncio
 
     from opencomputer.agent.loop import AgentLoop as _AgentLoop
+    from opencomputer.headless import parse_output_mode as _parse_output_mode
+    from opencomputer.oneshot_output import (
+        OneshotResult as _OneshotResult,
+    )
+    from opencomputer.oneshot_output import (
+        emit_final as _emit_final,
+    )
+    from opencomputer.oneshot_output import (
+        stream_subscriber as _stream_subscriber,
+    )
     from opencomputer.tools.delegate import DelegateTool as _DelegateTool
     from plugin_sdk.runtime_context import RuntimeContext as _RuntimeContext
+
+    output_mode = _parse_output_mode(output)
+    oneshot_result = _OneshotResult()
 
     _configure_logging_once()
     cfg = load_config()
@@ -2443,9 +2545,10 @@ def _run_oneshot_turn(
     permission_mode = _derive_permission_mode(plan=plan, auto=False, accept_edits=False)
     runtime = _RuntimeContext(plan_mode=plan, permission_mode=permission_mode)
 
-    async def _run() -> str:
+    async def _run() -> tuple[str, str]:
         result = await loop.run_conversation(prompt, runtime=runtime)
         msg = getattr(result, "final_message", None)
+        sid = getattr(result, "session_id", "") or ""
         # Drain fire-and-forget tasks (e.g. social-traces post-task
         # distill+submit) before this coroutine returns, otherwise
         # ``asyncio.run`` cancels them when its event loop tears down.
@@ -2460,16 +2563,20 @@ def _run_oneshot_turn(
         except Exception:  # noqa: BLE001
             pass
         if msg is None:
-            return ""
+            return "", str(sid)
         content = getattr(msg, "content", "")
-        return content if isinstance(content, str) else ""
+        return (content if isinstance(content, str) else ""), str(sid)
 
     try:
-        text = _asyncio.run(_run())
+        with _stream_subscriber(oneshot_result, output_mode):
+            text, session_id = _asyncio.run(_run())
     except KeyboardInterrupt:
         raise typer.Exit(130) from None
-    if text:
-        typer.echo(text)
+
+    oneshot_result.final_message = text or ""
+    oneshot_result.session_id = session_id
+
+    _emit_final(oneshot_result, output_mode)
 
 
 @app.command(name="oneshot")
@@ -2488,6 +2595,19 @@ def oneshot(
     plan: bool = typer.Option(
         False, "--plan", help="Plan mode (read-only / refuses destructive tools).",
     ),
+    output: str = typer.Option(
+        "text",
+        "--output",
+        "-o",
+        help=(
+            "Output mode for stdout. 'text' (default) prints the assistant's "
+            "final message. 'json' emits one summary JSON object at end of run "
+            "(session_id, num_turns, total_*_tokens, total_cost_usd, "
+            "final_message). 'stream-json' emits one NDJSON line per LLM call "
+            "as it fires plus a final {\"event\":\"summary\",...} line. "
+            "(v1.1 plan-1 M2.2)"
+        ),
+    ),
 ) -> None:
     """Run a single agent turn non-interactively, print the response, exit.
 
@@ -2501,10 +2621,18 @@ def oneshot(
         oc oneshot "what's in the README?"
         oc oneshot "summarise this file" --model anthropic:claude-opus-4-7
         oc oneshot "describe a kanban board" --plan
+        oc oneshot "say hi" --output json | jq .session_id
+        oc oneshot "do 3 things" --output stream-json | jq -c .event
 
     See also: ``oc chat -q "..."`` is a Hermes-parity alias for this command.
     """
-    _run_oneshot_turn(prompt, model=model, provider_name=provider_name, plan=plan)
+    _run_oneshot_turn(
+        prompt,
+        model=model,
+        provider_name=provider_name,
+        plan=plan,
+        output=output,
+    )
 
 
 @app.command()
@@ -3467,10 +3595,14 @@ app.add_typer(tui_app, name="tui")
 
 # 2026-05-08 — `.worktreeinclude` + checkpoint hygiene CLIs.
 from opencomputer.cli_checkpoints import checkpoints_app  # noqa: E402
+
+# 2026-05-09 — v1.1 plan-2 M7: path-glob rules CLI.
+from opencomputer.cli_rules import rules_app  # noqa: E402
 from opencomputer.cli_worktrees import worktrees_app  # noqa: E402
 
 app.add_typer(checkpoints_app, name="checkpoints")
 app.add_typer(worktrees_app, name="worktrees")
+app.add_typer(rules_app, name="rules")
 
 # ─── service (cross-platform always-on daemon) ────────────────────────
 service_app = typer.Typer(
