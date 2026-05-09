@@ -133,16 +133,45 @@ class ChannelRoutingMatch:
 
 
 @dataclass(frozen=True, slots=True)
+class BroadcastTarget:
+    """One destination in a broadcast fan-out (v1.1 plan-3 M11.4).
+
+    Each ``BroadcastTarget`` is dispatched as a separate concurrent
+    AgentLoop run.  ``profile`` is optional per-target so different
+    targets can run under different profiles (different memory + creds
+    + agent templates) — e.g. one inbound triggers ``code-reviewer``
+    in the ``coder`` profile AND ``security-reviewer`` in the
+    ``audit`` profile simultaneously.
+    """
+
+    agent: str
+    profile: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ChannelRoutingRule:
     """One rule mapping a match-pattern to an agent template (and
-    optionally a different profile)."""
+    optionally a different profile).
+
+    For broadcast fan-out (M11.4), set ``broadcast_to`` to a tuple of
+    :class:`BroadcastTarget`; the gateway then dispatches to every
+    target in parallel.  When ``broadcast_to`` is non-empty, the
+    ``agent`` field is treated as a sentinel (convention:
+    ``"<broadcast>"``) and is not used for dispatch.
+    """
 
     match: ChannelRoutingMatch
     agent: str
     profile: str | None = None
-    """Optional cross-profile re-bind.  When set, the gateway swaps
-    its per-message MemoryManager + credential pool + agent-template
-    registry to the named profile before dispatching."""
+    """Optional cross-profile re-bind for the SINGLE-target case.
+    When set, the gateway swaps its per-message MemoryManager +
+    credential pool + agent-template registry to the named profile
+    before dispatching.  Ignored when ``broadcast_to`` is non-empty."""
+    broadcast_to: tuple[BroadcastTarget, ...] = ()
+    """v1.1 plan-3 M11.4 — broadcast fan-out.  When non-empty, the
+    gateway dispatches the inbound message to EVERY target in
+    parallel (one AgentLoop per target).  ``agent`` and ``profile``
+    are ignored when ``broadcast_to`` is set."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,14 +192,29 @@ class ChannelRoutingConfig:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedRoute:
-    """Output of :func:`match_route`.  ``rule_index`` is None when the
-    default rule fired."""
+    """Output of :func:`match_route`.
+
+    Single-target case: ``broadcast_targets`` is empty, ``agent`` and
+    ``profile`` carry the destination.
+
+    Broadcast case (v1.1 plan-3 M11.4): ``broadcast_targets`` is
+    non-empty; the gateway dispatches to every target in parallel.
+    ``agent`` is the sentinel ``"<broadcast>"`` and ``profile`` is
+    ``None``.
+    """
 
     agent: str
     profile: str | None
     matched_rule_index: int | None
     """0-indexed position of the matching rule in the config; None when
     the default rule fired."""
+    broadcast_targets: tuple[BroadcastTarget, ...] = ()
+    """Empty for single-target dispatch; non-empty when the matched
+    rule was a broadcast rule (M11.4)."""
+
+    @property
+    def is_broadcast(self) -> bool:
+        return bool(self.broadcast_targets)
 
 
 def match_route(
@@ -216,6 +260,7 @@ def match_route(
         agent=rule.agent,
         profile=rule.profile,
         matched_rule_index=-neg_idx,
+        broadcast_targets=rule.broadcast_to,
     )
 
 
@@ -287,16 +332,105 @@ def _parse_rule(raw: dict[str, Any], *, index: int) -> ChannelRoutingRule:
         role=_str_or_none(match_raw.get("role")),
     )
     agent = raw.get("agent")
-    if not isinstance(agent, str) or not agent.strip():
-        raise ValueError(
-            f"routing.rules[{index}].agent must be a non-empty string"
-        )
+    # Detect broadcast key presence separately from truthiness so that
+    # an explicit `broadcast_to: []` raises "must be non-empty" rather
+    # than silently falling through to the agent-required check.
+    if "broadcast_to" in raw:
+        broadcast_raw: Any = raw.get("broadcast_to")
+        broadcast_present = True
+    elif "broadcast" in raw:
+        broadcast_raw = raw.get("broadcast")
+        broadcast_present = True
+    else:
+        broadcast_raw = None
+        broadcast_present = False
+
+    # If broadcast is set, agent is allowed to be the sentinel
+    # "<broadcast>" or any non-empty string (the gateway ignores it).
+    # If broadcast is NOT set, agent is required.
+    if broadcast_present:
+        broadcast_targets = _parse_broadcast(broadcast_raw, index=index)
+        # agent has loose validation in broadcast mode — just needs to be
+        # a string (sentinel "<broadcast>" by convention).
+        if agent is None:
+            agent = "<broadcast>"
+        if not isinstance(agent, str):
+            raise ValueError(
+                f"routing.rules[{index}].agent must be a string"
+            )
+    else:
+        broadcast_targets = ()
+        if not isinstance(agent, str) or not agent.strip():
+            raise ValueError(
+                f"routing.rules[{index}].agent must be a non-empty string"
+            )
+        agent = agent.strip()
     profile = raw.get("profile")
     if profile is not None and (not isinstance(profile, str) or not profile.strip()):
         raise ValueError(
             f"routing.rules[{index}].profile must be a non-empty string when set"
         )
-    return ChannelRoutingRule(match=match, agent=agent.strip(), profile=profile)
+    return ChannelRoutingRule(
+        match=match,
+        agent=agent,
+        profile=profile,
+        broadcast_to=broadcast_targets,
+    )
+
+
+def _parse_broadcast(
+    raw: Any, *, index: int
+) -> tuple[BroadcastTarget, ...]:
+    """Parse the ``broadcast_to:`` (or legacy ``broadcast:``) list.
+
+    Each element is either a bare string (just an agent name) or
+    a dict ``{agent: ..., profile: ...}``.  Strict validation on
+    types/empties matches the rest of the loader's posture.
+    """
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"routing.rules[{index}].broadcast_to must be a list, "
+            f"got {type(raw).__name__}"
+        )
+    if not raw:
+        raise ValueError(
+            f"routing.rules[{index}].broadcast_to must be non-empty when set"
+        )
+    targets: list[BroadcastTarget] = []
+    for j, entry in enumerate(raw):
+        if isinstance(entry, str):
+            agent_name = entry.strip()
+            if not agent_name:
+                raise ValueError(
+                    f"routing.rules[{index}].broadcast_to[{j}] must be "
+                    f"a non-empty agent name"
+                )
+            targets.append(BroadcastTarget(agent=agent_name))
+        elif isinstance(entry, dict):
+            agent_name = entry.get("agent")
+            if not isinstance(agent_name, str) or not agent_name.strip():
+                raise ValueError(
+                    f"routing.rules[{index}].broadcast_to[{j}].agent "
+                    f"must be a non-empty string"
+                )
+            target_profile = entry.get("profile")
+            if target_profile is not None and (
+                not isinstance(target_profile, str)
+                or not target_profile.strip()
+            ):
+                raise ValueError(
+                    f"routing.rules[{index}].broadcast_to[{j}].profile "
+                    f"must be a non-empty string when set"
+                )
+            targets.append(
+                BroadcastTarget(agent=agent_name.strip(), profile=target_profile)
+            )
+        else:
+            raise ValueError(
+                f"routing.rules[{index}].broadcast_to[{j}] must be a string "
+                f"or a mapping, got {type(entry).__name__}"
+            )
+    return tuple(targets)
 
 
 def _parse_default(raw: dict[str, Any]) -> ChannelRoutingDefault:
@@ -319,6 +453,7 @@ def _str_or_none(value: Any) -> str | None:
 
 
 __all__ = [
+    "BroadcastTarget",
     "ChannelRoutingConfig",
     "ChannelRoutingDefault",
     "ChannelRoutingMatch",
