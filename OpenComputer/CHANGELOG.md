@@ -18,6 +18,32 @@ Reads `~/.opencomputer/harness/<session_id>/rewind/<checkpoint_id>/` via the exi
 
 Refined plan doc at `docs/superpowers/plans/2026-05-09-v1-1-plan-2-refined-execution.md` records the audit findings (M4.5 already shipped as `oc worktrees clean`; M8.3 already shipped as `HookEvent.AFTER_COMPACTION`) and the deferral rationale for the larger Tier-B + Tier-C items (M4.1-4.4 subagent isolation, M5.2-5.4 checkpoints + rewind + plan-mode v2, M8.1-8.2 prompt + agent hook types).
 
+### Added — v1.1 Plan-2 M7: path-glob rules + `oc rules` CLI (2026-05-09)
+
+Operators can now drop `*.md` files into `.opencomputer/rules/` (workspace-local) or `~/.opencomputer/<profile>/rules/` (cross-project) and the agent picks them up automatically when it edits files matching the rule's `paths:` glob list.
+
+```yaml
+# .opencomputer/rules/python.md
+---
+paths:
+  - "**/*.py"
+priority: 50
+---
+Use type hints. Prefer `from __future__ import annotations`.
+```
+
+The next time the agent runs `Read` / `Edit` / `Write` / `MultiEdit` / `Glob` / `Grep` / `NotebookEdit` against a `.py` file, the rule body is appended to the system prompt as an `[Active Rules]` block via the existing `DynamicInjectionProvider` mechanism. Frozen base prompt + InjectionEngine = no prefix-cache invalidation.
+
+- New `opencomputer.agent.rules_loader` — `Rule` dataclass + `load_rules()` + `merged_rules()` (workspace-shadows-profile) + `active_rules_for()` + `format_rules_block()` + `extract_paths_from_tool_call()`. Glob matching uses `PurePosixPath.full_match()` on Python 3.13+ and falls back to a regex translator on 3.12 (both honor `**` as zero-or-more path segments). Per-rule body cap of 4 KB.
+- New `opencomputer.agent.path_rules_injection.PathGlobRulesProvider` — DynamicInjectionProvider implementation registered at loop boot in `cli.py`. Walks the message history backwards to find the LAST assistant turn's tool calls; emits the rule block once per turn that touches matching files. Idle turns contribute nothing.
+- New `oc rules` CLI subapp:
+  - `oc rules list [--json]` — every loaded rule from workspace + profile.
+  - `oc rules check <path> [--json]` — debugging: which rules match `<path>`.
+  - `oc rules show <name>` — full body + frontmatter of one rule.
+- Bootstrapping is fail-open: an unparseable rule file is logged + skipped; the rules dir not existing is a no-op.
+
+42 new tests in `test_path_glob_rules.py` (loader / merger / matcher / formatter / extractor / injection provider / `load_rules_for_active_profile`) and `test_cli_rules.py` (3 subcommands × table+JSON modes).
+
 ### Added — Hermes Cron + Delegation long-tail finishers (2026-05-08 / 2026-05-09)
 
 Closes 11 honest gaps + 2 latent runtime bugs between the Hermes Cron & Delegation reference spec and OpenComputer. PR #494 already shipped no_agent / parallel-batch / multi-profile parity; this work picks up the long tail and hardens it to production-grade.

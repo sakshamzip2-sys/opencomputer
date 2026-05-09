@@ -1139,6 +1139,27 @@ def _run_chat_session(
     from opencomputer.agent.thinking_injector import ThinkingInjector
     injection_engine.unregister("thinking_tags_fallback")
     injection_engine.register(ThinkingInjector())
+
+    # v1.1 plan-2 M7 (2026-05-09) — register the path-glob rules
+    # injector so .opencomputer/rules/*.md fire on the next turn after
+    # any path-touching tool call. Empty rules list → provider stays
+    # registered but contributes nothing (cheap no-op per turn).
+    try:
+        from opencomputer.agent.path_rules_injection import (
+            PathGlobRulesProvider,
+            load_rules_for_active_profile,
+        )
+
+        injection_engine.unregister("path_glob_rules")
+        injection_engine.register(
+            PathGlobRulesProvider(rules=load_rules_for_active_profile())
+        )
+    except Exception:  # noqa: BLE001 — never break loop boot on rules load fail
+        import logging as _log_mod
+        _log_mod.getLogger("opencomputer.cli").debug(
+            "path-glob rules registration failed (suppressed)", exc_info=True
+        )
+
     loop = AgentLoop(provider=provider, config=cfg, compaction_disabled=no_compact)
 
     # Kanban-Goals v2 (2026-05-08) — banner callback for the Ralph loop.
@@ -3467,10 +3488,14 @@ app.add_typer(tui_app, name="tui")
 
 # 2026-05-08 — `.worktreeinclude` + checkpoint hygiene CLIs.
 from opencomputer.cli_checkpoints import checkpoints_app  # noqa: E402
+
+# 2026-05-09 — v1.1 plan-2 M7: path-glob rules CLI.
+from opencomputer.cli_rules import rules_app  # noqa: E402
 from opencomputer.cli_worktrees import worktrees_app  # noqa: E402
 
 app.add_typer(checkpoints_app, name="checkpoints")
 app.add_typer(worktrees_app, name="worktrees")
+app.add_typer(rules_app, name="rules")
 
 # ─── service (cross-platform always-on daemon) ────────────────────────
 service_app = typer.Typer(
