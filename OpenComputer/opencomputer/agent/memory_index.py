@@ -67,3 +67,48 @@ class BM25Index:
     @staticmethod
     def _tokenize(text: str) -> list[str]:
         return BM25Index._TOKEN_RE.findall(text.lower())
+
+    # ─── segmentation (pure) ───────────────────────────────────────────
+
+    _HEADING_RE = re.compile(r"^#{1,6}\s")
+
+    @staticmethod
+    def _segment(text: str) -> list[IndexedEntry]:
+        if not text or not text.strip():
+            return []
+
+        lines = text.splitlines()
+        entries: list[IndexedEntry] = []
+        cur_lines: list[tuple[int, str]] = []  # (1-indexed line no, content)
+        cur_blank_run = 0
+
+        def flush() -> None:
+            if not cur_lines:
+                return
+            line_start = cur_lines[0][0]
+            line_end = cur_lines[-1][0]
+            raw = "\n".join(content for _, content in cur_lines).strip()
+            if raw:
+                entries.append(IndexedEntry(raw=raw, line_start=line_start, line_end=line_end))
+            cur_lines.clear()
+
+        for idx, line in enumerate(lines, start=1):
+            stripped = line.strip()
+            if not stripped:
+                cur_blank_run += 1
+                if cur_blank_run >= 1:
+                    flush()
+                continue
+
+            cur_blank_run = 0
+
+            if BM25Index._HEADING_RE.match(line):
+                # heading is a strong boundary; flush prior entry then start a new one with the heading
+                flush()
+                cur_lines.append((idx, line))
+                continue
+
+            cur_lines.append((idx, line))
+
+        flush()
+        return entries
