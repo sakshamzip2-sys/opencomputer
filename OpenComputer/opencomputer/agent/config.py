@@ -1171,6 +1171,105 @@ class CodeExecutionConfig:
             )
 
 
+# ─── v1.1 plan-3 M10 — per-channel routing ────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingMatch:
+    """Match-criteria for a single :class:`RoutingRule`.
+
+    Each non-empty field tightens the match. The dispatcher resolves the
+    most-specific-wins precedence chain (see
+    :func:`opencomputer.agent.routing.resolve_routing_rule`):
+
+        exact peer → parent peer → guild + roles → guild → team →
+        account → channel → default
+
+    All fields default to empty string so authors only set the dimensions
+    that matter for a given rule. Unset fields are wildcards.
+    """
+
+    platform: str = ""
+    """Match :attr:`MessageEvent.platform.value` (e.g. "slack", "telegram")."""
+
+    chat_id: str = ""
+    """Exact peer / chat / DM identifier (highest precedence)."""
+
+    channel: str = ""
+    """Slack / Discord channel name (e.g. "#security-alerts")."""
+
+    guild: str = ""
+    """Discord guild / server id (or Slack workspace, Matrix server)."""
+
+    team: str = ""
+    """Slack team / Matrix room namespace."""
+
+    account: str = ""
+    """Bot / app account id (when one daemon serves several bots)."""
+
+    role: str = ""
+    """Discord member role (must match a role on the inbound user)."""
+
+    peer: str = ""
+    """Alias for :attr:`chat_id` mirroring OpenClaw's vocabulary.
+
+    Authors typically set one or the other; both are honored at match
+    time so config copy-pasted from OpenClaw works without renaming.
+    """
+
+    def __post_init__(self) -> None:
+        # Normalize to non-leading-hash channel form so "#foo" matches "foo"
+        # and vice versa (Slack vs Discord vs Matrix conventions diverge).
+        if self.channel.startswith("#"):
+            object.__setattr__(self, "channel", self.channel.lstrip("#"))
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingRule:
+    """One routing rule — a match criterion + an agent template binding.
+
+    ``profile`` is optional cross-profile re-bind (M10.3 — not used by
+    M10.1's schema layer; recorded so the rule round-trips through YAML).
+    """
+
+    match: RoutingMatch = field(default_factory=RoutingMatch)
+    agent: str = ""
+    profile: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.agent:
+            raise ValueError("routing rule missing required `agent` field")
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingDefault:
+    """Fallback when no rule matches.
+
+    Same shape as a rule's tail (``agent`` + optional ``profile``) but no
+    ``match`` block — it always fires when the rule list is exhausted.
+    """
+
+    agent: str = "default"
+    profile: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingConfig:
+    """Per-channel routing rules — top-level ``routing:`` config block.
+
+    Rules are evaluated in order; the first match wins. Within a single
+    rule, the :class:`RoutingMatch` block fully constrains the match —
+    every set field must match the inbound :class:`MessageEvent`.
+
+    Most-specific-wins is enforced by sorting rules at parse time using
+    :func:`_specificity` so authors can list rules in any order without
+    a less-specific rule eclipsing a more-specific one.
+    """
+
+    rules: tuple[RoutingRule, ...] = ()
+    default: RoutingDefault = field(default_factory=RoutingDefault)
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     """Root configuration — composed of small focused configs."""
@@ -1258,6 +1357,11 @@ class Config:
     #: ``ExecuteCode.execute`` reads ``code_execution.terminal.env_passthrough``;
     #: G5 adds the ``max_tool_calls`` cap as a configurable slot.
     code_execution: CodeExecutionConfig = field(default_factory=CodeExecutionConfig)
+    #: v1.1 plan-3 M10.1 (2026-05-09) — per-channel routing rules. Empty
+    #: tuple of rules + default agent "default" means "no routing" — the
+    #: dispatcher falls through to the active profile's default agent
+    #: template (current behavior, fully backwards-compatible).
+    routing: RoutingConfig = field(default_factory=RoutingConfig)
     home: Path = field(default_factory=_home)
 
 
@@ -1294,6 +1398,10 @@ __all__ = [
     "CustomProviderModelOverride",
     "FallbackProvider",
     "ProviderRoutingConfig",
+    "RoutingConfig",
+    "RoutingDefault",
+    "RoutingMatch",
+    "RoutingRule",
     "split_or_routing_suffix",
     "split_hf_routing_suffix",
     "DelegationConfig",

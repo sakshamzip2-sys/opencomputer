@@ -3596,6 +3596,9 @@ app.add_typer(tui_app, name="tui")
 # 2026-05-08 — `.worktreeinclude` + checkpoint hygiene CLIs.
 from opencomputer.cli_checkpoints import checkpoints_app  # noqa: E402
 
+# 2026-05-09 — v1.1 plan-3 M10.4: per-channel routing dry-run CLI.
+from opencomputer.cli_routing import routing_app  # noqa: E402
+
 # 2026-05-09 — v1.1 plan-2 M7: path-glob rules CLI.
 from opencomputer.cli_rules import rules_app  # noqa: E402
 from opencomputer.cli_worktrees import worktrees_app  # noqa: E402
@@ -3603,6 +3606,7 @@ from opencomputer.cli_worktrees import worktrees_app  # noqa: E402
 app.add_typer(checkpoints_app, name="checkpoints")
 app.add_typer(worktrees_app, name="worktrees")
 app.add_typer(rules_app, name="rules")
+app.add_typer(routing_app, name="routing")
 
 # ─── service (cross-platform always-on daemon) ────────────────────────
 service_app = typer.Typer(
