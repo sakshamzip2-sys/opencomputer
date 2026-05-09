@@ -23,7 +23,42 @@ provider plugin already knows them.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
+
+from opencomputer.agent.agent_cache import (
+    DEFAULT_AUX_RESPONSE_CACHE_MAX,
+    AgentCache,
+    aux_response_signature,
+)
+
+_log = logging.getLogger("opencomputer.agent.aux_llm")
+
+#: Module-level singleton response cache (M1.3, 2026-05-09). Opt-in
+#: via ``use_cache=True`` on :func:`complete_text`. Sized for ~2MB
+#: worst case (256 entries × ~8KB each at typical max_tokens).
+_AUX_RESPONSE_CACHE: AgentCache = AgentCache(max_size=DEFAULT_AUX_RESPONSE_CACHE_MAX)
+
+#: Telemetry counters for ``oc usage`` integration / debug surfaces.
+#: Best-effort — never crash the call path.
+_AUX_CACHE_STATS: dict[str, int] = {"hits": 0, "misses": 0}
+
+
+def aux_cache_stats() -> dict[str, int]:
+    """Return a snapshot of aux-LLM response cache hit/miss counts.
+
+    M1.3 — exposed so ``oc usage`` (or any debug surface) can render
+    the cache effectiveness without grovelling into module internals.
+    Returns a fresh dict so callers can mutate it safely.
+    """
+    return dict(_AUX_CACHE_STATS)
+
+
+def clear_aux_response_cache() -> None:
+    """Empty the aux-LLM response cache. Intended for tests + ``oc admin reset``."""
+    _AUX_RESPONSE_CACHE.clear()
+    _AUX_CACHE_STATS["hits"] = 0
+    _AUX_CACHE_STATS["misses"] = 0
 
 
 def _resolve_provider() -> Any:
@@ -110,6 +145,7 @@ async def complete_text(
     max_tokens: int = 2048,
     temperature: float = 2.0,
     model: str | None = None,
+    use_cache: bool = False,
 ) -> str:
     """Run a single text completion through the configured provider.
 
@@ -120,6 +156,14 @@ async def complete_text(
     underlying provider error otherwise — callers should wrap in their
     own try/except if they want to convert SDK errors into user-facing
     text.
+
+    ``use_cache=True`` (M1.3, 2026-05-09) memoizes responses keyed on
+    ``(provider, model, system, messages, max_tokens, temperature)``.
+    Opt-in: callers MUST verify their prompt is deterministic (same
+    inputs always produce a semantically identical answer) before
+    enabling. Smart-mode security assessments at temperature=0.0 are
+    the canonical use case. Cache misses always hit the upstream
+    provider; the result is then stored.
     """
     from plugin_sdk.core import Message
 
@@ -128,6 +172,30 @@ async def complete_text(
         for m in messages
     ]
     resolved_model = model or _resolve_default_model()
+
+    if use_cache:
+        # We need the provider name for the cache key — resolve here
+        # (cheap, registry lookup) so the key is provider-aware. A
+        # cache miss falls through to the same _aux_call_with_fallback
+        # path as the non-cached case so fallback behavior is identical.
+        try:
+            provider_name = default_config().model.provider
+        except Exception:  # noqa: BLE001 — fall back to non-cached path
+            provider_name = ""
+        if provider_name:
+            cache_key = aux_response_signature(
+                provider_name=provider_name,
+                model=resolved_model,
+                system=system,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            cached = _AUX_RESPONSE_CACHE.get(cache_key)
+            if cached is not None:
+                _AUX_CACHE_STATS["hits"] += 1
+                return cached
+            _AUX_CACHE_STATS["misses"] += 1
 
     async def _attempt(prov: Any, model_name: str) -> Any:
         return await prov.complete(
@@ -138,7 +206,25 @@ async def complete_text(
             temperature=temperature,
         )
 
-    return await _aux_call_with_fallback(_attempt, resolved_model)
+    result = await _aux_call_with_fallback(_attempt, resolved_model)
+
+    if use_cache:
+        try:
+            provider_name = default_config().model.provider
+        except Exception:  # noqa: BLE001
+            provider_name = ""
+        if provider_name:
+            cache_key = aux_response_signature(
+                provider_name=provider_name,
+                model=resolved_model,
+                system=system,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            _AUX_RESPONSE_CACHE.put(cache_key, result)
+
+    return result
 
 
 async def _aux_call_with_fallback(attempt, primary_model: str) -> str:
@@ -184,6 +270,7 @@ def complete_text_sync(
     max_tokens: int = 2048,
     temperature: float = 2.0,
     model: str | None = None,
+    use_cache: bool = False,
 ) -> str:
     """Sync wrapper for :func:`complete_text`.
 
@@ -198,6 +285,7 @@ def complete_text_sync(
             max_tokens=max_tokens,
             temperature=temperature,
             model=model,
+            use_cache=use_cache,
         )
     )
 
@@ -289,6 +377,8 @@ def _record_aux_cost(provider: Any, model: str, resp: Any) -> None:
 
 
 __all__ = [
+    "aux_cache_stats",
+    "clear_aux_response_cache",
     "complete_text",
     "complete_text_sync",
     "complete_video",

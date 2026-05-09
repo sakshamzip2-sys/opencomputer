@@ -147,6 +147,11 @@ async def assess_risk(
     try:
         from opencomputer.agent.aux_llm import complete_text
 
+        # M1.3 (2026-05-09) — opt in to aux-LLM response cache.
+        # Smart-mode runs at temperature=0.0 with a fixed system prompt;
+        # the same (command, capability_id, scope) deterministically yields
+        # the same RiskAssessment, so an agent that retries the same Bash
+        # invocation 10 times pays for the LLM verdict once.
         raw = await asyncio.wait_for(
             complete_text(
                 messages=[{"role": "user", "content": user_msg}],
@@ -154,6 +159,7 @@ async def assess_risk(
                 max_tokens=128,
                 temperature=0.0,
                 model=model,
+                use_cache=True,
             ),
             timeout=_TIMEOUT_S,
         )
