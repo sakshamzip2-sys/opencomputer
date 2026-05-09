@@ -1046,6 +1046,81 @@ class Dispatch:
         loop = await self._router.get_or_load(profile_id)
         profile_home = self._router._profile_home_resolver(profile_id)
 
+        # v1.1 plan-3 M10.3 — per-rule profile rebind. After the
+        # BindingResolver picks the source profile and we load its loop,
+        # consult the source profile's routing.rules for THIS event. If
+        # a matched rule sets `profile: <name>` (carried as
+        # ``ResolvedTemplate.profile_rebind`` from M10.2), swap to the
+        # named profile's loop for the remainder of dispatch.
+        #
+        # Composition with M10.2 (system_prompt routing): after this
+        # swap, the M10.2 resolution inside ``_dispatch_tool_calls``
+        # consults the REBOUND profile's routing rules. If the rebound
+        # profile lists the same rule (typical setup — source profile
+        # routes to specialised profiles), the agent template + system
+        # prompt resolve again on the rebound profile and apply
+        # identically.
+        #
+        # Composition with M1.4 (per-profile env): per-profile .env
+        # files are loaded at CLI startup based on the active profile.
+        # Mid-process rebinds via M10.3 use the rebound profile's loop
+        # which was constructed against its own profile_home, so its
+        # cached resources (memory, agent templates, MCP servers) cover
+        # the common case. Re-loading per-profile env per-message is a
+        # follow-up if real workloads need credential isolation per
+        # rebound dispatch (currently the source-profile env wins).
+        #
+        # Defensive: any failure logs WARNING and falls through to the
+        # source profile — a stale rule must NEVER break message dispatch.
+        try:
+            cfg_obj_for_rebind = getattr(loop, "config", None)
+            routing_cfg_for_rebind = getattr(cfg_obj_for_rebind, "routing", None)
+            if routing_cfg_for_rebind is not None and routing_cfg_for_rebind.rules:
+                from opencomputer.agent.agent_templates import (
+                    discover_agents as _discover_for_rebind,
+                )
+                from opencomputer.agent.routing import (
+                    resolve_template_for_event as _resolve_for_rebind,
+                )
+
+                _templates_for_rebind = _discover_for_rebind()
+                _resolved_for_rebind = _resolve_for_rebind(
+                    routing_cfg_for_rebind, event, _templates_for_rebind
+                )
+                if (
+                    _resolved_for_rebind is not None
+                    and _resolved_for_rebind.profile_rebind
+                    and _resolved_for_rebind.profile_rebind != profile_id
+                ):
+                    _new_pid = _resolved_for_rebind.profile_rebind
+                    try:
+                        _new_loop = await self._router.get_or_load(_new_pid)
+                        _new_home = self._router._profile_home_resolver(_new_pid)
+                        logger.info(
+                            "M10.3 routing rebind: %s:%s → profile=%r "
+                            "(source=%r, agent=%r)",
+                            event.platform.value if event.platform else "?",
+                            event.chat_id,
+                            _new_pid,
+                            profile_id,
+                            _resolved_for_rebind.template_name,
+                        )
+                        loop = _new_loop
+                        profile_home = _new_home
+                        profile_id = _new_pid
+                    except Exception as _exc:  # noqa: BLE001
+                        logger.warning(
+                            "M10.3 routing rebind to %r failed (%s) — "
+                            "continuing on source profile %r",
+                            _new_pid, _exc, profile_id,
+                        )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "M10.3 routing rebind resolution failed: %s — "
+                "continuing on source profile",
+                e,
+            )
+
         # Round 2a P-5 — record the (adapter, chat_id) binding so a
         # consent prompt later in this turn can find the right surface
         # to ask the user on. Best-effort: missing adapter = legacy
