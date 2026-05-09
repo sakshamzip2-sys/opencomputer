@@ -411,23 +411,60 @@ def extract_tarball(
                 )
             if should_strip and top_level is not None:
                 prefix = top_level + "/"
-                for m in members:
-                    if m.name == top_level:
-                        # The wrapper directory itself — drop it.
-                        continue
-                    stripped_name = m.name[len(prefix):]
-                    if not stripped_name:
-                        continue
-                    if m.isreg():
-                        f = tar.extractfile(m)
-                        if f is None:
+                # SECURITY: rebuild a synthetic in-memory archive with the
+                # wrapper stripped, then hand it to tarfile.extractall with
+                # filter='data' so all the upstream-CPython-vetted
+                # path-traversal / symlink-escape / device-file rejections
+                # apply uniformly.  Earlier hand-rolled extraction skipped
+                # these checks — a malicious sdist could ship
+                # "foo-1.0/../../../etc/passwd" and escape ``dest``.
+                # https://docs.python.org/3/library/tarfile.html#tarfile-extraction-filter
+                buf = io.BytesIO()
+                with tarfile.open(
+                    fileobj=buf, mode="w:gz"
+                ) as rewritten_tar:
+                    for m in members:
+                        if m.name == top_level:
+                            continue  # drop wrapper dir itself
+                        stripped_name = m.name[len(prefix):]
+                        if not stripped_name:
                             continue
-                        target_path = dest / stripped_name
-                        target_path.parent.mkdir(parents=True, exist_ok=True)
-                        target_path.write_bytes(f.read())
-                    elif m.isdir():
-                        (dest / stripped_name).mkdir(parents=True, exist_ok=True)
-                    # Other types (symlinks, etc.) skipped under strip.
+                        # Build a TarInfo with the stripped name; preserve
+                        # type / mode / size / mtime / link targets.  The
+                        # ``data`` filter applied at extract time rejects
+                        # any residual ../-escapes regardless of the input.
+                        new_info = tarfile.TarInfo(name=stripped_name)
+                        new_info.mode = m.mode
+                        new_info.type = m.type
+                        new_info.size = m.size
+                        new_info.mtime = m.mtime
+                        new_info.uid = 0
+                        new_info.gid = 0
+                        new_info.uname = ""
+                        new_info.gname = ""
+                        if m.islnk() or m.issym():
+                            # Strip the wrapper from link targets too;
+                            # filter='data' will reject absolute / escaping
+                            # link targets at extract time.
+                            link = m.linkname
+                            if link.startswith(prefix):
+                                link = link[len(prefix):]
+                            new_info.linkname = link
+                        if m.isreg():
+                            f = tar.extractfile(m)
+                            payload = f.read() if f is not None else b""
+                            rewritten_tar.addfile(
+                                new_info, io.BytesIO(payload)
+                            )
+                        else:
+                            rewritten_tar.addfile(new_info)
+
+                # Re-open the synthetic archive and extract through
+                # ``filter='data'`` for the path-traversal / device /
+                # symlink-escape rejection logic CPython upstreams.
+                buf.seek(0)
+                with tarfile.open(fileobj=buf, mode="r:gz") as stripped_tar:
+                    stripped_tar.extractall(path=dest, filter="data")
             else:
                 tar.extractall(path=dest, filter="data")
     except Exception:
@@ -832,6 +869,11 @@ def install_from_pypi(
     before_install_hook: BeforeInstallHook | None = None,
     skip_scan: bool = False,
     pip_download_fn: Callable[[str, Path], Path] | None = None,
+    signature_url: str | None = None,
+    signature_bytes: bytes | None = None,
+    require_sigstore: bool = False,
+    cert_identity: str | None = None,
+    cert_oidc_issuer: str | None = None,
 ) -> InstallResult:
     """Install a plugin via ``pip download`` of its source dist.
 
@@ -906,6 +948,45 @@ def install_from_pypi(
 
         actual_sha = hashlib.sha256(raw).hexdigest()
 
+        # Sigstore verification (M11.3 follow-up).  When operator passes
+        # a signature URL/bytes (or sets OC_PLUGIN_REQUIRE_SIGSTORE=1),
+        # run cosign verify-blob BEFORE extraction so a tampered sdist
+        # never lands on disk.  ``verify_or_warn`` degrades gracefully
+        # when require=False and cosign is absent / fails.
+        sigstore_record: dict[str, str] | None = None
+        if signature_bytes is not None or signature_url is not None:
+            from opencomputer.plugins.sigstore_verify import (
+                is_required_by_env,
+                verify_or_warn,
+            )
+
+            sig_path = tmp_path / f"{sdist_path.name}.sig"
+            if signature_bytes is not None:
+                sig_path.write_bytes(signature_bytes)
+            else:
+                # Fetch the signature blob via the same HTTP guard as
+                # tarball downloads (size-limited).
+                sig_path.write_bytes(
+                    _http_get_bytes(signature_url, max_bytes=64 * 1024)
+                )
+            require = require_sigstore or is_required_by_env()
+            verification = verify_or_warn(
+                sdist_path,
+                signature_path=sig_path,
+                require=require,
+                cert_identity=cert_identity,
+                cert_oidc_issuer=cert_oidc_issuer,
+            )
+            if verification is not None:
+                sigstore_record = {
+                    "cosign_version": verification.cosign_version,
+                    "signature": (
+                        signature_url or f"<inline:{len(signature_bytes or b'')} bytes>"
+                    ),
+                    "cert_identity": cert_identity or "",
+                    "cert_oidc_issuer": cert_oidc_issuer or "",
+                }
+
         # PyPI sdists have a top-level ``<name>-<version>/`` directory
         # wrapper (PEP 643).  Extract through it so plugin.json lands
         # at plugin_dir/plugin.json without the wrapper prefix.
@@ -963,6 +1044,31 @@ def install_from_pypi(
             installed_at=int(time.time()),
         ),
     )
+
+    # Persist sigstore verification side-car (out-of-band of
+    # InstalledRecord schema so we don't bump the schema version for
+    # an opt-in feature).  ``oc plugin verify`` reads this and re-runs
+    # cosign with the same identity/issuer claims so tampering
+    # post-install surfaces.
+    if sigstore_record is not None:
+        sigstore_dir = dest_root / ".sigstore"
+        sigstore_dir.mkdir(parents=True, exist_ok=True)
+        sidecar = sigstore_dir / f"{plugin_id_hint}.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "plugin_id": plugin_id_hint,
+                    "version": version,
+                    "source": "pypi",
+                    "source_url": package_spec,
+                    "tarball_sha256": actual_sha,
+                    "verified_at": int(time.time()),
+                    **sigstore_record,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
     return InstallResult(
         plugin_id=plugin_id_hint, version=version, install_path=plugin_dir

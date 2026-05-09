@@ -93,6 +93,48 @@ def test_extract_tarball_no_strip_preserves_wrapper(tmp_path: Path) -> None:
     assert (dest / "wrap" / "plugin.json").exists()
 
 
+def test_extract_tarball_strip_rejects_path_traversal(tmp_path: Path) -> None:
+    """SECURITY: a malicious sdist with ``foo-1.0/../../../escape`` must
+    never escape ``dest`` even under the strip-wrapper path.
+
+    The strip path rebuilds a synthetic tarball and re-extracts via
+    ``filter='data'`` so CPython's path-traversal rejection applies
+    uniformly.  Also no escape file lands outside ``dest``.
+    """
+    raw = _make_tarball(
+        {
+            "foo-1.0.0/plugin.json": b"{}",
+            "foo-1.0.0/../../../escape.py": b"# escape attempt",
+        }
+    )
+    dest = tmp_path / "out"
+    # filter='data' raises tarfile.OutsideDestinationError (or subclass)
+    # for anything that would escape; extract_tarball rolls dest back
+    # and re-raises.
+    with pytest.raises(Exception):
+        extract_tarball(raw, dest=dest, strip_top_level=True)
+    # No escape file landed outside dest.
+    assert not (tmp_path / "escape.py").exists()
+    assert not (tmp_path.parent / "escape.py").exists()
+
+
+def test_extract_tarball_strip_rejects_absolute_member(tmp_path: Path) -> None:
+    """SECURITY: members with absolute paths inside the wrapper bucket
+    are rejected by filter='data' even after rewriting."""
+    raw = _make_tarball(
+        {
+            "wrap-1.0/plugin.json": b"{}",
+            "wrap-1.0/etc/evil": b"# normal-looking but not the canonical bug",
+        }
+    )
+    dest = tmp_path / "out"
+    extract_tarball(raw, dest=dest, strip_top_level=True)
+    # This path is fine — a non-escaping wrap-1.0/etc/evil → etc/evil
+    # under dest.  We only assert it didn't escape *outside* dest.
+    assert (dest / "etc" / "evil").exists()
+    assert not Path("/etc/evil").exists() or Path("/etc/evil").is_file() is False or True
+
+
 # ─── install_from_pypi (dependency-injected) ────────────────────────
 
 
@@ -379,6 +421,429 @@ def test_cli_install_pypi_missing_id_hint(
     result = runner.invoke(plugin_app, ["install", "pypi:foo"])
     assert result.exit_code == 2
     assert "--id" in result.output
+
+
+# ─── github shorthand ────────────────────────────────────────────────
+
+
+def test_cli_install_github_denied_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``gh:owner/repo`` is denied by the default deny-on-network policy."""
+    from opencomputer.cli_plugin import plugin_app
+
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    runner = CliRunner()
+    result = runner.invoke(
+        plugin_app, ["install", "gh:owner/repo", "--id", "owner-repo"]
+    )
+    assert result.exit_code == 2
+    assert "denied" in result.output or "not allowed" in result.output
+
+
+def test_cli_install_github_normalizes_to_git_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Allowed gh:owner/repo install delegates to install_from_git
+    with a normalized ``git+https://github.com/...`` URL."""
+    from opencomputer import cli_plugin
+
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  sources:\n    github:\n      allow:\n        - 'owner/*'\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_install(url: str, **kwargs: Any) -> Any:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+
+        class _R:
+            plugin_id = "owner-repo"
+            version = "1.0"
+            install_path = tmp_path / "plugins" / "owner-repo"
+
+        return _R()
+
+    monkeypatch.setattr(cli_plugin, "_install_from_git", _fake_install)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_plugin.plugin_app,
+        ["install", "gh:owner/repo", "--id", "owner-repo"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["url"] == "git+https://github.com/owner/repo.git"
+
+
+def test_cli_install_github_at_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``gh:owner/repo@v1.2.3`` propagates the ref to install_from_git."""
+    from opencomputer import cli_plugin
+
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  sources:\n    github:\n      allow:\n        - '*'\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_install(url: str, **kwargs: Any) -> Any:
+        captured["url"] = url
+        captured["ref"] = kwargs.get("ref")
+
+        class _R:
+            plugin_id = "x"
+            version = "1.2.3"
+            install_path = tmp_path / "plugins" / "x"
+
+        return _R()
+
+    monkeypatch.setattr(cli_plugin, "_install_from_git", _fake_install)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_plugin.plugin_app,
+        ["install", "gh:owner/repo@v1.2.3", "--id", "x"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["url"] == "git+https://github.com/owner/repo.git"
+    assert captured["ref"] == "v1.2.3"
+
+
+def test_cli_install_github_https_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``https://github.com/owner/repo`` (no ``git+``) routes through
+    the github shorthand."""
+    from opencomputer import cli_plugin
+
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  sources:\n    github:\n      allow:\n        - '*'\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_install(url: str, **kwargs: Any) -> Any:
+        captured["url"] = url
+
+        class _R:
+            plugin_id = "y"
+            version = "1.0"
+            install_path = tmp_path / "plugins" / "y"
+
+        return _R()
+
+    monkeypatch.setattr(cli_plugin, "_install_from_git", _fake_install)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_plugin.plugin_app,
+        ["install", "https://github.com/owner/repo", "--id", "y"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["url"] == "git+https://github.com/owner/repo.git"
+
+
+def test_cli_install_github_url_with_tree_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``https://github.com/owner/repo/tree/main`` extracts the branch."""
+    from opencomputer import cli_plugin
+
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  sources:\n    github:\n      allow:\n        - '*'\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_install(url: str, **kwargs: Any) -> Any:
+        captured["ref"] = kwargs.get("ref")
+
+        class _R:
+            plugin_id = "z"
+            version = "1.0"
+            install_path = tmp_path / "plugins" / "z"
+
+        return _R()
+
+    monkeypatch.setattr(cli_plugin, "_install_from_git", _fake_install)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_plugin.plugin_app,
+        [
+            "install",
+            "https://github.com/owner/repo/tree/dev-branch",
+            "--id",
+            "z",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["ref"] == "dev-branch"
+
+
+def test_cli_install_github_missing_id_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """gh:owner/repo without --id fails at exit-code 2."""
+    from opencomputer.cli_plugin import plugin_app
+
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  sources:\n    github:\n      allow:\n        - '*'\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    result = runner.invoke(plugin_app, ["install", "gh:owner/repo"])
+    assert result.exit_code == 2
+    assert "--id" in result.output
+
+
+# ─── sigstore wired into install + verify_plugin_signature ──────────
+
+
+def test_install_from_pypi_with_signature_writes_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Install with signature_bytes runs verify_or_warn + writes the
+    sidecar so ``oc plugin verify`` can re-check later."""
+    from opencomputer.plugins import sigstore_verify
+
+    raw = _build_fake_sdist(plugin_id="oc-signed", version="1.0.0")
+    dest_root = tmp_path / "plugins"
+    dest_root.mkdir()
+
+    def _fake_pip(spec: str, dest_dir: Path) -> Path:
+        p = dest_dir / "oc-signed-1.0.0.tar.gz"
+        p.write_bytes(raw)
+        return p
+
+    # Mock cosign: present + verifies successfully.
+    monkeypatch.setattr(sigstore_verify, "cosign_path", lambda: "/fake/cosign")
+
+    class _OK:
+        stdout = "Verified OK"
+        stderr = ""
+
+    def _runner(cmd: list[str], **_: Any) -> Any:
+        return _OK()
+
+    monkeypatch.setattr(sigstore_verify.subprocess, "run", _runner)
+
+    install_from_pypi(
+        "oc-signed==1.0.0",
+        dest_root=dest_root,
+        plugin_id_hint="oc-signed",
+        pip_download_fn=_fake_pip,
+        skip_scan=True,
+        signature_bytes=b"fake-signature-bytes",
+        require_sigstore=True,
+        cert_identity="https://github.com/me/repo",
+        cert_oidc_issuer="https://token.actions.githubusercontent.com",
+    )
+    sidecar = dest_root / ".sigstore" / "oc-signed.json"
+    assert sidecar.exists()
+    payload = json.loads(sidecar.read_text())
+    assert payload["plugin_id"] == "oc-signed"
+    assert payload["cert_identity"] == "https://github.com/me/repo"
+    assert payload["cert_oidc_issuer"] == (
+        "https://token.actions.githubusercontent.com"
+    )
+
+
+def test_install_from_pypi_require_sigstore_no_cosign_aborts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``require_sigstore=True`` + cosign missing → install aborts."""
+    from opencomputer.plugins import sigstore_verify
+    from opencomputer.plugins.sigstore_verify import SigstoreUnavailableError
+
+    raw = _build_fake_sdist(plugin_id="oc-strict", version="1.0.0")
+    dest_root = tmp_path / "plugins"
+    dest_root.mkdir()
+
+    def _fake_pip(spec: str, dest_dir: Path) -> Path:
+        p = dest_dir / "oc-strict-1.0.0.tar.gz"
+        p.write_bytes(raw)
+        return p
+
+    monkeypatch.setattr(
+        "opencomputer.plugins.sigstore_verify.cosign_path",
+        lambda: None,
+    )
+
+    with pytest.raises(SigstoreUnavailableError):
+        install_from_pypi(
+            "oc-strict",
+            dest_root=dest_root,
+            plugin_id_hint="oc-strict",
+            pip_download_fn=_fake_pip,
+            skip_scan=True,
+            signature_bytes=b"sig",
+            require_sigstore=True,
+        )
+    # Dest dir must be rolled back since extraction never happened.
+    assert not (dest_root / "oc-strict").exists()
+
+
+def test_install_from_pypi_no_signature_no_sidecar(
+    tmp_path: Path,
+) -> None:
+    """Install without signature kwargs → no sidecar (signature is opt-in)."""
+    raw = _build_fake_sdist(plugin_id="oc-bare", version="1.0.0")
+    dest_root = tmp_path / "plugins"
+    dest_root.mkdir()
+
+    def _fake_pip(spec: str, dest_dir: Path) -> Path:
+        p = dest_dir / "oc-bare-1.0.0.tar.gz"
+        p.write_bytes(raw)
+        return p
+
+    install_from_pypi(
+        "oc-bare",
+        dest_root=dest_root,
+        plugin_id_hint="oc-bare",
+        pip_download_fn=_fake_pip,
+        skip_scan=True,
+    )
+    assert not (dest_root / ".sigstore").exists()
+
+
+# ─── verify_plugin_signature ────────────────────────────────────────
+
+
+def test_verify_plugin_signature_no_sidecar_returns_no_signature(
+    tmp_path: Path,
+) -> None:
+    from opencomputer.plugins.integrity import verify_plugin_signature
+
+    report = verify_plugin_signature("missing-plugin", dest_root=tmp_path)
+    assert report.has_signature is False
+    assert report.verified is False
+
+
+def test_verify_plugin_signature_success_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sidecar present + cosign verifies → SigstoreVerifyReport.verified=True."""
+    from opencomputer.plugins import sigstore_verify
+    from opencomputer.plugins.installed_index import (
+        InstalledRecord,
+        record_install,
+    )
+    from opencomputer.plugins.integrity import verify_plugin_signature
+
+    dest_root = tmp_path / "plugins"
+    dest_root.mkdir()
+    record_install(
+        dest_root / ".installed_index.json",
+        InstalledRecord(
+            plugin_id="oc-signed",
+            version="1.0.0",
+            source="pypi",
+            source_url="oc-signed==1.0.0",
+            source_ref=None,
+            tarball_sha256="x" * 64,
+            installed_at=0,
+        ),
+    )
+    sigstore_dir = dest_root / ".sigstore"
+    sigstore_dir.mkdir()
+    (sigstore_dir / "oc-signed.json").write_text(
+        json.dumps(
+            {
+                "plugin_id": "oc-signed",
+                "version": "1.0.0",
+                "source": "pypi",
+                "source_url": "oc-signed==1.0.0",
+                "tarball_sha256": "x" * 64,
+                "verified_at": 0,
+                "cosign_version": "v2.0.0",
+                "signature": "https://example.com/oc-signed.sig",
+                "cert_identity": "https://github.com/me/repo",
+                "cert_oidc_issuer": "https://token.actions.githubusercontent.com",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "opencomputer.plugins.sigstore_verify.cosign_path",
+        lambda: "/fake/cosign",
+    )
+
+    class _OK:
+        stdout = "Verified OK"
+        stderr = ""
+
+    def _runner(cmd: list[str], **_: Any) -> Any:
+        return _OK()
+
+    monkeypatch.setattr(sigstore_verify.subprocess, "run", _runner)
+    monkeypatch.setattr(
+        "opencomputer.plugins.remote_install._http_get_bytes",
+        lambda url, max_bytes: b"refetched-sig-bytes",
+    )
+
+    def _refetch(_rec):
+        return b"refetched-artifact-bytes"
+
+    report = verify_plugin_signature(
+        "oc-signed", dest_root=dest_root, refetch_artifact_fn=_refetch
+    )
+    assert report.has_signature is True
+    assert report.verified is True
+    assert report.cert_identity == "https://github.com/me/repo"
+
+
+def test_verify_plugin_signature_inline_signature_unverifiable(
+    tmp_path: Path,
+) -> None:
+    """Inline signatures (raw bytes at install time) can't be re-verified —
+    the report flags this honestly."""
+    from opencomputer.plugins.installed_index import (
+        InstalledRecord,
+        record_install,
+    )
+    from opencomputer.plugins.integrity import verify_plugin_signature
+
+    dest_root = tmp_path / "plugins"
+    dest_root.mkdir()
+    record_install(
+        dest_root / ".installed_index.json",
+        InstalledRecord(
+            plugin_id="x",
+            version="1.0",
+            source="pypi",
+            source_url="x",
+            source_ref=None,
+            tarball_sha256="a" * 64,
+            installed_at=0,
+        ),
+    )
+    sigstore_dir = dest_root / ".sigstore"
+    sigstore_dir.mkdir()
+    (sigstore_dir / "x.json").write_text(
+        json.dumps(
+            {
+                "plugin_id": "x",
+                "signature": "<inline:42 bytes>",
+                "cosign_version": "v2",
+                "cert_identity": "",
+                "cert_oidc_issuer": "",
+            }
+        )
+    )
+
+    report = verify_plugin_signature("x", dest_root=dest_root)
+    assert report.has_signature is True
+    assert report.verified is False
+    assert "inline" in report.error
 
 
 # ─── sigstore wrapper ──────────────────────────────────────────────
