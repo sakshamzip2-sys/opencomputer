@@ -20,6 +20,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from rank_bm25 import BM25Okapi
+
 
 @dataclass(frozen=True)
 class IndexedEntry:
@@ -57,10 +59,49 @@ class BM25Index:
     # ─── public ────────────────────────────────────────────────────────
 
     def query(self, text: str, top_k: int = 5) -> list[QueryHit]:
-        raise NotImplementedError  # implemented in Task 4
+        if not self._loaded:
+            self._build()
+
+        if not self._entries or self._bm25 is None:
+            return []
+
+        query_tokens = self._tokenize(text)
+        if not query_tokens:
+            return []
+
+        scores = self._bm25.get_scores(query_tokens)
+        ranked = sorted(
+            ((float(score), i) for i, score in enumerate(scores) if score > 0),
+            key=lambda pair: pair[0],
+            reverse=True,
+        )
+        hits: list[QueryHit] = []
+        for rank, (score, idx) in enumerate(ranked[:top_k]):
+            hits.append(QueryHit(entry=self._entries[idx], score=score, rank=rank))
+        return hits
 
     def invalidate(self) -> None:
         raise NotImplementedError  # implemented in Task 6
+
+    # ─── build ─────────────────────────────────────────────────────────
+
+    def _build(self) -> None:
+        """Read MEMORY.md, segment, tokenize, build BM25 in memory."""
+        if not self._memory_path.exists():
+            self._entries = []
+            self._tokens = []
+            self._bm25 = None
+            self._loaded = True
+            return
+
+        text = self._memory_path.read_text(encoding="utf-8")
+        self._entries = self._segment(text)
+        self._tokens = [self._tokenize(e.raw) for e in self._entries]
+        if self._tokens and any(self._tokens):
+            self._bm25 = BM25Okapi(self._tokens)
+        else:
+            self._bm25 = None
+        self._loaded = True
 
     # ─── tokenization (pure) ───────────────────────────────────────────
 
