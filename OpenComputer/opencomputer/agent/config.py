@@ -1143,10 +1143,47 @@ class GoalJudgeConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolClassifierConfig:
+    """Auxiliary classifier-model override for v1.1 plan-3 M9.2.
+
+    The :class:`opencomputer.agent.tool_call_classifier.ToolCallClassifier`
+    runs in auto mode (``permission_mode=auto``) before the F1 ConsentGate
+    on every tool call. With both fields unset (the default) the
+    classifier falls back to the chat provider via
+    :func:`opencomputer.agent.aux_llm.complete_text` — same plumbing the
+    goal judge uses.
+
+    Setting both routes the classifier through a dedicated provider —
+    typically a cheap-but-capable model (e.g. a small Anthropic Haiku or
+    OpenAI GPT-4o-mini) so the per-tool-call latency cost stays bounded.
+    Spend is tracked separately in :func:`opencomputer.agent.usage_pricing`
+    so ``oc usage`` shows classifier cost as its own line.
+    """
+
+    provider: str | None = None
+    model: str | None = None
+    #: Hard ceiling on classifier wall-clock latency per call. The
+    #: classifier fail-closes (treats the tool call as ``BLOCK``) if this
+    #: timeout fires, so a wedged auxiliary provider can't waste a
+    #: slow-classifier budget OR silently fall through to ALLOW. Default
+    #: 8s — enough for Haiku-scale models on Anthropic, fast enough that
+    #: an interactive user notices instead of waiting forever.
+    timeout_seconds: float = 8.0
+    #: Hard cap on classifier output tokens. The decision is a single
+    #: token plus a short rationale; 256 leaves slack for verbose models
+    #: without burning quota on runaway generations.
+    max_tokens: int = 256
+
+
+@dataclass(frozen=True, slots=True)
 class AuxiliaryConfig:
     """Bundle of auxiliary-model overrides. Goal judge is the first slot."""
 
     goal_judge: GoalJudgeConfig = field(default_factory=GoalJudgeConfig)
+    #: v1.1 plan-3 M9.2 — auto-mode tool-call classifier knobs. Defaults
+    #: leave the feature dormant until the user opts into auto mode AND
+    #: the classifier has a registered provider available.
+    tool_classifier: ToolClassifierConfig = field(default_factory=ToolClassifierConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1408,6 +1445,7 @@ def load_config_for_profile(profile_home: Path) -> Config:
 
 
 __all__ = [
+    "AuxiliaryConfig",
     "Config",
     "CronConfig",
     "CustomProvider",
@@ -1421,6 +1459,7 @@ __all__ = [
     "split_or_routing_suffix",
     "split_hf_routing_suffix",
     "DelegationConfig",
+    "GoalJudgeConfig",
     "ModelConfig",
     "LoopConfig",
     "SessionConfig",
@@ -1433,6 +1472,7 @@ __all__ = [
     "HookCommandConfig",
     "HookPromptConfig",
     "ToolsConfig",
+    "ToolClassifierConfig",
     "WebSearchConfig",
     "FullSystemControlConfig",
     "default_config",
