@@ -667,6 +667,33 @@ def _register_settings_hooks(cfg: Config) -> int:
                 )
             )
             registered += 1
+
+    # v1.1 plan-2 M8.2 — agent hooks. Same lazy-import pattern; pulls in
+    # the delegate tool only when the user actually configured one.
+    if getattr(cfg, "agent_hooks", ()):
+        from opencomputer.hooks.agent_handlers import (  # noqa: PLC0415
+            make_agent_hook_handler,
+        )
+
+        for ah in cfg.agent_hooks:
+            try:
+                event = HookEvent(ah.event)
+            except ValueError:
+                _log.warning(
+                    "agent hook: unknown event %r; skipping",
+                    ah.event,
+                )
+                continue
+            fire_and_forget = (event != HookEvent.PRE_LLM_CALL)
+            hook_engine.register(
+                HookSpec(
+                    event=event,
+                    handler=make_agent_hook_handler(ah),
+                    matcher=ah.matcher,
+                    fire_and_forget=fire_and_forget,
+                )
+            )
+            registered += 1
     return registered
 
 

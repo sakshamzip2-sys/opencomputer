@@ -586,6 +586,72 @@ class HookPromptConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class HookAgentConfig:
+    """One subagent-spawning hook entry declared in config.yaml (v1.1 plan-2 M8.2).
+
+    Settings-declared hook that delegates the decision to a fresh
+    subagent via :class:`opencomputer.tools.delegate.DelegateTool` with
+    an opt-in filesystem sandbox (``isolation="copy"`` by default — see
+    :class:`HookCommandConfig` for the shell-out alternative).
+
+    Compared to ``type: prompt`` (single aux-LLM call) this is heavier
+    but more capable: the spawned child can run tools (Read / Grep /
+    Bash via its allowlist) before returning a decision, which lets the
+    hook reason over actual file contents instead of only the rendered
+    HookContext.
+
+    Settings-format block::
+
+        hooks:
+          PreToolUse:
+            - type: agent
+              matcher: "Bash"
+              prompt: |
+                Inspect the proposed Bash command. If it would
+                permanently delete data or send credentials over the
+                wire, reply "block: <reason>". Otherwise reply "allow".
+              agent: code-reviewer       # registered AgentTemplate name
+              isolation: copy            # "none" | "worktree" | "copy"
+              max_turns: 5
+              timeout_seconds: 60
+              returns: allow_block       # or "structured"
+
+    Hard caps default to 5 turns, 60-second wall-clock, 5,000 total
+    tokens. Exceeding any cap fails-open with a logged warning, matching
+    the shell-hook + prompt-hook contract: an advisory hook must never
+    wedge the loop.
+
+    Attributes:
+        event: Hook event name (must match ``HookEvent`` enum).
+        prompt: User message handed to the spawned subagent.
+        agent: Optional registered :class:`AgentTemplate` name. Empty
+            string == default delegate behaviour (no template).
+        isolation: ``"none"`` / ``"worktree"`` / ``"copy"``. Default
+            ``"copy"`` so an ill-behaved hook subagent can't trash the
+            parent's tree.
+        returns: ``"allow_block"`` (default) parses for an
+            ``allow``/``block`` token in the subagent's final message.
+            ``"structured"`` returns the subagent's full text as the
+            decision reason — caller treats any non-empty response as
+            advisory pass.
+        matcher: Optional regex over tool name (Pre/PostToolUse only).
+        max_turns: Iteration cap on the spawned child loop.
+        timeout_seconds: Wall-clock cap on the entire hook call.
+        token_budget_total: Estimated combined cap; exceeded → refuse.
+    """
+
+    event: str = ""
+    prompt: str = ""
+    agent: str = ""
+    isolation: str = "copy"  # "none" | "worktree" | "copy"
+    returns: str = "allow_block"  # "allow_block" | "structured"
+    matcher: str | None = None
+    max_turns: int = 5
+    timeout_seconds: float = 60.0
+    token_budget_total: int = 5000
+
+
+@dataclass(frozen=True, slots=True)
 class MCPServerConfig:
     """One MCP server the agent should connect to.
 
@@ -1116,6 +1182,10 @@ class Config:
     #: at CLI startup via
     #: :func:`opencomputer.hooks.prompt_handlers.make_prompt_hook_handler`.
     prompt_hooks: tuple[HookPromptConfig, ...] = ()
+    #: v1.1 plan-2 M8.2 (2026-05-09) — settings-declared subagent hooks
+    #: (``type: agent``). Same YAML block as ``hooks`` and ``prompt_hooks``;
+    #: the parser sniffs ``type:`` and routes accordingly.
+    agent_hooks: tuple[HookAgentConfig, ...] = ()
     #: 3.F — master enable/disable for autonomous full-system-control mode.
     #: Defaults to disabled (invisible). When enabled, the structured
     #: ``agent.log`` collector + optional menu-bar indicator activate.
@@ -1216,6 +1286,7 @@ __all__ = [
     "GatewayConfig",
     "MCPConfig",
     "MCPServerConfig",
+    "HookAgentConfig",
     "HookCommandConfig",
     "HookPromptConfig",
     "ToolsConfig",
