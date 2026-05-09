@@ -2,6 +2,19 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
+## [v2026.5.9] — 2026-05-09
+
+The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEASE.md`, on tag push (`git tag v2026.5.9 && git push origin v2026.5.9`) the `release.yml` workflow publishes to PyPI via OIDC trusted publishing.
+
+**What's new since v2026.5.5** (see the per-PR stanzas below this header):
+
+- v1.1 plan-1: profile.yaml parser unification (PR #520), opt-in aux-LLM response cache (#521), `oc oneshot --output text|json|stream-json` (#522), wire `permission.request` + `permission.response` + per-session ring buffer (#523).
+- v1.1 plan-2: `oc session checkpoints` (#526), path-glob rules + `oc rules` CLI (#527), delegate `isolation=worktree|copy` (#528), SKILL.md `context: fork` + tools allowlist (#529), `oc session rewind` (#530), ExitPlanMode `next_mode` proposal slot (#531) + loop mutation follow-up (#534), `type: prompt` + `type: agent` settings hooks (#532), per-prompt message-history checkpoints schema v15 (#535), SKILL.md inline tools hard-enforce (#537), plugin-loader sibling-subpackage isolation fix (#538).
+- Hermes parity / security-v2 / dashboard production-grade rolls (PRs #496-#519).
+- Plans 3-6 audited; M12 (`/btw`) confirmed already shipped pre-release; the rest are demand-gated per their own preambles (`docs/superpowers/plans/2026-05-09-v1-1-plans-3-to-6-audit.md`).
+
+**Stability commitment:** the `plugin_sdk/*` surface is the contract. Date-versioning does not weaken that — any breaking change to `plugin_sdk/*` is announced explicitly here regardless of date.
+
 ## [Unreleased]
 
 ### Added — v1.1 Plan-2 M8.2: `type: agent` settings hooks (2026-05-09)
