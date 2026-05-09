@@ -688,10 +688,6 @@ def session_checkpoints(
         console.print(f"[red]error:[/red] could not read checkpoints: {exc}")
         raise typer.Exit(1) from None
 
-    # Newest first so a user picking "the last one before I broke things"
-    # sees it at top. Per-checkpoint size is a best-effort sum of file
-    # bytes — RewindStore.list() returns Checkpoint instances which carry
-    # the full ``files`` map; we don't re-stat the dir.
     cps_sorted = sorted(cps, key=lambda c: c.created_at, reverse=True)[:limit]
 
     if json_out:
@@ -746,6 +742,200 @@ def session_checkpoints(
         f"[dim]showing {len(cps_sorted)} of {len(cps)} checkpoint(s)"
         f"{'; pass --limit to see more' if len(cps) > len(cps_sorted) else ''}[/dim]"
     )
+
+
+# ─── rewind (v1.1 plan-2 M5.3, 2026-05-09) ───────────────────────────────
+
+
+@session_app.command("rewind")
+def session_rewind(
+    session_id: str = typer.Argument(..., help="Session id whose files to restore."),
+    at: str | None = typer.Option(
+        None,
+        "--at",
+        help=(
+            "Specific checkpoint id (or 8-char prefix) to restore. Skips the "
+            "interactive picker — required under --headless."
+        ),
+    ),
+    mode: str = typer.Option(
+        "files",
+        "--mode",
+        help=(
+            "Restore mode. 'files' (default) restores file contents from the "
+            "checkpoint via RewindStore.restore(). 'conv_only' / 'summarize_from' "
+            "require the message-history checkpoint surface (v1.1 deferred — "
+            "tracked as M5.2 follow-up); requesting them today returns a clear "
+            "not-yet-implemented error."
+        ),
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help=(
+            "Skip the confirmation prompt. Required under --headless or when "
+            "--at is supplied non-interactively."
+        ),
+    ),
+) -> None:
+    """Rewind a session's working tree to a saved checkpoint.
+
+    Interactive: pick from the session's checkpoints (newest first).
+    Non-interactive: pass ``--at <checkpoint_id>``.
+
+    Files are restored from the on-disk RewindStore at
+    ``~/.opencomputer/harness/<session_id>/rewind/<checkpoint_id>/``
+    written by the `auto_checkpoint` PreToolUse hook.
+
+    The plan's full mode matrix (``conv_only`` / ``files_only`` /
+    ``summarize_from``) requires per-prompt message-history snapshots
+    (M5.2) which aren't wired yet — this command surfaces only the
+    file-restore mode and reports cleanly on the others.
+    """
+    from rewind.store import RewindStore  # type: ignore[import-not-found]
+
+    from opencomputer.checkpoint_admin import harness_root  # noqa: F401
+
+    if mode not in ("files", "conv_only", "files_only", "summarize_from"):
+        console.print(
+            f"[red]error:[/red] unknown --mode {mode!r}. Use one of: "
+            f"files, conv_only, files_only, summarize_from."
+        )
+        raise typer.Exit(2)
+    if mode in ("conv_only", "summarize_from"):
+        console.print(
+            f"[yellow]not yet implemented:[/yellow] --mode {mode} needs the "
+            f"per-prompt message-history checkpoint surface (v1.1 plan-2 M5.2 "
+            f"deferral). Use --mode files for the file-restore path that's "
+            f"shipped today."
+        )
+        raise typer.Exit(2)
+
+    rwd_root = harness_root() / session_id / "rewind"
+    if not rwd_root.exists():
+        console.print(
+            f"[red]error:[/red] no rewind store for session "
+            f"[cyan]{session_id[:8]}[/cyan] (no dir at {rwd_root})."
+        )
+        raise typer.Exit(1)
+
+    try:
+        store = RewindStore(rwd_root, workspace_root=harness_root() / session_id)
+        checkpoints = store.list()
+    except (OSError, ValueError) as exc:
+        console.print(f"[red]error:[/red] cannot read checkpoints: {exc}")
+        raise typer.Exit(1) from None
+
+    if not checkpoints:
+        console.print(
+            f"[yellow]no checkpoints[/yellow] recorded for session "
+            f"[cyan]{session_id[:8]}[/cyan]."
+        )
+        raise typer.Exit(1)
+
+    if at:
+        target = _resolve_checkpoint(checkpoints, at)
+        if target is None:
+            console.print(
+                f"[red]error:[/red] no checkpoint matches "
+                f"[cyan]{at}[/cyan]. Run [bold]oc session checkpoints "
+                f"{session_id[:8]}[/bold] to list available ids."
+            )
+            raise typer.Exit(1)
+    else:
+        import sys
+
+        if not sys.stdin.isatty():
+            console.print(
+                "[red]error:[/red] interactive picker requires a TTY. "
+                "Pass --at <checkpoint_id> to choose one non-interactively."
+            )
+            raise typer.Exit(1)
+        target = _interactive_pick(checkpoints, session_id)
+        if target is None:
+            console.print("[dim]cancelled.[/dim]")
+            raise typer.Exit(1)
+
+    if not yes:
+        console.print(
+            f"Restore session [cyan]{session_id[:8]}[/cyan] files to "
+            f"checkpoint [bold]{target.id[:12]}[/bold] "
+            f"({target.label}, {target.created_at})? [y/N] ",
+            end="",
+        )
+        try:
+            answer = input().strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            console.print("[dim]aborted.[/dim]")
+            raise typer.Exit(1)
+
+    try:
+        store.restore(target.id)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]error:[/red] restore failed: {exc}")
+        raise typer.Exit(1) from None
+
+    console.print(
+        f"[green]restored[/green] session [cyan]{session_id[:8]}[/cyan] "
+        f"to checkpoint [bold]{target.id[:12]}[/bold] "
+        f"({len(target.files)} file(s) written)"
+    )
+
+
+def _resolve_checkpoint(checkpoints, spec: str):
+    """Match a checkpoint by exact id or 4+-char prefix."""
+    spec = spec.strip().lower()
+    exact = [c for c in checkpoints if c.id.lower() == spec]
+    if exact:
+        return exact[0]
+    if len(spec) >= 4:
+        prefixed = [c for c in checkpoints if c.id.lower().startswith(spec)]
+        if len(prefixed) == 1:
+            return prefixed[0]
+    return None
+
+
+def _interactive_pick(checkpoints, session_id: str):
+    """Show a numbered list and read a single selection."""
+    console.print(
+        f"\nCheckpoints for session [cyan]{session_id[:8]}[/cyan] "
+        f"(newest first):\n"
+    )
+    table = Table(show_lines=False)
+    table.add_column("#", style="cyan", no_wrap=True)
+    table.add_column("id", style="dim", no_wrap=True)
+    table.add_column("label")
+    table.add_column("created_at", style="dim")
+    table.add_column("files", justify="right")
+    sorted_cps = sorted(checkpoints, key=lambda c: c.created_at, reverse=True)
+    for idx, cp in enumerate(sorted_cps, start=1):
+        table.add_row(
+            str(idx),
+            cp.id[:12],
+            cp.label,
+            cp.created_at,
+            str(len(cp.files)),
+        )
+    console.print(table)
+    console.print(
+        "\nSelect a number (1-N), an id prefix (4+ chars), or press Enter to cancel:"
+    )
+    try:
+        raw = input("> ").strip()
+    except EOFError:
+        return None
+    if not raw:
+        return None
+    try:
+        idx = int(raw)
+        if 1 <= idx <= len(sorted_cps):
+            return sorted_cps[idx - 1]
+    except ValueError:
+        pass
+    return _resolve_checkpoint(sorted_cps, raw)
 
 
 __all__ = ["session_app"]
