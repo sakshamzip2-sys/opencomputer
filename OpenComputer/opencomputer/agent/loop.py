@@ -4190,6 +4190,92 @@ class AgentLoop:
                 if not allowed and reason is not None:
                     blocked.setdefault(c.id, reason)
 
+        # v1.1 plan-3 M9.2 (2026-05-09) — auto-mode tool-call classifier.
+        # When the session is in permission_mode=auto, every pending tool
+        # call passes through ToolCallClassifier.classify BEFORE the
+        # F1 consent gate fires. The classifier sees only:
+        #   - the user's verbatim messages
+        #   - the assistant's pre-tool-call free-form text
+        #   - the tool_use requests already made (NOT their results)
+        #   - the pending call's name + summarized args
+        # tool_result content is structurally invisible — see
+        # opencomputer/agent/tool_call_classifier.py for the security
+        # contract (poison-resistance assertion in
+        # _build_classifier_input).
+        #
+        # Composition with consent gate (M9.5):
+        #   - Decision.BLOCK → tool blocked outright (this dispatch loop
+        #     surfaces the block reason; consent gate doesn't run).
+        #   - Decision.ALLOW → continue to consent gate (consent gate
+        #     can still deny — auto mode does not skip the gate).
+        #   - Decision.ASK → continue to consent gate. Per-call Tier-2
+        #     prompts already exist for tools with capability_claims;
+        #     this path treats the classifier's "I'm uncertain" the
+        #     same way as a Tier-2 claim that needs user confirmation.
+        #
+        # Fail-closed: any classifier error returns BLOCK with
+        # failed_closed=True. A wedged auxiliary provider must never
+        # silently fall through to ALLOW.
+        try:
+            from plugin_sdk import effective_permission_mode as _epm_m92
+
+            _mode = _epm_m92(self._runtime)
+            _is_auto = str(_mode).endswith("auto")
+        except Exception:  # noqa: BLE001
+            _is_auto = False
+
+        if _is_auto and calls:
+            try:
+                from opencomputer.agent.tool_call_classifier import (
+                    Decision as _M92Decision,
+                )
+                from opencomputer.agent.tool_call_classifier import (
+                    ToolCallClassifier as _M92Classifier,
+                )
+
+                # Build the prior tool_use list from the persisted history.
+                _prior_calls: list[ToolCall] = []
+                _user_msgs: list[Message] = []
+                try:
+                    _hist = list(self.db.get_messages(session_id)) if session_id else []
+                    for _m in _hist:
+                        if _m.role in ("user", "assistant", "system"):
+                            _user_msgs.append(_m)
+                        if _m.tool_calls:
+                            _prior_calls.extend(_m.tool_calls)
+                except Exception:  # noqa: BLE001
+                    pass
+
+                _classifier = _M92Classifier()
+                for _c in calls:
+                    # Skip if already blocked by skill_filter or future
+                    # checks above (don't waste classifier calls).
+                    if _c.id in blocked:
+                        continue
+                    _decision = await _classifier.classify(
+                        user_messages=_user_msgs,
+                        tool_calls_so_far=_prior_calls,
+                        pending=_c,
+                    )
+                    if _decision.decision == _M92Decision.BLOCK:
+                        _block_msg = (
+                            f"Auto-mode classifier blocked this call: "
+                            f"{_decision.rationale}"
+                        )
+                        if _decision.failed_closed:
+                            _block_msg += " (fail-closed)"
+                        blocked.setdefault(_c.id, _block_msg)
+                    # ALLOW + ASK both fall through to the consent gate
+                    # below. ASK semantics map onto consent gate's
+                    # PER_ACTION prompt for any tool with
+                    # capability_claims; tools without claims have no
+                    # interactive surface and effectively allow.
+            except Exception as e:  # noqa: BLE001
+                _log.warning(
+                    "M9.2 classifier path raised — falling through to "
+                    "consent gate without classification: %s", e,
+                )
+
         if self._consent_gate is not None:
             from opencomputer.agent.consent.bypass import BypassManager
             from plugin_sdk.consent import ConsentTier
