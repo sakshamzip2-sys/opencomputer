@@ -4997,6 +4997,17 @@ def main() -> None:
         load_for_profile(read_active_profile())
     except Exception as e:  # noqa: BLE001 — never crash startup on env load
         _log.debug("per-profile env load failed: %s", e)
+    # v1.1 plan-4 M13 — attach plugin-advertised top-level CLI subcommands
+    # as lazy placeholders. Discovery is cheap (manifest JSON only); the
+    # owning plugin loads only when the user actually invokes `oc <name>`.
+    try:
+        from opencomputer.plugins.cli_registry import (
+            register_plugin_cli_commands,
+        )
+
+        register_plugin_cli_commands(app)
+    except Exception as e:  # noqa: BLE001 — never crash startup on plugin scan
+        _log.debug("M13 plugin CLI registration failed: %s", e)
     app()
 
 

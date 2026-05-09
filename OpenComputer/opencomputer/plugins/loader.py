@@ -49,6 +49,18 @@ class PluginIncompatibleError(RuntimeError):
     """
 
 
+class PluginCLINameCollision(RuntimeError):  # noqa: N818 — spec-mandated name from v1.1 plan-4 M13
+    """Raised when a plugin tries to register an `oc <name>` subcommand
+    that collides with a core verb (always fatal) or another plugin's
+    command (fatal unless ``replace=True``). v1.1 plan-4 M13.
+
+    Caught by ``load_plugin`` so one bad plugin's collision doesn't break
+    the rest of the registry — the plugin's load is logged + skipped, the
+    rest continue. Authors fix by renaming via the documented
+    ``cli_commands`` prefix convention (e.g. ``<plugin-id>-<verb>``).
+    """
+
+
 def _check_min_host_version(
     *, plugin_id: str, min_host_version: str, host_version: str
 ) -> None:
@@ -687,6 +699,7 @@ class PluginAPI:
         slash_commands: dict[str, Any] | None = None,
         activation_source: PluginActivationSource = "bundled",
         outgoing_queue: Any = None,
+        cli_commands: dict[str, Any] | None = None,
     ) -> None:
         self.tools = tool_registry
         self.hooks = hook_engine
@@ -715,6 +728,15 @@ class PluginAPI:
         # same table. Keyed by command name (no leading slash).
         self.slash_commands: dict[str, Any] = (
             slash_commands if slash_commands is not None else {}
+        )
+        # v1.1 plan-4 M13: plugin-authored top-level CLI subcommands.
+        # Threaded in from PluginRegistry so all plugins register into one
+        # table. Keyed by command name. Values are typer.Typer instances
+        # (loose-typed at the loader boundary so we don't import typer
+        # here). The CLI's lazy-load placeholder reads this dict after
+        # firing the plugin's register(api).
+        self._cli_commands: dict[str, Any] = (
+            cli_commands if cli_commands is not None else {}
         )
         # Task I.7: why this plugin was activated. Exposed to plugin code
         # via the ``activation_source`` property so ``register(api)`` can
@@ -1128,6 +1150,52 @@ class PluginAPI:
         Source: openclaw DoctorHealthContribution.
         """
         self.doctor_contributions.append(contribution)
+
+    def register_cli_command(
+        self,
+        name: str,
+        app: Any,  # typer.Typer at runtime; loose-typed so loader needn't import typer
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Register a top-level `oc <name> ...` Typer subcommand (v1.1 plan-4 M13).
+
+        The CLI's plugin loader reads the plugin manifest's
+        ``cli_commands`` array at startup and pre-attaches a lazy
+        placeholder; on actual ``oc <name>`` invocation the plugin's
+        ``register(api)`` runs, this method captures the real Typer app,
+        and the placeholder dispatches into it.
+
+        Three layers of conflict resolution:
+
+        * **Core vs plugin** — names in
+          :data:`opencomputer.plugins.cli_registry.CORE_RESERVED_CLI_NAMES`
+          (the verbs core ships) are always fatal — the plugin cannot
+          shadow them. Raises :class:`PluginCLINameCollision`.
+        * **Plugin vs plugin** — first registration wins; the second
+          raises :class:`PluginCLINameCollision`. Pass ``replace=True``
+          only for documented core-blessed overrides.
+        * **Profile-scoped** — the manifest's ``cli_commands_profiles``
+          is enforced at the CLI loader; this method does not need to
+          re-check (a profile-excluded plugin would not have been
+          activated and so this method would never run).
+        """
+        from opencomputer.plugins.cli_registry import CORE_RESERVED_CLI_NAMES
+
+        if name in CORE_RESERVED_CLI_NAMES:
+            raise PluginCLINameCollision(
+                f"plugin tried to register CLI command {name!r} which is "
+                "a reserved core verb; rename via the cli_commands prefix "
+                "convention (e.g. <plugin-id>-<verb>)."
+            )
+        if name in self._cli_commands and not replace:
+            raise PluginCLINameCollision(
+                f"plugin CLI command {name!r} is already registered by "
+                "another plugin; rename via the cli_commands prefix "
+                "convention (e.g. <plugin-id>-<verb>) or, for documented "
+                "core-blessed overrides, pass replace=True."
+            )
+        self._cli_commands[name] = app
 
 
 def load_plugin(
