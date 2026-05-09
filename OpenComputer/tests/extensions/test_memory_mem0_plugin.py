@@ -220,18 +220,28 @@ async def test_system_prompt_block_with_results() -> None:
 # ─── register() tests ───────────────────────────────────────────────────
 
 
-def test_register_with_compat_api_calls_register_memory_provider(tmp_path) -> None:
+def test_register_with_compat_api_calls_register_memory_provider(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """register() invokes api.register_memory_provider on a modern core."""
     from extensions.memory_mem0 import plugin as plugin_mod
 
+    # Plugin short-circuits silently when neither MEM0_API_KEY nor
+    # MEM0_BASE_URL is set (M1.B1 follow-up); set one so the register
+    # path is reached.
+    monkeypatch.setenv("MEM0_API_KEY", "fake-test-key")
     api = MagicMock()
     plugin_mod.register(api)
     api.register_memory_provider.assert_called_once()
 
 
-def test_register_on_old_core_warns_and_returns(caplog) -> None:
+def test_register_on_old_core_warns_and_returns(
+    caplog, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Old core (no method) → warning logged, no crash."""
     from extensions.memory_mem0 import plugin as plugin_mod
+
+    monkeypatch.setenv("MEM0_API_KEY", "fake-test-key")
 
     class _OldAPI:
         # No register_memory_provider attr.
