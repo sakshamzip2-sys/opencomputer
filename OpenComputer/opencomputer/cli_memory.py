@@ -819,6 +819,72 @@ def memory_dream_off() -> None:
     console.print(msg)
 
 
+# ─── 2026-05-09 — dream-v2 enable/disable ───────────────────────────
+
+
+@memory_app.command("dream-v2-on")
+def memory_dream_v2_on() -> None:
+    """EXPERIMENTAL — enable Dreaming v2 (pure local episodic→MEMORY.md).
+
+    Sets ``memory.dreaming_v2_enabled = True``. Unlike the v1
+    ``dream-on`` flow, v2 does NOT register a separate cron job —
+    instead it fires inside the system cron tick (see
+    ``opencomputer.cron.system_jobs.run_system_tick``) which is
+    invoked on every ``oc cron daemon`` tick alongside the four other
+    system jobs. So flipping the flag is sufficient: as soon as the
+    cron daemon ticks again, v2 will run.
+
+    For the cron daemon itself, see ``oc cron daemon`` (foreground)
+    or the LaunchAgent setup at ``oc cron install``.
+
+    Idempotent: re-running with the flag already True is a no-op.
+    Distinct from v1 ``dream-on`` — both can coexist (v1 reads
+    ``dreaming_enabled``, v2 reads ``dreaming_v2_enabled``); typical
+    usage is one or the other.
+    """
+    from opencomputer.agent.config_store import (
+        config_file_path,
+        load_config,
+        save_config,
+        set_value,
+    )
+
+    cfg = load_config()
+    cfg = set_value(cfg, "memory.dreaming_v2_enabled", True)
+    save_config(cfg)
+
+    console.print(
+        "[green]✓[/green] dreaming_v2 enabled\n"
+        f"[dim]saved to {config_file_path()}[/dim]\n"
+        "[dim]v2 fires from the system cron tick — make sure "
+        "[cyan]oc cron daemon[/cyan] is running.[/dim]"
+    )
+
+
+@memory_app.command("dream-v2-off")
+def memory_dream_v2_off() -> None:
+    """EXPERIMENTAL — disable Dreaming v2.
+
+    Only writes the config flag; existing MEMORY.md / DREAMS.md rows
+    are left intact. Pairs with :func:`memory_dream_v2_on`.
+    """
+    from opencomputer.agent.config_store import (
+        config_file_path,
+        load_config,
+        save_config,
+        set_value,
+    )
+
+    cfg = load_config()
+    cfg = set_value(cfg, "memory.dreaming_v2_enabled", False)
+    save_config(cfg)
+
+    console.print(
+        "[green]✓[/green] dreaming_v2 disabled\n"
+        f"[dim]saved to {config_file_path()}[/dim]"
+    )
+
+
 # ─── 2026-04-28 — passive-education learning-moment controls ────────
 
 
