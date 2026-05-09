@@ -17,6 +17,124 @@ The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEAS
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-3 M6.4: Dreaming v2 cron + CLI production wiring (2026-05-09)
+
+The DreamingPipeline engine (three-gate consolidation INTO MEMORY.md) shipped in the prior commit; this PR closes the cron + CLI deferral so it actually runs.
+
+```bash
+# Manual trigger for testing / observability
+oc memory dream-v2 --limit 50 --output json
+
+# Cron path: enable + the system tick handles the rest
+echo 'memory: { dreaming_v2_enabled: true }' >> ~/.opencomputer/<profile>/config.yaml
+```
+
+What ships:
+
+- `opencomputer/cron/dreaming_v2_tick.py` — production tick. Builds five injectable callables from real substrates: `score_fn` via active provider's `BaseProvider.complete()` with a memory-importance judge prompt + regex float extraction; `recall_count_fn` via SQL COUNT against `recall_citations`; `embed_fn` via `BaseProvider.embed()` (M6.6 contract); `promote_fn` via `MemoryManager.append_declarative()`; `hold_fn` writing to `<profile_home>/DREAMS.md` with FIFO byte-cap eviction.
+- `oc memory dream-v2` CLI command — `--limit`, `--force` (override disabled-by-config), `--output text|json`. Default-OFF stays default-OFF; `--force` is the explicit override.
+- Persistent state at `<profile_home>/cron/dreaming_v2_state.json` tracks `processed_event_ids` (idempotency) + `last_run_ts_ns` (cron-miss detection). Atomic temp-rename writes.
+- After successful promotion, `episodic_events.dreamed_into` flips so the row doesn't re-enter the candidate pool.
+- Six new `MemoryConfig` knobs: `dreaming_v2_enabled` (master switch, default False), `dreaming_v2_score_threshold` (0.65), `dreaming_v2_min_recall_count` (2), `dreaming_v2_diversity_threshold` (0.8), `dreaming_v2_max_promotions_per_run` (20), `dreaming_v2_dreams_md_max_bytes` (16384), `dreaming_v2_candidate_fetch_limit` (50).
+
+29 new tests (`tests/test_dreaming_v2_tick.py`): candidate fetch (undreamed-only / limit / empty-summary), recall_count_fn against real schema, promote_fn invalidates BM25 + vector indices, hold_fn FIFO eviction + atomic write, paragraph splitting, state ledger round-trip, pipeline assembly with/without provider, end-to-end async runs (high-quality promote, idempotent skip, disabled returns empty, `dreamed_into` flip), CLI happy paths, and four config round-trip integration tests pinning that the seven `cfg.memory.dreaming_v2_*` knobs survive YAML override → `load_config` → `build_production_dependencies` → `DreamingV2Config` end-to-end. 73-test broader sweep (dreaming + system_tick + cli_memory) all green.
+
+### Added — v1.1 Plan-3 M10.2: gateway dispatcher routing integration (2026-05-09)
+
+Wires the M10.1 routing schema into `Dispatch.handle_message`. Inbound `MessageEvent`s now resolve through the active profile's `routing.rules`; on a non-default match, the named `AgentTemplate`'s `system_prompt` is applied to that turn via the same `system_prompt_override` plumbing `DelegateTool` already uses for `agent: ...` delegation.
+
+```yaml
+# config.yaml — same schema M10.1 shipped
+routing:
+  rules:
+    - match: {platform: slack, channel: "#security-alerts"}
+      agent: security-reviewer       # AgentTemplate at home/agents/security-reviewer.md
+  default:
+    agent: default
+```
+
+Now an inbound Slack message in `#security-alerts` runs through the agent loop with `security-reviewer.md`'s system prompt installed; everywhere else uses the active profile's normal default. Previously the rules were operator-visible (`oc routing list/test`) but had zero runtime effect.
+
+`opencomputer/agent/routing.py:resolve_template_for_event` returns a frozen `ResolvedTemplate(template_name, system_prompt, profile_rebind)` or None on default-match / unknown template / empty system prompt. M10.3 cross-profile rebind hook is plumbed but not consumed (waits on plan-1 M1.4 per-profile env).
+
+9 new tests in `tests/test_routing_dispatcher.py`. 39/39 routing tests pass; 185 existing dispatcher / gateway tests still pass.
+
+### Added — v1.1 Plan-3 M9.1: `permission_mode = "auto"` equivalence pin (2026-05-09)
+
+Schema-and-pin slice of plan-3 M9. The `auto` `PermissionMode` value, the `--auto` CLI flag, the `/auto` slash command, and the wire `ChatParams.permission_mode = "auto"` were already in place individually; this PR adds `tests/test_auto_mode_runtime.py` (13 tests) which pins the M9 acceptance criterion: setting auto via CLI / slash / wire / legacy `--yolo` all surface the SAME `effective_permission_mode`. Catches drift if any single entry point is rewritten without the others.
+
+**Why this is a tiny PR**: every M9.1 surface listed in `docs/superpowers/plans/2026-05-08-v1-1-plan-3-heavy-features-and-parked.md` was already shipped piecemeal (CLI flag at `cli.py:2342`, slash command at `agent/slash_commands_impl/auto_cmd.py`, wire param at `gateway/protocol_v2.py:118`, helper at `plugin_sdk/permission_mode.py`). The audit caught only one missing piece — the dedicated equivalence test the plan calls for. Shipping it as the M9.1 closure rather than re-deriving the surface from scratch.
+
+**M9.2 (the `ToolCallClassifier` that intercepts tool calls in auto mode) remains the security-critical multi-day item** — it stays separate per its own plan-3 preamble. M9.1's `auto` mode today simply skips the F1 ConsentGate (same as legacy `--yolo`); M9.2 is what makes auto mode actually safe via per-call adversarial classification.
+
+### Added — v1.1 Plan-3 M10.1 + M10.4: per-channel routing schema + `oc routing` CLI (2026-05-09)
+
+Schema-and-dry-run slice of plan-3 M10. Operators can now declare routing rules in their `config.yaml` and inspect them with `oc routing list` / `oc routing test` — without the gateway dispatcher actually consuming them yet (M10.2/M10.3 land separately). The schema is the load-bearing piece; the CLI is what makes the schema reviewable.
+
+```yaml
+# ~/.opencomputer/<profile>/config.yaml
+routing:
+  rules:
+    - match: {platform: slack, channel: "#security-alerts"}
+      agent: security-reviewer
+    - match: {platform: telegram, peer: "12345"}
+      agent: executive
+      profile: work
+    - match: {platform: discord, guild: myguild, role: admin}
+      agent: admin-only
+    - match: {platform: discord, guild: myguild}
+      agent: guild-default
+  default:
+    agent: fallback
+```
+
+```
+$ oc routing list
+Routing rules (4 — most-specific first):
+  1. [spec=1001] platform='telegram', chat_id='12345', peer='12345' → agent='executive', profile='work'
+  2. [spec=301]  platform='discord', guild='myguild', role='admin' → agent='admin-only'
+  3. [spec=141]  platform='slack', channel='security-alerts' → agent='security-reviewer'
+  4. [spec=101]  platform='discord', guild='myguild' → agent='guild-default'
+
+Default: agent='fallback'
+
+$ oc routing test discord U777 --guild myguild --role admin
+Input: platform='discord', chat_id='U777', guild='myguild', role='admin'
+→ Matched rule (specificity=301): agent='admin-only'
+
+$ oc routing test matrix U999
+Input: platform='matrix', chat_id='U999'
+→ DEFAULT (no rule matched). agent='fallback'
+```
+
+**Most-specific-wins precedence (OpenClaw chain):**
+
+```
+exact peer (chat_id) → guild + role → guild → team → account → channel → platform → default
+```
+
+`peer:` is honored as an alias for `chat_id:` so YAML copy-pasted from OpenClaw works without renaming. `#channel` is normalized to `channel` so Slack-flavored configs match Discord-flavored event metadata identically. Authors can list rules in any order — the parser sorts them by `_match_specificity` so a less-specific rule listed first never eclipses a more-specific one.
+
+**What's deferred (intentional honest scope):**
+
+* **M10.2 — dispatcher integration** (gateway reads rules → applies agent template per inbound message). The plan-3 doc has this as a separate 1-2 day item. Schema is in place so M10.2 only needs to flip the `Dispatch.handle_message` lookup.
+* **M10.3 — per-rule profile rebind** (`profile:` field on a rule swaps the gateway's per-message context to that profile's memory + creds). Requires plan-1 M1.4 (per-profile env). Schema honors `profile:` today and round-trips it through YAML; the gateway plumbing is the M10.3 work.
+
+**Files:**
+
+- `opencomputer/agent/config.py` — `RoutingMatch`, `RoutingRule`, `RoutingDefault`, `RoutingConfig` dataclasses + `Config.routing` field (additive default; existing configs unchanged).
+- `opencomputer/agent/routing.py` (NEW) — `_match_specificity` + `sort_rules_by_specificity` + `match_rule` + `resolve_routing_rule(event)` + `resolve_routing_rule_by_fields(dict)` (the CLI's entry point — no MessageEvent dep).
+- `opencomputer/agent/config_store.py` — `_parse_routing_block` parser + `load_config` plumb-through; `_to_yaml_dict` writer for round-trip. Drops unknown match dimensions with a WARNING (forward-compat for un-ported OpenClaw fields); rejects rules missing `agent`.
+- `opencomputer/cli_routing.py` (NEW) — `routing_app` Typer with `list` + `test` commands. Both support `--output text|json` for scripting / piping to jq.
+- `opencomputer/cli.py` — `app.add_typer(routing_app, name="routing")`.
+
+**Tests (30 new across 4 files, all green):**
+
+- `tests/test_routing_precedence.py` — 11 tests covering every step of the precedence chain (chat_id beats guild+channel; peer alias matches chat_id; guild+role beats guild alone; channel beats platform; team beats channel; account beats channel; guild beats team beats account; sort is order-independent + stable for equal specificity).
+- `tests/test_routing_default_fallback.py` — 3 tests: no rules → default fires; rules present but none match → default; default agent defaults to "default".
+- `tests/test_routing_yaml_round_trip.py` — 8 tests: minimal block parses; full block with profile parses; empty block returns None (Config.routing untouched); rule missing `agent` is skipped with WARNING; unknown match dimension dropped with WARNING; channel `#foo` normalizes to `foo`; full Config → YAML → reload round-trips with most-specific-first ordering preserved; config without `routing:` block leaves Config.routing at default.
+- `tests/test_cli_routing.py` — 8 tests: `list` text + JSON; no rules listed; `test` matches security channel + admin role; falls through to default; JSON output; `#channel` normalization at the CLI flag layer.
+
 ### Added — v1.1 Plan-4 M13: plugin-authored top-level CLI subcommands (2026-05-09)
 
 Closes the long-standing audit gap that plugins could register tools, providers, channels, hooks, slash commands, MCPs, agent templates, and skills, but could **not** ship `oc <plugin-id> <subcommand>` Typer subcommands. Slash commands were the in-session workaround; CLI workflows had no equivalent.

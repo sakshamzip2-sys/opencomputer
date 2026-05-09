@@ -876,3 +876,137 @@ def memory_learning_status() -> None:
     ):
         when = _dt.datetime.fromtimestamp(fired_at).isoformat(timespec="seconds")
         console.print(f"  - {moment_id} [dim]({when})[/dim]")
+
+
+# ─── v1.1 plan-3 M6.4 — Dreaming v2 (three-gate consolidation INTO MEMORY.md) ──
+
+
+@memory_app.command("dream-v2")
+def memory_dream_v2(
+    limit: int = typer.Option(
+        50,
+        "--limit",
+        "-n",
+        help="Max recent un-dreamed episodic events to score (1-500).",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Run even when dreaming_v2 is disabled in config.yaml.",
+    ),
+    output: str = typer.Option(
+        "text", "--output", "-o", help="text|json"
+    ),
+) -> None:
+    """Run one Dreaming v2 pass NOW.
+
+    Three gates (score / recall-count / diversity) decide whether each
+    candidate episodic event is promoted into MEMORY.md, held in
+    DREAMS.md, or dropped. Default cron cadence runs the same engine
+    via the system tick (gated by ``cfg.memory.dreaming_v2_enabled``).
+    """
+    import asyncio
+    import json as _json
+
+    from opencomputer.cron.dreaming_v2_tick import (
+        build_production_dependencies,
+        run_dreaming_v2_async,
+    )
+
+    limit = max(1, min(int(limit), 500))
+    deps = build_production_dependencies()
+
+    if not deps.config.enabled and not force:
+        console.print(
+            "[yellow]dreaming_v2 is disabled[/yellow] "
+            "(cfg.memory.dreaming_v2_enabled = false). "
+            "Re-run with [cyan]--force[/cyan] to override, or enable in "
+            "[cyan]~/.opencomputer/<profile>/config.yaml[/cyan]."
+        )
+        raise typer.Exit(code=0)
+
+    if force and not deps.config.enabled:
+        # Build a one-shot deps with config.enabled forced True so the
+        # engine actually runs (engine's own enabled-check otherwise
+        # short-circuits).
+        from opencomputer.agent.dreaming_v2 import DreamingV2Config
+
+        deps = type(deps)(
+            profile_home=deps.profile_home,
+            memory=deps.memory,
+            db=deps.db,
+            provider=deps.provider,
+            model=deps.model,
+            config=DreamingV2Config(
+                enabled=True,
+                score_threshold=deps.config.score_threshold,
+                min_recall_count=deps.config.min_recall_count,
+                diversity_threshold=deps.config.diversity_threshold,
+                max_promotions_per_run=deps.config.max_promotions_per_run,
+                dreams_md_max_bytes=deps.config.dreams_md_max_bytes,
+            ),
+        )
+
+    summary = asyncio.run(
+        run_dreaming_v2_async(deps=deps, candidate_limit=limit)
+    )
+
+    payload = {
+        "promoted": [
+            {
+                "event_id": r.candidate.event_id,
+                "score": r.score,
+                "recall_count": r.recall_count,
+                "diversity": r.diversity_score,
+                "rationale": r.rationale,
+                "preview": r.candidate.raw_text[:120],
+            }
+            for r in summary.promoted
+        ],
+        "held": [
+            {
+                "event_id": r.candidate.event_id,
+                "score": r.score,
+                "recall_count": r.recall_count,
+                "diversity": r.diversity_score,
+                "rationale": r.rationale,
+            }
+            for r in summary.held
+        ],
+        "dropped": [
+            {
+                "event_id": r.candidate.event_id,
+                "rationale": r.rationale,
+            }
+            for r in summary.dropped
+        ],
+        "skipped_already_processed": summary.skipped_already_processed,
+        "total_evaluated": summary.total_evaluated,
+        "catch_up_run": summary.catch_up_run,
+    }
+
+    if output == "json":
+        typer.echo(_json.dumps(payload, indent=2))
+        return
+
+    console.print(
+        f"[green]✓[/green] dream-v2 finished: "
+        f"promoted={len(summary.promoted)}, "
+        f"held={len(summary.held)}, "
+        f"dropped={len(summary.dropped)}, "
+        f"skipped_already_processed={summary.skipped_already_processed}, "
+        f"total_evaluated={summary.total_evaluated}"
+        + (" (catch-up run)" if summary.catch_up_run else "")
+    )
+    if summary.promoted:
+        console.print("\n[bold green]Promoted to MEMORY.md:[/bold green]")
+        for r in summary.promoted:
+            console.print(
+                f"  • [dim]score={r.score:.2f} recall={r.recall_count} "
+                f"div={r.diversity_score:.2f}[/dim] "
+                f"{r.candidate.raw_text[:80]}"
+            )
+    if summary.held:
+        console.print("\n[bold yellow]Held in DREAMS.md:[/bold yellow]")
+        for r in summary.held:
+            console.print(f"  • [dim]{r.rationale}[/dim]")
