@@ -633,4 +633,119 @@ def rename_(
     )
 
 
+# ─── checkpoints (v1.1 plan-2 M5.1, 2026-05-09) ──────────────────────────
+
+
+@session_app.command("checkpoints")
+def session_checkpoints(
+    session_id: str = typer.Argument(..., help="Session id to inspect."),
+    limit: int = typer.Option(
+        50, "--limit", help="Maximum number of checkpoints to display."
+    ),
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit machine-readable JSON instead of a Rich table.",
+    ),
+) -> None:
+    """List per-prompt checkpoints saved for ``session_id``.
+
+    Reads the existing on-disk layout written by
+    ``extensions/coding-harness/rewind/store.py`` —
+    ``~/.opencomputer/harness/<session_id>/rewind/<checkpoint_id>/``.
+    No new storage; this command surfaces what the rewind/checkpoint
+    plumbing already records.
+
+    Use ``oc checkpoints status`` for a cross-session aggregate; this
+    command focuses on one session so you can pick a checkpoint to
+    pass to ``rewind`` (M5.3, deferred).
+    """
+    import json as _json
+
+    from rewind.store import RewindStore  # type: ignore[import-not-found]
+
+    # checkpoint_admin already wires extensions/coding-harness onto
+    # sys.path at import-time, so importing it first lets us pull
+    # RewindStore off the resulting module path without re-doing the
+    # sys.path dance here.
+    from opencomputer.checkpoint_admin import harness_root  # noqa: F401
+
+    rwd = harness_root() / session_id / "rewind"
+    if not rwd.exists():
+        if json_out:
+            typer.echo(_json.dumps({"session_id": session_id, "checkpoints": []}))
+            return
+        console.print(
+            f"[yellow]no checkpoints[/yellow] for session "
+            f"[cyan]{session_id[:8]}[/cyan] (no rewind dir at {rwd})"
+        )
+        return
+
+    try:
+        store = RewindStore(rwd, workspace_root=harness_root() / session_id)
+        cps = store.list()
+    except (OSError, ValueError) as exc:
+        console.print(f"[red]error:[/red] could not read checkpoints: {exc}")
+        raise typer.Exit(1) from None
+
+    # Newest first so a user picking "the last one before I broke things"
+    # sees it at top. Per-checkpoint size is a best-effort sum of file
+    # bytes — RewindStore.list() returns Checkpoint instances which carry
+    # the full ``files`` map; we don't re-stat the dir.
+    cps_sorted = sorted(cps, key=lambda c: c.created_at, reverse=True)[:limit]
+
+    if json_out:
+        typer.echo(
+            _json.dumps(
+                {
+                    "session_id": session_id,
+                    "checkpoints": [
+                        {
+                            "id": c.id,
+                            "label": c.label,
+                            "created_at": c.created_at,
+                            "file_count": len(c.files),
+                            "size_bytes": sum(len(b) for b in c.files.values()),
+                            "excluded_files": list(c.excluded_files),
+                        }
+                        for c in cps_sorted
+                    ],
+                }
+            )
+        )
+        return
+
+    if not cps_sorted:
+        console.print(
+            f"[dim]no checkpoints recorded for session "
+            f"[cyan]{session_id[:8]}[/cyan][/dim]"
+        )
+        return
+
+    table = Table(
+        title=f"Checkpoints — session {session_id[:8]}",
+        show_lines=False,
+    )
+    table.add_column("id", style="cyan", no_wrap=True)
+    table.add_column("label")
+    table.add_column("created_at", style="dim")
+    table.add_column("files", justify="right")
+    table.add_column("size", justify="right")
+    for cp in cps_sorted:
+        size_kb = sum(len(b) for b in cp.files.values()) / 1024
+        size_str = f"{size_kb:.1f}KB" if size_kb >= 1 else f"{int(size_kb * 1024)}B"
+        table.add_row(
+            cp.id[:12],
+            cp.label,
+            cp.created_at,
+            str(len(cp.files)),
+            size_str,
+        )
+    console.print(table)
+    console.print(
+        f"[dim]showing {len(cps_sorted)} of {len(cps)} checkpoint(s)"
+        f"{'; pass --limit to see more' if len(cps) > len(cps_sorted) else ''}[/dim]"
+    )
+
+
 __all__ = ["session_app"]
