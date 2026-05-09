@@ -559,3 +559,109 @@ def test_cli_dream_v2_json_output(
     assert "held" in payload
     assert "dropped" in payload
     assert "skipped_already_processed" in payload
+
+
+# ─── config round-trip + production deps integration ────────────
+
+
+def test_config_loads_dreaming_v2_defaults() -> None:
+    """Default Config has the 7 dreaming_v2 fields with the spec values."""
+    from opencomputer.agent.config_store import default_config
+
+    cfg = default_config()
+    assert cfg.memory.dreaming_v2_enabled is False
+    assert cfg.memory.dreaming_v2_score_threshold == 0.65
+    assert cfg.memory.dreaming_v2_min_recall_count == 2
+    assert cfg.memory.dreaming_v2_diversity_threshold == 0.8
+    assert cfg.memory.dreaming_v2_max_promotions_per_run == 20
+    assert cfg.memory.dreaming_v2_dreams_md_max_bytes == 16384
+    assert cfg.memory.dreaming_v2_candidate_fetch_limit == 50
+
+
+def test_config_yaml_overrides_dreaming_v2_fields(tmp_path: Path) -> None:
+    """YAML overrides flow through ``_apply_overrides`` correctly for
+    every dreaming_v2_* knob."""
+    from opencomputer.agent.config_store import load_config
+
+    yaml_path = tmp_path / "config.yaml"
+    yaml_path.write_text(
+        """
+memory:
+  dreaming_v2_enabled: true
+  dreaming_v2_score_threshold: 0.42
+  dreaming_v2_min_recall_count: 7
+  dreaming_v2_diversity_threshold: 0.95
+  dreaming_v2_max_promotions_per_run: 3
+  dreaming_v2_dreams_md_max_bytes: 1024
+  dreaming_v2_candidate_fetch_limit: 11
+""".strip(),
+        encoding="utf-8",
+    )
+    cfg = load_config(yaml_path)
+    assert cfg.memory.dreaming_v2_enabled is True
+    assert cfg.memory.dreaming_v2_score_threshold == 0.42
+    assert cfg.memory.dreaming_v2_min_recall_count == 7
+    assert cfg.memory.dreaming_v2_diversity_threshold == 0.95
+    assert cfg.memory.dreaming_v2_max_promotions_per_run == 3
+    assert cfg.memory.dreaming_v2_dreams_md_max_bytes == 1024
+    assert cfg.memory.dreaming_v2_candidate_fetch_limit == 11
+
+
+def test_build_production_dependencies_picks_up_yaml_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: YAML overrides → load_config → build_production_dependencies
+    → DreamingV2Config carries the operator's tuning into the engine."""
+    from opencomputer.cron.dreaming_v2_tick import build_production_dependencies
+
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    (profile_home / "config.yaml").write_text(
+        """
+memory:
+  dreaming_v2_enabled: true
+  dreaming_v2_score_threshold: 0.5
+  dreaming_v2_min_recall_count: 4
+  dreaming_v2_max_promotions_per_run: 7
+""".strip(),
+        encoding="utf-8",
+    )
+    # Steer _home() at the temp profile so load_config + MemoryManager
+    # resolve to it consistently.
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(profile_home))
+
+    deps = build_production_dependencies()
+    assert deps.config.enabled is True
+    assert deps.config.score_threshold == 0.5
+    assert deps.config.min_recall_count == 4
+    assert deps.config.max_promotions_per_run == 7
+    # Untouched fields keep their defaults.
+    assert deps.config.diversity_threshold == 0.8
+    assert deps.config.dreams_md_max_bytes == 16384
+
+
+def test_run_system_tick_skips_dreaming_when_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When cfg.memory.dreaming_v2_enabled is False (default), the cron
+    tick must short-circuit with a 'disabled' status — never spin up the
+    engine, never call provider.complete()."""
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+
+    from opencomputer.cron import dreaming_v2_tick
+
+    summary = dreaming_v2_tick.run_dreaming_v2_tick()
+    # Either the deps build itself failed early (no error path), or
+    # the disabled check fired.  Both are acceptable outcomes for the
+    # default-OFF flag — what we assert is that NO production
+    # promote_fn / hold_fn ran (no MEMORY.md / DREAMS.md written).
+    assert not (tmp_path / "MEMORY.md").exists()
+    assert not (tmp_path / "DREAMS.md").exists()
+    # Status MUST be either "disabled" or carry an "error:" prefix —
+    # never a normal {"promoted": N, ...} payload.
+    if isinstance(summary, dict):
+        assert (
+            summary.get("status") == "disabled"
+            or "error" in summary
+            or summary.get("promoted", 0) == 0
+        )

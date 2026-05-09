@@ -17,7 +17,28 @@ The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEAS
 
 ## [Unreleased]
 
-<<<<<<< HEAD
+### Added — v1.1 Plan-3 M6.4: Dreaming v2 cron + CLI production wiring (2026-05-09)
+
+The DreamingPipeline engine (three-gate consolidation INTO MEMORY.md) shipped in the prior commit; this PR closes the cron + CLI deferral so it actually runs.
+
+```bash
+# Manual trigger for testing / observability
+oc memory dream-v2 --limit 50 --output json
+
+# Cron path: enable + the system tick handles the rest
+echo 'memory: { dreaming_v2_enabled: true }' >> ~/.opencomputer/<profile>/config.yaml
+```
+
+What ships:
+
+- `opencomputer/cron/dreaming_v2_tick.py` — production tick. Builds five injectable callables from real substrates: `score_fn` via active provider's `BaseProvider.complete()` with a memory-importance judge prompt + regex float extraction; `recall_count_fn` via SQL COUNT against `recall_citations`; `embed_fn` via `BaseProvider.embed()` (M6.6 contract); `promote_fn` via `MemoryManager.append_declarative()`; `hold_fn` writing to `<profile_home>/DREAMS.md` with FIFO byte-cap eviction.
+- `oc memory dream-v2` CLI command — `--limit`, `--force` (override disabled-by-config), `--output text|json`. Default-OFF stays default-OFF; `--force` is the explicit override.
+- Persistent state at `<profile_home>/cron/dreaming_v2_state.json` tracks `processed_event_ids` (idempotency) + `last_run_ts_ns` (cron-miss detection). Atomic temp-rename writes.
+- After successful promotion, `episodic_events.dreamed_into` flips so the row doesn't re-enter the candidate pool.
+- Six new `MemoryConfig` knobs: `dreaming_v2_enabled` (master switch, default False), `dreaming_v2_score_threshold` (0.65), `dreaming_v2_min_recall_count` (2), `dreaming_v2_diversity_threshold` (0.8), `dreaming_v2_max_promotions_per_run` (20), `dreaming_v2_dreams_md_max_bytes` (16384), `dreaming_v2_candidate_fetch_limit` (50).
+
+29 new tests (`tests/test_dreaming_v2_tick.py`): candidate fetch (undreamed-only / limit / empty-summary), recall_count_fn against real schema, promote_fn invalidates BM25 + vector indices, hold_fn FIFO eviction + atomic write, paragraph splitting, state ledger round-trip, pipeline assembly with/without provider, end-to-end async runs (high-quality promote, idempotent skip, disabled returns empty, `dreamed_into` flip), CLI happy paths, and four config round-trip integration tests pinning that the seven `cfg.memory.dreaming_v2_*` knobs survive YAML override → `load_config` → `build_production_dependencies` → `DreamingV2Config` end-to-end. 73-test broader sweep (dreaming + system_tick + cli_memory) all green.
+
 ### Added — v1.1 Plan-3 M9.1: `permission_mode = "auto"` equivalence pin (2026-05-09)
 
 Schema-and-pin slice of plan-3 M9. The `auto` `PermissionMode` value, the `--auto` CLI flag, the `/auto` slash command, and the wire `ChatParams.permission_mode = "auto"` were already in place individually; this PR adds `tests/test_auto_mode_runtime.py` (13 tests) which pins the M9 acceptance criterion: setting auto via CLI / slash / wire / legacy `--yolo` all surface the SAME `effective_permission_mode`. Catches drift if any single entry point is rewritten without the others.
@@ -25,7 +46,7 @@ Schema-and-pin slice of plan-3 M9. The `auto` `PermissionMode` value, the `--aut
 **Why this is a tiny PR**: every M9.1 surface listed in `docs/superpowers/plans/2026-05-08-v1-1-plan-3-heavy-features-and-parked.md` was already shipped piecemeal (CLI flag at `cli.py:2342`, slash command at `agent/slash_commands_impl/auto_cmd.py`, wire param at `gateway/protocol_v2.py:118`, helper at `plugin_sdk/permission_mode.py`). The audit caught only one missing piece — the dedicated equivalence test the plan calls for. Shipping it as the M9.1 closure rather than re-deriving the surface from scratch.
 
 **M9.2 (the `ToolCallClassifier` that intercepts tool calls in auto mode) remains the security-critical multi-day item** — it stays separate per its own plan-3 preamble. M9.1's `auto` mode today simply skips the F1 ConsentGate (same as legacy `--yolo`); M9.2 is what makes auto mode actually safe via per-call adversarial classification.
-=======
+
 ### Added — v1.1 Plan-3 M10.1 + M10.4: per-channel routing schema + `oc routing` CLI (2026-05-09)
 
 Schema-and-dry-run slice of plan-3 M10. Operators can now declare routing rules in their `config.yaml` and inspect them with `oc routing list` / `oc routing test` — without the gateway dispatcher actually consuming them yet (M10.2/M10.3 land separately). The schema is the load-bearing piece; the CLI is what makes the schema reviewable.
