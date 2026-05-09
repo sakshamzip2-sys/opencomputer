@@ -28,9 +28,12 @@ from plugin_sdk.core import MessageEvent
 
 __all__ = [
     "MatchOutcome",
+    "ResolvedTemplate",
     "_match_specificity",
     "match_rule",
     "resolve_routing_rule",
+    "resolve_routing_rule_by_fields",
+    "resolve_template_for_event",
     "sort_rules_by_specificity",
 ]
 
@@ -203,4 +206,70 @@ def resolve_routing_rule_by_fields(
         agent=routing.default.agent,
         profile=routing.default.profile,
         matched_default=True,
+    )
+
+
+# ─── M10.2 dispatcher integration ────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedTemplate:
+    """What the gateway dispatcher needs to apply a routed agent template.
+
+    M10.2 returns this to ``Dispatch.handle_message``; ``None`` means
+    no rule matched (or the matched rule names a template that isn't
+    registered) — caller should fall through to default dispatch.
+    """
+
+    template_name: str
+    system_prompt: str
+    profile_rebind: str = ""
+    """M10.3 hook — non-empty means the gateway should rebind to this
+    profile for the message. Today's caller (M10.2) ignores this and
+    routes against the active profile only; M10.3 will consume it."""
+
+
+def resolve_template_for_event(
+    routing: RoutingConfig,
+    event: MessageEvent,
+    templates: dict[str, object],
+) -> ResolvedTemplate | None:
+    """Resolve the agent template (if any) for an inbound event.
+
+    Parameters
+    ----------
+    routing:
+        The active profile's :class:`RoutingConfig`. Empty rules → returns ``None``.
+    event:
+        Inbound :class:`MessageEvent` to match against the rules.
+    templates:
+        Map of template-name → AgentTemplate-shaped object. Pass the
+        result of
+        :func:`opencomputer.agent.agent_templates.discover_agents`. We
+        only read ``.system_prompt`` so the type is loosely-bound for
+        test ergonomics.
+
+    Returns
+    -------
+    ResolvedTemplate | None
+        ``None`` when no rule matches OR the matched rule names a
+        template that isn't in ``templates`` (caller falls through to
+        default dispatch). Otherwise a :class:`ResolvedTemplate`
+        carrying the system prompt to override.
+    """
+    if not routing.rules:
+        return None
+    outcome = resolve_routing_rule(routing, event)
+    if outcome.matched_default or not outcome.agent:
+        return None
+    template = templates.get(outcome.agent)
+    if template is None:
+        return None
+    system_prompt = getattr(template, "system_prompt", None)
+    if not isinstance(system_prompt, str) or not system_prompt:
+        return None
+    return ResolvedTemplate(
+        template_name=outcome.agent,
+        system_prompt=system_prompt,
+        profile_rebind=outcome.profile,
     )
