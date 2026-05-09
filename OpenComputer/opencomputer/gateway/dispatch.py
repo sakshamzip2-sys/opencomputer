@@ -1764,7 +1764,9 @@ class Dispatch:
             return False
 
         token = uuid.uuid4().hex[:24]
-        prompt_text = gate.render_prompt(claim, scope)
+        # Hermes parity: pass session_id so render_prompt can surface
+        # any Tirith findings stashed by the loop's pre-consent scan.
+        prompt_text = gate.render_prompt(claim, scope, session_id=session_id)
         try:
             result = await adapter.send_approval_request(
                 chat_id=chat_id,
@@ -1888,8 +1890,14 @@ class Dispatch:
         gate = getattr(_click_loop, "_consent_gate", None)
         if gate is None:
             return
+        # Hermes parity: 4th verb 'session' grants for the rest of the
+        # session only — dispatched to the in-memory cache via
+        # resolve_pending(... session_scoped=True).
+        session_scoped = False
         if verb == "once":
             decision, persist = True, False
+        elif verb == "session":
+            decision, persist, session_scoped = True, False, True
         elif verb == "always":
             decision, persist = True, True
         elif verb == "deny":
@@ -1902,6 +1910,7 @@ class Dispatch:
             capability_id=capability_id,
             decision=decision,
             persist=persist,
+            session_scoped=session_scoped,
         )
         if not resolved:
             logger.info(

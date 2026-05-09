@@ -38,7 +38,6 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-import yaml
 from rich.console import Console
 from rich.table import Table
 
@@ -725,28 +724,23 @@ def _read_and_validate_profile_yaml(
     printing a Rich-formatted message that includes ``action_label``
     so users see which mutator failed.
     """
+    from opencomputer.agent.config_store import ConfigYAMLError, load_yaml_dict
     from opencomputer.agent.profile_config import (
         ProfileConfigError,
         validate_profile_config_dict,
     )
 
-    if not path.exists():
-        return {}
-
     try:
-        raw = yaml.safe_load(path.read_text()) or {}
-    except yaml.YAMLError as exc:
+        raw = load_yaml_dict(path)
+    except ConfigYAMLError as exc:
         _console.print(
-            f"[red]error:[/red] {path}: invalid YAML ({exc}). "
+            f"[red]error:[/red] {path}: {exc.cause}. "
             f"Cannot {action_label} plugin until profile.yaml parses."
         )
         raise typer.Exit(code=1) from None
 
-    if not isinstance(raw, dict):
-        _console.print(
-            f"[red]error:[/red] {path} must contain a YAML mapping at the top level."
-        )
-        raise typer.Exit(code=1)
+    if not raw:
+        return raw
 
     try:
         validate_profile_config_dict(raw, path=path)

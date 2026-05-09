@@ -127,6 +127,13 @@ class DockerStrategy(SandboxStrategy):
         cmd.extend(_SECURITY_ARGS)
         if not config.network_allowed:
             cmd.extend(["--network", "none"])
+        # Hermes parity: container_persistent: false locks down /workspace
+        # + /root with explicit tmpfs so the implicit container layer can't
+        # accumulate state. Default True (no extra tmpfs) preserves
+        # current behaviour.
+        if not config.container_persistent:
+            cmd.extend(["--tmpfs", "/workspace:rw,size=512m"])
+            cmd.extend(["--tmpfs", "/root:rw,size=256m"])
         for p in config.read_paths:
             cmd.extend(["-v", f"{p}:{p}:ro"])
         for p in config.write_paths:

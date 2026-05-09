@@ -156,16 +156,23 @@ def test_parse_hooks_unknown_event_in_flat_list_skipped(
 
 
 def test_parse_hooks_unsupported_type_skipped(caplog: pytest.LogCaptureFixture) -> None:
+    """v1.1 plan-2 M8.1 (2026-05-09): ``type: prompt`` is now valid
+    (parsed by ``_parse_prompt_hooks_block``), so the unsupported-type
+    branch is exercised by a hypothetical future-only type instead.
+    """
     block = {
         "PreToolUse": [
-            {"type": "prompt", "command": "hi", "prompt": "..."},  # unsupported
+            {"type": "embedding", "command": "hi"},   # truly unsupported
+            {"type": "prompt", "system": "rate"},      # parsed elsewhere
             {"type": "command", "command": "python3 /tmp/ok.py"},
         ]
     }
     with caplog.at_level("WARNING", logger="opencomputer.config"):
         parsed = _parse_hooks_block(block)
     assert len(parsed) == 1
-    assert any("unsupported type" in rec.message.lower() for rec in caplog.records)
+    assert any(
+        "unsupported type" in rec.message.lower() for rec in caplog.records
+    ), f"expected unsupported-type warning, got: {[r.message for r in caplog.records]}"
 
 
 def test_load_config_round_trips_hooks_block(tmp_path: Path) -> None:

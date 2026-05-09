@@ -31,11 +31,12 @@ class TestServerStructure:
         s = build_server()
         assert s.name == "opencomputer"
 
-    def test_twelve_tools_registered(self) -> None:
-        # Original 5 + Tier-A item 14 (channels_list, events_poll) +
-        # Tier-A item 14 follow-up (messages_send, messages_send_status,
-        # events_wait) + attachments_fetch + permissions_respond
-        # (Hermes-doc 10/10 F1 write-back) = 12 tools.
+    def test_canonical_and_alias_tools_registered(self) -> None:
+        # Original 12 (sessions/session_get/messages_read/recall_search/
+        # channels_list/events_poll/events_wait/messages_send/
+        # messages_send_status/attachments_fetch/consent_history/
+        # permissions_respond) + G12 aliases (conversations_list +
+        # conversation_get, 2026-05-09).
         s = build_server()
         tools = asyncio.run(s.list_tools())
         names = sorted(t.name for t in tools)
@@ -43,11 +44,14 @@ class TestServerStructure:
             "attachments_fetch",
             "channels_list",
             "consent_history",
+            "conversation_get",
+            "conversations_list",
             "events_poll",
             "events_wait",
             "messages_read",
             "messages_send",
             "messages_send_status",
+            "permissions_list_open",
             "permissions_respond",
             "recall_search",
             "session_get",
