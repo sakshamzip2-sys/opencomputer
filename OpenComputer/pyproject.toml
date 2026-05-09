@@ -63,6 +63,10 @@ dependencies = [
   # a transitive dep). Used only when WebFetch is invoked with
   # mode="readability" or auto-mode picks readability for an article URL.
   "readability-lxml>=0.8.1",
+  # BM25 retrieval over MEMORY.md (v1.1 plan-3 M6.1). Pure-Python; ~30KB.
+  # Used by opencomputer.agent.memory_index.BM25Index. Foundation for
+  # M6.2 vector index and M6.3 Active Memory pre-loop injection.
+  "rank_bm25>=0.2.2,<0.3",
 ]
 
 [project.optional-dependencies]
