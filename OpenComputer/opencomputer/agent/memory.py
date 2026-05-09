@@ -426,6 +426,18 @@ class MemoryManager:
             bundled_skills_paths = [bundled] if bundled.exists() else []
         self.bundled_skills_paths = bundled_skills_paths
 
+        # v1.1 plan-3 M6.1 — BM25 index over MEMORY.md.  Lazy-built; cache
+        # under <profile_home>/cache/.  Invalidated on every successful
+        # declarative write below.
+        from opencomputer.agent.memory_index import BM25Index
+
+        self._bm25_index = BM25Index(self.declarative_path.parent)
+
+    @property
+    def bm25_index(self) -> "BM25Index":  # type: ignore[name-defined]  # forward-ref string keeps the import lazy
+        """BM25 retrieval index over MEMORY.md (v1.1 plan-3 M6.1)."""
+        return self._bm25_index
+
     def rebind_to_profile(self, profile_home: Path) -> None:
         """Re-resolve declarative_path / user_path / soul_path to point at
         a new profile's home directory. Used by the Ctrl+P profile-swap
@@ -435,10 +447,17 @@ class MemoryManager:
         ``skills_path``, bundled-skills paths, and ``global_soul_path``
         are NOT rebound — skill roots and the global SOUL fallback are
         shared across profiles, not per-profile.
+
+        The per-profile BM25 index is swapped to point at the new home so
+        retrieval isolates cleanly across profiles.
         """
         self.declarative_path = profile_home / "MEMORY.md"
         self.user_path = profile_home / "USER.md"
         self.soul_path = profile_home / "SOUL.md"
+
+        from opencomputer.agent.memory_index import BM25Index
+
+        self._bm25_index = BM25Index(profile_home)
 
     # ─── declarative (MEMORY.md) ───────────────────────────────────
 
@@ -454,18 +473,25 @@ class MemoryManager:
             limit=self.memory_char_limit,
             kind="memory",
         )
+        self._bm25_index.invalidate()
 
     def replace_declarative(self, old: str, new: str) -> bool:
-        return self._replace(
+        changed = self._replace(
             self.declarative_path,
             old,
             new,
             limit=self.memory_char_limit,
             kind="memory",
         )
+        if changed:
+            self._bm25_index.invalidate()
+        return changed
 
     def remove_declarative(self, block: str) -> bool:
-        return self._remove(self.declarative_path, block, kind="memory")
+        changed = self._remove(self.declarative_path, block, kind="memory")
+        if changed:
+            self._bm25_index.invalidate()
+        return changed
 
     # ─── user profile (USER.md) ────────────────────────────────────
 
@@ -542,6 +568,8 @@ class MemoryManager:
             return False
         with _file_lock(target):
             shutil.copy2(backup, target)
+        if which == "memory":
+            self._bm25_index.invalidate()
         return True
 
     # ─── stats ─────────────────────────────────────────────────────
