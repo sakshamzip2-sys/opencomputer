@@ -518,6 +518,22 @@ class MemoryConfig:
     candidates to combine; production tuning has shown ~20 is the
     sweet-spot for MEMORY.md sizes seen in practice (≤256 entries)."""
 
+    # v1.1 plan-3 M6.4 — Dreaming v2 three-gate consolidation INTO MEMORY.md.
+    # Distinct from `dreaming_enabled` above (Round 2A P-18 in-DB
+    # episodic clustering).  Default OFF; opt-in via config.yaml.
+    dreaming_v2_enabled: bool = False
+    """When True, ``opencomputer.cron.dreaming_v2_tick.run_dreaming_v2_tick``
+    fires inside the system cron tick and ``oc memory dream-v2`` is wired
+    to the same engine.  Promotes high-signal episodic events into
+    MEMORY.md via the score / recall-count / diversity gates."""
+    dreaming_v2_score_threshold: float = 0.65
+    dreaming_v2_min_recall_count: int = 2
+    dreaming_v2_diversity_threshold: float = 0.8
+    dreaming_v2_max_promotions_per_run: int = 20
+    dreaming_v2_dreams_md_max_bytes: int = 16384
+    dreaming_v2_candidate_fetch_limit: int = 50
+    """How many recent un-dreamed episodic events to score per tick."""
+
 
 @dataclass(frozen=True, slots=True)
 class HookCommandConfig:
