@@ -88,7 +88,20 @@ class BM25Index:
         return hits
 
     def invalidate(self) -> None:
-        raise NotImplementedError  # implemented in Task 6
+        self._entries = []
+        self._tokens = []
+        self._bm25 = None
+        self._loaded = False
+        try:
+            self._cache_path.unlink()
+        except FileNotFoundError:
+            pass
+        # also clean up any stale .tmp from a crashed save
+        tmp_path = self._cache_path.with_suffix(".tmp")
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
 
     # ─── cache I/O ─────────────────────────────────────────────────────
 
