@@ -73,6 +73,47 @@ Sandbox cwd flows to the child via `runtime.custom["delegate_isolation_cwd"]` + 
 
 Honest deferral: hard enforcement of `tools:` under `context: inline` would require per-skill state on the agent loop's tool dispatcher (the skill body becomes text the parent loop executes — there's no ambient "skill is active" surface). The advisory directive is a pragmatic best-effort; users wanting hard enforcement set `context: fork`.
 
+### Added — v1.1 Plan-2 M8.1: `type: prompt` settings hooks (2026-05-09)
+
+The fifth-of-fourteen plan-2 item the parallel session's PR series (#526-#531) didn't pick up. PR-scope shrunk to M8.1-only after #528 / #529 / #531 landed in parallel and absorbed M4.1+M4.2 / M4.3+M4.4 / M5.4 respectively.
+
+LLM-prompt hooks declared in the same `hooks:` YAML block as command hooks:
+
+```yaml
+hooks:
+  PreToolUse:
+    - type: prompt
+      matcher: "Bash"
+      system: |
+        Reply 'block: <reason>' or 'allow' based on this command's danger.
+      model: auto                      # or specific model id
+      returns: allow_block             # or "score" with score_threshold
+      timeout_seconds: 5
+      token_budget_input: 500          # refuses to call when exceeded
+      token_budget_output: 100
+```
+
+**Why**: the existing `hooks:` block only knew `type: command`, requiring a shell-out to invoke any LLM judgement. Inline `type: prompt` lets users declare risk-rating / policy-classification hooks without writing an external script.
+
+**How**: a new `HookPromptConfig` dataclass + parallel `_parse_prompt_hooks_block` parser scans the same YAML block as the existing command-hook parser; entries with `type: prompt` land in `Config.prompt_hooks`, entries with `type: command` (or no `type`) land in the existing `Config.hooks`. The parsed prompt-hook spec is wrapped in an async handler via `make_prompt_hook_handler` and registered alongside command hooks at CLI bootstrap. Five fail-open paths (timeout, LLM error, ambiguous response, no-numeric-in-score-mode, estimated-input-over-budget) so a wedged or expensive aux-LLM never wedges or bankrupts the loop.
+
+**Skipped (covered by parallel-session PRs)**
+
+- M4.1+M4.2 (`delegate(isolation="worktree"|"copy")`) → PR #528.
+- M4.3+M4.4 (SKILL.md frontmatter `context: fork` + `tools:`) → PR #529.
+- M5.4 (`ExitPlanMode` `next_mode`) → PR #531.
+- M5.1 (`oc session checkpoints <id>`) → PR #526.
+- M5.2+M5.3 (per-prompt checkpoint + rewind picker) → PR #530.
+- M7 (path-glob rules) → PR #527.
+- M4.5 + M8.3 already on main as `oc worktrees clean` + `HookEvent.AFTER_COMPACTION`.
+
+**Tests**
+
+22 new tests covering `HookPromptConfig` defaults + `_parse_prompt_hooks_block` extraction (nested + flat-list shapes, malformed entries skipped) + `_render_context` + response parsing (`allow_block` + `score`) + handler integration (mocked aux-LLM, timeout fail-open, error fail-open, token-cap pre-call refusal). One semantic update to `tests/test_settings_hooks.py::test_parse_hooks_unsupported_type_skipped` because `type: prompt` is no longer "unsupported" — replaced with `type: embedding` to keep exercising the warn-and-skip branch.
+
+Plan: `docs/superpowers/plans/2026-05-09-v1-1-plan-2-tier-b-execution.md` (the 9-lens audit).
+Original spec: `docs/superpowers/plans/2026-05-08-v1-1-plan-2-architecture-features.md`.
+
 ### Added — Hermes Cron + Delegation long-tail finishers (2026-05-08 / 2026-05-09)
 
 Closes 11 honest gaps + 2 latent runtime bugs between the Hermes Cron & Delegation reference spec and OpenComputer. PR #494 already shipped no_agent / parallel-batch / multi-profile parity; this work picks up the long tail and hardens it to production-grade.

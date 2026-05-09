@@ -601,6 +601,10 @@ def _register_settings_hooks(cfg: Config) -> int:
     :func:`opencomputer.hooks.shell_handlers.make_shell_hook_handler`)
     then registers it against the global hook engine.
 
+    v1.1 plan-2 M8.1 (2026-05-09) — also iterates ``cfg.prompt_hooks``
+    and registers each :class:`HookPromptConfig` via
+    :func:`opencomputer.hooks.prompt_handlers.make_prompt_hook_handler`.
+
     Settings-declared hooks run AFTER plugin-declared hooks because
     plugins call ``api.register_hook`` at plugin-load time (which is
     earlier than this CLI-time call). Coexistence is by design — both
@@ -610,8 +614,6 @@ def _register_settings_hooks(cfg: Config) -> int:
     so a single bad entry can't wedge CLI startup. Returns the count
     successfully registered (used by the chat banner).
     """
-    if not cfg.hooks:
-        return 0
     registered = 0
     for h in cfg.hooks:
         try:
@@ -638,6 +640,33 @@ def _register_settings_hooks(cfg: Config) -> int:
             )
         )
         registered += 1
+
+    # v1.1 plan-2 M8.1 — prompt hooks. Lazy import so command-only
+    # configs don't pay for the aux-LLM module load at CLI start.
+    if getattr(cfg, "prompt_hooks", ()):
+        from opencomputer.hooks.prompt_handlers import (  # noqa: PLC0415
+            make_prompt_hook_handler,
+        )
+
+        for ph in cfg.prompt_hooks:
+            try:
+                event = HookEvent(ph.event)
+            except ValueError:
+                _log.warning(
+                    "prompt hook: unknown event %r; skipping",
+                    ph.event,
+                )
+                continue
+            fire_and_forget = (event != HookEvent.PRE_LLM_CALL)
+            hook_engine.register(
+                HookSpec(
+                    event=event,
+                    handler=make_prompt_hook_handler(ph),
+                    matcher=ph.matcher,
+                    fire_and_forget=fire_and_forget,
+                )
+            )
+            registered += 1
     return registered
 
 
