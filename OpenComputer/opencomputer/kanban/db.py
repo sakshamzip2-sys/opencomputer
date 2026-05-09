@@ -2791,6 +2791,49 @@ def _rotate_worker_log(log_path: Path, max_bytes: int) -> None:
         pass
 
 
+def _resolve_oc_executable() -> list[str]:
+    """Return the argv prefix for spawning a kanban worker.
+
+    Three-tier resolution so the dispatcher works regardless of how the
+    parent was launched (interactive shell, systemd, launchd, Docker,
+    `pip install --user`, venv, ...):
+
+    1. ``shutil.which("oc")`` — fastest path; honours the dispatcher's
+       inherited ``$PATH``. Works for the common `pip install --user`
+       case where the user's shell adds ``~/.local/bin`` to PATH.
+    2. ``Path(sys.executable).parent / "oc"`` — covers venv installs
+       where the CLI script sits next to the interpreter even if the
+       venv's ``bin/`` is not on the dispatcher's ``$PATH``. This is
+       the most common cause of the "`oc` not on PATH" spawn failure:
+       the dispatcher inherits a daemon-launch ``$PATH`` (launchd /
+       systemd) that doesn't include the venv.
+    3. ``[sys.executable, "-m", "opencomputer"]`` — bulletproof
+       bootstrap when neither script is reachable. The ``opencomputer``
+       package always exposes ``__main__.py``-style module dispatch
+       via ``opencomputer.cli:main``, so spawning the same Python
+       interpreter as the parent dispatcher is guaranteed to work.
+
+    Returns a list (rather than a single string) so callers can splat
+    it into argv: ``cmd = [*_resolve_oc_executable(), "-p", profile, ...]``.
+    """
+    import shutil
+    import sys
+
+    # 1. PATH lookup
+    found = shutil.which("oc")
+    if found:
+        return [found]
+
+    # 2. Sibling of sys.executable (venv layout)
+    sibling = Path(sys.executable).parent / "oc"
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return [str(sibling)]
+
+    # 3. Module-form bootstrap — guaranteed to work because
+    # ``opencomputer`` always declares the cli entry point.
+    return [sys.executable, "-m", "opencomputer"]
+
+
 def _default_spawn(task: Task, workspace: str) -> int | None:
     """Fire-and-forget ``oc -p <profile> chat -q ...`` subprocess.
 
@@ -2875,7 +2918,7 @@ def _default_spawn(task: Task, workspace: str) -> int | None:
     env["OC_PROFILE"] = task.assignee
 
     cmd = [
-        "oc",
+        *_resolve_oc_executable(),
         "-p", task.assignee,
         # Auto-load the kanban-worker skill so every dispatched worker
         # has the pattern library (good summary/metadata shapes, retry
