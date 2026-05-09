@@ -4,6 +4,20 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added — v1.1 Plan-1 M1.3: opt-in aux-LLM response cache (2026-05-09)
+
+Wires `AgentCache` into a real production caller after Phase 12a left it unwired. The original plan's premise — wrap a v2 LLM-backed post-response reviewer — was stale (the reviewer is still v1 rule-based, no LLM call), so this lands the cache against the actual deterministic aux-LLM caller that benefits: `security.smart_mode.assess_command_risk`, which runs at temperature=0.0 with a fixed system prompt.
+
+- New `opencomputer.agent.aux_llm.complete_text(..., use_cache=False)` opt-in kwarg (mirrored on `complete_text_sync`). Cache key via `aux_response_signature(provider, model, system, messages, max_tokens, temperature)` — sha256 over `(system, messages)` so the key stays fixed-size. `temperature` IS part of the key; callers SHOULD NOT opt in at temperature > 0 unless they explicitly want sample re-use.
+- New `aux_cache_stats() -> dict[str, int]` and `clear_aux_response_cache()` exposed for observability + test isolation.
+- `AgentCache` docstring updated to acknowledge both production use cases (AgentLoop instance cache via `AgentRouter`; aux-response cache via `aux_llm`).
+- `security.smart_mode.assess_command_risk` opted in with `use_cache=True`. An agent that retries the same `(command, capability_id, scope)` 10 times now pays for the LLM verdict once.
+- Default cache size `DEFAULT_AUX_RESPONSE_CACHE_MAX = 256` entries × ~8KB ≈ 2MB worst case.
+
+13 new tests in `test_aux_llm_response_cache.py` pin the contract: opt-in vs default, cache-key sensitivity to system/messages/temperature/max_tokens, LRU eviction at capacity, clear+stats, and a regression guard that smart_mode keeps the `use_cache=True` opt-in.
+
+Honest deferral: surfacing cache hit/miss stats in `oc usage` is a follow-up (the data is exposed via `aux_cache_stats()` but `cli_usage.py` integration is not in this PR).
+
 ### Changed — v1.1 Plan-1 M1.2: unify profile.yaml parse paths (2026-05-09)
 
 Closes the strict-vs-lenient profile.yaml parser divergence flagged in `2026-05-08-v1-1-plan-1-foundation-and-cleanup.md` M1.2. Previously `cli_plugin._read_and_validate_profile_yaml` (strict, schema-validated) and the `cli_profile.env-template` / `cli_profile.env-init` lenient readers each open-coded `yaml.safe_load(path.read_text()) or {}` with subtly different error handling — a malformed profile.yaml could fail through one consumer and pass through another.
