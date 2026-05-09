@@ -542,7 +542,51 @@ def _discover_plugins() -> int:
     search_paths = standard_search_paths()
     enabled = _resolve_plugin_filter()
     loaded = plugin_registry.load_all(search_paths, enabled_ids=enabled)
+
+    # v1.1 plan-3 M11.5 — Mount any plugin-registered CLI subcommand
+    # trees into the main typer app.  Idempotent: typer.Typer.add_typer
+    # accepts the same plugin's app once; re-running plugin discovery
+    # in tests doesn't add the same registration twice because the
+    # plugin's register(api) call is also gated by the registry.
+    try:
+        api = plugin_registry.api()
+        registered = getattr(api, "all_cli_commands", lambda: {})()
+        for ns, sub_app in registered.items():
+            # Skip if this namespace was already mounted (test re-runs).
+            if ns in _MOUNTED_PLUGIN_CLI_NAMESPACES:
+                continue
+            try:
+                app.add_typer(sub_app, name=ns)
+                _MOUNTED_PLUGIN_CLI_NAMESPACES.add(ns)
+            except Exception as exc:  # noqa: BLE001
+                # A bad plugin must NEVER prevent the CLI from starting.
+                _log_cli_mount_failure(ns, exc)
+    except Exception as exc:  # noqa: BLE001
+        # Defensive — extremely unlikely (registry.api always returns).
+        # If something pathological happens, log + proceed; the rest of
+        # the CLI must still work.
+        _log_cli_mount_failure("<plugin-cli-discovery>", exc)
+
     return len(loaded)
+
+
+# v1.1 plan-3 M11.5 — process-wide set of mounted plugin CLI namespaces.
+# Idempotent across multiple ``_discover_plugins()`` calls so test runs +
+# multi-profile dispatch don't double-mount.
+_MOUNTED_PLUGIN_CLI_NAMESPACES: set[str] = set()
+
+
+def _log_cli_mount_failure(namespace: str, exc: Exception) -> None:
+    """Log a plugin-CLI mount failure without crashing the CLI."""
+    import logging
+
+    logging.getLogger("opencomputer.cli").warning(
+        "Failed to mount plugin CLI subcommands for %r (%s: %s); "
+        "the rest of the CLI is unaffected",
+        namespace,
+        type(exc).__name__,
+        exc,
+    )
 
 
 def _apply_model_overrides() -> int:
@@ -3596,6 +3640,9 @@ app.add_typer(tui_app, name="tui")
 # 2026-05-08 — `.worktreeinclude` + checkpoint hygiene CLIs.
 from opencomputer.cli_checkpoints import checkpoints_app  # noqa: E402
 
+# 2026-05-09 — v1.1 plan-3 M10.4: per-channel routing dry-run CLI.
+from opencomputer.cli_routing import routing_app  # noqa: E402
+
 # 2026-05-09 — v1.1 plan-2 M7: path-glob rules CLI.
 from opencomputer.cli_rules import rules_app  # noqa: E402
 from opencomputer.cli_worktrees import worktrees_app  # noqa: E402
@@ -3603,6 +3650,7 @@ from opencomputer.cli_worktrees import worktrees_app  # noqa: E402
 app.add_typer(checkpoints_app, name="checkpoints")
 app.add_typer(worktrees_app, name="worktrees")
 app.add_typer(rules_app, name="rules")
+app.add_typer(routing_app, name="routing")
 
 # ─── service (cross-platform always-on daemon) ────────────────────────
 service_app = typer.Typer(
