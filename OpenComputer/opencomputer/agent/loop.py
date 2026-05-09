@@ -4247,6 +4247,27 @@ class AgentLoop:
                     pass
 
                 _classifier = _M92Classifier()
+                # M9.3: per-session block budget — pause auto mode after
+                # 3 consecutive blocks or 20 total. M9.4: every classifier
+                # decision lands in the existing F1 HMAC-chained audit log
+                # via audit_classifier_decision (no-op when no logger
+                # available — defensive).
+                from opencomputer.agent.tool_call_classifier import (
+                    audit_classifier_decision as _m94_audit,
+                )
+                from opencomputer.agent.tool_call_classifier import (
+                    is_paused as _m93_is_paused,
+                )
+                from opencomputer.agent.tool_call_classifier import (
+                    record_classifier_decision as _m93_record,
+                )
+
+                # M9.3: if budget already tripped on a prior turn, every
+                # classifier decision is treated as ASK (forces consent
+                # gate to handle). User must `oc resume` to clear the
+                # budget before auto mode resumes.
+                _budget_paused = _m93_is_paused(session_id) if session_id else False
+
                 for _c in calls:
                     # Skip if already blocked by skill_filter or future
                     # checks above (don't waste classifier calls).
@@ -4257,6 +4278,20 @@ class AgentLoop:
                         tool_calls_so_far=_prior_calls,
                         pending=_c,
                     )
+                    # M9.4: record EVERY decision (allow + block + ask)
+                    # into the audit chain. Best-effort — auditing
+                    # failure must not break dispatch.
+                    if session_id:
+                        try:
+                            _audit_logger = getattr(
+                                self._consent_gate, "_audit_logger", None
+                            )
+                            _m94_audit(
+                                _audit_logger, session_id, _c, _decision,
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+
                     if _decision.decision == _M92Decision.BLOCK:
                         _block_msg = (
                             f"Auto-mode classifier blocked this call: "
@@ -4265,11 +4300,53 @@ class AgentLoop:
                         if _decision.failed_closed:
                             _block_msg += " (fail-closed)"
                         blocked.setdefault(_c.id, _block_msg)
+
+                    # M9.3: update per-session budget. Returns True iff
+                    # this decision tripped the budget threshold (3
+                    # consecutive or 20 total blocks).
+                    if session_id:
+                        _budget_tripped = _m93_record(session_id, _decision)
+                        if _budget_tripped:
+                            _log.warning(
+                                "M9.3 block budget tripped for session %s — "
+                                "pausing auto mode (run `oc resume` to "
+                                "clear). Subsequent calls require explicit "
+                                "PER_ACTION approval until then.",
+                                session_id,
+                            )
+                            # Mutate the runtime so the next consent gate
+                            # check sees default mode (PER_ACTION
+                            # prompts). Preserves the user's original
+                            # intent — they DID toggle auto on; we're
+                            # temporarily downgrading until they confirm
+                            # via `oc resume`.
+                            try:
+                                self._runtime.custom["permission_mode"] = "default"
+                                self._runtime.custom.pop("yolo_session", None)
+                                self._runtime.custom["m9_3_paused_session"] = session_id
+                            except Exception:  # noqa: BLE001
+                                pass
+                            _budget_paused = True
                     # ALLOW + ASK both fall through to the consent gate
                     # below. ASK semantics map onto consent gate's
                     # PER_ACTION prompt for any tool with
                     # capability_claims; tools without claims have no
                     # interactive surface and effectively allow.
+
+                # M9.3: if the budget was ALREADY paused entering this
+                # dispatch, force every call into the consent gate
+                # PER_ACTION path by treating un-blocked calls as ASK
+                # (which the gate already handles). Implementation:
+                # leave runtime in default mode (already done by the
+                # block-trip path above). If this dispatch never tripped
+                # but the session is already paused from a prior turn,
+                # do the same flip here so the consent gate sees
+                # default mode.
+                if _budget_paused and session_id:
+                    try:
+                        self._runtime.custom["permission_mode"] = "default"
+                    except Exception:  # noqa: BLE001
+                        pass
             except Exception as e:  # noqa: BLE001
                 _log.warning(
                     "M9.2 classifier path raised — falling through to "
