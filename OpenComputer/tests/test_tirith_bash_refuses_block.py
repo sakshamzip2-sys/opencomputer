@@ -11,9 +11,9 @@ from unittest.mock import patch
 
 import pytest
 
-from plugin_sdk.core import ToolCall
-from opencomputer.tools.bash import BashTool
 from opencomputer.security.tirith import TirithResult
+from opencomputer.tools.bash import BashTool
+from plugin_sdk.core import ToolCall
 
 
 @pytest.mark.asyncio

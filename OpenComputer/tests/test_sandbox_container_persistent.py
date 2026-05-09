@@ -1,8 +1,8 @@
 """Hermes parity: container_persistent: false adds explicit /workspace + /root tmpfs."""
 from __future__ import annotations
 
-from plugin_sdk.sandbox import SandboxConfig
 from opencomputer.sandbox.docker import DockerStrategy
+from plugin_sdk.sandbox import SandboxConfig
 
 
 def test_persistent_default_is_true():

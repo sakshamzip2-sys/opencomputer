@@ -56,6 +56,8 @@ from typing import ClassVar
 
 from opencomputer.security.tirith import (
     check_command as tirith_check_command,
+)
+from opencomputer.security.tirith import (
     format_findings_for_user,
 )
 from opencomputer.tools.ptc import (

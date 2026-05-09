@@ -270,7 +270,10 @@ async def test_processing_lifecycle_during_consent_prompt() -> None:
         def render_prompt(claim, scope) -> str:
             return f"Allow {claim} on {scope}?"
 
-        def resolve_pending(self, *, session_id, capability_id, decision, persist):
+        def resolve_pending(
+            self, *, session_id, capability_id, decision, persist,
+            session_scoped: bool = False,
+        ):
             self.resolve_count += 1
             call_log.append(f"resolve_pending#{self.resolve_count}")
             if self._pending_event is not None:

@@ -5,9 +5,9 @@ from unittest.mock import patch
 
 import pytest
 
-from plugin_sdk.core import ToolCall
-from opencomputer.tools.execute_code import ExecuteCode
 from opencomputer.security.tirith import TirithResult
+from opencomputer.tools.execute_code import ExecuteCode
+from plugin_sdk.core import ToolCall
 
 
 @pytest.mark.asyncio

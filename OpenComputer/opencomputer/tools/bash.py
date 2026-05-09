@@ -7,8 +7,10 @@ import os
 
 from opencomputer.security.tirith import (
     TirithResult,
-    check_command as tirith_check_command,
     format_findings_for_user,
+)
+from opencomputer.security.tirith import (
+    check_command as tirith_check_command,
 )
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
