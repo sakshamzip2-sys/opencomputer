@@ -17,7 +17,18 @@ The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEAS
 
 ## [Unreleased]
 
-<<<<<<< HEAD
+### Security + Added — v1.1 Plan-3 M11.3: typed plugin sources + allow/deny policy + PyPI/GitHub installers + sigstore (2026-05-09)
+
+Three-PR arc closing M11.3:
+
+1. **Data model + policy** — typed `PluginSource` (5 kinds: `pypi`/`github`/`git`/`directory`/`url`), canonical `parse_source`, `PluginSourcePolicy` enforcing per-source allow/deny rules with deny-by-default for network kinds. `oc plugin install` runs `_enforce_source_policy(source)` BEFORE any network IO on every install path.
+2. **Production wiring** — `install_from_pypi` (`pip download --no-deps --no-binary :all:` → existing tarball pipeline; PEP-643 wrapper stripped via `extract_tarball(strip_top_level=True)`); GitHub shorthand support (`gh:owner/repo`, `gh:owner/repo@v1.2.3`, `https://github.com/owner/repo`, `https://github.com/owner/repo/tree/<ref>`).
+3. **Sigstore wrapper** (`opencomputer/plugins/sigstore_verify.py`) — `verify_blob` shells out to `cosign verify-blob`; `verify_or_warn` is the convenience wrapper installers call. `OC_PLUGIN_REQUIRE_SIGSTORE=1` forces fail-closed mode. Wired into `install_from_pypi` (signature_url / signature_bytes / require_sigstore / cert_identity / cert_oidc_issuer kwargs). New `verify_plugin_signature` re-verifies the recorded signature on `oc plugin verify` (sidecar at `<dest_root>/.sigstore/<plugin_id>.json` keeps cosign claims out-of-band of the InstalledRecord schema).
+
+**SECURITY FIX**: the `extract_tarball(strip_top_level=True)` path was rolling its own file-by-file extraction without going through tarfile's `filter='data'` guard. A malicious sdist with a member named `foo-1.0/../../../etc/passwd` would write outside `dest`. Fixed by rebuilding a synthetic in-memory archive with the wrapper stripped, then re-extracting via `filter='data'` so CPython's vetted path-traversal / symlink-escape / device-file rejection applies uniformly. Two new SECURITY tests prove the rejection.
+
+82 new tests across data model + policy + installers + sigstore + path-traversal. Ruff clean.
+
 ### Added — v1.1 Plan-3 M9.1: `permission_mode = "auto"` equivalence pin (2026-05-09)
 
 Schema-and-pin slice of plan-3 M9. The `auto` `PermissionMode` value, the `--auto` CLI flag, the `/auto` slash command, and the wire `ChatParams.permission_mode = "auto"` were already in place individually; this PR adds `tests/test_auto_mode_runtime.py` (13 tests) which pins the M9 acceptance criterion: setting auto via CLI / slash / wire / legacy `--yolo` all surface the SAME `effective_permission_mode`. Catches drift if any single entry point is rewritten without the others.
@@ -25,7 +36,7 @@ Schema-and-pin slice of plan-3 M9. The `auto` `PermissionMode` value, the `--aut
 **Why this is a tiny PR**: every M9.1 surface listed in `docs/superpowers/plans/2026-05-08-v1-1-plan-3-heavy-features-and-parked.md` was already shipped piecemeal (CLI flag at `cli.py:2342`, slash command at `agent/slash_commands_impl/auto_cmd.py`, wire param at `gateway/protocol_v2.py:118`, helper at `plugin_sdk/permission_mode.py`). The audit caught only one missing piece — the dedicated equivalence test the plan calls for. Shipping it as the M9.1 closure rather than re-deriving the surface from scratch.
 
 **M9.2 (the `ToolCallClassifier` that intercepts tool calls in auto mode) remains the security-critical multi-day item** — it stays separate per its own plan-3 preamble. M9.1's `auto` mode today simply skips the F1 ConsentGate (same as legacy `--yolo`); M9.2 is what makes auto mode actually safe via per-call adversarial classification.
-=======
+
 ### Added — v1.1 Plan-3 M10.1 + M10.4: per-channel routing schema + `oc routing` CLI (2026-05-09)
 
 Schema-and-dry-run slice of plan-3 M10. Operators can now declare routing rules in their `config.yaml` and inspect them with `oc routing list` / `oc routing test` — without the gateway dispatcher actually consuming them yet (M10.2/M10.3 land separately). The schema is the load-bearing piece; the CLI is what makes the schema reviewable.
