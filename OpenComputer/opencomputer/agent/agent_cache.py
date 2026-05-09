@@ -1,29 +1,42 @@
-"""Agent cache — LRU of warmed `AgentLoop` instances keyed by config signature.
+"""Agent cache — generic LRU of warmed objects keyed by structural signature.
 
-Without this, every call into `Dispatch.handle_message` (gateway) or
-`DelegateTool` (subagent) builds a fresh `AgentLoop`, which throws away the
-per-session prompt-snapshot cache and the LRU it lives behind. Repeated calls
-under the same configuration end up paying full prompt-build cost every time.
+Two production use cases share the same engine:
 
-The cache key is a `config_signature` tuple over the dimensions that change
-the prompt or the tool schemas. If any of those drift (model swap, new
-plugin loaded mid-process, config edit), the signature changes and the cache
-returns a miss — never a stale loop.
+1. **AgentLoop instance cache** (original Phase 12a intent). Without this,
+   every call into ``Dispatch.handle_message`` or ``DelegateTool`` would
+   build a fresh ``AgentLoop`` and throw away the per-session
+   prompt-snapshot LRU. ``AgentRouter`` (gateway/agent_router.py) is the
+   active production caller for this shape, keyed on ``profile_id``.
 
-Mirrors `_prompt_snapshots` in `opencomputer/agent/loop.py` — same
-`OrderedDict + popitem(last=False)` LRU pattern.
+2. **Aux-LLM response cache** (v1.1 plan-1 M1.3, 2026-05-09). The
+   ``opencomputer.agent.aux_llm`` helpers expose an opt-in
+   ``use_cache=True`` parameter that memoizes deterministic
+   ``provider.complete()`` calls (e.g. smart-mode security assessments
+   at temperature=0.0, where the same command+scope always yields the
+   same risk verdict). Cache key is :func:`aux_response_signature`.
+
+The class itself stores ``Any`` and is intentionally generic — the
+key shape is what carries the contract. Both signatures funnel through
+the same ``OrderedDict + popitem(last=False)`` LRU.
 
 Source: hermes-agent 03-borrowables.md §Agent cache.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
 DEFAULT_AGENT_CACHE_MAX = 32
+
+#: Hard cap on aux-LLM response cache memory. Each entry is a string ≤
+#: ``aux_llm.complete_text(max_tokens=...)`` which is bounded at the call
+#: site. 256 entries × ~8KB each ≈ 2MB worst case.
+DEFAULT_AUX_RESPONSE_CACHE_MAX = 256
 
 
 def config_signature(
@@ -47,6 +60,39 @@ def config_signature(
         tuple(sorted(tool_names)),
         extras,
     )
+
+
+def aux_response_signature(
+    *,
+    provider_name: str,
+    model: str,
+    system: str,
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+    temperature: float,
+) -> tuple[Any, ...]:
+    """Build the cache key for an aux-LLM response.
+
+    M1.3 (2026-05-09). Mirrors the ``aux_llm.complete_text`` argument
+    shape so opt-in callers don't have to pre-hash anything — the
+    signature function does it. Uses sha256 hashing on the
+    ``(system, messages)`` text so:
+
+    * The key is fixed-size regardless of prompt length.
+    * Two semantically-equivalent prompts with whitespace differences
+      hash differently — that is intentional. Aux-LLM responses can be
+      sensitive to whitespace at temperature=0; treating them as
+      identical would be a silent miss.
+
+    ``temperature`` IS part of the key (different temperatures sample
+    different distributions). At temperature > 0 the cache is still
+    "correct" in that it returns one valid sample, but callers SHOULD
+    NOT opt in to caching at temperature > 0 unless they explicitly
+    want sample re-use.
+    """
+    payload = json.dumps({"system": system, "messages": messages}, sort_keys=True)
+    text_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return (provider_name, model, text_hash, max_tokens, temperature)
 
 
 @dataclass(slots=True)
@@ -101,4 +147,10 @@ class AgentCache:
         self._store.clear()
 
 
-__all__ = ["DEFAULT_AGENT_CACHE_MAX", "AgentCache", "config_signature"]
+__all__ = [
+    "DEFAULT_AGENT_CACHE_MAX",
+    "DEFAULT_AUX_RESPONSE_CACHE_MAX",
+    "AgentCache",
+    "aux_response_signature",
+    "config_signature",
+]

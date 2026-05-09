@@ -2286,6 +2286,15 @@ class AgentLoop:
                             system_prompt_override=system_prompt_override,
                         )
                     self.db.end_session(sid)
+                    # M4.4: clear any active skill tool filter on END_TURN so
+                    # subsequent turns aren't constrained.
+                    try:
+                        from opencomputer.agent.skill_tools_filter import (
+                            clear_active_filter,
+                        )
+                        clear_active_filter()
+                    except Exception:  # noqa: BLE001
+                        pass
                     # 2026-05-08 — Hermes Doc-2 parity: TRANSFORM_LLM_OUTPUT
                     # fires once per turn after the final response is
                     # assembled, before delivery. Handlers may return
@@ -2373,6 +2382,34 @@ class AgentLoop:
                 except Exception:
                     pass  # cron tool may not be registered in some contexts
 
+                # v1.1 plan-2 M5.2 (2026-05-09): snapshot the message
+                # history BEFORE dispatching this tool block so a later
+                # `oc session rewind --mode conv_only` can restore state
+                # at this exact point. Best-effort — checkpoint failures
+                # never wedge the loop. Skipped on the first iteration
+                # if the session is fresh (no messages yet — nothing to
+                # restore TO).
+                if step.assistant_message.tool_calls and messages:
+                    try:
+                        from opencomputer.agent.checkpoint_manager import (
+                            CheckpointManager,
+                        )
+
+                        _cp_mgr = CheckpointManager(self.db)
+                        _msg_dicts = [
+                            _msg_to_dict(m) for m in messages
+                        ]
+                        _cp_mgr.create(
+                            session_id=sid,
+                            messages=_msg_dicts,
+                            label=f"before tool_use turn={iterations}",
+                        )
+                    except Exception:  # noqa: BLE001
+                        _log.debug(
+                            "M5.2: checkpoint create failed (suppressed)",
+                            exc_info=True,
+                        )
+
                 # Dispatch tools BEFORE persisting the assistant message. If we saved
                 # it first and then got cancelled mid-dispatch, the DB would hold a
                 # tool_use with no matching tool_result — Anthropic 400s on resume.
@@ -2387,6 +2424,20 @@ class AgentLoop:
                 # the loop terminates cleanly via END_TURN.
                 if any(getattr(r, "is_error", False) for r in tool_results):
                     _session_had_errors = True
+
+                # v1.1 plan-2 M5.4 follow-up (2026-05-09): if any of the
+                # just-dispatched tool calls was ExitPlanMode AND it left
+                # a next_mode proposal in the slot, mutate this loop's
+                # RuntimeContext.permission_mode now so subsequent turns
+                # in the same session pick up the new mode without the
+                # user having to run `/exit-plan <mode>` manually.
+                # ``keep`` means stay in plan mode — leave runtime alone.
+                _exit_plan_called = any(
+                    (getattr(_tc, "name", "") == "ExitPlanMode")
+                    for _tc in (step.assistant_message.tool_calls or [])
+                )
+                if _exit_plan_called:
+                    self._maybe_apply_exit_plan_proposal()
                 # Round 2B P-3: tool dispatch finished — count both successful and
                 # error results as activity (the agent did *something*, that's
                 # what the inactivity timer cares about). ``_dispatch_tool_calls``
@@ -4058,6 +4109,30 @@ class AgentLoop:
 
         blocked: dict[str, str] = {}  # call.id → block reason
 
+        # v1.1 plan-2 M4.4 hard enforcement (2026-05-09): when an inline
+        # SkillTool has set an active tool filter, block any call whose
+        # tool name isn't in the skill's allowlist. The Skill itself
+        # is implicitly allowed (so the skill body's request to read
+        # other tools doesn't recursively self-block).
+        try:
+            from opencomputer.agent.skill_tools_filter import (
+                get_active_filter,
+                is_tool_allowed,
+            )
+
+            _skill_filter = get_active_filter()
+        except Exception:  # noqa: BLE001
+            _skill_filter = None
+        if _skill_filter is not None:
+            for c in calls:
+                if c.name == "Skill":
+                    # Always allow re-invoking the Skill tool (lets the
+                    # model swap to a different skill if needed).
+                    continue
+                allowed, reason = is_tool_allowed(c.name)
+                if not allowed and reason is not None:
+                    blocked.setdefault(c.id, reason)
+
         if self._consent_gate is not None:
             from opencomputer.agent.consent.bypass import BypassManager
             from plugin_sdk.consent import ConsentTier
@@ -4806,6 +4881,96 @@ class AgentLoop:
                 exc_info=True,
             )
             return _NoOpDemandTracker()
+
+    def _maybe_apply_exit_plan_proposal(self) -> None:
+        """v1.1 plan-2 M5.4 follow-up — consume the ExitPlanMode proposal slot.
+
+        Called after every loop iteration that dispatched an
+        ``ExitPlanMode`` tool call. Reads the process-wide proposal slot
+        set by the tool's ``execute()`` (when the agent passed
+        ``next_mode``), and mutates ``self._runtime`` to switch the
+        permission_mode for the rest of this session.
+
+        - ``next_mode == "keep"`` → leave runtime alone (agent stays in
+          plan mode and continues iterating).
+        - ``next_mode in {"auto","acceptEdits","manual"}`` → rebuild
+          runtime with that mode and clear plan_mode.
+        - No proposal → no-op (the agent called ExitPlanMode without
+          a next_mode suggestion).
+
+        Slot reads from :mod:`opencomputer.agent.exit_plan_proposal`
+        (a core module so the tool's writer and this reader share
+        identity even when the tool's file is loaded under a
+        synthetic plugin-loader name).
+        """
+        from opencomputer.agent.exit_plan_proposal import pop_last_proposal
+
+        try:
+            proposal = pop_last_proposal()
+        except Exception:  # noqa: BLE001
+            _log.debug("M5.4: pop_last_proposal failed", exc_info=True)
+            return
+
+        if proposal is None:
+            return
+        if proposal.next_mode == "keep":
+            _log.info(
+                "M5.4: ExitPlanMode proposal next_mode=keep — staying in plan mode"
+            )
+            return
+        if proposal.next_mode not in ("auto", "acceptEdits", "manual"):
+            _log.warning(
+                "M5.4: ExitPlanMode proposal had unknown next_mode=%r; ignoring",
+                proposal.next_mode,
+            )
+            return
+
+        try:
+            self._runtime = replace(
+                self._runtime,
+                plan_mode=False,
+                permission_mode=proposal.next_mode,
+            )
+            _log.info(
+                "M5.4: applied ExitPlanMode proposal — permission_mode now %r",
+                proposal.next_mode,
+            )
+        except Exception:  # noqa: BLE001
+            _log.warning(
+                "M5.4: failed to mutate runtime for next_mode=%r",
+                proposal.next_mode,
+                exc_info=True,
+            )
+
+
+def _msg_to_dict(msg: Any) -> dict[str, Any]:
+    """v1.1 plan-2 M5.2 (2026-05-09) — minimal Message-to-dict for checkpoints.
+
+    Strips fields that aren't JSON-serialisable (large bytes, custom
+    objects). Captures role + content + tool_calls + tool_call_id +
+    name so a restored session can recreate a working message list.
+    """
+    out: dict[str, Any] = {
+        "role": getattr(msg, "role", "user"),
+        "content": getattr(msg, "content", ""),
+    }
+    if getattr(msg, "tool_calls", None):
+        try:
+            out["tool_calls"] = [
+                {
+                    "id": getattr(tc, "id", ""),
+                    "name": getattr(tc, "name", ""),
+                    "arguments": getattr(tc, "arguments", {}) or {},
+                }
+                for tc in msg.tool_calls
+            ]
+        except Exception:  # noqa: BLE001
+            out["tool_calls"] = []
+    if getattr(msg, "tool_call_id", None):
+        out["tool_call_id"] = msg.tool_call_id
+    if getattr(msg, "name", None):
+        out["name"] = msg.name
+    return out
 
 
 async def _maybe_transform_tool_result(

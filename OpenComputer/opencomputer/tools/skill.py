@@ -140,17 +140,32 @@ class SkillTool(BaseTool):
         if context_mode == "fork":
             return await self._dispatch_fork(call.id, meta.name, body, metadata)
 
-        # ``inline`` path — current behavior + optional advisory tools constraint.
-        # M4.4 (degraded): the parent agent's loop has no per-skill enforcement
-        # surface, so an explicit ``tools:`` list is rendered as a directive
-        # the model is asked to follow rather than a hard allowlist. The hard
-        # path is ``context: fork`` where the constraint flows to delegate.
+        # ``inline`` path — body returned to the parent agent.
         if metadata.get("model"):
             raise SkillModelOverrideRequiresForkError(
                 f"skill {name!r} sets model={metadata['model']!r} but "
                 f"context is 'inline'. model overrides require context: fork "
                 f"so the new provider applies to a fresh subagent loop."
             )
+
+        # M4.4 hard enforcement (2026-05-09): when an inline skill declares
+        # ``tools:``, register a process-wide allowlist that the agent loop's
+        # PreToolUse skill_tools_enforcer hook reads. Subsequent tool calls
+        # outside the allowlist are blocked. The agent loop clears the
+        # filter on END_TURN so other turns aren't constrained.
+        tools_list = metadata.get("tools")
+        if isinstance(tools_list, list) and tools_list:
+            try:
+                from opencomputer.agent.skill_tools_filter import (
+                    set_active_filter,
+                )
+
+                set_active_filter(
+                    skill_name=meta.name,
+                    tools=[str(t) for t in tools_list],
+                )
+            except Exception:  # noqa: BLE001 — never break the skill on filter setup
+                pass
 
         body_with_constraints = self._render_inline_body(meta.name, body, metadata)
         return ToolResult(
@@ -162,11 +177,14 @@ class SkillTool(BaseTool):
     def _render_inline_body(
         skill_name: str, body: str, metadata: dict[str, Any]
     ) -> str:
-        """Wrap the skill body with optional advisory directives.
+        """Wrap the skill body with the tools-constraint directive.
 
-        For ``inline`` mode the parent agent will execute the steps
-        itself, so we can only ASK the model to honor a tool allowlist.
-        For hard enforcement use ``context: fork``.
+        M4.4 (2026-05-09): inline ``tools:`` list now has HARD
+        enforcement via :mod:`opencomputer.agent.skill_tools_filter` —
+        a PreToolUse hook in the agent loop blocks tool calls outside
+        the allowlist for the duration of the skill. The body still
+        renders the directive so the model sees the constraint and
+        doesn't waste turns probing for blocked tools.
         """
         lines = [f"# Skill: {skill_name}"]
         tools_list = metadata.get("tools")
@@ -174,10 +192,9 @@ class SkillTool(BaseTool):
             tools_str = ", ".join(str(t) for t in tools_list)
             lines.append("")
             lines.append(
-                f"[Skill Tools Constraint] While following this skill, prefer "
-                f"using only these tools: {tools_str}. (Advisory — not enforced; "
-                f"set context: fork in the SKILL.md frontmatter for hard "
-                f"enforcement via subagent allowlist.)"
+                f"[Skill Tools Constraint] This skill restricts tool use to: "
+                f"{tools_str}. Other tools will be hard-blocked by the agent "
+                f"loop until this skill's turn ends."
             )
         lines.append("")
         lines.append(body)

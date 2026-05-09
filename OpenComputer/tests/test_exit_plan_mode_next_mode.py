@@ -193,3 +193,109 @@ class TestSchema:
         # plan stays required, next_mode does not
         assert "next_mode" not in params["required"]
         assert "plan" in params["required"]
+
+
+# ─── M5.4 follow-up: AgentLoop._maybe_apply_exit_plan_proposal ───────────
+
+
+class TestLoopApplyExitPlanProposal:
+    """Pin AgentLoop._maybe_apply_exit_plan_proposal — the runtime
+    mutation surface that consumes the proposal slot after an
+    ExitPlanMode tool call lands.
+
+    These tests build a minimal AgentLoop stand-in (just the bits the
+    helper touches) so we don't have to spin up the whole loop.
+    """
+
+    def _make_stub(self):
+        """Return an object with `_runtime` we can mutate via the helper."""
+        from dataclasses import replace as _replace
+
+        from plugin_sdk.runtime_context import (
+            DEFAULT_RUNTIME_CONTEXT,
+            RuntimeContext,
+        )
+
+        class _Stub:
+            _runtime = _replace(DEFAULT_RUNTIME_CONTEXT, plan_mode=True)
+
+        from opencomputer.agent.loop import AgentLoop
+
+        # Bind the helper to a stub instance — Python's bound-method
+        # protocol works on duck-typed objects as long as the
+        # function's signature only touches `self._runtime`.
+        stub = _Stub()
+        stub._maybe_apply_exit_plan_proposal = (
+            AgentLoop._maybe_apply_exit_plan_proposal.__get__(stub, _Stub)
+        )
+        return stub, RuntimeContext
+
+    def test_no_proposal_is_noop(self) -> None:
+        stub, _ = self._make_stub()
+        before = stub._runtime
+        stub._maybe_apply_exit_plan_proposal()
+        assert stub._runtime is before
+
+    def test_proposal_keep_does_not_mutate_runtime(self) -> None:
+        stub, _ = self._make_stub()
+        tool = ExitPlanModeTool()
+        _run(
+            tool.execute(
+                ToolCall(
+                    id="t",
+                    name="ExitPlanMode",
+                    arguments={"plan": "x", "next_mode": "keep"},
+                )
+            )
+        )
+        before = stub._runtime
+        stub._maybe_apply_exit_plan_proposal()
+        assert stub._runtime is before
+
+    def test_proposal_auto_mutates_runtime(self) -> None:
+        stub, _ = self._make_stub()
+        tool = ExitPlanModeTool()
+        _run(
+            tool.execute(
+                ToolCall(
+                    id="t",
+                    name="ExitPlanMode",
+                    arguments={"plan": "x", "next_mode": "auto"},
+                )
+            )
+        )
+        stub._maybe_apply_exit_plan_proposal()
+        assert stub._runtime.plan_mode is False
+        assert stub._runtime.permission_mode == "auto"
+
+    def test_proposal_accept_edits_mutates_runtime(self) -> None:
+        stub, _ = self._make_stub()
+        tool = ExitPlanModeTool()
+        _run(
+            tool.execute(
+                ToolCall(
+                    id="t",
+                    name="ExitPlanMode",
+                    arguments={"plan": "x", "next_mode": "acceptEdits"},
+                )
+            )
+        )
+        stub._maybe_apply_exit_plan_proposal()
+        assert stub._runtime.permission_mode == "acceptEdits"
+
+    def test_proposal_consumed_only_once(self) -> None:
+        stub, _ = self._make_stub()
+        tool = ExitPlanModeTool()
+        _run(
+            tool.execute(
+                ToolCall(
+                    id="t",
+                    name="ExitPlanMode",
+                    arguments={"plan": "x", "next_mode": "auto"},
+                )
+            )
+        )
+        stub._maybe_apply_exit_plan_proposal()
+        before = stub._runtime
+        stub._maybe_apply_exit_plan_proposal()
+        assert stub._runtime is before
