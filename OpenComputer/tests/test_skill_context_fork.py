@@ -95,7 +95,9 @@ class TestInlineMode:
         assert not result.is_error
         assert "[Skill Tools Constraint]" in result.content
         assert "Read, Bash" in result.content
-        assert "Advisory — not enforced" in result.content
+        # M4.4 hard-enforce (2026-05-09): inline tools allowlist now
+        # enforced at dispatch; directive now says "hard-blocked".
+        assert "hard-blocked" in result.content
         assert "Run the linter." in result.content
 
     def test_inline_without_tools_omits_directive(self, tmp_path: Path) -> None:

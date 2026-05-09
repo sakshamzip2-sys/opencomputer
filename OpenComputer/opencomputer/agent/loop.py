@@ -2286,6 +2286,15 @@ class AgentLoop:
                             system_prompt_override=system_prompt_override,
                         )
                     self.db.end_session(sid)
+                    # M4.4: clear any active skill tool filter on END_TURN so
+                    # subsequent turns aren't constrained.
+                    try:
+                        from opencomputer.agent.skill_tools_filter import (
+                            clear_active_filter,
+                        )
+                        clear_active_filter()
+                    except Exception:  # noqa: BLE001
+                        pass
                     # 2026-05-08 — Hermes Doc-2 parity: TRANSFORM_LLM_OUTPUT
                     # fires once per turn after the final response is
                     # assembled, before delivery. Handlers may return
@@ -4057,6 +4066,30 @@ class AgentLoop:
         from plugin_sdk.hooks import HookContext, HookEvent
 
         blocked: dict[str, str] = {}  # call.id → block reason
+
+        # v1.1 plan-2 M4.4 hard enforcement (2026-05-09): when an inline
+        # SkillTool has set an active tool filter, block any call whose
+        # tool name isn't in the skill's allowlist. The Skill itself
+        # is implicitly allowed (so the skill body's request to read
+        # other tools doesn't recursively self-block).
+        try:
+            from opencomputer.agent.skill_tools_filter import (
+                get_active_filter,
+                is_tool_allowed,
+            )
+
+            _skill_filter = get_active_filter()
+        except Exception:  # noqa: BLE001
+            _skill_filter = None
+        if _skill_filter is not None:
+            for c in calls:
+                if c.name == "Skill":
+                    # Always allow re-invoking the Skill tool (lets the
+                    # model swap to a different skill if needed).
+                    continue
+                allowed, reason = is_tool_allowed(c.name)
+                if not allowed and reason is not None:
+                    blocked.setdefault(c.id, reason)
 
         if self._consent_gate is not None:
             from opencomputer.agent.consent.bypass import BypassManager
