@@ -1272,9 +1272,17 @@ def _check_service() -> Check:
     if s.running:
         return Check("service", "pass", f"{backend.NAME} running (pid={s.pid})")
     if s.enabled:
-        return Check("service", "warn", f"{backend.NAME} enabled but not running")
+        return Check(
+            "service",
+            "warn",
+            f"{backend.NAME} enabled but not running — run `oc service start` to launch it",
+        )
     if s.file_present:
-        return Check("service", "warn", f"{backend.NAME} file present but not enabled")
+        return Check(
+            "service",
+            "warn",
+            f"{backend.NAME} file present but not enabled — run `oc service install --enable` to activate",
+        )
     return Check("service", "skip", f"{backend.NAME} not installed (run `oc service install`)")
 
 
