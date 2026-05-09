@@ -59,8 +59,18 @@ jobs:
       - name: Build TUI bundle
         run: ./scripts/build-tui.sh
 
-      - name: Build sdist + wheel
-        run: python -m build
+      - name: Build wheel + sdist
+        # ``python -m build`` defaults to two-stage (sdist → wheel built
+        # FROM the sdist). The dashboard SPA + TUI bundle aren't tracked
+        # in git, so they're absent from the sdist tarball, which makes
+        # the wheel-from-sdist phase fail with FileNotFoundError on the
+        # force-included paths. Building --wheel from the source tree
+        # directly avoids the round-trip; ``--sdist`` is still produced
+        # for completeness but built second using ``--no-isolation`` so
+        # it sees the same files.
+        run: |
+          python -m build --wheel
+          python -m build --sdist --no-isolation
 
       - name: Verify the built artifacts import
         run: |
