@@ -85,6 +85,25 @@ class TestProtocolSurface:
         assert p.context == ""
         assert p.timeout_s == 300.0
 
+    # Tier-C of 2026-05-10 memory-observability design — wire surface
+    # for in-process MemoryWriteEvent so a TUI memory-status panel can
+    # render compaction warnings in real time. Behavioural coverage of
+    # the bus→wire bridge lives in test_wire_memory_broadcast.py; these
+    # tests pin only the protocol surface contract here for completeness.
+    def test_event_memory_write_constant(self) -> None:
+        from opencomputer.gateway.protocol import EVENT_MEMORY_WRITE
+
+        assert EVENT_MEMORY_WRITE == "memory.write"
+
+    def test_event_schemas_includes_memory_write(self) -> None:
+        from opencomputer.gateway.protocol import EVENT_MEMORY_WRITE
+        from opencomputer.gateway.protocol_v2 import (
+            EVENT_SCHEMAS,
+            MemoryWritePayload,
+        )
+
+        assert EVENT_SCHEMAS[EVENT_MEMORY_WRITE] is MemoryWritePayload
+
 
 # ─── Ring-buffer + seq (M3.3) ────────────────────────────────────────────
 

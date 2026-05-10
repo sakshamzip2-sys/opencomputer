@@ -229,6 +229,62 @@ specifically resolves memo §6 follow-ups (anime entry, token-rotation flag, pro
 
 - Phase 2 follow-up: periodic forced consolidation (memo §3 fix shape) — once `oc memory
   doctor` exists, the cron just calls it on a cadence with `--interactive` deferred.
-- TUI memory panel — blocked on TUI symptom report from a separate session.
+- ~~TUI memory panel — blocked on TUI symptom report from a separate session.~~
+  **CLOSED Tier-C (2026-05-10):** `EVENT_MEMORY_WRITE` + `MemoryWritePayload` schema
+  added to `gateway/protocol(_v2).py`. `WireServer` subscribes to `default_bus` for
+  `MemoryWriteEvent` on `start()` and broadcasts to all connected WS clients via new
+  `_session_clients_all`. Ink+React `MemoryPanel` (`ui-tui/src/components/memoryPanel.tsx`)
+  renders a single status line under the chat header. The "fictional auto bridge"
+  diagram-claim from this spec's §Architecture line "default_bus → wire_server WireEvent
+  broadcast (auto)" is now real.
 - USER.md split (PROJECTS.md + USER.md) — re-evaluate after dogfood pass shows whether the
   doctor is sufficient.
+
+## Tier-C postscript (2026-05-10 audit)
+
+Audit of the M2 publisher path discovered three downstream defects beyond the original
+spec's scope:
+
+1. **`MemoryBridge._on_memory_write_event`** at `agent/memory_bridge.py:353-375` called
+   `provider.on_memory_write(action, target, content_size)` — dropped
+   `compaction_delta` and `dropped_paragraphs`. The `MemoryProvider.on_memory_write`
+   signature in `plugin_sdk/memory.py:187-204` predated M2 and was never extended.
+   **Status: closed Tier-B (2026-05-10).** Signature extended with kwargs (BC via defaults);
+   bridge uses `inspect.signature` for per-provider kwarg projection so legacy 3-kwarg
+   overrides keep working unchanged.
+2. **Dashboard SSE projection** at `dashboard/routes/events.py:42-51` stripped every
+   subclass-specific field — only the 6 base `SignalEvent` fields crossed. `compaction_delta`
+   etc. never reached a browser SPA panel via that channel. **Status: closed Tier-A
+   (2026-05-10).** Projection extracted as `project_event` module-level function; uses
+   `dataclasses.asdict` to surface every field; failure-isolated with WARN-log fallback;
+   privacy contracts pinned by tests for the 3 most sensitive event types.
+3. **Spec's "auto bridge" claim** (§Architecture line 82). Tier-C makes it true.
+   **Status: closed.**
+
+## Tier-C+ postscript (2026-05-10 follow-through)
+
+Audit against the Hermes TUI reference doc surfaced two user-visible gaps:
+
+1. **No initial state on connect.** A wire client (TUI / dashboard SPA) connecting fresh
+   sees nothing in the memory panel until the first `memory.write` event fires — the
+   bus has no replay for global-broadcast events. **Status: closed.** New
+   `METHOD_MEMORY_STATUS = "memory.status"` wire RPC + typed `MemoryStatusResult` schema
+   in `protocol_v2`; `WireServer._collect_memory_status` reads MEMORY.md + USER.md via
+   `MemoryManager` paths/limits and returns one `MemoryStatusEntry` per file. New
+   `GET /api/v1/memory/status` REST endpoint mirrors the wire RPC for the dashboard SPA
+   (which uses HTTP, not WS). Both surfaces share the same response shape + failure
+   isolation (missing file → zero-size entry; unreadable file → omitted + WARN log;
+   no `MemoryConfig` → empty entries, never an error). The TUI calls `memoryStatus()`
+   after `hello()` to seed `MemoryPanel` state from first frame.
+2. **Panel only tracked the last-written file.** When MEMORY.md was written then USER.md
+   was written, MEMORY.md disappeared from the panel because state was a single nullable
+   payload. **Status: closed.** `MemoryPanel` props refactored from
+   `event: MemoryWritePayload | null` to `entries: Record<string, MemoryWritePayload>`.
+   Render iterates entries sorted alphabetically by `target` (matching server-side sort
+   in `_collect_memory_status`). New `seedFromStatusEntry` adapter promotes wire status
+   entries into the panel's payload shape; `statusTag` returns `"idle"` for entries seeded
+   without an associated action. Per-target updates preserve the other file's visibility.
+
+Skipped from this round: `display.sections.memory` config + `/details memory ...` runtime
+toggle (Hermes-style per-section visibility). Pure convention follow with no functional
+gap; not blocking. Add when a second OC-specific panel needs the same machinery.

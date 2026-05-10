@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from opencomputer.gateway.protocol import (
     EVENT_ASSISTANT_MESSAGE,
     EVENT_ERROR,
+    EVENT_MEMORY_WRITE,
     EVENT_PERMISSION_REQUEST,
     EVENT_TOOL_CALL,
     EVENT_TOOL_RESULT,
@@ -42,6 +43,7 @@ from opencomputer.gateway.protocol import (
     EVENT_TURN_END,
     METHOD_CHAT,
     METHOD_HELLO,
+    METHOD_MEMORY_STATUS,
     METHOD_PERMISSION_RESPONSE,
     METHOD_SEARCH,
     METHOD_SESSION_LIST,
@@ -236,6 +238,52 @@ class PermissionResponseResult(_StrictModel):
     resolved: bool
 
 
+# Tier-C+ of 2026-05-10 memory-observability design — initial-state RPC.
+# A wire client (TUI / IDE / dashboard) calls METHOD_MEMORY_STATUS on
+# connect to seed its memory panel before the first MemoryWriteEvent
+# fires.
+
+
+class MemoryStatusParams(_StrictModel):
+    """No params — the server resolves the active profile and reports both
+    declarative-memory files (MEMORY.md + USER.md) for that profile.
+
+    Per-profile selection deferred to v1.1 (matches the rest of the wire
+    surface — see the ``v1: always default profile`` comments in
+    :mod:`opencomputer.gateway.wire_server`).
+    """
+
+
+class MemoryStatusEntry(_StrictModel):
+    """One file's cap status. Mirrors :class:`opencomputer.agent.memory_cap.CapStatus`
+    plus a ``target`` discriminator so the client can render multiple files
+    in one panel without a parallel keying scheme.
+
+    ``pct`` is a fraction (0.0-1.0+, may exceed 1.0 mid-compaction); the
+    client formats as percentage. ``paragraph_count`` is the live entry
+    count (excluding the compaction header) — useful for "you have N
+    durable rules" affordances.
+    """
+
+    target: str            # "MEMORY.md" | "USER.md"
+    content_size: int      # bytes used
+    cap_limit: int         # 4000 / 2000
+    pct: float             # bytes_used / cap_limit (defensive: 0.0 if cap_limit==0)
+    paragraph_count: int   # live entries, compaction header excluded
+
+
+class MemoryStatusResult(_StrictModel):
+    """Snapshot of memory cap status for every declarative-memory file.
+
+    Order is stable: alphabetical by ``target`` so clients can rely on
+    indexing (MEMORY.md before USER.md). Empty tuple if the active
+    profile has no memory manager (e.g. minimal test harnesses) — the
+    client must handle this case rather than assume non-empty.
+    """
+
+    entries: tuple[MemoryStatusEntry, ...]
+
+
 # Map method name → (params schema, result schema). Wire dispatchers can
 # look this up to validate both directions of any RPC call.
 METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
@@ -248,6 +296,7 @@ METHOD_SCHEMAS: dict[str, tuple[type[_StrictModel], type[_StrictModel]]] = {
     METHOD_SLASH_LIST: (SlashListParams, SlashListResult),
     METHOD_SLASH_DISPATCH: (SlashDispatchParams, SlashDispatchResult),
     METHOD_PERMISSION_RESPONSE: (PermissionResponseParams, PermissionResponseResult),
+    METHOD_MEMORY_STATUS: (MemoryStatusParams, MemoryStatusResult),
 }
 
 
@@ -290,6 +339,33 @@ class ErrorPayload(_StrictModel):
     detail: str = ""
 
 
+class MemoryWritePayload(_StrictModel):
+    """Server → client event when the agent writes to declarative memory.
+
+    Tier-C of 2026-05-10 memory-observability design — surfaces the
+    in-process ``MemoryWriteEvent`` over the wire so a TUI / IDE /
+    dashboard client can render a memory-status panel and react to
+    silent compaction in real time.
+
+    Field semantics mirror :class:`plugin_sdk.ingestion.MemoryWriteEvent`
+    plus a wire-only ``cap_limit`` so a panel can render the percentage
+    without round-tripping a config call to learn the cap.
+
+    No ``session_id`` field — memory writes are per-process, not per-session
+    (``MemoryWriteEvent.session_id`` is always ``None`` from the publisher
+    at ``opencomputer/agent/memory.py:435``). The bridge therefore
+    broadcasts to every connected WS client; per-session ring-buffer
+    replay does NOT cover memory.write events.
+    """
+
+    action: str  # "append" | "replace" | "remove"
+    target: str  # "MEMORY.md" | "USER.md"
+    content_size: int  # post-write byte count
+    cap_limit: int  # 4000 for MEMORY.md, 2000 for USER.md
+    compaction_delta: int = 0  # bytes freed by silent compaction (0 if none)
+    dropped_paragraphs: int = 0  # paragraphs dropped by compaction (0 if none)
+
+
 # Map event name → payload schema.
 EVENT_SCHEMAS: dict[str, type[_StrictModel]] = {
     EVENT_TURN_BEGIN: TurnBeginPayload,
@@ -299,6 +375,7 @@ EVENT_SCHEMAS: dict[str, type[_StrictModel]] = {
     EVENT_ASSISTANT_MESSAGE: AssistantMessagePayload,
     EVENT_ERROR: ErrorPayload,
     EVENT_PERMISSION_REQUEST: PermissionRequestPayload,
+    EVENT_MEMORY_WRITE: MemoryWritePayload,
 }
 
 
@@ -316,6 +393,7 @@ __all__ = [
     "METHOD_SLASH_LIST",
     "METHOD_SLASH_DISPATCH",
     "METHOD_PERMISSION_RESPONSE",
+    "METHOD_MEMORY_STATUS",
     "SlashListParams",
     "SlashListResult",
     "SlashCommandInfo",
@@ -328,6 +406,7 @@ __all__ = [
     "EVENT_ASSISTANT_MESSAGE",
     "EVENT_ERROR",
     "EVENT_PERMISSION_REQUEST",
+    "EVENT_MEMORY_WRITE",
     # v2 method schemas
     "HelloParams",
     "HelloResult",
@@ -344,6 +423,9 @@ __all__ = [
     "PermissionRequestPayload",
     "PermissionResponseParams",
     "PermissionResponseResult",
+    "MemoryStatusParams",
+    "MemoryStatusEntry",
+    "MemoryStatusResult",
     "METHOD_SCHEMAS",
     # v2 event schemas
     "TurnBeginPayload",
@@ -352,5 +434,6 @@ __all__ = [
     "ToolResultPayload",
     "AssistantMessagePayload",
     "ErrorPayload",
+    "MemoryWritePayload",
     "EVENT_SCHEMAS",
 ]

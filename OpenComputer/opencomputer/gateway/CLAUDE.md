@@ -73,3 +73,65 @@ existing wire callers still work via the generic v1 types.
 - **Channel-adapter plugins** MUST NOT import from `opencomputer.gateway.*`
   except `BaseChannelAdapter` from `plugin_sdk.channel_contract`. Use
   the message handler the gateway sets on you, not the gateway directly.
+
+## Bus → Wire bridge (Tier-C of 2026-05-10 memory-observability design)
+
+`WireServer` bridges select in-process bus events to all connected WS
+clients. The first instance is `MemoryWriteEvent → EVENT_MEMORY_WRITE`.
+
+**Adding a new bridged event** (template — duplicate this once a second
+event needs broadcasting):
+
+1. Add a `EVENT_FOO = "foo.bar"` constant to `protocol.py` and the
+   matching `FooPayload(_StrictModel)` to `protocol_v2.py`. Register in
+   `EVENT_SCHEMAS` dict.
+2. In `WireServer.__init__`, add `self._foo_subscription: Any | None = None`.
+3. In `WireServer.start()` after the `websockets.serve` line, subscribe:
+   `self._foo_subscription = default_bus.subscribe("foo_event_type", self._on_foo_bus_event)`.
+4. In `WireServer.stop()` BEFORE the server.close line: unsubscribe + nil
+   the handle.
+5. Implement `_on_foo_bus_event(event)` as a SYNC handler (the bus
+   publish path is sync-only — async handlers are silently SKIPPED).
+   Use `asyncio.run_coroutine_threadsafe(self._broadcast_global(...),
+   self._loop_ref)` to hop into the wire server's loop. Wrap in
+   try/except — observability never breaks a publisher.
+6. `_broadcast_global` already handles fan-out to `_session_clients_all`
+   with per-client error isolation.
+
+**When to broadcast vs. session-key**: if the event has a meaningful
+`session_id`, prefer per-session keying (mirror
+`broadcast_permission_request` at line 552). Use `_broadcast_global` only
+for per-process events that affect every client (memory caps, scheduler
+ticks, future global telemetry).
+
+**Replay**: `_session_rings` is per-session. Global broadcasts are NOT
+buffered, so a client that reconnects after a global event misses it.
+Accept this gap; clients pull current state via REST/RPC on reconnect.
+
+## Initial-state RPC pattern (`memory.status`)
+
+Companion to a global-broadcast event — closes the "fresh-connect
+blindness" gap that broadcasts can't fix on their own. Pattern:
+
+1. Add `METHOD_FOO_STATUS = "foo.status"` to `protocol.py` plus typed
+   `FooStatusParams` (usually empty) and `FooStatusResult` in
+   `protocol_v2.py`. Register in `METHOD_SCHEMAS` + `__all__`.
+2. Add a dispatch case in `WireServer._dispatch` that resolves the
+   active loop, calls a `_collect_foo_status` static helper, returns
+   the typed payload via `_send_response`.
+3. The collector helper does all the I/O and degrades gracefully —
+   missing dependency → empty result, per-item failure → omit that item +
+   WARN log. Never raise out of the helper.
+4. Update the hello-handshake's `methods` list so capability-detecting
+   clients see the new RPC at handshake time.
+5. (Optional) Mirror the same response shape as a REST endpoint under
+   `opencomputer/dashboard/routes/foo.py` so the dashboard SPA can fetch
+   it without speaking WS — use the same typed schema for cross-surface
+   consistency. See `opencomputer/dashboard/routes/memory.py` and the
+   `MemoryStatusResult` schema for the canonical example.
+
+**When to add a status RPC**: any time you've added a global-broadcast
+event whose state is non-trivially derivable from history alone — i.e.
+the event is a delta and the client needs the snapshot to render
+correctly. If the event IS the full snapshot (e.g. a config-changed
+event that always carries the full new config), no status RPC needed.

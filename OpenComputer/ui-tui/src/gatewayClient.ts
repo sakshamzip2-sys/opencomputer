@@ -27,6 +27,22 @@ export interface HelloResult {
   events: string[];
 }
 
+/**
+ * Wire shape for one declarative-memory file. Mirrors
+ * `opencomputer.gateway.protocol_v2.MemoryStatusEntry`.
+ */
+export interface MemoryStatusEntry {
+  target: string;
+  content_size: number;
+  cap_limit: number;
+  pct: number;
+  paragraph_count: number;
+}
+
+export interface MemoryStatusResult {
+  entries: MemoryStatusEntry[];
+}
+
 export class OCWireClient {
   private ws: WebSocket | null = null;
   private pending = new Map<string, Pending>();
@@ -143,5 +159,19 @@ export class OCWireClient {
   slashList(): Promise<{ commands: SlashCommand[] }> { return this.call("slash.list"); }
   slashDispatch(name: string, args = ""): Promise<{ output: string }> {
     return this.call("slash.dispatch", { name, args });
+  }
+  /**
+   * Fetch current MEMORY.md / USER.md cap status. Used by the memory
+   * panel on connect to seed initial state — without this, the panel
+   * shows nothing until the first memory.write event fires.
+   *
+   * Returns an empty entries array if the server's active profile has
+   * no memory manager (test harnesses, minimal builds). Old wire
+   * servers without this method will reject the call with "unknown
+   * method"; callers should treat that as "no initial state available"
+   * and rely on memory.write events alone.
+   */
+  memoryStatus(): Promise<MemoryStatusResult> {
+    return this.call<MemoryStatusResult>("memory.status");
   }
 }

@@ -190,16 +190,31 @@ class MemoryProvider(ABC):
         action: str,
         target: str,
         content_size: int,
+        compaction_delta: int = 0,
+        dropped_paragraphs: int = 0,
     ) -> None:
         """Optional: observe declarative-memory writes (audit pattern).
 
         Called by MemoryBridge when a MemoryWriteEvent arrives on the bus.
+
         ``action`` is "append" | "replace" | "remove". ``target`` is the
         file name (e.g. "MEMORY.md" / "USER.md"). ``content_size`` is the
         total byte count AFTER the write — NOT the delta, NOT the content.
+
+        Tier-B of 2026-05-10 memory-observability follow-through adds
+        ``compaction_delta`` (bytes freed by silent inline compaction during
+        this write, 0 if none) and ``dropped_paragraphs`` (count of
+        paragraphs the compaction dropped). Both default to 0 so override
+        signatures using the legacy 3-kwarg shape continue to work
+        unchanged — :class:`opencomputer.agent.memory_bridge.MemoryBridge`
+        introspects the override's signature and only forwards kwargs the
+        override accepts. Override authors who want the rich signal should
+        either accept the new kwargs explicitly or use ``**kwargs`` to
+        future-proof against further additions.
+
         Default: no-op.
 
-        PR-8 of Hermes parity plan.
+        PR-8 of Hermes parity plan; extended Tier-B 2026-05-10.
         """
         return None
 

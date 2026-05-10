@@ -70,6 +70,13 @@ METHOD_SLASH_DISPATCH = "slash.dispatch"  # 2026-05-07: invoke a slash command
 # call this in response to a permission.request event to allow/deny a
 # Tier-2 capability on behalf of the user.
 METHOD_PERMISSION_RESPONSE = "permission.response"
+# Tier-C+ of 2026-05-10 memory-observability design — initial-state RPC.
+# A wire client (TUI / IDE / dashboard) calls this on connect to seed its
+# memory panel with current MEMORY.md / USER.md cap status before the first
+# write event fires. Without this, a long-idle session shows nothing in the
+# memory panel until the user writes to memory; with it, the panel reflects
+# the live state from the first frame.
+METHOD_MEMORY_STATUS = "memory.status"
 
 
 # ─── Event names (gateway → client) ─────────────────────────────
@@ -84,6 +91,11 @@ EVENT_ERROR = "error"
 # on a wire-bound session when no channel adapter is available. The
 # client responds via the METHOD_PERMISSION_RESPONSE RPC.
 EVENT_PERMISSION_REQUEST = "permission.request"
+# Tier-C of 2026-05-10 memory-observability design — broadcasts every
+# MemoryWriteEvent the in-process bus publishes, so a TUI / IDE / dashboard
+# client can render a memory-status panel and surface silent compaction in
+# real time. No session_id keying — broadcast to all connected WS clients.
+EVENT_MEMORY_WRITE = "memory.write"
 
 
 __all__ = [
@@ -99,6 +111,7 @@ __all__ = [
     "METHOD_SLASH_LIST",
     "METHOD_SLASH_DISPATCH",
     "METHOD_PERMISSION_RESPONSE",
+    "METHOD_MEMORY_STATUS",
     "EVENT_TURN_BEGIN",
     "EVENT_TURN_END",
     "EVENT_TOOL_CALL",
@@ -106,4 +119,5 @@ __all__ = [
     "EVENT_ASSISTANT_MESSAGE",
     "EVENT_ERROR",
     "EVENT_PERMISSION_REQUEST",
+    "EVENT_MEMORY_WRITE",
 ]

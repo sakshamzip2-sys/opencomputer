@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
 from collections import deque
 from typing import TYPE_CHECKING, Any
@@ -31,11 +32,13 @@ from opencomputer.agent.steer import default_registry as _steer_registry
 from opencomputer.gateway.protocol import (
     EVENT_ASSISTANT_MESSAGE,
     EVENT_ERROR,
+    EVENT_MEMORY_WRITE,
     EVENT_PERMISSION_REQUEST,
     EVENT_TURN_BEGIN,
     EVENT_TURN_END,
     METHOD_CHAT,
     METHOD_HELLO,
+    METHOD_MEMORY_STATUS,
     METHOD_PERMISSION_RESPONSE,
     METHOD_SEARCH,
     METHOD_SESSION_LIST,
@@ -127,14 +130,56 @@ class WireServer:
         self._session_clients: dict[
             str, set[websockets.WebSocketServerProtocol]
         ] = {}
+        # Tier-C of 2026-05-10 memory-observability design — every
+        # currently-connected ws regardless of session binding. Used by
+        # ``_broadcast_global`` for events that are per-process and don't
+        # carry a ``session_id`` (e.g. ``MemoryWriteEvent``). Updated in
+        # ``_handle_client`` connect/disconnect; intentionally distinct
+        # from ``_session_clients`` because anonymous wire calls (no hello
+        # session_id) still need to receive memory-write broadcasts.
+        self._session_clients_all: set[websockets.WebSocketServerProtocol] = set()
+        # Saved at ``start()`` so the sync bus handler can schedule
+        # ``_broadcast_global`` coroutines onto the wire-server's loop
+        # via ``asyncio.run_coroutine_threadsafe``. None until start().
+        self._loop_ref: asyncio.AbstractEventLoop | None = None
+        # Subscription handle so ``stop()`` can cleanly unsubscribe and
+        # avoid leaking subscribers across test/server lifecycles.
+        self._memory_write_subscription: Any | None = None
 
     async def start(self) -> None:
         self._server = await websockets.serve(
             self._handle_client, self.host, self.port
         )
+        # Tier-C: capture the running loop ref so the sync bus handler
+        # can schedule async broadcasts via run_coroutine_threadsafe.
+        # get_running_loop is guaranteed to succeed here — start() is
+        # always awaited.
+        self._loop_ref = asyncio.get_running_loop()
+        try:
+            from opencomputer.ingestion.bus import default_bus
+
+            self._memory_write_subscription = default_bus.subscribe(
+                "memory_write", self._on_memory_write_bus_event
+            )
+        except Exception:
+            # Bus unavailable in some lightweight test harnesses; the wire
+            # server still works for chat/sessions/etc. without it.
+            logger.exception(
+                "wire: failed to subscribe to default_bus for memory.write; "
+                "TUI memory panel will not receive events"
+            )
         logger.info("wire: listening on ws://%s:%s", self.host, self.port)
 
     async def stop(self) -> None:
+        # Tier-C: unsubscribe from the bus FIRST so a late publish during
+        # shutdown can't enqueue a broadcast onto a closing loop.
+        if self._memory_write_subscription is not None:
+            try:
+                self._memory_write_subscription.unsubscribe()
+            except Exception:
+                logger.exception("wire: memory_write unsubscribe failed (ignored)")
+            self._memory_write_subscription = None
+        self._loop_ref = None
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -144,6 +189,10 @@ class WireServer:
     ) -> None:
         client_id = str(uuid.uuid4())[:8]
         logger.info("wire: client %s connected", client_id)
+        # Tier-C: register for global broadcasts (memory.write etc.). The
+        # session-keyed _session_clients registry is populated lazily in
+        # _dispatch when the client provides session_id via hello/chat.
+        self._session_clients_all.add(ws)
         try:
             async for raw in ws:
                 try:
@@ -181,6 +230,9 @@ class WireServer:
         except websockets.ConnectionClosed:
             pass
         finally:
+            # Tier-C: drop from global broadcast set first so any in-flight
+            # broadcast scheduled before disconnect simply skips this ws.
+            self._session_clients_all.discard(ws)
             # M3.1 — drop this ws from any session it was registered on
             # so future permission.request broadcasts don't try to send
             # over a dead socket. Walk the registry copy to mutate safely.
@@ -235,6 +287,7 @@ class WireServer:
                         METHOD_SLASH_LIST,
                         METHOD_SLASH_DISPATCH,
                         METHOD_PERMISSION_RESPONSE,
+                        METHOD_MEMORY_STATUS,
                     ],
                     "events": [
                         EVENT_TURN_BEGIN,
@@ -242,6 +295,7 @@ class WireServer:
                         EVENT_ASSISTANT_MESSAGE,
                         EVENT_ERROR,
                         EVENT_PERMISSION_REQUEST,
+                        EVENT_MEMORY_WRITE,
                     ],
                     "gap_warning": gap_warning,
                     "server_last_event_seq": server_last_seq,
@@ -428,6 +482,23 @@ class WireServer:
                 await self._send_response(
                     ws, req.id, False, error=f"slash.dispatch: {exc}"
                 )
+        elif req.method == METHOD_MEMORY_STATUS:
+            # Tier-C+ of 2026-05-10 memory-observability design.
+            # Returns current cap status for every declarative-memory file
+            # (MEMORY.md + USER.md) so a freshly-connected client can seed
+            # its memory panel without waiting for a write event.
+            # v1: always default profile (matches the rest of the wire surface).
+            try:
+                _loop = await self._router.get_or_load("default")
+                entries = self._collect_memory_status(_loop)
+                await self._send_response(
+                    ws, req.id, True, payload={"entries": entries}
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("memory.status: failed")
+                await self._send_response(
+                    ws, req.id, False, error=f"memory.status: {exc}"
+                )
         else:
             await self._send_response(
                 ws, req.id, False, error=f"unknown method: {req.method}"
@@ -548,6 +619,157 @@ class WireServer:
                 session_id, deque(maxlen=RING_BUFFER_MAX)
             ).append(ev)
         await ws.send(ev.model_dump_json())
+
+    # ─── Tier-C bus→wire bridge (memory.write) ─────────────────────
+
+    def _on_memory_write_bus_event(self, event: Any) -> None:
+        """Sync bus handler — schedule a broadcast onto the wire-server loop.
+
+        Runs on the publisher's thread (typically the agent loop's). Builds
+        the typed payload synchronously, then hops into the wire-server's
+        asyncio loop via ``run_coroutine_threadsafe``. Per-client send
+        errors are swallowed inside ``_broadcast_global`` so a stale ws
+        never blocks a memory write from reaching other clients.
+
+        Failure-isolated: any exception is logged but never propagates to
+        the publisher — a wedged TUI panel must not break a memory write.
+        """
+        loop = self._loop_ref
+        if loop is None or loop.is_closed():
+            return
+        try:
+            # cap_limit is wire-only — derived from the target filename so
+            # a TUI panel can render percentage without an extra RPC.
+            cap_limit = 2000 if event.target == "USER.md" else 4000
+            payload = {
+                "action": event.action,
+                "target": event.target,
+                "content_size": event.content_size,
+                "cap_limit": cap_limit,
+                "compaction_delta": event.compaction_delta,
+                "dropped_paragraphs": event.dropped_paragraphs,
+            }
+
+            if os.environ.get("OPENCOMPUTER_WIRE_DEBUG_EVENTS") == "1":
+                logger.debug(
+                    "wire bridge: broadcasting memory.write target=%s "
+                    "drop=%d delta=%d clients=%d",
+                    event.target,
+                    event.dropped_paragraphs,
+                    event.compaction_delta,
+                    len(self._session_clients_all),
+                )
+
+            asyncio.run_coroutine_threadsafe(
+                self._broadcast_global(EVENT_MEMORY_WRITE, payload), loop
+            )
+        except RuntimeError:
+            # Loop closed in the gap between is_closed() check and schedule.
+            logger.debug("wire bridge: loop closed before memory.write broadcast")
+        except Exception:  # noqa: BLE001 — must not break the publisher
+            logger.exception("wire bridge: failed to forward memory.write event")
+
+    async def _broadcast_global(
+        self, event_name: str, payload: dict[str, Any]
+    ) -> None:
+        """Send an event to every WS in ``_session_clients_all``.
+
+        Used for events without session-keyed routing (memory writes,
+        future global telemetry). Per-client send failures are swallowed
+        so one stale ws never blocks delivery to others.
+
+        Memory-write events have no session_id (per-process state), so
+        they are NOT recorded in ``_session_rings``. Reconnecting clients
+        do NOT see replay of memory.write events — they call
+        :data:`METHOD_MEMORY_STATUS` on connect to seed initial state
+        from the server's view of MEMORY.md / USER.md.
+        """
+        clients = list(self._session_clients_all)
+        if not clients:
+            return
+        ev = WireEvent(event=event_name, payload=payload)
+        msg = ev.model_dump_json()
+        for client_ws in clients:
+            try:
+                await client_ws.send(msg)
+            except Exception:  # noqa: BLE001 — never break broadcast on stale client
+                continue
+
+    @staticmethod
+    def _collect_memory_status(loop: Any) -> list[dict[str, Any]]:
+        """Build the ``METHOD_MEMORY_STATUS`` payload for one AgentLoop.
+
+        Reads MEMORY.md + USER.md from disk (single ``stat()`` + ``read_text``
+        per file) and computes :class:`opencomputer.agent.memory_cap.CapStatus`
+        for each. Returns the dict-of-dicts shape the wire schema expects.
+
+        Failure modes:
+
+        * ``loop.memory`` missing (e.g. minimal test harness with stubbed
+          loop) → returns empty list. The client renders nothing rather than
+          erroring.
+        * One file missing on disk → that entry reports ``content_size=0,
+          paragraph_count=0, pct=0.0``. The other file still reported.
+        * Both files unreadable (permissions) → per-file errors logged at
+          WARN; that entry is omitted from the result. Other files still
+          reported. Empty list is a valid response.
+
+        Returned entries are sorted by ``target`` for stable client-side
+        rendering — MEMORY.md before USER.md alphabetically.
+        """
+        from opencomputer.agent.memory_cap import cap_status
+
+        manager = getattr(loop, "memory", None)
+        if manager is None:
+            logger.debug("memory.status: loop has no memory manager — empty result")
+            return []
+
+        # Each entry: (target_filename, file_path, cap_limit). The pairs
+        # come from MemoryManager's canonical attributes — never hardcoded
+        # in this method so a future split (PROJECTS.md etc.) needs zero
+        # changes here when MemoryManager grows new fields.
+        targets = [
+            (
+                "MEMORY.md",
+                getattr(manager, "declarative_path", None),
+                getattr(manager, "memory_char_limit", 4000),
+            ),
+            (
+                "USER.md",
+                getattr(manager, "user_path", None),
+                getattr(manager, "user_char_limit", 2000),
+            ),
+        ]
+        entries: list[dict[str, Any]] = []
+        for target, path, limit in targets:
+            if path is None:
+                logger.debug(
+                    "memory.status: %s path missing from MemoryManager — skipping",
+                    target,
+                )
+                continue
+            try:
+                text = path.read_text(encoding="utf-8") if path.exists() else ""
+            except OSError as exc:
+                logger.warning(
+                    "memory.status: failed to read %s (%s): %s — omitting from result",
+                    target,
+                    path,
+                    exc,
+                )
+                continue
+            status = cap_status(text, limit=limit, file_name=target)
+            entries.append(
+                {
+                    "target": status.file_name,
+                    "content_size": status.bytes_used,
+                    "cap_limit": status.bytes_limit,
+                    "pct": status.pct,
+                    "paragraph_count": status.paragraph_count,
+                }
+            )
+        entries.sort(key=lambda e: e["target"])
+        return entries
 
     async def broadcast_permission_request(
         self,

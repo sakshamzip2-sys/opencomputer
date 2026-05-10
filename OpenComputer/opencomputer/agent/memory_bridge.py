@@ -17,6 +17,7 @@ stays stateless and can be constructed per-call if needed.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import Any
 
@@ -26,6 +27,103 @@ logger = logging.getLogger(__name__)
 
 _HEALTH_TIMEOUT_S = 2.0
 _CONSECUTIVE_FAILURE_LIMIT = 3
+
+# ─── Tier-B 2026-05-10: on_memory_write BC kwarg detection ─────────────
+#
+# Tier-B added ``compaction_delta`` + ``dropped_paragraphs`` to the
+# ``MemoryProvider.on_memory_write`` contract. Existing overrides with the
+# legacy 3-kwarg signature must keep working; the bridge introspects each
+# provider's override exactly once (cached by id) and only forwards kwargs
+# the override accepts. Each kwarg-mismatch surfaces ONE info-level log
+# line per provider so operators see a nudge to upgrade without log spam.
+
+#: Cache of ``(id(provider), accepted_kwargs)``. Keyed by id() (not the
+#: provider object itself) so it never holds a strong reference back —
+#: providers can be garbage-collected normally.
+_ON_MEMORY_WRITE_KWARG_CACHE: dict[int, frozenset[str]] = {}
+
+#: Provider ids that have already received the legacy-signature info log.
+#: Single-emission per provider lifetime keeps the log scannable.
+_LEGACY_SIGNATURE_LOGGED: set[int] = set()
+
+#: Canonical kwarg superset the bridge knows how to forward. Used as a
+#: fast-path "if the override declares **kwargs we just send everything"
+#: shortcut and as the projection target for explicit-kwarg overrides.
+_ON_MEMORY_WRITE_KWARGS: frozenset[str] = frozenset(
+    {"action", "target", "content_size", "compaction_delta", "dropped_paragraphs"}
+)
+
+
+def _accepted_on_memory_write_kwargs(provider: Any) -> frozenset[str]:
+    """Return the subset of ``_ON_MEMORY_WRITE_KWARGS`` that the provider's
+    ``on_memory_write`` override actually accepts.
+
+    Result is cached per provider-instance so the ``inspect.signature`` cost
+    is paid once. If signature introspection fails (C-implemented method,
+    weird metaclass), defaults to the legacy 3-kwarg subset so the call
+    still succeeds.
+
+    ``**kwargs`` in the override signature → forward everything (the
+    override has opted in to whatever the bridge knows about).
+    """
+    cache_key = id(provider)
+    cached = _ON_MEMORY_WRITE_KWARG_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    handler = getattr(provider, "on_memory_write", None)
+    if handler is None:
+        result = frozenset()
+    else:
+        try:
+            sig = inspect.signature(handler)
+        except (TypeError, ValueError):
+            # Unintrospectable — assume the legacy signature so the call
+            # still goes through. Logged at debug because this is a
+            # plugin-author oddity, not an OC defect.
+            logger.debug(
+                "on_memory_write inspect.signature failed for provider %s; "
+                "assuming legacy 3-kwarg signature",
+                getattr(provider, "provider_id", repr(provider)),
+            )
+            result = frozenset({"action", "target", "content_size"})
+        else:
+            params = sig.parameters
+            has_var_kw = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+            if has_var_kw:
+                result = _ON_MEMORY_WRITE_KWARGS
+            else:
+                result = frozenset(_ON_MEMORY_WRITE_KWARGS & params.keys())
+
+    _ON_MEMORY_WRITE_KWARG_CACHE[cache_key] = result
+
+    # One-time info log if the override is missing the post-Tier-B kwargs.
+    # We track logged ids so a long-running process emits a single line per
+    # provider — never spammy, but the upgrade nudge is visible to operators.
+    missing = _ON_MEMORY_WRITE_KWARGS - result - {"action", "target", "content_size"}
+    if missing and cache_key not in _LEGACY_SIGNATURE_LOGGED:
+        _LEGACY_SIGNATURE_LOGGED.add(cache_key)
+        logger.info(
+            "memory provider %s on_memory_write uses legacy signature; "
+            "fields %s will not be forwarded. Add these kwargs (or **kwargs) "
+            "to the override to receive compaction observability.",
+            getattr(provider, "provider_id", repr(provider)),
+            sorted(missing),
+        )
+
+    return result
+
+
+def _reset_on_memory_write_cache() -> None:
+    """Test hook — clear the per-provider signature cache and log-once set.
+
+    Production code never calls this; tests rely on it to exercise the
+    one-time-logging behaviour deterministically.
+    """
+    _ON_MEMORY_WRITE_KWARG_CACHE.clear()
+    _LEGACY_SIGNATURE_LOGGED.clear()
 
 #: Contexts that must NOT spin external memory providers. Referenced by both
 #: :meth:`MemoryBridge.prefetch` and :meth:`MemoryBridge.sync_turn` so the
@@ -351,18 +449,31 @@ class MemoryBridge:
             )
 
     def _on_memory_write_event(self, event) -> None:
-        """Bus handler: fan out MemoryWriteEvent to provider.on_memory_write."""
+        """Bus handler: fan out MemoryWriteEvent to provider.on_memory_write.
+
+        Tier-B 2026-05-10: builds the kwargs dict from
+        :data:`_ON_MEMORY_WRITE_KWARGS` (action / target / content_size /
+        compaction_delta / dropped_paragraphs) and projects it down to the
+        subset the provider override accepts (see
+        :func:`_accepted_on_memory_write_kwargs`). Legacy 3-kwarg overrides
+        keep working unchanged; new overrides receive the rich signal.
+        """
         import asyncio as _asyncio
 
         provider = self._provider
         if provider is None or self._is_disabled():
             return
         try:
-            coro = provider.on_memory_write(
-                action=event.action,
-                target=event.target,
-                content_size=event.content_size,
-            )
+            full_kwargs = {
+                "action": event.action,
+                "target": event.target,
+                "content_size": event.content_size,
+                "compaction_delta": getattr(event, "compaction_delta", 0),
+                "dropped_paragraphs": getattr(event, "dropped_paragraphs", 0),
+            }
+            accepted = _accepted_on_memory_write_kwargs(provider)
+            kwargs = {k: v for k, v in full_kwargs.items() if k in accepted}
+            coro = provider.on_memory_write(**kwargs)
             try:
                 loop = _asyncio.get_running_loop()
                 loop.create_task(coro)

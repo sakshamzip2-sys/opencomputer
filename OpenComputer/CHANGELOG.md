@@ -2,15 +2,16 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
-## [v2026.5.10.post2] — 2026-05-10
+## [Unreleased]
 
-- feat(browser): browser-harness + opencli-bridge auto-set `AGENT_BROWSER_ARGS=--no-sandbox,--headless=new` on display-less Linux (no `DISPLAY`/`WAYLAND_DISPLAY`). agent-browser only auto-adds `--no-sandbox` in containers/root, so KVM VPS deployments fall through every check; this fills the gap. Respects user override.
-
-## [v2026.5.10.post1] — 2026-05-10
-
-- fix(channels): 10 channel adapters were registering the class instead of an instance (dingtalk, feishu, irc, qqbot, teams, wecom, wecom-callback, webhook-inbound, weixin, yuanbao) — caused gateway crash with `BaseChannelAdapter.set_message_handler() missing 1 required positional argument: 'handler'`
-- fix(opencli-bridge): rename `dispatcher.py` → `opencli_dispatcher.py` to avoid sys.modules collision with browser-harness's dispatcher
-- fix(opencli-bridge): `run_browser()` no longer appends `-f json` (browser subcommands don't support it)
+- feat(wire): `EVENT_MEMORY_WRITE` + `MemoryWritePayload` typed schema in protocol_v2 — closes Tier-C of the 2026-05-10 memory-observability design. WireServer subscribes to the in-process `default_bus` for `MemoryWriteEvent` on `start()` and broadcasts a `WireEvent(event="memory.write")` to every connected WS client via the new `_session_clients_all` set; unsubscribes on `stop()`. Sync→async hop via `asyncio.run_coroutine_threadsafe`. Per-process event (no session_id), so no ring-buffer replay on reconnect — clients pull current state via REST/RPC.
+- feat(tui): Ink+React `MemoryPanel` component renders a single status line under the chat header on every memory write. Surfaces compaction warnings (red, "🛑 COMPACTED — dropped N entries") in real time so silent inline compaction (M2 of the same design) is finally visible to the user without re-reading MEMORY.md / USER.md.
+- feat(dashboard): SSE projection at `/api/v1/events` now surfaces every `SignalEvent` dataclass field — base + subclass-specific. Legacy 6-field paths preserved (BC). `project_event` extracted as a module-level function, failure-isolated (`asdict` failure → legacy fallback + WARN log). Privacy contracts pinned by tests for `MemoryWriteEvent` / `MessageSignalEvent` / `ForegroundAppEvent`. Closes Tier-A of the 2026-05-10 memory-observability follow-through.
+- feat(memory-provider): `MemoryProvider.on_memory_write` signature extended with `compaction_delta` + `dropped_paragraphs` kwargs (default 0, BC). `MemoryBridge` introspects each provider's override via `inspect.signature` (cached per-instance) and forwards only the kwargs the override accepts — legacy 3-kwarg overrides keep working unchanged; `**kwargs` overrides receive everything; partial overrides receive their declared subset. One INFO log per provider lifetime nudges legacy-shaped overrides to upgrade. Closes Tier-B of the 2026-05-10 memory-observability follow-through.
+- feat(wire-rpc): `METHOD_MEMORY_STATUS = "memory.status"` initial-state RPC + typed `MemoryStatusParams` / `MemoryStatusEntry` / `MemoryStatusResult` schemas. `WireServer._collect_memory_status` reads MEMORY.md + USER.md via `MemoryManager` and computes `CapStatus` for each. Failure-isolated: missing manager → empty entries; missing file → entry reports size=0; unreadable file → omit + WARN log. Hello-handshake advertises the new method + memory.write event so capability-detecting clients see them.
+- feat(tui-panel): `MemoryPanel` refactored from single-event state to per-target `Record<string, MemoryWritePayload>`. App calls `client.memoryStatus()` after `hello()` to seed both files' status from first frame. `memory.write` events update entries by target so writing one file no longer hides the other. Stable alphabetical ordering matches server-side sort. Old wire-servers without `memory.status` fall through cleanly — panel stays empty until first event.
+- feat(dashboard-rest): new `GET /api/v1/memory/status` REST endpoint mirrors the wire RPC for browser SPA consumers. Same shape, same failure-isolation, same per-profile resolution. Closes the dashboard SPA's "fresh-connect blindness" gap so its memory panel can also seed from initial state.
+- chore(observability): `OPENCOMPUTER_WIRE_DEBUG_EVENTS=1` env var emits one DEBUG log line per wire-bridge broadcast for diagnostics.
 
 ## [v2026.5.10] — 2026-05-10
 

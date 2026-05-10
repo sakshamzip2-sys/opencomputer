@@ -21,6 +21,7 @@ from opencomputer.dashboard.routes import (  # noqa: F401  (re-exports)
     env,
     events,
     logs,
+    memory,
     models,
     oc_update,
     plugins,
@@ -53,6 +54,7 @@ ALL_ROUTERS: list[APIRouter] = [
     oc_update.router,
     actions.router,
     events.router,
+    memory.router,
 ]
 
 __all__ = ["ALL_ROUTERS"]

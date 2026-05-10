@@ -6,6 +6,11 @@ import { Box, Text, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
 import { OCWireClient, type SlashCommand, type WireEvent } from "./gatewayClient.js";
 import { banner, theme } from "./theme.js";
+import {
+  MemoryPanel,
+  seedFromStatusEntry,
+  type MemoryWritePayload,
+} from "./components/memoryPanel.js";
 
 interface Turn {
   role: "user" | "assistant" | "tool" | "system";
@@ -30,6 +35,11 @@ export const App: React.FC<AppProps> = ({ client, resumeSpec = "" }) => {
   const [helloInfo, setHelloInfo] = useState<string>("");
   const [slashList, setSlashList] = useState<SlashCommand[]>([]);
   const [showSlashPalette, setShowSlashPalette] = useState(false);
+  // Tier-C: per-target map of memory status. Seeded from `memory.status`
+  // RPC on connect (so the panel renders MEMORY.md + USER.md from the
+  // first frame, not after the first write). memory.write events update
+  // the matching entry in-place.
+  const [memoryEntries, setMemoryEntries] = useState<Record<string, MemoryWritePayload>>({});
   const sessionId = useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -49,6 +59,22 @@ export const App: React.FC<AppProps> = ({ client, resumeSpec = "" }) => {
             setSlashList(s.commands);
           } catch {
             // older wire-server without slash.list — ignore
+          }
+          // Tier-C+: seed the memory panel with current cap status so
+          // MEMORY.md / USER.md are visible from the first frame, not
+          // after the first write event. Older wire-servers without
+          // memory.status reject as "unknown method"; the panel stays
+          // empty and updates lazily from memory.write events instead.
+          try {
+            const status = await client.memoryStatus();
+            const seeded: Record<string, MemoryWritePayload> = {};
+            for (const entry of status.entries) {
+              seeded[entry.target] = seedFromStatusEntry(entry);
+            }
+            setMemoryEntries(seeded);
+          } catch {
+            // older wire-server without memory.status — empty panel
+            // until the first memory.write event arrives.
           }
           // Resume target plumbing: if OC_TUI_RESUME is set, seed
           // sessionId.current so the first ``client.chat()`` call
@@ -103,6 +129,15 @@ export const App: React.FC<AppProps> = ({ client, resumeSpec = "" }) => {
           { role: "system", text: `error: ${String(payload.error ?? "")}` },
         ]);
         setBusy(false);
+      } else if (ev.event === "memory.write") {
+        // Tier-C of 2026-05-10 memory-observability design.
+        // Schema mirrors gateway/protocol_v2.MemoryWritePayload. Update
+        // the per-target entry so MEMORY.md and USER.md state both stay
+        // visible (writing one file doesn't hide the other).
+        const update = payload as unknown as MemoryWritePayload;
+        if (update.target) {
+          setMemoryEntries((prev) => ({ ...prev, [update.target]: update }));
+        }
       }
     });
     return () => { offConn(); offEv(); };
@@ -165,6 +200,7 @@ export const App: React.FC<AppProps> = ({ client, resumeSpec = "" }) => {
           </Text>
           {"   ESC or Ctrl+C to quit"}
         </Text>
+        <MemoryPanel entries={memoryEntries} />
       </Box>
 
       {showSlashPalette && slashList.length > 0 && (
