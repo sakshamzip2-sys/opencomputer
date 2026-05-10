@@ -58,8 +58,8 @@ def _try_terminal_menu(
     """
     try:
         from simple_term_menu import TerminalMenu
-    except ImportError as e:
-        raise _TierUnavailableError("simple_term_menu not installed") from e
+    except (ImportError, NotImplementedError) as e:
+        raise _TierUnavailableError("simple_term_menu unavailable") from e
     if not sys.stdin.isatty():
         raise _TierUnavailableError("not a TTY")
     try:

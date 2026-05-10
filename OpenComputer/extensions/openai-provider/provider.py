@@ -44,6 +44,8 @@ from plugin_sdk.provider_contract import (
     StreamEvent,
     Usage,
 )
+
+_OPENROUTER_DEFAULT_MAX_TOKENS = 512
 from plugin_sdk.tool_contract import ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -365,6 +367,29 @@ class OpenAIProvider(BaseProvider):
             for p in prefixes
         )
 
+    def _apply_token_limit_param(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        model: str,
+        max_tokens: int,
+    ) -> None:
+        """Use the token-limit parameter supported by the selected model."""
+        limit = max(1, int(max_tokens or 1))
+        if self.name == "openrouter":
+            try:
+                cap = int(os.environ.get("OPENROUTER_MAX_TOKENS", ""))
+            except (TypeError, ValueError):
+                cap = _OPENROUTER_DEFAULT_MAX_TOKENS
+            if cap <= 0:
+                cap = _OPENROUTER_DEFAULT_MAX_TOKENS
+            limit = min(limit, cap)
+
+        if self.name == "openai":
+            kwargs["max_completion_tokens"] = limit
+        else:
+            kwargs["max_tokens"] = limit
+
     def _parse_response(self, resp: ChatCompletion) -> ProviderResponse:
         """Convert an OpenAI response to our canonical Message + metadata."""
         choice = resp.choices[0]
@@ -441,9 +466,11 @@ class OpenAIProvider(BaseProvider):
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": self._to_openai_messages(messages, system),
-            "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        self._apply_token_limit_param(
+            kwargs, model=model, max_tokens=max_tokens,
+        )
         if tools:
             kwargs["tools"] = _format_tools_for_openai(tools)
         # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
@@ -651,10 +678,12 @@ class OpenAIProvider(BaseProvider):
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": self._to_openai_messages(messages, system),
-            "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": True,
         }
+        self._apply_token_limit_param(
+            kwargs, model=model, max_tokens=max_tokens,
+        )
         if tools:
             kwargs["tools"] = _format_tools_for_openai(tools)
         # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
@@ -807,10 +836,12 @@ class OpenAIProvider(BaseProvider):
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": self._to_openai_messages(messages, system),
-            "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": True,
         }
+        self._apply_token_limit_param(
+            kwargs, model=model, max_tokens=max_tokens,
+        )
         if tools:
             kwargs["tools"] = _format_tools_for_openai(tools)
         # Tier 2.A — /reasoning + /fast slash commands → API kwargs.

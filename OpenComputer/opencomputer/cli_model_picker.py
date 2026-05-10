@@ -1,21 +1,19 @@
-"""``oc model`` — interactive model + provider picker (Hermes-exact UX).
+"""``oc model`` — interactive model + provider picker.
 
-Three-tier picker fallback (TerminalMenu → curses → numbered list) ported
-from Hermes' ``hermes model`` flow. Active provider/model are pre-marked
-with ``← currently active`` / ``← currently in use`` suffixes; ESC/q
-returns ``Leave unchanged.`` without writing.
+Uses the prompt_toolkit ``radiolist`` from :mod:`opencomputer.cli_ui.menu`
+so users can navigate with arrow keys, jump by typing a number, ENTER /
+SPACE to select, ESC to cancel. Matches the Hermes-style provider-pick UI
+(radio glyphs + "← currently active" markers).
 
-History:
-- 2026-04-30 (PR #275): initial Hermes-parity port, but used numbered
-  ``typer.prompt`` only and dropped models with empty ``provider_id``.
-- 2026-04-30 (PR #276): added ``_infer_provider`` so curated models surface.
-- 2026-04-30 (this commit): full UX-parity with Hermes — TerminalMenu
-  arrow-key picker, active markers, "Leave unchanged" sentinel, exact
-  output strings.
+Provider list comes from :func:`_discover_providers` (every plugin
+manifest's ``setup.providers`` entry — 30+ providers). Model list
+comes from the in-memory model_metadata registry, filtered to the
+chosen provider; unknown providers fall back to a free-text prompt.
 """
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -26,23 +24,33 @@ from opencomputer.agent.config_store import (
     set_value,
 )
 from opencomputer.agent.model_metadata import list_models
-from opencomputer.cli_ui.term_menu import pick_one
+from opencomputer.cli_ui.menu import Choice, WizardCancelled, radiolist
 
 console = Console()
 
 
-_LEAVE_UNCHANGED = "Leave unchanged"
+# Vendor prefixes that appear in OpenRouter model ids (``<vendor>/<model>``).
+# Used by :func:`_infer_provider` to route slash-separated ids to OpenRouter
+# rather than mis-classifying them as OpenAI. Keep this short — it's only
+# an inference fallback for entries lacking an explicit ``provider_id``.
+_OPENROUTER_VENDOR_PREFIXES = (
+    "anthropic/", "openai/", "google/", "meta-llama/", "mistralai/",
+    "qwen/", "moonshotai/", "minimax/", "deepseek/", "x-ai/",
+    "nousresearch/", "perplexity/", "cohere/", "01-ai/", "nvidia/",
+    "microsoft/", "ai21/", "amazon/",
+)
 
 
 def _infer_provider(model_id: str) -> str:
-    """Map a model id to its provider when the registry entry has none.
-
-    The G.32 curated catalog ships every entry with ``provider_id=None``.
-    Without inference, the picker would show no models. Falls back to
-    ``"unknown"`` so unrecognised prefixes still appear (under their own
-    bucket) instead of being silently dropped.
-    """
+    """Map a model id to its provider when the registry entry has none."""
     m = model_id.lower()
+    # OpenRouter ids are ``<vendor>/<model>[:tag]`` — match before bare prefixes
+    # so ``minimax/minimax-m2.5:free`` doesn't get classified by ``minimax``
+    # rather than openrouter.
+    if "/" in m and m.startswith(_OPENROUTER_VENDOR_PREFIXES):
+        return "openrouter"
+    if m.endswith(":free") and "/" in m:
+        return "openrouter"
     if m.startswith("claude"):
         return "anthropic"
     if m.startswith(("gpt", "o1", "o2", "o3", "o4", "o5", "o6", "chatgpt")):
@@ -71,63 +79,8 @@ def _grouped_models() -> dict[str, list[str]]:
     return {p: sorted(set(grouped[p])) for p in sorted(grouped.keys())}
 
 
-def _label_with_marker(name: str, *, marker: str) -> str:
-    """Render ``<name>  ← <marker>`` so the active row is visible at a glance.
-
-    Hermes uses two-space pad + arrow + literal marker text.
-    """
-    return f"{name}  ← {marker}"
-
-
-def _pick_provider(grouped: dict[str, list[str]], current: str) -> str | None:
-    """Provider step. Returns selected provider id or None on cancel."""
-    providers = list(grouped.keys())
-    labels: list[str] = []
-    current_idx = 0
-    for i, p in enumerate(providers):
-        if p == current:
-            labels.append(_label_with_marker(p, marker="currently active"))
-            current_idx = i
-        else:
-            labels.append(p)
-    labels.append(_LEAVE_UNCHANGED)
-    idx = pick_one(
-        title="Select a provider:",
-        choices=labels,
-        current_idx=current_idx,
-        allow_cancel=True,
-    )
-    if idx is None or idx == len(labels) - 1:
-        return None
-    return providers[idx]
-
-
-def _pick_model(models: list[str], current: str) -> str | None:
-    """Model step. Returns selected model id or None on cancel."""
-    labels: list[str] = []
-    current_idx = 0
-    for i, m in enumerate(models):
-        if m == current:
-            labels.append(_label_with_marker(m, marker="currently in use"))
-            current_idx = i
-        else:
-            labels.append(m)
-    labels.append(_LEAVE_UNCHANGED)
-    idx = pick_one(
-        title="Select a model:",
-        choices=labels,
-        current_idx=current_idx,
-        allow_cancel=True,
-    )
-    if idx is None or idx == len(labels) - 1:
-        return None
-    return models[idx]
-
-
 def _provider_label(provider: str) -> str:
-    """Render a human label for the success message — Hermes uses
-    capitalised provider names (``OpenAI``, ``Anthropic``, etc).
-    """
+    """Render a human label for a provider id (legacy helper, used in success message)."""
     pretty = {
         "openai":     "OpenAI",
         "anthropic":  "Anthropic",
@@ -137,32 +90,136 @@ def _provider_label(provider: str) -> str:
         "deepseek":   "DeepSeek",
         "mistral":    "Mistral",
         "meta":       "Meta",
+        "unknown":    "Other",
     }
     return pretty.get(provider, provider.capitalize())
 
 
-def model_picker() -> None:
-    """Interactive provider + model picker. Persists to active config.yaml.
+def _discover_provider_rows() -> list[dict[str, Any]]:
+    """Return every plugin manifest's ``setup.providers`` entry."""
+    try:
+        from opencomputer.cli_setup.section_handlers.inference_provider import (
+            _discover_providers,
+        )
+        return _discover_providers()
+    except Exception:  # noqa: BLE001 — picker still works without descriptions
+        return []
 
-    Hermes-exact output (matches ``hermes_cli/main.py:1469-1471`` +
-    ``hermes_cli/auth.py:2818``)::
 
-        Current model: <id>
-        Active provider: <id>
+def _label_with_marker(name: str, *, marker: str) -> str:
+    """Back-compat helper retained for tests/callers."""
+    return f"{name}  ← {marker}"
 
-        Select a provider:
-        [arrow-key picker]
 
-        Select a model:
-        [arrow-key picker]
+def _pick_provider(
+    rows: list[dict[str, Any]],
+    current: str,
+) -> str | None:
+    """Provider step. Returns selected provider id or None on cancel."""
+    choices: list[Choice] = []
+    default_idx = 0
+    for i, row in enumerate(rows):
+        name = row["name"]
+        label = row.get("label") or name.title()
+        description = row.get("description") or ""
+        if name == current:
+            label = f"{label}  ← currently active"
+            default_idx = i
+        choices.append(Choice(label=label, value=name, description=description))
 
-        Default model set to: <id> (via <ProviderLabel>)
+    try:
+        idx = radiolist("Select provider:", choices, default=default_idx)
+    except WizardCancelled:
+        return None
+    return str(choices[idx].value)
+
+
+def _pick_model(
+    models: list[str],
+    current: str,
+    *,
+    allow_custom: bool = True,
+) -> str | None:
+    """Model step. Returns selected model id (or typed-in custom id) or None.
+
+    When ``models`` is empty (provider has no preregistered models in the
+    curated catalog), prompts directly for a custom id. When non-empty
+    and ``allow_custom`` is True, appends an "Enter custom model id"
+    option so users can type a model name not in the curated list (e.g.
+    OpenRouter has thousands).
     """
+    if not models:
+        return _prompt_custom_model(current)
+
+    choices: list[Choice] = []
+    default_idx = 0
+    for i, m in enumerate(models):
+        label = m
+        if m == current:
+            label = f"{m}  ← currently in use"
+            default_idx = i
+        choices.append(Choice(label=label, value=m))
+    if allow_custom:
+        choices.append(Choice(label="Enter custom model id…", value="__custom__"))
+
+    try:
+        idx = radiolist("Select a model:", choices, default=default_idx)
+    except WizardCancelled:
+        return None
+    chosen = choices[idx].value
+    if chosen == "__custom__":
+        return _prompt_custom_model(current)
+    return str(chosen)
+
+
+def _prompt_custom_model(current: str) -> str | None:
+    """Free-text fallback for providers without curated catalog entries."""
+    console.print(
+        "\n[dim]No curated models for this provider. Type a model id "
+        "(e.g. [cyan]anthropic/claude-opus-4.7[/cyan] for OpenRouter) or "
+        "press Enter to cancel.[/dim]"
+    )
+    if current:
+        console.print(f"  Current: [cyan]{current}[/cyan]")
+    try:
+        raw = input("  Model id: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    return raw or None
+
+
+def model_picker() -> None:
+    """Interactive provider + model picker. Persists to active config.yaml."""
+    # Load user-curated overrides into the in-memory registry so models
+    # added via ``oc models add`` are visible here. Without this, the
+    # picker only sees the curated default catalog from module load.
+    try:
+        from opencomputer.cli import _apply_model_overrides
+        _apply_model_overrides()
+    except Exception:  # noqa: BLE001 — overrides are best-effort
+        pass
+
+    rows = _discover_provider_rows()
     grouped = _grouped_models()
-    if not grouped:
+
+    # Merge: every discovered plugin provider, plus any model-registry
+    # provider we don't already cover (so curated catalog entries with
+    # no plugin still surface).
+    seen = {r["name"] for r in rows}
+    for prov in grouped.keys():
+        if prov in seen:
+            continue
+        rows.append({
+            "name": prov,
+            "label": _provider_label(prov),
+            "description": "",
+            "default_model": "",
+        })
+
+    if not rows:
         console.print(
-            "[yellow](._.) No models registered yet.[/yellow]\n"
-            "Add one first with [cyan]oc models add <provider> <model>[/cyan]."
+            "[yellow](._.) No providers available.[/yellow] "
+            "Install a provider plugin first."
         )
         raise typer.Exit(1)
 
@@ -170,26 +227,28 @@ def model_picker() -> None:
     current_p = cfg.model.provider
     current_m = cfg.model.model
 
-    console.print(f"Current model: [cyan]{current_m}[/cyan]")
-    console.print(f"Active provider: [cyan]{current_p}[/cyan]")
-    console.print()
+    console.print(f"Current model:    [cyan]{current_m}[/cyan]")
+    console.print(f"Active provider:  [cyan]{current_p}[/cyan]\n")
 
-    chosen_provider = _pick_provider(grouped, current_p)
+    chosen_provider = _pick_provider(rows, current_p)
     if chosen_provider is None:
-        console.print("No change.")
+        console.print("\nNo change.")
         raise typer.Exit(0)
 
-    models = grouped[chosen_provider]
-    if not models:
-        console.print(
-            f"[yellow](._.) No models registered under "
-            f"'{chosen_provider}'.[/yellow]"
-        )
-        raise typer.Exit(1)
+    # Models for the chosen provider come from the registry. If empty
+    # (most plugin providers don't ship curated metadata), `_pick_model`
+    # falls through to a free-text prompt.
+    models = grouped.get(chosen_provider, [])
+    # If we know the plugin's default_model and it's not in the catalog,
+    # surface it so users have something to pick.
+    row = next((r for r in rows if r["name"] == chosen_provider), None)
+    default_model = (row or {}).get("default_model") or ""
+    if default_model and default_model not in models:
+        models = [default_model, *models]
 
     chosen_model = _pick_model(models, current_m)
     if chosen_model is None:
-        console.print("No change.")
+        console.print("\nNo change.")
         raise typer.Exit(0)
 
     new_cfg = set_value(cfg, "model.provider", chosen_provider)
@@ -197,7 +256,7 @@ def model_picker() -> None:
     save_config(new_cfg)
 
     console.print(
-        f"\nDefault model set to: [cyan]{chosen_model}[/cyan] "
+        f"\n[green]✓[/green] Default model set to: [cyan]{chosen_model}[/cyan] "
         f"(via {_provider_label(chosen_provider)})"
     )
 
@@ -209,4 +268,5 @@ __all__ = [
     "_pick_provider",
     "_pick_model",
     "_provider_label",
+    "_label_with_marker",
 ]

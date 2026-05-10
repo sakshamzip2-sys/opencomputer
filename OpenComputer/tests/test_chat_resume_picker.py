@@ -8,10 +8,13 @@ loop without adding a new top-level command.
 from __future__ import annotations
 
 import time
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from rich.console import Console
 
 
 def _seed_sessions(tmp_path: Path, n: int = 3) -> Path:
@@ -146,6 +149,111 @@ def test_resume_pick_with_no_sessions_returns_none_without_prompting(
 
     assert resolved is None
     assert opened == [], "must not open the picker when there's nothing to pick"
+
+
+def test_chat_resume_target_resolves_exact_session_title(tmp_path: Path) -> None:
+    from opencomputer import cli
+    from opencomputer.agent.state import SessionDB
+
+    db_path = _seed_sessions(tmp_path, n=3)
+    db = SessionDB(db_path)
+
+    resolved, matches = cli._resolve_chat_resume_target("test session 1", db)
+
+    assert resolved == "session-01"
+    assert matches == []
+
+
+def test_chat_resume_target_keeps_id_prefix_matching(tmp_path: Path) -> None:
+    from opencomputer import cli
+    from opencomputer.agent.state import SessionDB
+
+    db_path = _seed_sessions(tmp_path, n=3)
+    db = SessionDB(db_path)
+
+    resolved, matches = cli._resolve_chat_resume_target("session-02", db)
+
+    assert resolved == "session-02"
+    assert matches == []
+
+
+def test_session_label_for_banner_uses_title_not_uuid(tmp_path: Path) -> None:
+    from opencomputer import cli
+    from opencomputer.agent.state import SessionDB
+
+    db_path = tmp_path / "sessions.db"
+    db = SessionDB(db_path)
+    db.create_session(
+        session_id="d991d7c3-233c-414f-a402-0034c4c02743",
+        platform="cli",
+        model="gpt-5.4",
+        title="pratyakksh",
+    )
+
+    assert cli._session_label_for_banner(db_path, "d991d7c3-233c-414f-a402-0034c4c02743") == "pratyakksh"
+
+
+def test_session_label_for_banner_shows_uuid_until_session_is_named(tmp_path: Path) -> None:
+    from opencomputer import cli
+    from opencomputer.agent.state import SessionDB
+
+    db_path = tmp_path / "sessions.db"
+    db = SessionDB(db_path)
+    db.create_session(
+        session_id="d991d7c3-233c-414f-a402-0034c4c02743",
+        platform="cli",
+        model="gpt-5.4",
+        title=None,
+    )
+
+    assert (
+        cli._session_label_for_banner(
+            db_path, "d991d7c3-233c-414f-a402-0034c4c02743",
+        )
+        == "d991d7c3-233c-414f-a402-0034c4c02743"
+    )
+
+
+def test_render_chat_banner_reflects_session_rename(tmp_path: Path) -> None:
+    from opencomputer import cli
+    from opencomputer.agent.state import SessionDB
+
+    session_id = "d991d7c3-233c-414f-a402-0034c4c02743"
+    db_path = tmp_path / "sessions.db"
+    db = SessionDB(db_path)
+    db.create_session(
+        session_id=session_id,
+        platform="cli",
+        model="gpt-5.4",
+        title=None,
+    )
+    cfg = SimpleNamespace(
+        model=SimpleNamespace(model="gpt-5.4", provider="openai"),
+        session=SimpleNamespace(db_path=db_path),
+    )
+
+    before_stream = StringIO()
+    cli._render_chat_banner(
+        Console(file=before_stream, force_terminal=True, color_system=None, width=100),
+        cfg,
+        cwd=str(tmp_path),
+        session_id=session_id,
+        home=tmp_path,
+    )
+    assert f"Session: {session_id}" in before_stream.getvalue()
+
+    db.set_session_title(session_id, "pratyakksh")
+    after_stream = StringIO()
+    cli._render_chat_banner(
+        Console(file=after_stream, force_terminal=True, color_system=None, width=100),
+        cfg,
+        cwd=str(tmp_path),
+        session_id=session_id,
+        home=tmp_path,
+    )
+    rendered = after_stream.getvalue()
+    assert "Session: pratyakksh" in rendered
+    assert f"Session: {session_id}" not in rendered
 
 
 def test_resume_passthrough_unknown_spec_returns_input(

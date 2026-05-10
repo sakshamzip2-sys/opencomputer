@@ -168,6 +168,32 @@ def test_build_welcome_banner_renders_header_and_meta_block(monkeypatch):
     assert "Type your message" in out
 
 
+def test_build_welcome_banner_can_show_session_title_instead_of_uuid(monkeypatch):
+    import io
+
+    from rich.console import Console
+
+    from opencomputer.cli_banner import build_welcome_banner
+
+    monkeypatch.setattr("opencomputer.cli_banner.get_available_skills", lambda: {})
+    monkeypatch.setattr("opencomputer.cli_banner.get_available_tools", lambda: {})
+
+    buf = io.StringIO()
+    console = Console(file=buf, width=120, force_terminal=False)
+    build_welcome_banner(
+        console,
+        model="gpt-5.4",
+        cwd="/tmp",
+        session_id="uuid-123",
+        session_label="pratyakksh",
+    )
+
+    out = buf.getvalue()
+    assert "Session:" in out
+    assert "pratyakksh" in out
+    assert "uuid-123" not in out
+
+
 def test_build_welcome_banner_lists_tools_and_skills(monkeypatch):
     """Hermes-screenshot parity: tools and skills are shown in the
     banner, grouped by plugin/category and truncated so the panel
