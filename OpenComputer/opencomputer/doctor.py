@@ -73,6 +73,198 @@ def _check_python() -> Check:
     return Check("python version", "pass", f"{v.major}.{v.minor}.{v.micro}")
 
 
+def _resolve_source_tree() -> Path | None:
+    """Locate the on-disk source tree this Python process is running from.
+
+    Returns the closest ancestor of the ``opencomputer`` package that
+    contains a ``.git`` directory, or ``None`` when no such ancestor
+    exists (typical for a PyPI install).
+
+    Walks up to 4 levels — enough for ``opencomputer/__init__.py``
+    in a worktree like ``.../OpenComputer/opencomputer/``, but bounded
+    so we don't scan the whole filesystem.
+    """
+    import opencomputer as _oc_pkg
+
+    pkg_path = Path(_oc_pkg.__file__).resolve().parent
+    here: Path | None = pkg_path
+    for _ in range(4):
+        if here is None:
+            break
+        if (here / ".git").exists():
+            return here
+        parent = here.parent
+        if parent == here:  # filesystem root
+            break
+        here = parent
+    return None
+
+
+def _git(args: list[str], cwd: Path) -> tuple[int, str]:
+    """Run a git command in ``cwd``; returns ``(exit_code, stripped_stdout)``.
+
+    No network — caller is expected to use only local-state subcommands
+    (``rev-parse``, ``rev-list``, ``status``). A ``git fetch`` would add
+    seconds to ``oc doctor`` and is intentionally avoided.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=4,
+            check=False,
+        )
+        return result.returncode, result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return -1, ""
+
+
+def _check_source_freshness() -> Check:
+    """Detect "merged but not deployed" — local source tree ≠ origin/main.
+
+    The pip-editable install path binds the ``oc`` binary to a
+    filesystem path, NOT a git branch. When the user merges a PR to
+    GitHub but their local tree is on an old commit (or a feature
+    branch), running ``oc <whatever>`` runs the OLD code. Bugs the user
+    thinks they fixed appear to persist.
+
+    This check compares the source tree's HEAD to the local refs cache
+    for ``origin/main`` and flags drift. Because we don't ``git fetch``,
+    "behind by N" reflects the last fetch — typically minutes-to-hours
+    fresh in active dev. Stale local refs themselves are flagged.
+
+    Status mapping:
+    * ``pass`` — HEAD is at or ahead of origin/main (you have all
+      merged work).
+    * ``warn`` — behind origin/main by ≥1 commit (pull required).
+    * ``warn`` — diverged (custom commits + missing main commits;
+      typical for a feature branch — print fix hint).
+    * ``skip`` — not a git checkout (PyPI install) or git unavailable.
+    """
+    tree = _resolve_source_tree()
+    if tree is None:
+        return Check(
+            "source freshness",
+            "skip",
+            "running from non-git install (PyPI / wheel) — freshness check N/A",
+        )
+
+    rc, _ = _git(["rev-parse", "--git-dir"], tree)
+    if rc != 0:
+        return Check(
+            "source freshness", "skip", f"git unavailable for {tree}"
+        )
+
+    rc_head, head_sha = _git(["rev-parse", "--short=8", "HEAD"], tree)
+    if rc_head != 0 or not head_sha:
+        return Check(
+            "source freshness", "skip", "could not read HEAD"
+        )
+
+    rc_main, main_sha = _git(
+        ["rev-parse", "--short=8", "refs/remotes/origin/main"], tree
+    )
+    if rc_main != 0 or not main_sha:
+        return Check(
+            "source freshness",
+            "warn",
+            f"no origin/main ref found (run `git -C {tree} fetch origin main`); HEAD={head_sha}",
+        )
+
+    if head_sha == main_sha:
+        return Check(
+            "source freshness",
+            "pass",
+            f"HEAD={head_sha} == origin/main (tree={tree})",
+        )
+
+    rc_count, count_out = _git(
+        ["rev-list", "--left-right", "--count", "origin/main...HEAD"], tree
+    )
+    if rc_count != 0:
+        return Check(
+            "source freshness",
+            "warn",
+            f"HEAD={head_sha}, origin/main={main_sha}, drift unknown",
+        )
+
+    parts = count_out.split()
+    if len(parts) != 2:
+        return Check(
+            "source freshness",
+            "warn",
+            f"unexpected rev-list output: {count_out!r}",
+        )
+
+    behind = int(parts[0])
+    ahead = int(parts[1])
+
+    if behind == 0:
+        # Ahead-only: feature branch in progress. Not a drift problem.
+        return Check(
+            "source freshness",
+            "pass",
+            f"HEAD={head_sha} ahead of origin/main by {ahead} commit(s) "
+            f"(feature branch in progress)",
+        )
+
+    # Behind: user has unmerged work in main. This is the case that
+    # bites people. Actionable fix string.
+    fix_hint = (
+        f"`git -C {tree} pull --ff-only origin main` to fast-forward, "
+        "then `pip install -e .` from that tree if your editable install "
+        "lives elsewhere"
+    )
+    return Check(
+        "source freshness",
+        "warn",
+        f"HEAD={head_sha} behind origin/main={main_sha} by {behind} commit(s) "
+        f"(ahead {ahead}). Editable install may run STALE code. Fix: {fix_hint}",
+    )
+
+
+def get_source_version_string() -> str:
+    """Build the long-form version string used by ``oc --version``.
+
+    Format: ``opencomputer X.Y.Z (git: <sha8>[, behind/ahead origin/main: B/A])``
+
+    Falls back to plain ``opencomputer X.Y.Z`` when the install isn't a
+    git checkout, when git isn't on PATH, or when refs aren't readable.
+    Designed to be safe in any install context — never raises.
+    """
+    from opencomputer import __version__
+
+    base = f"opencomputer {__version__}"
+    try:
+        tree = _resolve_source_tree()
+        if tree is None:
+            return base
+
+        rc_head, head_sha = _git(["rev-parse", "--short=8", "HEAD"], tree)
+        if rc_head != 0 or not head_sha:
+            return base
+        suffix = f"git: {head_sha}"
+
+        rc_count, count_out = _git(
+            ["rev-list", "--left-right", "--count", "origin/main...HEAD"],
+            tree,
+        )
+        if rc_count == 0 and count_out:
+            parts = count_out.split()
+            if len(parts) == 2:
+                behind = int(parts[0])
+                ahead = int(parts[1])
+                suffix += f", origin/main behind/ahead: {behind}/{ahead}"
+
+        return f"{base} ({suffix})"
+    except Exception:  # noqa: BLE001 — version string must never raise
+        return base
+
+
 def _check_config() -> tuple[Check, object]:
     from opencomputer.agent.config_store import config_file_path, load_config
 
@@ -1316,6 +1508,11 @@ def run_doctor(fix: bool = False) -> int:
         console.print("[dim]--fix mode: contributions may repair state in place.[/dim]\n")
 
     checks: list[Check] = [_check_python()]
+    # Source freshness — runs early so a stale-tree warning is the FIRST
+    # thing the user sees. Otherwise a user fixes a bug, sees it still
+    # broken, and re-runs doctor expecting an answer; making them scroll
+    # past 30 other checks to find this one defeats the point.
+    checks.append(_check_source_freshness())
     cfg_check, cfg = _check_config()
     checks.append(cfg_check)
 
