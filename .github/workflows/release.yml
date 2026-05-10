@@ -95,8 +95,8 @@ jobs:
           /tmp/wheel-smoke/bin/pip install --quiet dist/*.whl
 
           # 1. Sanity — CLI is reachable + version matches.
-          /tmp/wheel-smoke/bin/opencomputer --version
-          INSTALLED=$(/tmp/wheel-smoke/bin/opencomputer --version | awk '{print $2}')
+          /tmp/wheel-smoke/bin/oc --version
+          INSTALLED=$(/tmp/wheel-smoke/bin/oc --version | awk '{print $2}')
           if [ "$INSTALLED" != "${GITHUB_REF_NAME#v}" ]; then
             echo "::error::CLI reports v$INSTALLED but tag is $GITHUB_REF_NAME"
             exit 1
@@ -131,7 +131,7 @@ jobs:
           #    exits non-zero, and we don't set keys in CI). What we're
           #    really testing here is that doctor itself loads cleanly
           #    against the wheel without crashing on missing data files.
-          /tmp/wheel-smoke/bin/opencomputer doctor || \
+          /tmp/wheel-smoke/bin/oc doctor || \
             echo "(doctor exited non-zero, expected when no API key set in CI)"
 
           rm -rf /tmp/wheel-smoke
