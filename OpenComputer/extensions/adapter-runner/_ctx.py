@@ -44,8 +44,10 @@ def _t(label: str, t0: float) -> None:
         sys.stderr.write(f"[ADAPTER-TIMING] {label}: {dt*1000:.0f}ms\n")
         sys.stderr.flush()
 
-from ._site_memory import SiteMemory
-from ._strategy import Strategy
+# debug-timing helper above must define _DEBUG_TIMING first; imports
+# below must run after that block, hence the noqa-suppressed E402.
+from ._site_memory import SiteMemory  # noqa: E402
+from ._strategy import Strategy  # noqa: E402
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ._decorator import AdapterSpec
@@ -426,7 +428,9 @@ def _typed_browser_errors() -> Any:
     # Path 1 — browser-harness (primary).
     try:
         import sys as _sys
-        from pathlib import Path as _P
+        from pathlib import (
+            Path as _P,  # noqa: N814 — local-scope alias for compactness in this multi-path try/except
+        )
         bh_dir = str(_P(__file__).resolve().parent.parent / "browser-harness")
         if bh_dir not in _sys.path:
             _sys.path.insert(0, bh_dir)
@@ -447,7 +451,9 @@ def _typed_browser_errors() -> Any:
 
     # Path 2 — browser-control legacy.
     try:
-        from extensions.browser_control._utils import errors as _legacy  # type: ignore[import-not-found]
+        from extensions.browser_control._utils import (
+            errors as _legacy,  # type: ignore[import-not-found]
+        )
         _TYPED_ERRORS_CACHE = _legacy
         return _legacy
     except ImportError:

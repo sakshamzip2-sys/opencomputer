@@ -4,14 +4,14 @@ import logging
 import os
 import threading
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any
 
 import requests
 
 from .base import CloudBrowserProvider
 
 logger = logging.getLogger(__name__)
-_pending_create_keys: Dict[str, str] = {}
+_pending_create_keys: dict[str, str] = {}
 _pending_create_keys_lock = threading.Lock()
 
 _BASE_URL = "https://api.browser-use.com/api/v3"
@@ -72,7 +72,7 @@ class BrowserUseProvider(CloudBrowserProvider):
     # was removed during the OC port; OC users supply their own credentials)
     # ------------------------------------------------------------------
 
-    def _get_config_or_none(self) -> Optional[Dict[str, Any]]:
+    def _get_config_or_none(self) -> dict[str, Any] | None:
         api_key = os.environ.get("BROWSER_USE_API_KEY")
         if api_key:
             return {
@@ -82,7 +82,7 @@ class BrowserUseProvider(CloudBrowserProvider):
             }
         return None
 
-    def _get_config(self) -> Dict[str, Any]:
+    def _get_config(self) -> dict[str, Any]:
         config = self._get_config_or_none()
         if config is None:
             raise ValueError(
@@ -94,14 +94,14 @@ class BrowserUseProvider(CloudBrowserProvider):
     # Session lifecycle
     # ------------------------------------------------------------------
 
-    def _headers(self, config: Dict[str, Any]) -> Dict[str, str]:
+    def _headers(self, config: dict[str, Any]) -> dict[str, str]:
         headers = {
             "Content-Type": "application/json",
             "X-Browser-Use-API-Key": config["api_key"],
         }
         return headers
 
-    def create_session(self, task_id: str) -> Dict[str, object]:
+    def create_session(self, task_id: str) -> dict[str, object]:
         config = self._get_config()
         managed_mode = bool(config.get("managed_mode"))
 

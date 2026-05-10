@@ -34,10 +34,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Any
-
-from plugin_sdk.core import ToolCall, ToolResult
-from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 # Sibling-module imports — loader puts the plugin dir on sys.path.
 # Module is named ``dispatcher`` (not ``browser_tool``) because the OC
@@ -47,6 +43,8 @@ from plugin_sdk.tool_contract import BaseTool, ToolSchema
 # name caused a namespace collision when both plugins were active.
 import dispatcher as _bt  # type: ignore[import-not-found]
 
+from plugin_sdk.core import ToolCall, ToolResult
+from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 # ─── shared helpers ──────────────────────────────────────────────────────
 
@@ -84,9 +82,7 @@ def _classify_error(json_text: str) -> bool:
         parsed = json.loads(json_text)
     except (json.JSONDecodeError, TypeError):
         return False  # treat unparseable as success-ish; agent can read it
-    if isinstance(parsed, dict) and parsed.get("success") is False:
-        return True
-    return False
+    return bool(isinstance(parsed, dict) and parsed.get("success") is False)
 
 
 async def _run_dispatcher(fn, *args, **kwargs) -> str:

@@ -73,7 +73,7 @@ def detect_backend() -> BackendSelection:
                 return BackendSelection(
                     backend=chosen.strip().lower(),
                     source="config:browser.backend",
-                    detail=f"from profile config.yaml",
+                    detail="from profile config.yaml",
                 )
     except Exception:  # noqa: BLE001 — diagnostics must never crash
         pass

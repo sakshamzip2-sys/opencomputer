@@ -14,9 +14,9 @@ import logging
 import shutil
 from pathlib import Path
 
-from plugin_sdk.doctor import RepairResult
-
 import dispatcher  # type: ignore[import-not-found]
+
+from plugin_sdk.doctor import RepairResult
 
 _log = logging.getLogger("opencomputer.opencli_bridge.doctor")
 
