@@ -2402,6 +2402,50 @@ class AgentLoop:
                         _log.debug(
                             "TRANSFORM_LLM_OUTPUT hook failed", exc_info=True
                         )
+
+                    # Fire-and-forget auto-titler. Skips internally if the
+                    # session already has a title or this isn't the first
+                    # exchange. Without this wire-in the picker shows
+                    # "(untitled · ID)" forever — see TS-T6 lineage.
+                    #
+                    # ``maybe_auto_title`` counts user-role messages to
+                    # gate "is this the first exchange?". Tool-result
+                    # messages also have role="user" in the canonical
+                    # Anthropic shape (content is a list of tool_result
+                    # blocks), so we filter them out before counting —
+                    # otherwise a first turn with multiple tool calls
+                    # would spuriously trip the >2 cutoff.
+                    try:
+                        from opencomputer.agent.title_generator import (
+                            maybe_auto_title,
+                        )
+
+                        _final_text_for_title = ""
+                        if isinstance(final_assistant_msg.content, str):
+                            _final_text_for_title = final_assistant_msg.content
+                        elif isinstance(final_assistant_msg.content, list):
+                            _parts: list[str] = []
+                            for _part in final_assistant_msg.content:
+                                if isinstance(_part, dict) and _part.get("type") == "text":
+                                    _parts.append(_part.get("text", ""))
+                            _final_text_for_title = "".join(_parts)
+
+                        _real_user_history = [
+                            _m
+                            for _m in messages
+                            if getattr(_m, "role", None) == "user"
+                            and isinstance(getattr(_m, "content", None), str)
+                        ]
+                        maybe_auto_title(
+                            self.db,
+                            sid,
+                            user_message,
+                            _final_text_for_title,
+                            _real_user_history,
+                        )
+                    except Exception:  # noqa: BLE001 — auto-title is best-effort
+                        _log.debug("maybe_auto_title spawn failed", exc_info=True)
+
                     return ConversationResult(
                         final_message=final_assistant_msg,
                         messages=messages,
