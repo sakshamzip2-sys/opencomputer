@@ -755,6 +755,43 @@ def _register_settings_hooks(cfg: Config) -> int:
                 )
             )
             registered += 1
+
+    # CC §6 (2026-05-11) — HTTP hooks. Same lazy-import pattern; httpx is
+    # already a hard dep so no install gate needed beyond config presence.
+    if getattr(cfg, "http_hooks", ()):
+        from opencomputer.hooks.http_handlers import (  # noqa: PLC0415
+            make_http_hook_handler,
+        )
+
+        for hh in cfg.http_hooks:
+            try:
+                event = HookEvent(hh.event)
+            except ValueError:
+                _log.warning(
+                    "http hook: unknown event %r; skipping", hh.event
+                )
+                continue
+            # HTTP hooks default to blocking on PRE_* events (their
+            # whole purpose is to gate the next action) and fire-and-
+            # forget on POST_* / observation events.
+            fire_and_forget = (event != HookEvent.PRE_LLM_CALL) and not event.value.startswith("Pre")
+            try:
+                handler = make_http_hook_handler(hh)
+            except ValueError as exc:
+                _log.warning(
+                    "http hook: invalid config skipped (%s): %r", exc, hh
+                )
+                continue
+            hook_engine.register(
+                HookSpec(
+                    event=event,
+                    handler=handler,
+                    matcher=hh.matcher,
+                    fire_and_forget=fire_and_forget,
+                    timeout_ms=int(hh.timeout_seconds * 1000),
+                )
+            )
+            registered += 1
     return registered
 
 

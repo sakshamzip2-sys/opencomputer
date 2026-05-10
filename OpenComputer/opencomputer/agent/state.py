@@ -12,15 +12,70 @@ Uses WAL mode + application-level retry jitter for concurrency.
 from __future__ import annotations
 
 import json
+
+# v18 visibility surface — these dataclasses landed on a separate
+# feature branch (see docs/superpowers/specs/2026-05-10-cc-usage-context-
+# visibility-design.md). The worktree this file lives on derives from
+# origin/main BEFORE that branch was merged locally; the post-merge
+# main has the SessionUsageRow definition. To keep this branch
+# self-contained we declare ``PromptCheckpoint`` here next to the other
+# user-facing dataclasses; the visibility-branch merge keeps both.
+import logging as _logging_for_checkpoints
 import random
 import sqlite3
 import time
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from plugin_sdk.core import Message, ToolCall
+
+_LOG = _logging_for_checkpoints.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PromptCheckpoint:
+    """User-named session checkpoint backing ``/checkpoint`` + ``/restore``.
+
+    Spec: docs/OC-FROM-CLAUDE-CODE.md §11.
+
+    Distinct from the RewindStore (filesystem checkpoints powering
+    ``/rollback``). Prompt checkpoints capture the message history at a
+    chosen turn so the user can roll back to a known-good conversation
+    state when the agent goes down a wrong path.
+
+    Attributes:
+        id: stable uuid4 string used by ``/restore <id>``.
+        session_id: parent session FK; CASCADE-deletes with the session.
+        prompt_index: integer offset (turn number) — surfaced in
+            ``/restore`` listings so users can see "checkpoint after 5
+            turns".
+        messages: JSON-deserialised list of message dicts at the
+            checkpoint moment. Each dict shape matches the wire format
+            stored in ``messages``. None when the stored JSON is
+            corrupt (the getter logs a warning and returns None in
+            place of the row).
+        files_snapshot: opt-in mapping of path → hash captured at
+            checkpoint time. Off by default; enabled when the
+            ``checkpoints.snapshot_files`` config is true. Provider-
+            independent — the file content is NOT stored, just hashes
+            for "did this file change" UX.
+        label: human-readable handle. Non-unique — multiple checkpoints
+            in a session can share a label (e.g. auto-labelled
+            ``"before-Edit"``).
+        created_at: epoch seconds.
+    """
+
+    id: str
+    session_id: str
+    prompt_index: int
+    messages: list[dict[str, Any]]
+    files_snapshot: dict[str, str] | None
+    label: str
+    created_at: float
 
 #: Incremented when the SQLite schema is extended. Migration at open
 #: time advances the DB from its stored version to :data:`SCHEMA_VERSION`
@@ -1171,6 +1226,210 @@ class SessionDB:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    # ─── Prompt checkpoints (CC §11 — user-invocable /checkpoint, /restore) ──
+
+    def create_prompt_checkpoint(
+        self,
+        *,
+        session_id: str,
+        prompt_index: int,
+        messages: list[dict[str, Any]],
+        label: str,
+        files_snapshot: dict[str, str] | None = None,
+    ) -> str:
+        """Write a new row to ``prompt_checkpoints`` and return its id.
+
+        Spec: docs/OC-FROM-CLAUDE-CODE.md §11. Caller is responsible for
+        determining what ``messages`` to snapshot (typically the
+        in-flight message list at the user's turn boundary).
+
+        Validation:
+          - ``session_id`` must be non-empty (FK is enforced; a write
+            against an unknown sid raises ``sqlite3.IntegrityError``)
+          - ``label`` must be non-empty (UX contract — empty is a bug)
+          - ``messages`` is JSON-encoded; non-serialisable shapes raise
+
+        Returns the freshly-allocated uuid4 string. The id is the
+        stable handle ``/restore <id>`` uses.
+        """
+        if not session_id:
+            raise ValueError("create_prompt_checkpoint: session_id is required")
+        if not label:
+            raise ValueError("create_prompt_checkpoint: label is required")
+        cp_id = str(uuid.uuid4())
+        messages_json = json.dumps(messages)
+        files_json = json.dumps(files_snapshot) if files_snapshot is not None else None
+        with self._txn() as conn:
+            conn.execute(
+                """
+                INSERT INTO prompt_checkpoints
+                    (id, session_id, prompt_index, messages_snapshot_json,
+                     files_snapshot_json, label, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cp_id,
+                    session_id,
+                    int(prompt_index),
+                    messages_json,
+                    files_json,
+                    label,
+                    time.time(),
+                ),
+            )
+        return cp_id
+
+    def list_prompt_checkpoints(
+        self, session_id: str, *, limit: int = 50
+    ) -> list[PromptCheckpoint]:
+        """Return checkpoints for a session, most-recent first.
+
+        Empty / unknown session returns ``[]``. Limit clamped to
+        ``[1, 1000]`` mirroring ``usage_summary_aggregate``.
+        """
+        if not session_id:
+            return []
+        clamped_limit = max(1, min(int(limit) if limit else 1, 1000))
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id, session_id, prompt_index,
+                           messages_snapshot_json, files_snapshot_json,
+                           label, created_at
+                    FROM prompt_checkpoints
+                    WHERE session_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (session_id, clamped_limit),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            _LOG.error(
+                "list_prompt_checkpoints: SQL error for session_id=%s: %s",
+                session_id,
+                exc,
+            )
+            return []
+        return [self._row_to_checkpoint(r) for r in rows if r is not None]
+
+    def get_prompt_checkpoint(self, checkpoint_id: str) -> PromptCheckpoint | None:
+        """Fetch one checkpoint by id. Returns ``None`` when:
+
+          - id is empty / unknown
+          - ``messages_snapshot_json`` is corrupt JSON (logged at
+            warning; the row is treated as unreadable so ``/restore``
+            falls back to listing instead of crashing)
+        """
+        if not checkpoint_id:
+            return None
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT id, session_id, prompt_index,
+                           messages_snapshot_json, files_snapshot_json,
+                           label, created_at
+                    FROM prompt_checkpoints WHERE id = ?
+                    """,
+                    (checkpoint_id,),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            _LOG.error("get_prompt_checkpoint: SQL error for id=%s: %s", checkpoint_id, exc)
+            return None
+        if row is None:
+            return None
+        try:
+            return self._row_to_checkpoint(row)
+        except (json.JSONDecodeError, TypeError) as exc:
+            _LOG.warning(
+                "get_prompt_checkpoint: corrupt JSON for id=%s — treating as missing: %s",
+                checkpoint_id,
+                exc,
+            )
+            return None
+
+    def find_prompt_checkpoint_by_label(
+        self, *, session_id: str, label: str
+    ) -> PromptCheckpoint | None:
+        """Look up a checkpoint by ``(session_id, label)``.
+
+        Labels are non-unique; this returns the MOST RECENTLY CREATED
+        row matching both. Returns ``None`` when no row matches or
+        when either argument is empty.
+        """
+        if not session_id or not label:
+            return None
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT id, session_id, prompt_index,
+                           messages_snapshot_json, files_snapshot_json,
+                           label, created_at
+                    FROM prompt_checkpoints
+                    WHERE session_id = ? AND label = ?
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (session_id, label),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            _LOG.error(
+                "find_prompt_checkpoint_by_label: SQL error for (%s, %s): %s",
+                session_id,
+                label,
+                exc,
+            )
+            return None
+        if row is None:
+            return None
+        try:
+            return self._row_to_checkpoint(row)
+        except (json.JSONDecodeError, TypeError) as exc:
+            _LOG.warning(
+                "find_prompt_checkpoint_by_label: corrupt JSON: %s", exc
+            )
+            return None
+
+    def delete_prompt_checkpoint(self, checkpoint_id: str) -> bool:
+        """Remove a checkpoint by id. Returns True if a row was
+        deleted; False otherwise (no-op for unknown ids)."""
+        if not checkpoint_id:
+            return False
+        with self._txn() as conn:
+            cur = conn.execute(
+                "DELETE FROM prompt_checkpoints WHERE id = ?", (checkpoint_id,)
+            )
+            return cur.rowcount > 0
+
+    @staticmethod
+    def _row_to_checkpoint(row: Any) -> PromptCheckpoint:
+        """Decode a raw sqlite row into the typed dataclass.
+
+        Raises ``json.JSONDecodeError`` if ``messages_snapshot_json`` is
+        corrupt — callers catch and degrade to "treat as missing".
+        """
+        messages = json.loads(row["messages_snapshot_json"])
+        if not isinstance(messages, list):
+            raise json.JSONDecodeError(
+                "messages_snapshot_json was not a list", row["messages_snapshot_json"], 0
+            )
+        files_raw = row["files_snapshot_json"]
+        files_snapshot: dict[str, str] | None = None
+        if files_raw:
+            parsed = json.loads(files_raw)
+            if isinstance(parsed, dict):
+                files_snapshot = {str(k): str(v) for k, v in parsed.items()}
+        return PromptCheckpoint(
+            id=row["id"],
+            session_id=row["session_id"],
+            prompt_index=int(row["prompt_index"]),
+            messages=messages,
+            files_snapshot=files_snapshot,
+            label=row["label"],
+            created_at=float(row["created_at"]),
+        )
+
     def find_children_sessions(
         self, parent_session_id: str
     ) -> list[dict[str, Any]]:
@@ -1765,6 +2024,92 @@ class SessionDB:
                 "WHERE id = ?",
                 (in_delta, out_delta, cr_delta, cw_delta, session_id),
             )
+
+    def replace_session_messages_from_checkpoint(
+        self, *, session_id: str, checkpoint_id: str
+    ) -> int:
+        """Truncate the session's messages and replay the snapshot.
+
+        Used by ``/restore`` (CC §11). Atomic: the truncation and the
+        snapshot replay happen in one transaction. On any failure the
+        session's message history is left unchanged.
+
+        Returns the number of rows inserted. Returns ``0`` (without
+        raising) when:
+
+          - session_id or checkpoint_id is empty
+          - the checkpoint does not exist
+          - the checkpoint's session_id does not match (refuse to
+            cross-restore — checkpoints are session-scoped)
+          - the checkpoint's messages list is empty (a no-op restore
+            is suspicious; refuse rather than silently nuke the session)
+
+        Side effects:
+            ``messages`` rows for ``session_id`` are deleted before
+            the snapshot rows insert. The FTS5 triggers fire on both
+            sides so search stays consistent.
+        """
+        if not session_id or not checkpoint_id:
+            return 0
+        cp = self.get_prompt_checkpoint(checkpoint_id)
+        if cp is None:
+            _LOG.warning(
+                "replace_session_messages_from_checkpoint: unknown checkpoint id=%s",
+                checkpoint_id,
+            )
+            return 0
+        if cp.session_id != session_id:
+            _LOG.warning(
+                "replace_session_messages_from_checkpoint: refusing cross-session "
+                "restore (checkpoint.session_id=%s, target=%s)",
+                cp.session_id,
+                session_id,
+            )
+            return 0
+        if not cp.messages:
+            _LOG.warning(
+                "replace_session_messages_from_checkpoint: refusing empty-snapshot "
+                "restore for session=%s (checkpoint id=%s)",
+                session_id,
+                checkpoint_id,
+            )
+            return 0
+
+        inserted = 0
+        with self._txn() as conn:
+            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            for msg_dict in cp.messages:
+                if not isinstance(msg_dict, dict):
+                    continue
+                role = str(msg_dict.get("role", "")) or "user"
+                content = msg_dict.get("content")
+                content_str = (
+                    content if isinstance(content, str) else json.dumps(content)
+                )
+                tool_calls_raw = msg_dict.get("tool_calls")
+                tool_calls_json: str | None
+                if tool_calls_raw:
+                    tool_calls_json = json.dumps(tool_calls_raw)
+                else:
+                    tool_calls_json = None
+                conn.execute(
+                    """
+                    INSERT INTO messages(session_id, role, content, tool_call_id,
+                                          tool_calls, name, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session_id,
+                        role,
+                        content_str,
+                        msg_dict.get("tool_call_id"),
+                        tool_calls_json,
+                        msg_dict.get("name"),
+                        time.time(),
+                    ),
+                )
+                inserted += 1
+        return inserted
 
     def get_messages(self, session_id: str) -> list[Message]:
         with self._connect() as conn:

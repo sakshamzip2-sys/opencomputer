@@ -103,6 +103,47 @@ class HookEvent(str, Enum):
     # appending, A/B response routing.
     TRANSFORM_LLM_OUTPUT = "TransformLlmOutput"
 
+    # CC §2 (2026-05-11) — five additional Claude Code lifecycle events.
+    # Each is fire-and-forget by default (observers, not gates).
+
+    # POST_TOOL_BATCH fires once after a parallel tool batch resolves (all
+    # ``dispatch_tool_calls`` results are in). Use case: telemetry that wants
+    # the FULL batch view rather than N separate POST_TOOL_USE fires. The
+    # context carries ``batch_results`` (list of ToolResult) and
+    # ``batch_calls`` (list of ToolCall) in parallel order.
+    POST_TOOL_BATCH = "PostToolBatch"
+
+    # USER_PROMPT_EXPANSION fires when a slash command expands into a prompt
+    # (e.g. ``/scrape <url>`` → an injected user message). Distinct from
+    # ``UserPromptSubmit`` which fires for raw user text. The context's
+    # ``expansion_source`` carries the slash command name and ``message`` /
+    # ``prompt_text`` carry the expanded text. Use case: audit which slashes
+    # generate prompts vs return immediately.
+    USER_PROMPT_EXPANSION = "UserPromptExpansion"
+
+    # INSTRUCTIONS_LOADED fires when a ``CLAUDE.md`` / ``OPENCOMPUTER.md`` /
+    # ``SOUL.md`` / ``AGENTS.md`` instruction file is loaded into the
+    # system prompt. The context's ``instructions_path`` carries the file
+    # path; ``prompt_text`` carries the file body. Use case: react to
+    # project-specific rules (e.g. enable strict-mode tools when a
+    # given file is present).
+    INSTRUCTIONS_LOADED = "InstructionsLoaded"
+
+    # CWD_CHANGED fires when the agent's working directory changes between
+    # turns. The context carries the new ``cwd`` and the previous
+    # ``previous_cwd``. Use case: re-load directory-scoped instructions or
+    # run direnv. Fires only when the cwd actually differs from the
+    # previous turn's cwd — no fire on first-turn cwd capture.
+    CWD_CHANGED = "CwdChanged"
+
+    # FILE_CHANGED fires when a watched file is observed to change on disk.
+    # The file-watcher itself is plugin-provided (no core watcher daemon);
+    # this event provides the contract so plugins can register watchers and
+    # fan out changes via the standard hook surface. Context carries
+    # ``file_path`` and the change ``kind`` ("created" | "modified" |
+    # "deleted").
+    FILE_CHANGED = "FileChanged"
+
 
 @dataclass(frozen=True, slots=True)
 class HookContext:
@@ -188,6 +229,24 @@ class HookContext:
     #: TRANSFORM_LLM_OUTPUT. Distinct from ``outgoing_text`` which is the
     #: per-channel-message text in MESSAGE_SENDING (multiple chunks possible).
     response_text: str | None = None
+    # CC §2 (2026-05-11) — five additional events; matching context fields.
+    #: Parallel-batch tool calls + results — populated for POST_TOOL_BATCH.
+    #: Same length tuples; ``batch_calls[i]`` produced ``batch_results[i]``.
+    batch_calls: tuple[Any, ...] | None = None
+    batch_results: tuple[Any, ...] | None = None
+    #: Slash command name that produced the expansion — populated for
+    #: USER_PROMPT_EXPANSION. E.g. "scrape", "btw", "search".
+    expansion_source: str | None = None
+    #: Path of the instruction file that was just loaded — populated for
+    #: INSTRUCTIONS_LOADED. ``prompt_text`` carries the body.
+    instructions_path: str | None = None
+    #: Current and previous working directory — populated for CWD_CHANGED.
+    cwd: str | None = None
+    previous_cwd: str | None = None
+    #: Path of the file whose state change is being notified — populated
+    #: for FILE_CHANGED. ``change_kind`` carries the verb.
+    file_path: str | None = None
+    change_kind: str | None = None  # "created" | "modified" | "deleted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,4 +347,10 @@ ALL_HOOK_EVENTS: tuple[HookEvent, ...] = (
     HookEvent.SESSION_FINALIZE,
     HookEvent.SESSION_RESET,
     HookEvent.TRANSFORM_LLM_OUTPUT,
+    # CC §2 (2026-05-11) — five Claude-Code lifecycle additions.
+    HookEvent.POST_TOOL_BATCH,
+    HookEvent.USER_PROMPT_EXPANSION,
+    HookEvent.INSTRUCTIONS_LOADED,
+    HookEvent.CWD_CHANGED,
+    HookEvent.FILE_CHANGED,
 )
