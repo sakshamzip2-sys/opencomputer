@@ -14,7 +14,7 @@ import logging
 import shutil
 from pathlib import Path
 
-import dispatcher  # type: ignore[import-not-found]
+import opencli_dispatcher as dispatcher  # type: ignore[import-not-found]
 
 from plugin_sdk.doctor import RepairResult
 

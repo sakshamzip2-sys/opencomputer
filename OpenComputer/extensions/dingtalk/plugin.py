@@ -5,4 +5,4 @@ from adapter import DingTalkAdapter  # type: ignore[import-not-found]
 
 
 def register(api) -> None:  # PluginAPI duck-typed
-    api.register_channel("dingtalk", DingTalkAdapter)
+    api.register_channel("dingtalk", DingTalkAdapter())

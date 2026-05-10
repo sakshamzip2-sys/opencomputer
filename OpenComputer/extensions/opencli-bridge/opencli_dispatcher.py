@@ -199,7 +199,7 @@ def run_browser(
         cmd_args.extend(["--tab", target])
     if args:
         cmd_args.extend(args)
-    return run_opencli(cmd_args, timeout=timeout)
+    return run_opencli(cmd_args, timeout=timeout, json_mode=False)
 
 
 def list_adapters() -> dict[str, Any]:

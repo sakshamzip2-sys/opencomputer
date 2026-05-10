@@ -5,4 +5,4 @@ from adapter import WeComFullAdapter  # type: ignore[import-not-found]
 
 
 def register(api) -> None:
-    api.register_channel("wecom", WeComFullAdapter)
+    api.register_channel("wecom", WeComFullAdapter())

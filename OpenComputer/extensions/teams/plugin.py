@@ -5,4 +5,4 @@ from adapter import TeamsAdapter  # type: ignore[import-not-found]
 
 
 def register(api) -> None:  # PluginAPI duck-typed
-    api.register_channel("teams", TeamsAdapter)
+    api.register_channel("teams", TeamsAdapter())

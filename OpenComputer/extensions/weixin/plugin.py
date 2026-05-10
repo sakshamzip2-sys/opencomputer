@@ -5,4 +5,4 @@ from adapter import WeixinAdapter  # type: ignore[import-not-found]
 
 
 def register(api) -> None:
-    api.register_channel("weixin", WeixinAdapter)
+    api.register_channel("weixin", WeixinAdapter())

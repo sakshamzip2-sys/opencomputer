@@ -22,7 +22,7 @@ import json
 import logging
 from typing import Any
 
-import dispatcher  # type: ignore[import-not-found]
+import opencli_dispatcher as dispatcher  # type: ignore[import-not-found]
 
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema

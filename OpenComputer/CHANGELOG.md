@@ -2,6 +2,12 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
+## [v2026.5.10.post1] — 2026-05-10
+
+- fix(channels): 10 channel adapters were registering the class instead of an instance (dingtalk, feishu, irc, qqbot, teams, wecom, wecom-callback, webhook-inbound, weixin, yuanbao) — caused gateway crash with `BaseChannelAdapter.set_message_handler() missing 1 required positional argument: 'handler'`
+- fix(opencli-bridge): rename `dispatcher.py` → `opencli_dispatcher.py` to avoid sys.modules collision with browser-harness's dispatcher
+- fix(opencli-bridge): `run_browser()` no longer appends `-f json` (browser subcommands don't support it)
+
 ## [v2026.5.10] — 2026-05-10
 
 - feat(browser): browser-harness plugin (agent-browser/Hermes-derived, replaces browser-control as default)

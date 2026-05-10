@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import dispatcher  # type: ignore[import-not-found]
+import opencli_dispatcher as dispatcher  # type: ignore[import-not-found]
 
 _log = logging.getLogger("opencomputer.opencli_bridge.actions")
 

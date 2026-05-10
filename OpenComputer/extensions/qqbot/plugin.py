@@ -5,4 +5,4 @@ from adapter import QQBotAdapter  # type: ignore[import-not-found]
 
 
 def register(api) -> None:
-    api.register_channel("qqbot", QQBotAdapter)
+    api.register_channel("qqbot", QQBotAdapter())

@@ -5,4 +5,4 @@ from adapter import YuanbaoAdapter  # type: ignore[import-not-found]
 
 
 def register(api) -> None:  # PluginAPI duck-typed
-    api.register_channel("yuanbao", YuanbaoAdapter)
+    api.register_channel("yuanbao", YuanbaoAdapter())
