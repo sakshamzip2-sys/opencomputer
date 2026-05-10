@@ -42,6 +42,18 @@ _session_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "session_id", default=None,
 )
 
+# 2026-05-10 — Turn-index ContextVar used by tools that need to attribute
+# rows to a specific (session_id, turn_index) pair. The agent loop sets
+# this immediately before dispatching tool calls so tools like
+# ``RecallTool`` can write to ``recall_citations`` without plumbing
+# turn_index through ``ToolCall`` arguments. Default 0 means "no turn
+# context bound" — callers that need a strict per-turn id should still
+# guard with ``get_turn_index() is not None`` semantics by checking
+# whether they're inside a real session.
+_turn_index_var: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "turn_index", default=0,
+)
+
 
 def set_session_id(sid: str | None) -> None:
     """Bind ``sid`` to the current asyncio context for log stamping.
@@ -52,6 +64,21 @@ def set_session_id(sid: str | None) -> None:
     sees its own copy).
     """
     _session_id_var.set(sid)
+
+
+def set_turn_index(idx: int) -> None:
+    """Bind the current turn index to the asyncio context.
+
+    Called by the agent loop right before dispatching a tool batch.
+    Tools that need (session_id, turn_index) for record attribution
+    (e.g. ``RecallCitationsWriter``) read this via ``get_turn_index``.
+    """
+    _turn_index_var.set(int(idx))
+
+
+def get_turn_index() -> int:
+    """Return the current turn index from the ContextVar (default 0)."""
+    return _turn_index_var.get()
 
 
 class SessionContextFilter(logging.Filter):

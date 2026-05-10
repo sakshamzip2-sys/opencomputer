@@ -2551,6 +2551,23 @@ class AgentLoop:
                 # it first and then got cancelled mid-dispatch, the DB would hold a
                 # tool_use with no matching tool_result — Anthropic 400s on resume.
                 # Atomic batch persist below restores the invariant.
+                # 2026-05-10 — bind turn_index to the ContextVar so tools
+                # like RecallTool can attribute rows to (session_id,
+                # turn_index) without plumbing it through ToolCall args.
+                # session_id is already bound at session-creation time
+                # by SessionDB.create_session.
+                try:
+                    from opencomputer.observability.logging_config import (
+                        set_turn_index,
+                    )
+
+                    set_turn_index(int(iterations))
+                except Exception:  # noqa: BLE001 — never break dispatch
+                    _log.debug(
+                        "set_turn_index failed; recall citations may "
+                        "miss turn attribution this iteration",
+                        exc_info=True,
+                    )
                 tool_results = await self._dispatch_tool_calls(
                     step.assistant_message.tool_calls or [],
                     session_id=sid,
