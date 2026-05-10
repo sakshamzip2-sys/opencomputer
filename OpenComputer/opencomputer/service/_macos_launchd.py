@@ -221,7 +221,22 @@ def stop() -> bool:
     # atomic operation. The KeepAlive policy can't trigger because
     # the service is no longer in the domain.
     rc, _, _ = _launchctl("bootout", f"gui/{_uid()}/{label}")
-    return rc == 0
+    if rc != 0:
+        return False
+    # Wait briefly for launchd to fully detach the daemon. Without this
+    # delay, ``oc service restart`` races: bootout returns immediately
+    # but the next ``bootstrap`` collides with the still-detaching
+    # service and fails — surfacing as "restart failed: start step
+    # failed". Polling launchctl print until rc != 0 confirms the
+    # service is gone before stop() returns.
+    for _ in range(20):  # ~2s max
+        rc_check, _, _ = _launchctl("print", f"gui/{_uid()}/{label}")
+        if rc_check != 0:
+            return True
+        time.sleep(0.1)
+    # Bootout said success but service still listed; trust the bootout
+    # return code rather than block indefinitely.
+    return True
 
 
 def follow_logs(*, lines: int = 100, follow: bool = False) -> Iterator[str]:

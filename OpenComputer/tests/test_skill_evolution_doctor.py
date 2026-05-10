@@ -22,10 +22,14 @@ import time
 from opencomputer.doctor import _check_skill_evolution_state
 
 
-def test_state_missing_returns_ok_disabled(tmp_path):
+def test_state_missing_returns_ok_enabled_by_default(tmp_path):
+    """2026-05-10 — default flipped to ON. Missing state file is now
+    treated as 'enabled by default, no heartbeat yet'."""
     result = _check_skill_evolution_state(tmp_path)
     assert result.ok is True
-    assert "disabled" in result.message.lower()
+    msg_lower = result.message.lower()
+    assert "enabled by default" in msg_lower
+    assert "opt out" in msg_lower
 
 
 def test_state_disabled_returns_ok(tmp_path):
