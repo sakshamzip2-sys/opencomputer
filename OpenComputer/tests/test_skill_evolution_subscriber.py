@@ -39,6 +39,34 @@ async def test_subscriber_subscribes_on_start():
 
 
 @pytest.mark.asyncio
+async def test_subscriber_writes_heartbeat_on_start(tmp_path):
+    """Regression: heartbeat must be written when subscriber starts, not
+    only on first observed session_end. Without this, doctor's
+    `skill-evolution heartbeat stale` warning fires on every fresh
+    gateway start until the user triggers a real agent session — which
+    can be hours, far past the 10-min stale threshold."""
+    bus = MagicMock()
+    bus.subscribe = MagicMock(return_value=MagicMock())
+    sub = EvolutionSubscriber(
+        bus=bus,
+        profile_home_factory=lambda: tmp_path,
+        session_db_factory=lambda: MagicMock(),
+        provider=MagicMock(),
+        cost_guard=MagicMock(),
+    )
+
+    hb_path = tmp_path / "skills" / "evolution_heartbeat"
+    assert not hb_path.exists()
+
+    sub.start()
+
+    assert hb_path.exists(), "start() must write evolution_heartbeat"
+    written_ts = float(hb_path.read_text().strip())
+    # Heartbeat is a unix timestamp; very recent (within 5s of now).
+    assert abs(time.time() - written_ts) < 5
+
+
+@pytest.mark.asyncio
 async def test_subscriber_noops_when_disabled(tmp_path):
     bus = MagicMock()
     bus.subscribe = MagicMock(return_value=MagicMock())

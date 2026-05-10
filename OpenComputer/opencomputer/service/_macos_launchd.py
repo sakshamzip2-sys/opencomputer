@@ -144,10 +144,21 @@ def status() -> StatusResult:
     running = False
     pid: int | None = None
     if rc == 0:
+        # `launchctl print` prints `state =` multiple times: the first one
+        # is the top-level service lifecycle state (e.g. "running" /
+        # "not running" / "spawn scheduled"), and subsequent indented lines
+        # describe attribute states ("active" / "inactive"). Reading every
+        # line and overwriting `running` left it set by whichever
+        # `state =` came LAST — on macOS Sequoia that's "active", which
+        # doesn't contain the substring "running" — flipping the doctor
+        # row to "enabled but not running" even when the daemon was up.
+        # Take only the first `state =` line.
+        state_seen = False
         for raw_line in out.splitlines():
             line = raw_line.strip()
-            if line.startswith("state ="):
+            if not state_seen and line.startswith("state ="):
                 running = "running" in line
+                state_seen = True
             elif line.startswith("pid ="):
                 try:
                     pid = int(line.split("=", 1)[1].strip())
