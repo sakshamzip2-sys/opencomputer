@@ -4478,6 +4478,12 @@ from opencomputer.cli_usage import usage_app  # noqa: E402
 
 app.add_typer(usage_app, name="usage")
 
+# CC §4 (`/context`) — context-window inspection per session.
+# Spec: docs/superpowers/specs/2026-05-10-cc-usage-context-visibility-design.md
+from opencomputer.cli_context import context_app  # noqa: E402
+
+app.add_typer(context_app, name="context")
+
 # PR-1 — evolution self-improvement CLI
 from opencomputer.evolution.entrypoint import evolution_app  # noqa: E402
 

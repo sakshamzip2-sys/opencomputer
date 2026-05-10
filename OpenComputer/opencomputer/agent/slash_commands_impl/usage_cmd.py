@@ -63,6 +63,10 @@ class UsageCommand(SlashCommand):
         cost = runtime.custom.get("session_cost_usd")
         rl_remaining = runtime.custom.get("rate_limit_remaining")
         rl_reset = runtime.custom.get("rate_limit_reset_at")
+        # v18 (2026-05-10): per-session compaction count. AgentLoop sets
+        # this after each successful CompactionResult.did_compact via
+        # ``_record_compaction``. See CC visibility design §4.5.
+        compactions = runtime.custom.get("session_compactions")
 
         lines = ["## Session usage"]
         lines.append(f"  input tokens:  {_fmt_tokens(in_t)}")
@@ -79,6 +83,12 @@ class UsageCommand(SlashCommand):
                 f"  cache:         {_fmt_cache_count(cr)} read / "
                 f"{_fmt_cache_count(cw)} written"
             )
+
+        # v18 compaction-count row — only when > 0 so quiet sessions
+        # stay clean. Non-int / negative values are silently dropped to
+        # match the cache-row pattern; a buggy plugin can't break /usage.
+        if isinstance(compactions, int) and not isinstance(compactions, bool) and compactions > 0:
+            lines.append(f"  compactions:   {compactions}")
 
         if rl_remaining is not None or rl_reset is not None:
             lines.append("\n## Rate limit")

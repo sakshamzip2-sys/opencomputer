@@ -12,15 +12,51 @@ Uses WAL mode + application-level retry jitter for concurrency.
 from __future__ import annotations
 
 import json
+import logging
 import random
 import sqlite3
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from plugin_sdk.core import Message, ToolCall
+
+#: Logger for SessionDB internals. Module-level to keep call sites cheap;
+#: callers do not configure handlers — that's owned by the host (CLI /
+#: gateway). Severity discipline:
+#:   - ``warning``: adversarial / out-of-band caller passed empty / unknown
+#:     session ids; helpers self-heal but the caller likely has a bug.
+#:   - ``error``: a SQL operation we expected to succeed raised; bubbled
+#:     to the user via the empty-state path so the agent loop never wedges.
+_LOG = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SessionUsageRow:
+    """Per-session usage snapshot — return value of
+    :meth:`SessionDB.session_usage_summary` and
+    :meth:`SessionDB.usage_summary_aggregate`.
+
+    Frozen + slots-free for cheap equality + simple dict-like consumption
+    by Rich / typer renderers. ``cost_usd`` is ``None`` whenever the
+    underlying ``llm_calls`` rows for this session lack pricing data —
+    surfacing ``0.0`` would be a lie because the cost-guard table doesn't
+    cover every model. See CC visibility spec §4.2.
+    """
+
+    session_id: str
+    model: str | None
+    started_at: float
+    ended_at: float | None
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    compactions_count: int
+    cost_usd: float | None
 
 #: Incremented when the SQLite schema is extended. Migration at open
 #: time advances the DB from its stored version to :data:`SCHEMA_VERSION`
@@ -40,7 +76,14 @@ from plugin_sdk.core import Message, ToolCall
 #: v17 = source-column (2026-05-10) — ``sessions.source`` so oc-webui's
 #: hermes-port sidebar can distinguish CLI/messaging/webui rows. Existing
 #: rows are backfilled with ``'cli'`` (the historical de-facto source).
-SCHEMA_VERSION = 17
+#: v18 = compactions-count (2026-05-10) — ``sessions.compactions_count``
+#: tracks the number of times :class:`CompactionEngine` rewrote the
+#: message history for a given session. Surfaced by ``/context`` (slash)
+#: and ``oc context show`` / ``oc usage`` (CLIs) — closes the CC §4 +
+#: §10 visibility gaps documented at
+#: ``docs/superpowers/specs/2026-05-10-cc-usage-context-visibility-design.md``.
+#: Additive nullable column with DEFAULT 0; legacy rows read 0.
+SCHEMA_VERSION = 18
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -72,10 +115,15 @@ CREATE TABLE IF NOT EXISTS sessions (
     parent_session_id TEXT,             -- delegate-lineage (2026-05-10): if this session was
                                          -- spawned by a delegate() call, this points at the
                                          -- parent's session id; NULL for root sessions.
-    source            TEXT               -- source-column (2026-05-10): origin of the row,
+    source            TEXT,              -- source-column (2026-05-10): origin of the row,
                                          -- one of 'cli' | 'webui' | 'discord' | 'telegram' |
                                          -- 'slack' | 'cron' | 'tool' | 'api_server'. Used by
                                          -- oc-webui's sidebar to filter/group rows.
+    compactions_count INTEGER DEFAULT 0  -- compactions-count (v18, 2026-05-10): number of
+                                         -- times CompactionEngine rewrote this session's
+                                         -- message history. Bumped by AgentLoop after
+                                         -- CompactionResult.did_compact == True. Surfaced by
+                                         -- /context, /usage, oc usage, oc context.
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
@@ -266,6 +314,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (14, 15): "_migrate_v14_to_v15",
     (15, 16): "_migrate_v15_to_v16",
     (16, 17): "_migrate_v16_to_v17",
+    (17, 18): "_migrate_v17_to_v18",
 }
 
 
@@ -655,6 +704,8 @@ _EXPECTED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("sessions", "cwd", "TEXT"),  # Plan 3 (2026-05-01) — profile-suggester input
     ("sessions", "goal_last_judge_reason", "TEXT"),  # Kanban-Goals v2 (2026-05-08)
     ("sessions", "parent_session_id", "TEXT"),  # delegate-lineage (2026-05-10)
+    ("sessions", "source", "TEXT"),  # source-column (v17, 2026-05-10)
+    ("sessions", "compactions_count", "INTEGER DEFAULT 0"),  # compactions-count (v18, 2026-05-10)
     ("episodic_events", "dreamed_into", "INTEGER"),
 )
 
@@ -948,6 +999,37 @@ def _migrate_v16_to_v17(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source)"
+    )
+
+
+def _migrate_v17_to_v18(conn: sqlite3.Connection) -> None:
+    """compactions-count (2026-05-10) — per-session compaction counter.
+
+    Spec: ``docs/superpowers/specs/2026-05-10-cc-usage-context-visibility-design.md``.
+
+    Adds ``sessions.compactions_count INTEGER DEFAULT 0``. Bumped by
+    :class:`opencomputer.agent.loop.AgentLoop` after a successful
+    :class:`CompactionEngine` rewrite (``CompactionResult.did_compact``).
+    Surfaced by ``/context`` and ``/usage`` slash commands plus the new
+    ``oc usage`` / ``oc context`` CLI subcommands — closes the visibility
+    gaps documented in CC §4 (`/context`) and CC §10 (`/usage`).
+
+    Idempotent: ALTER skipped when the column already exists. Pre-v18
+    rows read 0 (the DEFAULT) for this column — the schema is honest
+    about not having tracked the counter before this migration; we
+    don't backfill historical compactions, just zero out the column
+    so future bumps land on a consistent base.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "compactions_count" not in cols:
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN compactions_count INTEGER DEFAULT 0"
+        )
+    # Defensive: if a partially-migrated DB ended up with NULL values
+    # (column added with no DEFAULT, e.g. pre-3.31 SQLite quirks), normalise
+    # to 0 so the SUM/MAX/MIN aggregates downstream never trip.
+    conn.execute(
+        "UPDATE sessions SET compactions_count = 0 WHERE compactions_count IS NULL"
     )
 
 
@@ -1758,6 +1840,225 @@ class SessionDB:
                 "WHERE id = ?",
                 (in_delta, out_delta, cr_delta, cw_delta, session_id),
             )
+
+    def increment_compaction_count(self, session_id: str) -> int:
+        """Atomically bump ``sessions.compactions_count`` for ``session_id``.
+
+        Returns the post-increment value. Returns ``0`` (without raising)
+        when:
+
+          - ``session_id`` is empty / falsy (caller bug — logged at WARNING),
+          - the session row does not exist (caller raced delete; logged
+            at WARNING), or
+          - the underlying SQL raised (logged at ERROR + returned 0 so the
+            agent loop never wedges over a counter).
+
+        Never raises. Compaction-counter telemetry is a "nice to have"
+        for ``/context`` and ``oc usage`` — it must not break the loop.
+
+        Spec: CC visibility design §4.2.
+        """
+        if not session_id or not isinstance(session_id, str):
+            _LOG.warning(
+                "increment_compaction_count called with empty/non-string session_id=%r; "
+                "no-op",
+                session_id,
+            )
+            return 0
+        try:
+            with self._txn() as conn:
+                # Single-statement UPDATE-and-RETURNING gives us atomic
+                # bump+read; sqlite supports RETURNING since 3.35 (2021).
+                # Fall back to a second SELECT for older sqlite.
+                try:
+                    cur = conn.execute(
+                        "UPDATE sessions SET compactions_count = "
+                        "COALESCE(compactions_count, 0) + 1 "
+                        "WHERE id = ? RETURNING compactions_count",
+                        (session_id,),
+                    )
+                    row = cur.fetchone()
+                    if row is None:
+                        _LOG.warning(
+                            "increment_compaction_count: no row for session_id=%s; "
+                            "counter unchanged",
+                            session_id,
+                        )
+                        return 0
+                    return int(row[0])
+                except sqlite3.OperationalError as exc:
+                    if "RETURNING" not in str(exc) and "syntax" not in str(exc).lower():
+                        raise
+                    # Fallback for SQLite < 3.35 — two-step in same txn.
+                    cur = conn.execute(
+                        "UPDATE sessions SET compactions_count = "
+                        "COALESCE(compactions_count, 0) + 1 WHERE id = ?",
+                        (session_id,),
+                    )
+                    if cur.rowcount == 0:
+                        _LOG.warning(
+                            "increment_compaction_count: no row for session_id=%s; "
+                            "counter unchanged",
+                            session_id,
+                        )
+                        return 0
+                    row = conn.execute(
+                        "SELECT compactions_count FROM sessions WHERE id = ?",
+                        (session_id,),
+                    ).fetchone()
+                    return int(row[0]) if row else 0
+        except sqlite3.Error as exc:  # pragma: no cover — defensive belt
+            _LOG.error(
+                "increment_compaction_count: SQL error for session_id=%s: %s",
+                session_id,
+                exc,
+            )
+            return 0
+
+    def session_usage_summary(self, session_id: str) -> SessionUsageRow | None:
+        """Return per-session token + cache + compaction + cost totals.
+
+        Returns ``None`` for unknown / empty session ids. Cost is summed
+        from ``llm_calls`` (joined by ``session_id``); ``None`` when the
+        session has no priced llm_calls rows. See CC visibility spec §4.2.
+        """
+        if not session_id or not isinstance(session_id, str):
+            return None
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT
+                        s.id, s.model, s.started_at, s.ended_at,
+                        COALESCE(s.input_tokens, 0)       AS input_tokens,
+                        COALESCE(s.output_tokens, 0)      AS output_tokens,
+                        COALESCE(s.cache_read_tokens, 0)  AS cache_read_tokens,
+                        COALESCE(s.cache_write_tokens, 0) AS cache_write_tokens,
+                        COALESCE(s.compactions_count, 0)  AS compactions_count,
+                        (
+                            SELECT SUM(c.cost_usd)
+                            FROM llm_calls c
+                            WHERE c.session_id = s.id AND c.cost_usd IS NOT NULL
+                        ) AS cost_usd
+                    FROM sessions s
+                    WHERE s.id = ?
+                    """,
+                    (session_id,),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            _LOG.error(
+                "session_usage_summary: SQL error for session_id=%s: %s",
+                session_id,
+                exc,
+            )
+            return None
+        if row is None:
+            return None
+        return SessionUsageRow(
+            session_id=row["id"],
+            model=row["model"] or None,
+            started_at=float(row["started_at"]),
+            ended_at=float(row["ended_at"]) if row["ended_at"] is not None else None,
+            input_tokens=int(row["input_tokens"]),
+            output_tokens=int(row["output_tokens"]),
+            cache_read_tokens=int(row["cache_read_tokens"]),
+            cache_write_tokens=int(row["cache_write_tokens"]),
+            compactions_count=int(row["compactions_count"]),
+            cost_usd=(float(row["cost_usd"]) if row["cost_usd"] is not None else None),
+        )
+
+    def usage_summary_aggregate(
+        self,
+        *,
+        since: float | None = None,
+        until: float | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        limit: int = 50,
+    ) -> list[SessionUsageRow]:
+        """Return per-session usage rows for ``oc usage show``.
+
+        Args:
+            since: epoch seconds floor on ``sessions.started_at``.
+            until: epoch seconds ceiling on ``sessions.started_at``.
+            model: filter to sessions whose ``sessions.model`` matches
+                exactly. Use ``None`` for all models.
+            provider: filter to sessions where any ``llm_calls.provider``
+                row matches. Implemented via ``EXISTS`` subquery so
+                sessions with NO llm_calls are excluded when this filter
+                is active (matches user intent: "show me my Anthropic
+                sessions" means ones that actually called Anthropic).
+            limit: max rows; clamped to ``[1, 1000]``. Most-recent first.
+
+        Empty result on empty DB. Never raises; SQL errors are logged
+        and surfaced as an empty list so the CLI renders an empty-state
+        message instead of a stack trace.
+        """
+        # Input validation: clamp limit, normalise empty strings.
+        clamped_limit = max(1, min(int(limit) if limit else 1, 1000))
+        model_filter = model or None
+        provider_filter = provider or None
+
+        sql_parts = [
+            """
+            SELECT
+                s.id, s.model, s.started_at, s.ended_at,
+                COALESCE(s.input_tokens, 0)       AS input_tokens,
+                COALESCE(s.output_tokens, 0)      AS output_tokens,
+                COALESCE(s.cache_read_tokens, 0)  AS cache_read_tokens,
+                COALESCE(s.cache_write_tokens, 0) AS cache_write_tokens,
+                COALESCE(s.compactions_count, 0)  AS compactions_count,
+                (
+                    SELECT SUM(c.cost_usd)
+                    FROM llm_calls c
+                    WHERE c.session_id = s.id AND c.cost_usd IS NOT NULL
+                ) AS cost_usd
+            FROM sessions s
+            """
+        ]
+        where: list[str] = []
+        args: list[Any] = []
+        if since is not None:
+            where.append("s.started_at >= ?")
+            args.append(float(since))
+        if until is not None:
+            where.append("s.started_at <= ?")
+            args.append(float(until))
+        if model_filter is not None:
+            where.append("s.model = ?")
+            args.append(model_filter)
+        if provider_filter is not None:
+            where.append(
+                "EXISTS (SELECT 1 FROM llm_calls c WHERE c.session_id = s.id AND c.provider = ?)"
+            )
+            args.append(provider_filter)
+        if where:
+            sql_parts.append("WHERE " + " AND ".join(where))
+        sql_parts.append("ORDER BY s.started_at DESC LIMIT ?")
+        args.append(clamped_limit)
+
+        sql = "\n".join(sql_parts)
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(sql, tuple(args)).fetchall()
+        except sqlite3.Error as exc:
+            _LOG.error("usage_summary_aggregate: SQL error: %s", exc)
+            return []
+        return [
+            SessionUsageRow(
+                session_id=row["id"],
+                model=row["model"] or None,
+                started_at=float(row["started_at"]),
+                ended_at=float(row["ended_at"]) if row["ended_at"] is not None else None,
+                input_tokens=int(row["input_tokens"]),
+                output_tokens=int(row["output_tokens"]),
+                cache_read_tokens=int(row["cache_read_tokens"]),
+                cache_write_tokens=int(row["cache_write_tokens"]),
+                compactions_count=int(row["compactions_count"]),
+                cost_usd=(float(row["cost_usd"]) if row["cost_usd"] is not None else None),
+            )
+            for row in rows
+        ]
 
     def get_messages(self, session_id: str) -> list[Message]:
         with self._connect() as conn:

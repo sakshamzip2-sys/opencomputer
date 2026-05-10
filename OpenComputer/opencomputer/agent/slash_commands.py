@@ -35,6 +35,7 @@ from opencomputer.agent.slash_commands_impl.busy_cmd import BusyCommand
 from opencomputer.agent.slash_commands_impl.capabilities_cmd import (
     CapabilitiesCommand,
 )
+from opencomputer.agent.slash_commands_impl.context_cmd import ContextCommand
 from opencomputer.agent.slash_commands_impl.copy_cmd import CopyCommand
 from opencomputer.agent.slash_commands_impl.details_cmd import DetailsCommand
 from opencomputer.agent.slash_commands_impl.display_toggles_cmd import (
@@ -97,6 +98,7 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     ReasoningCommand,
     FastCommand,
     UsageCommand,
+    ContextCommand,    # CC §4 — context-window % + compactions this session
     UpdateCommand,
     PlatformsCommand,
     # Batch 2 — session-aware (read session_id + session_db from

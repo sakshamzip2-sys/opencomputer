@@ -367,4 +367,185 @@ def _render_cache_stats(
     console.print(table)
 
 
+# ─── oc usage sessions ─────────────────────────────────────────────────
+#
+# v18 (2026-05-10): per-session SessionDB-backed view that surfaces the
+# new ``compactions_count`` column alongside cumulative tokens + cache +
+# joined cost from ``llm_calls``. Distinct from the JSONL-backed top-
+# level callback above; both views co-exist because they answer
+# different questions:
+#
+#   - ``oc usage`` (callback)       : "what's my last 24h provider /
+#                                       model spend?"  — reads JSONL telemetry
+#   - ``oc usage sessions``         : "show me each session row, with
+#                                       compaction count and cost" — reads
+#                                       SessionDB
+#
+# Spec: docs/superpowers/specs/2026-05-10-cc-usage-context-visibility-design.md §4.6.
+
+
+def _resolve_sessions_db_path() -> Path:
+    """Locate the active profile's ``sessions.db``.
+
+    Mirrors the resolution chain ``cli_ambient._profile_home`` /
+    ``cli_cost`` use: env var first, then config helper. Returns a
+    path even if the file doesn't exist — :class:`SessionDB` will
+    create it on first connect (with an empty schema), and the
+    rendering layer handles "no rows" cleanly.
+    """
+    env = os.environ.get("OPENCOMPUTER_PROFILE_HOME")
+    if env:
+        return Path(env) / "sessions.db"
+    from opencomputer.agent.config import _home  # lazy: avoid cycles
+
+    return _home() / "sessions.db"
+
+
+def _format_cost_or_dash(cost: float | None) -> str:
+    """Render cost as ``$X.YY`` when known, ``—`` when the underlying
+    ``llm_calls`` rows lack pricing data. Surfacing ``$0.00`` for
+    unpriced models would lie."""
+    if cost is None:
+        return "—"
+    return f"${cost:.4f}" if cost < 0.01 else f"${cost:.2f}"
+
+
+def _format_started_at(epoch: float) -> str:
+    """Compact human render of a session start timestamp."""
+    try:
+        return datetime.fromtimestamp(epoch, tz=UTC).strftime("%Y-%m-%d %H:%M")
+    except (OSError, OverflowError, ValueError):
+        return "(invalid date)"
+
+
+@usage_app.command("sessions")
+def usage_sessions(
+    session_id: str | None = typer.Option(
+        None, "--session-id", "-s",
+        help="Filter to one session id (exact match).",
+    ),
+    model: str | None = typer.Option(
+        None, "--model", "-m",
+        help="Filter to sessions whose ``model`` column matches exactly.",
+    ),
+    provider: str | None = typer.Option(
+        None, "--provider", "-p",
+        help=(
+            "Filter to sessions where any ``llm_calls.provider`` row "
+            "matches. Sessions with no llm_calls are excluded."
+        ),
+    ),
+    since: str | None = typer.Option(
+        None, "--since",
+        help=(
+            "ISO-8601 datetime floor (e.g. '2026-05-01' or "
+            "'2026-05-01T00:00:00Z'). Only sessions started at or "
+            "after this time are included."
+        ),
+    ),
+    limit: int = typer.Option(
+        50, "--limit", "-n",
+        help="Max rows to display. Clamped to [1, 1000].",
+    ),
+) -> None:
+    """List per-session token/cache/cost/compaction summaries from SessionDB.
+
+    Reads the same data the ``/usage`` and ``/context`` slash commands
+    surface in-chat. Use this for post-session inspection — e.g., "how
+    many compactions did my marathon refactor session need?"
+    """
+    from opencomputer.agent.state import SessionDB, SessionUsageRow
+
+    db_path = _resolve_sessions_db_path()
+    db = SessionDB(db_path)
+
+    parsed_since: float | None = None
+    if since:
+        try:
+            # Accept ISO-8601 dates and datetimes; treat naive as UTC.
+            dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            parsed_since = dt.timestamp()
+        except ValueError as exc:
+            raise typer.BadParameter(
+                f"--since: invalid ISO-8601 datetime: {since!r} ({exc})"
+            ) from exc
+
+    if session_id:
+        row = db.session_usage_summary(session_id)
+        rows: list[SessionUsageRow] = [row] if row is not None else []
+    else:
+        rows = db.usage_summary_aggregate(
+            since=parsed_since,
+            model=model,
+            provider=provider,
+            limit=limit,
+        )
+
+    if not rows:
+        from opencomputer.cli_ui.empty_state import render_empty_state
+
+        render_empty_state(
+            console=console,
+            title="No sessions matched",
+            when_populated=(
+                "a per-session table with input/output tokens, cache "
+                "reads, compaction count, and cost (joined from llm_calls)."
+            ),
+            why_empty=(
+                "No sessions in the DB match the filters. Run "
+                "``oc usage`` for the cross-provider JSONL view, or "
+                "drop the filters."
+            ),
+            next_steps=[
+                "[bold]oc usage sessions[/bold] — drop filters and list every session",
+                "[bold]oc usage --hours 24[/bold] — JSONL-backed per-provider rollup",
+                "[bold]oc context show --current[/bold] — context-window % for the most recent session",
+            ],
+        )
+        return
+
+    # Use a wide console so long model ids ("claude-sonnet-4-6") don't
+    # wrap in narrow CliRunner / CI terminals. soft_wrap=True flips off
+    # the default truncation; rows are written as-is and let the user's
+    # real terminal handle wrapping if needed.
+    wide_console = Console(width=240, soft_wrap=True)
+    table = Table(
+        title=f"Sessions ({len(rows)} row{'s' if len(rows) != 1 else ''})",
+        show_lines=False,
+        expand=False,
+    )
+    table.add_column("Session", overflow="fold")
+    table.add_column("Started", overflow="fold")
+    table.add_column("Model", overflow="fold", no_wrap=False)
+    table.add_column("In", justify="right")
+    table.add_column("Out", justify="right")
+    table.add_column("Cache R/W", justify="right")
+    table.add_column("Compactions", justify="right")
+    table.add_column("Cost", justify="right")
+
+    for r in rows:
+        cache_cell = (
+            f"{_format_int(r.cache_read_tokens)}/{_format_int(r.cache_write_tokens)}"
+            if (r.cache_read_tokens or r.cache_write_tokens)
+            else "—"
+        )
+        # Show only the first 8 chars of session id; the user can
+        # ``--session-id <full>`` if they need the whole thing back.
+        sid_short = r.session_id[:8] + "…" if len(r.session_id) > 9 else r.session_id
+        table.add_row(
+            sid_short,
+            _format_started_at(r.started_at),
+            r.model or "—",
+            _format_int(r.input_tokens),
+            _format_int(r.output_tokens),
+            cache_cell,
+            str(r.compactions_count),
+            _format_cost_or_dash(r.cost_usd),
+        )
+
+    wide_console.print(table)
+
+
 __all__ = ["usage_app"]
