@@ -14,13 +14,52 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "extensions" / "coding-harness"))
 
 
+def _purge_top_level_tools_module() -> None:
+    """Drop any cached top-level ``tools`` module from a sibling plugin
+    (e.g. ``extensions/browser-harness/plugin.py`` does ``import tools``
+    once at plugin load and caches a non-package single-file ``tools``
+    in ``sys.modules['tools']``). When this test then does
+    ``from tools.edit import EditTool`` against the coding-harness
+    package directory on sys.path, Python sees the cached non-package
+    and raises ``ModuleNotFoundError: No module named 'tools.edit';
+    'tools' is not a package``. Purging the cached entry forces a fresh
+    import that resolves through sys.path → coding-harness/tools/."""
+    for mod_name in list(sys.modules):
+        if mod_name == "tools" or mod_name.startswith("tools."):
+            sys.modules.pop(mod_name, None)
+
+
+_CODING_HARNESS_PATH = str(
+    Path(__file__).parent.parent / "extensions" / "coding-harness"
+)
+_BROWSER_HARNESS_PATH = str(
+    Path(__file__).parent.parent / "extensions" / "browser-harness"
+)
+
+
+def _ensure_coding_harness_wins_on_sys_path() -> None:
+    """Re-insert the coding-harness path at sys.path[0] AND drop the
+    browser-harness path (which carries a single-file ``tools.py``
+    that shadows coding-harness's ``tools/`` package). Plugin loading
+    by other tests can reorder sys.path; this fixture-time re-pin keeps
+    ``from tools.edit import EditTool`` resolving against the right
+    directory regardless of test order."""
+    while _BROWSER_HARNESS_PATH in sys.path:
+        sys.path.remove(_BROWSER_HARNESS_PATH)
+    if _CODING_HARNESS_PATH in sys.path:
+        sys.path.remove(_CODING_HARNESS_PATH)
+    sys.path.insert(0, _CODING_HARNESS_PATH)
+
+
 @pytest.fixture(autouse=True)
 def reset_sys_path():
+    _purge_top_level_tools_module()
+    _ensure_coding_harness_wins_on_sys_path()
     yield
     # Cleanup: remove our added path so other tests aren't affected.
-    extensions_path = str(Path(__file__).parent.parent / "extensions" / "coding-harness")
-    if extensions_path in sys.path:
-        sys.path.remove(extensions_path)
+    if _CODING_HARNESS_PATH in sys.path:
+        sys.path.remove(_CODING_HARNESS_PATH)
+    _purge_top_level_tools_module()
 
 
 @pytest.fixture(autouse=True)

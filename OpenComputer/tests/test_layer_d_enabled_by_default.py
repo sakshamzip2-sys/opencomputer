@@ -124,22 +124,32 @@ def test_layer_d_respects_layer_a_profile_scope(tmp_path: Path) -> None:
     )
 
 
-def test_browser_control_manifest_pins_enabled_by_default() -> None:
-    """Regression guard: the bundled browser-control manifest must keep
-    ``enabled_by_default: true`` so the agent always has a JS-capable
-    browser. SPA / client-rendered pages fail with WebFetch alone; this
-    flag is the only thing that survives a user pinning their profile to
-    a narrow ``enabled: [...]`` list.
+def test_browser_harness_manifest_pins_enabled_by_default() -> None:
+    """Regression guard for the JS-capable browser surface. As of
+    2026-05-08, ``browser-harness`` (Hermes-derived, agent-browser CLI)
+    is the default browser plugin and ``browser-control`` is dormant
+    (its ``register()`` short-circuits unless
+    ``OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1``). The agent still
+    needs A browser plugin Layer-D-force-included on narrow
+    ``enabled_ids`` lists — that role is now ``browser-harness``.
+
+    This test pins both manifests so a future edit can't quietly:
+
+    * demote ``browser-harness`` → leaves agent without browser tools, OR
+    * promote ``browser-control`` again → makes the plugin reappear in
+      profiles that opted out of the dormant family.
     """
-    path = (
-        Path(__file__).resolve().parent.parent
-        / "extensions"
-        / "browser-control"
-        / "plugin.json"
-    )
-    data = json.loads(path.read_text())
-    assert data.get("enabled_by_default") is True, (
-        "browser-control must remain enabled_by_default=true. Without it, the "
+    base = Path(__file__).resolve().parent.parent / "extensions"
+    harness = json.loads((base / "browser-harness" / "plugin.json").read_text())
+    legacy = json.loads((base / "browser-control" / "plugin.json").read_text())
+
+    assert harness.get("enabled_by_default") is True, (
+        "browser-harness must remain enabled_by_default=true. Without it, the "
         "plugin disappears from any profile.yaml that lists explicit enabled IDs, "
         "leaving the agent with no JS-capable browser."
+    )
+    assert legacy.get("enabled_by_default") is False, (
+        "browser-control must stay enabled_by_default=false (dormant) — "
+        "browser-harness is the active default since 2026-05-08. Re-enable "
+        "via OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1, not via this flag."
     )
