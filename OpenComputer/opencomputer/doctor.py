@@ -220,6 +220,17 @@ def _check_telegram_polling_conflict() -> list[Check]:
         r"|claude.*channels.*telegram",
         re.I,
     )
+    # 2026-05-10 — exclude the canonical launchd-managed gateway from the
+    # "other process" list. The launchd plist always passes ``--headless``
+    # to the gateway entry; a user running ``oc gateway`` interactively
+    # would NOT pass --headless. Treating the launchd gateway as a
+    # "rogue" was the long-running false positive Saksham flagged after
+    # PID 42895 (his old chat session) was killed and the launchd
+    # gateway came online.
+    canonical_gateway_pat = re.compile(
+        r"opencomputer.*--headless.*gateway|--headless.*opencomputer.*gateway",
+        re.I,
+    )
     for line in proc.stdout.splitlines()[1:]:
         parts = line.strip().split(None, 2)
         if len(parts) < 3:
@@ -227,8 +238,13 @@ def _check_telegram_polling_conflict() -> list[Check]:
         pid, _comm, args = parts
         if pid == self_pid:
             continue
-        if pat.search(args):
-            suspects.append((pid, args[:100]))
+        if not pat.search(args):
+            continue
+        if canonical_gateway_pat.search(args):
+            # The launchd-managed gateway is the one that's SUPPOSED to
+            # poll Telegram on this machine — not a competitor.
+            continue
+        suspects.append((pid, args[:100]))
 
     if not suspects:
         return [Check(
