@@ -93,3 +93,13 @@ credentials.json
 evals/history.db
 evals/history.db-journal
 evals/dashboard/
+
+# oc-webui — embedded git repo (upstream hermes-webui fork). Lives
+# inside this tree only as a sibling for `oc webui` discovery; tracked
+# in its own repo, not here. Without this entry every `git status`
+# shows it as untracked.
+oc-webui/
+
+# Parallel-session workspaces (worktree-style scratch dirs created by
+# concurrent Claude Code sessions). Should never enter the OC repo.
+hermes-workspace/

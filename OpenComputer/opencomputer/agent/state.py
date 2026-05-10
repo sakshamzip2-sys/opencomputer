@@ -37,7 +37,10 @@ from plugin_sdk.core import Message, ToolCall
 #: v16 = delegate-lineage (2026-05-10) — ``sessions.parent_session_id``
 #: + ``subagents`` table for cross-process registry persistence and
 #: ``oc sessions tree`` lineage walks.
-SCHEMA_VERSION = 16
+#: v17 = source-column (2026-05-10) — ``sessions.source`` so oc-webui's
+#: hermes-port sidebar can distinguish CLI/messaging/webui rows. Existing
+#: rows are backfilled with ``'cli'`` (the historical de-facto source).
+SCHEMA_VERSION = 17
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -66,10 +69,16 @@ CREATE TABLE IF NOT EXISTS sessions (
     goal_turns_used   INTEGER DEFAULT 0,
     goal_budget       INTEGER DEFAULT 20,
     goal_last_judge_reason TEXT,        -- Kanban-Goals v2 (2026-05-08): structured judge rationale
-    parent_session_id TEXT              -- delegate-lineage (2026-05-10): if this session was
+    parent_session_id TEXT,             -- delegate-lineage (2026-05-10): if this session was
                                          -- spawned by a delegate() call, this points at the
                                          -- parent's session id; NULL for root sessions.
+    source            TEXT               -- source-column (2026-05-10): origin of the row,
+                                         -- one of 'cli' | 'webui' | 'discord' | 'telegram' |
+                                         -- 'slack' | 'cron' | 'tool' | 'api_server'. Used by
+                                         -- oc-webui's sidebar to filter/group rows.
 );
+
+CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 
 CREATE TABLE IF NOT EXISTS messages (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -256,6 +265,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (13, 14): "_migrate_v13_to_v14",
     (14, 15): "_migrate_v14_to_v15",
     (15, 16): "_migrate_v15_to_v16",
+    (16, 17): "_migrate_v16_to_v17",
 }
 
 
@@ -909,6 +919,35 @@ def _migrate_v15_to_v16(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_subagents_state
             ON subagents(state);
         """
+    )
+
+
+def _migrate_v16_to_v17(conn: sqlite3.Connection) -> None:
+    """source-column (2026-05-10) — add ``sessions.source`` for oc-webui sidebar.
+
+    Hermes-webui's ``api/agent_sessions.py`` filters and groups sidebar
+    rows by ``sessions.source`` (``'cli' | 'webui' | 'discord' | ...``).
+    Without the column, the helper returns ``[]`` and the sidebar can
+    never show CLI-imported sessions. This migration:
+
+      1. Adds ``sessions.source TEXT`` (NULL on add — sqlite ALTER cannot
+         set NOT NULL with no default).
+      2. Backfills NULL rows with ``'cli'`` since pre-v17 sessions came
+         exclusively from CLI / messaging gateway flows.
+      3. Indexes the new column for fast sidebar filtering.
+
+    Idempotent: the ALTER is skipped when the column already exists.
+    """
+    cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+    }
+    if "source" not in cols:
+        conn.execute("ALTER TABLE sessions ADD COLUMN source TEXT")
+    conn.execute(
+        "UPDATE sessions SET source = 'cli' WHERE source IS NULL OR source = ''"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source)"
     )
 
 

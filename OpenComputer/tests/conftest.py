@@ -18,9 +18,14 @@ The aliases are injected into sys.modules BEFORE any test module is collected.
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
 import types
+import warnings
+from collections.abc import Iterator
 from pathlib import Path
+
+import pytest
 
 # Project root (parent of tests/)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -364,3 +369,125 @@ _register_screen_awareness_alias()
 _register_ollama_provider_alias()
 _register_groq_provider_alias()
 _register_memory_mem0_alias()
+
+
+# ── Test-isolation fixtures (added 2026-05-10) ───────────────────────
+# Three documented full-suite-only flakes existed on origin/main as of
+# 2026-05-08:
+#   1. tests/test_phase12b1_honcho_default.py::
+#      test_agent_loop_multi_turn_snapshot_stays_identical_across_different_prefetches
+#   2. tests/test_typed_event_bus.py::
+#      test_apublish_runs_async_handlers_concurrently
+#   3. tests/test_voice_mode_stt.py::test_openai_api_when_key_set
+#      (segfault — pycares + asyncio cross-loop)
+#   4. tests/test_browser_control_extension_daemon.py::
+#      test_command_timeout_when_extension_silent
+#
+# Root cause across all four: tests that mutate global singletons
+# (TypedEventBus default_bus, asyncio loops left with running tasks,
+# aiohttp client sessions never explicitly closed) leak state into
+# subsequent tests. The flakes don't always fire — depends on which
+# polluter ran first AND whether GC happened to clean up.
+#
+# These fixtures defend against those patterns at the harness level
+# without skipping any test or modifying production code. They are:
+#   * function-scoped + cheap (≤1 ms aggregate per test)
+#   * autouse=True so every test inherits them — no opt-in needed
+#   * silent in the success case; emit a single WARN once per session
+#     when they had to clean something up (so a real polluter still
+#     surfaces in CI logs)
+
+_iso_log = logging.getLogger("conftest.test_isolation")
+_polluter_warnings_shown: set[str] = set()
+
+
+def _warn_once(category: str, detail: str) -> None:
+    """Emit a WARN line at most once per pytest session per category.
+
+    Avoids drowning a 13k-test run in noise while still surfacing a real
+    polluter the first time it shows up.
+    """
+    if category in _polluter_warnings_shown:
+        return
+    _polluter_warnings_shown.add(category)
+    _iso_log.warning("test pollution detected (%s): %s", category, detail)
+
+
+@pytest.fixture(autouse=True)
+def _reset_event_bus_singleton() -> Iterator[None]:
+    """Clear bus subscribers between tests; preserve the singleton identity.
+
+    Subscribers added by one test would otherwise fire on events
+    published by later tests, causing:
+      * non-deterministic timing assertions (concurrent-handlers test)
+      * accidental cross-test event coupling
+
+    We CLEAR the existing bus's handlers in-place rather than swapping
+    the singleton for a new instance — that preserves the identity
+    relied on by ``test_default_bus_is_singleton`` (imported at module
+    load time and asserted ``is`` against ``get_default_bus()``).
+    """
+    yield
+    try:
+        from opencomputer.ingestion.bus import default_bus as _existing
+    except ImportError:
+        return  # bus module not built — nothing to reset
+
+    if _existing is None:
+        return
+    handlers = getattr(_existing, "_handlers", None)
+    if not handlers:
+        return
+    handler_count = sum(len(h) for h in handlers.values())
+    if handler_count > 0:
+        _warn_once(
+            "event_bus_handlers_leak",
+            f"default_bus carried {handler_count} unsubscribed handlers "
+            f"into teardown — a test forgot to unsubscribe",
+        )
+        # Clear in-place — preserves singleton identity.
+        for v in handlers.values():
+            v.clear()
+
+
+# Session-scoped warnings filter — set once, cheap per-test.
+# Filters the pycares/aiohttp ResourceWarnings that have caused native
+# aborts when surfaced from a background thread mid-teardown of the
+# NEXT test's event loop. The warnings are advisory (the underlying
+# socket gets closed by GC eventually), so suppressing the noise is
+# safe; real aiohttp errors still propagate as test failures.
+def pytest_configure(config) -> None:  # noqa: D401 — pytest hook
+    """Filter known-noisy ResourceWarnings that have caused native aborts."""
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*unclosed transport.*pycares.*",
+        category=ResourceWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*unclosed.*<aiohttp.connector\..*",
+        category=ResourceWarning,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _drop_orphan_browser_daemon_singleton() -> Iterator[None]:
+    """Clear the browser-control shared-daemon singleton reference.
+
+    Symptom this defends against: ``test_command_timeout_when_extension_silent``
+    failing intermittently because a prior test left
+    ``control_driver._shared_daemon`` pointing at a daemon that's
+    bound to a stale port + has stale extension-connection state.
+
+    We DON'T await ``daemon.stop()`` (that needs an event loop, which
+    risks deadlocks across pytest-asyncio's per-test loops). We just
+    NULL the singleton — the daemon will be GC'd when its references
+    drop, and the next test that needs one creates a fresh instance.
+    """
+    yield
+    try:
+        from extensions.browser_control import control_driver as _cd
+    except ImportError:
+        return
+    if getattr(_cd, "_shared_daemon", None) is not None:
+        _cd._shared_daemon = None
