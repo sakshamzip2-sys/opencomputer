@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
 from plugin_sdk.core import Message
 from plugin_sdk.tool_contract import ToolSchema
 
@@ -130,13 +131,13 @@ async def test_openrouter_sanitizes_invalid_tool_required_before_request(
     provider = Cls()
     captured: dict = {}
 
-    class _StopAfterCapture(RuntimeError):
+    class _StopAfterCaptureError(RuntimeError):
         pass
 
     class _FakeCompletions:
         async def create(self, **kwargs):
             captured.update(kwargs)
-            raise _StopAfterCapture("captured")
+            raise _StopAfterCaptureError("captured")
 
     provider.client = SimpleNamespace(
         chat=SimpleNamespace(completions=_FakeCompletions())
@@ -151,7 +152,7 @@ async def test_openrouter_sanitizes_invalid_tool_required_before_request(
         },
     )
 
-    with pytest.raises(_StopAfterCapture):
+    with pytest.raises(_StopAfterCaptureError):
         await provider.complete(
             model="google/gemini-test",
             messages=[Message(role="user", content="hi")],

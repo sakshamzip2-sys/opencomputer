@@ -9,9 +9,9 @@ from __future__ import annotations
 import getpass
 import json
 import os
+from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
-from typing import Any
 
 from opencomputer.cli_setup.env_writer import (
     default_env_file,
@@ -20,7 +20,6 @@ from opencomputer.cli_setup.env_writer import (
 )
 from opencomputer.cli_setup.sections import SectionResult, WizardCtx
 from opencomputer.cli_ui.menu import Choice, radiolist
-
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_DESCRIPTION = "100+ models, pay-per-use, free"
