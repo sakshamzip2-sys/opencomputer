@@ -343,6 +343,7 @@ class PromptBuilder:
         active_persona_id: str = "",
         user_tone: str = "",
         persona_preferred_tone: str = "",
+        pinned_files_block: str = "",
     ) -> str:
         memory = _truncate_from_top(declarative_memory, memory_char_limit)
         profile = _truncate_from_top(user_profile, user_char_limit)
@@ -413,6 +414,7 @@ class PromptBuilder:
             active_persona_id=ctx.active_persona_id,
             user_tone=ctx.user_tone,
             persona_preferred_tone=ctx.persona_preferred_tone,
+            pinned_files_block=pinned_files_block,
         )
 
     def build_user_facts(
@@ -514,6 +516,7 @@ class PromptBuilder:
         active_persona_id: str = "",
         user_tone: str = "",
         persona_preferred_tone: str = "",
+        pinned_files_block: str = "",
     ) -> str:
         """Async variant of build() that appends ambient memory blocks.
 
@@ -547,6 +550,7 @@ class PromptBuilder:
             active_persona_id=active_persona_id,
             user_tone=user_tone,
             persona_preferred_tone=persona_preferred_tone,
+            pinned_files_block=pinned_files_block,
         )
         if not enable_ambient_blocks or memory_bridge is None:
             return base

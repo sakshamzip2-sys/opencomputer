@@ -2977,6 +2977,111 @@ def search(
 
 
 @app.command()
+def pin(
+    path: str = typer.Argument(
+        None,
+        help="File path to pin into the system prompt. Omit to list current pins.",
+    ),
+    list_only: bool = typer.Option(
+        False, "--list", "-l", help="List currently pinned files and exit."
+    ),
+) -> None:
+    """Pin a file into the system prompt — stop the agent re-reading it.
+
+    The contents of the pinned file are injected into every session's
+    system prompt, so the agent SEES the file without ever calling the
+    `Read` tool. Targets the "reread_file" findings from `oc optimize`.
+
+    Usage:
+
+      oc pin                       # list current pins
+      oc pin --list                # list current pins
+      oc pin path/to/large.py      # add a file to the pin list
+      oc unpin path/to/large.py    # remove a file from the pin list
+
+    Storage: ``~/.opencomputer/<profile>/config.yaml`` under
+    ``prompt.pinned_files``. Combined size is capped (default 200 KB)
+    via ``prompt.max_total_bytes``.
+    """
+    from opencomputer.agent.config_store import load_config, save_config
+    from opencomputer.agent.pinned_files import (
+        add_pinned_file,
+        normalize_pinned_path,
+    )
+
+    cfg = load_config()
+
+    if path is None or list_only:
+        pins = cfg.prompt.pinned_files
+        if not pins:
+            console.print(
+                "[dim]no pinned files. "
+                "Run [bold]oc optimize[/bold] for candidates, then "
+                "[bold]oc pin <path>[/bold].[/dim]"
+            )
+            return
+        console.print(f"[bold]Pinned files ({len(pins)}):[/bold]")
+        for p in pins:
+            console.print(f"  [cyan]{p}[/cyan]")
+        console.print(
+            f"[dim]cap: {cfg.prompt.max_total_bytes} bytes total[/dim]"
+        )
+        return
+
+    try:
+        new_paths = add_pinned_file(cfg.prompt.pinned_files, path)
+    except (FileNotFoundError, IsADirectoryError) as exc:
+        console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if new_paths == cfg.prompt.pinned_files:
+        norm = normalize_pinned_path(path)
+        console.print(
+            f"[dim]already pinned: [/dim][cyan]{norm}[/cyan]"
+        )
+        return
+
+    from dataclasses import replace as _dc_replace
+    new_prompt_cfg = _dc_replace(cfg.prompt, pinned_files=new_paths)
+    new_cfg = _dc_replace(cfg, prompt=new_prompt_cfg)
+    cfg_path = save_config(new_cfg)
+    console.print(
+        f"[green]pinned[/green] [cyan]{new_paths[-1]}[/cyan] "
+        f"({len(new_paths)} total)\n"
+        f"[dim]config: {cfg_path}[/dim]"
+    )
+
+
+@app.command()
+def unpin(
+    path: str = typer.Argument(..., help="File path to remove from the pin list."),
+) -> None:
+    """Remove a file from the pinned-files list. Inverse of `oc pin`."""
+    from opencomputer.agent.config_store import load_config, save_config
+    from opencomputer.agent.pinned_files import remove_pinned_file
+
+    cfg = load_config()
+    new_paths = remove_pinned_file(cfg.prompt.pinned_files, path)
+
+    if new_paths == cfg.prompt.pinned_files:
+        console.print(
+            f"[dim]not pinned: [/dim][cyan]{path}[/cyan]\n"
+            "[dim]list pins with [bold]oc pin --list[/bold].[/dim]"
+        )
+        raise typer.Exit(code=1)
+
+    from dataclasses import replace as _dc_replace
+    new_prompt_cfg = _dc_replace(cfg.prompt, pinned_files=new_paths)
+    new_cfg = _dc_replace(cfg, prompt=new_prompt_cfg)
+    cfg_path = save_config(new_cfg)
+    console.print(
+        f"[green]unpinned[/green] [cyan]{path}[/cyan] "
+        f"({len(new_paths)} remaining)\n"
+        f"[dim]config: {cfg_path}[/dim]"
+    )
+
+
+@app.command()
 def sessions(limit: int = typer.Option(10, "--limit", "-n")) -> None:
     """List recent sessions."""
     from opencomputer.agent.state import SessionDB

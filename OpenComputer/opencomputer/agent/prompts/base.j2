@@ -254,6 +254,15 @@ When NO skill matches, work from first principles using the standard tools.
 The above is the project-local context aggregated from CLAUDE.md, OPENCOMPUTER.md, .hermes.md, AGENTS.md, and .cursorrules files in (or above) the working directory. Treat this as project-specific conventions — naming, formatting, testing, deployment. When project rules conflict with global rules, project rules win for *this* project's files; global rules win for cross-cutting safety (consent, secrets, force-push, etc.).
 
 {% endif %}
+{# ─── Slot 5b — Pinned files — Optimize Grade E mitigation (2026-05-10) ─── #}
+{% if pinned_files_block -%}
+<pinned-files>
+{{ pinned_files_block }}
+</pinned-files>
+
+The above are files the user has pinned via `oc pin <path>` so the agent doesn't re-read them via the `Read` tool every session. Treat their content as authoritative project context — already up to date for *this* session. If the user asks about one of these files, refer to the inlined content directly; only use the `Read` tool if you need to inspect changes the user just made within this session.
+
+{% endif %}
 
 {# ─── Slot 6 — Timestamp + platform — Hermes v2 D8 ─── #}
 # System info
