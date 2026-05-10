@@ -496,27 +496,35 @@ def run_dreaming_v2_tick() -> dict[str, Any]:
         cfg.memory, "dreaming_v2_candidate_fetch_limit", 50
     )
 
-    try:
-        summary = asyncio.run(
+    def _run_in_fresh_loop() -> DreamRunSummary:
+        # The coroutine is constructed *inside* asyncio.run's call so it
+        # cannot be orphaned if asyncio.run rejects (it never will here:
+        # this helper is invoked on a thread with no running loop).
+        return asyncio.run(
             run_dreaming_v2_async(
                 deps=deps, candidate_limit=int(candidate_limit)
             )
         )
-    except RuntimeError as exc:
-        # Already in an event loop (rare in cron tick context, but
-        # be defensive).
-        if "asyncio.run() cannot be called" in str(exc):
-            loop = asyncio.new_event_loop()
-            try:
-                summary = loop.run_until_complete(
-                    run_dreaming_v2_async(
-                        deps=deps, candidate_limit=int(candidate_limit)
-                    )
-                )
-            finally:
-                loop.close()
-        else:
-            raise
+
+    # Co-tenant cron path: ``oc gateway`` runs the cron scheduler as an
+    # asyncio task on its main loop, so this function runs inside a
+    # running event loop. ``asyncio.run`` then raises before iterating
+    # the coroutine, orphaning it (RuntimeWarning: coroutine never
+    # awaited) and silently no-op'ing the dream pass. Dispatch to a
+    # worker thread that owns its own loop. .result() blocks the cron
+    # tick coroutine until the dream pass completes — acceptable since
+    # the other system_jobs callbacks are already synchronous.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        summary = _run_in_fresh_loop()
+    else:
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="dreaming_v2_tick"
+        ) as pool:
+            summary = pool.submit(_run_in_fresh_loop).result()
 
     return _summarise_for_cron(summary)
 
