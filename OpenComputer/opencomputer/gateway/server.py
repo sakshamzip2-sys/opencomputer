@@ -261,6 +261,19 @@ class Gateway:
         # ``cfg.kanban.dispatch_in_gateway is true`` (default).
         self._kanban_dispatcher: Any | None = None
         self._kanban_dispatcher_task: asyncio.Task[None] | None = None
+        # 2026-05-10 — Cron scheduler co-tenant. The cron loop has always
+        # supported running inside the gateway daemon (per
+        # ``opencomputer/cron/scheduler.py``'s docstring on
+        # ``run_scheduler_loop``) but no production caller actually
+        # started it here. Result: users with ``oc service install`` (the
+        # launchd gateway) had cron jobs registered but NEVER executed,
+        # because nothing was ticking the scheduler. The user audit
+        # 2026-05-10 captured this as "19 jobs registered, 0 ever ran".
+        # Starting it here means a single launchd service ticks
+        # both gateway dispatch + cron jobs. Opt-out via
+        # ``cron.start_in_gateway: false`` for users who prefer running
+        # ``oc cron daemon`` separately.
+        self._cron_scheduler_task: asyncio.Task[None] | None = None
 
     def register_adapter(self, adapter: BaseChannelAdapter) -> None:
         """Register a channel adapter (usually from a loaded plugin)."""
@@ -520,6 +533,46 @@ class Gateway:
         # adapter has had a chance to connect. Fail-open — a flaky
         # channel must never wedge gateway boot.
         await self._fire_startup_pings()
+
+        # 2026-05-10 — co-tenant cron scheduler. Default ON via
+        # ``cron.start_in_gateway`` so a single launchd gateway service
+        # ticks both message dispatch + cron jobs. Without this, users
+        # with the launchd gateway saw "19 jobs registered, 0 ever ran"
+        # because nothing was ticking the scheduler in the same process.
+        # Opt-out for users who run a separate ``oc cron daemon``.
+        try:
+            cron_cfg = getattr(self._config, "cron", None)
+            if cron_cfg is None or getattr(
+                cron_cfg, "start_in_gateway", True
+            ):
+                from opencomputer.cron.scheduler import run_scheduler_loop
+
+                interval = (
+                    getattr(cron_cfg, "gateway_tick_interval_s", 60)
+                    if cron_cfg
+                    else 60
+                )
+                self._cron_scheduler_task = asyncio.create_task(
+                    run_scheduler_loop(interval_s=int(interval)),
+                    name="gateway-cron-scheduler",
+                )
+                logger.info(
+                    "gateway: co-tenant cron scheduler started "
+                    "(interval=%ds; opt-out via cron.start_in_gateway=false)",
+                    int(interval),
+                )
+            else:
+                logger.info(
+                    "gateway: cron.start_in_gateway=false — cron jobs "
+                    "will not tick from this process. Run `oc cron daemon` "
+                    "separately."
+                )
+        except Exception:  # noqa: BLE001 — cron must never wedge gateway boot
+            logger.warning(
+                "gateway: cron scheduler co-tenant start failed; "
+                "cron jobs will not tick from this process",
+                exc_info=True,
+            )
 
     async def _fire_startup_pings(self) -> None:
         """Send the configured startup-ping message to each (platform, chat).
@@ -929,6 +982,15 @@ class Gateway:
                 self._kanban_dispatcher_task.cancel()
             self._kanban_dispatcher_task = None
             self._kanban_dispatcher = None
+        # 2026-05-10 — co-tenant cron scheduler. Cancel cleanly so the
+        # gateway shutdown isn't held up by the cron loop's asyncio.sleep.
+        if self._cron_scheduler_task is not None:
+            self._cron_scheduler_task.cancel()
+            try:
+                await asyncio.wait_for(self._cron_scheduler_task, timeout=3.0)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+            self._cron_scheduler_task = None
         await asyncio.gather(
             *(a.disconnect() for a in self._adapters), return_exceptions=True
         )
