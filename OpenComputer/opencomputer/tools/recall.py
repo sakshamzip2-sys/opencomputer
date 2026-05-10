@@ -25,6 +25,7 @@ MemoryManager.append_declarative — does not reimplement any of them.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from opencomputer.agent.config import default_config
@@ -32,6 +33,19 @@ from opencomputer.agent.memory import MemoryManager
 from opencomputer.agent.state import SessionDB
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
+
+logger = logging.getLogger("opencomputer.tools.recall")
+
+
+def _coerce_float(v: Any) -> float | None:
+    """Convert FTS5 rank-style values to float; return None on bad input."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
 
 DEFAULT_SEARCH_LIMIT = 10
 DEFAULT_RECALL_LIMIT = 30
@@ -196,6 +210,14 @@ class RecallTool(BaseTool):
                 content=f"No memory matches for {query!r}.",
             )
 
+        # 2026-05-10 — Phase 2 v0 recall provenance. Record one citation
+        # per hit so the recommendation engine can join with turn_outcomes
+        # to compute per-memory mean downstream score. Without this the
+        # recall_citations table stays empty and Phase 2 v0 cannot
+        # distinguish "memory was surfaced this turn" from "memory shares
+        # a session with this turn". Best-effort: never raises.
+        self._record_citations(episodic, message_hits)
+
         lines: list[str] = []
         if episodic:
             lines.append(f"## Episodic ({len(episodic)})")
@@ -218,6 +240,99 @@ class RecallTool(BaseTool):
             else raw_content
         )
         return ToolResult(tool_call_id=call.id, content=content)
+
+    def _record_citations(
+        self,
+        episodic: list[dict],
+        message_hits: list[dict],
+    ) -> None:
+        """Write one ``recall_citations`` row per hit (episodic + message).
+
+        Resolves session_id and turn_index from the observability
+        ContextVars set by the agent loop. Best-effort: any failure
+        path (no session bound, write error, malformed hit) logs a
+        single WARNING and returns — the user-visible recall result is
+        unaffected. Pre-2026-05-10 the writer existed but had no
+        production caller; recall_citations stayed empty and Phase 2
+        v0's recommendation engine was effectively dark.
+        """
+        try:
+            from opencomputer.agent.recall_citations import (
+                CitationWrite,
+                RecallCitationsWriter,
+            )
+            from opencomputer.observability.logging_config import (
+                _session_id_var,
+                get_turn_index,
+            )
+        except Exception:  # noqa: BLE001 — boot-order edge case
+            logger.warning(
+                "recall: citations writer unavailable; recall provenance "
+                "rows will not be written this call",
+                exc_info=True,
+            )
+            return
+
+        session_id = _session_id_var.get()
+        if not session_id:
+            # No session bound — likely a CLI / test invocation. Citations
+            # require a session FK; silently skip rather than error.
+            return
+        turn_index = int(get_turn_index() or 0)
+
+        try:
+            writer = RecallCitationsWriter(self._db)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "recall: failed to construct RecallCitationsWriter; "
+                "citations skipped this call",
+                exc_info=True,
+            )
+            return
+
+        for h in episodic:
+            try:
+                writer.record(
+                    CitationWrite(
+                        session_id=session_id,
+                        turn_index=turn_index,
+                        episodic_event_id=str(h.get("id", "")),
+                        candidate_kind="episodic",
+                        candidate_text_id=None,
+                        bm25_score=_coerce_float(h.get("bm25_rank")),
+                        adjusted_score=_coerce_float(h.get("adjusted_rank")),
+                    )
+                )
+            except Exception:  # noqa: BLE001 — one bad row never blocks the rest
+                logger.warning(
+                    "recall: episodic citation write failed (id=%s); "
+                    "loop continues",
+                    h.get("id"),
+                    exc_info=True,
+                )
+
+        for h in message_hits:
+            try:
+                sid = str(h.get("session_id", ""))
+                ts = h.get("timestamp", 0)
+                writer.record(
+                    CitationWrite(
+                        session_id=session_id,
+                        turn_index=turn_index,
+                        episodic_event_id=None,
+                        candidate_kind="message",
+                        candidate_text_id=f"{sid[:8]}@{ts}",
+                        bm25_score=_coerce_float(h.get("rank")),
+                        adjusted_score=None,
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "recall: message citation write failed (session=%s); "
+                    "loop continues",
+                    h.get("session_id"),
+                    exc_info=True,
+                )
 
     def _maybe_synthesize(
         self,
