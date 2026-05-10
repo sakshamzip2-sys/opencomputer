@@ -134,6 +134,54 @@ gui/501/com.opencomputer.gateway = {
     assert s.pid == 91234
 
 
+def test_status_first_state_line_wins_when_multiple_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: macOS Sequoia's `launchctl print` emits 3 `state =`
+    lines. The first is the lifecycle state (running / not running);
+    the next two are attribute states (active / inactive). Previously
+    the loop overwrote `running` for every match, so the LAST line —
+    which says ``state = active``, NOT ``state = running`` — won and
+    the function returned running=False even when the daemon was up."""
+    from opencomputer.service import _macos_launchd
+
+    monkeypatch.setattr(_macos_launchd, "_uid", lambda: 501)
+    fake_plist = tmp_path / "com.opencomputer.gateway.plist"
+    fake_plist.write_text("(stub)")
+    monkeypatch.setattr(_macos_launchd, "_plist_path", lambda: fake_plist)
+
+    # Real macOS Sequoia output shape — three `state =` lines.
+    sample_print = """\
+gui/501/com.opencomputer.gateway = {
+\tactive count = 1
+\tstate = running
+\tpid = 96119
+\tnested-thing = {
+\t\tstate = active
+\t}
+\tanother-nested = {
+\t\tstate = active
+\t}
+}"""
+
+    monkeypatch.setattr(
+        _macos_launchd,
+        "_launchctl",
+        lambda *args: (0, sample_print, "") if args[0] == "print" else (0, "", ""),
+    )
+    monkeypatch.setattr(
+        "opencomputer.service._common.tail_lines",
+        lambda p, n: [],
+    )
+
+    s = _macos_launchd.status()
+    assert s.running is True, (
+        "first `state =` line was 'running' — top-level lifecycle state — "
+        "the function must NOT be fooled by subsequent attribute-state lines"
+    )
+    assert s.pid == 96119
+
+
 def test_start_kickstart(monkeypatch: pytest.MonkeyPatch) -> None:
     from opencomputer.service import _macos_launchd
 

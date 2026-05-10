@@ -20,6 +20,13 @@ def _isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     home = tmp_path / ".opencomputer"
     home.mkdir()
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(home))
+    # 2026-05-10 — dreaming defaults flipped to True; these tests cover the
+    # CLI flip semantics (off → on → off), so explicitly write a config.yaml
+    # that pins both flags off as the starting state.
+    (home / "config.yaml").write_text(
+        "memory:\n  dreaming_enabled: false\n  dreaming_v2_enabled: false\n",
+        encoding="utf-8",
+    )
 
 
 @pytest.fixture

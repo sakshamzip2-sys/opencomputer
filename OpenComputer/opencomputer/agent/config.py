@@ -471,13 +471,17 @@ class MemoryConfig:
     typical Anthropic prompt cache breakpoints. Provider implementations
     SHOULD respect this; bridge truncates if they don't.
     PR-6 of 2026-04-25 Hermes parity plan."""
-    # Round 2A P-18 — episodic-memory dreaming. EXPERIMENTAL. OFF by default.
+    # Round 2A P-18 — episodic-memory dreaming. ON by default (2026-05-10).
     # When enabled, an isolated lightweight LLM turn periodically clusters
     # recent episodic events and writes a per-cluster consolidation summary
     # back to episodic_events. Manual trigger: `opencomputer memory dream-now`.
-    # Auto trigger: `opencomputer memory dream-on --interval daily|hourly` —
-    # consult docs/memory_dreaming.md before promoting to default.
-    dreaming_enabled: bool = False
+    # Auto trigger: `opencomputer memory dream-on --interval daily|hourly`.
+    # Default-on aligns with the Honcho-as-default memory stance — the
+    # consolidation step is what makes long-running episodic memory useful
+    # rather than just an append-only log. Opt out with
+    # ``opencomputer memory dream-off`` or ``memory.dreaming_enabled: false``
+    # in config.yaml.
+    dreaming_enabled: bool = True
     """When True, ``opencomputer memory dream-now`` (and any future
     scheduler) consolidates recent episodic-memory entries into per-cluster
     summaries. Originals stay readable but get tagged with a
@@ -520,8 +524,11 @@ class MemoryConfig:
 
     # v1.1 plan-3 M6.4 — Dreaming v2 three-gate consolidation INTO MEMORY.md.
     # Distinct from `dreaming_enabled` above (Round 2A P-18 in-DB
-    # episodic clustering).  Default OFF; opt-in via config.yaml.
-    dreaming_v2_enabled: bool = False
+    # episodic clustering).  ON by default (2026-05-10) — same rationale as
+    # v1: consolidation is what makes the episodic store useful long-term.
+    # Opt out with ``opencomputer memory dream-v2-off`` or
+    # ``memory.dreaming_v2_enabled: false`` in config.yaml.
+    dreaming_v2_enabled: bool = True
     """When True, ``opencomputer.cron.dreaming_v2_tick.run_dreaming_v2_tick``
     fires inside the system cron tick and ``oc memory dream-v2`` is wired
     to the same engine.  Promotes high-signal episodic events into

@@ -492,10 +492,17 @@ def test_summarise_for_cron_shape() -> None:
 def test_cli_dream_v2_disabled_exits_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Default = disabled; --force needed to run."""
+    """When dreaming_v2 is disabled, --force needed to run.
+
+    2026-05-10 — default flipped to True; this test now pins the flag
+    off via config.yaml so the disabled-exit-zero path is still covered.
+    """
     from opencomputer.cli_memory import memory_app
 
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "memory:\n  dreaming_v2_enabled: false\n", encoding="utf-8"
+    )
     runner = CliRunner()
     result = runner.invoke(memory_app, ["dream-v2"])
     assert result.exit_code == 0
@@ -569,7 +576,8 @@ def test_config_loads_dreaming_v2_defaults() -> None:
     from opencomputer.agent.config_store import default_config
 
     cfg = default_config()
-    assert cfg.memory.dreaming_v2_enabled is False
+    # 2026-05-10 — flipped to default-on (Honcho-as-default consolidation).
+    assert cfg.memory.dreaming_v2_enabled is True
     assert cfg.memory.dreaming_v2_score_threshold == 0.65
     assert cfg.memory.dreaming_v2_min_recall_count == 2
     assert cfg.memory.dreaming_v2_diversity_threshold == 0.8
@@ -643,10 +651,19 @@ memory:
 def test_run_system_tick_skips_dreaming_when_disabled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """When cfg.memory.dreaming_v2_enabled is False (default), the cron
-    tick must short-circuit with a 'disabled' status — never spin up the
-    engine, never call provider.complete()."""
+    """When cfg.memory.dreaming_v2_enabled is False, the cron tick must
+    short-circuit with a 'disabled' status — never spin up the engine,
+    never call provider.complete().
+
+    2026-05-10 — default flipped to True; this test now writes a
+    config.yaml that pins the flag off, so the disabled-path is still
+    covered.
+    """
     monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "memory:\n  dreaming_v2_enabled: false\n",
+        encoding="utf-8",
+    )
 
     from opencomputer.cron import dreaming_v2_tick
 

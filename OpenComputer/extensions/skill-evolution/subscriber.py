@@ -136,10 +136,20 @@ class EvolutionSubscriber:
 
         Idempotent — calling :meth:`start` twice without an intervening
         :meth:`stop` returns early without registering a duplicate handler.
+
+        Writes the heartbeat file on subscribe so the doctor's "subscriber
+        running?" check succeeds immediately. Without this, the heartbeat
+        only updated on the FIRST observed ``session_end`` — meaning a
+        freshly-restarted gateway with no completed sessions yet would
+        be flagged "stale" even though the subscriber was healthy.
         """
         if self._subscription is not None:
             return
         self._subscription = self._bus.subscribe("session_end", self._handle_event)
+        try:
+            _write_heartbeat(self._profile_home_factory())
+        except Exception:  # noqa: BLE001 — never fail subscriber boot on heartbeat-write
+            _log.debug("skill-evolution: heartbeat-on-start failed", exc_info=True)
 
     def stop(self) -> None:
         """Unsubscribe from the bus. Idempotent.
