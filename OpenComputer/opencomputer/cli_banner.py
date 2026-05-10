@@ -162,31 +162,11 @@ def _truncate_csv(items: list[str], max_chars: int) -> str:
     return ", ".join(out) + ellipsis
 
 
-_BLOCK_LOGO_WIDTH = 105  # widest line of OPENCOMPUTER_BLOCK_LOGO
+_BLOCK_LOGO_WIDTH = 71  # widest line of OPENCOMPUTER_BLOCK_LOGO
 
-# Side mascot — a clean little robot rendered in yellow on the left
-# of the info panel (Hermes-screenshot layout). Designed to read as
-# a "computer agent" at a glance: head with eyes + antenna, torso
-# with status LEDs, two stubby arms.
-_OC_MASCOT = (
-    "          ▄▄▄          \n"
-    "         ╱   ╲         \n"
-    "        ╱_____╲        \n"
-    "       ┌───────┐       \n"
-    "       │ ◉   ◉ │       \n"
-    "       │   ▽   │       \n"
-    "       │  ───  │       \n"
-    "       └───┬───┘       \n"
-    "      ╔════╧════╗      \n"
-    "    ◀═╣ ▣  ▣  ▣ ╠═▶    \n"
-    "      ║ ▒▒▒▒▒▒▒ ║      \n"
-    "      ║  oc-01  ║      \n"
-    "      ╚═══╤═╤═══╝      \n"
-    "         ─┘ └─         \n"
-    "                       \n"
-    "     OpenComputer      \n"
-    "       /agent          \n"
-)
+# OpenSlides rose accent palette — banner-redesign 2026-05-10.
+_ROSE_ACCENT = "#C2185B"      # primary rose (panel border)
+_ROSE_TEXT = "#E91E78"        # light rose (wordmark, group labels)
 
 _MAX_GROUPS_SHOWN = 8       # how many tool/skill groups to list inline
 _MAX_ITEMS_PER_GROUP = 4    # how many items per group before "..."
@@ -198,7 +178,7 @@ def _format_group_line(group: str, items: list[str]) -> str:
     csv = ", ".join(shown)
     if len(items) > _MAX_ITEMS_PER_GROUP:
         csv += ", ..."
-    return f"  [cyan]{group}[/cyan]: [dim]{csv}[/dim]"
+    return f"  [{_ROSE_TEXT}]{group}[/{_ROSE_TEXT}]: [dim]{csv}[/dim]"
 
 
 def _render_groups(grouped: dict[str, list[str]]) -> tuple[list[str], int]:
@@ -221,17 +201,17 @@ def build_welcome_banner(
     session_label: str | None = None,
     home: Path | None = None,
 ) -> None:
-    """Print the OPENCOMPUTER welcome banner — Hermes-style:
+    """Print the OPENCOMPUTER welcome banner — banner-redesign v3:
 
-    1. Big chunky ANSI-Shadow title (yellow, centered).
-    2. Side-by-side block: a yellow ASCII mascot on the left, a cyan
-       info panel on the right (version + tools + skills, all
-       truncated so the panel never gets unwieldy).
+    1. Half-block OPENCOMPUTER wordmark (light rose ``#E91E78``,
+       centered, 71×3).
+    2. Side-by-side block: rose-bordered info panel on the left
+       (version + tools + skills, truncated), Pico the pill bug on
+       the right.
     3. Welcome line + a tip.
     """
     import random
 
-    from rich.align import Align
     from rich.columns import Columns
     from rich.console import Group
     from rich.panel import Panel
@@ -239,29 +219,27 @@ def build_welcome_banner(
 
     from opencomputer.cli_banner_art import OPENCOMPUTER_BLOCK_LOGO
 
-    # Render the chunky single-line OPENCOMPUTER title. We always show
-    # it: on terminals wider than the logo we center it; on narrower
-    # terminals we print it un-centered (each row preserved) so the
-    # chunky look persists even when the user's terminal is tight. The
-    # ``no_wrap`` + ``overflow="ignore"`` keeps Rich from soft-wrapping
-    # mid-glyph and breaking the figlet rows.
+    # Render the half-block OPENCOMPUTER wordmark. Left-aligned so it
+    # shares the same left margin as the info panel + Pico row below
+    # (Columns is left-flush at column 0). ``no_wrap`` + ``overflow``
+    # keeps Rich from soft-wrapping mid-glyph and breaking rows.
     width = console.size.width if console.size else 80
     logo = Text(
         OPENCOMPUTER_BLOCK_LOGO.rstrip("\n"),
-        style="bold yellow",
+        style=_ROSE_TEXT,
         no_wrap=True,
         overflow="ignore",
     )
-    if width >= _BLOCK_LOGO_WIDTH + 2:
-        console.print(Align.center(logo))
-    else:
-        console.print(logo, soft_wrap=True, no_wrap=True, overflow="ignore")
+    console.print(logo, soft_wrap=True, no_wrap=True, overflow="ignore")
 
     # Build the info panel content — version line, tools, skills, then
     # model/cwd/session. The grouping helpers return empty lists when
     # the registry hasn't been initialized yet, which is fine.
     sha = _git_short_sha() or ""
-    version_line = f"[bold yellow]OpenComputer[/bold yellow] [dim]v{__version__}[/dim]"
+    version_line = (
+        f"[bold {_ROSE_TEXT}]OpenComputer[/bold {_ROSE_TEXT}] "
+        f"[dim]v{__version__}[/dim]"
+    )
     if sha:
         version_line += f" [dim]· {sha}[/dim]"
 
@@ -294,26 +272,28 @@ def build_welcome_banner(
         panel_lines.append(
             f"[dim]{n_tools} tool{'s' if n_tools != 1 else ''} · "
             f"{n_skills} skill{'s' if n_skills != 1 else ''} · "
-            f"/help for commands[/dim]"
+            f"[/dim][{_ROSE_TEXT}]/help[/{_ROSE_TEXT}][dim] for commands[/dim]"
         )
     _ = home  # accepted for backwards-compat; not rendered
 
     panel_body = Group(*[Text.from_markup(line) for line in panel_lines])
     info_panel = Panel(
         panel_body,
-        border_style="cyan",
+        border_style=_ROSE_ACCENT,
         padding=(0, 2),
         expand=False,
     )
 
-    # Side-by-side: yellow mascot on the left, info panel on the right.
-    # Falls back to stacked rendering on narrow terminals.
-    mascot = Text(_OC_MASCOT.rstrip("\n"), style="bold yellow")
+    # Side-by-side per banner-redesign: rose-bordered info panel on
+    # the LEFT, Pico (rose pill bug) on the RIGHT. Falls back to
+    # stacked rendering on narrow terminals.
+    from opencomputer.cli_pico import render_pico
+    mascot = render_pico("idle")
     if width >= 100:
-        console.print(Columns([mascot, info_panel], padding=(0, 2)))
+        console.print(Columns([info_panel, mascot], padding=(0, 2)))
     else:
-        console.print(mascot)
         console.print(info_panel)
+        console.print(mascot)
 
     # Update-check hint — non-blocking (200ms), silently None when the
     # background check hasn't finished yet (caller already invoked
@@ -322,15 +302,15 @@ def build_welcome_banner(
         from opencomputer.cli_update_check import get_update_hint
         hint = get_update_hint(timeout=0.2)
         if hint:
-            console.print(f"[yellow]+ {hint}[/yellow]")
+            console.print(f"[{_ROSE_TEXT}]+ {hint}[/{_ROSE_TEXT}]")
     except Exception:  # noqa: BLE001
         pass  # update check is purely informational; never block startup
 
     # Welcome line — Hermes-parity wording.
     console.print()
     console.print(
-        "[bold]Welcome to OpenComputer![/bold] "
-        "Type your message or [cyan]/help[/cyan] for commands."
+        f"[bold]Welcome to OpenComputer![/bold] "
+        f"Type your message or [{_ROSE_TEXT}]/help[/{_ROSE_TEXT}] for commands."
     )
 
     # Tip

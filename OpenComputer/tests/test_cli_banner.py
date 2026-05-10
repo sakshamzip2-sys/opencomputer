@@ -256,3 +256,48 @@ def test_build_welcome_banner_truncates_long_tool_groups(monkeypatch):
     assert "Tool39" not in out
     # Section header is present.
     assert "Available Tools" in out
+
+
+def test_pico_module_exposes_six_expressions():
+    from opencomputer.cli_pico import PICO_EXPRESSIONS
+
+    assert set(PICO_EXPRESSIONS) == {
+        "idle", "blink", "happy", "curious", "rolled", "zooming",
+    }
+
+
+def test_pico_grids_are_16_wide_and_well_formed():
+    from opencomputer.cli_pico import PICO_EXPRESSIONS
+
+    for name, (grid, color) in PICO_EXPRESSIONS.items():
+        assert grid, f"{name} grid is empty"
+        assert all(len(row) == 16 for row in grid), \
+            f"{name} has rows that aren't 16 wide"
+        assert all(set(row) <= {"#", "."} for row in grid), \
+            f"{name} has chars outside #/."
+        assert color.startswith("#") and len(color) == 7
+
+
+def test_render_pico_idle_produces_half_block_text_in_rose():
+    from rich.text import Text
+
+    from opencomputer.cli_pico import render_pico
+
+    out = render_pico("idle")
+    assert isinstance(out, Text)
+    plain = out.plain
+    assert plain, "rendered Pico has no characters"
+    assert any(ch in plain for ch in "▀▄█"), \
+        "expected half-block characters in output"
+    # The rose color from the design appears as a span style.
+    assert any("#C2185B" in str(span.style) for span in out.spans), \
+        "expected #C2185B style on at least one span"
+
+
+def test_render_pico_unknown_expression_raises_keyerror():
+    import pytest
+
+    from opencomputer.cli_pico import render_pico
+
+    with pytest.raises(KeyError):
+        render_pico("not-a-real-expression")
