@@ -29,6 +29,11 @@ class SessionRow:
     title: str
     started_at: float  # Unix epoch seconds (matches SessionDB schema: REAL)
     message_count: int
+    # Empty when the session has no recorded cwd (very old rows). Used by
+    # :func:`format_session_label` as the headline when ``title`` is also
+    # empty — gives the picker a useful label even before the auto-titler
+    # has fired.
+    cwd: str = ""
 
 
 def filter_rows(rows: list[SessionRow], query: str) -> list[SessionRow]:
@@ -78,6 +83,101 @@ def format_time_ago(ts: float, *, now: float | None = None) -> str:
         return f"{hours} hour{'s' if hours != 1 else ''} ago"
     days = hours // 24
     return f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def format_session_label(row: SessionRow, *, now: float | None = None) -> str:
+    """Headline label for one row in the picker.
+
+    Resolution order:
+
+    1. ``row.title`` (set by :func:`opencomputer.agent.title_generator.maybe_auto_title`
+       after the first user→assistant exchange) wins when present.
+    2. ``<cwd-basename> @ HH:MM`` when title is empty but cwd is set —
+       gives the user real signal (which project + when) without the
+       useless "(untitled · ID)" string. Mirrors how Claude Code
+       headlines untitled sessions.
+    3. ``(untitled · <id-prefix>)`` legacy fallback for very old rows
+       that have neither title nor cwd recorded.
+
+    ``started_at`` is rendered in *local time* via :mod:`time.strftime`,
+    matching the user's terminal locale. ``now`` is accepted only for
+    test determinism (current implementation ignores it; ``started_at``
+    is always shown as the absolute time, not a relative-to-now diff).
+    """
+    del now  # accepted for test-API symmetry; not used for absolute time
+
+    if row.title:
+        return row.title
+
+    if row.cwd:
+        import os as _os
+        import time as _time
+
+        basename = _os.path.basename(row.cwd.rstrip("/")) or row.cwd
+        try:
+            hhmm = _time.strftime("%H:%M", _time.localtime(row.started_at))
+        except (TypeError, ValueError, OverflowError):
+            hhmm = "??:??"
+        return f"{basename} @ {hhmm}"
+
+    return f"(untitled · {row.id[:8]})"
+
+
+def compute_visible_window(
+    rows: list[SessionRow],
+    *,
+    selected_idx: int,
+    window_height: int,
+) -> tuple[list[SessionRow], int]:
+    """Pure scroll-window calculator — picks the visible slice of *rows*.
+
+    Returns ``(visible_rows, scroll_offset)`` where ``scroll_offset`` is
+    the index in *rows* that ``visible_rows[0]`` corresponds to. The
+    selected row is guaranteed to be inside ``visible_rows`` (when the
+    list is non-empty and ``selected_idx`` is valid).
+
+    This is the only "smart" piece of the picker's scroll logic — it
+    runs on every render, takes the full ``filtered`` list, the cursor
+    position, and the current terminal-derived window height, and
+    returns the slice to draw. Pure; no prompt_toolkit; trivially
+    testable.
+
+    Edge cases:
+
+    - Empty ``rows`` → ``([], 0)``.
+    - ``len(rows) <= window_height`` → all rows visible, offset 0.
+    - ``selected_idx`` past the bottom → offset clamps so visible[-1]
+      == rows[-1] (the "last page" view).
+    - ``selected_idx`` < 0 (no selection) → top window.
+    """
+    if not rows or window_height <= 0:
+        return [], 0
+
+    n = len(rows)
+
+    if n <= window_height:
+        return list(rows), 0
+
+    if selected_idx < 0:
+        return list(rows[:window_height]), 0
+
+    # Clamp selected_idx into bounds before computing the offset.
+    sel = max(0, min(selected_idx, n - 1))
+
+    # Center-ish strategy: keep the selected row in view. We use a
+    # straightforward "page" model — the offset is whatever puts ``sel``
+    # at the bottom margin of the window, then clamped to [0, n-height].
+    # This avoids surprising "jumps" when the cursor crosses a page
+    # boundary; the offset stays put unless the cursor is about to leave
+    # the visible window.
+    max_offset = n - window_height
+
+    # Anchor the offset so sel sits at index (window_height - 1) — i.e.,
+    # at the bottom of the visible window. Clamp to [0, max_offset].
+    desired_offset = sel - (window_height - 1)
+    offset = max(0, min(desired_offset, max_offset))
+
+    return list(rows[offset : offset + window_height]), offset
 
 
 # ─── Confirm-delete state machine helpers (importable for tests) ──────
@@ -212,12 +312,34 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
     def _list_text():
         if not state["filtered"]:
             return [("", "\n"), ("class:empty", "  no sessions match\n")]
+
+        # Compute the visible window from terminal height. Each row in the
+        # picker takes 2 lines (title + meta), and there are ~7 lines of
+        # chrome (header + 4 dividers + search + footer). We reserve 9
+        # lines for chrome + leading newline, then floor-divide remaining
+        # by 2 to get the visible row count.
+        try:
+            from prompt_toolkit.application.current import get_app
+
+            term_rows = get_app().output.get_size().rows
+        except Exception:  # noqa: BLE001 — picker must render even without app
+            term_rows = 24  # safe default
+        visible_count = max(1, (term_rows - 9) // 2)
+
+        visible_rows, scroll_offset = compute_visible_window(
+            state["filtered"],
+            selected_idx=state["selected_idx"],
+            window_height=visible_count,
+        )
+        state["scroll_offset"] = scroll_offset  # surface for tests
+
         out: list[tuple[str, str]] = [("", "\n")]
-        for i, row in enumerate(state["filtered"]):
-            is_sel = i == state["selected_idx"]
+        for local_i, row in enumerate(visible_rows):
+            absolute_i = scroll_offset + local_i
+            is_sel = absolute_i == state["selected_idx"]
             is_confirming = is_sel and state["mode"] == "confirm-delete"
             arrow = "❯ " if is_sel else "  "
-            title = row.title or f"(untitled · {row.id[:8]})"
+            title = format_session_label(row)
             meta = (
                 f"{format_time_ago(row.started_at)}  ·  "
                 f"{row.message_count} message{'s' if row.message_count != 1 else ''}  ·  "
@@ -239,6 +361,17 @@ def run_resume_picker(rows: list[SessionRow], db=None) -> str | None:  # noqa: A
                 out.append((title_cls, f"{title}\n"))
             out.append(("", "      "))  # meta indent
             out.append((meta_cls, f"{meta}\n"))
+
+        # Visual indicator that more rows exist below/above the window —
+        # only shown when there's actually overflow, so a small list looks
+        # uncluttered.
+        total = len(state["filtered"])
+        if total > visible_count:
+            shown_lo = scroll_offset + 1
+            shown_hi = scroll_offset + len(visible_rows)
+            out.append(
+                ("class:meta", f"\n  showing {shown_lo}-{shown_hi} of {total}\n")
+            )
         return out
 
     kb = KeyBindings()

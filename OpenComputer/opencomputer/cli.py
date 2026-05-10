@@ -2808,6 +2808,13 @@ def code(
 
 @app.command()
 def resume(
+    session: str = typer.Argument(
+        None,
+        help=(
+            "Session id, id-prefix, or one of the magic words 'last' / 'pick'. "
+            "Omit to open the full-screen picker (the default)."
+        ),
+    ),
     plan: bool = typer.Option(
         False, "--plan", help="Resume in plan mode."
     ),
@@ -2830,12 +2837,19 @@ def resume(
         False, "--no-compact", help="Disable automatic context compaction."
     ),
 ) -> None:
-    """Open a full-screen session picker and resume the selected session.
+    """Resume a saved session — by id, by id-prefix, or via the picker.
 
-    Equivalent to ``oc chat --resume pick`` but with a polished alt-screen
-    picker (search + arrow nav + metadata rows). Alt-screen mode bypasses
-    Cursor-Position-Report, so it works in editor terminals (VS Code,
-    JetBrains) where the inline dropdown can't render.
+    Three call shapes:
+
+    - ``oc resume`` — opens the full-screen alt-screen picker (search +
+      arrow nav + delete). Equivalent to ``oc chat --resume pick``.
+    - ``oc resume last`` — resumes the most recent session.
+    - ``oc resume <id-prefix>`` — resumes the matching session directly,
+      skipping the picker. Mirrors ``claude --resume <id>``.
+
+    Alt-screen mode bypasses Cursor-Position-Report, so the picker works
+    in editor terminals (VS Code, JetBrains) where the inline dropdown
+    can't render.
     """
     from opencomputer.agent.config import _home as _profile_home_fn
     from opencomputer.agent.state import SessionDB
@@ -2843,6 +2857,57 @@ def resume(
 
     profile_home = _profile_home_fn()
     db = SessionDB(profile_home / "sessions.db")
+
+    # ── Direct-resume path: positional id (or 'last' / 'pick' magic) ──
+    # When the user typed `oc resume <id>`, skip the picker entirely.
+    # Resolution order mirrors the in-chat ``/resume <target>`` command:
+    #   1. Magic words ``last``/``pick`` → _resolve_resume_target.
+    #   2. Exact title or lineage → _resolve_resume_target (Hermes parity).
+    #   3. Id-prefix → DB list_sessions + startswith (with ambiguity check).
+    if session and session != "pick":
+        resolved: str | None = _resolve_resume_target(session)
+        if resolved is None:
+            # Try id-prefix match. Mirrors the in-chat /resume handler at
+            # cli.py::_on_resume so behavior is consistent.
+            all_rows = db.list_sessions(limit=200)
+            matches = [
+                str(r.get("id", "")) for r in all_rows
+                if str(r.get("id", "")).startswith(session)
+            ]
+            if len(matches) > 1:
+                console.print(
+                    f"[yellow]ambiguous prefix[/yellow] {session!r} "
+                    f"matches {len(matches)} sessions:"
+                )
+                for mid in matches[:10]:
+                    title = db.get_session_title(mid) or "(untitled)"
+                    console.print(f"  [dim]{mid[:8]}[/dim]  {title}")
+                raise typer.Exit(code=1)
+            resolved = matches[0] if matches else None
+        if resolved is None:
+            console.print(
+                f"[red]error:[/red] no session matches [cyan]{session!r}[/cyan]. "
+                "Run [bold]oc resume[/bold] (no args) to browse, or "
+                "[bold]oc sessions[/bold] to list ids."
+            )
+            raise typer.Exit(code=1)
+        if yolo:
+            _emit_yolo_deprecation()
+            auto = True
+        permission_mode = _derive_permission_mode(
+            plan=plan, auto=auto, accept_edits=accept_edits
+        )
+        _run_chat_session(
+            resume=resolved,
+            plan=plan,
+            no_compact=no_compact,
+            yolo=auto,
+            accept_edits=accept_edits,
+            permission_mode=permission_mode,
+        )
+        return
+
+    # ── Picker path: no positional, or explicit 'pick' magic ──────────
     db_rows = db.list_sessions(limit=200)
 
     def _coerce_started_at(v) -> float:
@@ -2857,6 +2922,7 @@ def resume(
             title=r.get("title") or "",
             started_at=_coerce_started_at(r.get("started_at")),
             message_count=int(r.get("message_count", 0) or 0),
+            cwd=r.get("cwd") or "",
         )
         for r in db_rows
         if r.get("id")
