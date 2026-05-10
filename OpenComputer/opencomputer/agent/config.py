@@ -13,7 +13,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from opencomputer.agent.auxiliary_client import AuxiliaryConfig
+# Note: AuxiliaryConfig + AuxSlotConfig are defined in this module (see
+# below) — single source of truth. ``opencomputer.agent.auxiliary_client``
+# re-exports them so legacy imports keep working without circular-import
+# risk.
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -1239,14 +1242,65 @@ class ToolClassifierConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class AuxSlotConfig:
+    """Per-slot auxiliary model configuration (Hermes config v2 shape).
+
+    Hermes spec ``auxiliary.<slot>.{provider, model, base_url, api_key, timeout}``.
+    ``provider`` ``"auto"`` and ``"main"`` both inherit the active main
+    provider (caller decides what "main" is at resolution time). Setting
+    ``base_url`` takes precedence over ``provider`` — the slot uses an
+    OpenAI-compatible client pointed at the URL, with ``api_key`` (or
+    falls back to ``OPENAI_API_KEY``).
+
+    All fields default to "unset" sentinels (empty strings, default
+    timeout) — a partially-populated slot still parses cleanly.
+    """
+
+    provider: str = "auto"
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    timeout: float = 120.0
+
+
+@dataclass(frozen=True, slots=True)
 class AuxiliaryConfig:
-    """Bundle of auxiliary-model overrides. Goal judge is the first slot."""
+    """Bundle of auxiliary-model overrides.
+
+    Two coexisting shapes:
+
+    1. **Per-feature judges/classifiers** (Kanban-Goals v2 + tool-call
+       classifier): ``goal_judge``, ``tool_classifier``. Each routes a
+       specific in-loop decision through a dedicated provider.
+    2. **Per-task model overrides** (Hermes config v2): ``summary_model``,
+       ``classify_model``, ``extract_model``, ``title_model``,
+       ``compression``. Override which model handles each auxiliary task
+       (summarize a chunk, classify a snippet, etc.).
+
+    Both are populated from the same ``auxiliary:`` block in
+    ``config.yaml``; loader resolves nested vs flat shapes.
+    """
 
     goal_judge: GoalJudgeConfig = field(default_factory=GoalJudgeConfig)
     #: v1.1 plan-3 M9.2 — auto-mode tool-call classifier knobs. Defaults
     #: leave the feature dormant until the user opts into auto mode AND
     #: the classifier has a registered provider available.
     tool_classifier: ToolClassifierConfig = field(default_factory=ToolClassifierConfig)
+    #: Hermes config v2 — per-task model overrides. ``None`` falls back
+    #: to ``DEFAULT_MODEL_BY_TASK`` in :mod:`opencomputer.agent.auxiliary_client`.
+    summary_model: str | None = None
+    classify_model: str | None = None
+    extract_model: str | None = None
+    title_model: str | None = None
+    #: Default temperature for auxiliary tasks. Conservative — these calls
+    #: are deterministic in spirit (summarize, classify) so we don't want
+    #: stylistic drift.
+    temperature: float = 0.3
+    #: Hermes config v2 — nested compression slot. When ``None`` (default),
+    #: the legacy flat ``summary_model`` is consulted. When set with a
+    #: non-empty ``model`` field, it overrides the flat form. See
+    #: :func:`opencomputer.agent.auxiliary_client.effective_compression_model`.
+    compression: AuxSlotConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)

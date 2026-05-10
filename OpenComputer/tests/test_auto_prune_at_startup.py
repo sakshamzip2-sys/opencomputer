@@ -31,7 +31,12 @@ def test_maybe_run_auto_prune_calls_db_when_configured(tmp_path: Path) -> None:
     with patch.object(SessionDB, "auto_prune", return_value=0) as mock_prune:
         _maybe_run_auto_prune(db, cfg)
         mock_prune.assert_called_once_with(
-            older_than_days=90, untitled_days=7, min_messages=3
+            older_than_days=90,
+            untitled_days=7,
+            min_messages=3,
+            # Hermes config v2 (2026-05-08) — vacuum_after_prune defaults
+            # to True so SQLite freelist gets reclaimed after the DELETE.
+            vacuum_after_prune=True,
         )
 
 

@@ -70,49 +70,12 @@ DEFAULT_MODEL_BY_TASK: dict[str, str] = {
 TaskKind = Literal["summary", "classify", "extract", "title"]
 
 
-@dataclass(frozen=True, slots=True)
-class AuxSlotConfig:
-    """Per-slot auxiliary model configuration (Hermes config v2 shape).
-
-    Hermes spec ``auxiliary.<slot>.{provider, model, base_url, api_key, timeout}``.
-    ``provider`` ``"auto"`` and ``"main"`` both inherit the active main
-    provider (caller decides what "main" is at resolution time). Setting
-    ``base_url`` takes precedence over ``provider`` — the slot uses an
-    OpenAI-compatible client pointed at the URL, with ``api_key`` (or
-    falls back to ``OPENAI_API_KEY``).
-
-    All fields default to "unset" sentinels (empty strings, default
-    timeout) — a partially-populated slot still parses cleanly.
-    """
-
-    provider: str = "auto"
-    model: str = ""
-    base_url: str = ""
-    api_key: str = ""
-    timeout: float = 120.0
-
-
-@dataclass(frozen=True, slots=True)
-class AuxiliaryConfig:
-    """Per-task model overrides. ``None`` falls back to ``DEFAULT_MODEL_BY_TASK``.
-
-    Hermes config v2 adds a nested ``compression`` slot (parallel to the
-    flat ``summary_model``). When the nested form has a non-empty
-    ``model``, it takes precedence — see :func:`effective_compression_model`.
-    """
-
-    summary_model: str | None = None
-    classify_model: str | None = None
-    extract_model: str | None = None
-    title_model: str | None = None
-    #: Default temperature for auxiliary tasks. Conservative — these calls
-    #: are deterministic in spirit (summarize, classify) so we don't want
-    #: stylistic drift.
-    temperature: float = 0.3
-    #: Hermes-v2 nested compression slot. When ``None`` (default), the
-    #: legacy flat ``summary_model`` is consulted. When set with a
-    #: non-empty ``model`` field, it overrides the flat form.
-    compression: AuxSlotConfig | None = None
+# Canonical AuxiliaryConfig + AuxSlotConfig live in
+# :mod:`opencomputer.agent.config`. Re-exported here for callers that
+# still import them from this module (Hermes-port follow-throughs).
+# Single source of truth so ``cfg.auxiliary`` always points at the same
+# class no matter which module the test/production code imports from.
+from opencomputer.agent.config import AuxiliaryConfig, AuxSlotConfig  # noqa: E402, PLC0415
 
 
 def effective_compression_model(cfg: AuxiliaryConfig) -> str:
