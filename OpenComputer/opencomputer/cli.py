@@ -15,7 +15,6 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.theme import Theme as _RichTheme
 
-from opencomputer import __version__
 from opencomputer.agent.config import Config, default_config
 from opencomputer.agent.config_store import (
     config_file_path,
@@ -805,7 +804,14 @@ def default(
     if headless:
         os.environ["OPENCOMPUTER_HEADLESS"] = "1"
     if version:
-        console.print(f"opencomputer {__version__}")
+        # Long form when running from a git checkout — includes the
+        # current sha + behind/ahead vs origin/main. Helps users diagnose
+        # the "merged but not deployed" gotcha (editable installs bind
+        # to a filesystem path, not a branch). Falls back to plain
+        # version string for PyPI installs / non-git environments.
+        from opencomputer.doctor import get_source_version_string
+
+        console.print(get_source_version_string())
         raise typer.Exit()
     if ctx.invoked_subcommand is None:
         _run_chat_session(resume="", plan=False, no_compact=False, yolo=False)

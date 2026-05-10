@@ -2505,9 +2505,18 @@ class AgentLoop:
                             messages=_msg_dicts,
                             label=f"before tool_use turn={iterations}",
                         )
-                    except Exception:  # noqa: BLE001
-                        _log.debug(
-                            "M5.2: checkpoint create failed (suppressed)",
+                    except Exception:  # noqa: BLE001 — never wedge the loop
+                        # Promoted from _log.debug (2026-05-10): silent-debug
+                        # swallowing meant prompt_checkpoints stayed empty in
+                        # the user's DB for weeks with zero diagnostic. WARNING
+                        # is still non-fatal but visible at the default log
+                        # level so the failure mode surfaces in production.
+                        _log.warning(
+                            "M5.2: checkpoint create failed for session %s "
+                            "(suppressed; agent loop continues). "
+                            "`oc session rewind --mode conv_only` will have "
+                            "no rollback point for this turn.",
+                            sid,
                             exc_info=True,
                         )
 
