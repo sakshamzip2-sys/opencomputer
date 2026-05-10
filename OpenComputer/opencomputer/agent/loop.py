@@ -954,6 +954,54 @@ class AgentLoop:
         except Exception as e:  # noqa: BLE001 — defensive
             _log.warning("system-control attach_to_bus skipped: %s", e)
 
+    # ─── compaction telemetry ───────────────────────────────────────
+
+    def _record_compaction(self) -> None:
+        """Bump per-session ``compactions_count`` and mirror to runtime.
+
+        Called from each post-compaction success branch — both the
+        proactive compaction (token threshold) and the reactive
+        ``CONTEXT_FULL`` retry. The DB increment is best-effort:
+        :meth:`SessionDB.increment_compaction_count` swallows SQL
+        errors and returns 0, and we additionally guard against
+        adversarial ``increment_compaction_count`` overrides raising
+        unexpectedly. Counter telemetry must NEVER wedge the loop —
+        compaction itself succeeded; the counter is only a "nice to
+        have" surfaced by ``/usage``, ``/context``, and the new
+        ``oc usage`` / ``oc context`` CLIs.
+
+        Side effects:
+
+          - On success (counter > 0): writes
+            ``runtime.custom["session_compactions"]`` with the new
+            value so an in-flight ``/context`` slash command sees the
+            fresh count without another DB read.
+          - On failure / unknown session / empty session_id: leaves
+            the runtime key untouched. Absence ≠ zero, so the slash
+            command can render "(not tracked)" honestly.
+
+        Spec: docs/superpowers/specs/2026-05-10-cc-usage-context-visibility-design.md §4.3.
+        """
+        sid = self._current_session_id or ""
+        if not sid or self.db is None:
+            return
+        try:
+            new_count = self.db.increment_compaction_count(sid)
+        except Exception as exc:  # noqa: BLE001 — counter must never break loop
+            _log.warning(
+                "compaction-counter increment raised for session=%s: %s "
+                "(loop continues; /context will read 'not tracked' for this turn)",
+                sid,
+                exc,
+            )
+            return
+        if new_count <= 0:
+            # Either the row didn't exist (race with delete) or SessionDB
+            # caught a SQL error and returned 0. Don't lie to /context.
+            return
+        if self._runtime is not None:
+            self._runtime.custom["session_compactions"] = new_count
+
     # ─── the loop ──────────────────────────────────────────────────
 
     async def run_conversation(
@@ -2006,6 +2054,11 @@ class AgentLoop:
                     )
                     if result.did_compact:
                         messages = result.messages
+                        # v18 (2026-05-10): bump per-session compaction
+                        # counter for /context, /usage, oc usage, oc
+                        # context surfacing. Best-effort — never wedges
+                        # the loop. See _record_compaction docstring.
+                        self._record_compaction()
                         # Round 2A P-1: AFTER_COMPACTION fires only when
                         # compaction actually ran (did_compact=True). The handler
                         # sees the post-compaction message list (synthetic
@@ -2098,6 +2151,13 @@ class AgentLoop:
                         )
                         if cresult.did_compact:
                             messages = cresult.messages
+                            # v18 (2026-05-10): same per-session
+                            # counter bump as the proactive site;
+                            # this is the reactive CONTEXT_FULL
+                            # retry path. Both must register so
+                            # /context's "compactions this session"
+                            # row is honest.
+                            self._record_compaction()
                             step = await self._run_one_step(
                                 messages=messages,
                                 system=system,
