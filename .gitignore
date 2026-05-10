@@ -19,3 +19,17 @@
 **/*.egg-info/
 **/dist/
 **/build/
+
+# Node — added 2026-05-10 when browser-harness + opencli-bridge plugins
+# introduced project-local npm deps. We commit package.json + package-lock.json
+# (the manifest + exact version pins for reproducibility) but ignore the
+# materialised node_modules tree (GBs of transitive deps, regenerable via
+# `npm install`).
+**/node_modules/
+**/npm-debug.log*
+**/yarn-debug.log*
+**/yarn-error.log*
+
+# Claude Code per-session artifacts (transcripts, memory, etc.) live
+# alongside the repo but shouldn't be tracked.
+/.claude/
