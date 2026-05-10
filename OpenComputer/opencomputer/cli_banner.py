@@ -164,30 +164,6 @@ def _truncate_csv(items: list[str], max_chars: int) -> str:
 
 _BLOCK_LOGO_WIDTH = 105  # widest line of OPENCOMPUTER_BLOCK_LOGO
 
-# Side mascot — a clean little robot rendered in yellow on the left
-# of the info panel (Hermes-screenshot layout). Designed to read as
-# a "computer agent" at a glance: head with eyes + antenna, torso
-# with status LEDs, two stubby arms.
-_OC_MASCOT = (
-    "          ▄▄▄          \n"
-    "         ╱   ╲         \n"
-    "        ╱_____╲        \n"
-    "       ┌───────┐       \n"
-    "       │ ◉   ◉ │       \n"
-    "       │   ▽   │       \n"
-    "       │  ───  │       \n"
-    "       └───┬───┘       \n"
-    "      ╔════╧════╗      \n"
-    "    ◀═╣ ▣  ▣  ▣ ╠═▶    \n"
-    "      ║ ▒▒▒▒▒▒▒ ║      \n"
-    "      ║  oc-01  ║      \n"
-    "      ╚═══╤═╤═══╝      \n"
-    "         ─┘ └─         \n"
-    "                       \n"
-    "     OpenComputer      \n"
-    "       /agent          \n"
-)
-
 _MAX_GROUPS_SHOWN = 8       # how many tool/skill groups to list inline
 _MAX_ITEMS_PER_GROUP = 4    # how many items per group before "..."
 
@@ -306,9 +282,10 @@ def build_welcome_banner(
         expand=False,
     )
 
-    # Side-by-side: yellow mascot on the left, info panel on the right.
-    # Falls back to stacked rendering on narrow terminals.
-    mascot = Text(_OC_MASCOT.rstrip("\n"), style="bold yellow")
+    # Side-by-side: Pico (rose pill bug) on the left, info panel on the
+    # right. Falls back to stacked rendering on narrow terminals.
+    from opencomputer.cli_pico import render_pico
+    mascot = render_pico("idle")
     if width >= 100:
         console.print(Columns([mascot, info_panel], padding=(0, 2)))
     else:
