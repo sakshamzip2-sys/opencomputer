@@ -2,6 +2,19 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
+## [v2026.5.10] — 2026-05-10
+
+- feat(browser): browser-harness plugin (agent-browser/Hermes-derived, replaces browser-control as default)
+- feat(browser): opencli-bridge plugin (100+ deterministic site adapters via OpenCLI)
+- browser-control dormant (reactivate via OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1)
+- feat(gateway): autostart cron scheduler co-tenant
+- feat(hook-history): persist hook fire history to JSONL
+- feat(service): oc service status --watch + oc wire/dashboard --detach
+- feat(activate): oc activate wizard scaffolds dormant feature areas
+- fix(loop): promote silent debug-swallow patterns to WARNING
+- fix(resume): positional id arg, auto-titles, scrolling
+- plus misc hardening across social-traces, env_loader, memory, audit
+
 ## [v2026.5.9] — 2026-05-09
 
 The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEASE.md`, on tag push (`git tag v2026.5.9 && git push origin v2026.5.9`) the `release.yml` workflow publishes to PyPI via OIDC trusted publishing.
