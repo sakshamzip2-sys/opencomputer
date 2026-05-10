@@ -914,7 +914,15 @@ class AgentLoop:
             )
         except Exception as _exc:  # noqa: BLE001 — never crash the loop
             _ups_log = logging.getLogger("opencomputer.agent.loop")
-            _ups_log.debug("USER_PROMPT_SUBMIT fire failed: %s", _exc)
+            # Promoted from DEBUG (2026-05-10): user-defined hooks
+            # subscribed to USER_PROMPT_SUBMIT silently never fire if
+            # this swallows. Keep non-fatal but visible.
+            _ups_log.warning(
+                "USER_PROMPT_SUBMIT fire failed for session %s: %s "
+                "(loop continues; subscribed hooks did NOT fire this turn)",
+                sid,
+                _exc,
+            )
 
         # OpenClaw 1.C — push the (session_id, delegation_depth) frame for
         # the repetition detector. Idempotent: re-entering the same session
@@ -1381,7 +1389,15 @@ class AgentLoop:
                 )
             )
         except Exception:  # noqa: BLE001 — never let BEFORE_TASK break the loop
-            _log.debug("BEFORE_TASK fire failed (suppressed)", exc_info=True)
+            # Promoted from DEBUG (2026-05-10): BEFORE_TASK is the
+            # primary user-extension point for pre-turn behaviors;
+            # silent failure here = subscribers never run.
+            _log.warning(
+                "BEFORE_TASK fire failed for session %s (loop continues; "
+                "subscribed hooks did NOT fire this turn)",
+                sid,
+                exc_info=True,
+            )
             _bt_decision = None
 
         if (
@@ -2275,7 +2291,17 @@ class AgentLoop:
                                 content=(step.assistant_message.content or "") + _reveal,
                             )
                     except Exception:  # noqa: BLE001 — never break the turn
-                        _log.debug("learning_moments hook failed", exc_info=True)
+                        # Promoted from DEBUG (2026-05-10): learning
+                        # moments are user-visible suggestions; silent
+                        # failure = user never sees the hint they would
+                        # have benefited from.
+                        _log.warning(
+                            "learning_moments hook failed for session %s "
+                            "(loop continues; user did NOT see the "
+                            "contextual suggestion this turn)",
+                            sid,
+                            exc_info=True,
+                        )
 
                     messages.append(final_assistant_msg)
                     self._emit_before_message_write(
@@ -2471,7 +2497,18 @@ class AgentLoop:
                             _real_user_history,
                         )
                     except Exception:  # noqa: BLE001 — auto-title is best-effort
-                        _log.debug("maybe_auto_title spawn failed", exc_info=True)
+                        # Promoted from DEBUG (2026-05-10): the entire
+                        # reason this code path exists is so the
+                        # session gets a non-empty title in the resume
+                        # picker. Silent failure here = user keeps
+                        # seeing "(untitled · ID)" forever.
+                        _log.warning(
+                            "maybe_auto_title spawn failed for session %s "
+                            "(loop continues; this session will remain "
+                            "untitled in `oc resume` picker)",
+                            sid,
+                            exc_info=True,
+                        )
 
                     return ConversationResult(
                         final_message=final_assistant_msg,
@@ -2910,7 +2947,15 @@ class AgentLoop:
                     classifier_version="regex_v1",
                 )
         except Exception:  # noqa: BLE001 — degrade silently
-            _log.debug("vibe-classify / per-turn log failed", exc_info=True)
+            # Promoted from DEBUG (2026-05-10): vibe_log table is the
+            # data source for emotion/topic analytics; silent failure =
+            # 0 rows growing, so analytics dashboards lie.
+            _log.warning(
+                "vibe-classify / per-turn log failed for session %s "
+                "(loop continues; vibe_log row NOT written for this turn)",
+                session_id,
+                exc_info=True,
+            )
 
         if result.persona_id == "companion":
             try:
@@ -3080,7 +3125,15 @@ class AgentLoop:
                     + lm_overlay
                 )
         except Exception:  # noqa: BLE001 — never break loop on overlay miss
-            _log.debug("learning_moments mechanism-B failed", exc_info=True)
+            # Promoted from DEBUG (2026-05-10): mechanism-B injects
+            # learning-moments overlay into the system prompt; silent
+            # failure means user never sees /skill, /commit etc. nudges.
+            _log.warning(
+                "learning_moments mechanism-B failed for session %s "
+                "(loop continues; overlay NOT injected this turn)",
+                session_id,
+                exc_info=True,
+            )
 
         return overlay
 
@@ -5136,7 +5189,16 @@ class AgentLoop:
 
             return standard_search_paths()
         except Exception:  # noqa: BLE001
-            _log.debug("demand_tracker: search-path resolution failed", exc_info=True)
+            # Promoted from DEBUG (2026-05-10): plugin-demand tracking
+            # silently degrades to empty when search paths can't resolve;
+            # user's `oc plugin demand` shows 0 rows for plugins they're
+            # actually demanding.
+            _log.warning(
+                "demand_tracker: search-path resolution failed "
+                "(plugin demand tracking degraded; `oc plugin demand` "
+                "may show fewer signals than reality)",
+                exc_info=True,
+            )
             return []
 
     def _active_profile_plugins(self) -> frozenset[str] | None:
@@ -5160,7 +5222,16 @@ class AgentLoop:
             assert isinstance(enabled, frozenset)
             return enabled
         except Exception:  # noqa: BLE001
-            _log.debug("demand_tracker: profile-config read failed", exc_info=True)
+            # Promoted from DEBUG (2026-05-10): same observability gap
+            # as search-path failure above — silently disables the
+            # active-plugin filter, so demand tracking conflates
+            # already-enabled plugins with truly-missing ones.
+            _log.warning(
+                "demand_tracker: profile-config read failed "
+                "(plugin-demand active-plugin filter disabled; "
+                "`oc plugin demand` may flag plugins that are already enabled)",
+                exc_info=True,
+            )
             return None
 
     def _build_demand_tracker(self, cfg: Any) -> Any:
