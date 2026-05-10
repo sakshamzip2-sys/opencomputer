@@ -123,6 +123,109 @@ def _git(args: list[str], cwd: Path) -> tuple[int, str]:
         return -1, ""
 
 
+def _check_fd_limit_and_competitors() -> Check:
+    """Detect FD-exhaustion risk (EMFILE) and competing OC/Hermes daemons.
+
+    The user audit (2026-05-10) found gateway log entries like::
+
+        OSError: [Errno 24] Too many open files: '/Users/saksham/.opencomputer/pairing/.lock'
+        sqlite3.OperationalError: unable to open database file
+
+    The gateway briefly hit the per-process FD ceiling and silently dropped
+    pairing flock + sqlite operations. With multiple OC / Hermes daemons
+    (gateway, cron, hermes-agent, etc.) all running simultaneously each
+    eats from the same pool.
+
+    This check reports:
+
+    * Soft FD limit (``ulimit -n``).
+    * Current FD usage of the live ``oc gateway`` daemon if found.
+    * Competing daemons (``hermes_gateway``, multiple ``oc gateway`` PIDs).
+
+    Status:
+      * pass  — soft limit ≥ 4096 AND no competing daemons
+      * warn  — soft limit < 4096 OR competitors detected
+      * skip  — psutil unavailable
+    """
+    try:
+        import resource
+
+        soft_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    except Exception:  # noqa: BLE001
+        return Check(
+            "fd limit + competitors",
+            "skip",
+            "resource module unavailable on this platform",
+        )
+
+    try:
+        import psutil
+    except ImportError:
+        return Check(
+            "fd limit + competitors",
+            "skip",
+            f"psutil unavailable; soft limit={soft_limit} (raw)",
+        )
+
+    oc_gateway_procs: list[tuple[int, int]] = []
+    hermes_gateway_procs: list[int] = []
+    for proc in psutil.process_iter(["pid", "cmdline", "name"]):
+        try:
+            cmdline = " ".join(proc.info.get("cmdline") or [])
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if not cmdline:
+            continue
+        if "oc gateway" in cmdline or "opencomputer gateway" in cmdline or (
+            "/oc " in cmdline and " gateway" in cmdline
+        ):
+            try:
+                fds = proc.num_fds()
+            except (psutil.AccessDenied, AttributeError):
+                fds = -1
+            oc_gateway_procs.append((proc.info["pid"], fds))
+        elif "hermes_cli" in cmdline and "gateway" in cmdline:
+            hermes_gateway_procs.append(proc.info["pid"])
+
+    issues: list[str] = []
+    if soft_limit < 4096:
+        issues.append(
+            f"low FD soft limit ({soft_limit}); raise via "
+            "`ulimit -n 65536` in your shell rc"
+        )
+    if len(oc_gateway_procs) > 1:
+        pids = ", ".join(str(p) for p, _ in oc_gateway_procs)
+        issues.append(
+            f"{len(oc_gateway_procs)} oc gateway processes running "
+            f"(pids: {pids}); kill duplicates with "
+            "`oc gateway stop && oc gateway start`"
+        )
+    if hermes_gateway_procs:
+        pids = ", ".join(str(p) for p in hermes_gateway_procs)
+        issues.append(
+            f"{len(hermes_gateway_procs)} hermes_gateway process(es) "
+            f"running (pids: {pids}); these compete for FDs + ports "
+            f"with oc gateway. Stop one or the other."
+        )
+
+    fd_summary_parts: list[str] = [f"soft limit={soft_limit}"]
+    for pid, fds in oc_gateway_procs:
+        fd_summary_parts.append(
+            f"oc gateway pid={pid} fds={fds if fds >= 0 else '?'}"
+        )
+    for pid in hermes_gateway_procs:
+        fd_summary_parts.append(f"hermes_gateway pid={pid}")
+    fd_summary = "; ".join(fd_summary_parts)
+
+    if issues:
+        return Check(
+            "fd limit + competitors",
+            "warn",
+            f"{fd_summary}. Issues: " + " | ".join(issues),
+        )
+    return Check("fd limit + competitors", "pass", fd_summary)
+
+
 def _check_source_freshness() -> Check:
     """Detect "merged but not deployed" — local source tree ≠ origin/main.
 
@@ -1525,6 +1628,11 @@ def run_doctor(fix: bool = False) -> int:
     # broken, and re-runs doctor expecting an answer; making them scroll
     # past 30 other checks to find this one defeats the point.
     checks.append(_check_source_freshness())
+    # 2026-05-10 — FD-exhaustion + competing-daemon detection. The user
+    # audit found the gateway briefly hit EMFILE (Errno 24) and silently
+    # dropped pairing flock + sqlite ops. This check surfaces the problem
+    # at-rest so operators see it before the next outage.
+    checks.append(_check_fd_limit_and_competitors())
     cfg_check, cfg = _check_config()
     checks.append(cfg_check)
 
