@@ -162,8 +162,15 @@ def _profile_home() -> Path:
 
 
 def _activate_mcp(*, accept_defaults: bool) -> str:
-    """Append MCP server stubs to config.yaml if section is empty."""
-    config_path = _profile_home() / "config.yaml"
+    """Write MCP starter stubs to a sibling ``mcp_examples.yaml``.
+
+    Writing to ``config.yaml`` directly was unstable: any subsequent
+    ``set_value`` operation (e.g. ``oc memory dream-on``) re-serializes
+    the structured Config dataclass and wipes raw comment blocks. The
+    examples now live in a separate file the user copies from manually.
+    """
+    profile = _profile_home()
+    config_path = profile / "config.yaml"
     raw: dict[str, Any] = {}
     if config_path.exists():
         try:
@@ -178,20 +185,18 @@ def _activate_mcp(*, accept_defaults: bool) -> str:
     if existing_servers:
         return f"mcp: skip ({len(existing_servers)} server(s) already configured)"
 
+    examples_path = profile / "mcp_examples.yaml"
+    if examples_path.exists():
+        return f"mcp: skip (examples already at {examples_path})"
+
     if not _confirm(
-        "MCP servers: write 3 commented-out starter stubs to config.yaml?",
+        f"MCP servers: write 3 commented-out starter stubs to {examples_path.name}?",
         accept_defaults=accept_defaults,
     ):
         return "mcp: skipped (user declined)"
 
-    # Append the comment block to config.yaml verbatim — leaves the actual
-    # `servers:` list empty so loading config.yaml stays valid YAML.
-    existing_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    if "MCP servers — uncomment one or more" in existing_text:
-        return "mcp: skip (starter block already present)"
-    appended = existing_text.rstrip() + "\n\n" + _STARTER_MCP_BLOCK_COMMENT
-    config_path.write_text(appended, encoding="utf-8")
-    return f"mcp: wrote starter stubs to {config_path}"
+    examples_path.write_text(_STARTER_MCP_BLOCK_COMMENT, encoding="utf-8")
+    return f"mcp: wrote starter stubs to {examples_path} (copy entries into config.yaml mcp.servers)"
 
 
 # ─── Sub-area: agents ───────────────────────────────────────────────────────

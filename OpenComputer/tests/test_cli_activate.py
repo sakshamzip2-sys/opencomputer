@@ -38,10 +38,14 @@ def test_activate_all_writes_each_sub_area(
     result = runner.invoke(app, ["activate", "--accept-defaults"])
     assert result.exit_code == 0, result.stdout
 
-    # 1. MCP — config.yaml has the comment block
-    config_yaml = fresh_profile / "config.yaml"
-    assert config_yaml.exists(), "config.yaml not written"
-    assert "MCP servers — uncomment one or more" in config_yaml.read_text()
+    # 1. MCP — examples written to mcp_examples.yaml (NOT config.yaml).
+    # 2026-05-10: writing to config.yaml was unstable because any
+    # subsequent set_value call (oc memory dream-on, etc.) re-serializes
+    # the dataclass and wipes raw comment blocks. The examples now live
+    # in a sibling file users copy from manually.
+    examples_yaml = fresh_profile / "mcp_examples.yaml"
+    assert examples_yaml.exists(), "mcp_examples.yaml not written"
+    assert "MCP servers — uncomment one or more" in examples_yaml.read_text()
 
     # 2. Agents — 3 starter templates dropped
     agents_dir = fresh_profile / "agents"

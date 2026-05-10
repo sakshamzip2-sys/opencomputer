@@ -30,8 +30,14 @@ Activation is gated by an on-disk JSON file:
 
     <profile_home>/skills/evolution_state.json   {"enabled": <bool>}
 
-A missing file is treated as ``enabled=false`` so the feature ships
-opt-in. T6 supplies the CLI for flipping it.
+A missing file is treated as ``enabled=true`` (2026-05-10 — flipped
+to default-on alongside the dreaming defaults; consolidation is the
+headline value-add). The feature still keeps a hard local boundary:
+all trajectory data stays in ``<profile_home>/skills/``, generated
+skills are staged in ``_proposed/`` for ``oc skills review`` (never
+auto-published), and ``sensitive_filter`` redacts before any LLM
+judge call. ``oc skills evolution off`` writes ``{"enabled": false}``
+to opt out.
 
 Heartbeat
 ---------
@@ -70,12 +76,20 @@ _HEARTBEAT_FILENAME = "evolution_heartbeat"
 
 
 def _is_enabled(profile_home: Path) -> bool:
-    """Read state file; treat missing/unreadable as disabled."""
+    """Read state file; default to enabled when file missing.
+
+    2026-05-10 — flipped from default-off (opt-in) to default-on
+    (opt-out). A missing or unreadable state file now returns True so
+    fresh installs auto-collect trajectories. ``oc skills evolution off``
+    writes ``{"enabled": false}`` to opt out. Malformed JSON still
+    returns False — surface as a config error rather than silently
+    auto-collect under unknown state.
+    """
     state_path = profile_home / "skills" / _STATE_FILENAME
     try:
         raw = state_path.read_text(encoding="utf-8")
     except (OSError, FileNotFoundError):
-        return False
+        return True
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
@@ -84,7 +98,7 @@ def _is_enabled(profile_home: Path) -> bool:
             state_path,
         )
         return False
-    return bool(data.get("enabled", False))
+    return bool(data.get("enabled", True))
 
 
 def _write_heartbeat(profile_home: Path) -> None:

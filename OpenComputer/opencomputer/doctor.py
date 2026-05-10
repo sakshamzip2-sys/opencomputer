@@ -1291,12 +1291,14 @@ def _check_ambient_state(profile_home: Path) -> CheckResult:
 def _check_skill_evolution_state(profile_home: Path) -> CheckResult:
     """T8 — read skill-evolution state.json; warn if enabled but heartbeat stale.
 
-    The auto-skill-evolution subscriber is opt-in (default off). When the user
-    has flipped ``oc skills evolution on`` the in-process subscriber writes a
-    heartbeat file on every observed ``session_end`` event while enabled.
-    Sessions are infrequent (one per user-driven turn), so the staleness
-    threshold is generous (10 minutes) — this surfaces "subscriber not
-    running" rather than "no events recently".
+    2026-05-10 — default flipped to ON. A missing state.json means the
+    user hasn't explicitly opted out; the subscriber treats that as
+    enabled. Doctor mirrors that behavior.
+
+    The in-process subscriber writes a heartbeat file on subscribe AND
+    on every observed ``session_end`` event. Staleness threshold is
+    generous (10 minutes) — surfaces "subscriber not running" rather
+    than "no events recently".
 
     Also surfaces a pile-up warning when the ``_proposed/`` candidates
     directory has more than 20 entries — that's the user's review queue
@@ -1304,24 +1306,34 @@ def _check_skill_evolution_state(profile_home: Path) -> CheckResult:
     """
     state_path = profile_home / "skills" / "evolution_state.json"
     if not state_path.exists():
-        return CheckResult(
-            ok=True,
-            level="info",
-            message=(
-                "skill-evolution disabled (default — opt in with "
-                "`opencomputer skills evolution on`)"
-            ),
-        )
-    try:
-        state = json.loads(state_path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        return CheckResult(
-            ok=False,
-            level="warning",
-            message=f"evolution_state.json unreadable: {exc}",
-        )
-    if not state.get("enabled", False):
-        return CheckResult(ok=True, level="info", message="skill-evolution disabled")
+        # 2026-05-10 — default-on: state file absent means "not yet
+        # opted out". Treat as enabled. If heartbeat hasn't fired yet
+        # (e.g. fresh gateway, no sessions completed), report info-only.
+        hb_path_default = profile_home / "skills" / "evolution_heartbeat"
+        if not hb_path_default.exists():
+            return CheckResult(
+                ok=True,
+                level="info",
+                message=(
+                    "skill-evolution enabled by default (no heartbeat yet — "
+                    "fires once gateway boots; opt out via "
+                    "`opencomputer skills evolution off`)"
+                ),
+            )
+        # Fall through to the heartbeat-age check using a synthetic
+        # enabled-state.
+        state: dict = {"enabled": True}
+    else:
+        try:
+            state = json.loads(state_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            return CheckResult(
+                ok=False,
+                level="warning",
+                message=f"evolution_state.json unreadable: {exc}",
+            )
+        if not state.get("enabled", True):
+            return CheckResult(ok=True, level="info", message="skill-evolution disabled")
     hb_path = profile_home / "skills" / "evolution_heartbeat"
     if not hb_path.exists():
         return CheckResult(

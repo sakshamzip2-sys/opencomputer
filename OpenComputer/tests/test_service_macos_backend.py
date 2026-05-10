@@ -195,6 +195,36 @@ def test_start_kickstart(monkeypatch: pytest.MonkeyPatch) -> None:
     assert any(c[0] == "kickstart" for c in calls)
 
 
+def test_stop_polls_until_service_detached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: stop() must wait for launchd to fully detach before
+    returning. Without the post-bootout poll, ``oc service restart``
+    races — bootout returns immediately but the next bootstrap collides
+    with the still-detaching service and the restart "start step" fails."""
+    from opencomputer.service import _macos_launchd
+
+    monkeypatch.setattr(_macos_launchd, "_uid", lambda: 501)
+    monkeypatch.setattr(_macos_launchd.time, "sleep", lambda _s: None)
+    print_call_count = 0
+
+    def fake_launchctl(*args: str) -> tuple[int, str, str]:
+        nonlocal print_call_count
+        if args[0] == "print":
+            print_call_count += 1
+            # First print call: service exists (rc=0). After 3 polls, gone.
+            if print_call_count <= 3:
+                return (0, "state = running", "")
+            return (1, "", "Could not find service")
+        # bootout always succeeds in this fixture.
+        return (0, "", "")
+
+    monkeypatch.setattr(_macos_launchd, "_launchctl", fake_launchctl)
+    assert _macos_launchd.stop() is True
+    # Print called: 1 initial state-check + N polls until service is gone.
+    assert print_call_count >= 2, f"stop() should poll print after bootout; got {print_call_count}"
+
+
 def test_stop_uses_bootout(monkeypatch: pytest.MonkeyPatch) -> None:
     """Updated 2026-05-08 (PR #489): stop() now uses ``launchctl bootout``
     instead of ``launchctl kill SIGTERM``. With KeepAlive=dict, a clean
@@ -204,6 +234,7 @@ def test_stop_uses_bootout(monkeypatch: pytest.MonkeyPatch) -> None:
     from opencomputer.service import _macos_launchd
 
     monkeypatch.setattr(_macos_launchd, "_uid", lambda: 501)
+    monkeypatch.setattr(_macos_launchd.time, "sleep", lambda _s: None)
     calls: list = []
 
     def fake_launchctl(*args: str) -> tuple[int, str, str]:
