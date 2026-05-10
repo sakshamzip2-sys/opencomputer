@@ -28,10 +28,9 @@ import logging
 import os
 import threading
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any
 
 import requests
-
 from browser_camofox_state import get_camofox_identity
 from compat import load_config, tool_error
 
@@ -43,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 30  # seconds per HTTP request
 _SNAPSHOT_MAX_CHARS = 80_000  # camofox paginates at this limit
-_vnc_url: Optional[str] = None  # cached from /health response
+_vnc_url: str | None = None  # cached from /health response
 _vnc_url_checked = False  # only probe once per process
 
 
@@ -82,7 +81,7 @@ def check_camofox_available() -> bool:
         return False
 
 
-def get_vnc_url() -> Optional[str]:
+def get_vnc_url() -> str | None:
     """Return the VNC URL if the Camofox server exposes one, or None."""
     if not _vnc_url_checked:
         check_camofox_available()
@@ -110,11 +109,11 @@ def _managed_persistence_enabled() -> bool:
 # Session management
 # ---------------------------------------------------------------------------
 # Maps task_id -> {"user_id": str, "tab_id": str|None}
-_sessions: Dict[str, Dict[str, Any]] = {}
+_sessions: dict[str, dict[str, Any]] = {}
 _sessions_lock = threading.Lock()
 
 
-def _get_session(task_id: Optional[str]) -> Dict[str, Any]:
+def _get_session(task_id: str | None) -> dict[str, Any]:
     """Get or create a camofox session for the given task.
 
     When managed persistence is enabled, uses a deterministic userId
@@ -144,7 +143,7 @@ def _get_session(task_id: Optional[str]) -> Dict[str, Any]:
         return session
 
 
-def _ensure_tab(task_id: Optional[str], url: str = "about:blank") -> Dict[str, Any]:
+def _ensure_tab(task_id: str | None, url: str = "about:blank") -> dict[str, Any]:
     """Ensure a tab exists for the session, creating one if needed."""
     session = _get_session(task_id)
     if session["tab_id"]:
@@ -165,14 +164,14 @@ def _ensure_tab(task_id: Optional[str], url: str = "about:blank") -> Dict[str, A
     return session
 
 
-def _drop_session(task_id: Optional[str]) -> Optional[Dict[str, Any]]:
+def _drop_session(task_id: str | None) -> dict[str, Any] | None:
     """Remove and return session info."""
     task_id = task_id or "default"
     with _sessions_lock:
         return _sessions.pop(task_id, None)
 
 
-def camofox_soft_cleanup(task_id: Optional[str] = None) -> bool:
+def camofox_soft_cleanup(task_id: str | None = None) -> bool:
     """Release the in-memory session without destroying the server-side context.
 
     When managed persistence is enabled the browser profile (and its cookies)
@@ -228,7 +227,7 @@ def _delete(path: str, body: dict = None, timeout: int = _DEFAULT_TIMEOUT) -> di
 # Tool implementations
 # ---------------------------------------------------------------------------
 
-def camofox_navigate(url: str, task_id: Optional[str] = None) -> str:
+def camofox_navigate(url: str, task_id: str | None = None) -> str:
     """Navigate to a URL via Camofox."""
     try:
         session = _get_session(task_id)
@@ -288,8 +287,8 @@ def camofox_navigate(url: str, task_id: Optional[str] = None) -> str:
         return tool_error(str(e), success=False)
 
 
-def camofox_snapshot(full: bool = False, task_id: Optional[str] = None,
-                     user_task: Optional[str] = None) -> str:
+def camofox_snapshot(full: bool = False, task_id: str | None = None,
+                     user_task: str | None = None) -> str:
     """Get accessibility tree snapshot from Camofox."""
     try:
         session = _get_session(task_id)
@@ -326,7 +325,7 @@ def camofox_snapshot(full: bool = False, task_id: Optional[str] = None,
         return tool_error(str(e), success=False)
 
 
-def camofox_click(ref: str, task_id: Optional[str] = None) -> str:
+def camofox_click(ref: str, task_id: str | None = None) -> str:
     """Click an element by ref via Camofox."""
     try:
         session = _get_session(task_id)
@@ -349,7 +348,7 @@ def camofox_click(ref: str, task_id: Optional[str] = None) -> str:
         return tool_error(str(e), success=False)
 
 
-def camofox_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
+def camofox_type(ref: str, text: str, task_id: str | None = None) -> str:
     """Type text into an element by ref via Camofox."""
     try:
         session = _get_session(task_id)
@@ -371,7 +370,7 @@ def camofox_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
         return tool_error(str(e), success=False)
 
 
-def camofox_scroll(direction: str, task_id: Optional[str] = None) -> str:
+def camofox_scroll(direction: str, task_id: str | None = None) -> str:
     """Scroll the page via Camofox."""
     try:
         session = _get_session(task_id)
@@ -387,7 +386,7 @@ def camofox_scroll(direction: str, task_id: Optional[str] = None) -> str:
         return tool_error(str(e), success=False)
 
 
-def camofox_back(task_id: Optional[str] = None) -> str:
+def camofox_back(task_id: str | None = None) -> str:
     """Navigate back via Camofox."""
     try:
         session = _get_session(task_id)
@@ -403,7 +402,7 @@ def camofox_back(task_id: Optional[str] = None) -> str:
         return tool_error(str(e), success=False)
 
 
-def camofox_press(key: str, task_id: Optional[str] = None) -> str:
+def camofox_press(key: str, task_id: str | None = None) -> str:
     """Press a keyboard key via Camofox."""
     try:
         session = _get_session(task_id)
@@ -419,7 +418,7 @@ def camofox_press(key: str, task_id: Optional[str] = None) -> str:
         return tool_error(str(e), success=False)
 
 
-def camofox_close(task_id: Optional[str] = None) -> str:
+def camofox_close(task_id: str | None = None) -> str:
     """Close the browser session via Camofox."""
     try:
         session = _drop_session(task_id)
@@ -434,7 +433,7 @@ def camofox_close(task_id: Optional[str] = None) -> str:
         return json.dumps({"success": True, "closed": True, "warning": str(e)})
 
 
-def camofox_get_images(task_id: Optional[str] = None) -> str:
+def camofox_get_images(task_id: str | None = None) -> str:
     """Get images on the current page via Camofox.
 
     Extracts image information from the accessibility tree snapshot,
@@ -482,7 +481,7 @@ def camofox_get_images(task_id: Optional[str] = None) -> str:
 
 
 def camofox_vision(question: str, annotate: bool = False,
-                   task_id: Optional[str] = None) -> str:
+                   task_id: str | None = None) -> str:
     """Take a screenshot and analyze it with vision AI via Camofox."""
     try:
         session = _get_session(task_id)
@@ -571,7 +570,7 @@ def camofox_vision(question: str, annotate: bool = False,
         return tool_error(str(e), success=False)
 
 
-def camofox_console(clear: bool = False, task_id: Optional[str] = None) -> str:
+def camofox_console(clear: bool = False, task_id: str | None = None) -> str:
     """Get console output — limited support in Camofox.
 
     Camofox does not expose browser console logs via its REST API.

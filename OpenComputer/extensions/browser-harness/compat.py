@@ -214,7 +214,7 @@ def tool_error(message: str, **fields):
 # =========================================================================
 
 
-class CallLLMNotConfigured(NotImplementedError):
+class CallLLMNotConfigured(NotImplementedError):  # noqa: N818 — matches IsolationFailed/WorktreeNotAvailable convention in sibling extensions
     """Raised by the ``call_llm`` shim until the OC auxiliary system is wired.
 
     Browser-harness uses ``call_llm`` for two non-critical features:

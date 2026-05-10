@@ -12,8 +12,13 @@ from opencomputer.agent.subagent_registry import SubagentRegistry
 
 @pytest.fixture(autouse=True)
 def _reset_registry():
+    # delegate-lineage (2026-05-10): an AgentLoop construction earlier in
+    # the suite may have attached a SubagentStore to the singleton.
+    # Detach so these RAM-only tests don't share state with sqlite.
+    SubagentRegistry.instance().detach_store()
     SubagentRegistry.instance().reset()
     yield
+    SubagentRegistry.instance().detach_store()
     SubagentRegistry.instance().reset()
 
 

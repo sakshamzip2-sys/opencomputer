@@ -99,12 +99,35 @@ async def run_adapter(
     # Exception aliases when no browser plugin is on disk.
     from ._ctx import _typed_browser_errors  # local import to dodge circular  # noqa: PLC0415
     _err = _typed_browser_errors()
-    AdapterConfigError = _err.AdapterConfigError
-    AdapterEmptyResultError = _err.AdapterEmptyResultError
-    AdapterNotFoundError = _err.AdapterNotFoundError
-    AdapterTimeoutError = _err.AdapterTimeoutError
-    AuthRequiredError = _err.AuthRequiredError
-    BrowserServiceError = _err.BrowserServiceError
+
+    # Cross-plugin catch tuples — adapters can ``raise`` either the
+    # browser-harness lifted class OR the browser-control legacy class,
+    # depending on which plugin they were authored against. When both
+    # modules are loadable in this process the runner must catch both
+    # variants — otherwise an adapter that raises the legacy
+    # ``AuthRequiredError`` would fall through to the generic
+    # ``Exception`` catch and produce ``adapter X raised: ...`` instead
+    # of ``auth required: ...``. Build the tuples here so the
+    # subsequent ``except`` clauses match every loaded variant.
+    def _catch_tuple(cls_name: str) -> tuple[type, ...]:
+        classes: list[type] = [getattr(_err, cls_name)]
+        try:
+            from extensions.browser_control._utils import (
+                errors as _legacy,  # type: ignore[import-not-found]  # noqa: PLC0415
+            )
+        except ImportError:
+            return tuple(classes)
+        legacy_cls = getattr(_legacy, cls_name, None)
+        if legacy_cls is not None and legacy_cls is not classes[0]:
+            classes.append(legacy_cls)
+        return tuple(classes)
+
+    AdapterConfigError = _catch_tuple("AdapterConfigError")
+    AdapterEmptyResultError = _catch_tuple("AdapterEmptyResultError")
+    AdapterNotFoundError = _catch_tuple("AdapterNotFoundError")
+    AdapterTimeoutError = _catch_tuple("AdapterTimeoutError")
+    AuthRequiredError = _catch_tuple("AuthRequiredError")
+    BrowserServiceError = _catch_tuple("BrowserServiceError")
 
     try:
         coerced = coerce_args(spec, arguments)

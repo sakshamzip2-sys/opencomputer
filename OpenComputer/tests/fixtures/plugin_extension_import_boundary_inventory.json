@@ -22,6 +22,11 @@
   "extensions/browser-bridge/adapter.py": [
     "opencomputer.ingestion.bus"
   ],
+  "extensions/browser-harness/compat.py": [
+    "opencomputer.agent.config",
+    "opencomputer.agent.config_store",
+    "opencomputer.security.url_safety"
+  ],
   "extensions/coding-harness/hooks/plan_block.py": [
     "opencomputer.tools.bash_safety"
   ],
@@ -91,6 +96,12 @@
     "opencomputer.agent.runtime_flags",
     "opencomputer.inference.observability",
     "opencomputer.inference.pricing"
+  ],
+  "extensions/opencli-bridge/dispatcher.py": [
+    "opencomputer.agent.config"
+  ],
+  "extensions/opencli-bridge/plugin.py": [
+    "opencomputer.agent.config"
   ],
   "extensions/skill-evolution/skill_extractor.py": [
     "opencomputer.agent.structured"

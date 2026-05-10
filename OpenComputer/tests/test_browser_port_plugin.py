@@ -1,5 +1,15 @@
-"""Tests for extensions.browser_control.plugin — register() registers
-the Browser tool, all 11 deprecation shims, and a doctor row."""
+"""Tests for extensions.browser_control.plugin — register() behavior.
+
+As of 2026-05-08 the plugin is **dormant** by default: ``register()``
+short-circuits without registering any tools or a doctor row unless
+``OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1`` is set. The new
+``browser-harness`` plugin owns the browser-tool surface. These tests
+pin both branches:
+
+* Dormant default — ``register()`` is a no-op (zero tools, zero doctor).
+* Legacy reactivated — ``register()`` registers Browser + 11 shims + 1
+  doctor row, just like the pre-2026-05-08 contract.
+"""
 
 from __future__ import annotations
 
@@ -26,7 +36,6 @@ def _import_plugin_register():
     """Re-import the plugin entry under a fresh sys.modules state so the
     package-bootstrap branch is exercised end-to-end."""
     import importlib
-    import sys
     # Don't pop anything if already loaded — conftest pre-registers the
     # extensions.browser_control package alias. The plugin's
     # _bootstrap_package_namespace is a no-op when the alias already exists.
@@ -34,7 +43,27 @@ def _import_plugin_register():
     return mod.register
 
 
-def test_register_adds_browser_plus_eleven_shims():
+def test_register_dormant_by_default_registers_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1, register() is
+    a no-op. Browser-harness owns the surface; browser-control is
+    loaded-but-inactive so its package namespace stays bootstrapped for
+    the typed-error fallback in adapter-runner."""
+    monkeypatch.delenv("OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY", raising=False)
+    api = _FakeApi()
+    register = _import_plugin_register()
+    register(api)
+    assert api.tools == []
+    assert api.doctor_contributions == []
+
+
+def test_register_legacy_mode_adds_browser_plus_eleven_shims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the env var set, the legacy contract is preserved exactly
+    as it was pre-2026-05-08: 1 + 11 = 12 tools + 1 doctor row."""
+    monkeypatch.setenv("OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY", "1")
     api = _FakeApi()
     register = _import_plugin_register()
     register(api)
@@ -53,7 +82,10 @@ def test_register_adds_browser_plus_eleven_shims():
     assert expected_shims.issubset(set(tool_names))
 
 
-def test_register_adds_doctor_row():
+def test_register_legacy_mode_adds_doctor_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY", "1")
     api = _FakeApi()
     register = _import_plugin_register()
     register(api)
@@ -64,9 +96,13 @@ def test_register_adds_doctor_row():
 
 
 @pytest.mark.asyncio
-async def test_doctor_run_returns_pass_when_playwright_present():
-    """Smoke-test the doctor probe — when playwright is importable
-    AND OPENCOMPUTER_BROWSER_CONTROL_URL is unset, status is 'pass'."""
+async def test_doctor_run_returns_pass_when_playwright_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Smoke-test the doctor probe under legacy reactivation — when
+    playwright is importable AND OPENCOMPUTER_BROWSER_CONTROL_URL is
+    unset, status is 'pass' (or 'warn' on minimal CI)."""
+    monkeypatch.setenv("OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY", "1")
     api = _FakeApi()
     register = _import_plugin_register()
     register(api)

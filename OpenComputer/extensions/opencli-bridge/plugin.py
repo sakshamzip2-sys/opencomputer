@@ -169,6 +169,7 @@ def register(api: Any) -> None:  # PluginAPI is duck-typed
     if hasattr(api, "register_doctor_contribution"):
         try:
             from doctor import run as _doctor_run  # type: ignore[import-not-found]
+
             from plugin_sdk.doctor import HealthContribution  # type: ignore[import-not-found]
             api.register_doctor_contribution(
                 HealthContribution(

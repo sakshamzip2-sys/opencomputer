@@ -22,10 +22,10 @@ import json
 import logging
 from typing import Any
 
+import dispatcher  # type: ignore[import-not-found]
+
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
-
-import dispatcher  # type: ignore[import-not-found]
 
 _log = logging.getLogger("opencomputer.opencli_bridge.tools")
 

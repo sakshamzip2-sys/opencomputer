@@ -132,7 +132,7 @@ async def _probe_session_alive(runtime: Any) -> bool:
     try:
         await asyncio.wait_for(probe_page.evaluate("1"), timeout=2.0)
         return True
-    except (TimeoutError, asyncio.TimeoutError):
+    except TimeoutError:
         return False
     except Exception:  # noqa: BLE001
         # Page closed / target detached / browser closed — same outcome:
@@ -288,7 +288,7 @@ async def handle_navigate(
     short_timeout = min(full_timeout, 6_000)
     try:
         await page.goto(url, timeout=short_timeout, wait_until="commit")
-    except Exception as first_exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         _log.warning(
             "profile %r: page.goto(%s) timed out at %sms; reattaching "
             "session and retrying once with %sms",

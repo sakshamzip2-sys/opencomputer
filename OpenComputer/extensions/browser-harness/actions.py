@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Optional
+from typing import Any
 
 # Sibling-module import — loader puts the plugin dir on sys.path,
 # OR adapter-runner's _ctx.py adds it manually before this import fires.
@@ -53,8 +53,8 @@ class BrowserHarnessActions:
         self,
         *,
         url: str,
-        target_id: Optional[str] = None,
-        profile: Optional[str] = None,
+        target_id: str | None = None,
+        profile: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         """Navigate the browser to ``url`` in the session keyed by ``target_id``.
@@ -88,8 +88,8 @@ class BrowserHarnessActions:
         self,
         action: dict[str, Any],
         *,
-        profile: Optional[str] = None,
-        target_id: Optional[str] = None,
+        profile: str | None = None,
+        target_id: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         """Dispatch one of: ``evaluate``, ``click``.

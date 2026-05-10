@@ -938,4 +938,173 @@ def _interactive_pick(checkpoints, session_id: str):
     return _resolve_checkpoint(sorted_cps, raw)
 
 
+# ─── tree (delegate-lineage 2026-05-10) ──────────────────────────────────
+
+
+@session_app.command("tree")
+def session_tree(
+    session_id: str = typer.Argument(
+        ..., help="Session id (or 8-char prefix) whose lineage tree to render."
+    ),
+    max_depth: int = typer.Option(
+        10,
+        "--max-depth",
+        "-d",
+        min=1,
+        max=20,
+        help=(
+            "Cap on tree depth — defends against accidental cycles in a "
+            "corrupted DB. Default 10 covers every practical delegation chain."
+        ),
+    ),
+    profile: str | None = typer.Option(
+        None,
+        "--agent",
+        "-a",
+        help=(
+            "Read sessions from a different profile's sessions.db. By default "
+            "this command reads the active profile."
+        ),
+    ),
+) -> None:
+    """Render the delegation lineage as an ASCII tree.
+
+    Walks ``sessions.parent_session_id`` from the supplied id upward to
+    find the root, then renders every descendant. When the
+    ``subagents`` table has matching rows, each node is enriched with
+    role / state / agent_template / elapsed time.
+
+    Use ``oc sessions list`` to find a session id, then ``oc sessions
+    tree <id>`` to see its delegation lineage. Sessions without
+    delegation children render as a single-node tree (the root row
+    only).
+
+    delegate-lineage 2026-05-10 — closes audit gap (3) "no UI surface
+    that says this child belongs to that parent".
+    """
+    db = _db_for_profile(profile) if profile else _db()
+
+    # 1) resolve the input — accept full id OR 8+-char prefix.
+    target_id = session_id
+    target = db.get_session(target_id)
+    if target is None:
+        # Prefix match — list ANY recent sessions, find prefix matches.
+        candidates = [
+            row for row in db.list_sessions(limit=500)
+            if row["id"].startswith(target_id)
+        ]
+        if not candidates:
+            typer.secho(
+                f"no session matching id-prefix {target_id!r}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(1)
+        if len(candidates) > 1:
+            typer.secho(
+                f"prefix {target_id!r} matches {len(candidates)} sessions; "
+                f"narrow it. Matches: "
+                + ", ".join(c["id"][:12] for c in candidates[:5]),
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(1)
+        target = candidates[0]
+        target_id = target["id"]
+
+    # 2) climb to root so the tree shows full ancestry, not just the subtree.
+    root_id = db.find_root_session(target_id, max_climb=max_depth)
+    root = db.get_session(root_id)
+    if root is None:
+        typer.secho(
+            f"root session {root_id!r} not found (corrupted DB?)",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # 3) optionally enrich each node from the subagents table when the
+    #    store is reachable. Failures degrade gracefully — tree still
+    #    renders without agent metadata.
+    subagent_by_child: dict[str, dict] = {}
+    try:
+        from opencomputer.agent.subagent_store import (
+            SubagentStore,
+            SubagentStoreUnavailable,
+        )
+
+        try:
+            store = SubagentStore(db.db_path)
+        except SubagentStoreUnavailable:
+            store = None
+        if store is not None:
+            # We don't know every subagent in the tree without walking,
+            # so populate as we descend (lazy via closure).
+            def _lookup_subagent(child_sid: str) -> dict | None:
+                if child_sid in subagent_by_child:
+                    return subagent_by_child[child_sid]
+                row = store.find_by_child(child_sid)
+                if row is None:
+                    return None
+                summary = {
+                    "state": row.display_state,
+                    "role": row.role,
+                    "agent_template": row.agent_template,
+                    "isolation_mode": row.isolation_mode,
+                    "elapsed": (
+                        (row.ended_at - row.started_at).total_seconds()
+                        if row.ended_at is not None
+                        else None
+                    ),
+                }
+                subagent_by_child[child_sid] = summary
+                return summary
+        else:
+            def _lookup_subagent(child_sid: str) -> dict | None:
+                return None
+    except Exception:  # noqa: BLE001
+        def _lookup_subagent(child_sid: str) -> dict | None:
+            return None
+
+    # 4) render. Importing rich.tree here keeps cli_session.py's import
+    # graph small; rich is a transitive dep of console anyway.
+    from rich.tree import Tree
+
+    def _node_label(row: dict, *, is_root: bool = False) -> str:
+        title = (row.get("title") or "").strip()
+        meta = _lookup_subagent(row["id"])
+        bits: list[str] = [f"[cyan]{row['id'][:8]}[/cyan]"]
+        if meta is not None:
+            bits.append(f"[{meta['state']}]")
+            if meta.get("role"):
+                bits.append(meta["role"])
+            if meta.get("agent_template"):
+                bits.append(f"agent={meta['agent_template']}")
+            if meta.get("isolation_mode") and meta["isolation_mode"] != "none":
+                bits.append(f"iso={meta['isolation_mode']}")
+            if meta.get("elapsed") is not None:
+                bits.append(f"{meta['elapsed']:.1f}s")
+        msg_count = row.get("message_count") or 0
+        bits.append(f"msgs={int(msg_count)}")
+        if is_root:
+            bits.append("[dim](root)[/dim]")
+        if title:
+            bits.append(f"— [italic]{title[:60]}[/italic]")
+        return " ".join(bits)
+
+    tree = Tree(_node_label(root, is_root=True))
+
+    def _walk(parent_sid: str, parent_node: Tree, depth: int) -> None:
+        if depth >= max_depth:
+            parent_node.add(f"[yellow](depth-cap reached at {max_depth})[/yellow]")
+            return
+        children = db.find_children_sessions(parent_sid)
+        for child in children:
+            child_node = parent_node.add(_node_label(child))
+            _walk(child["id"], child_node, depth + 1)
+
+    _walk(root["id"], tree, 0)
+    console.print(tree)
+
+
 __all__ = ["session_app"]

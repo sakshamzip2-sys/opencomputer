@@ -606,6 +606,30 @@ class AgentLoop:
         # Default disabled (auto_prune_days=0); never deletes anything
         # unless the operator explicitly opts in via config.yaml.
         _maybe_run_auto_prune(self.db, config)
+        # delegate-lineage (2026-05-10): wire the SubagentStore into the
+        # singleton registry so register/update/kill survive process
+        # restart and ``oc agents history`` becomes cross-process. The
+        # store shares the SessionDB's sqlite file via WAL — no extra
+        # state. Best-effort: a schema mismatch (very old DB) drops the
+        # registry back to RAM-only without breaking AgentLoop init.
+        try:
+            from opencomputer.agent.subagent_registry import SubagentRegistry
+            from opencomputer.agent.subagent_store import (
+                SubagentStore,
+                SubagentStoreUnavailable,
+            )
+
+            try:
+                _store = SubagentStore(self.db.db_path)
+                SubagentRegistry.instance().attach_store(_store)
+            except SubagentStoreUnavailable as exc:
+                _log.debug(
+                    "SubagentStore unavailable for %s: %s — registry runs RAM-only",
+                    self.db.db_path,
+                    exc,
+                )
+        except Exception:  # noqa: BLE001 — never break AgentLoop init
+            _log.debug("SubagentStore wiring skipped", exc_info=True)
         self.memory = memory or MemoryManager(
             declarative_path=config.memory.declarative_path,
             skills_path=config.memory.skills_path,
@@ -955,10 +979,26 @@ class AgentLoop:
         # before any reply) leaves no row.
         existing = self.db.get_session(sid) if session_id else None
         if existing is None:
+            # delegate-lineage (2026-05-10): when this run_conversation
+            # was invoked by ``DelegateTool``, the parent loop threads
+            # its session_id through ``runtime.custom["parent_session_id"]``.
+            # We capture it on the pending meta so the eventual
+            # ``db.ensure_session`` call writes the lineage column. Empty
+            # string / missing → root session (None at SQL level).
+            _parent_sid_from_runtime: str | None = None
+            try:
+                _parent_sid_from_runtime = (
+                    self._runtime.custom.get("parent_session_id")
+                    if self._runtime is not None and self._runtime.custom
+                    else None
+                ) or None
+            except Exception:  # noqa: BLE001 — runtime shape never blocks loop start
+                _parent_sid_from_runtime = None
             self._pending_session_meta[sid] = {
                 "platform": "cli",
                 "model": self.config.model.model,
                 "cwd": os.getcwd(),  # Plan 3 — profile-analysis cwd-pattern signal
+                "parent_session_id": _parent_sid_from_runtime,
             }
             messages: list[Message] = []
             # Round 2B P-9: optional pre-seed for forked-context delegations.
@@ -3555,6 +3595,7 @@ class AgentLoop:
             platform=meta.get("platform", "cli"),
             model=meta.get("model", ""),
             cwd=meta.get("cwd"),
+            parent_session_id=meta.get("parent_session_id"),  # delegate-lineage 2026-05-10
         )
         self._session_ensured.add(sid)
 

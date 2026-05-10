@@ -47,8 +47,12 @@ def session(db: SessionDB) -> str:
 
 
 class TestSchema:
-    def test_schema_version_is_15(self) -> None:
-        assert SCHEMA_VERSION == 15
+    def test_schema_version_is_at_or_above_15(self) -> None:
+        # Floor assertion (was hardcoded 15; bumped to 16 by
+        # delegate-lineage 2026-05-10 — `parent_session_id` column +
+        # `subagents` table). Future migrations should keep this floor
+        # rather than re-baking exact equality.
+        assert SCHEMA_VERSION >= 15
 
     def test_fresh_db_has_prompt_checkpoints_table(self, db: SessionDB) -> None:
         with db._connect() as conn:
@@ -115,13 +119,14 @@ class TestMigrationFromV14:
             )
             conn.commit()
 
-        # Open through SessionDB — apply_migrations runs and upgrades to v15
+        # Open through SessionDB — apply_migrations runs and upgrades
+        # past v15 (current floor; delegate-lineage bumped to v16).
         db = SessionDB(db_path)
         with db._connect() as conn:
             row = conn.execute(
                 "SELECT version FROM schema_version"
             ).fetchone()
-            assert int(row[0]) == 15
+            assert int(row[0]) >= 15
 
             row = conn.execute(
                 """

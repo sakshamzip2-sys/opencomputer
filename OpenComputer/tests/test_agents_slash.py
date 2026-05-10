@@ -25,8 +25,12 @@ def ctx():
 
 @pytest.fixture(autouse=True)
 def reset_registry():
+    # delegate-lineage (2026-05-10): detach any SubagentStore to keep
+    # these tests RAM-only.
+    SubagentRegistry.instance().detach_store()
     SubagentRegistry.instance().reset()
     yield
+    SubagentRegistry.instance().detach_store()
     SubagentRegistry.instance().reset()
 
 
