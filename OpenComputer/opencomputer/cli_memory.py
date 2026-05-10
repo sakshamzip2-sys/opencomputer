@@ -23,7 +23,12 @@ from rich.table import Table
 
 from opencomputer.agent.config import MemoryConfig, SessionConfig
 from opencomputer.agent.config_store import load_config
-from opencomputer.agent.memory import MemoryManager
+from opencomputer.agent.memory import (
+    MemoryManager,
+    _segment_paragraphs,
+    _strip_prior_compaction_header,
+)
+from opencomputer.agent.memory_cap import cap_status
 from opencomputer.agent.state import SessionDB
 
 memory_app = typer.Typer(
@@ -176,6 +181,173 @@ def memory_stats() -> None:
         stats["user_chars"],
         stats["user_char_limit"],
     )
+
+
+def _flag_paragraph(text: str) -> list[str]:
+    """Return human-readable drift flags for a single paragraph.
+
+    Deterministic checks only (M3 scope; LLM-driven drift detection is
+    explicitly out per the 2026-05-10 spec). Each flag is a short string
+    rendered next to the paragraph in the audit table.
+    """
+    flags: list[str] = []
+    upper = text.upper()
+    if "TODO" in upper or "TBD" in upper or "FIXME" in upper:
+        flags.append("[TODO]")
+    if len(text) > 400:
+        flags.append("[long]")
+    if len(text) < 20:
+        flags.append("[short]")
+    return flags
+
+
+def _audit_one_file(label: str, path: Path, body: str, limit: int) -> None:
+    """Render the audit view for one memory file."""
+    if not body.strip():
+        console.print(f"[dim]{label} is empty (0 chars / {limit} cap).[/dim]")
+        return
+
+    status = cap_status(body, limit=limit, file_name=label)
+    pct_int = int(round(status.pct * 100))
+    pct_color = "green" if pct_int < 80 else ("yellow" if pct_int < 100 else "red")
+    console.print(
+        f"[bold cyan]── {label}[/bold cyan]  "
+        f"[{pct_color}]{status.bytes_used}/{status.bytes_limit} chars "
+        f"({pct_int}%)[/{pct_color}]  "
+        f"[dim]{path}[/dim]"
+    )
+
+    cleaned = _strip_prior_compaction_header(body).strip()
+    paragraphs = _segment_paragraphs(cleaned)
+    if not paragraphs:
+        console.print("[dim](no paragraphs to audit)[/dim]")
+        return
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("#", justify="right", no_wrap=True)
+    table.add_column("Chars", justify="right", no_wrap=True)
+    table.add_column("Flags", no_wrap=True)
+    table.add_column("Preview", overflow="fold")
+
+    for idx, para in enumerate(paragraphs, start=1):
+        flags = _flag_paragraph(para)
+        # First-line snippet, truncated for table sanity.
+        first_line = para.split("\n", 1)[0].strip()
+        preview = first_line if len(first_line) <= 100 else first_line[:97] + "..."
+        flags_text = " ".join(flags) if flags else "[dim]—[/dim]"
+        table.add_row(str(idx), str(len(para)), flags_text, preview)
+
+    console.print(table)
+    flagged_count = sum(1 for p in paragraphs if _flag_paragraph(p))
+    if flagged_count:
+        console.print(
+            f"[dim]flagged: {flagged_count} of {len(paragraphs)} paragraph(s)[/dim]"
+        )
+
+
+@memory_app.command("audit")
+def memory_audit(
+    user: bool = typer.Option(False, "--user", help="Audit USER.md instead of MEMORY.md"),
+    all_files: bool = typer.Option(False, "--all", help="Audit BOTH MEMORY.md and USER.md"),
+    interactive: bool = typer.Option(
+        False,
+        "--interactive",
+        help="Walk paragraphs and prompt keep/delete/replace/skip per entry",
+    ),
+) -> None:
+    """Per-paragraph audit of MEMORY.md / USER.md.
+
+    Read-only by default; ``--interactive`` enables write mode. Distinct from
+    ``oc memory doctor`` (multi-layer health) — this command inspects the
+    paragraphs of the agent's declarative memory files.
+    """
+    mm = _manager()
+    targets: list[tuple[str, Path, str, int]] = []  # (label, path, body, limit)
+
+    if all_files:
+        targets.append(("MEMORY.md", mm.declarative_path, mm.read_declarative(), mm.memory_char_limit))
+        targets.append(("USER.md", mm.user_path, mm.read_user(), mm.user_char_limit))
+    elif user:
+        targets.append(("USER.md", mm.user_path, mm.read_user(), mm.user_char_limit))
+    else:
+        targets.append(("MEMORY.md", mm.declarative_path, mm.read_declarative(), mm.memory_char_limit))
+
+    for label, path, body, limit in targets:
+        _audit_one_file(label, path, body, limit)
+        if interactive:
+            _audit_interactive_walk(mm, label, path, body)
+
+
+def _audit_interactive_walk(mm: MemoryManager, label: str, path: Path, body: str) -> None:
+    """Walk each paragraph and prompt keep/delete/replace/skip per entry.
+
+    Delegates writes to the existing ``MemoryManager.remove_*`` /
+    ``replace_*`` paths so locking, atomic writes, ``.bak`` backup, and
+    ``MemoryWriteEvent`` publication continue to work — same write path
+    the Memory tool uses.
+
+    Known limitation: ``remove_*`` is implemented via ``str.replace(block,
+    "")`` (memory.py:922) which is a global substring match. If two
+    paragraphs share identical text both are removed. In practice memory
+    paragraphs are unique. Documented in the M4 spec section.
+    """
+    is_user = label == "USER.md"
+
+    # Re-read just-in-time so we walk against the current state (the M3
+    # caller passed in a snapshot which is fine for the read-only table,
+    # but the interactive walk needs to track edits).
+    current_body = mm.read_user() if is_user else mm.read_declarative()
+    cleaned = _strip_prior_compaction_header(current_body).strip()
+    paragraphs = _segment_paragraphs(cleaned)
+    if not paragraphs:
+        console.print(f"[dim]{label} has no paragraphs to walk.[/dim]")
+        return
+
+    console.print(
+        f"[bold]Interactive walk over {label}[/bold] — "
+        "[k]eep / [d]elete / [r]eplace / [s]kip per paragraph "
+        "(unknown input = skip)."
+    )
+
+    total = len(paragraphs)
+    for idx, para in enumerate(paragraphs, start=1):
+        first_line = para.split("\n", 1)[0].strip()
+        preview = first_line if len(first_line) <= 80 else first_line[:77] + "..."
+        console.print(
+            f"\n[cyan]\\[{idx}/{total}] ({len(para)} chars)[/cyan] {preview}"
+        )
+        try:
+            action = typer.prompt("Action", default="s", show_default=False).strip().lower()
+        except typer.Abort:
+            console.print("[yellow]Aborted by user.[/yellow]")
+            return
+
+        if action in {"d", "delete"}:
+            ok = mm.remove_user(para) if is_user else mm.remove_declarative(para)
+            console.print(
+                "[green]deleted.[/green]" if ok else "[yellow]not found (skipped).[/yellow]"
+            )
+        elif action in {"r", "replace"}:
+            try:
+                new_text = typer.prompt("Replacement text").strip()
+            except typer.Abort:
+                console.print("[yellow]Replacement aborted; paragraph kept.[/yellow]")
+                continue
+            if not new_text:
+                console.print("[yellow]Empty replacement; paragraph kept.[/yellow]")
+                continue
+            ok = (
+                mm.replace_user(para, new_text)
+                if is_user
+                else mm.replace_declarative(para, new_text)
+            )
+            console.print(
+                "[green]replaced.[/green]" if ok else "[yellow]substring not found; skipped.[/yellow]"
+            )
+        elif action in {"k", "keep", "s", "skip", ""}:
+            continue
+        else:
+            console.print(f"[dim]unknown action {action!r} — skipped.[/dim]")
 
 
 @memory_app.command("prune")
