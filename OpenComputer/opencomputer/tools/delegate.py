@@ -293,6 +293,12 @@ class DelegateTool(BaseTool):
                 ),
                 is_error=True,
             )
+        # delegate-lineage (2026-05-10) — bomb #5 fix scope variable.
+        # Populated lazily inside the model-cfg block when DelegationConfig
+        # carries base_url/api_key; restored in the outer finally so env
+        # never leaks past this call's lifetime. Maps env-var name → prior
+        # value (``None`` when the var was absent before our mutation).
+        _env_overrides_to_save: dict[str, str | None] = {}
         # T1.1: enforce max delegation depth
         parent_loop = getattr(self._factory, "__self__", None)
         max_depth = 2  # default mirrors Hermes
@@ -330,6 +336,12 @@ class DelegateTool(BaseTool):
                 parent_loop.config.loop, "orchestrator_enabled", True
             )
         is_orchestrator = (raw_role == "orchestrator") and orchestrator_enabled
+        # delegate-lineage (2026-05-10) — surface the demotion to the
+        # caller in the result content (audit's bomb #4: previously a
+        # silent WARNING log). Capture the boundary depth so the message
+        # can cite the exact reason.
+        _demoted_orchestrator_at_max_depth: bool = False
+        _demoted_max_depth_value: int = 0
         if is_orchestrator and self._current_runtime.delegation_depth + 1 >= max_depth:
             import logging as _logging
             _logging.getLogger(__name__).warning(
@@ -338,6 +350,8 @@ class DelegateTool(BaseTool):
                 max_depth,
             )
             is_orchestrator = False
+            _demoted_orchestrator_at_max_depth = True
+            _demoted_max_depth_value = max_depth
 
         # III.1: parse the allowlist input. ``None`` / missing → unrestricted
         # (parent's full registry); explicit ``[]`` → no tools at all; list
@@ -483,10 +497,29 @@ class DelegateTool(BaseTool):
         # ``parent_messages`` with ITS message history when it dispatches its
         # own delegate calls; leaving the parent's snapshot in place would
         # leak parent context into a grandchild.
+        # delegate-lineage (2026-05-10): thread the parent's session_id
+        # via runtime.custom so the child's ``run_conversation`` can
+        # write it to the ``sessions.parent_session_id`` column at
+        # session-create time. Empty string = no parent session
+        # (programmatic CLI bootstrap path).
+        _parent_loop_for_lineage = getattr(self._factory, "__self__", None)
+        # Defensive: MagicMock parents (used by tests) return a MagicMock
+        # for ``_current_session_id`` unless explicitly stubbed. We only
+        # accept strings — a non-string is treated as "no parent session"
+        # so the lineage flow degrades to root-session behaviour rather
+        # than corrupting a sqlite TEXT column with a repr.
+        _raw_parent_sid = getattr(_parent_loop_for_lineage, "_current_session_id", "")
+        _parent_session_id_for_lineage: str = (
+            _raw_parent_sid if isinstance(_raw_parent_sid, str) else ""
+        )
+        _child_custom_seed: dict = dict(self._current_runtime.custom or {})
+        if _parent_session_id_for_lineage:
+            _child_custom_seed["parent_session_id"] = _parent_session_id_for_lineage
         child_runtime = dataclasses.replace(
             self._current_runtime,
             delegation_depth=self._current_runtime.delegation_depth + 1,
             parent_messages=(),
+            custom=_child_custom_seed,
         )
 
         subagent_loop = self._factory()
@@ -544,10 +577,20 @@ class DelegateTool(BaseTool):
                         child_cfg.model, **replace_kwargs
                     )
                 if delegation.base_url or delegation.api_key:
+                    # delegate-lineage (2026-05-10) — bomb #5 fix: capture
+                    # prior env values so the outer try/finally can
+                    # restore them. Without this, the process inherits
+                    # ``OPENCOMPUTER_DELEGATION_*`` forever.
                     import os as _os
                     if delegation.base_url:
+                        _env_overrides_to_save["OPENCOMPUTER_DELEGATION_BASE_URL"] = (
+                            _os.environ.get("OPENCOMPUTER_DELEGATION_BASE_URL")
+                        )
                         _os.environ["OPENCOMPUTER_DELEGATION_BASE_URL"] = delegation.base_url
                     if delegation.api_key:
+                        _env_overrides_to_save["OPENCOMPUTER_DELEGATION_API_KEY"] = (
+                            _os.environ.get("OPENCOMPUTER_DELEGATION_API_KEY")
+                        )
                         _os.environ["OPENCOMPUTER_DELEGATION_API_KEY"] = delegation.api_key
             subagent_loop.config = dataclasses.replace(
                 child_cfg,
@@ -559,26 +602,13 @@ class DelegateTool(BaseTool):
         # don't inherit a stale allowlist from a prior delegation.
         subagent_loop.allowed_tools = allowed
 
-        # Hermes parity (2026-05-08): SubagentRegistry — register the child so
-        # `oc agents running` / `oc agents kill <id>` can see/cancel it.
-        # Best-effort: registry import / register failure must not break
-        # delegation. Update the record on completion/failure in the
-        # try/except below.
-        _registry_record = None
-        try:
-            from opencomputer.agent.subagent_registry import SubagentRegistry
-            _registry_record = SubagentRegistry.instance().register(
-                parent_id=self._current_runtime.custom.get("agent_id")
-                if self._current_runtime.custom
-                else None,
-                goal=task,
-            )
-        except Exception:
-            _registry_record = None
-
         # v1.1 plan-2 M4.1 + M4.2 (2026-05-09): isolation sandbox for
         # the child. 'none' (default) is a no-op — equivalent to the
         # pre-M4 behavior.
+        # delegate-lineage (2026-05-10): isolation parsing moved BEFORE
+        # the registry register call so the registry row carries the
+        # final ``isolation_mode`` value at insert time (no follow-up
+        # UPDATE needed).
         raw_isolation = (call.arguments.get("isolation") or "none").strip().lower()
         if raw_isolation not in ("none", "worktree", "copy"):
             return ToolResult(
@@ -589,6 +619,32 @@ class DelegateTool(BaseTool):
                 ),
                 is_error=True,
             )
+
+        # Hermes parity (2026-05-08): SubagentRegistry — register the child so
+        # `oc agents running` / `oc agents kill <id>` can see/cancel it.
+        # Best-effort: registry import / register failure must not break
+        # delegation. Update the record on completion/failure in the
+        # try/except below.
+        # delegate-lineage (2026-05-10): augmented signature carries the
+        # full delegation shape — parent_session_id, role,
+        # agent_template, isolation_mode, depth — so cross-process
+        # ``oc agents history`` reflects what was actually issued.
+        _registry_record = None
+        try:
+            from opencomputer.agent.subagent_registry import SubagentRegistry
+            _registry_record = SubagentRegistry.instance().register(
+                parent_id=self._current_runtime.custom.get("agent_id")
+                if self._current_runtime.custom
+                else None,
+                goal=task,
+                parent_session_id=_parent_session_id_for_lineage,
+                role="orchestrator" if is_orchestrator else "leaf",
+                agent_template=template.name if template is not None else None,
+                isolation_mode=raw_isolation,
+                depth=self._current_runtime.delegation_depth,
+            )
+        except Exception:  # noqa: BLE001 — registry must never break delegation
+            _registry_record = None
 
         from opencomputer.agent.delegate_isolation import (
             IsolationFailed,
@@ -646,6 +702,10 @@ class DelegateTool(BaseTool):
 
                     # T3.2 (PR-8): publish DelegationCompleteEvent so MemoryBridge
                     # subscribers (and any other bus listener) can react. Best-effort.
+                    # delegate-lineage (2026-05-10): parent_session_id now
+                    # populated from the parent loop's ``_current_session_id``
+                    # — closes audit defect #1 (event published with
+                    # literal empty string).
                     try:
                         from opencomputer.ingestion.bus import default_bus as _bus
                         from plugin_sdk.ingestion import DelegationCompleteEvent
@@ -654,14 +714,18 @@ class DelegateTool(BaseTool):
                         _bus.publish(DelegationCompleteEvent(
                             session_id=call.id,  # parent tool-call id as session context
                             source="agent_loop",
-                            parent_session_id="",  # parent session_id unavailable here; set to empty
+                            parent_session_id=_parent_session_id_for_lineage,
                             child_session_id=result.session_id,
                             child_outcome=_child_outcome,
                         ))
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — bus failure must not break delegation
                         pass
 
                     # Hermes parity: mark the subagent record completed.
+                    # delegate-lineage (2026-05-10): also persist the
+                    # child's session_id so ``oc sessions tree`` and
+                    # ``oc agents history`` can correlate the registry
+                    # entry to the actual conversation row.
                     if _registry_record is not None:
                         try:
                             from datetime import UTC
@@ -672,13 +736,31 @@ class DelegateTool(BaseTool):
                                 _registry_record.agent_id,
                                 state="completed",
                                 ended_at=_dt.now(UTC),
+                                child_session_id=result.session_id,
                             )
-                        except Exception:
+                        except Exception:  # noqa: BLE001 — registry must never break the return path
                             pass
 
+                    # delegate-lineage (2026-05-10) — bomb #4 fix: surface
+                    # the orchestrator demotion in the tool_result content
+                    # so the caller (LLM) sees that role=orchestrator was
+                    # not honoured. Prefix is detectable + additive; the
+                    # original content remains intact after the blank line.
+                    _result_content = result.final_message.content
+                    if (
+                        _demoted_orchestrator_at_max_depth
+                        and isinstance(_result_content, str)
+                    ):
+                        _result_content = (
+                            f"Note: role=orchestrator was demoted to leaf — "
+                            f"child would have been at max_depth="
+                            f"{_demoted_max_depth_value} with no room to "
+                            f"delegate. Re-issue with role=leaf to silence.\n\n"
+                            + _result_content
+                        )
                     return ToolResult(
                         tool_call_id=call.id,
-                        content=result.final_message.content,
+                        content=_result_content,
                     )
         except WorktreeNotAvailable as exc:
             # M4.1: parent cwd isn't a git repo. Surface a clean error so
@@ -760,9 +842,22 @@ class DelegateTool(BaseTool):
                         ended_at=_dt.now(UTC),
                         error=str(exc)[:200],
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001
                     pass
             raise
+        finally:
+            # delegate-lineage (2026-05-10) — bomb #5 fix: restore env
+            # vars regardless of success/failure path so the next
+            # delegation in this process doesn't see leaked
+            # ``OPENCOMPUTER_DELEGATION_*`` values from this one.
+            if _env_overrides_to_save:
+                import os as _os
+
+                for _k, _prior in _env_overrides_to_save.items():
+                    if _prior is None:
+                        _os.environ.pop(_k, None)
+                    else:
+                        _os.environ[_k] = _prior
 
     async def _execute_batch(
         self, call_id: str, tasks: list[dict[str, object]]

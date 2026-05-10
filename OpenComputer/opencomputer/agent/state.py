@@ -34,7 +34,10 @@ from plugin_sdk.core import Message, ToolCall
 #: to NULL. v5 = Tier-A item 11 ``tool_usage`` table — per-tool-call
 #: telemetry for ``opencomputer insights`` (tool, duration_ms, error,
 #: model, ts). Existing data unaffected; the table starts empty.
-SCHEMA_VERSION = 15
+#: v16 = delegate-lineage (2026-05-10) — ``sessions.parent_session_id``
+#: + ``subagents`` table for cross-process registry persistence and
+#: ``oc sessions tree`` lineage walks.
+SCHEMA_VERSION = 16
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -62,7 +65,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     goal_active       INTEGER DEFAULT 0,
     goal_turns_used   INTEGER DEFAULT 0,
     goal_budget       INTEGER DEFAULT 20,
-    goal_last_judge_reason TEXT         -- Kanban-Goals v2 (2026-05-08): structured judge rationale
+    goal_last_judge_reason TEXT,        -- Kanban-Goals v2 (2026-05-08): structured judge rationale
+    parent_session_id TEXT              -- delegate-lineage (2026-05-10): if this session was
+                                         -- spawned by a delegate() call, this points at the
+                                         -- parent's session id; NULL for root sessions.
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -249,6 +255,7 @@ MIGRATIONS: dict[tuple[int, int], str] = {
     (12, 13): "_migrate_v12_to_v13",
     (13, 14): "_migrate_v13_to_v14",
     (14, 15): "_migrate_v14_to_v15",
+    (15, 16): "_migrate_v15_to_v16",
 }
 
 
@@ -637,6 +644,7 @@ _EXPECTED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("sessions", "vibe_updated", "REAL"),
     ("sessions", "cwd", "TEXT"),  # Plan 3 (2026-05-01) — profile-suggester input
     ("sessions", "goal_last_judge_reason", "TEXT"),  # Kanban-Goals v2 (2026-05-08)
+    ("sessions", "parent_session_id", "TEXT"),  # delegate-lineage (2026-05-10)
     ("episodic_events", "dreamed_into", "INTEGER"),
 )
 
@@ -840,6 +848,70 @@ def _migrate_v14_to_v15(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v15_to_v16(conn: sqlite3.Connection) -> None:
+    """delegate-lineage (2026-05-10) — close the audit's lineage gaps.
+
+    Two additive changes:
+
+    1. ``sessions.parent_session_id`` — a child session row created by
+       :class:`opencomputer.tools.delegate.DelegateTool` now carries a
+       schema-level link to the parent's session id. NULL = root session
+       (the parent of all delegations or a CLI ``oc chat`` session).
+       Indexed for ``oc sessions tree`` walks.
+
+    2. ``subagents`` table — the in-memory ``SubagentRegistry`` is
+       backed by sqlite so ``oc agents history`` / ``oc agents running``
+       survive process restart. ``host_pid`` + ``host_started_at`` carry
+       liveness signal; a ``running`` record whose pid is no longer
+       alive (or whose pid was reused — start-time mismatch) is
+       reported as ``orphaned`` at read time.
+
+    Idempotent: the ALTER skips when the column is already present
+    (fresh DBs after baseline DDL acquire it via the same migration on
+    a freshly-bumped schema_version=0 path), and ``CREATE TABLE IF NOT
+    EXISTS`` is naturally idempotent.
+    """
+    cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+    }
+    if "parent_session_id" not in cols:
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_parent "
+        "ON sessions(parent_session_id)"
+    )
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS subagents (
+            agent_id          TEXT PRIMARY KEY,
+            parent_session_id TEXT,
+            child_session_id  TEXT,
+            parent_agent_id   TEXT,
+            goal              TEXT NOT NULL,
+            started_at        REAL NOT NULL,
+            ended_at          REAL,
+            state             TEXT NOT NULL DEFAULT 'running',
+            error             TEXT,
+            role              TEXT NOT NULL DEFAULT 'leaf',
+            agent_template    TEXT,
+            isolation_mode    TEXT NOT NULL DEFAULT 'none',
+            depth             INTEGER NOT NULL DEFAULT 0,
+            host_pid          INTEGER NOT NULL,
+            host_started_at   REAL NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_subagents_parent_session
+            ON subagents(parent_session_id);
+        CREATE INDEX IF NOT EXISTS idx_subagents_child_session
+            ON subagents(child_session_id);
+        CREATE INDEX IF NOT EXISTS idx_subagents_state
+            ON subagents(state);
+        """
+    )
+
+
 def apply_migrations(conn: sqlite3.Connection) -> None:
     """Advance DB from stored schema_version to SCHEMA_VERSION. Idempotent."""
     current = _read_schema_version(conn)
@@ -921,6 +993,7 @@ class SessionDB:
         model: str = "",
         title: str = "",
         cwd: str | None = None,
+        parent_session_id: str | None = None,
     ) -> None:
         """Idempotent session-row insert. Existing rows are left untouched.
 
@@ -930,15 +1003,22 @@ class SessionDB:
         :meth:`create_session` in that this never overwrites existing
         ``platform``/``model``/``cwd`` columns; it only inserts when no
         row is present.
+
+        ``parent_session_id`` (delegate-lineage, 2026-05-10) records the
+        delegating session's id when the row is being inserted by a
+        ``DelegateTool`` invocation; defaults to ``None`` for root
+        sessions. ``None`` and empty string are normalised to NULL.
         """
+        psid = parent_session_id or None
         with self._txn() as conn:
             conn.execute(
                 """
-                INSERT INTO sessions (id, started_at, platform, model, title, cwd)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO sessions
+                    (id, started_at, platform, model, title, cwd, parent_session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO NOTHING
                 """,
-                (session_id, time.time(), platform, model, title, cwd),
+                (session_id, time.time(), platform, model, title, cwd, psid),
             )
 
     def create_session(
@@ -948,6 +1028,7 @@ class SessionDB:
         model: str = "",
         title: str = "",
         cwd: str | None = None,  # Plan 3 — captured for profile-suggester
+        parent_session_id: str | None = None,  # delegate-lineage 2026-05-10
     ) -> None:
         """Create or upsert a session row.
 
@@ -962,19 +1043,31 @@ class SessionDB:
         was in when ``oc`` started — used by the daily profile-analysis
         cron to detect cwd patterns. Defaults to None for backwards
         compatibility with callers that don't pass it.
+
+        delegate-lineage (2026-05-10): ``parent_session_id`` is the
+        delegating session's id when the row is created by a
+        ``DelegateTool`` call; defaults to ``None`` for root sessions.
+        On UPSERT we COALESCE so a delegate-issued create_session that
+        re-fires for the same id never *clears* a previously-recorded
+        parent linkage, but DOES set it on first write.
         """
+        psid = parent_session_id or None
         with self._txn() as conn:
             conn.execute(
                 """
-                INSERT INTO sessions (id, started_at, platform, model, title, cwd)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO sessions
+                    (id, started_at, platform, model, title, cwd, parent_session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
-                  started_at = excluded.started_at,
-                  platform   = excluded.platform,
-                  model      = excluded.model,
-                  cwd        = excluded.cwd
+                  started_at        = excluded.started_at,
+                  platform          = excluded.platform,
+                  model             = excluded.model,
+                  cwd               = excluded.cwd,
+                  parent_session_id = COALESCE(
+                      sessions.parent_session_id, excluded.parent_session_id
+                  )
                 """,
-                (session_id, time.time(), platform, model, title, cwd),
+                (session_id, time.time(), platform, model, title, cwd, psid),
             )
         # Round 2B P-4 — bind the session id onto the
         # observability ContextVar so subsequent log records emitted
@@ -1038,6 +1131,51 @@ class SessionDB:
                 "SELECT * FROM sessions ORDER BY started_at DESC LIMIT ?", (limit,)
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def find_children_sessions(
+        self, parent_session_id: str
+    ) -> list[dict[str, Any]]:
+        """Return every session whose ``parent_session_id`` matches.
+
+        delegate-lineage (2026-05-10). Empty parent argument returns an
+        empty list — the column is nullable, and querying for "all
+        roots" is the wrong semantics here (use ``list_sessions``
+        instead).
+
+        Result order is by ``started_at`` ASC so a tree walk renders
+        children in the order they were spawned.
+        """
+        if not parent_session_id:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sessions WHERE parent_session_id = ? "
+                "ORDER BY started_at ASC",
+                (parent_session_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def find_root_session(self, session_id: str, *, max_climb: int = 10) -> str:
+        """Walk ``parent_session_id`` upward to find the root ancestor.
+
+        Returns ``session_id`` itself if the row has no parent or the
+        chain hits ``max_climb`` (the depth cap defends against
+        accidental cycles in a corrupted DB). delegate-lineage
+        (2026-05-10).
+        """
+        if not session_id:
+            return session_id
+        current = session_id
+        with self._connect() as conn:
+            for _ in range(max_climb):
+                row = conn.execute(
+                    "SELECT parent_session_id FROM sessions WHERE id = ?",
+                    (current,),
+                ).fetchone()
+                if row is None or not row["parent_session_id"]:
+                    return current
+                current = row["parent_session_id"]
+        return current
 
     # ─── session titles (TS-T6) ───────────────────────────────────
 

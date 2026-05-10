@@ -13,10 +13,14 @@ runner = CliRunner()
 
 
 def setup_function(_):
+    # delegate-lineage (2026-05-10): detach any SubagentStore to keep
+    # these tests RAM-only.
+    SubagentRegistry.instance().detach_store()
     SubagentRegistry.instance().reset()
 
 
 def teardown_function(_):
+    SubagentRegistry.instance().detach_store()
     SubagentRegistry.instance().reset()
 
 

@@ -22,8 +22,13 @@ from plugin_sdk.core import ToolCall
 
 @pytest.fixture(autouse=True)
 def _reset_registry():
+    # delegate-lineage (2026-05-10): detach any SubagentStore that may
+    # have been attached by a prior AgentLoop construction so these
+    # MagicMock-driven tests don't write to a real sqlite file.
+    SubagentRegistry.instance().detach_store()
     SubagentRegistry.instance().reset()
     yield
+    SubagentRegistry.instance().detach_store()
     SubagentRegistry.instance().reset()
 
 
