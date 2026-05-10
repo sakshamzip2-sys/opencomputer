@@ -38,15 +38,15 @@ SIDE_GLYPH = r"""
         .::::::.
 """
 
-# Active logo: single-line ANSI-Shadow figlet of OPENCOMPUTER. 105
-# cols × 6 lines tall. Hermes-screenshot parity — chunky title that
-# reads as a single word. Narrow terminals fall back to a one-line
-# inline title (handled in cli_banner.build_welcome_banner).
+# Active logo: half-block "Solid" wordmark of OPENCOMPUTER from the
+# 2026-05-10 banner-redesign handoff (variant A · recommended). 71
+# cols × 3 rows. Built from a single 5×6-pixel grid per glyph,
+# converted to half-blocks (▀ ▄ █). Every letter same width, same
+# x-height, same stroke. Rendered in light rose #E91E78 by
+# build_welcome_banner; narrow terminals fall back to a one-line
+# inline title.
 OPENCOMPUTER_BLOCK_LOGO = (
-    " ██████╗ ██████╗ ███████╗███╗   ██╗ ██████╗ ██████╗ ███╗   ███╗██████╗ ██╗   ██╗████████╗███████╗██████╗ \n"
-    "██╔═══██╗██╔══██╗██╔════╝████╗  ██║██╔════╝██╔═══██╗████╗ ████║██╔══██╗██║   ██║╚══██╔══╝██╔════╝██╔══██╗\n"
-    "██║   ██║██████╔╝█████╗  ██╔██╗ ██║██║     ██║   ██║██╔████╔██║██████╔╝██║   ██║   ██║   █████╗  ██████╔╝\n"
-    "██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║██║     ██║   ██║██║╚██╔╝██║██╔═══╝ ██║   ██║   ██║   ██╔══╝  ██╔══██╗\n"
-    "╚██████╔╝██║     ███████╗██║ ╚████║╚██████╗╚██████╔╝██║ ╚═╝ ██║██║     ╚██████╔╝   ██║   ███████╗██║  ██║\n"
-    " ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝      ╚═════╝    ╚═╝   ╚══════╝╚═╝  ╚═╝\n"
+    "▄▀▀▀▄ █▀▀▀▄ █▀▀▀▀ █▄  █ ▄▀▀▀▀ ▄▀▀▀▄ █▄ ▄█ █▀▀▀▄ █   █ ▀▀█▀▀ █▀▀▀▀ █▀▀▀▄\n"
+    "█   █ █▄▄▄▀ █▄▄   █ █ █ █     █   █ █ ▀ █ █▄▄▄▀ █   █   █   █▄▄   █▄▄▄▀\n"
+    "▀▄▄▄▀ █     █▄▄▄▄ █  ▀█ ▀▄▄▄▄ ▀▄▄▄▀ █   █ █     ▀▄▄▄▀   █   █▄▄▄▄ █ ▀▄▄\n"
 )
