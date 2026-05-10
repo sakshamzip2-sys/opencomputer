@@ -31,6 +31,7 @@ is its in-process companion.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -47,11 +48,14 @@ __all__ = [
     "AuditFinding",
     "EnvSecretProvider",
     "ExecSecretProvider",
+    "FileSecretProvider",
     "SecretProvider",
     "SecretProviderError",
     "SecretRegistry",
     "SecretSpec",
+    "apply_secrets_to_environ",
     "audit_paths",
+    "load_secrets_at_startup",
 ]
 
 
@@ -190,6 +194,106 @@ class ExecSecretProvider(SecretProvider):
         return proc.stdout.decode("utf-8", errors="replace").rstrip("\n")
 
 
+class FileSecretProvider(SecretProvider):
+    """Resolves a secret by reading a value out of a local JSON file.
+
+    Two-part lookup string:
+
+    * Plain key — ``api_keys/anthropic`` — interpreted as a JSON pointer
+      (RFC 6901-style ``/``-separated path). The pointer traverses
+      nested objects/arrays; a missing segment is a hard error.
+    * Single key — ``ANTHROPIC_API_KEY`` (no ``/``) — short-circuit to
+      a top-level dict lookup.
+
+    Args:
+        path: absolute path to the secrets file.
+        encoding: text encoding (default utf-8).
+        require_strict_perms: when True (default), refuse to read the
+            file unless its permissions are ``0o600`` or stricter
+            (owner-only). Stops the operator from accidentally
+            world-readable credentials. Pass False for tests or for
+            files managed by an external secrets store.
+    """
+
+    def __init__(
+        self,
+        *,
+        path: str | Path,
+        encoding: str = "utf-8",
+        require_strict_perms: bool = True,
+    ) -> None:
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            raise SecretProviderError(
+                f"file provider path must be absolute, got {path!r}"
+            )
+        if not p.is_file():
+            raise SecretProviderError(
+                f"file provider path not found at {p}"
+            )
+        if require_strict_perms:
+            mode = p.stat().st_mode & 0o777
+            if mode & 0o077:
+                raise SecretProviderError(
+                    f"file provider path {p} is world/group readable "
+                    f"(mode 0o{mode:03o}); chmod 600 it before use"
+                )
+        self._path = p
+        self._encoding = encoding
+
+    def resolve(self, key: str) -> str:
+        try:
+            text = self._path.read_text(encoding=self._encoding)
+        except OSError as e:
+            raise SecretProviderError(
+                f"file provider could not read {self._path}: {e}"
+            ) from e
+        try:
+            data: Any = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise SecretProviderError(
+                f"file provider {self._path} is not valid JSON: {e}"
+            ) from e
+        # JSON-pointer-ish traversal. We accept both ``"foo/bar"`` and
+        # ``"foo.bar"`` so operators don't trip on convention drift.
+        segments = [s for s in re.split(r"[/.]", key) if s]
+        if not segments:
+            raise SecretProviderError(
+                f"file provider lookup {key!r} is empty after splitting on /."
+            )
+        node: Any = data
+        for seg in segments:
+            if isinstance(node, dict):
+                if seg not in node:
+                    raise SecretProviderError(
+                        f"file provider: key {seg!r} not found in {self._path}"
+                    )
+                node = node[seg]
+            elif isinstance(node, list):
+                try:
+                    idx = int(seg)
+                except ValueError as e:
+                    raise SecretProviderError(
+                        f"file provider: array index must be int, got {seg!r}"
+                    ) from e
+                try:
+                    node = node[idx]
+                except IndexError as e:
+                    raise SecretProviderError(
+                        f"file provider: index {idx} out of range at {key!r}"
+                    ) from e
+            else:
+                raise SecretProviderError(
+                    f"file provider: cannot descend into non-container at {seg!r} in {key!r}"
+                )
+        if not isinstance(node, str):
+            raise SecretProviderError(
+                f"file provider: value at {key!r} is not a string "
+                f"(got {type(node).__name__})"
+            )
+        return node
+
+
 # ─── registry ─────────────────────────────────────────────────────────
 
 
@@ -203,16 +307,23 @@ class SecretSpec:
         source: which provider class handles this spec.
         lookup: provider-specific lookup string. For ``env`` it's the
             env-var name; for ``exec`` it's the secret id passed to
-            the configured CLI.
+            the configured CLI; for ``file`` it's the JSON pointer
+            into the file (``/``-separated, e.g. ``"api_keys/anthropic"``).
         provider_name: optional logical provider name, used to pick
-            among multiple configured exec providers (e.g.
-            ``"onepassword"`` vs ``"vault"``).
+            among multiple configured exec/file providers (e.g.
+            ``"onepassword"`` vs ``"vault"``, or
+            ``"main_secrets"`` vs ``"backup_secrets"``).
+        export_as: when set, ``apply_secrets_to_environ`` will write the
+            resolved value to ``os.environ[export_as]``. Use this to
+            map a registry id (``"anthropic"``) to the env var name
+            existing OC code reads (``"ANTHROPIC_API_KEY"``).
     """
 
     id: str
-    source: Literal["env", "exec"]
+    source: Literal["env", "exec", "file"]
     lookup: str
     provider_name: str = "default"
+    export_as: str = ""
 
 
 @dataclass(slots=True)
@@ -220,7 +331,9 @@ class SecretRegistry:
     """Eager resolver — load a list of specs and serve resolved values."""
 
     _values: dict[str, str] = field(default_factory=dict)
+    _specs: tuple[SecretSpec, ...] = ()
     _exec_providers: dict[str, ExecSecretProvider] = field(default_factory=dict)
+    _file_providers: dict[str, FileSecretProvider] = field(default_factory=dict)
     _env_provider: EnvSecretProvider = field(default_factory=EnvSecretProvider)
 
     def register_exec_provider(
@@ -232,6 +345,16 @@ class SecretRegistry:
         delegate to *provider* during :meth:`load`.
         """
         self._exec_providers[name] = provider
+
+    def register_file_provider(
+        self, name: str, provider: FileSecretProvider,
+    ) -> None:
+        """Register a :class:`FileSecretProvider` under *name*.
+
+        Specs with ``source="file"`` and ``provider_name=name`` will
+        delegate to *provider* during :meth:`load`.
+        """
+        self._file_providers[name] = provider
 
     def load(self, specs: Sequence[SecretSpec]) -> None:
         """Eager-resolve every spec. Failure preserves last-known-good.
@@ -252,12 +375,28 @@ class SecretRegistry:
                         f"{spec.provider_name!r} which is not registered"
                     )
                 new_values[spec.id] = provider.resolve(spec.lookup)
+            elif spec.source == "file":
+                file_provider = self._file_providers.get(spec.provider_name)
+                if file_provider is None:
+                    raise SecretProviderError(
+                        f"spec {spec.id!r} requires file provider "
+                        f"{spec.provider_name!r} which is not registered"
+                    )
+                new_values[spec.id] = file_provider.resolve(spec.lookup)
             else:  # pragma: no cover — defensive; literal narrows it already
                 raise SecretProviderError(
                     f"spec {spec.id!r} has unknown source {spec.source!r}"
                 )
         # Atomic swap.
         self._values = new_values
+        self._specs = tuple(specs)
+
+    def specs(self) -> tuple[SecretSpec, ...]:
+        """Return the currently-loaded specs (post-:meth:`load`).
+
+        Useful for :func:`apply_secrets_to_environ` and audit logs.
+        """
+        return self._specs
 
     def get(self, id: str) -> str | None:
         return self._values.get(id)
@@ -385,3 +524,242 @@ def audit_paths(paths: Sequence[Path]) -> list[AuditFinding]:
                 )
             )
     return findings
+
+
+# ─── startup wire-in ──────────────────────────────────────────────────
+
+
+def apply_secrets_to_environ(
+    registry: SecretRegistry,
+    *,
+    overwrite_existing: bool = True,
+    environ: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Export resolved secrets into ``environ`` based on each spec's
+    ``export_as``.
+
+    Behaviour:
+
+    * Specs whose ``export_as`` is empty are skipped — the operator did
+      not declare an env-var target for them, so they remain
+      registry-only (callers consult ``registry.get(id)``).
+    * For specs with ``export_as``, the resolved value is written to
+      ``environ[export_as]``. The previous value (if any) is logged at
+      WARNING level so the operator sees plaintext-vs-ref conflicts.
+    * ``overwrite_existing`` controls whether existing values are
+      replaced. Default ``True`` — refs take precedence over plaintext
+      env vars (OpenClaw spec: "If ref and plaintext both exist, ref
+      wins at runtime"). Set False to honour pre-existing env values
+      when the operator has explicitly set them.
+
+    Returns the mutated ``environ`` (same dict identity as passed in).
+    Defaults to mutating ``os.environ`` directly when no dict is given,
+    so the most common call site (OC startup) is one line.
+    """
+    target: dict[str, str] = environ if environ is not None else os.environ  # type: ignore[assignment]
+    conflicts: list[str] = []
+    for spec in registry.specs():
+        if not spec.export_as:
+            continue
+        resolved = registry.get(spec.id)
+        if resolved is None:
+            # Shouldn't happen post-load — but defend against caller
+            # using a registry whose load() raised mid-way.
+            _log.warning(
+                "secrets.apply: spec %r resolved to None — skipping export",
+                spec.id,
+            )
+            continue
+        existing = target.get(spec.export_as)
+        if existing == resolved:
+            continue  # idempotent
+        if existing is not None and existing != "":
+            conflicts.append(spec.export_as)
+            if not overwrite_existing:
+                _log.warning(
+                    "secrets.apply: %s already set in env (length=%d); "
+                    "keeping existing value (overwrite_existing=False)",
+                    spec.export_as, len(existing),
+                )
+                continue
+            _log.warning(
+                "secrets.apply: %s already set in env (length=%d); "
+                "ref-resolved value wins per OpenClaw spec — old value "
+                "DISCARDED in-process",
+                spec.export_as, len(existing),
+            )
+        target[spec.export_as] = resolved
+    if conflicts:
+        _log.info(
+            "secrets.apply: reconciled %d plaintext-vs-ref conflicts: %s",
+            len(conflicts), ", ".join(sorted(conflicts)),
+        )
+    return target
+
+
+def load_secrets_at_startup(
+    *,
+    profile_home: Path | None = None,
+    overwrite_existing: bool = True,
+) -> SecretRegistry | None:
+    """Read ``<profile_home>/secrets.json``, resolve every spec, apply
+    to ``os.environ``. Called once during OC bootstrap.
+
+    Returns the populated registry on success, or ``None`` if there is
+    nothing to load (no ``secrets.json`` file, no specs). The caller
+    keeps the returned registry for later ``registry.resolve_wire(...)``
+    calls.
+
+    Failure modes:
+
+    * ``secrets.json`` exists but is malformed → log error + return None.
+      Startup proceeds with whatever env vars the operator had pre-set.
+    * A spec fails to resolve → log error + return None. Startup
+      proceeds; existing env vars stay intact (no partial application).
+
+    Both failure modes are loud-but-non-fatal so a broken secrets file
+    doesn't kill the daemon entirely; the operator sees the error in
+    logs and `oc secrets audit` will surface it.
+    """
+    if profile_home is None:
+        profile_home = Path(os.environ.get(
+            "OC_PROFILE_DIR",
+            str(Path.home() / ".opencomputer" / "default"),
+        )).expanduser()
+    secrets_path = profile_home / "secrets.json"
+    if not secrets_path.is_file():
+        return None
+    try:
+        raw = json.loads(secrets_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        _log.error(
+            "secrets: cannot parse %s: %s — startup continues with plain env",
+            secrets_path, e,
+        )
+        return None
+    specs = _parse_specs_from_dict(raw)
+    if not specs:
+        return None
+    registry = SecretRegistry()
+    # Register declared exec/file providers from the same JSON. Operators
+    # declare them once at the top level so multiple specs can share a
+    # provider config.
+    try:
+        _register_providers_from_dict(registry, raw)
+    except SecretProviderError as e:
+        _log.error(
+            "secrets: provider registration failed (%s) — startup continues with plain env",
+            e,
+        )
+        return None
+    try:
+        registry.load(specs)
+    except SecretProviderError as e:
+        _log.error(
+            "secrets: spec resolution failed (%s) — startup continues with plain env",
+            e,
+        )
+        return None
+    apply_secrets_to_environ(registry, overwrite_existing=overwrite_existing)
+    _log.info(
+        "secrets: loaded %d spec(s) from %s; %d exported to env",
+        len(specs), secrets_path,
+        sum(1 for s in specs if s.export_as),
+    )
+    return registry
+
+
+def _parse_specs_from_dict(raw: Any) -> list[SecretSpec]:
+    """Parse ``secrets.json`` ``secrets`` list into typed specs."""
+    if not isinstance(raw, dict):
+        return []
+    out: list[SecretSpec] = []
+    for entry in raw.get("secrets") or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            spec_id = str(entry["id"])
+            source = entry["source"]
+            if source not in ("env", "exec", "file"):
+                _log.warning(
+                    "secrets: spec %r has unknown source %r — skipped",
+                    spec_id, source,
+                )
+                continue
+            out.append(SecretSpec(
+                id=spec_id,
+                source=source,
+                lookup=str(entry["lookup"]),
+                provider_name=str(entry.get("provider_name", "default")),
+                export_as=str(entry.get("export_as", "")),
+            ))
+        except (KeyError, TypeError) as e:
+            _log.warning("secrets: malformed spec entry %r — %s", entry, e)
+            continue
+    return out
+
+
+def _register_providers_from_dict(
+    registry: SecretRegistry, raw: Any,
+) -> None:
+    """Read top-level ``providers`` dict in ``secrets.json`` and register
+    each declared exec/file provider on the registry.
+
+    Shape::
+
+        {
+          "providers": {
+            "vault":       {"type": "exec", "command": "/opt/homebrew/bin/vault",
+                            "args": ["kv", "get", "-field={id}", "secret/{id}"],
+                            "timeout_s": 5, "max_output_bytes": 65536,
+                            "pass_env": ["VAULT_ADDR", "VAULT_TOKEN"]},
+            "onepassword": {"type": "exec", "command": "/opt/homebrew/bin/op",
+                            "args": ["read", "{id}"]},
+            "local_file":  {"type": "file", "path": "/Users/saksham/.opencomputer/secrets.local.json"}
+          },
+          "secrets": [...]
+        }
+
+    Unknown provider types are skipped with a warning rather than raising
+    so a fresh OC install with a partially-typed secrets.json still
+    boots.
+    """
+    if not isinstance(raw, dict):
+        return
+    providers = raw.get("providers") or {}
+    if not isinstance(providers, dict):
+        _log.warning(
+            "secrets: providers must be a dict, got %s — skipping all",
+            type(providers).__name__,
+        )
+        return
+    for name, cfg in providers.items():
+        if not isinstance(cfg, dict):
+            _log.warning("secrets: provider %r config must be dict — skipped", name)
+            continue
+        ptype = cfg.get("type")
+        if ptype == "exec":
+            registry.register_exec_provider(
+                str(name),
+                ExecSecretProvider(
+                    command=str(cfg["command"]),
+                    args_template=tuple(cfg.get("args") or []),
+                    timeout_s=float(cfg.get("timeout_s", DEFAULT_TIMEOUT_S)),
+                    max_output_bytes=int(cfg.get("max_output_bytes", DEFAULT_MAX_OUTPUT_BYTES)),
+                    pass_env=tuple(cfg.get("pass_env") or []),
+                ),
+            )
+        elif ptype == "file":
+            registry.register_file_provider(
+                str(name),
+                FileSecretProvider(
+                    path=str(cfg["path"]),
+                    encoding=str(cfg.get("encoding", "utf-8")),
+                    require_strict_perms=bool(cfg.get("require_strict_perms", True)),
+                ),
+            )
+        else:
+            _log.warning(
+                "secrets: provider %r has unknown type %r — skipped",
+                name, ptype,
+            )

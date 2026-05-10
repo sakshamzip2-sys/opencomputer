@@ -5770,6 +5770,20 @@ def main() -> None:
         load_for_profile(read_active_profile())
     except Exception as e:  # noqa: BLE001 — never crash startup on env load
         _log.debug("per-profile env load failed: %s", e)
+    # OpenClaw-parity SecretRef pipeline — resolve per-profile
+    # ``secrets.json`` specs and export ``export_as``-tagged values to
+    # os.environ BEFORE plugins/providers initialise. Refs win over
+    # plaintext env vars at runtime per OpenClaw spec — see
+    # opencomputer.security.secrets.apply_secrets_to_environ. Wrapped in
+    # try/except so a malformed secrets file (or a flaky vault exec)
+    # never wedges startup — the loader itself logs the failure loudly
+    # and OC continues with whatever env was already set.
+    try:
+        from opencomputer.security.secrets import load_secrets_at_startup
+
+        load_secrets_at_startup()
+    except Exception as e:  # noqa: BLE001 — never crash startup on secrets
+        _log.warning("secrets: startup load raised %s — continuing without refs", e)
     # v1.1 plan-4 M13 — attach plugin-advertised top-level CLI subcommands
     # as lazy placeholders. Discovery is cheap (manifest JSON only); the
     # owning plugin loads only when the user actually invokes `oc <name>`.

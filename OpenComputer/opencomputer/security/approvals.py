@@ -43,6 +43,7 @@ import fnmatch
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 logger = logging.getLogger("opencomputer.security.approvals")
@@ -295,6 +296,99 @@ def load_approvals_from_active_config() -> ApprovalsConfig:
         return ApprovalsConfig()
 
 
+class SecretsApprovalsError(RuntimeError):
+    """Raised when persisting an approval rule fails (no active profile, etc.)."""
+
+
+def persist_command_rule(
+    rule: CommandRule,
+    *,
+    profile_home: object | None = None,
+) -> Path:
+    """Append *rule* to the active profile's
+    ``security.approvals.command_rules`` list in ``config.yaml`` —
+    creating the file and the nested keys if absent.
+
+    Used to implement OpenClaw-style "allow-always": when a user picks
+    "always allow" at a consent prompt, the runtime calls this so the
+    rule survives the process. Subsequent loads pick it up via
+    :func:`load_approvals_from_active_config`.
+
+    The write is atomic: tmp file + ``os.replace`` so a crash mid-write
+    cannot leave a half-rendered yaml file.
+
+    Defensive: a malformed pre-existing config is replaced with a
+    minimal valid one carrying the new rule, with a WARNING log. We
+    prefer a working config + a loud warning over refusing the write.
+    """
+    import os as _os
+    from pathlib import Path as _Path
+
+    import yaml
+
+    if profile_home is None:
+        from opencomputer.profiles import (
+            profile_home_dir,
+            read_active_profile,
+        )
+
+        active = read_active_profile()
+        if active is None:
+            raise SecretsApprovalsError(
+                "no active profile — cannot persist command rule"
+            )
+        profile_home = profile_home_dir(active)
+    home_path: _Path = _Path(str(profile_home)).expanduser()
+    home_path.mkdir(parents=True, exist_ok=True)
+    config_path = home_path / "config.yaml"
+
+    data: dict[str, object] = {}
+    if config_path.is_file():
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            if isinstance(raw, dict):
+                data = raw  # type: ignore[assignment]
+            else:
+                logger.warning(
+                    "approvals.persist: %s top-level is %s, not dict; "
+                    "replacing with minimal config",
+                    config_path, type(raw).__name__,
+                )
+        except yaml.YAMLError as e:
+            logger.warning(
+                "approvals.persist: %s is malformed (%s); "
+                "replacing with minimal config",
+                config_path, e,
+            )
+    security = data.setdefault("security", {})
+    if not isinstance(security, dict):
+        security = {}
+        data["security"] = security
+    approvals = security.setdefault("approvals", {})
+    if not isinstance(approvals, dict):
+        approvals = {}
+        security["approvals"] = approvals
+    rules = approvals.setdefault("command_rules", [])
+    if not isinstance(rules, list):
+        rules = []
+        approvals["command_rules"] = rules
+    rules.append({
+        "pattern": rule.pattern,
+        "verdict": rule.verdict,
+        "matcher": rule.matcher,
+    })
+
+    rendered = yaml.safe_dump(data, sort_keys=False)
+    tmp_path = config_path.with_suffix(".yaml.tmp")
+    tmp_path.write_text(rendered, encoding="utf-8")
+    _os.replace(tmp_path, config_path)
+    logger.info(
+        "approvals.persist: appended rule (pattern=%r verdict=%s matcher=%s) → %s",
+        rule.pattern, rule.verdict, rule.matcher, config_path,
+    )
+    return config_path
+
+
 __all__ = [
     "DEFAULT_MODE",
     "DEFAULT_TIMEOUT_S",
@@ -303,8 +397,10 @@ __all__ = [
     "ApprovalsConfig",
     "CommandRule",
     "CommandVerdict",
+    "SecretsApprovalsError",
     "load_approvals_from_active_config",
     "parse_command_rules",
     "parse_mode",
     "parse_timeout",
+    "persist_command_rule",
 ]

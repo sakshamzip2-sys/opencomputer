@@ -1,4 +1,4 @@
-"""``oc secrets`` — audit and resolve secret references.
+"""``oc secrets`` — audit, resolve, list, and migrate secret references.
 
 Subcommands:
 
@@ -10,11 +10,10 @@ Subcommands:
   the value itself, so a screen-recording or shoulder-surfing
   scenario can't leak the secret.
 * ``oc secrets list`` — list configured spec ids without values.
-
-This is the operator surface that makes :mod:`opencomputer.security.secrets`
-useful from the command line. It does NOT mutate config files — that's
-a separate ``oc secrets configure`` flow which is intentionally out of
-scope for this PR (see OC-FROM-OPENCLAW.md item 3 follow-up).
+* ``oc secrets configure`` — interactive (or ``--yes``) migration:
+  scans ``os.environ`` for known credential names and writes them as
+  ``source: env`` specs into ``<profile>/secrets.json``, ready for
+  later swap to ``source: exec`` against 1Password / Vault / sops.
 """
 from __future__ import annotations
 
@@ -209,6 +208,171 @@ def cmd_resolve(
             f"[green]{ref_id}[/green]: resolved (length={len(value)}). "
             f"Pass --show to print the value."
         )
+
+
+@secrets_app.command("configure")
+def cmd_configure(
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Non-interactive: auto-accept every detected credential.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Print the planned secrets.json without writing it.",
+    ),
+) -> None:
+    """Scan ``os.environ`` for known credential names and migrate them
+    into ``<profile>/secrets.json`` as ``source: env`` specs.
+
+    Detected env vars are matched against a curated list of known
+    credential prefixes/exact names. Each match becomes a spec like::
+
+        {"id": "anthropic", "source": "env",
+         "lookup": "ANTHROPIC_API_KEY",
+         "export_as": "ANTHROPIC_API_KEY"}
+
+    ``export_as`` mirrors the env-var name so the loader rewrites the
+    same key back on startup — making the migration a no-op for
+    consumers that already read ``ANTHROPIC_API_KEY``. The operator can
+    later swap a spec's ``source`` to ``exec`` or ``file`` and the rest
+    of the system keeps working.
+
+    Use ``--yes`` for non-interactive migration; ``--dry-run`` to
+    preview without writing.
+    """
+    profile = _active_profile_dir()
+    existing_specs = _load_specs_from_profile()
+    existing_ids = {s.id for s in existing_specs}
+    existing_lookups = {s.lookup for s in existing_specs if s.source == "env"}
+    detected = _detect_credentials_in_environ()
+    if not detected:
+        _console.print(
+            "[yellow]No known credential env vars detected.[/yellow] "
+            "Nothing to migrate."
+        )
+        return
+
+    new_specs: list[dict[str, str]] = []
+    skipped: list[str] = []
+    for env_name, spec_id in detected:
+        if env_name in existing_lookups:
+            skipped.append(f"{env_name} (already migrated)")
+            continue
+        if spec_id in existing_ids:
+            spec_id = f"{spec_id}-{env_name.lower()}"
+        if yes:
+            confirm = True
+        else:
+            confirm = typer.confirm(
+                f"Migrate {env_name!r} → spec id {spec_id!r}?",
+                default=True,
+            )
+        if not confirm:
+            skipped.append(f"{env_name} (skipped by user)")
+            continue
+        new_specs.append({
+            "id": spec_id,
+            "source": "env",
+            "lookup": env_name,
+            "export_as": env_name,
+        })
+
+    if not new_specs:
+        _console.print("[yellow]Nothing migrated.[/yellow]")
+        if skipped:
+            _console.print("Skipped: " + ", ".join(skipped))
+        return
+
+    secrets_path = profile / "secrets.json"
+    if secrets_path.is_file():
+        try:
+            existing_doc = json.loads(secrets_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing_doc = {}
+    else:
+        existing_doc = {}
+    if not isinstance(existing_doc, dict):
+        existing_doc = {}
+    existing_doc.setdefault("secrets", [])
+    if not isinstance(existing_doc["secrets"], list):
+        existing_doc["secrets"] = []
+    existing_doc["secrets"].extend(new_specs)
+
+    rendered = json.dumps(existing_doc, indent=2, sort_keys=False)
+    if dry_run:
+        _console.print(rendered)
+        _console.print(
+            f"[yellow]dry-run[/yellow] — would write {secrets_path} "
+            f"(+{len(new_specs)} specs)"
+        )
+        return
+
+    profile.mkdir(parents=True, exist_ok=True)
+    secrets_path.write_text(rendered + "\n", encoding="utf-8")
+    try:
+        secrets_path.chmod(0o600)
+    except OSError as e:
+        _console.print(
+            f"[yellow]warning:[/yellow] chmod 600 on {secrets_path} failed: {e}"
+        )
+    _console.print(
+        f"[green]wrote[/green] {secrets_path} (+{len(new_specs)} specs)"
+    )
+    if skipped:
+        _console.print("Skipped: " + ", ".join(skipped))
+    _console.print(
+        "Restart oc to apply. Resolved values are exported into "
+        "os.environ so existing code that reads e.g. ANTHROPIC_API_KEY "
+        "keeps working."
+    )
+
+
+# Curated set of known credential env-var names. Format:
+# ``(env_var_name, suggested_spec_id)``. Spec ids are kept short so
+# users can later reference them in plugin-specific config without
+# typing the full env var name.
+_KNOWN_CREDENTIAL_NAMES: tuple[tuple[str, str], ...] = (
+    ("ANTHROPIC_API_KEY", "anthropic"),
+    ("CLAUDE_CODE_OAUTH_TOKEN", "claude-code-oauth"),
+    ("OPENAI_API_KEY", "openai"),
+    ("OPENROUTER_API_KEY", "openrouter"),
+    ("GROQ_API_KEY", "groq"),
+    ("MISTRAL_API_KEY", "mistral"),
+    ("GEMINI_API_KEY", "gemini"),
+    ("DEEPSEEK_API_KEY", "deepseek"),
+    ("LMSTUDIO_API_KEY", "lmstudio"),
+    ("OLLAMA_API_KEY", "ollama"),
+    ("TELEGRAM_BOT_TOKEN", "telegram"),
+    ("DISCORD_BOT_TOKEN", "discord"),
+    ("SLACK_BOT_TOKEN", "slack"),
+    ("MATTERMOST_BOT_TOKEN", "mattermost"),
+    ("MATRIX_ACCESS_TOKEN", "matrix"),
+    ("WHATSAPP_API_TOKEN", "whatsapp"),
+    ("SIGNAL_BOT_TOKEN", "signal"),
+    ("GITHUB_TOKEN", "github"),
+    ("GH_TOKEN", "github-gh"),
+    ("AWS_ACCESS_KEY_ID", "aws-access-key"),
+    ("AWS_SECRET_ACCESS_KEY", "aws-secret"),
+    ("BROWSER_USE_API_KEY", "browser-use"),
+    ("BROWSERBASE_API_KEY", "browserbase"),
+    ("FIRECRAWL_API_KEY", "firecrawl"),
+    ("HUGGINGFACE_TOKEN", "huggingface"),
+    ("LINEAR_API_KEY", "linear"),
+    ("NOTION_API_KEY", "notion"),
+    ("PINECONE_API_KEY", "pinecone"),
+    ("POSTMAN_API_KEY", "postman"),
+    ("SOURCEGRAPH_TOKEN", "sourcegraph"),
+)
+
+
+def _detect_credentials_in_environ() -> list[tuple[str, str]]:
+    """Return the subset of :data:`_KNOWN_CREDENTIAL_NAMES` that have a
+    non-empty value in ``os.environ`` right now."""
+    return [
+        (env_name, spec_id)
+        for env_name, spec_id in _KNOWN_CREDENTIAL_NAMES
+        if os.environ.get(env_name)
+    ]
 
 
 @secrets_app.command("list")

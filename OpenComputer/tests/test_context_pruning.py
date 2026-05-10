@@ -149,25 +149,13 @@ def test_sliding_window_zero_returns_original():
 
 
 def _stamped(role: str, content: str, ts: float) -> Message:
-    """Build a Message-like object that carries an extra ``timestamp``
-    attribute. We use a tiny shim subclass since ``Message`` is frozen
-    + slotted — direct attribute assignment fails."""
+    """Build a real Message carrying a producer-attached timestamp.
 
-    class _Stamped:
-        def __init__(self, role: str, content: Any, ts: float):
-            self.role = role
-            self.content = content
-            self.tool_call_id = None
-            self.tool_calls = None
-            self.name = None
-            self.reasoning = None
-            self.reasoning_details = None
-            self.codex_reasoning_items = None
-            self.reasoning_replay_blocks = None
-            self.attachments: list[str] = []
-            self.timestamp = ts
-
-    return _Stamped(role, content, ts)  # type: ignore[return-value]
+    Message gained ``timestamp: float | None`` on 2026-05-11 — this
+    test was previously forced to use a shim subclass because the
+    dataclass was frozen + slotted with no timestamp slot.
+    """
+    return Message(role=role, content=content, timestamp=ts)  # type: ignore[arg-type]
 
 
 def test_cache_ttl_drops_old_messages():
@@ -224,15 +212,29 @@ def test_cache_ttl_keeps_system_message():
     assert "fresh" in contents
 
 
-def test_cache_ttl_handles_datetime_timestamps():
-    """``timestamp`` may be a ``datetime`` object — our extractor copes."""
+def test_cache_ttl_extractor_handles_datetime_on_duck_typed_msg():
+    """``_msg_timestamp`` accepts datetime objects on duck-typed
+    message instances — kept for plugins that bring their own message
+    types into the pruner. (Built-in Message uses ``float | None``.)
+    """
     import datetime
 
-    fresh = _stamped("user", "x", ts=0)
-    fresh.timestamp = datetime.datetime.fromtimestamp(995)  # type: ignore[attr-defined]
-    msgs = [fresh, _stamped("user", "old", ts=10)]
+    class _Duck:
+        role = "user"
+        content = "x"
+        tool_call_id = None
+        tool_calls = None
+        name = None
+        reasoning = None
+        reasoning_details = None
+        codex_reasoning_items = None
+        reasoning_replay_blocks = None
+        attachments: list[str] = []
+        timestamp = datetime.datetime.fromtimestamp(995)
+
+    msgs = [_Duck(), _stamped("user", "old", ts=10)]
     cfg = ContextPruningConfig(mode="cache-ttl", ttl_seconds=60)
-    out = prune_messages(msgs, cfg, now=1000)
+    out = prune_messages(msgs, cfg, now=1000)  # type: ignore[arg-type]
     contents = [getattr(m, "content", None) for m in out]
     assert "x" in contents
     assert "old" not in contents

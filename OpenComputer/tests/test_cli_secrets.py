@@ -117,3 +117,79 @@ def test_resolve_load_failure_exits_with_code_2(tmp_path: Path, monkeypatch):
     result = _runner.invoke(secrets_app, ["resolve", "x"])
     assert result.exit_code == 2, result.output
     assert "Registry load failed" in result.output
+
+
+# ─── configure ────────────────────────────────────────────────────────
+
+
+def test_configure_yes_writes_secrets_json(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("OC_PROFILE_DIR", str(tmp_path))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-o-x")
+    # Clear anything that might already be set.
+    for var in (
+        "TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN", "SLACK_BOT_TOKEN",
+        "GITHUB_TOKEN", "GH_TOKEN",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    result = _runner.invoke(secrets_app, ["configure", "--yes"])
+    assert result.exit_code == 0, result.output
+    secrets_path = tmp_path / "secrets.json"
+    assert secrets_path.is_file()
+    doc = json.loads(secrets_path.read_text())
+    ids = {s["id"] for s in doc["secrets"]}
+    assert "anthropic" in ids
+    assert "openai" in ids
+    # Spec sets export_as to the original env var name so existing
+    # consumers keep working after the load runs at startup.
+    anthropic_spec = next(s for s in doc["secrets"] if s["id"] == "anthropic")
+    assert anthropic_spec["export_as"] == "ANTHROPIC_API_KEY"
+
+
+def test_configure_dry_run_does_not_write(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("OC_PROFILE_DIR", str(tmp_path))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    result = _runner.invoke(secrets_app, ["configure", "--yes", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / "secrets.json").exists()
+    assert "dry-run" in result.output
+
+
+def test_configure_skips_already_migrated(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("OC_PROFILE_DIR", str(tmp_path))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-x")
+    (tmp_path / "secrets.json").write_text(json.dumps({
+        "secrets": [
+            {"id": "anthropic", "source": "env", "lookup": "ANTHROPIC_API_KEY",
+             "export_as": "ANTHROPIC_API_KEY"},
+        ],
+    }))
+    result = _runner.invoke(secrets_app, ["configure", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "already migrated" in result.output
+    # File unchanged (still has just one spec)
+    doc = json.loads((tmp_path / "secrets.json").read_text())
+    anthropic_specs = [s for s in doc["secrets"] if s["id"] == "anthropic"]
+    assert len(anthropic_specs) == 1
+
+
+def test_configure_no_credentials_detected(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("OC_PROFILE_DIR", str(tmp_path))
+    # Strip every known credential env var to guarantee nothing detected.
+    for var in (
+        "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
+        "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "LMSTUDIO_API_KEY",
+        "OLLAMA_API_KEY", "TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN",
+        "SLACK_BOT_TOKEN", "MATTERMOST_BOT_TOKEN", "MATRIX_ACCESS_TOKEN",
+        "WHATSAPP_API_TOKEN", "SIGNAL_BOT_TOKEN", "GITHUB_TOKEN",
+        "GH_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+        "BROWSER_USE_API_KEY", "BROWSERBASE_API_KEY", "FIRECRAWL_API_KEY",
+        "HUGGINGFACE_TOKEN", "LINEAR_API_KEY", "NOTION_API_KEY",
+        "PINECONE_API_KEY", "POSTMAN_API_KEY", "SOURCEGRAPH_TOKEN",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    result = _runner.invoke(secrets_app, ["configure", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "No known credential env vars detected" in result.output

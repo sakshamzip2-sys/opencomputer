@@ -1,4 +1,4 @@
-# OC ⇄ OpenClaw Parity — Implementation Report (2026-05-10)
+# OC ⇄ OpenClaw Parity — Implementation Report (2026-05-10/11)
 
 This file describes the production-grade implementation that landed on
 2026-05-10 against `docs/OC-FROM-OPENCLAW.md`. It covers six features
@@ -24,6 +24,40 @@ bundles (OpenClaw flight-recorder), Broadcast groups, Multi-account
 channel support. Each justified at the bottom of this doc.
 
 ---
+
+## 2026-05-11 — gap-closure follow-up
+
+After an honest-completion audit, three real gaps from the 2026-05-10
+ship were closed at production quality:
+
+* **M2 was scaffolding, now wired.** Added `FileSecretProvider`
+  (JSON-pointer reads of a chmod-0600 file), top-level `providers:`
+  block in `secrets.json`, `SecretSpec.export_as` so resolved values
+  reach `os.environ`, `load_secrets_at_startup()` invoked from
+  `cli.main()`, plaintext-vs-ref reconciliation per OpenClaw spec
+  ("ref wins, plaintext discarded with WARNING"), and
+  `oc secrets configure [--yes] [--dry-run]` for interactive
+  migration of known credential env vars into specs. **Saksham's
+  plaintext `CLAUDE_CODE_OAUTH_TOKEN` in `.zshrc` now has a
+  one-command migration path** — run `oc secrets configure --yes`,
+  then swap the spec's `source: env` to `source: exec` once a
+  Vault/1Password binary is available. 30 new tests.
+
+* **M5 `allow` verdict is no longer informational.** Added
+  `persist_command_rule()` writer that atomically appends to
+  `<profile>/config.yaml`, and `ConsentGate.check()` now consults
+  `command_rules` against the scope string for every capability —
+  not just bash. Deny short-circuits; allow short-circuits to
+  allowed (operator pre-approved); ask falls through to the normal
+  grant flow. 13 new tests.
+
+* **M6 cache-ttl is functionally usable.** Added `timestamp: float
+  | None = None` to `plugin_sdk.core.Message` (forward-compatible
+  default), roundtripped through `SessionDB._msg_row` (honours
+  producer-attached value, falls back to `time.time()`) +
+  `get_messages` (SELECTs the column). Cache-ttl pruning sees a
+  real value end-to-end; loaded messages drop correctly by age. 7
+  new tests.
 
 ## What shipped this PR
 
