@@ -1,25 +1,12 @@
 {
   "id": "browser-control",
   "name": "browser-control",
-  "description": "Single Browser tool (16 outer actions + 11 act-kinds) backed by the OpenClaw-port control service. Drives managed Chrome via Playwright over CDP. Eleven legacy tool names kept as deprecation shims for one minor release. ALWAYS ON: enabled_by_default=true is honored via Layer D in registry.py — needed because WebFetch returns empty HTML for SPA pages.",
-  "version": "0.3.0",
+  "description": "[DORMANT 2026-05-08] Legacy Playwright/CDP browser plugin — superseded by browser-harness which uses agent-browser CLI for reliability across long chat sessions. Files retained for typed-error reference (browser-harness's errors.py is a copy) + emergency reactivation via OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1. Original description: Single Browser tool (16 outer actions + 11 act-kinds) backed by the OpenClaw-port control service.",
+  "version": "0.3.1-dormant",
   "kind": "tool",
-  "enabled_by_default": true,
+  "enabled_by_default": false,
   "entry": "plugin",
   "author": "OpenComputer",
   "license": "MIT",
-  "tool_names": [
-    "Browser",
-    "browser_navigate",
-    "browser_click",
-    "browser_fill",
-    "browser_snapshot",
-    "browser_scrape",
-    "browser_scroll",
-    "browser_back",
-    "browser_press",
-    "browser_get_images",
-    "browser_vision",
-    "browser_console"
-  ]
+  "tool_names": []
 }

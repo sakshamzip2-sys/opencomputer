@@ -94,21 +94,17 @@ async def run_adapter(
     maps each to a ``ToolResult(is_error=True, content=<msg>)`` with a
     deterministic ``code`` field for the agent to branch on.
     """
-    # Lazy import — the typed errors live in browser-control, which
-    # may not be importable in pure-PUBLIC test contexts.
-    try:
-        from extensions.browser_control._utils.errors import (  # type: ignore[import-not-found]
-            AdapterConfigError,
-            AdapterEmptyResultError,
-            AdapterNotFoundError,
-            AdapterTimeoutError,
-            AuthRequiredError,
-            BrowserServiceError,
-        )
-    except ImportError:  # pragma: no cover - fallback for partial installs
-        AdapterConfigError = AdapterEmptyResultError = AdapterTimeoutError = (
-            AuthRequiredError
-        ) = AdapterNotFoundError = BrowserServiceError = Exception  # type: ignore[misc, assignment]
+    # Resolve typed errors via the shared helper — prefers browser-harness's
+    # lifted copy; falls back to legacy browser-control; finally to bare
+    # Exception aliases when no browser plugin is on disk.
+    from ._ctx import _typed_browser_errors  # local import to dodge circular  # noqa: PLC0415
+    _err = _typed_browser_errors()
+    AdapterConfigError = _err.AdapterConfigError
+    AdapterEmptyResultError = _err.AdapterEmptyResultError
+    AdapterNotFoundError = _err.AdapterNotFoundError
+    AdapterTimeoutError = _err.AdapterTimeoutError
+    AuthRequiredError = _err.AuthRequiredError
+    BrowserServiceError = _err.BrowserServiceError
 
     try:
         coerced = coerce_args(spec, arguments)

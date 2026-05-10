@@ -1,0 +1,19 @@
+{
+  "id": "browser-harness",
+  "name": "Browser Harness",
+  "version": "0.1.0",
+  "description": "Multi-backend browser automation — local Chromium via agent-browser, user's real Chrome via CDP, plus Browser Use Cloud / Browserbase / Firecrawl / Camofox. Hermes-derived dispatcher with a pluggable CloudBrowserProvider ABC.",
+  "author": "OpenComputer Contributors",
+  "license": "MIT",
+  "kind": "tool",
+  "enabled_by_default": true,
+  "entry": "plugin",
+  "tool_names": [
+    "BrowserNavigate",
+    "BrowserSnapshot",
+    "BrowserClick",
+    "BrowserType",
+    "BrowserVision"
+  ],
+  "min_host_version": ""
+}

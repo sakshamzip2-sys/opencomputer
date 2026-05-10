@@ -2,7 +2,7 @@
 
 This file is auto-loaded at session start. It is the **single comprehensive brief** a new Claude session needs to resume work on OpenComputer without re-explaining anything.
 
-Last updated: 2026-05-05 (v1.0 release prep — pyproject 2026.5.5; tag + PyPI tag is the operator's next step)
+Last updated: 2026-05-08 (browser-harness is the default browser layer; opencli-bridge added as a complementary plugin shipping 100+ deterministic site adapters + auto-loaded chrome.debugger extension; legacy browser-control plugin is dormant — files retained, register() short-circuits without registering tools; reactivate via OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1)
 
 ---
 
@@ -231,6 +231,125 @@ All committed + pushed to `main`. Current main sha: `5c62a12` (2026-04-24).
 **Test count:** 885 passing across 71 test files.
 
 **Bundled extensions (7):** telegram, discord, anthropic-provider, openai-provider, coding-harness, dev-tools, memory-honcho.
+
+---
+
+### 4.1 browser-harness (2026-05-08, DEFAULT — replaces legacy browser-control)
+
+**Status:** active default. ``adapter-runner`` now routes browser ops through ``BrowserHarnessActions`` (Hermes-derived, agent-browser CLI). The legacy ``browser-control`` plugin is dormant — its package files remain on disk so the typed-error fallback in ``adapter-runner._ctx._typed_browser_errors`` still works as a path-3 backstop, and the ``extensions.browser_control`` package namespace is bootstrapped at import time for any straggler relative imports — but its ``register()`` returns early before any tools are registered. Reactivate the legacy path via ``OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1``.
+
+**What it is:** a Hermes-derived multi-backend browser plugin lifted from `nousresearch/hermes-agent` `tools/browser_*.py`. Replaces the broken Playwright-based `browser-control` plugin with `agent-browser` CLI (Node, project-local install) plus pluggable cloud providers.
+
+**Backends supported (all from Hermes):**
+- Local headless Chromium via `agent-browser` (default)
+- User's real Chrome via CDP (`OPENCOMPUTER_BROWSER_CDP_URL=ws://localhost:9222`)
+- Browser Use Cloud (`BROWSER_USE_API_KEY`)
+- Browserbase (`BROWSERBASE_API_KEY` + `BROWSERBASE_PROJECT_ID`)
+- Firecrawl (`FIRECRAWL_API_KEY`)
+- Camofox local stealth (`CAMOFOX_URL`)
+
+Plus one OC-specific addition planned (extension-daemon for managed-Chrome reliability) — not yet implemented; the structural fix for the chat-mode-after-idle bug comes from agent-browser's process-isolated daemon rather than Playwright/CDP.
+
+**Files:**
+- `extensions/browser-harness/dispatcher.py` — lifted Hermes `browser_tool.py` (byte-identical except imports)
+- `extensions/browser-harness/browser_camofox.py`, `browser_camofox_state.py` — Camofox client (lifted)
+- `extensions/browser-harness/browser_providers/` — 4 cloud provider files (lifted)
+- `extensions/browser-harness/redact.py` — Hermes secret-redaction module (lifted byte-identical)
+- `extensions/browser-harness/compat.py` — Hermes→OC shims (real wires for `is_safe_url`/`load_config`/`get_hermes_home`; `call_llm` raises until OC's `auxiliary_client` is wired)
+- `extensions/browser-harness/tools.py` — OC `BaseTool` wrappers: `BrowserNavigate`, `BrowserSnapshot`, `BrowserClick`, `BrowserType`, `BrowserVision`
+- `extensions/browser-harness/actions.py` — `BrowserHarnessActions` adapter-runner client (drop-in for `extensions.browser_control.client.BrowserActions`)
+- `extensions/browser-harness/config.py` — `detect_backend()` + `use_browser_harness_for_adapter_runner()` introspection
+- `extensions/browser-harness/VENDORED.md` — provenance + divergence log
+
+**External deps added:**
+- `requests` Python package (`pip install requests`) — Hermes uses it for HTTP calls into cloud providers
+- `node_modules/agent-browser` — installed via `npm install agent-browser` in OC repo root (project-local, NOT global)
+- `node_modules/.bin` is prepended to PATH at plugin load by `plugin.py`
+
+**Default behaviour:** `adapter-runner` routes browser ops through `browser-harness` automatically. No env var required.
+
+```bash
+opencomputer chat   # browser-harness handles browser tools by default
+```
+
+**Reverting to legacy browser-control:**
+```bash
+export OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1
+opencomputer chat   # adapter-runner uses browser-control's BrowserActions (Playwright)
+```
+This is an emergency escape hatch only. The legacy plugin's `register()` short-circuits without setting this env var, so its tools stay invisible to the LLM. Setting it BOTH re-enables the legacy plugin's tool registration AND switches `adapter-runner` back to it.
+
+**Persistent browser profile (OpenClaw-style, default since 2026-05-08):** `plugin.py` sets `AGENT_BROWSER_PROFILE=<oc_profile_home>/browser-profile/` at register time so agent-browser's Chromium uses a fixed user-data-dir per OC profile. Cookies, logins, extensions, and history persist across runs. Each `-p <name>` OC profile gets its own isolated browser profile. Users who export `AGENT_BROWSER_PROFILE` themselves before launch are left alone. Without this, agent-browser would default to an ephemeral `/var/folders/.../T/agent-browser-chrome-<uuid>/` dir per process — fresh dir on every daemon restart, all cookies lost.
+
+**Headed vs. headless:** `agent-browser` runs headless by default. Set `AGENT_BROWSER_HEADED=1` to see the Chromium window (useful for first-time logins / debugging). Headless is the right default for production / batch runs.
+
+**Known caveats:**
+- `call_llm` is stubbed (raises `CallLLMNotConfigured`); both Hermes call sites have try/except fallbacks so vision analysis and content-extraction features degrade gracefully. Wiring to `opencomputer.agent.auxiliary_client` is a future enhancement.
+- `check_website_access` returns None (no per-profile website allow/deny policy yet).
+- agent-browser's persistent profile dir is separate from the user's real system Chrome (Google Chrome.app). User logins from system Chrome are NOT shared. For sites needing auth, log in once via agent-browser's headed Chromium and the cookies stick to that OC-profile-scoped dir thereafter.
+- The Nous-managed-tool-gateway path was removed from `browser_providers/browser_use.py` (irrelevant to OC). Documented in `VENDORED.md` "Divergences" section.
+
+**To deprecate legacy browser-control:** validate browser-harness against LearnX/Luma/Swiggy adapters end-to-end (requires LLM budget + initial agent-browser auth setup), then promote `OPENCOMPUTER_USE_BROWSER_HARNESS=1` to default. After that, delete `extensions/browser-control/` and drop the `playwright` Python dep.
+
+---
+
+### 4.2 opencli-bridge (2026-05-08, complementary to browser-harness)
+
+**Status:** active default. Sibling browser-tool plugin alongside browser-harness. Bridges [`@jackwener/opencli`](https://github.com/jackwener/opencli) (Apache-2.0, 19k⭐, Node CLI) into OC. Provides 100+ pre-built deterministic site adapters (HN, Reddit, X/Twitter, Wikipedia, PyPI, Steam, GitHub, Bilibili, Xiaohongshu, Cursor / Notion / Antigravity Electron apps, etc.) plus a chrome.debugger extension auto-loaded into the agent's own Chrome. **Zero LLM tokens at runtime** for any task that maps to a built-in adapter.
+
+**Why it complements browser-harness rather than replacing it:**
+
+| Use case | Right backend |
+|---|---|
+| Site has a built-in OpenCLI adapter | `OpenCliRun` (zero tokens, deterministic) |
+| Site doesn't have one yet, recurring task | `OpenCliBrowse` → `OpenCliAuthor` (one-time author, then free forever) |
+| One-off raw exploration | browser-harness `BrowserNavigate / Snapshot / Click / Type / Vision` |
+| VPS deployment (no real Chrome avail) | browser-harness only |
+
+**Five tools registered:**
+- `OpenCliList` — discover the 100+ adapters (call first)
+- `OpenCliRun` — run a deterministic adapter
+- `OpenCliBrowse` — live browser ops via the chrome.debugger extension
+- `OpenCliAuthor` — crystallize a browse session into a reusable adapter
+- `OpenCliInspect` — inspect adapter source / args / status
+
+**Files (`extensions/opencli-bridge/`):**
+- `extension/v1.0.6/` — bundled Chrome extension (Apache-2.0, redistributed)
+- `plugin.py` — register entry + PATH prepend + extension side-load + HOME-shim
+- `dispatcher.py` — `subprocess.Popen(["opencli", ...])` JSON parser
+- `tools.py` — 5 `BaseTool` wrappers, all with priority hints in descriptions
+- `actions.py` — `OpenCliBridgeActions` for adapter-runner (parallel to `BrowserHarnessActions`)
+- `doctor.py` — three-step health check
+- `skills/opencli-routing/SKILL.md` — routing decision tree (when to use what)
+- `VENDORED.md` — provenance + Apache-2.0 attribution + re-sync checklist
+
+**External deps added:**
+- `@jackwener/opencli ^1.0.6` (resolves to 1.7.14) in [package.json](package.json) — npm install pulls it project-local at `node_modules/.bin/opencli`
+- The bundled extension ships in the OC repo; user takes no install step
+
+**Side-load mechanism:** `plugin.py` appends the extension path to `AGENT_BROWSER_EXTENSIONS` (additive, comma-separated). agent-browser's launcher passes that through as `--load-extension=<path>` to Chromium. Verified loaded by reading `chrome://extensions` shadow DOM during smoke tests.
+
+**Per-OC-profile state isolation (HOME-shim):** opencli hardcodes `os.homedir() / ".opencli"` for state ([upstream main.js:29](node_modules/@jackwener/opencli/dist/src/main.js)). To avoid clobbering the user's real `~/.opencli/`, `plugin.py:_setup_home_shim()` builds a per-OC-profile shim:
+
+```
+<oc_profile_home>/
+├── opencli/                   ← REAL state (authored adapters, configs)
+└── opencli-shim-home/
+    └── .opencli  →  ../opencli  ← symlink the dispatcher's HOME points at
+```
+
+dispatcher.py sets `HOME=<oc_profile_home>/opencli-shim-home` per subprocess. Surgical: opencli only uses `os.homedir()` for the state path, so this override has no other side effects. Each `oc -p <name>` gets a fully isolated OpenCLI state tree.
+
+**Smoke test that passed:** `OpenCliList(filter="hackernews")` → returned catalog. `OpenCliRun(site="hackernews", command="top", args={limit: 3})` → returned 3 real top HN stories with rank/score/author/url, zero LLM tokens, JSON output.
+
+**Known caveats:**
+- opencli's existing `~/.opencli/clis/` (e.g., user's prior `luma`, `learnx.bak`, `linkedin`, `swiggy` adapters) is NOT migrated automatically into per-OC-profile dirs. User can copy what they want manually. Default behavior is fresh start per OC profile.
+- The format flag is `-f json` (NOT `--json`) — dispatcher auto-injects it. Got bit by this once; document.
+- OpenCLI doesn't provide an `OPENCLI_HOME` env var — that's why we needed the symlink shim.
+- 5 OpenCLI upstream skills (`opencli-adapter-author`, `opencli-autofix`, `opencli-browser`, `opencli-usage`, `smart-search`) were NOT mirrored verbatim because the GH API fetch was sandboxed; we wrote our own concise `opencli-routing` skill that captures the decision tree. Future: fetch + mirror those 5 (Apache-2.0 allows).
+- The chrome.debugger extension can't attach to a tab agent-browser is already CDP-controlling (one-debugger-per-tab Chrome rule). Tab partitioning solves it: each path opens its own tabs. The agent picks per task, doesn't try to use both on the same tab.
+
+**LLM tool-selection steering:** purely encoded in tool descriptions (e.g., `OpenCliRun.description` says "PREFERRED for any web data task. Returns clean JSON, ZERO LLM tokens at runtime. ... If this returns 'adapter_not_found', do NOT just fall back to live browsing without crystallizing"). No InjectionEngine wiring needed — descriptions are read every turn and Claude follows priority hints reliably. Optional: post-task reflection hook for stronger nudge could be added later.
 
 ---
 

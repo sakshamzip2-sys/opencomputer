@@ -68,9 +68,42 @@ def _bootstrap_package_namespace() -> None:
 
 
 def register(api: Any) -> None:
-    """Register Browser + 11 shims + doctor row."""
+    """Register Browser + 11 shims + doctor row.
+
+    DORMANT MODE (2026-05-08): skips tool registration when
+    ``OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY`` is NOT explicitly set to
+    ``"1"``. Default state is "loaded but inactive" — the package
+    namespace bootstrap still runs (some legacy code paths in
+    ``adapter-runner`` historically imported typed errors from here, and
+    test fixtures may still rely on the namespace being present), but no
+    agent-facing tools register, so the LLM doesn't see Browser /
+    browser_navigate / etc. The new ``browser-harness`` plugin owns the
+    browser-tool surface.
+
+    Reactivation: ``export OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1``.
+    Removal: delete the entire ``extensions/browser-control/`` directory
+    and the typed-error fallback in ``extensions/adapter-runner/_ctx.py``.
+    """
     _bootstrap_package_namespace()
 
+    import os
+    legacy_explicitly_enabled = os.environ.get(
+        "OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY"
+    ) == "1"
+
+    if not legacy_explicitly_enabled:
+        # Dormant — package namespace is bootstrapped (so any lingering
+        # ``from extensions.browser_control...`` imports still resolve)
+        # but no tools or doctor row are registered. Plugin appears in
+        # ``opencomputer plugins`` with 0 actual registrations.
+        _log.debug(
+            "browser-control plugin loaded in dormant mode "
+            "(superseded by browser-harness; set "
+            "OPENCOMPUTER_USE_BROWSER_CONTROL_LEGACY=1 to reactivate)"
+        )
+        return
+
+    # ── Legacy active mode (reactivated via env var) ─────────────────
     # Imports go through the package alias so the relative imports
     # inside ``client/`` and ``server/`` resolve correctly.
     from extensions.browser_control._tool import (  # type: ignore[import-not-found]

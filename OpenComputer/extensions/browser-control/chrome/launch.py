@@ -96,7 +96,19 @@ def build_chrome_launch_args(
     # --disable-features list. Chrome only honors the last
     # --disable-features flag, so we accumulate features here and emit
     # a single flag below.
-    disable_features = ["Translate", "MediaRouter"]
+    disable_features = [
+        "Translate",
+        "MediaRouter",
+        # macOS-specific: stops Chrome from detecting that its window is
+        # occluded by another app (Terminal, VSCode, etc). Without this,
+        # the renderer process can be partially suspended even when
+        # --disable-renderer-backgrounding is set, causing page.goto to
+        # hang for ~20s on the first command after an idle gap.
+        "CalculateNativeWinOcclusion",
+        # BFCache freezes pages on idle in a way that breaks subsequent
+        # CDP-driven navigates ("frame is detached" errors, hung goto).
+        "BackForwardCache",
+    ]
 
     args: list[str] = [
         f"--remote-debugging-port={profile.cdp_port}",
@@ -109,6 +121,14 @@ def build_chrome_launch_args(
         "--disable-session-crashed-bubble",
         "--hide-crash-restore-bubble",
         "--password-store=basic",
+        # Standard automation flags — keep Chrome at full priority even
+        # when occluded by Terminal/VSCode. Without these, macOS Chrome
+        # throttles renderer JS + timers in backgrounded tabs, making
+        # CDP page.goto / Runtime.evaluate hit 20s timeouts between
+        # chat turns when the user isn't looking at the window.
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
     ]
     if is_headless:
         args.extend(["--headless=new", "--disable-gpu"])
@@ -289,6 +309,25 @@ async def launch_openclaw_chrome(
         decorate_openclaw_profile(udir, name=profile.name, color=profile.color)
 
     ensure_profile_clean_exit(udir)
+
+    # Fast-path: Chrome already reachable on the target port (left over from a
+    # prior process or a daemon that kept it alive). Skip spawn entirely — a
+    # second Chrome trying to bind the same port opens a useless window the
+    # user can't dismiss, and CDP still routes to the first instance.
+    if await is_chrome_reachable(profile.cdp_url, timeout_ms=800):
+        _log.debug(
+            "launch: Chrome already reachable at %s — attaching without spawn",
+            profile.cdp_url,
+        )
+        return RunningChrome(
+            pid=-1,
+            executable=executable,
+            user_data_dir=udir,
+            cdp_port=profile.cdp_port,
+            cdp_url=profile.cdp_url,
+            started_at=time.time(),
+            proc=None,
+        )
 
     real_args = build_chrome_launch_args(resolved, profile, udir)
     proc = await spawn_fn(

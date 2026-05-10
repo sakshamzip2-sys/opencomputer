@@ -309,6 +309,19 @@ async def _connect_managed_cached(profile: Any, running: Any) -> Any:
 
         connected = await connect_browser(running.cdp_url)
         session = PlaywrightSession(browser=connected.browser, cdp_url=running.cdp_url)
+
+        # Race-condition guard: Chrome's initial page target (e.g. the "New Tab"
+        # page) may register slightly AFTER the CDP server becomes reachable and
+        # connect_over_cdp returns. If we proceed immediately, browser.contexts
+        # is empty → _new_page_for_session falls through to browser.new_context()
+        # which creates an incognito-like window (visible ghost). Poll briefly so
+        # the default context with its pages is visible before any tab operation.
+        if not session.list_pages():
+            for _ in range(10):  # up to 1 s in 100 ms steps
+                await asyncio.sleep(0.1)
+                if session.list_pages():
+                    break
+
         _managed_cache[profile_name] = _ManagedProfileEntry(
             running=running,
             connected=connected,
@@ -321,6 +334,20 @@ async def _connect_managed_cached(profile: Any, running: Any) -> Any:
             running.cdp_url,
         )
         return session
+
+
+async def evict_managed_session(profile_name: str) -> None:
+    """Force-evict the cached PlaywrightSession for ``profile_name``.
+
+    Used when the underlying CDP WebSocket between Playwright and Chrome
+    has gone stale (idle timeout, OS network throttling) even though the
+    Chrome subprocess is still alive. The next ``_connect_managed_cached``
+    call will re-establish a fresh session against the same Chrome.
+    """
+    async with _managed_cache_lock:
+        stale = _managed_cache.pop(profile_name, None)
+    if stale is not None:
+        await _close_managed_entry_best_effort(stale)
 
 
 def _build_default_profile_driver() -> Any:
@@ -478,11 +505,26 @@ def _build_default_tab_ops_backend() -> Any:
     async def _new_page_for_session(sess: Any) -> Any:
         """Pick a context off the connected browser (or create one) and
         return a fresh Page with the navigation guard pre-installed.
+
+        Uses the existing default Chrome context (browser.contexts[0]) so
+        new pages open as tabs in the existing window rather than as separate
+        incognito-like windows. If no context is visible yet (rare race after
+        fresh Chrome launch), brief retry before falling back.
         """
         contexts = list(getattr(sess.browser, "contexts", []) or [])
+        if not contexts:
+            # Brief retry — Chrome's default context may not yet be visible
+            # to Playwright if the page target registered after connect_over_cdp.
+            await asyncio.sleep(0.2)
+            contexts = list(getattr(sess.browser, "contexts", []) or [])
         if contexts:
             ctx = contexts[0]
         else:
+            # Last resort: create a context. new_context() on managed Chrome
+            # produces a regular (non-incognito) context when the browser was
+            # launched without --incognito, so this is still within the same
+            # Chrome profile — just may appear as a new window on macOS if
+            # no existing window is available.
             ctx = await sess.browser.new_context()
         return await ctx.new_page()
 

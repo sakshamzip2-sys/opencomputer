@@ -1,0 +1,15 @@
+{
+  "name": "opencomputer-runtime-deps",
+  "private": true,
+  "description": "Project-local Node tools used by OC plugins (browser-harness uses agent-browser; opencli-bridge uses @jackwener/opencli).",
+  "scripts": {
+    "postinstall": "node -e \"console.log('\\n\\u2705 OC browser tooling installed:'); console.log('   \\u2022 agent-browser  -> node_modules/.bin/agent-browser'); console.log('   \\u2022 opencli        -> node_modules/.bin/opencli'); console.log('\\nFirst run only: ./node_modules/.bin/agent-browser install   (downloads Chromium, ~250 MB, one-time)\\nThen: oc chat\\n')\""
+  },
+  "dependencies": {
+    "agent-browser": "^0.27.0",
+    "@jackwener/opencli": "^1.0.6"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

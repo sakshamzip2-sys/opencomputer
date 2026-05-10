@@ -21,6 +21,7 @@ be misleading anyway.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -56,14 +57,9 @@ _log = logging.getLogger("opencomputer.browser_control.server.agent_handlers")
 PageResolver = Callable[[Any, str], Awaitable[Any]]
 
 
-async def _resolve_page(
+async def _resolve_page_once(
     ctx: BrowserRouteContext, *, profile: str | None, target_id: str | None
 ) -> tuple[Any, str, Any]:
-    """Resolve (runtime, target_id, page).
-
-    Uses the ``page_resolver`` callable on ``ctx.extra`` if set; otherwise
-    pulls pages off ``runtime.playwright_session`` directly.
-    """
     name = resolve_profile_name(ctx, query_profile=profile, body_profile=profile)
     runtime = await _ensure_running(ctx, name)
 
@@ -108,6 +104,120 @@ async def _resolve_page(
     return runtime, chosen, page
 
 
+async def _probe_session_alive(runtime: Any) -> bool:
+    """Fast WS-liveness probe — returns False iff the cached PlaywrightSession's
+    CDP WebSocket has wedged.
+
+    Chrome's HTTP control plane and the Playwright CDP WebSocket are
+    independent transports. The HTTP-level ``is_chrome_reachable`` probe
+    in lifecycle can return success while the WS itself is dead (macOS
+    network/power throttling, idle TCP teardown, BFCache pause).
+
+    Tests an existing Page (no new page created) by sending a trivial
+    ``page.evaluate("1")`` with a 2s timeout. If the WS is alive, this
+    completes in a few ms. If wedged, we hit the timeout cleanly.
+    """
+    sess = runtime.playwright_session
+    if sess is None:
+        return False
+    try:
+        pages = sess.list_pages()
+    except Exception:  # noqa: BLE001
+        return False
+    if not pages:
+        # No pages cached — can't probe. Treat as alive; downstream
+        # handlers will fail/retry naturally.
+        return True
+    probe_page = pages[0]
+    try:
+        await asyncio.wait_for(probe_page.evaluate("1"), timeout=2.0)
+        return True
+    except (TimeoutError, asyncio.TimeoutError):
+        return False
+    except Exception:  # noqa: BLE001
+        # Page closed / target detached / browser closed — same outcome:
+        # the session is unusable, force a re-attach.
+        return False
+
+
+async def _reattach_session(
+    ctx: BrowserRouteContext, runtime: Any
+) -> None:
+    """Evict cached PlaywrightSession and re-attach to the SAME Chrome.
+
+    Avoids a Chrome relaunch (no ghost windows, no lost cookies) by
+    going directly through ``connect_managed`` instead of full
+    ``ensure_profile_running``. Required because lifecycle's HTTP-level
+    probe will short-circuit ``ensure_profile_running`` even when the WS
+    is dead, so we'd never get a fresh session that way.
+    """
+    from .._dispatcher_bootstrap import (  # type: ignore[import-not-found]
+        evict_managed_session,
+    )
+
+    profile_name = runtime.profile.name
+    try:
+        await evict_managed_session(profile_name)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning(
+            "profile %r: evict_managed_session failed: %s", profile_name, exc
+        )
+
+    runtime.playwright_session = None
+    if runtime.running is None or ctx.driver.connect_managed is None:
+        raise BrowserHandlerError(
+            f"profile {profile_name!r}: cannot re-attach (no running Chrome "
+            f"or connect_managed driver)",
+            status=503,
+            code="reattach_failed",
+        )
+    try:
+        runtime.playwright_session = await ctx.driver.connect_managed(
+            runtime.profile, runtime.running
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.error(
+            "profile %r: re-attach connect_managed failed: %s",
+            profile_name,
+            exc,
+        )
+        raise BrowserHandlerError(
+            f"CDP re-attach failed: {exc}", status=503, code="reattach_failed"
+        ) from exc
+
+
+async def _resolve_page(
+    ctx: BrowserRouteContext, *, profile: str | None, target_id: str | None
+) -> tuple[Any, str, Any]:
+    """Resolve (runtime, target_id, page) with stale-WS auto-recovery.
+
+    Probes BEFORE doing any operation that touches the CDP WebSocket
+    (list_tabs, get_page_for_target). If the probe times out, the WS
+    is dead — evict cache and re-attach against the same Chrome before
+    proceeding. Without the pre-probe, ``list_tabs`` itself would hang
+    on the wedged ``Target.getTargetInfo`` CDP call before any other
+    recovery code could run.
+    """
+    name = resolve_profile_name(ctx, query_profile=profile, body_profile=profile)
+    runtime = await _ensure_running(ctx, name)
+
+    # Skip probe for non-Playwright drivers — they don't have the
+    # wedge-prone CDP WebSocket path.
+    capabilities = get_browser_profile_capabilities(runtime.profile)
+    needs_probe = not (
+        capabilities.uses_chrome_mcp or capabilities.uses_control_extension
+    )
+    if needs_probe and not await _probe_session_alive(runtime):
+        _log.warning(
+            "profile %r: CDP WebSocket probe failed — evicting cached "
+            "PlaywrightSession and re-attaching",
+            runtime.profile.name,
+        )
+        await _reattach_session(ctx, runtime)
+
+    return await _resolve_page_once(ctx, profile=profile, target_id=target_id)
+
+
 def _record(target_id: str) -> None:
     try:
         record_action(target_id)
@@ -148,13 +258,59 @@ async def handle_navigate(
             str(exc), status=400, code="nav_blocked"
         ) from exc
 
-    timeout = max(1000, min(120_000, int(timeout_ms or 20_000)))
+    full_timeout = max(1000, min(120_000, int(timeout_ms or 20_000)))
+
+    # Same-URL skip: if the page is already on the target URL, navigating
+    # again is a no-op for the user. But Chrome can treat same-URL goto
+    # as a "no commit needed" same-document nav and never fire the
+    # frameNavigated event Playwright is waiting on, so page.goto hangs
+    # to its timeout. Just return the cached state. Adapter callers use
+    # this purely as a "warm the page" step; if we're already warm, skip.
     try:
-        await page.goto(url, timeout=timeout)
-    except Exception as exc:
-        raise BrowserHandlerError(
-            f"navigation failed: {exc}", status=502, code="nav_failed"
-        ) from exc
+        current_url = page.url or ""
+    except Exception:  # noqa: BLE001
+        current_url = ""
+    if current_url and current_url.rstrip("/") == url.rstrip("/"):
+        _log.debug(
+            "handle_navigate: skipping goto — already on %s (target=%s)",
+            current_url,
+            tid,
+        )
+        _record(tid)
+        return {"ok": True, "profile": runtime.profile.name, "target_id": tid, "url": current_url}
+
+    # Two-phase navigate: try with a short timeout first; on failure,
+    # force-reattach the Playwright session and retry with the full
+    # timeout. This catches the "WS evaluate works but page.goto hangs"
+    # case that the upstream probe in _resolve_page can't detect (the
+    # CDP connection is alive enough to answer Runtime.evaluate but
+    # Page.navigate stalls because the renderer is in macOS App Nap).
+    short_timeout = min(full_timeout, 6_000)
+    try:
+        await page.goto(url, timeout=short_timeout, wait_until="commit")
+    except Exception as first_exc:  # noqa: BLE001
+        _log.warning(
+            "profile %r: page.goto(%s) timed out at %sms; reattaching "
+            "session and retrying once with %sms",
+            runtime.profile.name,
+            url,
+            short_timeout,
+            full_timeout,
+            exc_info=False,
+        )
+        try:
+            await _reattach_session(ctx, runtime)
+            # Re-resolve page on the fresh session.
+            runtime, tid, page = await _resolve_page_once(
+                ctx, profile=profile, target_id=target_id
+            )
+            await page.goto(url, timeout=full_timeout, wait_until="commit")
+        except Exception as exc:
+            raise BrowserHandlerError(
+                f"navigation failed (after reattach): {exc}",
+                status=502,
+                code="nav_failed",
+            ) from exc
 
     _record(tid)
     final_url = getattr(page, "url", url)

@@ -26,11 +26,16 @@ _T_FOCUS_CLOSE = 5.0
 _T_START_STOP = 15.0
 _T_OPEN = 15.0
 _T_RESET = 20.0
-_T_SNAPSHOT = 20.0
-_T_ACT = 20.0
-_T_SCREENSHOT = 20.0
-_T_NAVIGATE = 20.0
-_T_DOWNLOAD = 20.0
+# These need headroom over the SERVER-side timeout so the server's
+# stale-WS reattach + retry path can run end-to-end. Server uses 20s
+# default timeout for navigate / 20s for act; at the HTTP-client layer
+# we add ~15s for the reattach overhead so the client doesn't cut off
+# a successfully-recovering request mid-flight.
+_T_SNAPSHOT = 35.0
+_T_ACT = 35.0
+_T_SCREENSHOT = 35.0
+_T_NAVIGATE = 35.0
+_T_DOWNLOAD = 35.0
 _T_GENERIC = 10.0
 
 

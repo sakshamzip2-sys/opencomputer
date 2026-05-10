@@ -1,0 +1,18 @@
+{
+  "id": "opencli-bridge",
+  "name": "opencli-bridge",
+  "description": "Bridges @jackwener/opencli — turn any website into a deterministic CLI. Ships with 100+ pre-built site adapters (HN, Reddit, X, Bilibili, Wikipedia, PyPI, Steam, etc.) plus the chrome.debugger extension auto-loaded into the agent's own Chrome. The LLM picks the cheapest tool: zero-token deterministic adapter when one exists, live-browse + adapter-author when not. Per-OC-profile state isolation via HOME-shim.",
+  "version": "0.1.0",
+  "kind": "tool",
+  "enabled_by_default": true,
+  "entry": "plugin",
+  "author": "OpenComputer",
+  "license": "MIT",
+  "tool_names": [
+    "OpenCliList",
+    "OpenCliRun",
+    "OpenCliBrowse",
+    "OpenCliAuthor",
+    "OpenCliInspect"
+  ]
+}

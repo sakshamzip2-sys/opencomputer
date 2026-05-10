@@ -51,12 +51,19 @@ def is_running_alive(running: Any) -> bool:
     `proc.poll()` (sync Popen analogue). Defensive on missing
     attributes — treats unknown state as dead, since handing back a
     possibly-stale entry is the worse failure mode.
+
+    ``proc=None`` with ``pid=-1`` is the sentinel for an externally-
+    running Chrome we attached to without spawning (pre-spawn reachability
+    fast-path in launch_openclaw_chrome). Treat these as alive so the
+    per-process cache does not evict them on every tool call.
     """
     if running is None:
         return False
     proc = getattr(running, "proc", None)
     if proc is None:
-        return False
+        # Sentinel: pid=-1 means we attached to an existing Chrome, not ours.
+        # Treat as alive — the cache evicts on actual CDP failure, not here.
+        return getattr(running, "pid", 0) == -1
     rc = getattr(proc, "returncode", None)
     if rc is not None:
         return False
