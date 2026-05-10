@@ -1196,7 +1196,41 @@ class AgentLoop:
                         runtime=self._runtime,
                     )
                 )
-                skills = self.memory.list_skills()
+                # OpenClaw `requires:` parity — gate skills on host
+                # capabilities. We hand the plugin registry's loaded
+                # ids to ``list_skills`` so plugin-coupled skills can
+                # be evaluated; skills with unmet binaries/env/os/
+                # plugin requirements are dropped from the prompt
+                # snapshot (the model never sees a skill it can't
+                # run). The CLI / dashboard listing path still gets
+                # all skills via plain ``list_skills()`` — only the
+                # injection lane filters.
+                try:
+                    from opencomputer.plugins.registry import registry as _pr_for_gate
+
+                    _installed_plugin_ids = frozenset(
+                        lp.candidate.manifest.id for lp in _pr_for_gate.loaded
+                    )
+                except Exception:  # noqa: BLE001 — gating must NEVER break the loop
+                    _log.debug(
+                        "skill-gate: plugin index unavailable, skipping plugin gate",
+                        exc_info=True,
+                    )
+                    _installed_plugin_ids = None
+                _all_skills = self.memory.list_skills(
+                    installed_plugin_ids=_installed_plugin_ids,
+                )
+                _gated = [s for s in _all_skills if s.unmet_requirements]
+                if _gated:
+                    # One DEBUG line per skipped skill — verbose mode lets
+                    # the user see what's inactive and why without
+                    # surfacing that to the model.
+                    for s in _gated:
+                        _log.debug(
+                            "skill-gate: skipping %r — unmet=%s",
+                            s.id, s.unmet_requirements,
+                        )
+                skills = [s for s in _all_skills if not s.unmet_requirements]
                 # Phase 10f.C: read MEMORY.md + USER.md and render them into
                 # the FROZEN base prompt. Mid-session edits don't rebuild
                 # this — that's the prefix-cache invariant.
@@ -1855,6 +1889,34 @@ class AgentLoop:
                 # First iteration (no prior measurement) skips the check
                 # unless the user explicitly forced compaction.
                 if self._last_input_tokens > 0 or _force_compact:
+                    # OpenClaw `contextPruning` parity — cheap, lossy
+                    # prune step BEFORE the (expensive, lossless-of-
+                    # meaning) compactor. Default config is mode="none"
+                    # so existing sessions are byte-identical until the
+                    # operator opts in. Sliding mode keeps the last N
+                    # user turns verbatim; cache-ttl drops by message
+                    # age. Pruning never raises — internal exception
+                    # handler returns the original list.
+                    _cp_cfg = getattr(self.config.loop, "context_pruning", None)
+                    if _cp_cfg is not None and _cp_cfg.mode != "none":
+                        try:
+                            from opencomputer.agent.context_pruning import (
+                                prune_messages as _prune,
+                            )
+
+                            _before = len(messages)
+                            messages = _prune(messages, _cp_cfg)
+                            _after = len(messages)
+                            if _after < _before:
+                                _log.debug(
+                                    "context_pruning: dropped %d messages (%s mode)",
+                                    _before - _after, _cp_cfg.mode,
+                                )
+                        except Exception:  # noqa: BLE001
+                            _log.warning(
+                                "context_pruning: prune step failed — keeping original messages",
+                                exc_info=True,
+                            )
                     # D7: emit PreCompact hook BEFORE actually compacting so
                     # plugins can observe / log / modify behavior pre-summary.
                     if self.compaction.should_compact(self._last_input_tokens):
@@ -4868,6 +4930,44 @@ class AgentLoop:
                         session_id=session_id,
                         runtime=self._runtime,
                     )
+                # OpenClaw `tokenjuice` parity — deterministic post-hook
+                # compaction of noisy tool results (Bash/find/grep/...).
+                # Sits AFTER the plugin-driven transforms so user
+                # rewrites take precedence; only the unmodified-by-
+                # plugins case is touched. Safe by default — disabled
+                # in fresh configs so behavior is byte-identical until
+                # the operator opts in.
+                _tj = getattr(self.config.loop, "tokenjuice", None)
+                if _tj is not None and _tj.enabled:
+                    try:
+                        from opencomputer.agent.tokenjuice import (
+                            compact_tool_result as _tj_compact,
+                        )
+
+                        _orig_content = getattr(result, "content", None)
+                        if isinstance(_orig_content, str):
+                            _new_content = _tj_compact(
+                                tool_name=c.name,
+                                content=_orig_content,
+                                config=_tj,
+                            )
+                            if _new_content is not _orig_content and _new_content != _orig_content:
+                                from plugin_sdk.core import ToolResult as _ToolResultRebuild
+
+                                _log.debug(
+                                    "tokenjuice: %s %d→%d chars",
+                                    c.name, len(_orig_content), len(_new_content),
+                                )
+                                result = _ToolResultRebuild(
+                                    tool_call_id=result.tool_call_id,
+                                    content=_new_content,
+                                    is_error=getattr(result, "is_error", False),
+                                )
+                    except Exception:  # noqa: BLE001 — never break the loop
+                        _log.warning(
+                            "tokenjuice: rewrite failed for %s — keeping original",
+                            c.name, exc_info=True,
+                        )
                 if self._tool_callback is not None:
                     try:
                         self._tool_callback(

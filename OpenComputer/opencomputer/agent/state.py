@@ -1651,6 +1651,13 @@ class SessionDB:
         attachments_json = (
             json.dumps(msg.attachments) if msg.attachments else None
         )
+        # 2026-05-11: honour msg.timestamp if the producer attached one
+        # (e.g. via attach_timestamps_for_pruning). Falls back to
+        # time.time() so legacy producers that don't set it keep their
+        # current "row is timestamped on append" semantics. This lets
+        # context_pruning cache-ttl mode see the same value the DB stored.
+        msg_ts = getattr(msg, "timestamp", None)
+        ts_value = float(msg_ts) if msg_ts is not None else time.time()
         return (
             session_id,
             msg.role,
@@ -1663,7 +1670,7 @@ class SessionDB:
             codex_items_json,
             reasoning_replay_json,
             attachments_json,
-            time.time(),
+            ts_value,
         )
 
     #: Shared INSERT statement for the messages table. Kept as a module
@@ -1764,7 +1771,7 @@ class SessionDB:
             rows = conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, name, "
                 "reasoning, reasoning_details, codex_reasoning_items, "
-                "reasoning_replay_blocks, attachments "
+                "reasoning_replay_blocks, attachments, timestamp "
                 "FROM messages WHERE session_id = ? ORDER BY id",
                 (session_id,),
             ).fetchall()
@@ -1821,6 +1828,23 @@ class SessionDB:
                         attachments_list = [str(p) for p in parsed]
                 except (json.JSONDecodeError, TypeError):
                     attachments_list = []
+            # 2026-05-11: roundtrip the per-row timestamp into
+            # Message.timestamp so context_pruning cache-ttl mode can see it.
+            # ``r["timestamp"]`` is REAL NUMERIC in the schema; coerce
+            # to float defensively (sqlite Row returns the native type
+            # but stay robust against schema drift).
+            try:
+                raw_ts = r["timestamp"]
+            except (IndexError, KeyError):
+                raw_ts = None
+            ts_value: float | None
+            if raw_ts is None:
+                ts_value = None
+            else:
+                try:
+                    ts_value = float(raw_ts)
+                except (TypeError, ValueError):
+                    ts_value = None
             out.append(
                 Message(
                     role=r["role"],
@@ -1833,6 +1857,7 @@ class SessionDB:
                     codex_reasoning_items=codex_items,
                     reasoning_replay_blocks=reasoning_replay,
                     attachments=attachments_list,
+                    timestamp=ts_value,
                 )
             )
         return out

@@ -225,6 +225,54 @@ class ConsentGate:
                 audit_event_id=audit_id,
             )
 
+        # OpenClaw-parity per-command rule consultation. Patterns match
+        # against ``scope`` (the command-string / resource-id the caller
+        # passed) — first-match-wins. Deny short-circuits to refused;
+        # allow short-circuits to allowed (the operator has explicitly
+        # pre-approved this pattern). Ask falls through to the normal
+        # grant flow.
+        #
+        # Only consulted when ``scope`` is non-empty since a None scope
+        # carries no command text to pattern-match against. Tirith /
+        # hardline checks for bash run inside ``BashTool.execute`` (not
+        # via the consent gate); this branch covers OTHER capabilities
+        # whose scope happens to look like a command string.
+        if scope:
+            rule_verdict = approvals_cfg.evaluate_command(scope)
+            if rule_verdict == "deny":
+                audit_id = self._audit.append(AuditEvent(
+                    session_id=session_id, actor="hook",
+                    action="check_command_rule_deny",
+                    capability_id=claim.capability_id,
+                    tier=int(claim.tier_required),
+                    scope=scope,
+                    decision="deny",
+                    reason="command_rules deny match",
+                ))
+                return ConsentDecision(
+                    allowed=False,
+                    reason="security.approvals.command_rules: deny match",
+                    tier_matched=claim.tier_required,
+                    audit_event_id=audit_id,
+                )
+            if rule_verdict == "allow":
+                audit_id = self._audit.append(AuditEvent(
+                    session_id=session_id, actor="hook",
+                    action="check_command_rule_allow",
+                    capability_id=claim.capability_id,
+                    tier=int(claim.tier_required),
+                    scope=scope,
+                    decision="allow",
+                    reason="command_rules allow match",
+                ))
+                return ConsentDecision(
+                    allowed=True,
+                    reason="security.approvals.command_rules: allow match",
+                    tier_matched=claim.tier_required,
+                    audit_event_id=audit_id,
+                )
+            # rule_verdict == "ask" or None → fall through to grant flow.
+
         # Hermes parity: session-scoped grant short-circuits before the
         # persistent-store lookup. Session grants live in-memory only
         # and are cleared on SESSION_FINALIZE via on_session_finalize.

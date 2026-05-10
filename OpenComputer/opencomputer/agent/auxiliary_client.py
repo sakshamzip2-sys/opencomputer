@@ -48,7 +48,6 @@ Out of scope (follow-ups, by design):
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import Literal
 
 from plugin_sdk.core import Message

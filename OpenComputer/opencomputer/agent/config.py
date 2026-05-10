@@ -21,6 +21,23 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from opencomputer.agent.context_pruning import ContextPruningConfig
+    from opencomputer.agent.tokenjuice import TokenjuiceConfig
+
+
+def _default_tokenjuice_config() -> Any:
+    """Lazy import to avoid a top-level circular with agent.tokenjuice."""
+    from opencomputer.agent.tokenjuice import TokenjuiceConfig
+
+    return TokenjuiceConfig()
+
+
+def _default_context_pruning_config() -> Any:
+    """Lazy import to avoid a top-level circular with agent.context_pruning."""
+    from opencomputer.agent.context_pruning import ContextPruningConfig
+
+    return ContextPruningConfig()
+
 
 def _home() -> Path:
     """Return the active profile's home dir, creating it if needed.
@@ -430,6 +447,24 @@ class LoopConfig:
     — a profile setting other than ``"compressor"`` resolves through the
     registry; an unknown name logs a warning and falls back to the
     default so a misconfigured profile still boots."""
+    tokenjuice: TokenjuiceConfig = field(
+        default_factory=lambda: _default_tokenjuice_config(),
+    )
+    """OpenClaw-parity tool-result compaction. Default is ``enabled=False`` so
+    existing sessions are byte-identical until the operator opts in. When
+    enabled, results from tools not on the do-not-compact list pass through
+    :func:`opencomputer.agent.tokenjuice.compact_tool_result` before
+    re-entering the conversation. ``Read``-class tools are protected by
+    default (file content must stay verbatim)."""
+    context_pruning: ContextPruningConfig = field(
+        default_factory=lambda: _default_context_pruning_config(),
+    )
+    """OpenClaw-parity ``contextPruning`` modes — cheap, lossy
+    pre-compaction step. Default is ``mode="none"`` so existing sessions
+    are byte-identical. Sliding-window mode keeps the last ``window_turns``
+    user turns verbatim; cache-ttl drops messages older than ``ttl_seconds``
+    when their producers attach a ``timestamp``. Always-keep-system True by
+    default — losing the system prompt mid-session would change behaviour."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1637,7 +1672,7 @@ def resolve_tzinfo(cfg: Config) -> Any:
     return zoneinfo.ZoneInfo(cfg.timezone)
 
 
-def now_in_tz(cfg: Config) -> "datetime":
+def now_in_tz(cfg: Config) -> datetime:
     """Current ``datetime`` in ``cfg.timezone`` (or naive when unset).
 
     Used by ``prompt_builder`` for system-prompt time injection. Returns

@@ -315,6 +315,38 @@ class RequiredCredentialFile:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillRequirements:
+    """Skill-declared host capabilities (OpenClaw ``requires:`` parity).
+
+    Frontmatter shape::
+
+        requires:
+          binaries: [pdftotext, ghostscript]   # `shutil.which()` resolvable
+          env:      [ADOBE_API_KEY]            # set in `os.environ`
+          os:       [macos, linux]             # current platform must match
+          plugins:  [unbrowse-openclaw]        # plugin id must be installed
+
+    Each list is independent; a skill with only ``binaries`` ignores the
+    other gates. Empty fields default to "no requirement of that kind".
+
+    Distinct from :class:`RequiredEnvVar` (Hermes-parity passthrough hint
+    used by ExecuteCode + sandbox). ``SkillRequirements.env`` is for
+    *gating* — should this skill be visible to the model at all — while
+    ``required_environment_variables`` is for *passthrough* into the
+    sandbox once the skill is already running. Skills can use both.
+    """
+
+    binaries: tuple[str, ...] = field(default_factory=tuple)
+    env: tuple[str, ...] = field(default_factory=tuple)
+    os: tuple[str, ...] = field(default_factory=tuple)
+    plugins: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.binaries or self.env or self.os or self.plugins)
+
+
+@dataclass(frozen=True, slots=True)
 class SkillMeta:
     """Lightweight skill metadata — from frontmatter, without loading the body.
 
@@ -343,6 +375,13 @@ class SkillMeta:
     required_env_vars: tuple[RequiredEnvVar, ...] = field(default_factory=tuple)
     #: P3.5 Hermes parity: skill-declared credential-file bind mounts.
     required_credential_files: tuple[RequiredCredentialFile, ...] = field(default_factory=tuple)
+    #: OpenClaw parity: declared host capabilities the skill needs.
+    requires: SkillRequirements = field(default_factory=SkillRequirements)
+    #: Computed at load time. Empty == satisfied. Each entry is a
+    #: ``"<kind>:<value>"`` tag (``binary:pdftotext``, ``env:FOO``,
+    #: ``os:linux``, ``plugin:unbrowse``) so callers can render or
+    #: aggregate by kind without re-evaluating.
+    unmet_requirements: tuple[str, ...] = field(default_factory=tuple)
 
 
 # ─── Hermes-parity skill-frontmatter parsers (P3.4 + P3.5) ────────────
@@ -380,6 +419,97 @@ def _parse_required_env_vars(raw: object) -> tuple[RequiredEnvVar, ...]:
             )
         # Anything else: skip silently.
     return tuple(out)
+
+
+def _str_list(raw: object, *, lower: bool = False) -> tuple[str, ...]:
+    """Coerce a frontmatter value into a tuple of non-empty stripped strings.
+
+    Used by :func:`_parse_skill_requires` for each ``requires.*`` slot.
+    Non-list inputs degrade to ``()`` so a malformed key doesn't prevent
+    the rest of the requires block from parsing.
+    """
+    if not isinstance(raw, list):
+        return ()
+    out: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            continue
+        s = entry.strip()
+        if not s:
+            continue
+        out.append(s.lower() if lower else s)
+    return tuple(out)
+
+
+def _parse_skill_requires(raw: object) -> SkillRequirements:
+    """Parse the ``requires:`` frontmatter key (OpenClaw parity).
+
+    Accepts a mapping with optional ``binaries``, ``env``, ``os``,
+    ``plugins`` keys. Anything else → empty :class:`SkillRequirements`.
+    OS names are normalised to lowercase to match the supported set
+    (``macos``, ``linux``, ``windows``).
+    """
+    if not isinstance(raw, dict):
+        return SkillRequirements()
+    return SkillRequirements(
+        binaries=_str_list(raw.get("binaries")),
+        env=_str_list(raw.get("env")),
+        os=_str_list(raw.get("os"), lower=True),
+        plugins=_str_list(raw.get("plugins")),
+    )
+
+
+def _platform_name() -> str:
+    """Map :func:`platform.system` → spec OS name (``macos``/``linux``/``windows``)."""
+    import platform as _platform
+
+    sysname = _platform.system().lower()
+    if sysname == "darwin":
+        return "macos"
+    return sysname  # ``linux``, ``windows``, or whatever else
+
+
+def _evaluate_skill_requirements(
+    reqs: SkillRequirements,
+    *,
+    installed_plugin_ids: frozenset[str] | None,
+) -> tuple[str, ...]:
+    """Return the unmet portion of *reqs* as ``"<kind>:<value>"`` tags.
+
+    Empty tuple ⇒ satisfied. ``installed_plugin_ids=None`` skips the
+    plugin gate entirely — when we don't know what's installed we
+    refuse to gate (a fresh shell that hasn't loaded the plugin index
+    must not silently hide every plugin-coupled skill).
+    """
+    if reqs.is_empty:
+        return ()
+
+    unmet: list[str] = []
+
+    # Binaries — `shutil.which` returns the resolved path or None.
+    for name in reqs.binaries:
+        if shutil.which(name) is None:
+            unmet.append(f"binary:{name}")
+
+    # Env vars — empty string counts as missing (a sentinel set to
+    # blank is no better than unset for skill gating purposes).
+    for var in reqs.env:
+        if not os.environ.get(var):
+            unmet.append(f"env:{var}")
+
+    # OS — current platform must appear in the declared list.
+    if reqs.os:
+        current = _platform_name()
+        if current not in reqs.os:
+            unmet.append(f"os:{current}-not-in-{','.join(reqs.os)}")
+
+    # Plugins — only gate when we actually know what's installed.
+    if reqs.plugins and installed_plugin_ids is not None:
+        for pid in reqs.plugins:
+            if pid not in installed_plugin_ids:
+                unmet.append(f"plugin:{pid}")
+
+    return tuple(unmet)
 
 
 def _parse_required_credential_files(raw: object) -> tuple[RequiredCredentialFile, ...]:
@@ -943,7 +1073,11 @@ class MemoryManager:
 
     # ─── procedural (skills) ─────────────────────────────────────
 
-    def list_skills(self) -> list[SkillMeta]:
+    def list_skills(
+        self,
+        *,
+        installed_plugin_ids: frozenset[str] | None = None,
+    ) -> list[SkillMeta]:
         """Scan all skill roots for SKILL.md files. User skills shadow bundled ones.
 
         Phase III.4: also enumerates sibling ``references/`` (``.md`` only)
@@ -958,6 +1092,16 @@ class MemoryManager:
         ``<skills_path>/.hub/<source>/<skill-name>/SKILL.md`` are discovered.
         Hub roots are appended after user + bundled roots, so user skills
         still shadow on id collision.
+
+        OpenClaw parity (``requires:`` gating): each :class:`SkillMeta`
+        carries ``requires`` (declared) and ``unmet_requirements``
+        (computed). The loader does not filter — callers (e.g. the
+        agent prompt builder) decide whether to drop unmet skills,
+        while listing surfaces (CLI, dashboard) keep visibility.
+        Pass ``installed_plugin_ids`` to enable plugin-gate checks; the
+        loader does not look the index up itself because the canonical
+        path lives in :mod:`opencomputer.plugins.installed_index` and
+        depends on the active profile, which the agent loop knows.
         """
         roots = [self.skills_path, *self.bundled_skills_paths]
         hub_root = self.skills_path / ".hub"
@@ -1011,6 +1155,15 @@ class MemoryManager:
                 required_creds = _parse_required_credential_files(
                     meta.get("required_credential_files")
                 )
+                # OpenClaw parity: declared host capabilities. Evaluation
+                # uses the loader's optional plugin-index hint; when None
+                # the plugin gate is intentionally skipped so a skill
+                # that lists plugins isn't hidden just because the
+                # caller hasn't supplied an index yet.
+                requires = _parse_skill_requires(meta.get("requires"))
+                unmet = _evaluate_skill_requirements(
+                    requires, installed_plugin_ids=installed_plugin_ids,
+                )
                 out.append(
                     SkillMeta(
                         id=skill_dir.name,
@@ -1023,6 +1176,8 @@ class MemoryManager:
                         priority=priority,
                         required_env_vars=required_env,
                         required_credential_files=required_creds,
+                        requires=requires,
+                        unmet_requirements=unmet,
                     )
                 )
                 # Hermes parity (P3.4 / P3.5): publish the skill's

@@ -1,4 +1,5 @@
-"""Approvals config — Hermes-parity ``security.approvals.{mode,timeout}``.
+"""Approvals config — Hermes-parity ``security.approvals.{mode,timeout}``
+plus OpenClaw-parity per-command pattern rules.
 
 Maps the Hermes ``approvals.mode: manual|smart|off`` knob into
 OpenComputer's idioms:
@@ -11,6 +12,26 @@ OpenComputer's idioms:
 
 ``timeout`` overrides the consent gate's default 300s wait.
 
+OpenClaw-parity (2026-05-10) — per-command pattern rules. Operators
+declare allow/ask/deny verdicts for specific command shapes, e.g.::
+
+    security:
+      approvals:
+        mode: manual
+        command_rules:
+          - pattern: "git commit"
+            verdict: allow
+          - pattern: "git push"
+            verdict: ask
+          - pattern: "rm -rf"
+            verdict: deny
+
+Rules are evaluated first-match-wins, in the order declared. A rule
+verdict of ``allow`` short-circuits the consent gate; ``deny`` refuses
+the command outright (without going through the LLM-driven Tirith scan
+either, so denials are deterministic). ``ask`` is the default and
+falls through to whatever ``mode`` would otherwise do.
+
 Config-schema independence: like
 :mod:`opencomputer.security.website_blocklist`, this module reads YAML
 directly rather than going through the central ``SecurityConfig``
@@ -18,8 +39,12 @@ dataclass. Independence from concurrent ``security.*`` schema PRs.
 """
 from __future__ import annotations
 
+import fnmatch
 import logging
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal
 
 logger = logging.getLogger("opencomputer.security.approvals")
 
@@ -27,6 +52,37 @@ logger = logging.getLogger("opencomputer.security.approvals")
 VALID_MODES: frozenset[str] = frozenset({"manual", "smart", "off"})
 DEFAULT_MODE: str = "manual"
 DEFAULT_TIMEOUT_S: float = 300.0  # 5 minutes — matches consent gate default
+
+CommandVerdict = Literal["allow", "ask", "deny"]
+VALID_VERDICTS: frozenset[str] = frozenset({"allow", "ask", "deny"})
+
+
+@dataclass(frozen=True, slots=True)
+class CommandRule:
+    """One per-command approval rule.
+
+    Patterns are matched against the *raw* command string passed to
+    Bash — typically the full shell string the agent would run. Two
+    matchers are supported:
+
+    * ``substring`` (default) — match if ``pattern`` appears anywhere
+      in the command. Cheap, predictable; recommended for most users.
+    * ``glob`` — :mod:`fnmatch` shell-style globs. Use when you need
+      ``git push *origin*`` or ``rm -rf /tmp/*``-style expressions.
+    * ``regex`` — full Python regex. Power-tool; an invalid regex
+      degrades gracefully (rule is skipped + warning logged).
+
+    Verdict ``deny`` short-circuits Tirith and the consent gate.
+    Verdict ``allow`` short-circuits the consent gate but Tirith
+    still runs (Tirith is a static-analysis backstop the operator
+    cannot override away — only hardline + this deny can).
+    Verdict ``ask`` is the default fallthrough — equivalent to no
+    rule matching.
+    """
+
+    pattern: str
+    verdict: CommandVerdict = "ask"
+    matcher: Literal["substring", "glob", "regex"] = "substring"
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,10 +98,13 @@ class ApprovalsConfig:
         timeout_s: seconds the consent gate waits for a user response
             before auto-denying. Mirrors the Hermes
             ``approvals.timeout`` knob.
+        command_rules: ordered list of :class:`CommandRule` evaluated
+            first-match-wins. OpenClaw-parity per-command verdicts.
     """
 
     mode: str = DEFAULT_MODE
     timeout_s: float = DEFAULT_TIMEOUT_S
+    command_rules: tuple[CommandRule, ...] = field(default_factory=tuple)
 
     @property
     def auto_allow(self) -> bool:
@@ -56,6 +115,36 @@ class ApprovalsConfig:
         without each rebuilding the mode-vs-flag logic.
         """
         return self.mode == "off"
+
+    def evaluate_command(self, command: str) -> CommandVerdict | None:
+        """Return the verdict for *command* or ``None`` if no rule matched.
+
+        First-match-wins. ``None`` means "fall through to the
+        ``mode``-driven path" (i.e. the existing Hermes-parity
+        behaviour). Defensive: a malformed regex in a rule is skipped
+        with a warning rather than crashing the whole evaluation.
+        """
+        for rule in self.command_rules:
+            try:
+                if _command_matches(command, rule):
+                    return rule.verdict
+            except re.error as e:
+                logger.warning(
+                    "approvals: invalid regex %r in rule (skipping): %s",
+                    rule.pattern, e,
+                )
+        return None
+
+
+def _command_matches(command: str, rule: CommandRule) -> bool:
+    """Pure matcher — used by :meth:`ApprovalsConfig.evaluate_command`."""
+    if rule.matcher == "substring":
+        return rule.pattern in command
+    if rule.matcher == "glob":
+        return fnmatch.fnmatchcase(command, rule.pattern)
+    if rule.matcher == "regex":
+        return re.search(rule.pattern, command) is not None
+    return False
 
 
 def parse_mode(raw: object) -> str:
@@ -108,12 +197,78 @@ def parse_timeout(raw: object) -> float:
     return v
 
 
-def load_approvals_from_active_config() -> ApprovalsConfig:
-    """Read ``security.approvals.{mode,timeout}`` from the active profile's
-    ``config.yaml``.
+def parse_command_rules(raw: object) -> tuple[CommandRule, ...]:
+    """Parse the ``command_rules`` YAML list into a tuple of rules.
 
-    On any error returns the safe default (``manual``, 300s). This is
-    the public hot-path callers should use.
+    Tolerant of malformed entries — a single bad rule is skipped with
+    a warning, the rest are honoured. Accepts either::
+
+        command_rules:
+          - pattern: "git push"
+            verdict: ask
+          - pattern: "^rm -rf /"
+            verdict: deny
+            matcher: regex
+
+    or the OpenClaw-style mapping shorthand (less expressive, no
+    matcher choice — substring only)::
+
+        command_rules:
+          "git commit": allow
+          "git push": ask
+          "rm -rf": deny
+    """
+    if isinstance(raw, dict):
+        out: list[CommandRule] = []
+        for pattern, verdict_raw in raw.items():
+            verdict = _normalise_verdict(verdict_raw)
+            if verdict is None:
+                continue
+            out.append(CommandRule(pattern=str(pattern), verdict=verdict))
+        return tuple(out)
+    if not isinstance(raw, list):
+        return ()
+    out_list: list[CommandRule] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        pattern = str(entry.get("pattern", "")).strip()
+        if not pattern:
+            continue
+        verdict = _normalise_verdict(entry.get("verdict"))
+        if verdict is None:
+            continue
+        matcher_raw = str(entry.get("matcher", "substring")).strip().lower()
+        matcher = matcher_raw if matcher_raw in {"substring", "glob", "regex"} else "substring"
+        out_list.append(
+            CommandRule(pattern=pattern, verdict=verdict, matcher=matcher)  # type: ignore[arg-type]
+        )
+    return tuple(out_list)
+
+
+def _normalise_verdict(raw: object) -> CommandVerdict | None:
+    if not isinstance(raw, str):
+        logger.warning(
+            "approvals: command rule verdict %r is not a string — skipping rule",
+            raw,
+        )
+        return None
+    candidate = raw.strip().lower()
+    if candidate not in VALID_VERDICTS:
+        logger.warning(
+            "approvals: unknown verdict %r — skipping rule. Valid: %s",
+            raw, ", ".join(sorted(VALID_VERDICTS)),
+        )
+        return None
+    return candidate  # type: ignore[return-value]
+
+
+def load_approvals_from_active_config() -> ApprovalsConfig:
+    """Read ``security.approvals.{mode,timeout,command_rules}`` from the
+    active profile's ``config.yaml``.
+
+    On any error returns the safe default (``manual``, 300s, no rules).
+    This is the public hot-path callers should use.
     """
     try:
         import yaml
@@ -135,17 +290,117 @@ def load_approvals_from_active_config() -> ApprovalsConfig:
         return ApprovalsConfig(
             mode=parse_mode(appr.get("mode")),
             timeout_s=parse_timeout(appr.get("timeout")),
+            command_rules=parse_command_rules(appr.get("command_rules")),
         )
     except Exception:  # noqa: BLE001
         return ApprovalsConfig()
+
+
+class SecretsApprovalsError(RuntimeError):
+    """Raised when persisting an approval rule fails (no active profile, etc.)."""
+
+
+def persist_command_rule(
+    rule: CommandRule,
+    *,
+    profile_home: object | None = None,
+) -> Path:
+    """Append *rule* to the active profile's
+    ``security.approvals.command_rules`` list in ``config.yaml`` —
+    creating the file and the nested keys if absent.
+
+    Used to implement OpenClaw-style "allow-always": when a user picks
+    "always allow" at a consent prompt, the runtime calls this so the
+    rule survives the process. Subsequent loads pick it up via
+    :func:`load_approvals_from_active_config`.
+
+    The write is atomic: tmp file + ``os.replace`` so a crash mid-write
+    cannot leave a half-rendered yaml file.
+
+    Defensive: a malformed pre-existing config is replaced with a
+    minimal valid one carrying the new rule, with a WARNING log. We
+    prefer a working config + a loud warning over refusing the write.
+    """
+    import os as _os
+    from pathlib import Path as _Path
+
+    import yaml
+
+    if profile_home is None:
+        from opencomputer.profiles import (
+            profile_home_dir,
+            read_active_profile,
+        )
+
+        active = read_active_profile()
+        if active is None:
+            raise SecretsApprovalsError(
+                "no active profile — cannot persist command rule"
+            )
+        profile_home = profile_home_dir(active)
+    home_path: _Path = _Path(str(profile_home)).expanduser()
+    home_path.mkdir(parents=True, exist_ok=True)
+    config_path = home_path / "config.yaml"
+
+    data: dict[str, object] = {}
+    if config_path.is_file():
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            if isinstance(raw, dict):
+                data = raw  # type: ignore[assignment]
+            else:
+                logger.warning(
+                    "approvals.persist: %s top-level is %s, not dict; "
+                    "replacing with minimal config",
+                    config_path, type(raw).__name__,
+                )
+        except yaml.YAMLError as e:
+            logger.warning(
+                "approvals.persist: %s is malformed (%s); "
+                "replacing with minimal config",
+                config_path, e,
+            )
+    security = data.setdefault("security", {})
+    if not isinstance(security, dict):
+        security = {}
+        data["security"] = security
+    approvals = security.setdefault("approvals", {})
+    if not isinstance(approvals, dict):
+        approvals = {}
+        security["approvals"] = approvals
+    rules = approvals.setdefault("command_rules", [])
+    if not isinstance(rules, list):
+        rules = []
+        approvals["command_rules"] = rules
+    rules.append({
+        "pattern": rule.pattern,
+        "verdict": rule.verdict,
+        "matcher": rule.matcher,
+    })
+
+    rendered = yaml.safe_dump(data, sort_keys=False)
+    tmp_path = config_path.with_suffix(".yaml.tmp")
+    tmp_path.write_text(rendered, encoding="utf-8")
+    _os.replace(tmp_path, config_path)
+    logger.info(
+        "approvals.persist: appended rule (pattern=%r verdict=%s matcher=%s) → %s",
+        rule.pattern, rule.verdict, rule.matcher, config_path,
+    )
+    return config_path
 
 
 __all__ = [
     "DEFAULT_MODE",
     "DEFAULT_TIMEOUT_S",
     "VALID_MODES",
+    "VALID_VERDICTS",
     "ApprovalsConfig",
+    "CommandRule",
+    "CommandVerdict",
+    "SecretsApprovalsError",
     "load_approvals_from_active_config",
+    "parse_command_rules",
     "parse_mode",
     "parse_timeout",
+    "persist_command_rule",
 ]
