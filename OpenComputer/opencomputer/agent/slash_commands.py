@@ -35,6 +35,9 @@ from opencomputer.agent.slash_commands_impl.busy_cmd import BusyCommand
 from opencomputer.agent.slash_commands_impl.capabilities_cmd import (
     CapabilitiesCommand,
 )
+from opencomputer.agent.slash_commands_impl.checkpoint_cmd import (
+    CheckpointCommand,
+)
 from opencomputer.agent.slash_commands_impl.copy_cmd import CopyCommand
 from opencomputer.agent.slash_commands_impl.details_cmd import DetailsCommand
 from opencomputer.agent.slash_commands_impl.display_toggles_cmd import (
@@ -64,6 +67,7 @@ from opencomputer.agent.slash_commands_impl.queue_mode_cmd import (
     QueueModeCommand,
 )
 from opencomputer.agent.slash_commands_impl.reasoning_cmd import ReasoningCommand
+from opencomputer.agent.slash_commands_impl.restore_cmd import RestoreCommand
 from opencomputer.agent.slash_commands_impl.rollback_cmd import RollbackCommand
 from opencomputer.agent.slash_commands_impl.save_cmd import SaveCommand
 from opencomputer.agent.slash_commands_impl.scrape import ScrapeCommand
@@ -130,6 +134,10 @@ _BUILTIN_COMMANDS: tuple[type, ...] = (
     BackgroundCommand,
     # v1.1 plan-3 M11.2 — /batch fan-out via DelegateTool isolation=worktree.
     BatchCommand,
+    # CC §11 — user-invocable session checkpoints (distinct from
+    # /rollback which uses the filesystem RewindStore).
+    CheckpointCommand,
+    RestoreCommand,
     # Hermes CLI/TUI/Sessions v2 parity (2026-05-08):
     # B1 /rollback [N], B2 /busy [interrupt|queue|steer|status],
     # B3 /details [section] [mode], D5 /mouse [on|off|toggle|status].
