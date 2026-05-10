@@ -882,6 +882,28 @@ class CronConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class UserModelConfig:
+    """F4 user-model graph + behavioral inference config.
+
+    The audit (2026-05-10) found 28 graph nodes / 0 edges because:
+      - ``MotifImporter.import_recent`` had no production caller
+      - ``BehavioralInferenceEngine.attach_to_bus`` had no production caller
+        (so MotifStore stayed empty)
+
+    Both are fixed by auto-attaching the inference engine in the gateway
+    daemon (this config flag) plus a periodic motif_import system-tick
+    in cron. Defaults ON so the F4 graph populates by default.
+    """
+
+    #: Auto-attach :class:`BehavioralInferenceEngine` in the gateway
+    #: daemon. Default ON. The engine subscribes to the F2 default-bus
+    #: and persists motifs to ``inference/motifs.sqlite`` as the agent
+    #: produces signal events. Opt-out for users who run a separate
+    #: ``oc inference run`` process.
+    inference_engine_start_in_gateway: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class FullSystemControlConfig:
     """3.F — master enable/disable for autonomous full-system-control mode.
 
@@ -1474,6 +1496,12 @@ class Config:
     #: prompt" recommendation. Empty by default; manage via
     #: ``oc pin <path>`` / ``oc unpin <path>`` / ``oc pin --list``.
     prompt: PromptConfig = field(default_factory=PromptConfig)
+    #: 2026-05-10 — F4 user-model graph + behavioral inference. Default
+    #: enables auto-attach of the inference engine in the gateway daemon
+    #: so motifs flow through MotifStore and the user_model graph
+    #: populates with edges. Opt out via
+    #: ``user_model.inference_engine_start_in_gateway: false``.
+    user_model: UserModelConfig = field(default_factory=UserModelConfig)
     home: Path = field(default_factory=_home)
 
 

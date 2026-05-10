@@ -129,8 +129,44 @@ def run_system_tick() -> dict[str, str | int]:
     else:
         summary["dreaming_v2"] = dream_result
 
+    # 2026-05-10 — F4 user-model motif import. The audit found 28 graph
+    # nodes / 0 edges because ``MotifImporter.import_recent`` had no
+    # production caller; it only ran via ``oc user-model import``.
+    # Without this tick, the F4 graph stays edge-less even when the
+    # behavioral inference engine produces motifs. Idempotent: the
+    # importer dedups by motif id, so repeated ticks don't re-add nodes.
+    motif_result = _safe_call("motif_import", _run_motif_import_tick)
+    if isinstance(motif_result, dict):
+        summary["motif_import_nodes"] = int(motif_result.get("nodes_added", 0))
+        summary["motif_import_edges"] = int(motif_result.get("edges_added", 0))
+    else:
+        summary["motif_import"] = motif_result
+
     logger.info("system_tick summary: %s", summary)
     return summary
+
+
+def _run_motif_import_tick() -> dict[str, int]:
+    """Pull recent motifs from MotifStore into the user-model graph.
+
+    Cheap when MotifStore is empty (the typical case during the first
+    days after a clean install). ``inference/motifs.sqlite`` is created
+    lazily by :class:`BehavioralInferenceEngine` — until that fires,
+    this tick is a fast no-op.
+
+    Returns ``{"nodes_added": N, "edges_added": M}``.
+    """
+    try:
+        from opencomputer.user_model.importer import MotifImporter
+    except Exception:  # noqa: BLE001 — degrade gracefully
+        return {"nodes_added": 0, "edges_added": 0}
+    try:
+        importer = MotifImporter()
+        nodes_added, edges_added = importer.import_recent(limit=100)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("motif_import_tick: import_recent failed: %s", exc)
+        return {"nodes_added": 0, "edges_added": 0}
+    return {"nodes_added": int(nodes_added), "edges_added": int(edges_added)}
 
 
 def _safe_call(name: str, fn):
