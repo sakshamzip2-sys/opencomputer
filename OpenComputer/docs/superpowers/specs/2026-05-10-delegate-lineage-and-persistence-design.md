@@ -243,14 +243,38 @@ the provider instance, never touch `os.environ`). That's a larger
 refactor — out of scope. Save/restore bounds the blast radius without
 changing the provider contract.
 
-## 6. Deferred items
+## 6. Deferred items — honest
 
-| Item | Why deferred |
+The audit listed four "fuzz" items: kill -9 mid-delegation, parent
+crash, child OOM, and lock-timeout under concurrent siblings. Of
+those, **lock-timeout** and **parent crash** ARE covered by tests in
+this PR (see `test_delegate_lineage_e2e_gaps.py`); the other two
+deserve an honest writeup of why they're out of scope:
+
+| Item | Why deferred — honestly |
 | --- | --- |
-| Periodic heartbeat for orphan detection | YAGNI; PID-liveness at read is enough until users complain. |
-| Per-provider first-class credential injection | Provider-plugin scope; bigger PR. |
-| `oc agents tail <id>` (live token stream) | Not in audit; ask first. |
-| `tasks=[...]` parallel batch return-shape canonicalisation | Existing per-task error handling is correct; canonical join shape can wait for a real consumer. |
+| Signal-level kill -9 | Cannot SIGKILL the test process from inside pytest; the receiving end of SIGKILL can't catch anything to record. The cross-process orphan-detection path (host_pid + host_started_at, dead-pid detection at read time) is the structural cover; `test_orphan_detection_across_processes` exercises it end-to-end. |
+| Process OOM | Same shape as kill -9 — OS terminates the child. Same orphan-detection cover applies. Triggering real OOM in pytest would need a separate process and explicit memory pressure, both fragile. The path is sound; the test would be flaky for limited extra coverage. |
+| Periodic heartbeat for orphan detection | YAGNI. Pid-liveness at read time is enough until users actually complain about stale `running` records. Adding a background heartbeat thread costs complexity; right now the failure mode is observable but not painful. |
+| Per-provider first-class credential injection (replacing the env-var hack) | Provider-plugin scope. The env-var save/restore in this PR caps the blast radius (no leaks across delegations or processes). The deeper refactor — pass credentials via dataclass to the provider plugin instance, never touch `os.environ` — is a bigger change and not in the audit. |
+| `oc agents tail <id>` live token stream | Not in audit. Ask first. |
+| `tasks=[...]` parallel batch return-shape canonicalisation | Existing per-task error handling is correct (`return_exceptions=True` + per-task error formatting). A canonical join shape (e.g. structured failure objects) can wait for a real consumer. |
+
+**What is NOT deferred and shipped in this PR**:
+
+| Audit item | Test that exercises it |
+| --- | --- |
+| Real `isolation='worktree'` smoke | `test_isolation_worktree_creates_distinct_cwd_for_child` — tmp git repo, real `git worktree add`, child receives distinct cwd. |
+| Real `isolation='copy'` smoke | `test_isolation_copy_creates_separate_cwd`. |
+| `isolation='worktree'` against non-git cwd | `test_isolation_worktree_on_non_git_cwd_returns_clean_error` — confirms `WorktreeNotAvailable` taxonomy is correct. |
+| Concurrent siblings with overlapping paths serialize | `test_concurrent_siblings_with_overlapping_paths_serialize`. |
+| Lock-timeout under concurrent siblings | `test_concurrent_siblings_overlapping_paths_timeout_cleanly` — small-timeout coordinator, timeout fires cleanly, lock releasable after. |
+| Non-overlapping siblings run in parallel | `test_concurrent_non_overlapping_siblings_run_in_parallel` — sanity inverse. |
+| `role='orchestrator'` (when honored, not demoted) | `test_role_orchestrator_when_honored_persists_in_registry` — registry record carries `role='orchestrator'`. |
+| `forked_context=True` | `test_forked_context_true_passes_parent_messages_to_child`. |
+| Real `AgentLoop` end-to-end persists lineage to sqlite | `test_agent_loop_end_to_end_persists_lineage_to_sqlite` — real loop, stub provider, real db, real lineage column. |
+| `AgentLoop.__init__` auto-attaches the store | `test_agent_loop_constructor_attaches_subagent_store_to_singleton` — production zero-opt-in path. |
+| Cross-process orphan detection | `test_orphan_detection_across_processes` — process A's dead-pid record is visible to process B as `orphaned`. |
 
 ## 7. Migration risk + rollout
 
