@@ -30,6 +30,43 @@ The first calver release that bundles the v1.1 plan-1 + plan-2 work. Per `RELEAS
 
 ## [Unreleased]
 
+### Added — Memory observability: closes silent-compaction gap (2026-05-10)
+
+Closes the architectural gap diagnosed in `oc-memory-deep-dive.md` §5: declarative-memory writes that triggered inline compaction silently dropped load-bearing rules from `MEMORY.md` / `USER.md` with no real-time signal to the agent or user. The published `MemoryWriteEvent` carried `content_size` only.
+
+**M1 — In-band cap-pressure warning** (`opencomputer/agent/memory_cap.py`, `opencomputer/tools/memory_tool.py`):
+
+- New `cap_status(text, *, limit, file_name) -> CapStatus` helper. Pure function; single source of truth for "how full is this file?".
+- New `warning_for(status, *, dropped) -> str | None`. Returns formatted warning when post-write pct ≥ 80% OR a paragraph was just dropped (escalates regardless of pct).
+- `MemoryTool` prepends the warning to its `ToolResult.content` on every successful write; mirrors to stderr via `[memory:warn]`. Wrapped in try/except — observability never breaks a write.
+
+**M2 — Compaction-delta on `MemoryWriteEvent`** (`plugin_sdk/ingestion.py`, `opencomputer/agent/memory.py`):
+
+- `MemoryWriteEvent` adds `compaction_delta: int = 0` (bytes freed) and `dropped_paragraphs: int = 0`. BC-safe per `plugin_sdk/CLAUDE.md` §1.4.
+- `_append`/`_replace` recover the round's drop count by diffing the cumulative-drop counter embedded in `_compaction_header`. No internal API signature changes — keeps `tests/test_memory_md_cap_pressure.py:42`'s direct-equality assertion intact.
+- `MemoryManager._last_write_metadata` side-channel carries the same data to the in-band warning so it escalates to `🛑 MEMORY MEMORY.md COMPACTED — DROPPED N ENTRIES` on actual compaction.
+
+**M3 — `oc memory audit`** (`opencomputer/cli_memory.py:memory_audit`):
+
+New paragraph-level inspector. Flags: `[TODO]` / `[long]` (>400 chars) / `[short]` (<20 chars). Distinct from `oc memory doctor` (existing multi-layer health command). Modes:
+
+```bash
+oc memory audit                    # MEMORY.md
+oc memory audit --user             # USER.md
+oc memory audit --all              # both
+oc memory audit --interactive      # walk paragraphs, prompt keep/delete/replace/skip
+```
+
+**M4 — Interactive walk** (`_audit_interactive_walk`):
+
+`--interactive` mode prompts per paragraph; delegates writes to existing `MemoryManager.remove_*` / `replace_*` so locking, atomic write, `.bak` backup, and `MemoryWriteEvent` publication chain are reused.
+
+**Tests:** 40 new tests across 5 files. 141/141 pass on memory + plugin-sdk regression. Ruff clean. Dogfood pass: `oc memory audit --all` against real `~/.opencomputer/{MEMORY.md,USER.md}` produced actionable output (USER.md flagged at 81%).
+
+**Open follow-ups:** periodic forced-consolidation cron (memo §3 fix shape) + TUI memory panel via existing wire bus (blocked on TUI symptom data per CLAUDE.md §5 dogfood gate).
+
+Spec: `docs/superpowers/specs/2026-05-10-memory-observability-design.md`.
+
 ### Added — v1.1 Plan-3 M9.3 + M9.4: block budget + audit chain for auto-mode classifier (2026-05-09)
 
 Closes the two M9.2 follow-ups that the security-critical PR honestly deferred. Both ride on top of `ToolCallClassifier` from PR #555.
