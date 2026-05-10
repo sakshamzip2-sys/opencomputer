@@ -16,14 +16,54 @@ Errors are returned as ToolResult(is_error=True) — this tool MUST NOT raise.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from opencomputer.agent.memory import MemoryTooLargeError
+from opencomputer.agent.memory_cap import cap_status, warning_for
 from plugin_sdk.core import ToolCall, ToolResult
 from plugin_sdk.tool_contract import BaseTool, ToolSchema
 
 _VALID_ACTIONS = {"add", "replace", "remove", "read"}
 _VALID_TARGETS = {"memory", "user"}
+
+_logger = logging.getLogger(__name__)
+
+
+def _post_write_warning(mm: Any, target: str) -> str | None:
+    """Compute the in-band cap-pressure warning for the just-written file, or None.
+
+    Wrapped in try/except so observability never breaks a write path.
+
+    Reads the compaction count from ``mm._last_write_metadata`` (set by
+    `MemoryManager._append`/`_replace`/`_remove` on the same call thread)
+    so the warning escalates to the COMPACTED variant when a drop happened.
+    """
+    try:
+        if target == "memory":
+            text = mm.read_declarative()
+            limit = mm.memory_char_limit
+            file_name = mm.declarative_path.name
+        else:
+            text = mm.read_user()
+            limit = mm.user_char_limit
+            file_name = mm.user_path.name
+        status = cap_status(text, limit=limit, file_name=file_name)
+        meta = getattr(mm, "_last_write_metadata", {}) or {}
+        dropped = int(meta.get("dropped_paragraphs", 0))
+        warning = warning_for(status, dropped=dropped)
+        if warning is not None:
+            _logger.warning(
+                "[memory:warn] %s %d%% (%d/%d chars) dropped=%d",
+                file_name,
+                int(round(status.pct * 100)),
+                status.bytes_used,
+                status.bytes_limit,
+                dropped,
+            )
+        return warning
+    except Exception:  # noqa: BLE001 — warning must never break a write
+        return None
 
 
 class MemoryTool(BaseTool):
@@ -128,10 +168,11 @@ class MemoryTool(BaseTool):
                     mm.append_declarative(text)
                 else:
                     mm.append_user(text)
-                return ToolResult(
-                    tool_call_id=call.id,
-                    content=f"Added entry to {target.upper()}.md",
-                    is_error=False,
+                return self._success(
+                    call.id,
+                    base=f"Added entry to {target.upper()}.md",
+                    mm=mm,
+                    target=target,
                 )
 
             if action == "replace":
@@ -149,10 +190,11 @@ class MemoryTool(BaseTool):
                         call.id,
                         f"substring not found in {target.upper()}.md",
                     )
-                return ToolResult(
-                    tool_call_id=call.id,
-                    content=f"Replaced in {target.upper()}.md",
-                    is_error=False,
+                return self._success(
+                    call.id,
+                    base=f"Replaced in {target.upper()}.md",
+                    mm=mm,
+                    target=target,
                 )
 
             if action == "remove":
@@ -165,10 +207,11 @@ class MemoryTool(BaseTool):
                         call.id,
                         f"block not found in {target.upper()}.md",
                     )
-                return ToolResult(
-                    tool_call_id=call.id,
-                    content=f"Removed from {target.upper()}.md",
-                    is_error=False,
+                return self._success(
+                    call.id,
+                    base=f"Removed from {target.upper()}.md",
+                    mm=mm,
+                    target=target,
                 )
 
             # Unreachable due to earlier validation.
@@ -182,6 +225,19 @@ class MemoryTool(BaseTool):
             )
         except Exception as e:  # pragma: no cover — defensive
             return self._err(call.id, f"memory op failed: {e}")
+
+    @staticmethod
+    def _success(
+        tool_call_id: str, *, base: str, mm: Any, target: str
+    ) -> ToolResult:
+        """Build a successful ToolResult, prepending a cap-pressure warning if needed."""
+        warning = _post_write_warning(mm, target)
+        content = f"{warning}\n\n{base}" if warning else base
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            content=content,
+            is_error=False,
+        )
 
     @staticmethod
     def _err(tool_call_id: str, msg: str) -> ToolResult:

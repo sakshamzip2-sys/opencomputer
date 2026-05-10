@@ -294,12 +294,22 @@ class MemoryWriteEvent(SignalEvent):
     enforcement, and provider cache-invalidation.
 
     PR-8 of Hermes parity plan.
+
+    M2 of 2026-05-10 memory-observability design adds ``compaction_delta``
+    and ``dropped_paragraphs`` so subscribers can react to silent
+    compaction events (memo §5 architectural gap). Both default to 0 so
+    pre-existing event constructors continue to work unchanged
+    (BC per ``plugin_sdk/CLAUDE.md`` §1.4).
     """
 
     event_type: str = field(default="memory_write", init=False)
     action: str = ""    # "append" | "replace" | "remove" | etc.
     target: str = ""    # which file (e.g. "MEMORY.md" / "USER.md")
     content_size: int = 0
+    #: Bytes freed by inline compaction during this write. 0 if no compaction.
+    compaction_delta: int = 0
+    #: Number of paragraphs dropped by inline compaction during this write.
+    dropped_paragraphs: int = 0
 
 
 @dataclass(frozen=True, slots=True)
