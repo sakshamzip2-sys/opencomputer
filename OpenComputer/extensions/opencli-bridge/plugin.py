@@ -74,6 +74,27 @@ def _append_extension_path() -> None:
         os.environ["AGENT_BROWSER_EXTENSIONS"] = current + "," + bundled
 
 
+def _set_headless_linux_args() -> None:
+    """Auto-set ``AGENT_BROWSER_ARGS`` on display-less Linux hosts.
+
+    agent-browser auto-adds ``--no-sandbox`` only when it detects a
+    container (Docker/Podman/cgroup match) or root. KVM-based VPS
+    deployments (Hostinger, etc.) are non-root, non-container Linux
+    machines with no display server — they fall through every check
+    and Chrome fails to launch. Setting ``AGENT_BROWSER_ARGS`` here
+    bypasses agent-browser's ``build_chrome_args`` filter so headless
+    works even when an extension is loaded.
+    """
+    import sys
+    if sys.platform != "linux":
+        return
+    if os.environ.get("AGENT_BROWSER_ARGS"):
+        return  # respect user override
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return  # display server present, headed mode works
+    os.environ["AGENT_BROWSER_ARGS"] = "--no-sandbox,--headless=new"
+
+
 def _resolve_oc_profile_home() -> Path | None:
     """Resolve the active OC profile home, if available.
 
@@ -138,6 +159,7 @@ def _setup_home_shim() -> None:
 # loaded after us see the merged ``AGENT_BROWSER_EXTENSIONS``.
 _prepend_node_bin_to_path()
 _append_extension_path()
+_set_headless_linux_args()
 _setup_home_shim()
 
 # Sibling-module imports — the loader puts this dir on sys.path[0] and

@@ -2,6 +2,10 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
+## [v2026.5.10.post2] — 2026-05-10
+
+- feat(browser): browser-harness + opencli-bridge auto-set `AGENT_BROWSER_ARGS=--no-sandbox,--headless=new` on display-less Linux (no `DISPLAY`/`WAYLAND_DISPLAY`). agent-browser only auto-adds `--no-sandbox` in containers/root, so KVM VPS deployments fall through every check; this fills the gap. Respects user override.
+
 ## [v2026.5.10.post1] — 2026-05-10
 
 - fix(channels): 10 channel adapters were registering the class instead of an instance (dingtalk, feishu, irc, qqbot, teams, wecom, wecom-callback, webhook-inbound, weixin, yuanbao) — caused gateway crash with `BaseChannelAdapter.set_message_handler() missing 1 required positional argument: 'handler'`

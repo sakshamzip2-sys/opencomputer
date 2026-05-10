@@ -75,5 +75,18 @@ def register(api) -> None:  # PluginAPI is duck-typed
         except Exception:
             pass
 
+    # Auto-set --no-sandbox + --headless=new on display-less Linux.
+    # agent-browser only auto-adds --no-sandbox in containers/root; KVM
+    # VPS deployments (Hostinger etc.) are non-root non-container Linux
+    # boxes with no display and fall through every check.
+    import sys
+    if (
+        sys.platform == "linux"
+        and not os.environ.get("AGENT_BROWSER_ARGS")
+        and not os.environ.get("DISPLAY")
+        and not os.environ.get("WAYLAND_DISPLAY")
+    ):
+        os.environ["AGENT_BROWSER_ARGS"] = "--no-sandbox,--headless=new"
+
     for tool_cls in tools.ALL_TOOL_CLASSES:
         api.register_tool(tool_cls())
