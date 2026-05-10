@@ -318,6 +318,22 @@ class TestRenderStatusLine:
         assert " | " not in text  # no ASCII pipe
 
 
+def test_cli_token_tally_sync_updates_status_line_bar() -> None:
+    from opencomputer import cli
+
+    rt = _FakeRuntime({
+        "model_id": "claude-opus-4-7",
+        "session_tokens_in": 0,
+        "session_tokens_out": 0,
+    })
+
+    cli._sync_runtime_token_tally(rt, {"in": 9_000, "out": 3_000})
+
+    text = _flatten(render_status_line(rt))
+    assert "12K/1M" in text
+    assert "1%" in text
+
+
 # ─── NO_COLOR honor ────────────────────────────────────────────────────
 
 

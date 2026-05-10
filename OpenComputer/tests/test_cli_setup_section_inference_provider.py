@@ -139,11 +139,28 @@ def test_openrouter_model_picker_defaults_to_curated_cloud_model(monkeypatch, tm
         "anthropic/claude-opus-4.7",
         "anthropic/claude-opus-4.6",
         "openai/gpt-5.1",
-        "google/gemma-4-31b-it:free",
+        "qwen/qwen3-coder:free",
     ]
     assert "baidu/cobuddy:free" not in labels
+    assert "google/gemma-4-31b-it:free" not in labels
     assert "Enter custom model name" in labels
     assert "Skip (keep current)" in labels
+
+
+def test_openrouter_curated_defaults_exclude_google_ai_studio_free_models():
+    from opencomputer.cli_setup.section_handlers import inference_provider as ip
+
+    labels = ip._curate_openrouter_model_ids([
+        "google/gemma-4-31b-it:free",
+        "google/gemma-4-26b-a4b-it:free",
+        "qwen/qwen3-coder:free",
+        "moonshotai/kimi-k2.6",
+        "anthropic/claude-opus-4.7",
+    ])
+
+    assert "google/gemma-4-31b-it:free" not in labels
+    assert "google/gemma-4-26b-a4b-it:free" not in labels
+    assert "qwen/qwen3-coder:free" in labels
 
 
 def test_openrouter_model_picker_can_skip_keep_current(monkeypatch, tmp_path):
@@ -158,13 +175,140 @@ def test_openrouter_model_picker_can_skip_keep_current(monkeypatch, tmp_path):
         "anthropic/claude-opus-4.7",
     ])
 
-    ctx = _make_ctx(tmp_path, config={"model": {"model": "google/gemma-4-31b-it:free"}})
+    ctx = _make_ctx(tmp_path, config={"model": {"model": "qwen/qwen3-coder:free"}})
     chosen = ip._choose_openrouter_model(
         ctx,
         default_model="anthropic/claude-opus-4.7",
     )
 
     assert chosen is None
+
+
+def test_openrouter_model_picker_does_not_default_to_google_current_model(
+    monkeypatch, tmp_path,
+):
+    from opencomputer.cli_setup.section_handlers import inference_provider as ip
+
+    captured: dict[str, object] = {}
+
+    def fake_radiolist(question, choices, default=0, **kw):
+        captured["labels"] = [c.label for c in choices]
+        captured["default"] = default
+        return default
+
+    monkeypatch.setattr(ip, "radiolist", fake_radiolist)
+    monkeypatch.setattr(ip, "_fetch_openrouter_models", lambda *a, **kw: [
+        "anthropic/claude-opus-4.7",
+        "qwen/qwen3-coder:free",
+    ])
+
+    ctx = _make_ctx(tmp_path, config={"model": {"model": "google/gemma-4-31b-it:free"}})
+    chosen = ip._choose_openrouter_model(
+        ctx,
+        default_model="anthropic/claude-opus-4.7",
+    )
+
+    assert chosen == "anthropic/claude-opus-4.7"
+    assert captured["default"] == 0
+    assert "google/gemma-4-31b-it:free  \u2190 currently in use" not in captured["labels"]
+
+
+def test_invoke_openai_setup_replaces_incompatible_openrouter_model(
+    monkeypatch, tmp_path,
+):
+    from opencomputer.cli_setup.section_handlers import inference_provider as ip
+
+    monkeypatch.setattr(ip, "_discover_providers", lambda: [
+        {
+            "name": "openai",
+            "label": "OpenAI",
+            "description": "OpenAI models",
+            "env_var": "OPENAI_API_KEY",
+            "signup_url": "https://platform.openai.com/api-keys",
+            "default_model": "gpt-5.4",
+        },
+    ])
+    monkeypatch.setattr(ip, "_collect_api_key", lambda *a, **kw: None)
+    monkeypatch.setattr(ip, "_test_provider_connection", lambda *a, **kw: True)
+
+    ctx = _make_ctx(
+        tmp_path,
+        config={
+            "model": {
+                "provider": "openrouter",
+                "model": "minimax/minimax-m2.5:free",
+            },
+        },
+    )
+
+    ok = ip._invoke_provider_setup("openai", ctx)
+
+    assert ok is True
+    assert ctx.config["model"]["provider"] == "openai"
+    assert ctx.config["model"]["model"] == "gpt-5.4"
+
+
+def test_invoke_openai_setup_keeps_existing_compatible_openai_model(
+    monkeypatch, tmp_path,
+):
+    from opencomputer.cli_setup.section_handlers import inference_provider as ip
+
+    monkeypatch.setattr(ip, "_discover_providers", lambda: [
+        {
+            "name": "openai",
+            "label": "OpenAI",
+            "description": "OpenAI models",
+            "env_var": "OPENAI_API_KEY",
+            "signup_url": "https://platform.openai.com/api-keys",
+            "default_model": "gpt-5.4",
+        },
+    ])
+    monkeypatch.setattr(ip, "_collect_api_key", lambda *a, **kw: None)
+    monkeypatch.setattr(ip, "_test_provider_connection", lambda *a, **kw: True)
+
+    ctx = _make_ctx(
+        tmp_path,
+        config={"model": {"provider": "openai", "model": "gpt-5.5"}},
+    )
+
+    ip._invoke_provider_setup("openai", ctx)
+
+    assert ctx.config["model"]["model"] == "gpt-5.5"
+
+
+def test_test_provider_connection_loads_plugin_with_plugin_api(monkeypatch):
+    from types import SimpleNamespace
+
+    from opencomputer.cli_setup.section_handlers import inference_provider as ip
+
+    class FakeProvider:
+        def __init__(self):
+            pass
+
+    fake_provider = SimpleNamespace(id="openrouter")
+    fake_manifest = SimpleNamespace(
+        kind="provider",
+        setup=SimpleNamespace(providers=[fake_provider]),
+    )
+    fake_candidate = SimpleNamespace(manifest=fake_manifest)
+
+    def fake_load_plugin(candidate, api):
+        assert candidate is fake_candidate
+        assert hasattr(api, "tools")
+        api.register_provider("openrouter", FakeProvider)
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    monkeypatch.setattr(
+        "opencomputer.plugins.discovery.standard_search_paths",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "opencomputer.plugins.discovery.discover",
+        lambda _paths: [fake_candidate],
+    )
+    monkeypatch.setattr("opencomputer.plugins.loader.load_plugin", fake_load_plugin)
+
+    assert ip._test_provider_connection("openrouter", "OPENROUTER_API_KEY") is True
 
 
 def test_run_writes_provider_to_config_on_selection(monkeypatch, tmp_path):

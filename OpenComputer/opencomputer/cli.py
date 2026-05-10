@@ -8,7 +8,20 @@ import logging
 import os
 import sys
 import uuid
+import warnings
 from pathlib import Path
+
+
+def _install_dependency_warning_filters() -> None:
+    """Hide noisy dependency-version warnings that leak before chat starts."""
+    warnings.filterwarnings(
+        "ignore",
+        message=r"urllib3 .*doesn't match a supported version!",
+        category=Warning,
+    )
+
+
+_install_dependency_warning_filters()
 
 import typer
 from rich.console import Console
@@ -890,6 +903,65 @@ def _resolve_resume_target(spec: str) -> str | None:
     return None
 
 
+def _resolve_chat_resume_target(target: str, db) -> tuple[str | None, list[str]]:
+    """Resolve an in-chat ``/resume`` target against title, lineage, then id prefix."""
+    target = (target or "").strip()
+    if not target:
+        return None, []
+    row = db.find_session_by_title(target)
+    if row:
+        return str(row["id"]), []
+    lineage = db.find_sessions_by_title_lineage(target)
+    if lineage:
+        return str(lineage[0]["id"]), []
+    rows = db.list_sessions(limit=200)
+    matches = [str(r["id"]) for r in rows if str(r.get("id", "")).startswith(target)]
+    if len(matches) == 1:
+        return matches[0], []
+    return None, matches
+
+
+def _session_label_for_banner(db_path, session_id: str) -> str:
+    """Return a friendly session title for the chat banner when one exists."""
+    try:
+        from opencomputer.agent.state import SessionDB
+
+        return SessionDB(db_path).get_session_title(session_id) or session_id
+    except Exception:  # noqa: BLE001
+        return session_id
+
+
+def _render_chat_banner(console, cfg, *, cwd: str, session_id: str, home) -> None:
+    """Render the startup chat banner with the latest persisted session label."""
+    from opencomputer.cli_banner import build_welcome_banner
+
+    build_welcome_banner(
+        console,
+        model=f"{cfg.model.model} ({cfg.model.provider})",
+        cwd=cwd,
+        session_id=session_id,
+        session_label=_session_label_for_banner(cfg.session.db_path, session_id),
+        home=home,
+    )
+
+
+def _sync_runtime_token_tally(runtime: object, tally: dict[str, int]) -> None:
+    """Copy cumulative chat token usage into runtime.custom for the status bar."""
+    custom = getattr(runtime, "custom", None)
+    if not isinstance(custom, dict):
+        return
+    try:
+        in_tokens = int(tally.get("in", 0) or 0)
+    except (TypeError, ValueError):
+        in_tokens = 0
+    try:
+        out_tokens = int(tally.get("out", 0) or 0)
+    except (TypeError, ValueError):
+        out_tokens = 0
+    custom["session_tokens_in"] = max(in_tokens, 0)
+    custom["session_tokens_out"] = max(out_tokens, 0)
+
+
 _STREAM_HOOKS_WIRED = False
 
 
@@ -1397,20 +1469,18 @@ def _run_chat_session(
     # 3-line preamble with categorized tools/skills listing + ASCII art.
     from pathlib import Path as _Path
 
-    from opencomputer.cli_banner import build_welcome_banner
-
     _banner_home_env = os.environ.get("OPENCOMPUTER_HOME")
     _banner_home = _Path(_banner_home_env) if _banner_home_env else _Path.home() / ".opencomputer"
     try:
         _cwd_str = str(_Path.cwd())
     except (FileNotFoundError, OSError):
         _cwd_str = "<cwd deleted>"
-    build_welcome_banner(
+    _render_chat_banner(
         console,
-        model=f"{cfg.model.model} ({cfg.model.provider})",
         cwd=_cwd_str,
         session_id=session_id,
         home=_banner_home,
+        cfg=cfg,
     )
     # tools / plugins / agents counts intentionally hidden from the
     # startup banner — they're noise for an interactive session. Run
@@ -1517,6 +1587,12 @@ def _run_chat_session(
     # variants below; no `nonlocal` needed.
     _token_tally = {"in": 0, "out": 0}
 
+    def _sync_status_token_tally() -> None:
+        _sync_runtime_token_tally(runtime, _token_tally)
+        loop_runtime = getattr(loop, "_runtime", None)
+        if loop_runtime is not runtime:
+            _sync_runtime_token_tally(loop_runtime, _token_tally)
+
     async def _run_turn(user_input: str, images: list[str] | None = None) -> None:
         if not use_live_ui:
             await _run_turn_plain(user_input, images=images)
@@ -1545,6 +1621,7 @@ def _run_chat_session(
             elapsed = _time.monotonic() - t_start
             _token_tally["in"] += result.input_tokens
             _token_tally["out"] += result.output_tokens
+            _sync_status_token_tally()
             renderer.finalize(
                 reasoning=getattr(result.final_message, "reasoning", None),
                 iterations=result.iterations,
@@ -1597,6 +1674,7 @@ def _run_chat_session(
         maybe_emit_bell(runtime)
         _token_tally["in"] += result.input_tokens
         _token_tally["out"] += result.output_tokens
+        _sync_status_token_tally()
         if printed_header["val"]:
             console.print()
         if result.final_message.content.strip() and not printed_header["val"]:
@@ -1680,6 +1758,7 @@ def _run_chat_session(
         session_id = str(uuid.uuid4())
         _token_tally["in"] = 0
         _token_tally["out"] = 0
+        _sync_status_token_tally()
         # Drop the queue when starting a fresh session — queued prompts
         # were authored against the old session's context.
         _session_queues.pop(session_id, None)
@@ -1809,6 +1888,17 @@ def _run_chat_session(
 
             db = SessionDB(profile_home / "sessions.db")
             db.set_session_title(session_id, title)
+            try:
+                console.clear()
+                _render_chat_banner(
+                    console,
+                    cfg,
+                    cwd=_cwd_str,
+                    session_id=session_id,
+                    home=_banner_home,
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return True
         except Exception as e:  # noqa: BLE001
             _log.warning("rename failed: %s", e)
@@ -1830,11 +1920,9 @@ def _run_chat_session(
             db = SessionDB(profile_home / "sessions.db")
             if target in ("pick", "last"):
                 resolved = _resolve_resume_target(target)
+                matches = []
             else:
-                rows = db.list_sessions(limit=200)
-                matches = [
-                    r["id"] for r in rows if r["id"].startswith(target)
-                ]
+                resolved, matches = _resolve_chat_resume_target(target, db)
                 if len(matches) > 1:
                     console.print(
                         f"[yellow]ambiguous prefix[/yellow] {target!r} "
@@ -1855,11 +1943,9 @@ def _run_chat_session(
             session_id = resolved
             _token_tally["in"] = 0
             _token_tally["out"] = 0
+            _sync_status_token_tally()
             title = db.get_session_title(session_id) or "(untitled)"
-            console.print(
-                f"[bold cyan]resumed →[/bold cyan] {session_id[:8]} "
-                f"[dim]({title})[/dim]"
-            )
+            console.print(f"[bold cyan]resumed →[/bold cyan] {title}")
             return True
         except Exception as e:  # noqa: BLE001
             _log.warning("resume failed: %s", e)
@@ -3589,13 +3675,17 @@ def _redact_for_auth(env_var: str, value: str) -> str:
     return "(set)"
 
 
-@app.command(name="model")
 def model_pick() -> None:
     """Interactive picker for default provider + model.
 
     Hermes-parity (2026-04-30). Walks through provider selection and
     model selection then persists choice to ``~/.opencomputer/<profile>/
     config.yaml``. Use ``oc models add`` for non-interactive registration.
+
+    Wired into the ``model`` Typer subgroup's callback (see ``model_app``
+    further down) so plain ``oc model`` runs the picker while
+    ``oc model add/list/remove`` still routes to the custom-providers
+    subcommands.
     """
     from opencomputer.cli_model_picker import model_picker
     model_picker()
@@ -5086,10 +5176,22 @@ def batch(
 
 
 model_app = typer.Typer(
-    help="Manage custom OpenAI/Anthropic-compatible providers (Wave 3 — 2026-05-08).",
-    no_args_is_help=True,
+    help=(
+        "Pick the default model (no args) or manage custom OpenAI/Anthropic-"
+        "compatible providers via add/list/remove."
+    ),
+    invoke_without_command=True,
+    no_args_is_help=False,
 )
 app.add_typer(model_app, name="model")
+
+
+@model_app.callback(invoke_without_command=True)
+def _model_root(ctx: typer.Context) -> None:
+    """Run the interactive picker when ``oc model`` has no subcommand."""
+    if ctx.invoked_subcommand is not None:
+        return
+    model_pick()
 
 
 @model_app.command("add")

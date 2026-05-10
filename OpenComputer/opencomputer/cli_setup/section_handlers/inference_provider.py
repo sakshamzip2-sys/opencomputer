@@ -30,22 +30,20 @@ OPENROUTER_RECOMMENDED_MODELS = [
     "openai/gpt-5.1",
     "openai/gpt-5-pro",
     "openai/gpt-5",
-    "google/gemini-3.1-pro-preview-customtools",
-    "google/gemini-3.1-pro-preview",
     "moonshotai/kimi-k2.6",
     "moonshotai/kimi-k2-thinking",
     "minimax/minimax-m2.7",
     "minimax/minimax-m2.5",
     "qwen/qwen-max",
     "qwen/qwen3-coder",
+    "deepseek/deepseek-chat",
 ]
 OPENROUTER_FALLBACK_FREE_MODELS = [
-    "google/gemma-4-31b-it:free",
-    "google/gemma-4-26b-a4b-it:free",
     "qwen/qwen3-coder:free",
     "qwen/qwen3-next-80b-a3b-instruct:free",
     "minimax/minimax-m2.5:free",
     "qwen/qwen-2.5-coder-32b-instruct:free",
+    "nvidia/nemotron-nano-9b-v2:free",
 ]
 OPENROUTER_MODEL_LIMIT = 500
 
@@ -138,10 +136,11 @@ def _curate_openrouter_model_ids(model_ids: list[str]) -> list[str]:
     family_prefixes = (
         "anthropic/claude-opus",
         "openai/gpt-5",
-        "google/gemini-3.1",
         "moonshotai/kimi",
         "minimax/minimax",
         "qwen/qwen",
+        "deepseek/deepseek",
+        "nvidia/nemotron",
     )
     for prefix in family_prefixes:
         if any(m.startswith(prefix) for m in curated):
@@ -208,6 +207,36 @@ def _is_openrouter_model_id(model_id: str) -> bool:
     return "/" in model_id
 
 
+def _is_google_openrouter_model(model_id: str) -> bool:
+    return (model_id or "").strip().lower().startswith("google/")
+
+
+def _model_matches_provider(provider: str, model_id: str) -> bool:
+    """Best-effort guard against persisting an incompatible model id."""
+    m = (model_id or "").strip().lower()
+    if not m:
+        return False
+    if provider == "openrouter":
+        return "/" in m
+    if provider == "openai":
+        return "/" not in m and m.startswith((
+            "gpt-", "o1", "o2", "o3", "o4", "o5", "o6", "chatgpt",
+        ))
+    if provider == "anthropic":
+        return "/" not in m and m.startswith("claude")
+    if provider in {"gemini", "google"}:
+        return "/" not in m and m.startswith(("gemini", "palm"))
+    if provider == "deepseek":
+        return "/" not in m and m.startswith("deepseek")
+    if provider == "minimax":
+        return "/" not in m and m.startswith("minimax")
+    if provider == "kimi":
+        return "/" not in m and m.startswith(("kimi", "moonshot"))
+    if provider == "qwen":
+        return "/" not in m and m.startswith("qwen")
+    return True
+
+
 def _choose_openrouter_model(ctx: WizardCtx, *, default_model: str) -> str | None:
     current = str((ctx.config.get("model") or {}).get("model") or "")
     models = _curate_openrouter_model_ids(_fetch_openrouter_models())
@@ -223,7 +252,12 @@ def _choose_openrouter_model(ctx: WizardCtx, *, default_model: str) -> str | Non
             current_idx = len(choices)
         choices.append(Choice(label, model_id))
 
-    if current and current_idx == -1 and _is_openrouter_model_id(current):
+    if (
+        current
+        and current_idx == -1
+        and _is_openrouter_model_id(current)
+        and not _is_google_openrouter_model(current)
+    ):
         current_idx = len(choices)
         choices.append(Choice(f"{current}  ← currently in use", current))
     choices.append(Choice("Enter custom model name", "__custom__"))
@@ -321,11 +355,13 @@ def _test_provider_connection(provider_name: str, env_var: str) -> bool:
                 if prov.id == provider_name:
                     # Try to construct the registered class
                     reg = PluginRegistry()
-                    load_plugin(cand, reg)
-                    cls = reg.get_provider(provider_name)
-                    if cls is None:
+                    api = reg.api()
+                    load_plugin(cand, api)
+                    registered = reg.providers.get(provider_name)
+                    if registered is None:
                         return False
-                    cls()  # raises if env var missing or other init issue
+                    if isinstance(registered, type):
+                        registered()  # raises if env var missing or other init issue
                     print(f"  ✓ Provider '{provider_name}' constructed successfully")
                     return True
     except Exception as e:  # noqa: BLE001
@@ -348,6 +384,9 @@ def _invoke_provider_setup(name: str, ctx: WizardCtx) -> bool:
     env_var = match["env_var"]
     default_model = match.get("default_model") or ""
     ctx.config.setdefault("model", {})
+    model_cfg = ctx.config["model"]
+    previous_provider = str(model_cfg.get("provider") or "")
+    previous_model = str(model_cfg.get("model") or "")
     ctx.config["model"]["provider"] = name
     if env_var:
         ctx.config["model"]["api_key_env"] = env_var
@@ -375,7 +414,12 @@ def _invoke_provider_setup(name: str, ctx: WizardCtx) -> bool:
         if chosen_model:
             ctx.config["model"]["model"] = chosen_model
     elif default_model:
-        ctx.config["model"].setdefault("model", default_model)
+        if (
+            not previous_model
+            or previous_provider != name
+            or not _model_matches_provider(name, previous_model)
+        ):
+            ctx.config["model"]["model"] = default_model
     return True
 
 

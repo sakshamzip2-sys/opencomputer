@@ -1,9 +1,12 @@
 """Arrow-key menu primitives for setup wizards and terminal workflows."""
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass
 from typing import Any
+
+_IS_WINDOWS = os.name == "nt"
 
 
 class WizardCancelled(Exception):  # noqa: N818
@@ -119,6 +122,20 @@ def _menu_application(
     )
 
 
+def _should_use_prompt_toolkit(_input: Any | None = None) -> bool:
+    """Return True when an interactive prompt_toolkit menu can be used.
+
+    Some Windows terminal launch paths report ``stdin`` as non-TTY while
+    ``stdout`` is still an interactive console. In that case numbered
+    fallback breaks arrow-key selection for commands like ``oc model``.
+    """
+    if _input is not None:
+        return True
+    if sys.stdin.isatty():
+        return True
+    return _IS_WINDOWS and sys.stdout.isatty()
+
+
 def radiolist(
     question: str,
     choices: list[Choice],
@@ -129,7 +146,7 @@ def radiolist(
     _output: Any | None = None,
 ) -> int:
     """Single-select menu. Returns selected index."""
-    if not sys.stdin.isatty() and _input is None:
+    if not _should_use_prompt_toolkit(_input):
         return _radiolist_numbered_fallback(question, choices, default, description)
 
     flush_stdin()
@@ -252,7 +269,7 @@ def checklist(
 ) -> list[int]:
     """Multi-select menu. Returns sorted list of selected indices."""
     pre_selected = pre_selected or []
-    if not sys.stdin.isatty() and _input is None:
+    if not _should_use_prompt_toolkit(_input):
         return _checklist_numbered_fallback(title, items, pre_selected)
 
     flush_stdin()
@@ -373,7 +390,7 @@ def single_select(
     _output: Any | None = None,
 ) -> int:
     """Single-select menu without radio glyphs."""
-    if not sys.stdin.isatty() and _input is None:
+    if not _should_use_prompt_toolkit(_input):
         return _single_select_numbered_fallback(title, items, default)
 
     flush_stdin()

@@ -4,6 +4,15 @@ All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](
 
 ## [Unreleased]
 
+- feat(oc-webui): production-grade shim integration. New `oc webui` CLI (Typer command, 5-tier discovery with strict-on-explicit-arg semantics). Schema v17 adds `sessions.source TEXT` + `idx_sessions_source` (backfilled to `'cli'`) so oc-webui's sidebar can group rows. Shim hardened across 12 modules — silent debug-swallow → WARN, credential-preview leak fixed (≤4 chars, ≥12-char min), profile name traversal-validated, frozenset coercion bug fixed in `_load_provider_plugins`. 66 new shim tests; full suite 13,834 / 0 failed.
+- chore(test-isolation): three autouse fixtures in `tests/conftest.py` defend against the documented full-suite-only flakes (Honcho snapshot, TypedEventBus concurrent handlers, voice-mode pycares segfault, browser-control daemon timeout) — no tests skipped, ≤1ms aggregate per-test cost, full-suite runtime unchanged.
+
+## [v2026.5.10.post3] — 2026-05-10
+
+- fix(cron): dreaming_v2 tick leaks coroutine when invoked from running event loop (#591). Under `oc gateway` (cron co-tenant on the main asyncio loop), `asyncio.run()` rejected the coroutine before iterating it, orphaning it (`RuntimeWarning: coroutine 'run_dreaming_v2_async' was never awaited`) and silently no-op'ing the dream pass every tick. The fallback `loop.run_until_complete()` path also failed (same thread-local check). Fixed by detecting the running loop and dispatching the coroutine to a single-shot `ThreadPoolExecutor` worker that owns its own loop.
+
+## [v2026.5.10.post2] — 2026-05-10
+
 - feat(wire): `EVENT_MEMORY_WRITE` + `MemoryWritePayload` typed schema in protocol_v2 — closes Tier-C of the 2026-05-10 memory-observability design. WireServer subscribes to the in-process `default_bus` for `MemoryWriteEvent` on `start()` and broadcasts a `WireEvent(event="memory.write")` to every connected WS client via the new `_session_clients_all` set; unsubscribes on `stop()`. Sync→async hop via `asyncio.run_coroutine_threadsafe`. Per-process event (no session_id), so no ring-buffer replay on reconnect — clients pull current state via REST/RPC.
 - feat(tui): Ink+React `MemoryPanel` component renders a single status line under the chat header on every memory write. Surfaces compaction warnings (red, "🛑 COMPACTED — dropped N entries") in real time so silent inline compaction (M2 of the same design) is finally visible to the user without re-reading MEMORY.md / USER.md.
 - feat(dashboard): SSE projection at `/api/v1/events` now surfaces every `SignalEvent` dataclass field — base + subclass-specific. Legacy 6-field paths preserved (BC). `project_event` extracted as a module-level function, failure-isolated (`asdict` failure → legacy fallback + WARN log). Privacy contracts pinned by tests for `MemoryWriteEvent` / `MessageSignalEvent` / `ForegroundAppEvent`. Closes Tier-A of the 2026-05-10 memory-observability follow-through.

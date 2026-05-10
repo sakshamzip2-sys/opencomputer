@@ -68,6 +68,17 @@ def test_menu_application_does_not_open_nested_alternate_buffer():
     assert app.renderer.full_screen is False
 
 
+def test_menu_uses_prompt_toolkit_when_windows_stdout_is_tty(monkeypatch):
+    """Windows launchers can expose a TTY stdout while stdin reports non-TTY."""
+    from opencomputer.cli_ui import menu
+
+    monkeypatch.setattr(menu, "_IS_WINDOWS", True)
+    monkeypatch.setattr(menu.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(menu.sys.stdout, "isatty", lambda: True)
+
+    assert menu._should_use_prompt_toolkit(_input=None) is True
+
+
 def test_radiolist_numbered_fallback_returns_index_for_valid_input(monkeypatch, capsys):
     """When stdin is non-TTY, radiolist falls back to a numbered prompt."""
     from opencomputer.cli_ui.menu import Choice, radiolist

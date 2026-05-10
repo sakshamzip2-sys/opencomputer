@@ -218,6 +218,7 @@ def build_welcome_banner(
     cwd: str,
     *,
     session_id: str | None = None,
+    session_label: str | None = None,
     home: Path | None = None,
 ) -> None:
     """Print the OPENCOMPUTER welcome banner — Hermes-style:
@@ -286,7 +287,8 @@ def build_welcome_banner(
     panel_lines.append(f"[bold]Model:[/bold]   {model}")
     panel_lines.append(f"[bold]CWD:[/bold]     [dim]{cwd}[/dim]")
     if session_id:
-        panel_lines.append(f"[bold]Session:[/bold] [dim]{session_id}[/dim]")
+        shown_session = session_label or session_id
+        panel_lines.append(f"[bold]Session:[/bold] [dim]{shown_session}[/dim]")
     if n_tools or n_skills:
         panel_lines.append("")
         panel_lines.append(
