@@ -1,4 +1,4 @@
-"""First-run onboarding offer for ``opencomputer chat`` (hermes parity).
+"""First-run onboarding offer for ``oc chat`` (hermes parity).
 
 Hermes' ``main.py`` checks ``_has_any_provider_configured()`` at chat
 launch and, if no provider key is reachable, prints an inline
@@ -27,7 +27,7 @@ def test_require_tty_exits_when_stdin_is_pipe(
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "interactive terminal" in err
-    assert "opencomputer setup" in err
+    assert "oc setup" in err
 
 
 def test_require_tty_passes_when_stdin_is_tty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,18 +89,18 @@ def test_offer_setup_inline_yes_runs_wizard(
     monkeypatch.setattr("sys.stdin", FakeTTY())
     monkeypatch.setattr("builtins.input", lambda _: "y")
 
-    setup_called: list[bool] = []
+    setup_called: list[dict] = []
 
-    def fake_run_setup() -> None:
-        setup_called.append(True)
+    def fake_run_setup(**kwargs) -> None:
+        setup_called.append(kwargs)
 
     monkeypatch.setattr(
-        "opencomputer.setup_wizard.run_setup", fake_run_setup
+        "opencomputer.cli_setup.wizard.run_setup", fake_run_setup
     )
     with pytest.raises(typer.Exit) as exc:
         cli._offer_setup_or_exit("ANTHROPIC_API_KEY is not set")
     assert exc.value.exit_code == 0
-    assert setup_called == [True]
+    assert setup_called == [{"quick": None}]
 
 
 def test_offer_setup_inline_no_exits_with_hint(
@@ -119,8 +119,8 @@ def test_offer_setup_inline_no_exits_with_hint(
     assert exc.value.exit_code == 1
     captured = capsys.readouterr()
     # Reviewer fix #3: guidance prints to stderr so a piped stdout
-    # (CI, ``opencomputer chat | grep …``) stays clean.
-    assert "opencomputer setup" in captured.err
+    # (CI, ``oc chat | grep …``) stays clean.
+    assert "oc setup" in captured.err
 
 
 def test_offer_setup_in_non_tty_prints_static_guidance(
@@ -133,4 +133,4 @@ def test_offer_setup_in_non_tty_prints_static_guidance(
         cli._offer_setup_or_exit("Config not found")
     assert exc.value.exit_code == 1
     captured = capsys.readouterr()
-    assert "opencomputer setup" in captured.err
+    assert "oc setup" in captured.err

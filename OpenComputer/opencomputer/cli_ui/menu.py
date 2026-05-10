@@ -1,20 +1,4 @@
-"""Arrow-key menu primitives — single source for the wizard's UX.
-
-Visual + UX modeled after hermes-agent's hermes_cli/curses_ui.py.
-Independently re-implemented on prompt_toolkit + numbered-fallback
-(no code copied) — see spec § 10 O1 license decision.
-
-Public API:
-  - radiolist(question, choices, default, description) -> int
-  - checklist(title, items, pre_selected) -> list[int]
-  - single_select(title, items, default) -> int
-  - flush_stdin() -> None
-
-Each primitive returns the SELECTED INDEX (not the value) — caller maps
-index back to the Choice via choices[idx]. ESC raises WizardCancelled
-(re-exported from cli_setup.wizard) to propagate cancellation cleanly
-through nested handlers.
-"""
+"""Arrow-key menu primitives for setup wizards and terminal workflows."""
 from __future__ import annotations
 
 import sys
@@ -22,47 +6,117 @@ from dataclasses import dataclass
 from typing import Any
 
 
-class WizardCancelled(Exception):  # noqa: N818 — public-facing name, no Error suffix per spec
-    """ESC pressed in a menu primitive — propagates cleanly through
-    nested section handlers without each having to check return values.
-
-    Re-exported from opencomputer.cli_setup.wizard for public callers.
-    Lives here in menu.py so menu primitives can raise it without
-    importing the wizard module (avoid circular import).
-    """
+class WizardCancelled(Exception):  # noqa: N818
+    """Raised when a user cancels an interactive menu."""
 
 
 @dataclass(frozen=True)
 class Choice:
-    """One menu entry. ``description`` is optional secondary text shown
-    under the menu title (single-select only) or as suffix (checklist)."""
+    """One menu entry."""
 
     label: str
-    value: object  # opaque to menu code; caller-defined type
+    value: object
     description: str | None = None
 
 
 def flush_stdin() -> None:
-    """Drain leftover keypresses before opening a prompt_toolkit Application.
-
-    Hermes uses this to avoid stale arrow-key bytes leaking into the menu
-    after returning from a previous menu (the OS terminal buffer can hold
-    them between primitive calls). Implementation: best-effort, never
-    raises. On non-TTY this is a no-op.
-    """
+    """Best-effort drain of stale keypresses before a prompt_toolkit menu."""
     try:
         if not sys.stdin.isatty():
             return
-        # Best-effort flush — termios on POSIX, no-op elsewhere.
         import termios
+
         try:
             termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
         except (termios.error, OSError):
             pass
     except ImportError:
-        # Windows: termios not available; no flush mechanism needed
-        # because prompt_toolkit's input pipeline drains itself.
         pass
+
+
+def _install_number_bindings(
+    bindings: Any,
+    *,
+    cursor: list[int],
+    count: int,
+    clear_on_confirm: bool = False,
+) -> list[str]:
+    """Bind 0-9 and backspace to a shared 1-based numeric cursor jump.
+
+    Digits build a short buffer, so typing ``38`` jumps to row 38 before
+    Enter/Space confirms. Arrow navigation should clear this buffer.
+    """
+    number_buffer: list[str] = []
+
+    def apply_number_buffer() -> None:
+        if not number_buffer:
+            return
+        try:
+            n = int("".join(number_buffer))
+        except ValueError:
+            return
+        if 1 <= n <= count:
+            cursor[0] = n - 1
+
+    for digit in "0123456789":
+        @bindings.add(digit)
+        def _digit(event, digit=digit):
+            number_buffer.append(digit)
+            apply_number_buffer()
+
+    @bindings.add("backspace")
+    @bindings.add("c-h")
+    def _backspace(event):
+        if number_buffer:
+            number_buffer.pop()
+            apply_number_buffer()
+
+    if clear_on_confirm:
+        @bindings.add("c-m")
+        def _enter(event):
+            number_buffer.clear()
+
+    return number_buffer
+
+
+def _clear_number_buffer(buf: list[str]) -> None:
+    buf.clear()
+
+
+def _menu_window(render: Any):
+    """Build a menu window that never paints cursor-line reverse video."""
+    from prompt_toolkit.layout.containers import Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    return Window(
+        FormattedTextControl(render, focusable=False, show_cursor=False),
+        always_hide_cursor=True,
+        dont_extend_width=True,
+    )
+
+
+def _menu_application(
+    render: Any,
+    bindings: Any,
+    *,
+    style: Any,
+    _input: Any | None = None,
+    _output: Any | None = None,
+):
+    """Build a selector application rendered inside the wizard screen."""
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit
+
+    return Application(
+        layout=Layout(HSplit([_menu_window(render)])),
+        key_bindings=bindings,
+        style=style,
+        full_screen=False,
+        erase_when_done=False,
+        input=_input,
+        output=_output,
+    )
 
 
 def radiolist(
@@ -71,26 +125,17 @@ def radiolist(
     default: int = 0,
     description: str | None = None,
     *,
-    _input: Any | None = None,   # injection for tests
+    _input: Any | None = None,
     _output: Any | None = None,
 ) -> int:
-    """Single-select menu. Returns selected index. Raises WizardCancelled
-    on ESC.
-
-    On TTY: arrow-key navigation via prompt_toolkit Application.
-    On non-TTY: numbered prompt via stdin.
-    """
+    """Single-select menu. Returns selected index."""
     if not sys.stdin.isatty() and _input is None:
         return _radiolist_numbered_fallback(question, choices, default, description)
 
     flush_stdin()
 
-    from prompt_toolkit.application import Application
     from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.layout import Layout
-    from prompt_toolkit.layout.containers import HSplit, Window
-    from prompt_toolkit.layout.controls import FormattedTextControl
 
     from opencomputer.cli_ui.style import (
         ARROW_GLYPH,
@@ -99,42 +144,48 @@ def radiolist(
         RADIO_ON,
     )
 
-    cursor = [default]  # mutable index in closure
+    cursor = [default]
+    bindings = KeyBindings()
+    number_buffer = _install_number_bindings(
+        bindings, cursor=cursor, count=len(choices)
+    )
 
     def render():
-        lines: list[tuple[str, str]] = []
-        lines.append(("class:menu.title", question + "\n"))
-        lines.append((
-            "class:menu.hint",
-            "↑↓ navigate  ENTER/SPACE select  ESC cancel\n",
-        ))
+        hint = "↑↓ navigate  numbers jump  ENTER/SPACE select  ESC cancel"
+        if number_buffer:
+            hint += f"  Choice: {''.join(number_buffer)}"
+        lines: list[tuple[str, str]] = [
+            ("class:menu.title", question + "\n"),
+            ("class:menu.hint", hint + "\n"),
+        ]
         if description:
             lines.append(("class:menu.description", f"  {description}\n"))
         lines.append(("", "\n"))
         for i, c in enumerate(choices):
             is_sel = i == cursor[0]
             arrow_class = "class:menu.selected.arrow" if is_sel else "class:"
-            arrow = ARROW_GLYPH if is_sel else " "
             row_class = "class:menu.selected" if is_sel else "class:"
-            glyph = RADIO_ON if is_sel else RADIO_OFF
             glyph_class = (
-                "class:menu.selected.glyph" if is_sel
+                "class:menu.selected.glyph"
+                if is_sel
                 else "class:menu.unselected.glyph"
             )
+            arrow = ARROW_GLYPH if is_sel else " "
+            glyph = RADIO_ON if is_sel else RADIO_OFF
             suffix = f"  ({c.description})" if c.description else ""
             lines.append((arrow_class, f" {arrow} "))
             lines.append((glyph_class, f"({glyph}) "))
             lines.append((row_class, f"{c.label}{suffix}\n"))
         return FormattedText(lines)
 
-    bindings = KeyBindings()
-
     @bindings.add("up")
     def _up(event):
+        _clear_number_buffer(number_buffer)
         cursor[0] = (cursor[0] - 1) % len(choices)
 
     @bindings.add("down")
     def _down(event):
+        _clear_number_buffer(number_buffer)
         cursor[0] = (cursor[0] + 1) % len(choices)
 
     @bindings.add("enter")
@@ -147,15 +198,12 @@ def radiolist(
     def _cancel(event):
         event.app.exit(exception=WizardCancelled())
 
-    layout = Layout(HSplit([Window(FormattedTextControl(render))]))
-
-    app = Application(
-        layout=layout,
-        key_bindings=bindings,
+    app = _menu_application(
+        render,
+        bindings,
         style=MENU_STYLE,
-        full_screen=False,
-        input=_input,
-        output=_output,
+        _input=_input,
+        _output=_output,
     )
     return app.run()
 
@@ -178,17 +226,17 @@ def _radiolist_numbered_fallback(
     while True:
         try:
             raw = input(f"Choice [1-{len(choices)}, default {default + 1}]: ").strip()
-        except EOFError:
+        except (EOFError, OSError):
             return default
         if raw == "":
             return default
         try:
             n = int(raw)
         except ValueError:
-            print(f"Invalid input '{raw}' — enter a number.", file=sys.stderr)
+            print(f"Invalid input '{raw}' - enter a number.", file=sys.stderr)
             continue
         if not (1 <= n <= len(choices)):
-            print(f"out of range — enter 1-{len(choices)}.", file=sys.stderr)
+            print(f"out of range - enter 1-{len(choices)}.", file=sys.stderr)
             continue
         return n - 1
 
@@ -198,6 +246,7 @@ def checklist(
     items: list[Choice],
     pre_selected: list[int] | None = None,
     *,
+    show_markers: bool = True,
     _input: Any | None = None,
     _output: Any | None = None,
 ) -> list[int]:
@@ -208,57 +257,57 @@ def checklist(
 
     flush_stdin()
 
-    from prompt_toolkit.application import Application
     from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.layout import Layout
-    from prompt_toolkit.layout.containers import HSplit, Window
-    from prompt_toolkit.layout.controls import FormattedTextControl
 
-    from opencomputer.cli_ui.style import (
-        ARROW_GLYPH,
-        CHECK_OFF,
-        CHECK_ON,
-        MENU_STYLE,
-    )
+    from opencomputer.cli_ui.style import ARROW_GLYPH, CHECK_OFF, CHECK_ON, MENU_STYLE
 
     cursor = [0]
     selected: set[int] = set(pre_selected)
+    bindings = KeyBindings()
+    number_buffer = _install_number_bindings(bindings, cursor=cursor, count=len(items))
 
     def render():
+        hint = "↑↓ navigate  numbers jump  SPACE toggle  ENTER confirm  ESC cancel"
+        if number_buffer:
+            hint += f"  Choice: {''.join(number_buffer)}"
         lines: list[tuple[str, str]] = [
             ("class:menu.title", title + "\n"),
-            ("class:menu.hint",
-             "↑↓ navigate  SPACE toggle  ENTER confirm  ESC cancel\n"),
+            ("class:menu.hint", hint + "\n"),
             ("", "\n"),
         ]
         for i, c in enumerate(items):
             is_cur = i == cursor[0]
             is_sel = i in selected
             arrow = ARROW_GLYPH if is_cur else " "
+            glyph = CHECK_ON if is_sel else CHECK_OFF
             arrow_class = "class:menu.selected.arrow" if is_cur else "class:"
             row_class = "class:menu.selected" if is_cur else "class:"
-            glyph = CHECK_ON if is_sel else CHECK_OFF
             glyph_class = (
-                "class:menu.selected.glyph" if is_sel
+                "class:menu.selected.glyph"
+                if is_sel
                 else "class:menu.unselected.glyph"
             )
             suffix = f"  ({c.description})" if c.description else ""
             lines.append((arrow_class, f" {arrow} "))
-            lines.append((glyph_class, f"[{glyph}] "))
+            if show_markers:
+                lines.append((glyph_class, f"[{glyph}] "))
             lines.append((row_class, f"{c.label}{suffix}\n"))
         return FormattedText(lines)
 
-    bindings = KeyBindings()
-
     @bindings.add("up")
-    def _up(event): cursor[0] = (cursor[0] - 1) % len(items)
+    def _up(event):
+        _clear_number_buffer(number_buffer)
+        cursor[0] = (cursor[0] - 1) % len(items)
 
     @bindings.add("down")
-    def _down(event): cursor[0] = (cursor[0] + 1) % len(items)
+    def _down(event):
+        _clear_number_buffer(number_buffer)
+        cursor[0] = (cursor[0] + 1) % len(items)
 
     @bindings.add(" ")
     def _toggle(event):
+        _clear_number_buffer(number_buffer)
         i = cursor[0]
         if i in selected:
             selected.remove(i)
@@ -274,16 +323,20 @@ def checklist(
     def _cancel(event):
         event.app.exit(exception=WizardCancelled())
 
-    layout = Layout(HSplit([Window(FormattedTextControl(render))]))
-    app = Application(
-        layout=layout, key_bindings=bindings, style=MENU_STYLE,
-        full_screen=False, input=_input, output=_output,
+    app = _menu_application(
+        render,
+        bindings,
+        style=MENU_STYLE,
+        _input=_input,
+        _output=_output,
     )
     return app.run()
 
 
 def _checklist_numbered_fallback(
-    title: str, items: list[Choice], pre_selected: list[int],
+    title: str,
+    items: list[Choice],
+    pre_selected: list[int],
 ) -> list[int]:
     """Non-TTY multi-select. Reads comma-separated numbers from stdin."""
     print(title)
@@ -295,22 +348,18 @@ def _checklist_numbered_fallback(
     pre_str = ",".join(str(i + 1) for i in pre_selected) or "none"
     while True:
         try:
-            raw = input(
-                f"Numbers comma-separated [default {pre_str}]: "
-            ).strip()
-        except EOFError:
+            raw = input(f"Numbers comma-separated [default {pre_str}]: ").strip()
+        except (EOFError, OSError):
             return sorted(pre_selected)
         if raw == "":
             return sorted(pre_selected)
         try:
             picks = sorted({int(x.strip()) - 1 for x in raw.split(",") if x.strip()})
         except ValueError:
-            print(f"Invalid input '{raw}' — comma-separated numbers only.",
-                  file=sys.stderr)
+            print(f"Invalid input '{raw}' - comma-separated numbers only.", file=sys.stderr)
             continue
         if not all(0 <= p < len(items) for p in picks):
-            print(f"out of range — only 1-{len(items)} are valid.",
-                  file=sys.stderr)
+            print(f"out of range - only 1-{len(items)} are valid.", file=sys.stderr)
             continue
         return picks
 
@@ -323,30 +372,28 @@ def single_select(
     _input: Any | None = None,
     _output: Any | None = None,
 ) -> int:
-    """Single-select WITHOUT radio glyphs — visual variant of radiolist
-    used when a (●)/(○) marker would imply "currently configured" rather
-    than "currently focused"."""
+    """Single-select menu without radio glyphs."""
     if not sys.stdin.isatty() and _input is None:
         return _single_select_numbered_fallback(title, items, default)
 
     flush_stdin()
 
-    from prompt_toolkit.application import Application
     from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.layout import Layout
-    from prompt_toolkit.layout.containers import HSplit, Window
-    from prompt_toolkit.layout.controls import FormattedTextControl
 
     from opencomputer.cli_ui.style import ARROW_GLYPH, MENU_STYLE
 
     cursor = [default]
+    bindings = KeyBindings()
+    number_buffer = _install_number_bindings(bindings, cursor=cursor, count=len(items))
 
     def render():
+        hint = "↑↓ navigate  numbers jump  ENTER select  ESC cancel"
+        if number_buffer:
+            hint += f"  Choice: {''.join(number_buffer)}"
         lines: list[tuple[str, str]] = [
             ("class:menu.title", title + "\n"),
-            ("class:menu.hint",
-             "↑↓ navigate  ENTER select  ESC cancel\n"),
+            ("class:menu.hint", hint + "\n"),
             ("", "\n"),
         ]
         for i, c in enumerate(items):
@@ -359,33 +406,41 @@ def single_select(
             lines.append((row_class, f"{c.label}{suffix}\n"))
         return FormattedText(lines)
 
-    bindings = KeyBindings()
-
     @bindings.add("up")
-    def _up(e): cursor[0] = (cursor[0] - 1) % len(items)
+    def _up(event):
+        _clear_number_buffer(number_buffer)
+        cursor[0] = (cursor[0] - 1) % len(items)
 
     @bindings.add("down")
-    def _down(e): cursor[0] = (cursor[0] + 1) % len(items)
+    def _down(event):
+        _clear_number_buffer(number_buffer)
+        cursor[0] = (cursor[0] + 1) % len(items)
 
     @bindings.add("enter")
-    def _select(e): e.app.exit(result=cursor[0])
+    def _select(event):
+        event.app.exit(result=cursor[0])
 
     @bindings.add("escape")
     @bindings.add("c-c")
-    def _cancel(e): e.app.exit(exception=WizardCancelled())
+    def _cancel(event):
+        event.app.exit(exception=WizardCancelled())
 
-    layout = Layout(HSplit([Window(FormattedTextControl(render))]))
-    app = Application(
-        layout=layout, key_bindings=bindings, style=MENU_STYLE,
-        full_screen=False, input=_input, output=_output,
+    app = _menu_application(
+        render,
+        bindings,
+        style=MENU_STYLE,
+        _input=_input,
+        _output=_output,
     )
     return app.run()
 
 
 def _single_select_numbered_fallback(
-    title: str, items: list[Choice], default: int,
+    title: str,
+    items: list[Choice],
+    default: int,
 ) -> int:
-    """Same as _radiolist_numbered_fallback minus the (○)/(●) glyphs."""
+    """Non-TTY single-select without radio glyphs."""
     print(title)
     for i, c in enumerate(items):
         marker = "→" if i == default else " "
@@ -395,7 +450,7 @@ def _single_select_numbered_fallback(
     while True:
         try:
             raw = input(f"Choice [1-{len(items)}, default {default + 1}]: ").strip()
-        except EOFError:
+        except (EOFError, OSError):
             return default
         if raw == "":
             return default

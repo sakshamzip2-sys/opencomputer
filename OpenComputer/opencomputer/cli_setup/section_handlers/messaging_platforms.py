@@ -23,6 +23,47 @@ from opencomputer.cli_setup.sections import SectionResult, WizardCtx
 from opencomputer.cli_ui.menu import Choice, checklist, radiolist
 
 
+_PLATFORM_ICONS = {
+    "telegram": "📨",
+    "discord": "🎮",
+    "slack": "💬",
+    "matrix": "🧩",
+    "mattermost": "💬",
+    "whatsapp": "📱",
+    "signal": "🔐",
+    "email": "✉",
+    "sms": "📲",
+    "twilio": "📲",
+    "dingtalk": "💬",
+    "feishu": "💬",
+    "lark": "💬",
+    "wecom": "🏢",
+    "wechat": "💬",
+    "weixin": "💬",
+    "bluebubbles": "💙",
+    "imessage": "💙",
+    "qq": "🐧",
+    "qqbot": "🐧",
+    "yuanbao": "💎",
+    "google-chat": "💬",
+    "irc": "#",
+    "teams": "🧑‍💻",
+    "microsoft-teams": "🧑‍💻",
+}
+
+
+def _platform_label(name: str, label: str) -> str:
+    lowered_name = name.lower()
+    lowered_label = label.lower()
+    icon = _PLATFORM_ICONS.get(lowered_name)
+    if icon is None:
+        for key, value in _PLATFORM_ICONS.items():
+            if key in lowered_name or key in lowered_label:
+                icon = value
+                break
+    return f"{icon or '💬'} {label}"
+
+
 def is_messaging_platforms_configured(ctx: WizardCtx) -> bool:
     gw = ctx.config.get("gateway") or {}
     return bool(gw.get("platforms"))
@@ -141,7 +182,7 @@ def run_messaging_platforms_section(ctx: WizardCtx) -> SectionResult:
 
     items = [
         Choice(
-            label=p["label"],
+            label=_platform_label(str(p["name"]), str(p["label"])),
             value=p["name"],
             description="(not configured)",
         )

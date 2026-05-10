@@ -1,32 +1,14 @@
-"""Agent-settings section handler (S1).
-
-Modeled after Hermes's "Applied recommended defaults" pattern in
-hermes_cli/setup.py::setup_agent_settings — independently
-re-implemented (no code copied).
-
-Single 2-option radiolist:
-  1. Apply recommended defaults — writes known-good values to config.loop.*
-     and prints a summary of what changed.
-  2. Skip — keeping current — returns SKIPPED_FRESH untouched.
-
-Per-field customization (max_iterations slider, custom timeout) is a
-follow-up. This section's job is the fast-path "I trust the defaults"
-button. Users who want to tweak edit ~/.opencomputer/config.yaml or
-re-run the wizard.
-"""
+"""Agent-settings setup section."""
 from __future__ import annotations
 
 from opencomputer.cli_setup.sections import SectionResult, WizardCtx
 from opencomputer.cli_ui.menu import Choice, radiolist
 
-# Recommended defaults. Mirrors Hermes screenshot 5 where appropriate;
-# otherwise uses OC's own LoopConfig defaults from
-# opencomputer/agent/config.py.
 _RECOMMENDED: dict[str, object] = {
     "max_iterations": 90,
     "parallel_tools": True,
-    "inactivity_timeout_s": 300,    # 5 min
-    "iteration_timeout_s": 1800,    # 30 min
+    "inactivity_timeout_s": 300,
+    "iteration_timeout_s": 1800,
     "delegation_max_iterations": 50,
     "max_delegation_depth": 2,
     "context_engine": "compressor",
@@ -34,44 +16,114 @@ _RECOMMENDED: dict[str, object] = {
 
 
 def is_agent_settings_configured(ctx: WizardCtx) -> bool:
-    """True if the loop section has any user-set values."""
-    loop = ctx.config.get("loop") or {}
-    return bool(loop)
+    return bool(ctx.config.get("loop"))
 
 
 def _apply_recommended(ctx: WizardCtx) -> None:
-    """Overwrite config.loop with the recommended defaults."""
-    ctx.config.setdefault("loop", {})
-    ctx.config["loop"].update(_RECOMMENDED)
+    ctx.config.setdefault("loop", {}).update(_RECOMMENDED)
+    ctx.config.setdefault("display", {})["tool_progress"] = "all"
+    ctx.config.setdefault("context", {})["compression_threshold"] = 0.5
+    ctx.config.setdefault("session_reset", {}).update({
+        "mode": "inactivity_daily",
+        "inactivity_timeout_minutes": 1440,
+        "daily_reset_hour": 4,
+    })
 
 
-def _print_summary() -> None:
-    print(
-        "  ✓ Applied recommended defaults:\n"
-        f"      Max iterations: {_RECOMMENDED['max_iterations']}\n"
-        f"      Parallel tools: {_RECOMMENDED['parallel_tools']}\n"
-        f"      Inactivity timeout: {_RECOMMENDED['inactivity_timeout_s']}s "
-        "(5 min)\n"
-        f"      Iteration timeout: {_RECOMMENDED['iteration_timeout_s']}s "
-        "(30 min)\n"
-        "  Edit ~/.opencomputer/config.yaml later to customize."
+def _prompt_int(label: str, default: int) -> int:
+    try:
+        raw = input(f"{label} [{default}]: ").strip()
+    except (EOFError, OSError):
+        return default
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"  Invalid number; keeping {default}.")
+        return default
+
+
+def _prompt_float(label: str, default: float) -> float:
+    try:
+        raw = input(f"{label} [{default}]: ").strip()
+    except (EOFError, OSError):
+        return default
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"  Invalid number; keeping {default}.")
+        return default
+
+
+def _customize(ctx: WizardCtx) -> None:
+    loop = ctx.config.setdefault("loop", {})
+    loop["max_iterations"] = _prompt_int(
+        "Max iterations",
+        int(loop.get("max_iterations") or _RECOMMENDED["max_iterations"]),
     )
+    print("  ✓ Max iterations set to", loop["max_iterations"])
+
+    progress_choices = [
+        Choice("off - Silent, just the final response", "off"),
+        Choice("new - Show tool name only when it changes", "new"),
+        Choice("all - Show every tool call with a short preview", "all"),
+        Choice("verbose - Full args, results, and debug logs", "verbose"),
+    ]
+    display = ctx.config.setdefault("display", {})
+    progress_idx = radiolist("Tool progress mode:", progress_choices, default=2)
+    display["tool_progress"] = progress_choices[progress_idx].value
+    print("  ✓ Tool progress set to", display["tool_progress"])
+
+    context = ctx.config.setdefault("context", {})
+    context["compression_threshold"] = _prompt_float(
+        "Compression threshold (0.5-0.95)",
+        float(context.get("compression_threshold") or 0.5),
+    )
+    print("  ✓ Context compression threshold set to", context["compression_threshold"])
+
+    reset_choices = [
+        Choice("Inactivity + daily reset (recommended)", "inactivity_daily"),
+        Choice("Inactivity only", "inactivity"),
+        Choice("Daily only", "daily"),
+        Choice("Never auto-reset", "never"),
+        Choice("Keep current settings", "keep"),
+    ]
+    reset_idx = radiolist("Session reset mode:", reset_choices, default=0)
+    if reset_choices[reset_idx].value != "keep":
+        reset = ctx.config.setdefault("session_reset", {})
+        reset["mode"] = reset_choices[reset_idx].value
+        reset["inactivity_timeout_minutes"] = _prompt_int(
+            "Inactivity timeout (minutes)", 1440
+        )
 
 
 def run_agent_settings_section(ctx: WizardCtx) -> SectionResult:
     choices = [
         Choice("Apply recommended defaults", "apply"),
-        Choice("Skip — keep current", "skip"),
+        Choice("Skip - keep current", "skip"),
+        Choice("Customize agent settings", "customize"),
     ]
     idx = radiolist(
-        "Configure agent loop settings?",
-        choices, default=0,
-        description="Recommended defaults: 90 iterations, parallel tools on, "
-                     "5-min inactivity / 30-min iteration timeouts.",
+        "Configure agent settings?",
+        choices,
+        default=0,
+        description="Recommended: 90 iterations, all tool progress, compression at 0.5.",
     )
-    if idx == 1:
+    action = choices[idx].value
+    if action == "skip":
         return SectionResult.SKIPPED_FRESH
+    if action == "apply":
+        _apply_recommended(ctx)
+        print("  ✓ Applied recommended defaults:")
+        print("      Max iterations: 90")
+        print("      Tool progress: all")
+        print("      Inactivity timeout: 300s (5 min)")
+        print("      Compression threshold: 0.50")
+        print("      Session reset: inactivity + daily")
+        return SectionResult.CONFIGURED
 
-    _apply_recommended(ctx)
-    _print_summary()
+    _customize(ctx)
     return SectionResult.CONFIGURED

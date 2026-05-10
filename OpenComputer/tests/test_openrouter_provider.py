@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+from plugin_sdk.core import Message
+from plugin_sdk.tool_contract import ToolSchema
 
 _REPO = Path(__file__).parent.parent
 _OPENAI_PROVIDER_PY = _REPO / "extensions" / "openai-provider" / "provider.py"
@@ -70,6 +73,7 @@ def test_api_key_env_class_attr_is_openrouter():
 def test_default_model_is_openrouter_shaped():
     Cls = _load_openrouter_class()
     assert "/" in Cls.default_model
+    assert Cls.default_model == "anthropic/claude-opus-4.7"
 
 
 def test_base_url_overridable_via_env(monkeypatch):
@@ -114,3 +118,45 @@ def test_register_attaches_openrouter(monkeypatch):
     plugin_mod.register(_StubAPI())
     assert "openrouter" in registered
     assert registered["openrouter"] is openrouter_mod.OpenRouterProvider
+
+
+@pytest.mark.asyncio
+async def test_openrouter_sanitizes_invalid_tool_required_before_request(
+    monkeypatch,
+):
+    """OpenRouter can route OpenAI-wire requests to strict Gemini backends."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    Cls = _load_openrouter_class()
+    provider = Cls()
+    captured: dict = {}
+
+    class _StopAfterCapture(RuntimeError):
+        pass
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            raise _StopAfterCapture("captured")
+
+    provider.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=_FakeCompletions())
+    )
+    tool = ToolSchema(
+        name="bad_tool",
+        description="Contains an invalid required field from a plugin schema.",
+        parameters={
+            "type": "object",
+            "properties": {"defined": {"type": "string"}},
+            "required": ["missing", "defined"],
+        },
+    )
+
+    with pytest.raises(_StopAfterCapture):
+        await provider.complete(
+            model="google/gemini-test",
+            messages=[Message(role="user", content="hi")],
+            tools=[tool],
+        )
+
+    params = captured["tools"][0]["function"]["parameters"]
+    assert params["required"] == ["defined"]

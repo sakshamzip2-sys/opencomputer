@@ -13,32 +13,27 @@ from pathlib import Path
 
 _FALLBACK_PATHS: list[Path] = [
     Path("/opt/homebrew/bin/oc"),
-    Path("/opt/homebrew/bin/opencomputer"),
     Path.home() / ".local" / "bin" / "oc",
-    Path.home() / ".local" / "bin" / "opencomputer",
     Path.home() / ".pyenv" / "shims" / "oc",
-    Path.home() / ".pyenv" / "shims" / "opencomputer",
     Path(sys.executable).parent / "oc",
-    Path(sys.executable).parent / "opencomputer",
 ]
 
 _PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
 def resolve_executable() -> str:
-    """Locate the oc/opencomputer executable. Returns absolute path string.
+    """Locate the oc executable. Returns absolute path string.
 
     Search order: ``OC_EXECUTABLE`` env var → ``shutil.which("oc")`` →
-    ``shutil.which("opencomputer")`` → ``_FALLBACK_PATHS`` (Homebrew,
-    ~/.local/bin, pyenv shims, sys.executable dir).
+    ``_FALLBACK_PATHS`` (Homebrew, ~/.local/bin, pyenv shims,
+    sys.executable dir).
     """
     override = os.environ.get("OC_EXECUTABLE")
     if override and Path(override).exists():
         return override
-    for name in ("oc", "opencomputer"):
-        found = shutil.which(name)
-        if found:
-            return found
+    found = shutil.which("oc")
+    if found:
+        return found
     for candidate in _FALLBACK_PATHS:
         if candidate.exists():
             return str(candidate)

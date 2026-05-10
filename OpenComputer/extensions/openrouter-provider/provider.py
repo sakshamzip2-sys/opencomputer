@@ -112,7 +112,7 @@ class OpenRouterProvider(OpenAIProvider):
     """
 
     name = "openrouter"
-    default_model = "openai/gpt-4o-mini"
+    default_model = "anthropic/claude-opus-4.7"
     _api_key_env: str = "OPENROUTER_API_KEY"
 
     def __init__(

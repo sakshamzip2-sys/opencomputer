@@ -4,5 +4,27 @@
   "kind": "provider",
   "version": "0.1.0",
   "entry": "plugin",
-  "description": "OpenRouter — single API key for 100+ models (Claude, GPT, Gemini, Llama). OpenAI-compatible endpoint subclassing the bundled openai-provider."
+  "description": "OpenRouter - single API key for 100+ models (Claude, GPT, Gemini, Llama). OpenAI-compatible endpoint subclassing the bundled openai-provider.",
+  "tool_names": [],
+  "model_support": {
+    "model_prefixes": [
+      "openrouter/",
+      "anthropic/",
+      "openai/",
+      "google/",
+      "meta-llama/"
+    ]
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "openrouter",
+        "auth_methods": ["api_key"],
+        "env_vars": ["OPENROUTER_API_KEY"],
+        "label": "OpenRouter",
+        "default_model": "anthropic/claude-opus-4.7",
+        "signup_url": "https://openrouter.ai/keys"
+      }
+    ]
+  }
 }

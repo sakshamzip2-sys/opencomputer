@@ -74,6 +74,52 @@ def test_apply_summary_printed(monkeypatch, tmp_path, capsys):
     assert "✓" in out
 
 
+def test_tool_configuration_menu_labels_include_icons():
+    from opencomputer.cli_setup.section_handlers import tools as ts
+
+    expected_icons = {
+        "web_search": "🔍",
+        "browser": "🌐",
+        "terminal": "💻",
+        "files": "📁",
+        "code": "⚙",
+        "vision": "👁",
+        "image_generation": "🎨",
+        "tts": "🔊",
+        "skills": "🧩",
+        "planning": "✅",
+        "memory": "🧠",
+        "session_search": "🔎",
+        "clarify": "❓",
+        "delegation": "👥",
+        "cron": "⏰",
+        "messaging": "💬",
+        "computer_use": "🖥",
+    }
+
+    labels_by_value = {choice.value: choice.label for choice in ts._TOOLS}
+    for value, icon in expected_icons.items():
+        assert labels_by_value[value].startswith(f"{icon} ")
+
+
+def test_tool_configuration_hides_checkbox_marker_column(monkeypatch, tmp_path):
+    from opencomputer.cli_setup.section_handlers import tools as ts
+
+    captured_kwargs: dict = {}
+
+    def fake_checklist(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return []
+
+    monkeypatch.setattr(ts, "radiolist", lambda *a, **kw: 0)
+    monkeypatch.setattr(ts, "checklist", fake_checklist)
+
+    ctx = _make_ctx(tmp_path)
+    ts.run_tools_section(ctx)
+
+    assert captured_kwargs["show_markers"] is False
+
+
 def test_section_registry_uses_live_tools_handler():
     from opencomputer.cli_setup.sections import SECTION_REGISTRY
 

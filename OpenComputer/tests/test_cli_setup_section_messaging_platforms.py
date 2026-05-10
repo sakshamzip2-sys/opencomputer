@@ -55,6 +55,37 @@ def test_setup_now_branch_calls_checklist_and_invokes_per_platform(
     assert invocations == ["telegram", "discord"]
 
 
+def test_setup_now_branch_adds_icons_to_platform_labels(monkeypatch, tmp_path):
+    from opencomputer.cli_setup.section_handlers import messaging_platforms as mp
+
+    fake_platforms = [
+        {"name": "telegram", "label": "Telegram", "configured": False},
+        {"name": "discord", "label": "Discord", "configured": False},
+        {"name": "slack", "label": "Slack", "configured": False},
+        {"name": "matrix", "label": "Matrix", "configured": False},
+        {"name": "custom-chat", "label": "Custom Chat", "configured": False},
+    ]
+    captured_items = []
+
+    def fake_checklist(title, items, **kwargs):
+        captured_items.extend(items)
+        return []
+
+    monkeypatch.setattr(mp, "_discover_platforms", lambda: fake_platforms)
+    monkeypatch.setattr(mp, "radiolist", lambda *a, **kw: 0)
+    monkeypatch.setattr(mp, "checklist", fake_checklist)
+
+    ctx = _make_ctx(tmp_path)
+    mp.run_messaging_platforms_section(ctx)
+
+    labels_by_value = {item.value: item.label for item in captured_items}
+    assert labels_by_value["telegram"].startswith("📨 ")
+    assert labels_by_value["discord"].startswith("🎮 ")
+    assert labels_by_value["slack"].startswith("💬 ")
+    assert labels_by_value["matrix"].startswith("🧩 ")
+    assert labels_by_value["custom-chat"].startswith("💬 ")
+
+
 def test_no_platforms_selected_returns_skipped_fresh(monkeypatch, tmp_path):
     from opencomputer.cli_setup.section_handlers import messaging_platforms as mp
     from opencomputer.cli_setup.sections import SectionResult

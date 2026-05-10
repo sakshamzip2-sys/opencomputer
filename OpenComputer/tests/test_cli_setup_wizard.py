@@ -40,18 +40,19 @@ def test_wizard_cancelled_re_exported_from_wizard_module():
     assert WizardCancelled is menu_wc, "Same exception class, single source"
 
 
-def test_section_registry_has_eight_entries_with_correct_order():
+def test_section_registry_has_oc_hermes_entries_with_correct_order():
     from opencomputer.cli_setup.sections import SECTION_REGISTRY
     keys = [s.key for s in SECTION_REGISTRY]
     assert keys == [
+        "configuration_location",
         "opencomputer_prior_detect",
         "inference_provider",
-        "messaging_platforms",
-        "agent_settings",
+        "vision_provider",
         "tts_provider",
         "terminal_backend",
+        "agent_settings",
+        "messaging_platforms",
         "tools",
-        "service_install",
     ]
 
 
@@ -62,10 +63,45 @@ def test_all_sections_are_live():
     live = {s.key for s in SECTION_REGISTRY if not s.deferred}
     assert deferred == set()
     assert live == {
+        "configuration_location",
         "opencomputer_prior_detect",
-        "inference_provider", "messaging_platforms", "agent_settings",
-        "tts_provider", "terminal_backend", "tools", "service_install",
+        "inference_provider", "vision_provider", "tts_provider",
+        "terminal_backend", "agent_settings", "messaging_platforms", "tools",
     }
+
+
+def test_quick_mode_only_runs_quick_sections(monkeypatch, tmp_path):
+    from opencomputer.cli_setup import sections as sec_mod
+    from opencomputer.cli_setup.sections import SectionResult, WizardSection
+    from opencomputer.cli_setup.wizard import run_setup
+
+    calls: list[str] = []
+
+    def mk_handler(key):
+        def h(ctx):
+            calls.append(key)
+            return SectionResult.SKIPPED_FRESH
+        return h
+
+    fake_registry = [
+        WizardSection(
+            key="quick", icon="◆", title="quick", description="d",
+            handler=mk_handler("quick"), quick=True,
+        ),
+        WizardSection(
+            key="full", icon="◆", title="full", description="d",
+            handler=mk_handler("full"), quick=False,
+        ),
+    ]
+    monkeypatch.setattr(sec_mod, "SECTION_REGISTRY", fake_registry)
+    monkeypatch.setattr(
+        "opencomputer.cli_setup.wizard._resolve_config_path",
+        lambda: tmp_path / "config.yaml",
+    )
+
+    rc = run_setup(quick=True)
+    assert rc == 0
+    assert calls == ["quick"]
 
 
 def test_run_setup_iterates_all_sections_in_order(monkeypatch, tmp_path):
@@ -188,6 +224,116 @@ def test_run_setup_configured_check_keep_does_not_call_handler(
     rc = wiz.run_setup()
     assert rc == 0
     assert handler_called == []
+
+
+def test_run_setup_existing_config_still_shows_initial_mode_prompt(
+    monkeypatch, tmp_path,
+):
+    from opencomputer.cli_setup import sections as sec_mod
+    from opencomputer.cli_setup import wizard as wiz
+    from opencomputer.cli_setup.sections import SectionResult, WizardSection
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("model:\n  provider: anthropic\n")
+    called: list[str] = []
+    prompts: list[str] = []
+
+    def handler(ctx):
+        called.append("handler")
+        return SectionResult.SKIPPED_FRESH
+
+    monkeypatch.setattr(sec_mod, "SECTION_REGISTRY", [
+        WizardSection(
+            key="x", icon="◆", title="X", description="d",
+            handler=handler, configured_check=lambda ctx: True,
+        )
+    ])
+    monkeypatch.setattr(wiz, "_resolve_config_path", lambda: config_path)
+
+    def fake_radiolist(question, choices, default=0, **kwargs):
+        prompts.append(question)
+        if question.startswith("How would you like"):
+            return 1  # Full setup
+        return 1  # Reconfigure configured section
+
+    monkeypatch.setattr(wiz, "radiolist", fake_radiolist)
+
+    rc = wiz.run_setup(quick=None)
+    assert rc == 0
+    assert prompts[0].startswith("How would you like")
+    assert not any("already fully configured" in p for p in prompts)
+    assert called == ["handler"]
+
+
+def test_run_setup_clears_screen_before_interactive_steps(monkeypatch, tmp_path):
+    """Interactive setup should repaint fresh screens instead of append forever."""
+    from opencomputer.cli_setup import sections as sec_mod
+    from opencomputer.cli_setup import wizard as wiz
+    from opencomputer.cli_setup.sections import SectionResult, WizardSection
+
+    clears: list[str] = []
+
+    def handler(ctx):
+        return SectionResult.SKIPPED_FRESH
+
+    monkeypatch.setattr(sec_mod, "SECTION_REGISTRY", [
+        WizardSection(
+            key="fresh",
+            title="Fresh Section",
+            description="desc",
+            handler=handler,
+            quick=True,
+            icon="◆",
+        )
+    ])
+    monkeypatch.setattr(wiz, "_resolve_config_path", lambda: tmp_path / "config.yaml")
+    monkeypatch.setattr(wiz._console, "clear", lambda: clears.append("clear"))
+
+    result = wiz.run_setup(quick=True)
+
+    assert result == 0
+    assert len(clears) >= 2
+
+
+def test_run_setup_uses_one_alternate_screen_for_interactive_wizard(
+    monkeypatch, tmp_path,
+):
+    """The wizard owns one alternate screen; menus should not open one per step."""
+    from opencomputer.cli_setup import sections as sec_mod
+    from opencomputer.cli_setup import wizard as wiz
+    from opencomputer.cli_setup.sections import SectionResult, WizardSection
+
+    events: list[str] = []
+
+    class FakeScreen:
+        def __enter__(self):
+            events.append("enter")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append("exit")
+            return False
+
+    def handler(ctx):
+        return SectionResult.SKIPPED_FRESH
+
+    monkeypatch.setattr(sec_mod, "SECTION_REGISTRY", [
+        WizardSection(
+            key="fresh",
+            title="Fresh Section",
+            description="desc",
+            handler=handler,
+            quick=True,
+            icon="◆",
+        )
+    ])
+    monkeypatch.setattr(wiz, "_resolve_config_path", lambda: tmp_path / "config.yaml")
+    monkeypatch.setattr(wiz._console, "screen", lambda: FakeScreen())
+
+    result = wiz.run_setup(quick=True)
+
+    assert result == 0
+    assert events == ["enter", "exit"]
 
 
 def test_run_setup_configured_check_reconfigure_calls_handler(
@@ -339,3 +485,27 @@ def test_run_setup_summary_includes_config_path(
     assert rc == 0
     out = capsys.readouterr().out
     assert "config.yaml" in out
+
+
+def test_completion_screen_uses_oc_commands(tmp_path, capsys):
+    from opencomputer.cli_setup.sections import WizardCtx
+    from opencomputer.cli_setup.wizard import _print_setup_summary
+
+    ctx = WizardCtx(
+        config={
+            "model": {"provider": "openrouter"},
+            "loop": {"max_iterations": 90},
+            "terminal": {"backend": "local"},
+        },
+        config_path=tmp_path / "config.yaml",
+        is_first_run=False,
+    )
+
+    _print_setup_summary(ctx)
+    out = capsys.readouterr().out
+
+    assert "oc setup" in out
+    assert "oc chat" in out
+    assert "oc doctor" in out
+    assert "opencomputer setup" not in out
+    assert "opencomputer chat" not in out

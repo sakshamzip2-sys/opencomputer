@@ -193,7 +193,6 @@ browser = [
 ]
 
 [project.scripts]
-opencomputer = "opencomputer.cli:main"
 oc = "opencomputer.cli:main"
 
 [tool.hatch.build.targets.wheel]
@@ -204,12 +203,12 @@ packages = ["opencomputer", "plugin_sdk"]
 # discovery target that ``opencomputer.plugins.discovery._bundled_
 # extensions_root()`` computes as ``<wheel install root>/extensions``.
 # Without this force-include, the wheel ships zero providers / channels
-# and ``opencomputer chat`` errors with "Provider 'anthropic' is not
+# and ``oc chat`` errors with "Provider 'anthropic' is not
 # available" on first use. Caught by the v2026.4.26 E2E install test.
 [tool.hatch.build.targets.wheel.force-include]
 "extensions" = "extensions"
 # systemd unit template — shipped alongside opencomputer.service so
-# `opencomputer service install` can read it from the installed wheel.
+# `oc service install` can read it from the installed wheel.
 "opencomputer/service/templates/opencomputer.service" = "opencomputer/service/templates/opencomputer.service"
 # Dashboard SPA build artifact (Vite output). Built by
 # `scripts/build-dashboard.sh` before packaging; excluded from git via

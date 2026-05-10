@@ -126,11 +126,9 @@ def test_get_available_tools_returns_empty_dict_when_registry_unreachable(
 
 
 def test_build_welcome_banner_renders_header_and_meta_block(monkeypatch):
-    """Banner header: ✦ OpenComputer + version pill, then meta block.
-
-    OPENCOMPUTER ASCII logo, OC side glyph, and tools/skills inventory
-    were removed at user request. The "OpenComputer" name lives on its
-    own bold line above the model so it reads as the agent title.
+    """Banner header: chunky ANSI-Shadow OPENCOMPUTER title, then a
+    cyan info panel with version + tools/skills (truncated) + model
+    block. Hermes-style layout per user request.
     """
     import io
 
@@ -157,29 +155,23 @@ def test_build_welcome_banner_renders_header_and_meta_block(monkeypatch):
     # Header line must include OpenComputer + version
     assert "OpenComputer" in out
     assert "v" in out  # version pill (e.g. v2026.4.27)
-    # Must NOT have the ASCII banner art or side glyph
+    # Must NOT have the legacy slant-style banner art or side glyph
     assert "/_____/" not in out
     assert ":::: OC ::::" not in out
     # Must have the meta block (model on its own line — no " · OpenComputer" suffix)
     assert "claude-opus-4-7" in out
-    # The model line should NOT contain the trailing " · OpenComputer" anymore
-    # (the agent name is its own header line above)
     assert "claude-opus-4-7 · OpenComputer" not in out
     assert "abc123" in out
     assert "/tmp" in out
-    # Must have the welcome line WITHOUT the "/help for commands" mention
-    # (deduped against the Tip line which mentions /help)
+    # Welcome line — Hermes-parity wording.
     assert "Welcome to OpenComputer" in out
-    assert "Type your message to start" in out
-    assert "/help for commands" not in out
+    assert "Type your message" in out
 
 
-def test_build_welcome_banner_does_not_list_tools_and_skills_inline(monkeypatch):
-    """Tools/skills inventory was removed from the chat banner per user request.
-
-    Both `oc tools` and `oc skills` still expose the full inventory on
-    demand. The chat surface stays clean — model line + welcome + tip
-    only.
+def test_build_welcome_banner_lists_tools_and_skills(monkeypatch):
+    """Hermes-screenshot parity: tools and skills are shown in the
+    banner, grouped by plugin/category and truncated so the panel
+    stays readable.
     """
     import io
 
@@ -200,17 +192,20 @@ def test_build_welcome_banner_does_not_list_tools_and_skills_inline(monkeypatch)
     console = Console(file=buf, width=120, force_terminal=False)
     build_welcome_banner(console, "m", "/cwd")
     out = buf.getvalue()
-    assert "Available Tools" not in out
-    assert "Available Skills" not in out
-    # Inventory totals also gone
-    assert "tools ·" not in out
-    assert "skills ·" not in out
-    # But the user-facing welcome line is still there
+    assert "Available Tools" in out
+    assert "Available Skills" in out
+    assert "coding-harness" in out
+    assert "Edit" in out
+    assert "research" in out
+    assert "arxiv" in out
     assert "Welcome to OpenComputer" in out
 
 
-def test_build_welcome_banner_omits_tools_inventory(monkeypatch):
-    """Long tool/skill lists no longer appear in the banner — inventory removed."""
+def test_build_welcome_banner_truncates_long_tool_groups(monkeypatch):
+    """Long per-group tool lists get truncated with ``...`` so the
+    panel never balloons. The first few items appear; the long tail
+    does not.
+    """
     import io
 
     from rich.console import Console
@@ -227,11 +222,11 @@ def test_build_welcome_banner_omits_tools_inventory(monkeypatch):
     )
 
     buf = io.StringIO()
-    console = Console(file=buf, width=80, force_terminal=False)
+    console = Console(file=buf, width=120, force_terminal=False)
     build_welcome_banner(console, "m", "/cwd")
     out = buf.getvalue()
-    # None of the 40 tools should appear — the entire inventory is gone
-    assert "Tool00" not in out
+    # First few tools appear; the long tail is truncated.
+    assert "Tool00" in out
     assert "Tool39" not in out
-    # And no tools/skills heading either
-    assert "Available Tools" not in out
+    # Section header is present.
+    assert "Available Tools" in out

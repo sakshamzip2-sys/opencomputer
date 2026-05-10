@@ -1,24 +1,15 @@
 """prompt_toolkit Style rules for Hermes-modeled menus.
 
 Visual register:
-  - title (yellow, bold) — the "Select provider:" heading
-  - hint (dim) — the navigation hint footer
-  - selected (green) — current row arrow + text
-  - selected.glyph (green bold) — (●) / [✓] in the selected row
-  - unselected.glyph (default) — (○) / [ ] in unselected rows
-  - description (dim italic) — optional description block under title
+  - title (yellow, bold) - the "Select provider:" heading
+  - hint (dim) - the navigation hint footer
+  - selected (green) - current row arrow + text
+  - selected.glyph (green bold) - selected radio/check glyphs
+  - unselected.glyph (default) - unselected radio/check glyphs
+  - description (dim italic) - optional description block under title
 
 Single source for re-skinning. All menu primitives in cli_ui/menu.py
 reference these class names.
-
-Hermes v2 D6/D7 wiring (2026-05-09): the static ``MENU_STYLE`` was the
-only consumer-side gap left after PR #515. ``current_menu_style()``
-now derives its colors from the active skin (``banner_title`` for the
-title, ``ui_label`` for the hint, ``ui_ok`` for selection, completion
-menu panes from ``completion_menu_*`` keys) so ``/skin <name>``
-actually changes how menus look. Legacy ``MENU_STYLE`` is preserved as
-the no-skin fallback so import sites that pulled the constant directly
-continue to work.
 """
 from __future__ import annotations
 
@@ -28,21 +19,19 @@ from prompt_toolkit.styles import Style
 
 logger = logging.getLogger("opencomputer.cli_ui.style")
 
-# Hermes v2 D6/D7 — derived once per module import as the no-skin
-# fallback. Modern call sites should use :func:`current_menu_style` to
-# pick up live skin changes; old call sites that grabbed ``MENU_STYLE``
-# at import time still get a sensible (default-skin) palette.
+_NO_HIGHLIGHT = "bg:ansidefault noreverse noinherit"
+
+# Derived once per module import as the no-skin fallback. Modern call sites
+# should use current_menu_style() to pick up live skin changes; old call sites
+# that grabbed MENU_STYLE at import time still get the default palette.
 _LEGACY_MENU_DICT = {
-    "menu.title": "fg:#ffd75f bold",
-    "menu.hint": "fg:#888888",
-    "menu.selected": "fg:#5fff5f",
-    "menu.selected.arrow": "fg:#5fff5f bold",
-    "menu.selected.glyph": "fg:#5fff5f bold",
-    "menu.unselected.glyph": "",
-    "menu.description": "fg:#888888 italic",
-    # Hermes v2 D6 — completion menu pane styling. prompt-toolkit's
-    # default ``completion-menu`` class names are wired here so the
-    # autocomplete dropdown picks up the active skin's color keys.
+    "menu.title": f"fg:#ffd75f bold {_NO_HIGHLIGHT}",
+    "menu.hint": f"fg:#888888 {_NO_HIGHLIGHT}",
+    "menu.selected": f"fg:#5fff5f bold {_NO_HIGHLIGHT}",
+    "menu.selected.arrow": f"fg:#5fff5f bold {_NO_HIGHLIGHT}",
+    "menu.selected.glyph": f"fg:#5fff5f bold {_NO_HIGHLIGHT}",
+    "menu.unselected.glyph": _NO_HIGHLIGHT,
+    "menu.description": f"fg:#888888 italic {_NO_HIGHLIGHT}",
     "completion-menu": "",
     "completion-menu.completion": "",
     "completion-menu.completion.current": "",
@@ -54,15 +43,10 @@ MENU_STYLE = Style.from_dict(_LEGACY_MENU_DICT)
 
 
 def _menu_dict_from_skin() -> dict[str, str]:
-    """Build the prompt-toolkit menu-style dict from the active skin.
-
-    Falls back to ``_LEGACY_MENU_DICT`` for any skin where a key is
-    missing — preserves the legacy palette as the always-present
-    safety net.
-    """
+    """Build the prompt-toolkit menu-style dict from the active skin."""
     try:
         from opencomputer.cli_ui.skin import current_spec
-    except Exception:  # noqa: BLE001 — never break menu render
+    except Exception:  # noqa: BLE001 - never break menu render
         return dict(_LEGACY_MENU_DICT)
     try:
         spec = current_spec()
@@ -89,14 +73,14 @@ def _menu_dict_from_skin() -> dict[str, str]:
     fg = _color("banner_text", "#FFFFFF")
 
     return {
-        "menu.title": f"fg:{title} bold",
-        "menu.hint": f"fg:{hint}",
-        "menu.selected": f"fg:{ok}",
-        "menu.selected.arrow": f"fg:{ok} bold",
-        "menu.selected.glyph": f"fg:{ok} bold",
-        "menu.unselected.glyph": "",
-        "menu.description": f"fg:{label} italic",
-        # prompt-toolkit completion menu — fg:bg pairs.
+        "menu.title": f"fg:{title} bold {_NO_HIGHLIGHT}",
+        "menu.hint": f"fg:{hint} {_NO_HIGHLIGHT}",
+        "menu.selected": f"fg:{ok} bold {_NO_HIGHLIGHT}",
+        "menu.selected.arrow": f"fg:{ok} bold {_NO_HIGHLIGHT}",
+        "menu.selected.glyph": f"fg:{ok} bold {_NO_HIGHLIGHT}",
+        "menu.unselected.glyph": _NO_HIGHLIGHT,
+        "menu.description": f"fg:{label} italic {_NO_HIGHLIGHT}",
+        # prompt-toolkit completion menu - fg:bg pairs.
         "completion-menu": f"bg:{cm_bg} fg:{fg}",
         "completion-menu.completion": f"bg:{cm_bg} fg:{fg}",
         "completion-menu.completion.current": f"bg:{cm_cur_bg} fg:{fg}",
@@ -106,11 +90,7 @@ def _menu_dict_from_skin() -> dict[str, str]:
 
 
 def current_menu_style() -> Style:
-    """Return a prompt-toolkit ``Style`` reflecting the active skin.
-
-    Call this each time you build a menu so that ``/skin <name>`` mid
-    session picks up the new palette.
-    """
+    """Return a prompt-toolkit Style reflecting the active skin."""
     return Style.from_dict(_menu_dict_from_skin())
 
 

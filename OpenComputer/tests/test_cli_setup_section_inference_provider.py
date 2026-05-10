@@ -41,6 +41,132 @@ def test_run_lists_all_discovered_providers_plus_custom(monkeypatch, tmp_path):
     assert "Leave unchanged" in labels
 
 
+def test_discover_providers_includes_openrouter_manifest_metadata():
+    from opencomputer.cli_setup.section_handlers import inference_provider as ip
+
+    providers = {p["name"]: p for p in ip._discover_providers()}
+
+    assert "openrouter" in providers
+    assert providers["openrouter"]["label"] == "OpenRouter"
+    assert providers["openrouter"]["description"] == "100+ models, pay-per-use, free"
+    assert providers["openrouter"]["env_var"] == "OPENROUTER_API_KEY"
+    assert providers["openrouter"]["default_model"] == "anthropic/claude-opus-4.7"
+    assert providers["openrouter"]["signup_url"] == "https://openrouter.ai/keys"
+
+
+def test_discover_providers_places_openrouter_first():
+    from opencomputer.cli_setup.section_handlers import inference_provider as ip
+
+    providers = ip._discover_providers()
+
+    assert providers
+    assert providers[0]["name"] == "openrouter"
+
+
+def test_invoke_openrouter_setup_replaces_invalid_old_model(
+    monkeypatch, tmp_path,
+):
+    from opencomputer.cli_setup.section_handlers import inference_provider as ip
+
+    monkeypatch.setattr(ip, "_discover_providers", lambda: [
+        {
+            "name": "openrouter",
+            "label": "OpenRouter",
+            "description": "100+ models, pay-per-use, free",
+            "env_var": "OPENROUTER_API_KEY",
+            "signup_url": "https://openrouter.ai/keys",
+            "default_model": "anthropic/claude-opus-4.7",
+        },
+    ])
+    monkeypatch.setattr(ip, "_collect_api_key", lambda *a, **kw: None)
+    monkeypatch.setattr(ip, "_test_provider_connection", lambda *a, **kw: True)
+    monkeypatch.setattr(ip, "_env_value_present", lambda *a, **kw: True)
+    monkeypatch.setattr(
+        ip,
+        "_fetch_openrouter_models",
+        lambda *a, **kw: [
+            "anthropic/claude-opus-4.7",
+            "google/gemma-4-31b-it:free",
+            "anthropic/claude-opus-4.6",
+        ],
+    )
+    monkeypatch.setattr(ip, "radiolist", lambda *a, **kw: 0)
+
+    ctx = _make_ctx(
+        tmp_path,
+        config={"model": {"provider": "anthropic", "model": "claude-opus-4-7"}},
+    )
+    ok = ip._invoke_provider_setup("openrouter", ctx)
+
+    assert ok is True
+    assert ctx.config["model"]["provider"] == "openrouter"
+    assert ctx.config["model"]["api_key_env"] == "OPENROUTER_API_KEY"
+    assert ctx.config["model"]["model"] == "anthropic/claude-opus-4.7"
+
+
+def test_openrouter_model_picker_defaults_to_curated_cloud_model(monkeypatch, tmp_path):
+    from opencomputer.cli_setup.section_handlers import inference_provider as ip
+
+    captured: dict[str, object] = {}
+
+    def fake_radiolist(question, choices, default=0, **kw):
+        captured["question"] = question
+        captured["labels"] = [c.label for c in choices]
+        captured["default"] = default
+        return default
+
+    monkeypatch.setattr(ip, "radiolist", fake_radiolist)
+    monkeypatch.setattr(ip, "_fetch_openrouter_models", lambda *a, **kw: [
+        "baidu/cobuddy:free",
+        "anthropic/claude-opus-4.7",
+        "anthropic/claude-opus-4.6",
+        "google/gemma-4-31b-it:free",
+        "qwen/qwen3-coder:free",
+        "openai/gpt-5.1",
+    ])
+
+    ctx = _make_ctx(tmp_path, config={"model": {"model": "claude-opus-4-7"}})
+    chosen = ip._choose_openrouter_model(
+        ctx,
+        default_model="anthropic/claude-opus-4.7",
+    )
+
+    assert chosen == "anthropic/claude-opus-4.7"
+    assert captured["question"] == "Select default OpenRouter model:"
+    assert captured["default"] == 0
+    labels = captured["labels"]
+    assert labels[:4] == [
+        "anthropic/claude-opus-4.7",
+        "anthropic/claude-opus-4.6",
+        "openai/gpt-5.1",
+        "google/gemma-4-31b-it:free",
+    ]
+    assert "baidu/cobuddy:free" not in labels
+    assert "Enter custom model name" in labels
+    assert "Skip (keep current)" in labels
+
+
+def test_openrouter_model_picker_can_skip_keep_current(monkeypatch, tmp_path):
+    from opencomputer.cli_setup.section_handlers import inference_provider as ip
+
+    def choose_skip(question, choices, default=0, **kw):
+        return next(i for i, choice in enumerate(choices)
+                    if choice.value == "__skip__")
+
+    monkeypatch.setattr(ip, "radiolist", choose_skip)
+    monkeypatch.setattr(ip, "_fetch_openrouter_models", lambda *a, **kw: [
+        "anthropic/claude-opus-4.7",
+    ])
+
+    ctx = _make_ctx(tmp_path, config={"model": {"model": "google/gemma-4-31b-it:free"}})
+    chosen = ip._choose_openrouter_model(
+        ctx,
+        default_model="anthropic/claude-opus-4.7",
+    )
+
+    assert chosen is None
+
+
 def test_run_writes_provider_to_config_on_selection(monkeypatch, tmp_path):
     from opencomputer.cli_setup.section_handlers import inference_provider as ip
     from opencomputer.cli_setup.sections import SectionResult

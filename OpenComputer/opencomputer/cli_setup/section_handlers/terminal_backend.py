@@ -1,19 +1,4 @@
-"""Terminal backend section (S3).
-
-Modeled after Hermes's setup_terminal_backend (hermes_cli/setup.py:1272).
-Independently re-implemented (no code copied).
-
-Detects available backends via shutil.which:
-  - apptainer / singularity → "apptainer"
-  - docker → "docker"
-  - always: "local" (fallback / no sandbox; matches Hermes naming)
-
-Builds a radiolist with detected backends + a Skip choice. User picks
-which to use; selection writes config.terminal.backend.
-
-Deeper sandbox configuration (image names, mount points, network
-isolation level) is deferred — config.yaml editing covers it.
-"""
+"""Terminal backend setup section."""
 from __future__ import annotations
 
 import shutil
@@ -23,43 +8,46 @@ from opencomputer.cli_ui.menu import Choice, radiolist
 
 
 def _detect_backends() -> list[str]:
-    """Return list of available backends, ordered by preference."""
-    out: list[str] = []
-    if shutil.which("apptainer") or shutil.which("singularity"):
-        out.append("apptainer")
+    out: list[str] = ["local"]
     if shutil.which("docker"):
         out.append("docker")
-    out.append("local")
+    if shutil.which("ssh"):
+        out.append("ssh")
+    if shutil.which("modal"):
+        out.append("modal")
+    if shutil.which("daytona"):
+        out.append("daytona")
+    if shutil.which("vercel"):
+        out.append("vercel")
+    if shutil.which("apptainer") or shutil.which("singularity"):
+        out.append("apptainer")
     return out
 
 
 _LABELS = {
-    "apptainer": "Apptainer / Singularity (rootless container sandbox; HPC-friendly)",
-    "docker": "Docker (container sandbox; runs as user)",
-    "local": "Local shell (run directly on this machine — default)",
+    "local": "Local - run directly on this machine (default)",
+    "docker": "Docker - isolated container with configurable resources",
+    "modal": "Modal - serverless cloud sandbox",
+    "ssh": "SSH - run on a remote machine",
+    "daytona": "Daytona - persistent cloud development environment",
+    "vercel": "Vercel Sandbox - cloud microVM with persistent snapshots",
+    "apptainer": "Apptainer / Singularity - rootless container sandbox",
 }
 
 
 def run_terminal_backend_section(ctx: WizardCtx) -> SectionResult:
-    backends = _detect_backends()
-    choices: list[Choice] = [
-        Choice(_LABELS[b], b) for b in backends
-    ]
-    choices.append(Choice("Skip — keep current", "__skip__"))
+    current = (ctx.config.get("terminal") or {}).get("backend") or "local"
+    detected = _detect_backends()
+    choices = [Choice(_LABELS[b], b) for b in detected]
+    choices.append(Choice(f"Keep current ({current})", "__skip__"))
+    default = next((i for i, c in enumerate(choices) if c.value == current), 0)
 
-    idx = radiolist(
-        "Select terminal backend:",
-        choices, default=0,
-        description="Where OpenComputer runs shell commands and code. "
-                     "Apptainer/Docker isolate file + network access; "
-                     "local is unsandboxed.",
-    )
+    idx = radiolist("Select terminal backend:", choices, default=default)
     chosen = choices[idx].value
     if chosen == "__skip__":
+        print(f"  Keeping current backend: {current}")
         return SectionResult.SKIPPED_FRESH
 
-    ctx.config.setdefault("terminal", {})
-    ctx.config["terminal"]["backend"] = chosen
-
+    ctx.config.setdefault("terminal", {})["backend"] = chosen
     print(f"  ✓ Set terminal backend: {chosen}")
     return SectionResult.CONFIGURED

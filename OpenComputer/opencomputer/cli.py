@@ -229,7 +229,7 @@ def _apply_profile_override() -> None:
             profile_name = None
 
     # Explicit flag always wins — even if OPENCOMPUTER_HOME was pre-set in
-    # the parent process. Without this, `opencomputer -p coder` would be
+    # the parent process. Without this, `oc -p coder` would be
     # silently suppressed whenever a parent had OPENCOMPUTER_HOME exported.
     if profile_name and profile_name != "default":
         try:
@@ -254,7 +254,7 @@ def _apply_profile_override() -> None:
 
 
 app = typer.Typer(
-    name="opencomputer",
+    name="oc",
     help="Personal AI agent framework — plugin-first, self-improving, multi-channel.",
     no_args_is_help=False,
 )
@@ -592,7 +592,7 @@ def _apply_model_overrides() -> int:
     """Round 2A P-11 — replay ``model_overrides.yaml`` against the registry.
 
     Runs AFTER :func:`_discover_plugins` so user-curated entries
-    (added via ``opencomputer models add``) win over plugin-shipped
+    (added via ``oc models add``) win over plugin-shipped
     catalogs. Missing or empty file → 0, no-op. Returns the count of
     entries applied so the chat banner can surface it.
 
@@ -996,7 +996,7 @@ def _require_tty(command_name: str) -> None:
     Ported from hermes-agent's ``hermes_cli/main.py::_require_tty`` —
     interactive wizards that depend on ``input()`` / Rich prompts spin
     or hang when stdin is a pipe. Calling this at the top of a wizard
-    entry point catches accidental ``opencomputer setup < something.txt``
+    entry point catches accidental ``oc setup < something.txt``
     invocations early with a helpful error.
     """
     import sys as _sys
@@ -1004,7 +1004,7 @@ def _require_tty(command_name: str) -> None:
     stdin = getattr(_sys, "stdin", None)
     if stdin is None or not stdin.isatty():
         print(
-            f"Error: 'opencomputer {command_name}' requires an interactive terminal.\n"
+            f"Error: 'oc {command_name}' requires an interactive terminal.\n"
             f"It cannot be run through a pipe or non-interactive subprocess.\n"
             f"Run it directly in your terminal instead.",
             file=_sys.stderr,
@@ -1053,10 +1053,10 @@ def _offer_setup_or_exit(reason: str) -> None:
     on every terminal and never hangs on a non-TTY (we short-circuit to
     static guidance + exit 1 in that case). On 'y' / Enter we hand off
     to :func:`opencomputer.setup_wizard.run_setup` and exit cleanly so
-    the user re-runs ``opencomputer`` after setup writes config + env.
+    the user re-runs ``oc`` after setup writes config + env.
 
     Diagnostic / guidance text goes to stderr so a piped stdout (CI,
-    ``opencomputer chat | grep …``) doesn't get polluted with the
+    ``oc chat | grep …``) doesn't get polluted with the
     error banner.
     """
     import sys as _sys
@@ -1069,21 +1069,21 @@ def _offer_setup_or_exit(reason: str) -> None:
     is_tty = bool(stdin is not None and stdin.isatty())
     if not is_tty:
         print(
-            "Run `opencomputer setup` to configure.",
+            "Run `oc setup` to configure.",
             file=_sys.stderr,
         )
         raise typer.Exit(1)
     try:
-        reply = input("Run `opencomputer setup` now? [Y/n] ").strip().lower()
+        reply = input("Run `oc setup` now? [Y/n] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         reply = "n"
     if reply in ("", "y", "yes"):
-        from opencomputer.setup_wizard import run_setup
+        from opencomputer.cli_setup.wizard import run_setup
 
-        run_setup()
+        run_setup(quick=None)
         raise typer.Exit(0)
     print(
-        "\nYou can run `opencomputer setup` at any time to configure.",
+        "\nYou can run `oc setup` at any time to configure.",
         file=_sys.stderr,
     )
     raise typer.Exit(1)
@@ -1155,7 +1155,7 @@ def _run_chat_session(
     # User vision: agent should know about the user before they start.
     # PR #143 shipped the bootstrap orchestrator; this fires it
     # automatically (background, quick mode) on first chat so users
-    # don't have to discover ``opencomputer profile bootstrap``.
+    # don't have to discover ``oc profile bootstrap``.
     try:
         from opencomputer.profile_bootstrap.auto_trigger import (
             kick_off_in_background,
@@ -1414,7 +1414,7 @@ def _run_chat_session(
     )
     # tools / plugins / agents counts intentionally hidden from the
     # startup banner — they're noise for an interactive session. Run
-    # ``opencomputer plugins``, ``opencomputer skills``, etc. to inspect
+    # ``oc plugins``, ``oc skills``, etc. to inspect
     # them on demand. Counters still computed above for any callers
     # that depend on n_plugins / n_agents in the same scope.
     if n_settings_hooks:
@@ -1565,7 +1565,7 @@ def _run_chat_session(
     async def _run_turn_plain(
         user_input: str, images: list[str] | None = None
     ) -> None:
-        # Legacy path — kept verbatim so `printf … | opencomputer chat`
+        # Legacy path — kept verbatim so `printf … | oc chat`
         # still produces clean piped output (no Rich Live escapes).
         printed_header = {"val": False}
 
@@ -2750,7 +2750,7 @@ def code(
 ) -> None:
     """Start the coding agent in [path] (or cwd). Snappy entry-point.
 
-    Mirrors ``opencomputer chat`` but is tailored for coding work — Edit,
+    Mirrors ``oc chat`` but is tailored for coding work — Edit,
     MultiEdit, TodoWrite, RunTests etc. are enabled by default. Use
     ``--plan`` for read-only discovery; ``--yolo`` to skip per-action
     confirmation prompts. Use ``--worktree`` to isolate this session in a
@@ -3231,7 +3231,7 @@ def plugins() -> None:
     """List discovered plugins (metadata only — no activation).
 
     Uses the canonical search-path order (profile-local → global → bundled).
-    Run with ``opencomputer -p <name> plugins`` to see that named profile's
+    Run with ``oc -p <name> plugins`` to see that named profile's
     locally-installed plugins.
     """
     from opencomputer.plugins.discovery import standard_search_paths
@@ -3271,22 +3271,13 @@ def plugins() -> None:
 
 @app.command()
 def setup(
-    new: bool = typer.Option(
-        False,
-        "--new",
-        help=(
-            "Use the Hermes-style section-driven wizard "
-            "(opt-in while we port legacy features). Default: legacy."
-        ),
-    ),
     non_interactive: bool = typer.Option(
         False,
         "--non-interactive",
         help=(
-            "Q2: skip all interactive prompts. Sections with existing "
-            "config keep their values; unconfigured sections skip with "
-            "a default-or-skip behavior. Useful for CI / headless. "
-            "Implies --new (legacy wizard does not support this flag)."
+            "Skip interactive prompts. Sections with existing config keep "
+            "their values; unconfigured sections skip with a default-or-skip "
+            "behavior. Useful for CI / headless."
         ),
     ),
     install_daemon: bool = typer.Option(
@@ -3301,33 +3292,24 @@ def setup(
         help="Profile to install the daemon for (only with --install-daemon).",
     ),
 ) -> None:
-    """Interactive first-run wizard — pick provider, enter key, test.
+    """Interactive first-run wizard - pick provider, enter key, test.
 
-    Default: invokes the legacy procedural wizard at
-    :func:`opencomputer.setup_wizard.run_setup`.
+    Opens the OpenComputer section-driven setup wizard.
 
-    With ``--new``: invokes the new section-driven wizard at
-    :func:`opencomputer.cli_setup.wizard.run_setup`. The new wizard
-    has the Hermes-style arrow-key UX but currently fewer LIVE
-    sections than the legacy one — sub-projects M1, S2-S5 etc. close
-    the gap. Once parity lands, the default flips to ``--new`` and
-    the legacy wrapper is retired.
-
-    With ``--non-interactive`` (implies ``--new``): all prompts are
-    skipped — sections with existing config keep their values, fresh
-    sections skip without prompting. Useful for CI / scripts.
+    With ``--non-interactive``: all prompts are skipped; sections with
+    existing config keep their values and fresh sections skip without
+    prompting. Useful for CI / scripts.
 
     With ``--install-daemon``: after the wizard returns, registers
     OpenComputer as an always-on system service via the right backend
     for the current platform (systemd on Linux, launchd on macOS,
     Task Scheduler on Windows).
     """
-    if non_interactive or new:
-        from opencomputer.cli_setup.wizard import run_setup as run_setup_new
-        run_setup_new(non_interactive=non_interactive)
-    else:
-        from opencomputer.setup_wizard import run_setup
-        run_setup()
+    from opencomputer.cli_setup.wizard import run_setup as run_setup_new
+    run_setup_new(
+        quick=False if non_interactive else None,
+        non_interactive=non_interactive,
+    )
 
     if install_daemon:
         from opencomputer.service.factory import get_backend
@@ -3384,7 +3366,7 @@ def run_auth_status() -> None:
     provider env var the active plugins declare, plus the proxy hint
     (``ANTHROPIC_BASE_URL``). Echoes only the last 4 characters of each
     set value — never the full token. Cleaner focused view than
-    ``opencomputer doctor`` when you just want to answer "did I export
+    ``oc doctor`` when you just want to answer "did I export
     the right key?".
 
     Public (not name-mangled) so :mod:`opencomputer.cli_auth` can invoke
@@ -3431,7 +3413,7 @@ def run_auth_status() -> None:
 
 
 def _redact_for_auth(env_var: str, value: str) -> str:
-    """Decide how a credential value is shown by ``opencomputer auth``.
+    """Decide how a credential value is shown by ``oc auth``.
 
     Two reviewer-driven safeguards over the naive last-4 echo:
 
@@ -3920,7 +3902,7 @@ def _service_install(
         # callers that pass --extra-args.
         "gateway",
         help=(
-            "Args after `opencomputer --headless --profile <p>`. "
+            "Args after `oc --headless --profile <p>`. "
             "Default: 'gateway' (long-running channel daemon). "
             "Note: systemd splits on whitespace and does NOT invoke a "
             "shell — args containing spaces are not supported."
@@ -4256,12 +4238,12 @@ from opencomputer.evolution.entrypoint import evolution_app  # noqa: E402
 
 app.add_typer(evolution_app, name="evolution")
 
-# Tier-A item 9 — Skills Guard CLI (`opencomputer skill scan <path>`)
+# Tier-A item 9 — Skills Guard CLI (`oc skill scan <path>`)
 from opencomputer.cli_skills import skill_app  # noqa: E402
 
 app.add_typer(skill_app, name="skill")
 
-# Tier-A item 11 — per-tool insights CLI (`opencomputer insights`)
+# Tier-A item 11 — per-tool insights CLI (`oc insights`)
 from opencomputer.cli_insights import insights_app  # noqa: E402
 
 app.add_typer(insights_app, name="insights")
@@ -4301,7 +4283,7 @@ from opencomputer.cli_ambient import app as ambient_app  # noqa: E402
 
 app.add_typer(ambient_app, name="ambient")
 
-# Auto-skill-evolution — `opencomputer skills {list,review,accept,reject,evolution}`
+# Auto-skill-evolution — `oc skills {list,review,accept,reject,evolution}`
 # Sibling to the singular `skill` namespace already mounted above.
 from opencomputer.cli_skills import app as skills_app  # noqa: E402
 
@@ -4387,7 +4369,7 @@ def config_edit() -> None:
     ``sources/hermes-agent-2026.4.23/hermes_cli/setup.py:2207``). Picks
     ``$VISUAL`` first (POSIX convention for the user's "real" editor),
     then ``$EDITOR``, then ``vi`` as a final fallback. Refuses with a
-    pointer to ``opencomputer setup`` when no config exists yet — better
+    pointer to ``oc setup`` when no config exists yet — better
     than dropping the user into an empty buffer they have to remember
     every config key for.
     """
@@ -4397,7 +4379,7 @@ def config_edit() -> None:
     if not cfg_path.exists():
         console.print(
             f"[bold red]error:[/bold red] no config at [dim]{cfg_path}[/dim]\n"
-            f"[dim]Run [bold]opencomputer setup[/bold] to create one.[/dim]"
+            f"[dim]Run [bold]oc setup[/bold] to create one.[/dim]"
         )
         raise typer.Exit(1)
 
@@ -4489,7 +4471,7 @@ def config_variants() -> None:
 
     Each variant ships a starter ``config.yaml`` with a distinct security
     posture (see ``sources/claude-code/examples/settings/README.md`` for the
-    inspiration). Use ``opencomputer config init --variant <name>`` to
+    inspiration). Use ``oc config init --variant <name>`` to
     copy one into the active profile.
     """
     names = _available_variants()
@@ -4502,7 +4484,7 @@ def config_variants() -> None:
         console.print(f"  [cyan]{name}[/cyan] — {desc}")
     console.print(
         "\n[dim]copy one into the active profile with "
-        "[bold]opencomputer config init --variant <name>[/bold][/dim]"
+        "[bold]oc config init --variant <name>[/bold][/dim]"
     )
 
 
@@ -4672,7 +4654,7 @@ def steer(
       on a separate process).
     * No ``--wire-url`` — write directly into the in-process
       :data:`opencomputer.agent.steer.default_registry`. Useful for
-      tests, scripts, or `opencomputer chat` running in a sibling
+      tests, scripts, or `oc chat` running in a sibling
       thread.
     """
     if not prompt.strip():
@@ -4742,7 +4724,7 @@ def steer(
         return
 
     # Standalone / in-process registry path. Useful in tests and when
-    # the user runs `opencomputer chat` and `opencomputer steer` in
+    # the user runs `oc chat` and `oc steer` in
     # sibling threads inside the same process. The session_id is
     # optional but strongly recommended — without it, this is a no-op
     # (the registry is keyed by session_id).
