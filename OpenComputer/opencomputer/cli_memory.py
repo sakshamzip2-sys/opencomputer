@@ -528,6 +528,104 @@ def _doctor_dreaming_row() -> tuple[str, str]:
     )
 
 
+def _doctor_active_memory_row() -> tuple[str, str]:
+    """(status, detail) for OpenClaw 1.B-alt Active Memory pre-loop injection.
+
+    Distinct from MEMORY.md hybrid retrieval — this layer queries SessionDB
+    FTS5 + episodic on every turn and prepends a `<relevant-memories>`
+    block. Off by default; useful when the user has rich session history.
+    """
+    try:
+        cfg = load_config().memory
+    except Exception as e:  # noqa: BLE001
+        return ("disabled", f"config read error: {e}")
+    if cfg.active_memory_enabled:
+        return (
+            "enabled",
+            f"top_n={cfg.active_memory_top_n} (FTS5 + episodic prepend per turn)",
+        )
+    return (
+        "disabled",
+        "opt-in via memory.active_memory_enabled=true — recalls relevant "
+        "past turns each request",
+    )
+
+
+def _doctor_vector_retrieval_row() -> tuple[str, str]:
+    """(status, detail) for MEMORY.md hybrid retrieval (M6.3 BM25+vector RRF).
+
+    Status mapping:
+      * disabled  — memory_md_retrieval_enabled=false in config
+      * active    — enabled AND active provider supports embeddings
+      * bm25-only — enabled BUT provider raises EmbeddingsUnsupportedError
+                    at probe-time; falls back gracefully but the user
+                    isn't getting vector recall. Includes the provider's
+                    own message so the fix hint (e.g. set VOYAGE_API_KEY)
+                    surfaces here instead of buried in DEBUG logs.
+    """
+    try:
+        full_cfg = load_config()
+    except Exception as e:  # noqa: BLE001
+        return ("disabled", f"config read error: {e}")
+
+    if not getattr(full_cfg.memory, "memory_md_retrieval_enabled", False):
+        return (
+            "disabled",
+            "opt-in via memory.memory_md_retrieval_enabled=true",
+        )
+
+    # Probe the active provider's embed() with an empty list. By contract
+    # this is cheap (most providers short-circuit) and raises
+    # EmbeddingsUnsupportedError when the provider can't embed.
+    try:
+        from opencomputer.cli import _resolve_provider
+        from plugin_sdk.embeddings import EmbeddingsUnsupportedError
+    except Exception as e:  # noqa: BLE001
+        return ("active", f"could not resolve embedding probe: {e}")
+
+    try:
+        provider = _resolve_provider(full_cfg.model.provider)
+    except Exception as e:  # noqa: BLE001
+        return (
+            "bm25-only",
+            f"active provider {full_cfg.model.provider!r} not resolvable: {e}",
+        )
+
+    if provider is None or not hasattr(provider, "embed"):
+        return (
+            "bm25-only",
+            f"active provider {full_cfg.model.provider!r} has no embed() method",
+        )
+
+    import asyncio
+
+    async def _probe() -> str:
+        try:
+            await provider.embed([])
+            return ""
+        except EmbeddingsUnsupportedError as exc:
+            return f"unsupported: {exc}"
+        except Exception as exc:  # noqa: BLE001 — surface the real error
+            return f"probe failed: {type(exc).__name__}: {exc}"
+
+    try:
+        msg = asyncio.run(_probe())
+    except RuntimeError:
+        # Already in an event loop (rare for `oc memory doctor`); fall
+        # back to "active" with a hint.
+        return (
+            "active",
+            "probe skipped (already in event loop) — assume provider supports embed",
+        )
+
+    if msg:
+        return ("bm25-only", msg)
+    return (
+        "active",
+        f"hybrid BM25+vector via {full_cfg.model.provider!r}.embed()",
+    )
+
+
 @memory_app.command("doctor")
 def memory_doctor() -> None:
     """Health report for every memory layer — baseline, episodic, docker,
@@ -578,6 +676,25 @@ def memory_doctor() -> None:
         d_status, d_detail = "disabled", f"error: {e}"
     rows.append(("dreaming", d_status, d_detail))
 
+    # Active Memory (OpenClaw 1.B-alt) — opt-in pre-loop FTS5 + episodic
+    # injection. Surface even when disabled so users know the layer
+    # exists and can opt in.
+    try:
+        am_status, am_detail = _doctor_active_memory_row()
+    except Exception as e:  # noqa: BLE001
+        am_status, am_detail = "disabled", f"error: {e}"
+    rows.append(("active_memory", am_status, am_detail))
+
+    # Vector retrieval (M6.3 hybrid BM25+vector RRF) — surfaces silent
+    # bm25-only fallback caused by unconfigured embedding providers
+    # (e.g., Anthropic without VOYAGE_API_KEY). Prevents the user from
+    # thinking hybrid retrieval is active when it has degraded silently.
+    try:
+        vr_status, vr_detail = _doctor_vector_retrieval_row()
+    except Exception as e:  # noqa: BLE001
+        vr_status, vr_detail = "bm25-only", f"probe error: {e}"
+    rows.append(("vector_retrieval", vr_status, vr_detail))
+
     table = Table(title="Memory doctor")
     table.add_column("Layer", style="bold cyan", no_wrap=True)
     table.add_column("Status", no_wrap=True)
@@ -594,6 +711,7 @@ def memory_doctor() -> None:
         "down": "yellow",
         "n/a": "dim",
         "fallback": "yellow",
+        "bm25-only": "yellow",  # vector retrieval degraded
         "disabled": "dim",
     }
 
