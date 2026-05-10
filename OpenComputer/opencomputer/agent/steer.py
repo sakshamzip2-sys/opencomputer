@@ -81,6 +81,79 @@ class SteerRegistry:
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._lock = threading.Lock()
 
+    def _event_for_running_loop_locked(
+        self, session_id: str
+    ) -> asyncio.Event:
+        """Return the cancel Event bound to the current running loop.
+
+        ``asyncio.Event`` lazy-binds to whichever loop first calls
+        ``_get_loop`` on it (typically the first ``.wait()`` or
+        ``.set()`` from an async context). Once bound, any other loop
+        awaiting it raises ``RuntimeError: ... is bound to a different
+        event loop``.
+
+        The CLI chat REPL wraps each turn in ``asyncio.run(...)``
+        (cli.py:2440), creating a fresh event loop per turn — so a
+        cached Event from turn N is dead on turn N+1. The same applies
+        to any caller that drives the registry through repeated
+        ``asyncio.run()`` calls, or to a daemon that recreates its loop
+        on reconnect.
+
+        Behaviour:
+
+        * No running loop (sync caller, e.g. SIGINT handler): return the
+          existing Event (or allocate a fresh one). Lazy-bind happens on
+          first async use.
+        * Running loop matches the Event's bound loop, or the Event has
+          never been bound: return it unchanged.
+        * Running loop differs: replace the Event with a fresh one,
+          preserving ``is_set()`` so a pending /steer cancel signal is
+          never silently lost across the rebind.
+
+        Caller MUST hold ``self._lock``.
+
+        Note on ``getattr(event, "_loop", None)``: ``_loop`` is the
+        attribute ``asyncio.mixins._LoopBoundMixin`` uses to remember
+        the bound loop; it is private but has been stable since Python
+        3.10 (the LoopBoundMixin was introduced precisely so primitives
+        could share lazy-binding semantics). The alternative — calling
+        ``event._get_loop()`` — has the side effect of binding the
+        Event to the running loop on the spot, which would defeat the
+        rebind detection.
+        """
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        existing = self._cancel_events.get(session_id)
+        if existing is None:
+            fresh = asyncio.Event()
+            self._cancel_events[session_id] = fresh
+            return fresh
+
+        if running_loop is None:
+            # Sync caller — keep existing; lazy-bind on first async use.
+            return existing
+
+        bound_loop = getattr(existing, "_loop", None)
+        if bound_loop is None or bound_loop is running_loop:
+            return existing
+
+        # Loop mismatch (CLI per-turn asyncio.run, daemon reconnect, etc.).
+        # Replace the Event preserving the set state so a pending cancel
+        # survives the rebind.
+        rebound = asyncio.Event()
+        if existing.is_set():
+            rebound.set()
+        self._cancel_events[session_id] = rebound
+        _log.debug(
+            "steer cancel_event: rebound stale Event for session %s "
+            "(was on loop %r, now on %r)",
+            session_id, bound_loop, running_loop,
+        )
+        return rebound
+
     def submit(self, session_id: str, nudge: str) -> None:
         """Store ``nudge`` for ``session_id``. Overrides any pending nudge.
 
@@ -94,6 +167,9 @@ class SteerRegistry:
 
         PR-A Feature 1: also sets the per-session cancel event if one
         has been allocated, so an in-flight tool dispatch can react.
+        The Event is rebound transparently if the running loop has
+        changed since the previous touch (see
+        ``_event_for_running_loop_locked``).
         """
         if not session_id:
             raise ValueError("steer.submit: session_id must be non-empty")
@@ -108,15 +184,7 @@ class SteerRegistry:
         with self._lock:
             previous = self._pending.get(session_id)
             self._pending[session_id] = normalized
-            event = self._cancel_events.get(session_id)
-            # PR-A Feature 1: allocate-if-missing so the cancel signal is
-            # never silently lost. The agent loop watches the same lazily-
-            # created instance via cancel_event(); a submit-before-watch
-            # case (rare but real) ends up with the event already set
-            # when the watcher allocates.
-            if event is None:
-                event = asyncio.Event()
-                self._cancel_events[session_id] = event
+            event = self._event_for_running_loop_locked(session_id)
         if previous is not None:
             _log.warning(
                 "steer override: previous nudge discarded for session %s",
@@ -156,20 +224,24 @@ class SteerRegistry:
     # ------------------------------------------------------------------
 
     def cancel_event(self, session_id: str) -> asyncio.Event:
-        """Return (lazy-creating) the per-session cancel event.
+        """Return the per-session cancel event for the running loop.
 
-        Allocated on first call; the same Event instance is returned on
-        subsequent calls. The agent loop's tool dispatcher allocates +
-        watches; ``submit`` sets; ``reset_cancel`` clears.
+        Allocated on first call. On subsequent calls, returns the same
+        Event so long as it is bound to the current running loop (or
+        unbound). If the caller is on a different loop than the one
+        the Event was bound to (e.g. CLI chat REPL's per-turn
+        ``asyncio.run`` wraps each turn in a fresh loop), the Event is
+        rebound transparently — a fresh Event is allocated preserving
+        the previous ``is_set()`` state so a pending /steer cancel
+        signal survives the rebind.
+
+        The agent loop's tool dispatcher allocates + watches via this
+        method; ``submit`` sets; ``reset_cancel`` clears.
         """
         if not session_id:
             raise ValueError("steer.cancel_event: session_id must be non-empty")
         with self._lock:
-            event = self._cancel_events.get(session_id)
-            if event is None:
-                event = asyncio.Event()
-                self._cancel_events[session_id] = event
-            return event
+            return self._event_for_running_loop_locked(session_id)
 
     def has_cancel_listener(self, session_id: str) -> bool:
         """Return True if a cancel event has been allocated for this session.

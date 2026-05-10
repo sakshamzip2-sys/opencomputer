@@ -142,6 +142,148 @@ def test_format_nudge_message_produces_documented_shape() -> None:
     assert "latest-wins" in rendered
 
 
+# ─── Loop-rebind regression (cross-loop Event reuse) ───────────────
+
+
+def test_cancel_event_survives_per_turn_asyncio_run() -> None:
+    """Regression — the CLI chat REPL wraps each turn in
+    ``asyncio.run(_run_turn_cancellable(...))`` (cli.py:2440), creating
+    a fresh event loop per turn. The :class:`SteerRegistry` is a
+    process-wide singleton whose ``_cancel_events`` dict caches an
+    :class:`asyncio.Event` per session id. Pre-fix the Event lazy-bound
+    to the first turn's loop, so the agent loop's
+    ``asyncio.create_task(cancel_event(sid).wait())`` call on turn 2
+    raised ``RuntimeError: <asyncio.locks.Event ...> is bound to a
+    different event loop`` — the symptom that flooded stderr with
+    "Task exception was never retrieved" stack traces and broke the
+    /steer mid-flight cancel feature.
+
+    Driving the registry through two ``asyncio.run`` calls on the same
+    session id must succeed AND emit zero unretrieved-task warnings.
+    """
+    import warnings
+
+    from opencomputer.agent.steer import SteerRegistry
+
+    reg = SteerRegistry()
+    sid = "sess-cross-loop"
+
+    async def _turn() -> None:
+        ev = reg.cancel_event(sid)
+        # Mirror agent/loop.py:4907 — a Task that .wait()s on the Event.
+        watcher = asyncio.create_task(ev.wait())
+        # Yield once so the watcher's coro actually starts; it must not
+        # raise on .wait() entry. Then cancel cleanly.
+        await asyncio.sleep(0)
+        watcher.cancel()
+        try:
+            await watcher
+        except asyncio.CancelledError:
+            pass
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        asyncio.run(_turn())
+        asyncio.run(_turn())
+        asyncio.run(_turn())
+
+    # The asyncio "Task exception was never retrieved" message is logged,
+    # not warned — but a stricter assertion is that none of our calls
+    # raised. If the bug is back, the asyncio.run on turn 2 raises
+    # RuntimeError, the test fails before this assert.
+    cross_loop = [
+        str(w.message) for w in caught
+        if "different event loop" in str(w.message)
+    ]
+    assert cross_loop == [], (
+        "asyncio.Event leaked across asyncio.run() boundary: "
+        f"{cross_loop!r}"
+    )
+
+
+def test_cancel_event_preserves_set_state_across_loops() -> None:
+    """A pending cancel signal (``submit`` then turn-end then new turn)
+    must survive the loop rebind — otherwise /steer fired between turns
+    would be silently lost.
+    """
+    from opencomputer.agent.steer import SteerRegistry
+
+    reg = SteerRegistry()
+    sid = "sess-survives-set"
+
+    async def _turn1_submit_only() -> None:
+        # Allocate the Event in this loop and signal it.
+        reg.submit(sid, "interrupt me")
+
+    async def _turn2_check() -> bool:
+        # Different loop. Event must still report is_set() True so the
+        # next turn's between-turn checkpoint can pick up the interrupt.
+        ev = reg.cancel_event(sid)
+        return ev.is_set()
+
+    asyncio.run(_turn1_submit_only())
+    assert asyncio.run(_turn2_check()) is True
+
+
+def test_submit_then_wait_in_new_loop_does_not_raise() -> None:
+    """Submit on loop A, then wait on loop B — the cross-loop guard
+    must apply on the .wait() side as well as on .set()."""
+    from opencomputer.agent.steer import SteerRegistry
+
+    reg = SteerRegistry()
+    sid = "sess-submit-then-wait"
+
+    async def _loop_a_submit() -> None:
+        reg.submit(sid, "kick")
+
+    async def _loop_b_wait() -> bool:
+        ev = reg.cancel_event(sid)
+        # Should be already set (preserved across rebind).
+        # Wait must not raise the cross-loop RuntimeError.
+        await asyncio.wait_for(ev.wait(), timeout=0.5)
+        return ev.is_set()
+
+    asyncio.run(_loop_a_submit())
+    assert asyncio.run(_loop_b_wait()) is True
+
+
+def test_make_cancelled_result_returns_valid_tool_result() -> None:
+    """Regression — ``_make_cancelled_result`` is the helper that
+    populates the tool_result slot when /steer fires mid-dispatch.
+
+    Pre-cross-loop-fix it was DEAD CODE: ``_cancel_watcher`` always
+    failed at ``Event.wait()`` with the cross-loop ``RuntimeError``,
+    ``asyncio.wait`` returned via ``FIRST_COMPLETED``,
+    ``_cancel_event.is_set()`` was False, and the agent loop took the
+    else branch that completes tools normally — so this helper was
+    never called and a typo (``call_id=`` instead of ``tool_call_id=``)
+    silently slept under the dead-code blanket.
+
+    Now that the watcher actually works, the steer-cancel branch will
+    fire and call this helper. It MUST construct a valid ToolResult
+    with the correct field name. This unit test guards against the
+    typo coming back and acts as the canary that exercises the helper
+    even without a full agent-loop integration test.
+    """
+    from opencomputer.agent.loop import _make_cancelled_result
+    from plugin_sdk.core import ToolCall, ToolResult
+
+    bash_call = ToolCall(id="toolu_bash_1", name="Bash", arguments={"cmd": "ls"})
+    result = _make_cancelled_result(bash_call, partial_stdout="line1\nline2")
+    assert isinstance(result, ToolResult)
+    assert result.tool_call_id == "toolu_bash_1"
+    assert "<INTERRUPTED-BY-STEER>" in result.content
+    assert "line1" in result.content
+    assert result.is_error is False
+
+    other_call = ToolCall(id="toolu_read_1", name="Read", arguments={})
+    result2 = _make_cancelled_result(other_call)
+    assert isinstance(result2, ToolResult)
+    assert result2.tool_call_id == "toolu_read_1"
+    assert "<INTERRUPTED-BY-STEER>" in result2.content
+    assert "no partial output" in result2.content
+
+
 # ─── AgentLoop integration ─────────────────────────────────────────
 
 

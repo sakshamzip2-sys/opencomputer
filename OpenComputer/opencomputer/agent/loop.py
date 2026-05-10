@@ -266,7 +266,7 @@ def _make_cancelled_result(call: ToolCall, partial_stdout: str = "") -> Any:
             "user steer; no partial output captured"
         )
     return ToolResult(
-        call_id=call.id or "",
+        tool_call_id=call.id or "",
         content=content,
         is_error=False,
     )
@@ -364,6 +364,105 @@ def apply_inject_contexts(
         )
         return list(messages[:-1]) + [_dc_replace(last, content=new_content)]
     return list(messages) + [Message(role="user", content=joined)]
+
+
+#: Synthetic content emitted for an assistant ``tool_use`` block that has
+#: no matching ``tool_result`` in the message history. Catches the case
+#: where a previous turn was killed mid-dispatch (process crash, asyncio
+#: cross-loop crash pre-fix, hard ^C between dispatch and persist) and
+#: left an orphan tool_use that would otherwise 400 the next provider
+#: call.
+ORPHAN_TOOL_RESULT_PLACEHOLDER = (
+    "<INTERRUPTED — tool result missing from session DB; synthesized at "
+    "the wire boundary so the Anthropic API tool_use/tool_result pairing "
+    "invariant holds. The original tool did not complete; treat as "
+    "no-op and decide what to do next.>"
+)
+
+
+def reconcile_orphan_tool_calls(
+    messages: list[Message],
+) -> tuple[list[Message], int]:
+    """Insert synthetic ``tool`` messages for any assistant ``tool_calls``
+    that lack a matching ``tool_call_id`` immediately after.
+
+    The Anthropic API rejects a request with HTTP 400 when an
+    ``assistant`` message contains ``tool_use`` blocks not paired with
+    ``tool_result`` blocks in the next message::
+
+        BadRequestError: Error code: 400 — messages.N: ``tool_use`` ids
+        were found without ``tool_result`` blocks immediately after:
+        toolu_XYZ. Each ``tool_use`` block must have a corresponding
+        ``tool_result`` block in the next message.
+
+    Sources of orphan tool_use that have actually been observed:
+
+    * pre-asyncio-fix: the SteerRegistry cancel Event lazy-bound to a
+      closed event loop, the ``_cancel_watcher`` Task raised
+      cross-loop, ``_dispatch_tool_calls``'s exception handling fell
+      back to a path that persisted the assistant message before
+      ``_persist_messages_batch`` had a chance to write the
+      tool_results.
+    * hard SIGKILL / power loss between ``_dispatch_tool_calls``
+      returning and ``_persist_messages_batch`` writing the batch
+      (rare; the dispatch order is "dispatch → batch persist" precisely
+      to minimize this window — see loop.py:2631).
+    * a third-party plugin's hook decision raising mid-batch.
+
+    The agent loop calls this once at session resume (after
+    ``self.db.get_messages``) so the wire-level message list sent to
+    the provider is always self-consistent. The DB row is left intact —
+    permanent repair is a separate `oc session repair` concern.
+
+    Algorithm:
+
+    1. Walk messages left-to-right.
+    2. When we see an assistant message with non-empty ``tool_calls``,
+       collect the ids we need to find in the next contiguous run of
+       ``tool``-role messages.
+    3. Walk that run, recording which ids we actually saw.
+    4. For each missing id, append a synthetic ``Message(role="tool",
+       content=ORPHAN_TOOL_RESULT_PLACEHOLDER, tool_call_id=<id>)``
+       at the end of the run (preserving the order of the originals).
+    5. Continue from the next non-tool message.
+
+    Returns ``(sanitized_messages, num_inserted)``. ``num_inserted == 0``
+    means the history was already clean — the common case.
+
+    Pure function. Idempotent: applying twice produces the same output
+    as applying once.
+    """
+    if not messages:
+        return [], 0
+    out: list[Message] = []
+    inserted = 0
+    i = 0
+    n = len(messages)
+    while i < n:
+        m = messages[i]
+        out.append(m)
+        if m.role == "assistant" and m.tool_calls:
+            needed_ids = [tc.id for tc in m.tool_calls]
+            seen_ids: set[str] = set()
+            j = i + 1
+            while j < n and messages[j].role == "tool":
+                tc_id = messages[j].tool_call_id
+                if tc_id is not None and tc_id in needed_ids:
+                    seen_ids.add(tc_id)
+                out.append(messages[j])
+                j += 1
+            for tc_id in needed_ids:
+                if tc_id not in seen_ids:
+                    out.append(Message(
+                        role="tool",
+                        content=ORPHAN_TOOL_RESULT_PLACEHOLDER,
+                        tool_call_id=tc_id,
+                    ))
+                    inserted += 1
+            i = j
+        else:
+            i += 1
+    return out, inserted
 
 
 def merge_adjacent_user_messages(messages: list[Message]) -> list[Message]:
@@ -1017,6 +1116,26 @@ class AgentLoop:
             # Existing session — already in DB, just track as ensured.
             self._session_ensured.add(sid)
             messages = self.db.get_messages(sid)
+            # Defensive: a previous turn may have been killed mid-dispatch
+            # (asyncio cross-loop crash pre-fix, hard SIGKILL between
+            # ``_dispatch_tool_calls`` and ``_persist_messages_batch``,
+            # plugin hook failure, etc.) leaving an assistant ``tool_use``
+            # block in the DB without its matching ``tool_result``.
+            # Anthropic 400s on that. Insert synthetic
+            # ``<INTERRUPTED — tool result missing>`` placeholders at the
+            # wire boundary so the next provider call has a self-consistent
+            # history. The DB row is left intact — repair is opt-in.
+            messages, _orphans_fixed = reconcile_orphan_tool_calls(messages)
+            if _orphans_fixed:
+                _log.warning(
+                    "session %s: reconciled %d orphan tool_use block(s) "
+                    "missing their tool_result on resume — synthesized "
+                    "<INTERRUPTED> placeholders so the provider call "
+                    "passes Anthropic's tool_use/tool_result pairing "
+                    "check. Run `oc session show %s` to inspect; the DB "
+                    "row is unchanged.",
+                    sid, _orphans_fixed, sid,
+                )
 
         # Phase 12b6 D8: slash-command dispatch. If the user's message maps
         # to a registered command, handle it inline. When the command's

@@ -451,3 +451,144 @@ def test_realistic_180_message_session_converts_cleanly(provider):
     for i in asst_indices:
         types = [b["type"] for b in wire[i]["content"]]
         assert "tool_use" in types
+
+
+# ─── Phase 5: ``tool_use without tool_result`` reconciliation ──────────
+#
+# Symmetric to Phase 1-4 (which target the *orphan tool_result* shape).
+# The asyncio-cross-loop bug (steer cancel Event lazy-bound to a closed
+# loop, fixed 2026-05-10 in steer.py) was one trigger; hard SIGKILL or
+# plugin-hook failure between ``_dispatch_tool_calls`` and
+# ``_persist_messages_batch`` is another. The wire-side guard is
+# :func:`reconcile_orphan_tool_calls`, applied at session resume in
+# :meth:`AgentLoop._run_conversation`.
+
+
+def test_reconcile_orphan_tool_calls_is_noop_on_clean_history():
+    """No tool_use → no work to do; identity transform."""
+    from opencomputer.agent.loop import reconcile_orphan_tool_calls
+
+    msgs = _build_session(3)  # 9 messages, all paired
+    out, inserted = reconcile_orphan_tool_calls(msgs)
+    assert inserted == 0
+    assert out == msgs
+
+
+def test_reconcile_orphan_tool_calls_inserts_synthetic_for_missing_pair():
+    """Single orphan: assistant has tool_use, no following tool message.
+
+    This is the exact wire shape that triggers Anthropic's 400::
+
+        messages.N: ``tool_use`` ids were found without ``tool_result``
+        blocks immediately after: toolu_XXX
+    """
+    from opencomputer.agent.loop import (
+        ORPHAN_TOOL_RESULT_PLACEHOLDER,
+        reconcile_orphan_tool_calls,
+    )
+
+    msgs = [
+        Message(role="user", content="run a command"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[ToolCall(id="toolu_orphan_42", name="Bash", arguments={"cmd": "ls"})],
+        ),
+        # ↑ This assistant turn was persisted with its tool_use, but the
+        # process died before the tool_result row was written.
+        Message(role="user", content="ok keep going"),
+    ]
+    out, inserted = reconcile_orphan_tool_calls(msgs)
+    assert inserted == 1
+    assert len(out) == 4
+    # The inserted synthetic must sit BETWEEN the assistant tool_use and
+    # the next user message.
+    assert out[0].role == "user"
+    assert out[1].role == "assistant"
+    assert out[2].role == "tool"
+    assert out[2].tool_call_id == "toolu_orphan_42"
+    assert out[2].content == ORPHAN_TOOL_RESULT_PLACEHOLDER
+    assert out[3].role == "user"
+
+
+def test_reconcile_orphan_tool_calls_handles_partial_pairing():
+    """Assistant with multiple tool_calls, only some have results."""
+    from opencomputer.agent.loop import reconcile_orphan_tool_calls
+
+    msgs = [
+        Message(role="user", content="run two things"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                ToolCall(id="toolu_a", name="Read", arguments={}),
+                ToolCall(id="toolu_b", name="Bash", arguments={}),
+                ToolCall(id="toolu_c", name="Grep", arguments={}),
+            ],
+        ),
+        # Only toolu_a was persisted before the crash.
+        Message(role="tool", content="file contents", tool_call_id="toolu_a"),
+    ]
+    out, inserted = reconcile_orphan_tool_calls(msgs)
+    assert inserted == 2
+    # Original tool message preserved + 2 synthetics in order of needed_ids.
+    tool_msgs = [m for m in out if m.role == "tool"]
+    assert len(tool_msgs) == 3
+    seen_ids = {m.tool_call_id for m in tool_msgs}
+    assert seen_ids == {"toolu_a", "toolu_b", "toolu_c"}
+    real = next(m for m in tool_msgs if m.tool_call_id == "toolu_a")
+    assert real.content == "file contents"  # not overwritten
+
+
+def test_reconcile_orphan_tool_calls_idempotent():
+    """Applying twice gives the same result as applying once."""
+    from opencomputer.agent.loop import reconcile_orphan_tool_calls
+
+    msgs = [
+        Message(role="user", content="x"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[ToolCall(id="toolu_z", name="Read", arguments={})],
+        ),
+        Message(role="user", content="y"),
+    ]
+    once, n1 = reconcile_orphan_tool_calls(msgs)
+    twice, n2 = reconcile_orphan_tool_calls(once)
+    assert n1 == 1
+    assert n2 == 0
+    assert once == twice
+
+
+def test_reconcile_then_anthropic_converter_passes(provider):
+    """End-to-end: an orphan tool_use survives reconcile-then-convert with
+    no 400-trigger shape on the wire."""
+    from opencomputer.agent.loop import reconcile_orphan_tool_calls
+
+    msgs = [
+        Message(role="user", content="run"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[ToolCall(id="toolu_orphan", name="Bash", arguments={"cmd": "ls"})],
+        ),
+        Message(role="user", content="next"),
+    ]
+    reconciled, inserted = reconcile_orphan_tool_calls(msgs)
+    assert inserted == 1
+    wire = provider._to_anthropic_messages(reconciled)
+    # Walk the wire and verify the synthetic tool_result block appears in
+    # the user message immediately after the assistant tool_use.
+    assistant_idx = next(
+        i for i, m in enumerate(wire)
+        if m["role"] == "assistant" and isinstance(m["content"], list)
+        and any(b.get("type") == "tool_use" for b in m["content"])
+    )
+    next_msg = wire[assistant_idx + 1]
+    assert next_msg["role"] == "user"
+    blocks = next_msg["content"]
+    assert isinstance(blocks, list)
+    tool_result_blocks = [b for b in blocks if b.get("type") == "tool_result"]
+    assert any(b.get("tool_use_id") == "toolu_orphan" for b in tool_result_blocks)
+    # And the symmetrical check still passes (no orphan tool_results).
+    _assert_no_orphan_tool_results(wire)
