@@ -493,8 +493,17 @@ opencomputer gateway       # daemon for Telegram/Discord
 opencomputer wire          # WebSocket API at ws://127.0.0.1:18789
 opencomputer plugins       # list 7 installed plugins
 opencomputer skills        # list skills
-opencomputer doctor        # health check
+opencomputer doctor        # health check (multi-layer)
 opencomputer config show   # dump config
+
+# Memory subcommands (`opencomputer memory --help` for the full set)
+opencomputer memory audit            # per-paragraph inspection of MEMORY.md (PR #588)
+opencomputer memory audit --user     # same for USER.md
+opencomputer memory audit --all      # both files
+opencomputer memory audit --interactive  # walk + prompt keep/delete/replace/skip
+opencomputer memory show [--user]    # cat the file
+opencomputer memory edit [--user]    # open in $EDITOR
+opencomputer memory prune [--user]   # clear file (.bak preserved)
 ```
 
 ### Test / lint
