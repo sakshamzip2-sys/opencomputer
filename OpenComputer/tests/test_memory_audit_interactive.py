@@ -124,3 +124,31 @@ class TestInteractiveCtrlCAborts:
         assert result.exit_code == 0
         # Unknown actions default to skip → no changes
         assert decl.read_text(encoding="utf-8") == before
+
+
+class TestInteractiveAllWalksBothFiles:
+    """Regression test for the /review-flagged "—all --interactive walks only first
+    file" claim. Verifies that --all --interactive iterates over BOTH MEMORY.md
+    AND USER.md, prompting for paragraphs in each.
+    """
+
+    def test_all_interactive_walks_memory_then_user(self, runner, fixture_files):
+        _decl, _user, mm = fixture_files
+        # Fixture: MEMORY.md has 3 paragraphs, USER.md has 1 paragraph
+        # Walk:
+        #   MEMORY.md → keep, delete (the TODO one), keep
+        #   USER.md → delete the only paragraph
+        # Total stdin lines: 4 actions
+        result = runner.invoke(
+            memory_app,
+            ["audit", "--all", "--interactive"],
+            input="k\nd\nk\nd\n",
+        )
+        assert result.exit_code == 0, result.output
+        # MEMORY.md: TODO paragraph deleted, others kept
+        body = mm.read_declarative()
+        assert "alpha first paragraph" in body
+        assert "gamma third paragraph" in body
+        assert "beta second paragraph TODO" not in body
+        # USER.md: paragraph deleted
+        assert "user paragraph one" not in mm.read_user()
