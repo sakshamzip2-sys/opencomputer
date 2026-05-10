@@ -117,7 +117,7 @@ def test_optional_channel_pre_selects_already_configured(
     assert "configured" in text
 
 
-def test_run_setup_offers_returning_user_menu_not_overwrite_yn(
+def test_run_setup_delegates_to_new_onboarding_ui(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Existing config → menu (Quick / Full / individual sections / Exit),
@@ -137,20 +137,16 @@ def test_run_setup_offers_returning_user_menu_not_overwrite_yn(
 
     monkeypatch.setattr("sys.stdin", FakeTTY())
 
-    asked: list[str] = []
+    called: list[dict] = []
 
-    def fake_prompt_ask(prompt, choices=None, **_):
-        asked.append(str(prompt))
-        return "exit"
+    def fake_run_setup(**kwargs):
+        called.append(kwargs)
 
-    monkeypatch.setattr(setup_wizard.Prompt, "ask", fake_prompt_ask)
+    monkeypatch.setattr("opencomputer.cli_setup.wizard.run_setup", fake_run_setup)
 
     setup_wizard.run_setup()
 
-    joined = " ".join(asked).lower()
-    assert "quick" in joined and "full" in joined, (
-        "expected returning users to see a Quick / Full menu, not a yes/no overwrite"
-    )
+    assert called == [{"quick": None}]
 
 
 def test_run_setup_refuses_in_non_tty(

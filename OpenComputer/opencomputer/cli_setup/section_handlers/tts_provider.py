@@ -1,62 +1,30 @@
-"""TTS provider section (S2).
-
-Modeled after Hermes's setup_tts (hermes_cli/setup.py:1262).
-Independently re-implemented (no code copied).
-
-Single 2-option radiolist:
-  1. Apply Edge TTS default — writes tts.provider="edge-tts",
-     voice="en-US-AriaNeural". Free, cloud-based, no API key needed.
-  2. Skip — keep current.
-
-Apply path is a focused merge: only `provider` and `voice` are
-overwritten; other tts.* keys (speed, model, custom voice maps) are
-preserved.
-
-Picking among offline engines (NeuTTS, KittenTTS) and premium engines
-(ElevenLabs, OpenAI TTS, xAI, MiniMax, Mistral, Gemini) is deferred —
-those need dependency-install or per-provider auth logic; users can
-edit ~/.opencomputer/config.yaml or run `oc setup tts` (planned) for
-fine-grained control.
-
-Default matches Hermes's choice (edge) per
-hermes_cli/setup.py::_setup_tts_provider — Edge TTS works out of the
-box without any signup.
-"""
+"""Text-to-speech provider setup section."""
 from __future__ import annotations
 
 from opencomputer.cli_setup.sections import SectionResult, WizardCtx
 from opencomputer.cli_ui.menu import Choice, radiolist
 
-_DEFAULT_TTS = {
-    "provider": "edge-tts",
-    "voice": "en-US-AriaNeural",
-}
-
-
-def _apply_defaults(ctx: WizardCtx) -> None:
-    """Merge default tts.provider/voice into config without clobbering
-    other tts.* keys."""
-    tts_block = ctx.config.setdefault("tts", {})
-    for key, value in _DEFAULT_TTS.items():
-        tts_block[key] = value
+_TTS_OPTIONS = [
+    Choice("Microsoft Edge TTS [recommended, free] - no API key needed", "edge-tts"),
+    Choice("Skip - keep defaults / configure later", "skip"),
+    Choice("OpenAI TTS [paid] - high quality voices", "openai"),
+    Choice("xAI TTS - Grok voices, requires xAI API key", "xai"),
+    Choice("ElevenLabs [paid] - premium voice quality", "elevenlabs"),
+    Choice("Google Gemini TTS - prompt-controllable voices", "gemini"),
+    Choice("KittenTTS [local, free] - lightweight local ONNX TTS", "kittentts"),
+    Choice("Piper [local, free] - local neural TTS", "piper"),
+]
 
 
 def run_tts_provider_section(ctx: WizardCtx) -> SectionResult:
-    choices = [
-        Choice("Apply Edge TTS default (free, no API key)", "apply"),
-        Choice("Skip — configure later", "skip"),
-    ]
-    idx = radiolist(
-        "Configure TTS provider for voice output?",
-        choices, default=1,
-        description="Default uses Edge TTS — Microsoft's free cloud voices, "
-                     "no signup. Premium engines (ElevenLabs, OpenAI, xAI, "
-                     "MiniMax, Mistral, Gemini, NeuTTS, KittenTTS) "
-                     "configurable via ~/.opencomputer/config.yaml.",
-    )
-    if idx == 1:
+    idx = radiolist("Choose a provider:", _TTS_OPTIONS, default=1)
+    provider = str(_TTS_OPTIONS[idx].value)
+    if provider == "skip":
         return SectionResult.SKIPPED_FRESH
 
-    _apply_defaults(ctx)
-    print("  ✓ Applied Edge TTS default (no API key required).")
+    tts = ctx.config.setdefault("tts", {})
+    tts["provider"] = provider
+    if provider == "edge-tts":
+        tts.setdefault("voice", "en-US-AriaNeural")
+    print(f"  ✓ Text-to-speech provider set to {provider}")
     return SectionResult.CONFIGURED

@@ -1,5 +1,5 @@
 """
-opencomputer setup — interactive first-run wizard.
+oc setup — interactive first-run wizard.
 
 Walks a new user through: pick provider → enter API key → optionally add
 channel tokens → write config.yaml → test the provider connection.
@@ -43,7 +43,7 @@ console = Console()
 # The setup wizard's channel step only writes config.yaml; nothing in
 # core wires channel selection to plugin activation. P-10 closes that
 # loop by auto-enabling the plugin that backs each chosen channel so
-# new users don't have to discover ``opencomputer plugin enable
+# new users don't have to discover ``oc plugin enable
 # <id>`` separately.
 #
 # HARD CONSTRAINT (Phase 5.B identity): we ONLY enable plugins that
@@ -424,27 +424,12 @@ async def _test_provider(provider_id: str, env_key: str) -> bool:
 
 
 def run_setup() -> None:
-    """Interactive setup wizard entry point.
-
-    Hermes parity:
-
-    - TTY guard up-front (``hermes_cli/main.py::_require_tty``) — we
-      refuse with a clear stderr message when stdin is a pipe so a
-      ``opencomputer setup < something.txt`` invocation doesn't hang.
-    - On existing config, returning users see a Welcome Back menu
-      (Quick / Full / individual section / Exit) instead of the
-      destructive Overwrite? Y/N. Mirrors hermes' menu at
-      ``hermes_cli/setup.py:2982-3018``.
-    """
+    """Compatibility entry point for the old procedural setup module."""
     from opencomputer.cli import _require_tty
+    from opencomputer.cli_setup.wizard import run_setup as run_new_setup
 
     _require_tty("setup")
-
-    _print_banner()
-
-    if config_file_path().exists():
-        return _setup_returning_user()
-    _run_full_setup(default_config())
+    run_new_setup(quick=None)
 
 
 def _setup_returning_user() -> None:
@@ -498,7 +483,7 @@ def _run_full_setup(cfg: Config) -> None:
 
     console.print(
         "\n[bold green]Setup complete.[/bold green] "
-        "Run [bold]opencomputer[/bold] to chat."
+        "Run [bold]oc[/bold] to chat."
     )
 
 
@@ -566,7 +551,7 @@ def _downgrade_memory_provider_to_empty() -> None:
 
     Called when Docker is absent or when ``ensure_started()`` fails —
     next wizard/CLI invocation should NOT retry the Honcho bring-up
-    until the user explicitly runs ``opencomputer memory setup``.
+    until the user explicitly runs ``oc memory setup``.
     """
     try:
         cfg = load_config()
@@ -630,7 +615,7 @@ def _optional_honcho() -> None:
                 console.print(
                     "[yellow]![/yellow] Docker daemon didn't come up in time. "
                     "Continuing on baseline memory; once Docker Desktop is "
-                    "running, run [cyan]opencomputer memory setup[/cyan] to enable Honcho."
+                    "running, run [cyan]oc memory setup[/cyan] to enable Honcho."
                 )
                 _downgrade_memory_provider_to_empty()
                 return
@@ -647,7 +632,7 @@ def _optional_honcho() -> None:
             )
             console.print(
                 f"[yellow]![/yellow] Docker daemon is not running — please start it "
-                f"([cyan]{cmd}[/cyan]) and re-run [cyan]opencomputer memory setup[/cyan]."
+                f"([cyan]{cmd}[/cyan]) and re-run [cyan]oc memory setup[/cyan]."
             )
             _downgrade_memory_provider_to_empty()
             return
@@ -670,7 +655,7 @@ def _optional_honcho() -> None:
     console.print(f"[red]✗[/red] {msg}")
     console.print(
         "[dim]Continuing on baseline memory. Fix the issue and re-run "
-        "[cyan]opencomputer memory setup[/cyan] to enable Honcho later.[/dim]"
+        "[cyan]oc memory setup[/cyan] to enable Honcho later.[/dim]"
     )
     _downgrade_memory_provider_to_empty()
 
@@ -681,10 +666,10 @@ def _optional_social_traces() -> None:
     Strictly opt-in (default no): the plugin sends redacted task
     summaries to a remote OpenHub endpoint and only becomes useful
     once one is configured. We perform the two flips a manual user
-    would do — ``opencomputer plugin enable social-traces``
-    (``profile.yaml``) and ``opencomputer traces enable``
+    would do — ``oc plugin enable social-traces``
+    (``profile.yaml``) and ``oc traces enable``
     (``<profile_home>/traces/state.json``). Endpoint configuration is
-    left for the user via the ``opencomputer traces`` commands.
+    left for the user via the ``oc traces`` commands.
     """
     console.print(
         "\n[bold]Step 6 — community trace network (optional, opt-in)[/bold]"
@@ -731,7 +716,7 @@ def _optional_social_traces() -> None:
 
     console.print(
         "[green]✓[/green] social-traces enabled. "
-        "Configure an OpenHub endpoint with [cyan]opencomputer traces[/cyan]."
+        "Configure an OpenHub endpoint with [cyan]oc traces[/cyan]."
     )
 
 

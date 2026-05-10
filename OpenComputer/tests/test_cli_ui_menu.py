@@ -18,6 +18,56 @@ def test_choice_dataclass_holds_label_value_and_optional_description():
     assert c2.description is None
 
 
+def test_menu_style_forces_default_background_without_reverse_video():
+    """Selected/menu text should be green-on-terminal-bg, not grey reverse video."""
+    from opencomputer.cli_ui.style import MENU_STYLE
+
+    for style_name in (
+        "menu.title",
+        "menu.hint",
+        "menu.selected",
+        "menu.selected.arrow",
+        "menu.selected.glyph",
+        "menu.unselected.glyph",
+        "menu.description",
+    ):
+        attrs = MENU_STYLE.get_attrs_for_style_str(f"class:{style_name}")
+        assert attrs.bgcolor == "ansidefault"
+        assert attrs.reverse is False
+
+
+def test_menu_window_hides_cursor_and_does_not_extend_highlight_area():
+    """The prompt-toolkit cursor line must not paint a grey slab behind rows."""
+    from prompt_toolkit.formatted_text import FormattedText
+
+    from opencomputer.cli_ui.menu import _menu_window
+
+    window = _menu_window(lambda: FormattedText([("", "x")]))
+
+    assert window.always_hide_cursor()
+    assert window.dont_extend_width()
+    assert window.content.show_cursor is False
+
+
+def test_menu_application_does_not_open_nested_alternate_buffer():
+    from prompt_toolkit.formatted_text import FormattedText
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.output import DummyOutput
+
+    from opencomputer.cli_ui.menu import _menu_application
+    from opencomputer.cli_ui.style import MENU_STYLE
+
+    app = _menu_application(
+        lambda: FormattedText([("", "x")]),
+        KeyBindings(),
+        style=MENU_STYLE,
+        _input=None,
+        _output=DummyOutput(),
+    )
+
+    assert app.renderer.full_screen is False
+
+
 def test_radiolist_numbered_fallback_returns_index_for_valid_input(monkeypatch, capsys):
     """When stdin is non-TTY, radiolist falls back to a numbered prompt."""
     from opencomputer.cli_ui.menu import Choice, radiolist
@@ -107,6 +157,49 @@ def test_radiolist_tty_immediate_enter_returns_default(monkeypatch):
     assert idx == 1
 
 
+def test_radiolist_tty_number_then_enter_selects_numbered_row(monkeypatch):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from opencomputer.cli_ui.menu import Choice, radiolist
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text("2\r")
+        idx = radiolist(
+            "Pick:",
+            [Choice("A", "a"), Choice("B", "b"), Choice("C", "c")],
+            default=0,
+            _input=pipe_input,
+            _output=DummyOutput(),
+        )
+
+    assert idx == 1
+
+
+def test_radiolist_tty_multi_digit_number_then_enter(monkeypatch):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from opencomputer.cli_ui.menu import Choice, radiolist
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    choices = [Choice(f"Item {i}", i) for i in range(1, 13)]
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text("12\r")
+        idx = radiolist(
+            "Pick:",
+            choices,
+            default=0,
+            _input=pipe_input,
+            _output=DummyOutput(),
+        )
+
+    assert idx == 11
+
+
 def test_radiolist_tty_esc_raises_wizard_cancelled(monkeypatch):
     from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.output import DummyOutput
@@ -169,6 +262,27 @@ def test_checklist_tty_space_toggles_then_enter_confirms(monkeypatch):
     assert selected == [0, 1]
 
 
+def test_checklist_tty_number_moves_cursor_then_space_toggles(monkeypatch):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from opencomputer.cli_ui.menu import Choice, checklist
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    items = [Choice(f"Item {i}", i) for i in range(1, 13)]
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text("12 \r")
+        selected = checklist(
+            "Pick:",
+            items,
+            _input=pipe_input,
+            _output=DummyOutput(),
+        )
+
+    assert selected == [11]
+
+
 def test_checklist_tty_esc_raises_wizard_cancelled(monkeypatch):
     from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.output import DummyOutput
@@ -211,5 +325,24 @@ def test_single_select_tty_arrow_then_enter(monkeypatch):
             "Pick:",
             [Choice("A", "a"), Choice("B", "b"), Choice("C", "c")],
             default=0, _input=pipe_input, _output=DummyOutput(),
+        )
+    assert idx == 2
+
+
+def test_single_select_tty_number_then_enter(monkeypatch):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from opencomputer.cli_ui.menu import Choice, single_select
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text("3\r")
+        idx = single_select(
+            "Pick:",
+            [Choice("A", "a"), Choice("B", "b"), Choice("C", "c")],
+            default=0,
+            _input=pipe_input,
+            _output=DummyOutput(),
         )
     assert idx == 2

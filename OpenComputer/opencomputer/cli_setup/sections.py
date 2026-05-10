@@ -1,8 +1,4 @@
-"""Data model for the wizard's section-driven flow.
-
-Visual + UX modeled after hermes-agent's hermes_cli/setup.py::run_setup_wizard.
-Independently re-implemented (no code copied) — see spec § 10 O1.
-"""
+"""Data model and registry for the section-driven setup wizard."""
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -20,9 +16,7 @@ class SectionResult(Enum):
 
 @dataclass
 class WizardCtx:
-    """Threaded through every section handler. Mutating ``config`` is
-    expected; the orchestrator persists the dict to disk after all
-    sections run."""
+    """Shared mutable context passed through all setup sections."""
 
     config: dict
     config_path: Path
@@ -31,14 +25,13 @@ class WizardCtx:
     extra: dict = field(default_factory=dict)
 
 
-HandlerFn = Callable[["WizardCtx"], "SectionResult"]
-ConfiguredCheckFn = Callable[["WizardCtx"], bool]
+HandlerFn = Callable[[WizardCtx], SectionResult]
+ConfiguredCheckFn = Callable[[WizardCtx], bool]
 
 
 @dataclass
 class WizardSection:
-    """One step in the wizard. Handlers and configured_check both
-    receive the WizardCtx."""
+    """One setup section."""
 
     key: str
     icon: str
@@ -48,15 +41,16 @@ class WizardSection:
     configured_check: ConfiguredCheckFn | None = None
     deferred: bool = False
     target_subproject: str = ""
+    quick: bool = False
 
 
 def _build_registry() -> list[WizardSection]:
-    """Single source of truth for section order. Imports happen here
-    (not at module top) so deferred-section subprojects can register
-    without circular imports."""
     from opencomputer.cli_setup.section_handlers.agent_settings import (
         is_agent_settings_configured,
         run_agent_settings_section,
+    )
+    from opencomputer.cli_setup.section_handlers.configuration_location import (
+        run_configuration_location_section,
     )
     from opencomputer.cli_setup.section_handlers.inference_provider import (
         is_inference_provider_configured,
@@ -69,31 +63,43 @@ def _build_registry() -> list[WizardSection]:
     from opencomputer.cli_setup.section_handlers.prior_install import (
         run_prior_install_section,
     )
-    from opencomputer.cli_setup.section_handlers.service_install import (
-        run_service_install_section,
-    )
     from opencomputer.cli_setup.section_handlers.terminal_backend import (
         run_terminal_backend_section,
     )
-    from opencomputer.cli_setup.section_handlers.tools import (
-        run_tools_section,
-    )
+    from opencomputer.cli_setup.section_handlers.tools import run_tools_section
     from opencomputer.cli_setup.section_handlers.tts_provider import (
         run_tts_provider_section,
+    )
+    from opencomputer.cli_setup.section_handlers.vision_provider import (
+        is_vision_provider_configured,
+        run_vision_provider_section,
     )
 
     return [
         WizardSection(
-            key="opencomputer_prior_detect", icon="◆",
+            key="configuration_location",
+            icon="◆",
+            title="Configuration Location",
+            description=(
+                "OpenComputer stores settings, secrets, and data under "
+                "~/.opencomputer."
+            ),
+            handler=run_configuration_location_section,
+            quick=True,
+        ),
+        WizardSection(
+            key="opencomputer_prior_detect",
+            icon="◆",
             title="OpenClaw / Hermes Installation Detected",
             description=(
                 "Detect ~/.openclaw or ~/.hermes data and offer to import "
-                "MEMORY/USER/SOUL files + skills/ (non-destructive)."
+                "MEMORY/USER/SOUL files + skills/ non-destructively."
             ),
             handler=run_prior_install_section,
         ),
         WizardSection(
-            key="inference_provider", icon="◆",
+            key="inference_provider",
+            icon="◆",
             title="Inference Provider",
             description=(
                 "Choose how to connect to your main chat model.\n"
@@ -101,61 +107,70 @@ def _build_registry() -> list[WizardSection]:
             ),
             handler=run_inference_provider_section,
             configured_check=is_inference_provider_configured,
+            quick=True,
         ),
         WizardSection(
-            key="messaging_platforms", icon="◆",
-            title="Messaging Platforms",
+            key="vision_provider",
+            icon="◆",
+            title="Vision & Image Analysis (optional)",
             description=(
-                "Connect to messaging platforms to chat with OpenComputer from anywhere.\n"
-                "Toggle with Space, confirm with Enter."
+                "Vision uses a separate multimodal backend. Skip now if "
+                "you do not need image analysis yet."
             ),
-            handler=run_messaging_platforms_section,
-            configured_check=is_messaging_platforms_configured,
+            handler=run_vision_provider_section,
+            configured_check=is_vision_provider_configured,
         ),
         WizardSection(
-            key="agent_settings", icon="◆", title="Agent Settings",
-            description=(
-                "Max iterations, parallel tools, inactivity + iteration "
-                "timeouts.\n"
-                "Recommended defaults work for most use cases."
-            ),
-            handler=run_agent_settings_section,
-            configured_check=is_agent_settings_configured,
-        ),
-        WizardSection(
-            key="tts_provider", icon="◆",
+            key="tts_provider",
+            icon="◆",
             title="Text-to-Speech Provider (optional)",
-            description=(
-                "Voice output. Default: Edge TTS (free, no API key). "
-                "Premium engines (ElevenLabs, OpenAI, xAI, NeuTTS, KittenTTS) "
-                "configurable later via config.yaml."
-            ),
+            description="Choose a voice output backend or keep it disabled.",
             handler=run_tts_provider_section,
         ),
         WizardSection(
-            key="terminal_backend", icon="◆", title="Terminal Backend",
+            key="terminal_backend",
+            icon="◆",
+            title="Terminal Backend",
             description=(
-                "Where Hermes runs shell commands and code. "
-                "Choose: local (default) / docker / apptainer."
+                "Choose where OpenComputer runs shell commands and code. "
+                "This affects execution, file access, and isolation."
             ),
             handler=run_terminal_backend_section,
+            quick=True,
         ),
         WizardSection(
-            key="tools", icon="◆", title="Tools",
+            key="agent_settings",
+            icon="◆",
+            title="Agent Settings",
             description=(
-                "Enable the recommended plugin preset "
-                "(coding-harness + memory-honcho + dev-tools)."
+                "Max iterations, tool progress display, context compression, "
+                "and reset policy."
+            ),
+            handler=run_agent_settings_section,
+            configured_check=is_agent_settings_configured,
+            quick=True,
+        ),
+        WizardSection(
+            key="messaging_platforms",
+            icon="◆",
+            title="Messaging Platforms",
+            description=(
+                "Connect Telegram, Discord, Slack, Matrix, and other channel "
+                "plugins."
+            ),
+            handler=run_messaging_platforms_section,
+            configured_check=is_messaging_platforms_configured,
+            quick=True,
+        ),
+        WizardSection(
+            key="tools",
+            icon="◆",
+            title="Tools / Tool Providers",
+            description=(
+                "Enable the recommended CLI tool set and provider-specific "
+                "tool integrations."
             ),
             handler=run_tools_section,
-        ),
-        WizardSection(
-            key="service_install", icon="◆", title="Always-On System Service",
-            description=(
-                "Install the gateway as a system service so it runs on login\n"
-                "and restarts on crash. Cross-platform: launchd (macOS),\n"
-                "systemd-user (Linux), Task Scheduler (Windows)."
-            ),
-            handler=run_service_install_section,
         ),
     ]
 

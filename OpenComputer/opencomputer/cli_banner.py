@@ -162,6 +162,56 @@ def _truncate_csv(items: list[str], max_chars: int) -> str:
     return ", ".join(out) + ellipsis
 
 
+_BLOCK_LOGO_WIDTH = 105  # widest line of OPENCOMPUTER_BLOCK_LOGO
+
+# Side mascot — a clean little robot rendered in yellow on the left
+# of the info panel (Hermes-screenshot layout). Designed to read as
+# a "computer agent" at a glance: head with eyes + antenna, torso
+# with status LEDs, two stubby arms.
+_OC_MASCOT = (
+    "          ▄▄▄          \n"
+    "         ╱   ╲         \n"
+    "        ╱_____╲        \n"
+    "       ┌───────┐       \n"
+    "       │ ◉   ◉ │       \n"
+    "       │   ▽   │       \n"
+    "       │  ───  │       \n"
+    "       └───┬───┘       \n"
+    "      ╔════╧════╗      \n"
+    "    ◀═╣ ▣  ▣  ▣ ╠═▶    \n"
+    "      ║ ▒▒▒▒▒▒▒ ║      \n"
+    "      ║  oc-01  ║      \n"
+    "      ╚═══╤═╤═══╝      \n"
+    "         ─┘ └─         \n"
+    "                       \n"
+    "     OpenComputer      \n"
+    "       /agent          \n"
+)
+
+_MAX_GROUPS_SHOWN = 8       # how many tool/skill groups to list inline
+_MAX_ITEMS_PER_GROUP = 4    # how many items per group before "..."
+
+
+def _format_group_line(group: str, items: list[str]) -> str:
+    """Render one ``group: item1, item2, ...`` line, truncated."""
+    shown = items[:_MAX_ITEMS_PER_GROUP]
+    csv = ", ".join(shown)
+    if len(items) > _MAX_ITEMS_PER_GROUP:
+        csv += ", ..."
+    return f"  [cyan]{group}[/cyan]: [dim]{csv}[/dim]"
+
+
+def _render_groups(grouped: dict[str, list[str]]) -> tuple[list[str], int]:
+    """Render up to ``_MAX_GROUPS_SHOWN`` groups; return (lines, total_items)."""
+    total = sum(len(v) for v in grouped.values())
+    keys = list(grouped.keys())
+    lines = [_format_group_line(k, grouped[k]) for k in keys[:_MAX_GROUPS_SHOWN]]
+    extra = len(keys) - _MAX_GROUPS_SHOWN
+    if extra > 0:
+        lines.append(f"  [dim](and {extra} more group{'s' if extra != 1 else ''}…)[/dim]")
+    return lines, total
+
+
 def build_welcome_banner(
     console: Console,
     model: str,
@@ -170,28 +220,98 @@ def build_welcome_banner(
     session_id: str | None = None,
     home: Path | None = None,
 ) -> None:
-    """Print the OPENCOMPUTER welcome banner with categorized
-    tools/skills listing."""
+    """Print the OPENCOMPUTER welcome banner — Hermes-style:
+
+    1. Big chunky ANSI-Shadow title (yellow, centered).
+    2. Side-by-side block: a yellow ASCII mascot on the left, a cyan
+       info panel on the right (version + tools + skills, all
+       truncated so the panel never gets unwieldy).
+    3. Welcome line + a tip.
+    """
     import random
 
-    # Header — agent name + version, styled to read as the title of
-    # the session. SHA dropped per user request; just show ``vX.Y.Z``.
-    console.print(
-        f"[bold yellow]✦ OpenComputer[/bold yellow]  "
-        f"[dim yellow]v{__version__}[/dim yellow]"
-    )
-    console.print()
+    from rich.align import Align
+    from rich.columns import Columns
+    from rich.console import Group
+    from rich.panel import Panel
+    from rich.text import Text
 
-    # Meta block — model + working dir + session.
-    # The profile-home line was dropped per user request: it duplicated
-    # what the cwd line already conveys for most users (the cwd is what
-    # the agent operates on; the OC home dir is purely internal state).
-    console.print(f"[bold]{model}[/bold]")
-    console.print(f"[dim]{cwd}[/dim]")
+    from opencomputer.cli_banner_art import OPENCOMPUTER_BLOCK_LOGO
+
+    # Render the chunky single-line OPENCOMPUTER title. We always show
+    # it: on terminals wider than the logo we center it; on narrower
+    # terminals we print it un-centered (each row preserved) so the
+    # chunky look persists even when the user's terminal is tight. The
+    # ``no_wrap`` + ``overflow="ignore"`` keeps Rich from soft-wrapping
+    # mid-glyph and breaking the figlet rows.
+    width = console.size.width if console.size else 80
+    logo = Text(
+        OPENCOMPUTER_BLOCK_LOGO.rstrip("\n"),
+        style="bold yellow",
+        no_wrap=True,
+        overflow="ignore",
+    )
+    if width >= _BLOCK_LOGO_WIDTH + 2:
+        console.print(Align.center(logo))
+    else:
+        console.print(logo, soft_wrap=True, no_wrap=True, overflow="ignore")
+
+    # Build the info panel content — version line, tools, skills, then
+    # model/cwd/session. The grouping helpers return empty lists when
+    # the registry hasn't been initialized yet, which is fine.
+    sha = _git_short_sha() or ""
+    version_line = f"[bold yellow]OpenComputer[/bold yellow] [dim]v{__version__}[/dim]"
+    if sha:
+        version_line += f" [dim]· {sha}[/dim]"
+
+    panel_lines: list[str] = [version_line, ""]
+
+    tools_grouped = get_available_tools()
+    if tools_grouped:
+        tool_lines, n_tools = _render_groups(tools_grouped)
+        panel_lines.append("[bold]Available Tools[/bold]")
+        panel_lines.extend(tool_lines)
+        panel_lines.append("")
+
+    skills_grouped = get_available_skills()
+    if skills_grouped:
+        skill_lines, n_skills = _render_groups(skills_grouped)
+        panel_lines.append("[bold]Available Skills[/bold]")
+        panel_lines.extend(skill_lines)
+        panel_lines.append("")
+    else:
+        n_skills = 0
+    n_tools = sum(len(v) for v in tools_grouped.values()) if tools_grouped else 0
+
+    panel_lines.append(f"[bold]Model:[/bold]   {model}")
+    panel_lines.append(f"[bold]CWD:[/bold]     [dim]{cwd}[/dim]")
     if session_id:
-        console.print(f"[dim]Session: {session_id}[/dim]")
-    # ``home`` arg accepted for backwards-compat but no longer rendered.
-    _ = home
+        panel_lines.append(f"[bold]Session:[/bold] [dim]{session_id}[/dim]")
+    if n_tools or n_skills:
+        panel_lines.append("")
+        panel_lines.append(
+            f"[dim]{n_tools} tool{'s' if n_tools != 1 else ''} · "
+            f"{n_skills} skill{'s' if n_skills != 1 else ''} · "
+            f"/help for commands[/dim]"
+        )
+    _ = home  # accepted for backwards-compat; not rendered
+
+    panel_body = Group(*[Text.from_markup(line) for line in panel_lines])
+    info_panel = Panel(
+        panel_body,
+        border_style="cyan",
+        padding=(0, 2),
+        expand=False,
+    )
+
+    # Side-by-side: yellow mascot on the left, info panel on the right.
+    # Falls back to stacked rendering on narrow terminals.
+    mascot = Text(_OC_MASCOT.rstrip("\n"), style="bold yellow")
+    if width >= 100:
+        console.print(Columns([mascot, info_panel], padding=(0, 2)))
+    else:
+        console.print(mascot)
+        console.print(info_panel)
 
     # Update-check hint — non-blocking (200ms), silently None when the
     # background check hasn't finished yet (caller already invoked
@@ -204,10 +324,12 @@ def build_welcome_banner(
     except Exception:  # noqa: BLE001
         pass  # update check is purely informational; never block startup
 
-    # Welcome line — `/help` mention dropped here because the Tip below
-    # already covers it (avoids the repeated mention the user flagged).
+    # Welcome line — Hermes-parity wording.
     console.print()
-    console.print("[bold]Welcome to OpenComputer![/bold] Type your message to start.")
+    console.print(
+        "[bold]Welcome to OpenComputer![/bold] "
+        "Type your message or [cyan]/help[/cyan] for commands."
+    )
 
     # Tip
     if _TIPS:

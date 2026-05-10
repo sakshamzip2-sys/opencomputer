@@ -17,18 +17,20 @@ def test_resolve_executable_finds_oc_on_path(monkeypatch: pytest.MonkeyPatch) ->
     assert resolve_executable() == "/usr/local/bin/oc"
 
 
-def test_resolve_executable_falls_back_to_opencomputer_name(
+def test_resolve_executable_ignores_removed_opencomputer_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from opencomputer.service._common import resolve_executable
+    from opencomputer.service import _common
 
     monkeypatch.delenv("OC_EXECUTABLE", raising=False)
+    monkeypatch.setattr(_common, "_FALLBACK_PATHS", [])
 
     def fake_which(name: str) -> str | None:
         return "/usr/local/bin/opencomputer" if name == "opencomputer" else None
 
     monkeypatch.setattr("shutil.which", fake_which)
-    assert resolve_executable() == "/usr/local/bin/opencomputer"
+    with pytest.raises(RuntimeError, match="could not find oc executable"):
+        _common.resolve_executable()
 
 
 def test_resolve_executable_searches_fallbacks_when_path_misses(

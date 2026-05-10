@@ -33,6 +33,7 @@ from opencomputer.agent.rate_guard import (
 )
 from opencomputer.inference.observability import LLMCallEvent, record_llm_call
 from opencomputer.inference.pricing import compute_cost_usd
+from opencomputer.tools.schema_sanitizer import sanitize_tool_schemas
 from plugin_sdk.core import Message, ToolCall
 from plugin_sdk.embeddings import MAX_BATCH_SIZE as MAX_EMBED_BATCH_SIZE
 from plugin_sdk.embeddings import EmbeddingBatch
@@ -82,6 +83,13 @@ _OPENAI_SUPPORTED_IMAGE_MEDIA_TYPES: tuple[str, ...] = (
     "image/webp",
 )
 _OPENAI_IMAGE_MAX_BYTES: int = 20 * 1024 * 1024
+
+
+def _format_tools_for_openai(tools: list[ToolSchema] | None) -> list[dict[str, Any]]:
+    """Convert tool schemas to OpenAI wire format and sanitize JSON Schema."""
+    if not tools:
+        return []
+    return sanitize_tool_schemas([t.to_openai_format() for t in tools])
 
 
 def _build_openai_image_block(
@@ -437,7 +445,7 @@ class OpenAIProvider(BaseProvider):
             "temperature": temperature,
         }
         if tools:
-            kwargs["tools"] = [t.to_openai_format() for t in tools]
+            kwargs["tools"] = _format_tools_for_openai(tools)
         # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
         if runtime_extras:
             from opencomputer.agent.runtime_flags import (
@@ -648,7 +656,7 @@ class OpenAIProvider(BaseProvider):
             "stream": True,
         }
         if tools:
-            kwargs["tools"] = [t.to_openai_format() for t in tools]
+            kwargs["tools"] = _format_tools_for_openai(tools)
         # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
         if runtime_extras:
             from opencomputer.agent.runtime_flags import (
@@ -804,7 +812,7 @@ class OpenAIProvider(BaseProvider):
             "stream": True,
         }
         if tools:
-            kwargs["tools"] = [t.to_openai_format() for t in tools]
+            kwargs["tools"] = _format_tools_for_openai(tools)
         # Tier 2.A — /reasoning + /fast slash commands → API kwargs.
         if runtime_extras:
             from opencomputer.agent.runtime_flags import (
@@ -957,7 +965,7 @@ class OpenAIProvider(BaseProvider):
                 )
         if tools:
             for t in tools:
-                total += len(enc.encode(_json.dumps(t.to_openai_format())))
+                total += len(enc.encode(_json.dumps(_format_tools_for_openai([t])[0])))
         return max(1, total)
 
     # ─── embeddings (v1.1 plan-3 M6.6) ──────────────────────────────────
