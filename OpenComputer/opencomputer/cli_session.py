@@ -49,6 +49,7 @@ from opencomputer.profiles import (
     get_profile_dir,
     validate_profile_name,
 )
+from plugin_sdk.core import Message
 
 session_app = typer.Typer(
     name="session", help="Inspect, fork, and resume saved sessions."
@@ -509,6 +510,195 @@ def session_prune(
         if db.delete_session(r["id"]):
             deleted += 1
     console.print(f"[green]pruned[/green] {deleted} session(s)")
+
+
+# ---------------------------------------------------------------------------
+# `oc session repair` — permanent DB cleanup of orphan tool_use rows.
+# ---------------------------------------------------------------------------
+#
+# Companion to the wire-side ``reconcile_orphan_tool_calls`` (loop.py): the
+# wire sanitizer auto-heals every resume by inserting synthetic
+# ``<INTERRUPTED — tool result missing>`` placeholders, but the underlying
+# DB rows stay corrupt. Users who want their DB clean (for export, audit,
+# debugging, migration to a new harness) run ``oc session repair`` to
+# materialize the same synthetics permanently.
+
+
+@session_app.command("repair")
+def session_repair(
+    session_id: str | None = typer.Argument(
+        None,
+        help=(
+            "Session ID (full UUID hex or 8-char prefix) to repair. "
+            "Pass ``--all`` instead to scan every session."
+        ),
+    ),
+    repair_all: bool = typer.Option(
+        False,
+        "--all",
+        help="Scan and repair every session in this profile's sessions.db.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        "-n",
+        help=(
+            "Report what would change without writing. Useful for "
+            "auditing how many sessions were affected by past mid-"
+            "dispatch crashes."
+        ),
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the confirmation prompt before rewriting the DB.",
+    ),
+    profile: str | None = typer.Option(
+        None,
+        "--agent",
+        help=(
+            "Repair another profile's sessions.db. Defaults to the "
+            "active profile."
+        ),
+    ),
+) -> None:
+    """Permanently insert ``<INTERRUPTED>`` placeholders for orphan ``tool_use`` rows.
+
+    The wire-side reconciler in ``opencomputer.agent.loop.reconcile_orphan_tool_calls``
+    auto-heals at every resume so a corrupt session can still be used,
+    but it does NOT touch the DB rows — every resume re-runs the same
+    synthesis. This command makes the repair permanent: it walks each
+    target session, detects every assistant ``tool_use`` block that
+    has no matching ``tool_result`` immediately after, and rewrites the
+    session's message rows so the synthetic placeholders sit between
+    the orphan ``tool_use`` and whatever message followed it.
+
+    Sources of orphan rows historically observed:
+
+    * pre-2026-05-10 ``SteerRegistry`` cross-loop crashes that killed
+      ``_dispatch_tool_calls`` mid-flight before
+      ``_persist_messages_batch`` ran.
+    * Hard SIGKILL / power loss between dispatch and persist (rare —
+      the persist order minimizes this window; see loop.py:2631).
+    * Plugin hook decisions that raised mid-batch.
+
+    Safety: the rewrite is a single transaction (``DELETE`` then
+    ``INSERT`` under one ``BEGIN``). The autoincrement ``messages.id``
+    values are reassigned by the reinsertion. Only ``vibe_log.message_id``
+    references the old IDs and that FK is intentionally loose
+    (nullable, no ``REFERENCES``) — see ``state.py:410``. No other
+    table holds an FK to ``messages.id``.
+
+    Examples::
+
+        oc session repair --all --dry-run        # audit, report only
+        oc session repair --all                  # repair all, prompt
+        oc session repair --all --yes            # repair all, no prompt
+        oc session repair 3a4f1e9b               # repair one session
+        oc session repair 3a4f1e9b --dry-run     # audit one session
+    """
+    from opencomputer.agent.loop import reconcile_orphan_tool_calls
+
+    if session_id and repair_all:
+        console.print(
+            "[red]error:[/red] specify either a session id OR ``--all``, not both."
+        )
+        raise typer.Exit(2)
+    if not session_id and not repair_all:
+        console.print(
+            "[red]error:[/red] specify a session id, or pass ``--all``."
+        )
+        raise typer.Exit(2)
+
+    db = _db_for_profile(profile) if profile else _db()
+
+    if repair_all:
+        rows = db.list_sessions(limit=10_000)
+        targets = [r["id"] for r in rows]
+    else:
+        # Allow 8-char prefix matches (mirrors the rest of cli_session).
+        all_rows = db.list_sessions(limit=10_000)
+        sid = session_id or ""
+        matches = [r["id"] for r in all_rows if r["id"].startswith(sid)]
+        if not matches:
+            console.print(
+                f"[red]error:[/red] no session matches {sid!r}."
+            )
+            raise typer.Exit(1)
+        if len(matches) > 1:
+            console.print(
+                f"[red]error:[/red] {sid!r} is ambiguous "
+                f"({len(matches)} matches). Pass a longer prefix or full id."
+            )
+            raise typer.Exit(1)
+        targets = matches
+
+    # First pass — analysis only, never touches the DB.
+    analyses: list[tuple[str, int, list[Message]]] = []
+    for sid in targets:
+        msgs = db.get_messages(sid)
+        reconciled, n_inserted = reconcile_orphan_tool_calls(msgs)
+        if n_inserted > 0:
+            analyses.append((sid, n_inserted, reconciled))
+
+    if not analyses:
+        console.print(
+            "[green]✓[/green] no orphan tool_use blocks found in "
+            f"{len(targets)} session(s) — nothing to repair."
+        )
+        return
+
+    # Render the audit summary.
+    table = Table(title="Sessions with orphan tool_use", show_lines=False)
+    table.add_column("session", style="cyan")
+    table.add_column("orphans", justify="right")
+    table.add_column("after-repair msg count", justify="right")
+    total_orphans = 0
+    for sid, n_inserted, reconciled in analyses:
+        table.add_row(sid[:8], str(n_inserted), str(len(reconciled)))
+        total_orphans += n_inserted
+    console.print(table)
+    console.print(
+        f"[bold]{len(analyses)}[/bold] session(s) need repair · "
+        f"[bold]{total_orphans}[/bold] synthetic ``<INTERRUPTED>`` "
+        "placeholder(s) would be inserted."
+    )
+
+    if dry_run:
+        console.print(
+            "[dim](dry-run — no changes written. Re-run without "
+            "``--dry-run`` to commit.)[/dim]"
+        )
+        return
+
+    if not yes:
+        console.print(
+            f"\n[yellow]This will rewrite the messages table for "
+            f"{len(analyses)} session(s).[/yellow] Continue? [y/N] ",
+            end="",
+        )
+        try:
+            answer = input().strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in {"y", "yes"}:
+            console.print("[dim]aborted.[/dim]")
+            raise typer.Exit(1)
+
+    repaired = 0
+    for sid, n_inserted, reconciled in analyses:
+        try:
+            db.replace_session_messages(sid, reconciled)
+            repaired += 1
+        except Exception as exc:  # noqa: BLE001 — surface, don't crash the loop
+            console.print(
+                f"[red]error:[/red] {sid[:8]}: {type(exc).__name__}: {exc}"
+            )
+    console.print(
+        f"[green]✓ repaired[/green] {repaired}/{len(analyses)} "
+        f"session(s) — {total_orphans} synthetic placeholder(s) inserted."
+    )
 
 
 # ---------------------------------------------------------------------------

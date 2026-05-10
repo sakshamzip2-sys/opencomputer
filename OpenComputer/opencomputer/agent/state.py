@@ -1714,6 +1714,59 @@ class SessionDB:
             )
             return ids
 
+    def replace_session_messages(
+        self, session_id: str, msgs: list[Message]
+    ) -> list[int]:
+        """Atomically replace ALL message rows for ``session_id`` with ``msgs``.
+
+        Used by ``oc session repair`` to permanently insert synthetic
+        ``<INTERRUPTED — tool result missing>`` placeholders for orphan
+        ``tool_use`` blocks (the rows the wire-side
+        ``reconcile_orphan_tool_calls`` synthesizes at every resume).
+        Position-correct insertion is the reason this can't be a simple
+        ``append`` — Anthropic requires the ``tool_result`` block to sit
+        IMMEDIATELY after the matching ``tool_use``, which means the
+        synthetic must land between the assistant turn and whatever
+        message currently follows it. SQLite ``messages.id`` is
+        ``AUTOINCREMENT`` and ordered by, so the cleanest atomic approach
+        is delete-all-then-reinsert under a single transaction.
+
+        FK safety: ``vibe_log.message_id`` is intentionally a loose FK
+        (nullable INTEGER, no ``REFERENCES`` constraint) precisely so
+        legacy-message cleanup like this never orphans classifier
+        evidence — see the schema docstring at state.py:410. No other
+        table holds an FK to ``messages.id``. Stale ``message_id``
+        values in vibe_log just become NULL-equivalent for analytics.
+
+        ``sessions.message_count`` is reset to ``len(msgs)`` to stay
+        consistent with the new row count.
+
+        Returns the list of new row IDs in insertion order. Raises
+        ``ValueError`` on empty ``session_id``; an empty ``msgs`` list
+        is permitted and clears the session's message rows.
+        """
+        if not session_id:
+            raise ValueError(
+                "replace_session_messages: session_id must be non-empty"
+            )
+        with self._txn() as conn:
+            conn.execute(
+                "DELETE FROM messages WHERE session_id = ?",
+                (session_id,),
+            )
+            ids: list[int] = []
+            for msg in msgs:
+                cur = conn.execute(
+                    self._INSERT_MESSAGE_SQL,
+                    self._msg_row(session_id, msg),
+                )
+                ids.append(int(cur.lastrowid or 0))
+            conn.execute(
+                "UPDATE sessions SET message_count = ? WHERE id = ?",
+                (len(msgs), session_id),
+            )
+            return ids
+
     def add_tokens(
         self,
         session_id: str,
