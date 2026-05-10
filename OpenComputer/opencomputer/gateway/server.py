@@ -274,6 +274,17 @@ class Gateway:
         # ``cron.start_in_gateway: false`` for users who prefer running
         # ``oc cron daemon`` separately.
         self._cron_scheduler_task: asyncio.Task[None] | None = None
+        # 2026-05-10 — F4 user-model graph fix. ``BehavioralInferenceEngine``
+        # extracts motifs from the F2 default-bus signal stream and persists
+        # them to ``inference/motifs.sqlite``. Without a production caller,
+        # MotifStore stayed empty and ``user_model/graph.sqlite`` never got
+        # edges (the user audit found 28 nodes / 0 edges). Auto-attaching
+        # the engine in the gateway daemon means motifs flow through the
+        # pipeline by default; the periodic motif_import system-tick (cron)
+        # then materializes them into the graph. Opt out via
+        # ``user_model.inference_engine_start_in_gateway: false``.
+        self._inference_engine: Any = None
+        self._inference_subscription: Any = None
 
     def register_adapter(self, adapter: BaseChannelAdapter) -> None:
         """Register a channel adapter (usually from a loaded plugin)."""
@@ -571,6 +582,41 @@ class Gateway:
             logger.warning(
                 "gateway: cron scheduler co-tenant start failed; "
                 "cron jobs will not tick from this process",
+                exc_info=True,
+            )
+
+        # 2026-05-10 — F4 user-model graph fix: auto-attach the
+        # BehavioralInferenceEngine to the F2 default-bus so motifs
+        # are persisted as the agent runs. Default ON. The companion
+        # ``motif_import`` system-tick (in cron/system_jobs) materializes
+        # those motifs into the graph (28 nodes / 0 edges → real edges).
+        # Opt-out via ``user_model.inference_engine_start_in_gateway: false``.
+        try:
+            user_model_cfg = getattr(self._config, "user_model", None)
+            if user_model_cfg is None or getattr(
+                user_model_cfg, "inference_engine_start_in_gateway", True
+            ):
+                from opencomputer.inference.engine import (
+                    BehavioralInferenceEngine,
+                )
+
+                self._inference_engine = BehavioralInferenceEngine()
+                self._inference_engine.attach_to_bus()
+                logger.info(
+                    "gateway: BehavioralInferenceEngine attached to "
+                    "default-bus (F4 motif extraction live; opt-out via "
+                    "user_model.inference_engine_start_in_gateway=false)"
+                )
+            else:
+                logger.info(
+                    "gateway: user_model.inference_engine_start_in_gateway"
+                    "=false — motif extraction will not run from this "
+                    "process. Run `oc inference run` separately."
+                )
+        except Exception:  # noqa: BLE001 — never wedge gateway boot
+            logger.warning(
+                "gateway: BehavioralInferenceEngine attach failed; F4 "
+                "motif extraction will not run from this process",
                 exc_info=True,
             )
 
@@ -991,6 +1037,16 @@ class Gateway:
             except (TimeoutError, asyncio.CancelledError):
                 pass
             self._cron_scheduler_task = None
+        # 2026-05-10 — F4 inference engine: detach from default-bus on
+        # shutdown so subscribers don't leak across restarts.
+        if self._inference_engine is not None:
+            try:
+                self._inference_engine.detach()
+            except Exception:  # noqa: BLE001 — never let teardown fail
+                logger.debug(
+                    "gateway: inference engine detach failed", exc_info=True
+                )
+            self._inference_engine = None
         await asyncio.gather(
             *(a.disconnect() for a in self._adapters), return_exceptions=True
         )
