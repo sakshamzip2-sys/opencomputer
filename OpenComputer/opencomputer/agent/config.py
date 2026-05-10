@@ -1331,6 +1331,36 @@ class RoutingConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PromptConfig:
+    """System-prompt augmentation knobs.
+
+    Today: pinned files only (Optimize Grade E mitigation, 2026-05-10).
+    Future slots — fixed-blocks injection, persona cap overrides, etc.
+    — go here so cross-cutting prompt config doesn't sprawl across the
+    Config root.
+
+    ``pinned_files`` is the active list of paths whose CONTENTS get
+    inlined into the system prompt at session start. Each path is read
+    fresh per session (so edits propagate) but never re-read mid-session
+    via the ``Read`` tool — that's the cost win.
+
+    Default is empty: feature is opt-in via ``oc pin <path>`` or by
+    editing config.yaml directly. Wire-in is non-fatal: a missing /
+    unreadable file is logged at WARNING and skipped.
+
+    ``max_total_bytes`` caps the combined size of all pinned files. The
+    cap exists to prevent runaway prompt growth — Optimize Grade E
+    flagged 5 files of ~250KB each, which would blow context budgets if
+    pinned naively. With the cap, the pinning machinery stops appending
+    once the limit is hit and warns about which files were truncated /
+    dropped, so the operator can prune the list.
+    """
+
+    pinned_files: tuple[str, ...] = ()
+    max_total_bytes: int = 200_000  # ~50k tokens at 4 bytes/token
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Root configuration — composed of small focused configs."""
 
@@ -1422,6 +1452,13 @@ class Config:
     #: dispatcher falls through to the active profile's default agent
     #: template (current behavior, fully backwards-compatible).
     routing: RoutingConfig = field(default_factory=RoutingConfig)
+    #: 2026-05-10 — Pinned files mechanism (Optimize Grade E mitigation).
+    #: Files listed here get their content injected into the system prompt
+    #: at session start, so the agent doesn't re-read them via the Read
+    #: tool every session. Inspired by ``oc optimize``'s "Pin to system
+    #: prompt" recommendation. Empty by default; manage via
+    #: ``oc pin <path>`` / ``oc unpin <path>`` / ``oc pin --list``.
+    prompt: PromptConfig = field(default_factory=PromptConfig)
     home: Path = field(default_factory=_home)
 
 

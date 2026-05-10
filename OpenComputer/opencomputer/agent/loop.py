@@ -1230,6 +1230,32 @@ class AgentLoop:
                 # per session — ambient blocks are evaluated once at session
                 # start and cached, matching the prefix-cache invariant.
                 from plugin_sdk import effective_permission_mode as _epm
+
+                # 2026-05-10 — Pinned files (Optimize Grade E mitigation).
+                # Render once per snapshot rebuild (not per turn) so the
+                # prefix cache stays warm; the config tuple is part of the
+                # snapshot key implicitly via the resulting prompt text.
+                _pinned_files_block = ""
+                try:
+                    from opencomputer.agent.pinned_files import (
+                        render_pinned_files_block,
+                    )
+                    _pcfg = getattr(self.config, "prompt", None)
+                    _pinned_paths = getattr(_pcfg, "pinned_files", ()) if _pcfg else ()
+                    _pinned_max = (
+                        getattr(_pcfg, "max_total_bytes", 200_000)
+                        if _pcfg else 200_000
+                    )
+                    if _pinned_paths:
+                        _pinned_files_block = render_pinned_files_block(
+                            _pinned_paths, max_total_bytes=_pinned_max
+                        )
+                except Exception:  # noqa: BLE001 — pinning never breaks the loop
+                    _log.warning(
+                        "pinned_files: render failed (skipping injection)",
+                        exc_info=True,
+                    )
+
                 snapshot = await self.prompt_builder.build_with_memory(
                     skills=skills,
                     declarative_memory=declarative,
@@ -1255,6 +1281,7 @@ class AgentLoop:
                     persona_preferred_tone=getattr(
                         self, "_active_persona_preferred_tone", ""
                     ),
+                    pinned_files_block=_pinned_files_block,
                 )
                 # Evict the least-recently-used snapshot if the cache is full
                 # BEFORE inserting, so we never exceed the cap even transiently.

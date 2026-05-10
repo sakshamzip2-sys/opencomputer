@@ -869,6 +869,20 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
             routing_dict["default"] = default_out
         if routing_dict:
             result["routing"] = routing_dict
+    # 2026-05-10 — pinned files (Optimize Grade E mitigation). Only
+    # serialize when non-default so first-run configs stay clean.
+    prompt_cfg = getattr(cfg, "prompt", None)
+    if prompt_cfg is not None and (
+        prompt_cfg.pinned_files
+        or prompt_cfg.max_total_bytes != type(prompt_cfg)().max_total_bytes
+    ):
+        prompt_dict: dict[str, Any] = {}
+        if prompt_cfg.pinned_files:
+            prompt_dict["pinned_files"] = list(prompt_cfg.pinned_files)
+        if prompt_cfg.max_total_bytes != type(prompt_cfg)().max_total_bytes:
+            prompt_dict["max_total_bytes"] = prompt_cfg.max_total_bytes
+        if prompt_dict:
+            result["prompt"] = prompt_dict
     return result
 
 
