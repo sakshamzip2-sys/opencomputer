@@ -682,3 +682,51 @@ def test_run_system_tick_skips_dreaming_when_disabled(
             or "error" in summary
             or summary.get("promoted", 0) == 0
         )
+
+
+def test_run_dreaming_v2_tick_inside_running_loop_no_coroutine_leak(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: ``oc gateway`` runs the cron scheduler as a co-tenant
+    asyncio task. ``run_dreaming_v2_tick`` therefore executes inside a
+    running event loop. Pre-fix, ``asyncio.run(...)`` rejected the
+    coroutine and emitted ``RuntimeWarning: coroutine 'run_dreaming_v2_async'
+    was never awaited`` every cron tick. Post-fix, the tick must:
+      1. complete without raising,
+      2. return a real summary dict (not the ``error:`` fallback string),
+      3. emit zero "never awaited" warnings.
+    """
+    import asyncio
+    import warnings
+
+    monkeypatch.setenv("OPENCOMPUTER_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "memory:\n  dreaming_v2_enabled: true\n",
+        encoding="utf-8",
+    )
+
+    from opencomputer.cron import dreaming_v2_tick
+
+    async def _drive() -> dict:
+        # Sanity-check we really are inside a running loop.
+        asyncio.get_running_loop()
+        return dreaming_v2_tick.run_dreaming_v2_tick()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        summary = asyncio.run(_drive())
+
+    never_awaited = [
+        w for w in caught
+        if issubclass(w.category, RuntimeWarning)
+        and "was never awaited" in str(w.message)
+    ]
+    assert never_awaited == [], (
+        f"coroutine leaked under running loop: {[str(w.message) for w in never_awaited]}"
+    )
+    # Summary should be the real cron payload (or a deps-build error if
+    # the test environment lacks a provider — we accept that, but NEVER
+    # the asyncio runtime-error string from the old fallback).
+    assert isinstance(summary, dict)
+    assert "asyncio.run() cannot be called" not in str(summary)
+    assert "This event loop is already running" not in str(summary)
