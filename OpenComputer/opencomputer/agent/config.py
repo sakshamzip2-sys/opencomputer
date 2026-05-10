@@ -864,6 +864,21 @@ class CronConfig:
 
     wrap_response: bool = False
     script_timeout_seconds: int = 120
+    #: 2026-05-10 — auto-tick cron jobs from inside the gateway daemon
+    #: instead of requiring a separate ``oc cron daemon`` process. Default
+    #: ``True`` so users with ``oc service install`` (the launchd gateway)
+    #: get cron execution for free. The user audit 2026-05-10 surfaced
+    #: the prior dormant state: jobs registered, never ran successfully,
+    #: because launchd ran ``oc gateway`` but nothing started the cron
+    #: scheduler. Set to ``False`` to opt back into the manual
+    #: ``oc cron daemon`` workflow (e.g., users running cron in a
+    #: separate systemd unit).
+    start_in_gateway: bool = True
+    #: Tick interval (seconds) for the gateway-co-tenant cron loop.
+    #: Mirrors the default in ``cron/scheduler.py::DEFAULT_TICK_INTERVAL_S``.
+    #: Smaller = more responsive cron firing, more wake-ups; 60s is a
+    #: reasonable balance for personal workstation use.
+    gateway_tick_interval_s: int = 60
 
 
 @dataclass(frozen=True, slots=True)

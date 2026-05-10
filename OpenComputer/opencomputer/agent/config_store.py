@@ -808,6 +808,13 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
         "gateway": _encode(cfg.gateway),
         "system_control": _encode(cfg.system_control),
     }
+    # 2026-05-10 — cron block is opt-in serialised when non-default so
+    # existing configs stay tidy. The new ``start_in_gateway`` knob
+    # defaults to True (gateway autoticks cron); users opting OUT need
+    # the block to round-trip.
+    cron_cfg_default = type(cfg.cron)()
+    if cfg.cron != cron_cfg_default:
+        result["cron"] = _encode(cfg.cron)
     # Wave 3 — only serialize the new top-level fields when non-empty
     # / non-default so existing configs stay tidy. Each round-trips
     # through the auto-parser.
