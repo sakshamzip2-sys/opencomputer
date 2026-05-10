@@ -43,10 +43,6 @@ _console = Console()
 #: ``/context`` command so users see consistent numbers across surfaces.
 _COMPACTION_TRIGGER_PCT: float = 0.98
 
-#: Conservative fallback for unknown models — see
-#: ``slash_commands_impl/context_cmd.py`` for the rationale.
-_DEFAULT_FALLBACK_WINDOW: int = 200_000
-
 
 def _resolve_sessions_db_path() -> Path:
     """Locate the active profile's ``sessions.db``.
@@ -62,30 +58,6 @@ def _resolve_sessions_db_path() -> Path:
     from opencomputer.agent.config import _home  # lazy: avoid cycles
 
     return _home() / "sessions.db"
-
-
-def _resolve_window(model: str) -> int:
-    """Return the model's context window via OC's resolution chain.
-
-    Synchronous-only (``enable_probe=False``) — the CLI renders fast
-    and never blocks on a network call. Falls back to
-    :data:`_DEFAULT_FALLBACK_WINDOW` when the model is empty / the
-    chain raises / a non-positive value comes back.
-    """
-    if not model:
-        return _DEFAULT_FALLBACK_WINDOW
-    try:
-        from opencomputer.agent.compaction import context_window_with_overrides
-
-        resolved = context_window_with_overrides(model, enable_probe=False)
-    except Exception as exc:  # noqa: BLE001 — CLI must never crash here
-        _LOG.debug(
-            "oc context: window resolution failed for model=%s: %s — using fallback",
-            model,
-            exc,
-        )
-        return _DEFAULT_FALLBACK_WINDOW
-    return int(resolved) if resolved and int(resolved) > 0 else _DEFAULT_FALLBACK_WINDOW
 
 
 def _render_session_panel(session_id: str) -> int:
@@ -118,10 +90,9 @@ def _render_session_panel(session_id: str) -> int:
         )
         return 0
 
-    max_ctx = _resolve_window(summary.model or "")
-    if max_ctx <= 0:
-        max_ctx = _DEFAULT_FALLBACK_WINDOW
+    from opencomputer.agent.compaction import resolve_window_safe
 
+    max_ctx = resolve_window_safe(summary.model or "")
     used = summary.input_tokens
     pct = (used / max_ctx * 100.0) if max_ctx > 0 else 0.0
     remaining = max_ctx - used
@@ -259,6 +230,8 @@ def context_list(
         )
         return
 
+    from opencomputer.agent.compaction import resolve_window_safe
+
     table = Table(title=f"Sessions ({len(rows)})", expand=False)
     table.add_column("Session", overflow="fold")
     table.add_column("Model", overflow="fold")
@@ -266,9 +239,7 @@ def context_list(
     table.add_column("%", justify="right")
     table.add_column("Compactions", justify="right")
     for r in rows:
-        max_ctx = _resolve_window(r.model or "")
-        if max_ctx <= 0:
-            max_ctx = _DEFAULT_FALLBACK_WINDOW
+        max_ctx = resolve_window_safe(r.model or "")
         pct = (r.input_tokens / max_ctx * 100.0) if max_ctx > 0 else 0.0
         table.add_row(
             (r.session_id[:8] + "…") if len(r.session_id) > 9 else r.session_id,

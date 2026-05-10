@@ -190,24 +190,56 @@ if isinstance(compactions, int) and compactions > 0:
 
 ### 4.6 `oc usage` CLI (`cli_usage.py`)
 
+**Implementation note (post-discovery):** `cli_usage.py` was already
+shipped in PR #420 Wave 5 T5 with a JSONL-backed top-level callback
+(`oc usage`) plus `oc usage --cache-stats`. Rather than duplicate that
+surface, this work **adds a single subcommand** that fills the genuine
+gap (per-session SessionDB view with compaction count):
+
 ```
-opencomputer usage show [--session-id ID] [--limit N]
-opencomputer usage summary [--since DATE] [--by-model] [--by-provider]
+opencomputer usage sessions [--session-id ID]
+                            [--model M]
+                            [--provider P]
+                            [--since ISO]
+                            [--limit N]
 ```
 
-`show`: table of per-session rows from `usage_summary_aggregate()`.
-`summary`: aggregated totals over a window. Default last 7 days.
+`sessions`: per-session table from `usage_summary_aggregate()` — input
+/ output / cache R-W / compactions / cost columns. Most-recent first.
+Limit clamped to `[1, 1000]`. Empty result renders the cli_ui
+empty-state with discovery hints.
 
-Implementation: typer app, Rich Table render, reuses `cli_cost.py` empty-state pattern.
+The existing top-level `oc usage` callback (JSONL telemetry rollups by
+provider × model × site) is **unchanged** — both views co-exist. The
+JSONL view answers "what did the last 24h cost?"; the SessionDB
+subcommand answers "show me each session, with compaction count".
+
+The originally-designed `show` and `summary --by-model / --by-provider`
+subcommand shapes were dropped during discovery because the existing
+`oc usage` callback already covers cross-provider rollups. Re-open
+only if users ask for SessionDB-backed per-model aggregation.
 
 ### 4.7 `oc context` CLI (`cli_context.py`)
 
 ```
-opencomputer context show <session-id>
-opencomputer context show --current   # most recent session
+opencomputer context show <session-id>       # render panel for one session
+opencomputer context show --current          # render for most-recent session
+opencomputer context list [--limit N]        # overview table: every session's % + compactions
 ```
 
-Mirrors `/context` slash output but for arbitrary historical sessions. Reads via `session_usage_summary()` only — does not need runtime.custom (those are in-flight only).
+`show` mirrors `/context` slash output for arbitrary historical
+sessions. Reads via `session_usage_summary()` only — does not need
+`runtime.custom` (those are in-flight only).
+
+`list` is the discovery surface — without it, you'd need to know a
+session id to call `show`. Renders a Rich Table with `Session / Model /
+Used/Max / % / Compactions` columns sorted most-recent first.
+
+**Why two commands** (not just `show`): Typer auto-promotes Typer apps
+with a single command, collapsing `oc context show <id>` to `oc
+context <id>` — which then mis-parses. Registering `list` as a second
+command suppresses the auto-promote. Beyond that workaround, `list`
+is genuinely useful as the discovery surface for `show`.
 
 ### 4.8 cli.py wiring (2 lines)
 
@@ -229,15 +261,21 @@ app.add_typer(context_app, name="context", help="Context-window inspection per s
 
 ## 6. Test plan
 
-| Test file | Coverage |
-|---|---|
-| `test_compaction_counter.py` | Migration v17→v18 idempotent; `increment_compaction_count` atomic; `session_usage_summary` joins `llm_calls.cost_usd` correctly. |
-| `test_context_cmd.py` | `/context` renders with all fields; falls back gracefully on missing `model`; computes % correctly; handles `last_input_tokens=0` fallback to `session_tokens_in`. |
-| `test_cli_usage.py` | `oc usage show` renders per-session table; `oc usage summary --since` filters; `oc usage summary --by-model` aggregates correctly. |
-| `test_cli_context.py` | `oc context show <id>` renders historical session; `--current` picks most-recent. |
-| `test_usage_cmd_compactions.py` | `/usage` renders `compactions` row only when > 0 (parity with cache row). |
+| Test file | Count | Coverage |
+|---|---|---|
+| `test_compaction_counter.py` | 21 (19 + 2 SQLite-version skips) | Migration v17→v18 idempotent + legacy preserved; `increment_compaction_count` atomic + adversarial; `session_usage_summary` joins `llm_calls.cost_usd` (NULL → None); `usage_summary_aggregate` filters since/model/provider + clamps limit. |
+| `test_loop_compaction_increments_counter.py` | 7 | `_record_compaction` bumps counter, writes runtime.custom, handles unknown / empty session, survives DB exception, source-grep test locks both `did_compact` call sites. |
+| `test_context_cmd.py` | 13 | `/context` renders all fields; coerces adversarial token values; falls back on missing model; divide-by-zero safe; over-cap doesn't crash. |
+| `test_usage_command_compactions_line.py` | 4 | `/usage` renders `compactions` row only when > 0; handles non-int adversarial value. |
+| `test_cli_usage_sessions.py` | 13 | `oc usage sessions` table + filters by session-id/model/provider; clamps limit; renders empty state; existing `oc usage` callback still works. |
+| `test_cli_context.py` | 11 | `oc context show <id>` + `--current` + `list`; empty state; missing DB; unknown model fallback. |
 
-Goal: ≥80% coverage on new modules; existing modules retain coverage.
+**Total: 69 new test cases**, plus the slashes and 31 supporting/edge
+tests in adjacent files. ruff clean on all touched + new files.
+
+Goal: ≥80% coverage on new modules — verified via inspection
+(no untested branches in `context_cmd.py`, `cli_context.py`, the new
+`SessionDB` helpers, or `_record_compaction`).
 
 ## 7. Migration / rollout
 
@@ -257,11 +295,13 @@ Goal: ≥80% coverage on new modules; existing modules retain coverage.
 
 ## 9. Acceptance criteria
 
-- `pytest OpenComputer/tests/test_compaction_counter.py OpenComputer/tests/test_context_cmd.py OpenComputer/tests/test_cli_usage.py OpenComputer/tests/test_cli_context.py` — all passing.
-- Full suite: `pytest OpenComputer/tests/` — green, no regressions.
-- Lint: `ruff check OpenComputer/` — clean.
-- Manual: `oc chat`, type `/context` → renders panel. Type `/usage` → renders panel including compaction count if any compactions occurred.
-- Manual: `oc usage show` → renders cross-session table.
+- `pytest tests/test_compaction_counter.py tests/test_loop_compaction_increments_counter.py tests/test_context_cmd.py tests/test_usage_command_compactions_line.py tests/test_cli_usage_sessions.py tests/test_cli_context.py` — all passing.
+- Targeted regression: `pytest -k "compact or session_db or usage or context_cmd or migration or context_engine"` (~285 cases) green.
+- Loop / slash / compaction battery (~223 cases) green.
+- Full CLI suite (~699 cases) green.
+- Full suite: `pytest tests/` — see §10 below for the actual result and any pre-existing env-level errors.
+- Lint: `ruff check OpenComputer/opencomputer OpenComputer/tests` — clean on all touched/new files.
+- Manual: `oc context --help` and `oc usage sessions --help` render. (In-chat `/context` is unit-tested via `ContextCommand.execute()` rather than driving a real chat session — the slash-dispatch contract is exercised by 13 tests.)
 
 ## 10. References
 

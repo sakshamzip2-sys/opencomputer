@@ -238,6 +238,51 @@ def context_window_with_overrides(
     return context_window_for(model)
 
 
+#: Conservative fallback for ``resolve_window_safe`` when the model is
+#: empty / the resolution chain raises / the resolved value is non-
+#: positive. 200k matches Anthropic's Claude 3.5+ default; lower
+#: defaults (e.g. ``context_window_for``'s 64k) are too pessimistic for
+#: "what's my agent's actual budget?" surfaces.
+_SAFE_FALLBACK_WINDOW: int = 200_000
+
+
+def resolve_window_safe(model: str) -> int:
+    """Synchronous, never-raising context-window resolver for slash /
+    CLI surfaces.
+
+    Wraps :func:`context_window_with_overrides` with:
+
+      - ``enable_probe=False`` — never blocks on a network round-trip.
+        OK for slash commands and CLI renders; bad for any
+        background-time accuracy path (use the un-suffixed variant).
+      - ``try/except`` around the resolution chain — a corrupt config
+        or unexpected import raises a debug log + falls back rather
+        than crashing the user-facing surface.
+      - Floor of :data:`_SAFE_FALLBACK_WINDOW` (200k) when the
+        resolved value is empty or non-positive — keeps `%`-of-context
+        math meaningful.
+
+    Returns the resolved or fallback window as an int. Used by
+    ``/context`` (slash), ``oc context show`` / ``list``, and any
+    future read-only "show me the context budget" surface.
+    """
+    if not model:
+        return _SAFE_FALLBACK_WINDOW
+    try:
+        resolved = context_window_with_overrides(model, enable_probe=False)
+    except Exception:  # noqa: BLE001 — caller is read-only / must not crash
+        import logging
+
+        logging.getLogger(__name__).debug(
+            "resolve_window_safe: resolution failed for model=%s — using fallback",
+            model,
+        )
+        return _SAFE_FALLBACK_WINDOW
+    if not resolved or int(resolved) <= 0:
+        return _SAFE_FALLBACK_WINDOW
+    return int(resolved)
+
+
 def context_window_for(model: str) -> int:
     """Look up the context window for a model.
 
@@ -605,5 +650,6 @@ __all__ = [
     "CompactionResult",
     "context_window_for",
     "context_window_with_overrides",
+    "resolve_window_safe",
     "DEFAULT_CONTEXT_WINDOWS",
 ]

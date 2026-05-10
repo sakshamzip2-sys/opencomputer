@@ -353,6 +353,28 @@ dispatcher.py sets `HOME=<oc_profile_home>/opencli-shim-home` per subprocess. Su
 
 ---
 
+### 4.3 CC §4 + §10 visibility surface (2026-05-10, schema v18)
+
+**Status:** active default. Closes the `/context` and `/usage` gaps documented in `docs/OC-FROM-CLAUDE-CODE.md` (§4 + §10).
+
+**Schema v18:** additive `sessions.compactions_count INTEGER DEFAULT 0`. AgentLoop's `_record_compaction()` bumps it after each successful `CompactionResult.did_compact` at both proactive and reactive compaction sites. The increment is atomic via `RETURNING` with a graceful pre-3.35 SQLite fallback. Telemetry must never wedge the loop — three-tier error handling (DB swallow → loop swallow → slash empty-state) guarantees that.
+
+**Surface added:**
+- `/context` slash — model, used/max tokens, remaining, compaction-trigger threshold, compactions this session, total input tokens. Reads `runtime.custom`.
+- `/usage` slash — augmented: compactions row when `session_compactions > 0`. Existing cache row, cost, tokens rows preserved.
+- `oc context show <session-id>` — historical session panel from SessionDB.
+- `oc context show --current` — render for the most-recent session.
+- `oc context list [--limit N]` — overview table: every session with its context % + compaction count.
+- `oc usage sessions [--session-id|--model|--provider|--since|--limit]` — SessionDB-backed per-session view (compactions + cost from joined `llm_calls`). Distinct from the existing top-level `oc usage` callback that reads JSONL telemetry.
+
+**Honest cost rendering:** `SessionUsageRow.cost_usd: float | None`. When `llm_calls` lacks pricing data the CLI shows `—`, not `$0.00`.
+
+**Why two commands on `oc context`** (`show` + `list`): Typer auto-promotes Typer apps with a single command, collapsing `oc context show <id>` parse. Registering `list` as a second command suppresses the auto-promote AND provides a useful discovery surface.
+
+**Spec:** `docs/superpowers/specs/2026-05-10-cc-usage-context-visibility-design.md`.
+
+---
+
 ## 5. What's NEXT — single source of truth
 
 > **This section is the authoritative phase map.** The omnibus plan `~/.claude/plans/2026-04-23-honcho-ecosystem-omnibus.md` drove Sub-projects A–D to completion; two older plans (`delightful-sauteeing-sutherland.md`, `phase-12-ultraplan-spec.md`) are superseded — do not use them.
@@ -535,6 +557,12 @@ See `RELEASE.md` — basically bump version in two places, tag `vX.Y.Z`, push. C
 6. **The plugin SDK boundary is enforced by a test.** `tests/test_phase6a.py::test_plugin_sdk_does_not_import_opencomputer` scans `plugin_sdk/*.py` for `from opencomputer` imports and fails if any exist. Do not bypass this — it's how the contract stays honest.
 
 7. **HookContext.runtime is optional for backwards compat.** Hooks written before Phase 6a don't pass it. New hooks should read modes through `effective_permission_mode(ctx.runtime)` (exported from `plugin_sdk`) rather than `ctx.runtime.plan_mode` / `ctx.runtime.yolo_mode` directly — the helper accounts for slash-command toggles living in `runtime.custom`.
+
+8. **Typer auto-promotes single-command apps.** A `typer.Typer(name="X")` with exactly one `@app.command(...)` collapses to a no-subcommand CLI, so `runner.invoke(app, ["show", arg])` misparses (the literal `"show"` becomes the first arg). Always register a second command — even a useful listing surface — to suppress the auto-promote. See `opencomputer/cli_context.py` (`show` + `list`) for the pattern.
+
+9. **`AgentLoop._runtime` is aliased to the module-shared `DEFAULT_RUNTIME_CONTEXT` at `__init__` time.** Writes to `_runtime.custom` from methods called BEFORE `run_conversation` therefore leak across `AgentLoop` instances in the same process (most visible in tests). `run_conversation` rebinds `_runtime` per call so production paths are fine, but unit tests that exercise loop helpers directly must re-bind: `loop._runtime = RuntimeContext()`. See `tests/test_loop_compaction_increments_counter.py::_fresh_loop` for the pattern.
+
+10. **Counter telemetry must never break the loop.** Anything bumping a per-session counter (compactions, future events) follows the three-tier swallow: `SessionDB.<method>` catches `sqlite3.Error` + returns sentinel; the `AgentLoop` helper catches any broad exception + logs WARNING; the slash / CLI renderer falls back to empty-state. A wedged counter must never wedge the agent. See `_record_compaction` for the canonical pattern.
 
 ---
 

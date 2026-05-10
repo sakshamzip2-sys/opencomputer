@@ -29,13 +29,6 @@ _LOG = logging.getLogger(__name__)
 #: of the resolved context window — see compaction.should_compact.
 _COMPACTION_TRIGGER_PCT: float = 0.98
 
-#: Conservative fallback context window when the model id is empty or
-#: maps to no entry in the resolution chain. 200k matches Anthropic's
-#: Claude 3.5+ default and is the right answer for the vast majority of
-#: OC users; ``context_window_for`` itself returns 64k for unknown
-#: models which is too pessimistic for "what's my budget?".
-_DEFAULT_FALLBACK_WINDOW: int = 200_000
-
 
 def _coerce_int(value: object, default: int = 0) -> int:
     """Best-effort int coercion. Adversarial inputs (strings, None,
@@ -58,37 +51,6 @@ def _coerce_int(value: object, default: int = 0) -> int:
     return default
 
 
-def _resolve_window(model: str) -> int:
-    """Return the model's context window via OC's resolution chain.
-
-    Synchronous-only: ``enable_probe=False`` skips the network probe
-    chain (OpenRouter / Ollama / Anthropic / models.dev) so this runs
-    fast in a slash command. The persistent cache layer would still
-    be hit for already-known models if ``enable_probe=True``, but a
-    cold cache could block the slash on a network call — not OK.
-
-    Falls back to ``_DEFAULT_FALLBACK_WINDOW`` when:
-
-      - ``model`` is empty / falsy,
-      - the resolution chain raises (e.g. corrupt config), or
-      - the resolved value is non-positive.
-    """
-    if not model:
-        return _DEFAULT_FALLBACK_WINDOW
-    try:
-        from opencomputer.agent.compaction import context_window_with_overrides
-
-        resolved = context_window_with_overrides(model, enable_probe=False)
-    except Exception as exc:  # noqa: BLE001 — slash must never crash
-        _LOG.debug(
-            "/context window resolution failed for model=%s: %s — using fallback",
-            model,
-            exc,
-        )
-        return _DEFAULT_FALLBACK_WINDOW
-    return int(resolved) if resolved and int(resolved) > 0 else _DEFAULT_FALLBACK_WINDOW
-
-
 class ContextCommand(SlashCommand):
     """``/context`` — context window % used + compaction count."""
 
@@ -98,13 +60,11 @@ class ContextCommand(SlashCommand):
     async def execute(self, args: str, runtime: RuntimeContext) -> SlashCommandResult:
         custom = runtime.custom if runtime is not None else {}
 
+        from opencomputer.agent.compaction import resolve_window_safe
+
         model_raw = custom.get("model") or ""
         model = str(model_raw) if model_raw else ""
-        max_ctx = _resolve_window(model)
-        # Guard against an arithmetic divide-by-zero even though
-        # ``_resolve_window`` already enforces > 0; defence-in-depth.
-        if max_ctx <= 0:
-            max_ctx = _DEFAULT_FALLBACK_WINDOW
+        max_ctx = resolve_window_safe(model)
 
         # Prefer current-turn (``last_input_tokens``) over cumulative
         # session count for the "% used" calculation. The cumulative
