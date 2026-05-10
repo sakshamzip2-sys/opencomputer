@@ -133,6 +133,47 @@ MUST_BE_WIRED: tuple[WireInRequirement, ...] = (
             "a no-op."
         ),
     ),
+    WireInRequirement(
+        symbol="ActiveMemoryInjector",
+        defining_module="opencomputer/agent/active_memory.py",
+        rationale=(
+            "OpenClaw 1.B-alt pre-loop memory injection. Class wired in "
+            "agent/loop.py; this entry pins the wire-in so accidental "
+            "removal during a refactor is caught at CI time. Without "
+            "the caller, memory.active_memory_enabled=true silently "
+            "produces zero <relevant-memories> blocks."
+        ),
+    ),
+    WireInRequirement(
+        symbol="record_fire",
+        defining_module="opencomputer/agent/hook_history.py",
+        rationale=(
+            "Persisted hook-fire records. The agent loop, gateway daemon, "
+            "and cron job runners all need to call record_fire(); without "
+            "production callers, oc hooks list shows '— Last fired' for "
+            "every event regardless of actual activity. PR #580 added "
+            "JSONL persistence; this audit pins the call sites in agent/loop.py "
+            "+ gateway/* + cron/*."
+        ),
+        extra_search_terms=("iter_history",),
+    ),
+)
+
+
+# ─── Discovery: dormant symbols not in the curated MUST list ──────────
+
+
+# Curated list of symbols that ARE known to be dormant — we don't want
+# them flagged by the discovery test below, but we also don't want them
+# silently lost. Adding here is a deliberate "yes this is dormant; the
+# fix is tracked elsewhere" signal.
+KNOWN_DORMANT: tuple[str, ...] = (
+    # `RecallCitationsWriter` (opencomputer/agent/recall_citations.py)
+    # — defined but never instantiated by RecallTool. Wiring it in
+    # requires plumbing recall hits through the tool dispatch path
+    # to capture episodic_event_ids per turn. Tracked as v1.1 plan-3
+    # M6.x followup.
+    "RecallCitationsWriter",
 )
 
 
