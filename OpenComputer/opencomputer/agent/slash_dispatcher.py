@@ -114,11 +114,39 @@ async def dispatch(
         )
     # Duck-typed Phase-6f commands may return a bare string; wrap it.
     if isinstance(raw, str):
-        return SlashCommandResult(output=raw, handled=True)
-    if isinstance(raw, SlashCommandResult):
-        return raw
-    # Anything else — coerce to string for safety.
-    return SlashCommandResult(output=str(raw), handled=True)
+        result = SlashCommandResult(output=raw, handled=True)
+    elif isinstance(raw, SlashCommandResult):
+        result = raw
+    else:
+        # Anything else — coerce to string for safety.
+        result = SlashCommandResult(output=str(raw), handled=True)
+
+    # CC §2 (2026-05-11) — fire USER_PROMPT_EXPANSION when a slash
+    # command transforms the user's literal slash text into a synthetic
+    # prompt that gets fed back to the LLM. A slash whose ``output`` is
+    # the empty string is a pure side-effect command (e.g. ``/quit``);
+    # it does NOT count as an "expansion" to a prompt. We emit only
+    # when there's prompt text to report.
+    expanded_text = (result.output or "").strip()
+    if expanded_text:
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine_upe
+            from plugin_sdk.hooks import HookContext as _HookContextUPE
+            from plugin_sdk.hooks import HookEvent as _HookEventUPE
+
+            sid = runtime.custom.get("session_id") if runtime is not None else None
+            _hook_engine_upe.fire_and_forget(
+                _HookContextUPE(
+                    event=_HookEventUPE.USER_PROMPT_EXPANSION,
+                    session_id=str(sid or ""),
+                    runtime=runtime,
+                    expansion_source=name,
+                    prompt_text=expanded_text,
+                )
+            )
+        except Exception:  # noqa: BLE001 — observer must never wedge dispatch
+            pass
+    return result
 
 
 __all__ = ["dispatch", "parse_slash"]

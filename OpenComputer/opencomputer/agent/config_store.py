@@ -654,6 +654,132 @@ def _parse_agent_hooks_block(block: Any) -> tuple[Any, ...]:
     return ()
 
 
+def _parse_http_hooks_block(block: Any) -> tuple[Any, ...]:
+    """Convert the top-level ``hooks:`` YAML block into a flat tuple of
+    :class:`HookHttpConfig`.
+
+    CC §6 (2026-05-11). Sibling to :func:`_parse_prompt_hooks_block`
+    and :func:`_parse_agent_hooks_block`; consumes only entries with
+    ``type: http``. The same YAML block can carry every other hook
+    type side-by-side; each parser claims its discriminator and
+    silently ignores the others.
+
+    Frontmatter shape::
+
+        - type: http
+          url: https://hooks.example.com/oc/pre
+          matcher: "Bash"
+          headers:
+            Authorization: "Bearer ${MY_TOKEN}"
+            X-Workspace: "oc"
+          timeout_seconds: 5
+          max_response_bytes: 65536
+
+    Malformed entries (missing url, non-string event, etc.) are
+    logged at WARNING and skipped — never raise.
+    """
+    from opencomputer.agent.config import HookHttpConfig
+    from plugin_sdk.hooks import HookEvent
+
+    if block is None:
+        return ()
+    valid_events = {e.value for e in HookEvent}
+
+    def _coerce(raw: dict, default_event: str | None = None):
+        if raw.get("type") != "http":
+            return None
+        event_name = raw.get("event", default_event)
+        if not isinstance(event_name, str) or not event_name:
+            _log.warning("http hooks: skipping entry missing event: %r", raw)
+            return None
+        if event_name not in valid_events:
+            _log.warning(
+                "http hooks: skipping entry with unknown event %r (expected one of %s)",
+                event_name, sorted(valid_events),
+            )
+            return None
+        url = raw.get("url")
+        if not isinstance(url, str) or not url.strip():
+            _log.warning("http hooks: skipping entry missing 'url': %r", raw)
+            return None
+        url = url.strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            _log.warning(
+                "http hooks: skipping entry with non-http(s) url %r: %r",
+                url, raw,
+            )
+            return None
+        matcher_value = raw.get("matcher")
+        if matcher_value is not None and not isinstance(matcher_value, str):
+            _log.warning(
+                "http hooks: skipping entry with non-string matcher: %r", raw
+            )
+            return None
+        headers_raw = raw.get("headers") or {}
+        if not isinstance(headers_raw, dict):
+            _log.warning(
+                "http hooks: skipping entry with non-dict headers: %r", raw
+            )
+            return None
+        headers: list[tuple[str, str]] = []
+        for k, v in headers_raw.items():
+            if not isinstance(k, str) or not k:
+                _log.warning("http hooks: skipping non-string header key in %r", raw)
+                continue
+            headers.append((k, str(v) if v is not None else ""))
+        timeout = raw.get("timeout_seconds", 5.0)
+        try:
+            timeout_f = float(timeout)
+        except (TypeError, ValueError):
+            _log.warning(
+                "http hooks: non-numeric timeout_seconds %r; defaulting to 5.0", timeout
+            )
+            timeout_f = 5.0
+        if timeout_f <= 0:
+            timeout_f = 5.0
+        max_response = raw.get("max_response_bytes", 64 * 1024)
+        try:
+            max_response_i = int(max_response)
+        except (TypeError, ValueError):
+            _log.warning(
+                "http hooks: non-int max_response_bytes %r; defaulting to 64KB",
+                max_response,
+            )
+            max_response_i = 64 * 1024
+        if max_response_i <= 0:
+            max_response_i = 64 * 1024
+        return HookHttpConfig(
+            event=event_name,
+            url=url,
+            headers=tuple(headers),
+            matcher=matcher_value,
+            timeout_seconds=timeout_f,
+            max_response_bytes=max_response_i,
+        )
+
+    parsed: list[Any] = []
+    if isinstance(block, list):
+        for entry in block:
+            if not isinstance(entry, dict):
+                continue
+            spec = _coerce(entry)
+            if spec is not None:
+                parsed.append(spec)
+        return tuple(parsed)
+    if isinstance(block, dict):
+        for event_name, entries in block.items():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                spec = _coerce(entry, default_event=event_name)
+                if spec is not None:
+                    parsed.append(spec)
+        return tuple(parsed)
+    return ()
+
+
 def _normalize_mcp_server_dict(raw: dict) -> dict:
     """Convert Hermes-spec nested MCP-server YAML to flat ``MCPServerConfig`` fields.
 
@@ -839,6 +965,8 @@ def load_config(path: Path | None = None) -> Config:
     parsed_prompt_hooks = _parse_prompt_hooks_block(hooks_block)
     # v1.1 plan-2 M8.2 (2026-05-09) — and agent hooks.
     parsed_agent_hooks = _parse_agent_hooks_block(hooks_block)
+    # CC §6 (2026-05-11) — HTTP hooks.
+    parsed_http_hooks = _parse_http_hooks_block(hooks_block)
     # v1.1 plan-3 M10.1 (2026-05-09) — top-level `routing:` block.
     routing_block = raw.pop("routing", None)
     parsed_routing = _parse_routing_block(routing_block)
@@ -871,7 +999,13 @@ def load_config(path: Path | None = None) -> Config:
                 f"Invalid timezone {cfg.timezone!r} in {cfg_path}: {exc}"
             ) from exc
 
-    if parsed_hooks or parsed_prompt_hooks or parsed_agent_hooks or parsed_routing:
+    if (
+        parsed_hooks
+        or parsed_prompt_hooks
+        or parsed_agent_hooks
+        or parsed_http_hooks
+        or parsed_routing
+    ):
         kwargs = {f.name: getattr(cfg, f.name) for f in fields(cfg)}
         if parsed_hooks:
             kwargs["hooks"] = parsed_hooks
@@ -879,6 +1013,8 @@ def load_config(path: Path | None = None) -> Config:
             kwargs["prompt_hooks"] = parsed_prompt_hooks
         if parsed_agent_hooks:
             kwargs["agent_hooks"] = parsed_agent_hooks
+        if parsed_http_hooks:
+            kwargs["http_hooks"] = parsed_http_hooks
         if parsed_routing is not None:
             kwargs["routing"] = parsed_routing
         cfg = Config(**kwargs)

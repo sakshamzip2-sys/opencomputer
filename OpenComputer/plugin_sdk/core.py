@@ -66,6 +66,19 @@ class Message:
     request time. Providers that don't simply ignore them.
 
     SessionDB serialises this as JSON alongside the other list fields."""
+    timestamp: float | None = None
+    """UNIX-seconds wall-clock when this message was created. ``None`` for
+    legacy / synthetic messages that weren't time-stamped at the source.
+
+    Set by SessionDB on append (via ``time.time()``) and roundtripped on
+    load. Consumed by
+    :class:`opencomputer.agent.context_pruning.ContextPruningConfig`
+    ``cache-ttl`` mode to prune messages older than a threshold; cheap
+    to ignore when not set.
+
+    Forward-compatible field added 2026-05-11 — pre-existing constructors
+    that don't pass the value get ``None`` and behave identically to the
+    pre-field code path."""
 
 
 @dataclass(frozen=True, slots=True)

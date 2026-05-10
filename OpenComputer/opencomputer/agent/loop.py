@@ -26,6 +26,7 @@ import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from opencomputer.agent.cheap_route import should_route_cheap
@@ -692,6 +693,17 @@ class AgentLoop:
         # per-call activity bump fires.
         self._loop_started_at: float = time.monotonic()
         self._last_activity_at: float = self._loop_started_at
+        # CC §2 (2026-05-11) — cwd tracking for CWD_CHANGED hook events.
+        # Captured at run_conversation entry; compared against
+        # ``os.getcwd()`` on subsequent turns to detect Bash-induced
+        # directory changes. Empty string sentinel for "haven't checked
+        # yet" — distinct from a real cwd that happens to be ``""``.
+        self._last_cwd: str = ""
+        # CC §2 — set of session ids for which INSTRUCTIONS_LOADED has
+        # already been emitted. Prevents per-turn spam: the contract is
+        # "these instruction files contributed to this session",
+        # emitted once per file at first turn.
+        self._instructions_emitted_for: set[str] = set()
         # ACP depth: tool_callback fires on tool start/complete. Re-set by
         # run_conversation; declared here so _dispatch_tool_calls callers that
         # bypass run_conversation don't hit AttributeError.
@@ -1002,6 +1014,106 @@ class AgentLoop:
         if self._runtime is not None:
             self._runtime.custom["session_compactions"] = new_count
 
+    # ─── CC §2 hook emissions ──────────────────────────────────────
+
+    def _emit_cwd_changed_if_drifted(self) -> None:
+        """Compare the live cwd to the last-seen value; fire
+        :data:`HookEvent.CWD_CHANGED` when it drifted.
+
+        Best-effort: ``os.getcwd`` can raise if the directory was
+        deleted while the agent was running. We swallow + skip the
+        emit in that case rather than break the loop. The first
+        observation seeds ``self._last_cwd`` and does NOT emit (no
+        "changed from nothing" noise on first invocation).
+
+        Spec: docs/OC-FROM-CLAUDE-CODE.md §2.
+        """
+        try:
+            current = os.getcwd()
+        except (FileNotFoundError, OSError):
+            return
+        prev = self._last_cwd
+        if not prev:
+            self._last_cwd = current
+            return
+        if current == prev:
+            return
+        self._last_cwd = current
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine_cwd
+            from plugin_sdk.hooks import HookContext as _HookContextCWD
+            from plugin_sdk.hooks import HookEvent as _HookEventCWD
+
+            _hook_engine_cwd.fire_and_forget(
+                _HookContextCWD(
+                    event=_HookEventCWD.CWD_CHANGED,
+                    session_id=self._current_session_id or "",
+                    runtime=self._runtime,
+                    cwd=current,
+                    previous_cwd=prev,
+                )
+            )
+        except Exception:  # noqa: BLE001 — observer must not wedge loop
+            pass
+
+    def _emit_instructions_loaded_once(self, sid: str) -> None:
+        """Fire :data:`HookEvent.INSTRUCTIONS_LOADED` once per session
+        per instruction file currently materialised.
+
+        Files considered:
+
+          - ``self.memory.declarative_path`` (MEMORY.md)
+          - ``self.memory.user_path`` (USER.md)
+          - ``self.memory.soul_path`` (per-profile SOUL.md)
+          - ``self.memory.global_soul_path`` (global SOUL.md, if any)
+
+        Each existing file produces ONE fire with its path in
+        ``instructions_path`` and the body in ``prompt_text``. Files
+        that don't exist do not fire. Missing / unreadable files are
+        skipped silently — observers never block the loop.
+        """
+        if not sid or sid in self._instructions_emitted_for:
+            return
+        self._instructions_emitted_for.add(sid)
+        try:
+            from opencomputer.hooks.engine import engine as _hook_engine_il
+            from plugin_sdk.hooks import HookContext as _HookContextIL
+            from plugin_sdk.hooks import HookEvent as _HookEventIL
+        except Exception:  # noqa: BLE001 — defensive at import time
+            return
+        candidate_paths: list[Path] = []
+        try:
+            mm = self.memory
+            for attr in ("declarative_path", "user_path", "soul_path", "global_soul_path"):
+                p = getattr(mm, attr, None)
+                if isinstance(p, Path) and p not in candidate_paths:
+                    candidate_paths.append(p)
+        except Exception:  # noqa: BLE001
+            return
+        for path in candidate_paths:
+            try:
+                if not path.exists() or not path.is_file():
+                    continue
+                body = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if not body.strip():
+                # Empty file — count as "not loaded" so observers
+                # don't get noise.
+                continue
+            try:
+                _hook_engine_il.fire_and_forget(
+                    _HookContextIL(
+                        event=_HookEventIL.INSTRUCTIONS_LOADED,
+                        session_id=sid,
+                        runtime=self._runtime,
+                        instructions_path=str(path),
+                        prompt_text=body,
+                    )
+                )
+            except Exception:  # noqa: BLE001 — never wedge the loop
+                continue
+
     # ─── the loop ──────────────────────────────────────────────────
 
     async def run_conversation(
@@ -1050,6 +1162,11 @@ class AgentLoop:
         self._runtime = runtime or DEFAULT_RUNTIME_CONTEXT
         # Expose current session id to memory tools via the context provider.
         self._current_session_id = sid
+        # CC §2 — emit INSTRUCTIONS_LOADED once for each instruction
+        # file contributing to this session. Idempotent (the helper
+        # tracks emitted sids); safe to call on every run_conversation
+        # entry — only the first call per session fires.
+        self._emit_instructions_loaded_once(sid)
         # Hermes-followup 2026-05-07 — publish (session_id, db) on
         # ContextVars so auxiliary callers (title-gen daemon thread,
         # judge-reviewer, dreaming, recall-synthesizer, aux_llm)
@@ -1363,7 +1480,41 @@ class AgentLoop:
                         runtime=self._runtime,
                     )
                 )
-                skills = self.memory.list_skills()
+                # OpenClaw `requires:` parity — gate skills on host
+                # capabilities. We hand the plugin registry's loaded
+                # ids to ``list_skills`` so plugin-coupled skills can
+                # be evaluated; skills with unmet binaries/env/os/
+                # plugin requirements are dropped from the prompt
+                # snapshot (the model never sees a skill it can't
+                # run). The CLI / dashboard listing path still gets
+                # all skills via plain ``list_skills()`` — only the
+                # injection lane filters.
+                try:
+                    from opencomputer.plugins.registry import registry as _pr_for_gate
+
+                    _installed_plugin_ids = frozenset(
+                        lp.candidate.manifest.id for lp in _pr_for_gate.loaded
+                    )
+                except Exception:  # noqa: BLE001 — gating must NEVER break the loop
+                    _log.debug(
+                        "skill-gate: plugin index unavailable, skipping plugin gate",
+                        exc_info=True,
+                    )
+                    _installed_plugin_ids = None
+                _all_skills = self.memory.list_skills(
+                    installed_plugin_ids=_installed_plugin_ids,
+                )
+                _gated = [s for s in _all_skills if s.unmet_requirements]
+                if _gated:
+                    # One DEBUG line per skipped skill — verbose mode lets
+                    # the user see what's inactive and why without
+                    # surfacing that to the model.
+                    for s in _gated:
+                        _log.debug(
+                            "skill-gate: skipping %r — unmet=%s",
+                            s.id, s.unmet_requirements,
+                        )
+                skills = [s for s in _all_skills if not s.unmet_requirements]
                 # Phase 10f.C: read MEMORY.md + USER.md and render them into
                 # the FROZEN base prompt. Mid-session edits don't rebuild
                 # this — that's the prefix-cache invariant.
@@ -1797,6 +1948,14 @@ class AgentLoop:
         # without threading another arg through every call site.
         self._loop_started_at = time.monotonic()
         self._last_activity_at = self._loop_started_at
+        # CC §2 — check for cwd drift since last turn (e.g. Bash `cd /elsewhere`)
+        # and fire CWD_CHANGED hooks before the new turn begins. First call
+        # only seeds the tracker; subsequent calls fire on diff.
+        self._emit_cwd_changed_if_drifted()
+        # CC §2 — emit INSTRUCTIONS_LOADED once per session for each
+        # instruction file (MEMORY.md, SOUL.md, USER.md) that
+        # contributes to the system prompt. ``sid`` is resolved a few
+        # lines below; we defer the actual emit there.
         self._tool_callback = tool_callback  # ACP depth: fire on tool start/complete
 
         # Wave-5 T1 — clear the tool-loop guard's per-turn streak so a
@@ -2022,6 +2181,34 @@ class AgentLoop:
                 # First iteration (no prior measurement) skips the check
                 # unless the user explicitly forced compaction.
                 if self._last_input_tokens > 0 or _force_compact:
+                    # OpenClaw `contextPruning` parity — cheap, lossy
+                    # prune step BEFORE the (expensive, lossless-of-
+                    # meaning) compactor. Default config is mode="none"
+                    # so existing sessions are byte-identical until the
+                    # operator opts in. Sliding mode keeps the last N
+                    # user turns verbatim; cache-ttl drops by message
+                    # age. Pruning never raises — internal exception
+                    # handler returns the original list.
+                    _cp_cfg = getattr(self.config.loop, "context_pruning", None)
+                    if _cp_cfg is not None and _cp_cfg.mode != "none":
+                        try:
+                            from opencomputer.agent.context_pruning import (
+                                prune_messages as _prune,
+                            )
+
+                            _before = len(messages)
+                            messages = _prune(messages, _cp_cfg)
+                            _after = len(messages)
+                            if _after < _before:
+                                _log.debug(
+                                    "context_pruning: dropped %d messages (%s mode)",
+                                    _before - _after, _cp_cfg.mode,
+                                )
+                        except Exception:  # noqa: BLE001
+                            _log.warning(
+                                "context_pruning: prune step failed — keeping original messages",
+                                exc_info=True,
+                            )
                     # D7: emit PreCompact hook BEFORE actually compacting so
                     # plugins can observe / log / modify behavior pre-summary.
                     if self.compaction.should_compact(self._last_input_tokens):
@@ -2833,6 +3020,34 @@ class AgentLoop:
                     session_id=sid,
                     turn_index=iterations,
                 )
+                # CC §2 (2026-05-11) — fire POST_TOOL_BATCH once per
+                # dispatched batch. Distinct from POST_TOOL_USE which
+                # fires per individual call; observers wanting the
+                # whole-batch view (telemetry rollups, audit summaries)
+                # subscribe here. Fire-and-forget — never block on a
+                # batch observer.
+                try:
+                    _tool_calls_tuple = tuple(step.assistant_message.tool_calls or ())
+                    if _tool_calls_tuple:
+                        from opencomputer.hooks.engine import (
+                            engine as _hook_engine_ptb,
+                        )
+                        from plugin_sdk.hooks import (
+                            HookContext as _HookContextPTB,
+                        )
+                        from plugin_sdk.hooks import HookEvent as _HookEventPTB
+
+                        _hook_engine_ptb.fire_and_forget(
+                            _HookContextPTB(
+                                event=_HookEventPTB.POST_TOOL_BATCH,
+                                session_id=sid,
+                                runtime=self._runtime,
+                                batch_calls=_tool_calls_tuple,
+                                batch_results=tuple(tool_results),
+                            )
+                        )
+                except Exception:  # noqa: BLE001 — observer must not wedge loop
+                    pass
                 # T1 of auto-skill-evolution plan — observe is_error flags
                 # so SessionEndEvent.had_errors reflects the truth even when
                 # the loop terminates cleanly via END_TURN.
@@ -5047,6 +5262,44 @@ class AgentLoop:
                         session_id=session_id,
                         runtime=self._runtime,
                     )
+                # OpenClaw `tokenjuice` parity — deterministic post-hook
+                # compaction of noisy tool results (Bash/find/grep/...).
+                # Sits AFTER the plugin-driven transforms so user
+                # rewrites take precedence; only the unmodified-by-
+                # plugins case is touched. Safe by default — disabled
+                # in fresh configs so behavior is byte-identical until
+                # the operator opts in.
+                _tj = getattr(self.config.loop, "tokenjuice", None)
+                if _tj is not None and _tj.enabled:
+                    try:
+                        from opencomputer.agent.tokenjuice import (
+                            compact_tool_result as _tj_compact,
+                        )
+
+                        _orig_content = getattr(result, "content", None)
+                        if isinstance(_orig_content, str):
+                            _new_content = _tj_compact(
+                                tool_name=c.name,
+                                content=_orig_content,
+                                config=_tj,
+                            )
+                            if _new_content is not _orig_content and _new_content != _orig_content:
+                                from plugin_sdk.core import ToolResult as _ToolResultRebuild
+
+                                _log.debug(
+                                    "tokenjuice: %s %d→%d chars",
+                                    c.name, len(_orig_content), len(_new_content),
+                                )
+                                result = _ToolResultRebuild(
+                                    tool_call_id=result.tool_call_id,
+                                    content=_new_content,
+                                    is_error=getattr(result, "is_error", False),
+                                )
+                    except Exception:  # noqa: BLE001 — never break the loop
+                        _log.warning(
+                            "tokenjuice: rewrite failed for %s — keeping original",
+                            c.name, exc_info=True,
+                        )
                 if self._tool_callback is not None:
                     try:
                         self._tool_callback(

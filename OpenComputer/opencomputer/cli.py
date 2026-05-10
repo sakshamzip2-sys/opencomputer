@@ -9,7 +9,6 @@ import os
 import sys
 import uuid
 import warnings
-from dataclasses import is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -753,6 +752,43 @@ def _register_settings_hooks(cfg: Config) -> int:
                     handler=make_agent_hook_handler(ah),
                     matcher=ah.matcher,
                     fire_and_forget=fire_and_forget,
+                )
+            )
+            registered += 1
+
+    # CC §6 (2026-05-11) — HTTP hooks. Same lazy-import pattern; httpx is
+    # already a hard dep so no install gate needed beyond config presence.
+    if getattr(cfg, "http_hooks", ()):
+        from opencomputer.hooks.http_handlers import (  # noqa: PLC0415
+            make_http_hook_handler,
+        )
+
+        for hh in cfg.http_hooks:
+            try:
+                event = HookEvent(hh.event)
+            except ValueError:
+                _log.warning(
+                    "http hook: unknown event %r; skipping", hh.event
+                )
+                continue
+            # HTTP hooks default to blocking on PRE_* events (their
+            # whole purpose is to gate the next action) and fire-and-
+            # forget on POST_* / observation events.
+            fire_and_forget = (event != HookEvent.PRE_LLM_CALL) and not event.value.startswith("Pre")
+            try:
+                handler = make_http_hook_handler(hh)
+            except ValueError as exc:
+                _log.warning(
+                    "http hook: invalid config skipped (%s): %r", exc, hh
+                )
+                continue
+            hook_engine.register(
+                HookSpec(
+                    event=event,
+                    handler=handler,
+                    matcher=hh.matcher,
+                    fire_and_forget=fire_and_forget,
+                    timeout_ms=int(hh.timeout_seconds * 1000),
                 )
             )
             registered += 1
@@ -4089,6 +4125,16 @@ from opencomputer.cli_channels import channels_app  # noqa: E402
 
 app.add_typer(channels_app, name="channels")
 
+# 2026-05-10 — `oc secrets` audit/resolve/list (OC-FROM-OPENCLAW item 3)
+from opencomputer.cli_secrets import secrets_app  # noqa: E402
+
+app.add_typer(secrets_app, name="secrets")
+
+# 2026-05-10 — `oc parity-doctor` upstream-parity self-check
+from opencomputer.cli_parity_doctor import parity_app  # noqa: E402
+
+app.add_typer(parity_app, name="parity-doctor")
+
 # Sub-project F1 — consent grant/revoke/history/verify-chain
 from opencomputer.cli_adapter import adapter_app  # noqa: E402
 from opencomputer.cli_consent import consent_app  # noqa: E402
@@ -5767,6 +5813,20 @@ def main() -> None:
         load_for_profile(read_active_profile())
     except Exception as e:  # noqa: BLE001 — never crash startup on env load
         _log.debug("per-profile env load failed: %s", e)
+    # OpenClaw-parity SecretRef pipeline — resolve per-profile
+    # ``secrets.json`` specs and export ``export_as``-tagged values to
+    # os.environ BEFORE plugins/providers initialise. Refs win over
+    # plaintext env vars at runtime per OpenClaw spec — see
+    # opencomputer.security.secrets.apply_secrets_to_environ. Wrapped in
+    # try/except so a malformed secrets file (or a flaky vault exec)
+    # never wedges startup — the loader itself logs the failure loudly
+    # and OC continues with whatever env was already set.
+    try:
+        from opencomputer.security.secrets import load_secrets_at_startup
+
+        load_secrets_at_startup()
+    except Exception as e:  # noqa: BLE001 — never crash startup on secrets
+        _log.warning("secrets: startup load raised %s — continuing without refs", e)
     # v1.1 plan-4 M13 — attach plugin-advertised top-level CLI subcommands
     # as lazy placeholders. Discovery is cheap (manifest JSON only); the
     # owning plugin loads only when the user actually invokes `oc <name>`.

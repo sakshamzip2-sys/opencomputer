@@ -147,6 +147,33 @@ class BashTool(BaseTool):
                 is_error=True,
             )
 
+        # OpenClaw-parity per-command pattern rules. Operators declare
+        # allow/ask/deny verdicts in
+        # ``security.approvals.command_rules``. ``deny`` short-circuits
+        # before Tirith — denials are deterministic and don't depend
+        # on a binary being installed. ``allow`` is consulted later
+        # by the consent gate; here we just record the verdict.
+        try:
+            from opencomputer.security.approvals import (
+                load_approvals_from_active_config as _load_appr,
+            )
+
+            _appr_cfg = _load_appr()
+            _verdict = _appr_cfg.evaluate_command(cmd)
+        except Exception:  # noqa: BLE001 — never let approvals break exec
+            _verdict = None
+        if _verdict == "deny":
+            return ToolResult(
+                tool_call_id=call.id,
+                content=(
+                    "Refused: command matched a deny rule in "
+                    "security.approvals.command_rules. Edit "
+                    "config.yaml or remove the matching pattern to "
+                    "permit this command."
+                ),
+                is_error=True,
+            )
+
         # Hermes parity: Tirith pre-exec scan. Subprocess call is
         # synchronous — wrapped in to_thread so the agent loop's async
         # dispatch isn't blocked. fail_open default per Tirith config;

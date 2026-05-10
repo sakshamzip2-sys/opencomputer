@@ -21,6 +21,23 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from opencomputer.agent.context_pruning import ContextPruningConfig
+    from opencomputer.agent.tokenjuice import TokenjuiceConfig
+
+
+def _default_tokenjuice_config() -> Any:
+    """Lazy import to avoid a top-level circular with agent.tokenjuice."""
+    from opencomputer.agent.tokenjuice import TokenjuiceConfig
+
+    return TokenjuiceConfig()
+
+
+def _default_context_pruning_config() -> Any:
+    """Lazy import to avoid a top-level circular with agent.context_pruning."""
+    from opencomputer.agent.context_pruning import ContextPruningConfig
+
+    return ContextPruningConfig()
+
 
 def _home() -> Path:
     """Return the active profile's home dir, creating it if needed.
@@ -430,6 +447,24 @@ class LoopConfig:
     — a profile setting other than ``"compressor"`` resolves through the
     registry; an unknown name logs a warning and falls back to the
     default so a misconfigured profile still boots."""
+    tokenjuice: TokenjuiceConfig = field(
+        default_factory=lambda: _default_tokenjuice_config(),
+    )
+    """OpenClaw-parity tool-result compaction. Default is ``enabled=False`` so
+    existing sessions are byte-identical until the operator opts in. When
+    enabled, results from tools not on the do-not-compact list pass through
+    :func:`opencomputer.agent.tokenjuice.compact_tool_result` before
+    re-entering the conversation. ``Read``-class tools are protected by
+    default (file content must stay verbatim)."""
+    context_pruning: ContextPruningConfig = field(
+        default_factory=lambda: _default_context_pruning_config(),
+    )
+    """OpenClaw-parity ``contextPruning`` modes — cheap, lossy
+    pre-compaction step. Default is ``mode="none"`` so existing sessions
+    are byte-identical. Sliding-window mode keeps the last ``window_turns``
+    user turns verbatim; cache-ttl drops messages older than ``ttl_seconds``
+    when their producers attach a ``timestamp``. Always-keep-system True by
+    default — losing the system prompt mid-session would change behaviour."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -647,6 +682,61 @@ class HookPromptConfig:
     token_budget_input: int = 500
     token_budget_output: int = 100
     score_threshold: float = 7.0
+
+
+@dataclass(frozen=True, slots=True)
+class HookHttpConfig:
+    """One HTTP hook entry declared in config.yaml (CC §6, 2026-05-11).
+
+    Settings-declared hook that POSTs a JSON-serialized
+    :class:`HookContext` payload to a user-supplied URL. The endpoint
+    decides allow / block / pass via the response body (same stdout-JSON
+    schema as shell hooks).
+
+    Mirrors Claude Code's ``"type": "http"`` shape from
+    ``docs/OC-FROM-CLAUDE-CODE.md`` §6.
+
+    Settings-format block::
+
+        hooks:
+          PreToolUse:
+            - type: http
+              url: https://hooks.example.com/oc/pre
+              matcher: "Bash"
+              headers:
+                Authorization: "Bearer ${MY_TOKEN}"
+              timeout_seconds: 5
+
+    Attributes:
+        event: Hook event name (must match a :class:`HookEvent` value).
+        url: Absolute HTTP/HTTPS URL to POST. The :class:`HookContext`
+            is serialized to JSON and sent as the request body.
+        headers: Static request headers. Values undergo
+            ``os.path.expandvars`` so ``${TOKEN}`` substitutes from env
+            at fire time. Empty / missing → no extra headers.
+        matcher: Optional regex over tool name (Pre/PostToolUse only).
+        timeout_seconds: Wall-clock cap; exceeded → fail-open + warn.
+        max_response_bytes: Cap on response body read. Larger
+            responses log a warning and pass-through; protects against
+            a misbehaving endpoint flooding the agent.
+
+    Decision contract:
+        The endpoint responds with JSON whose shape matches the shell-
+        handler stdout protocol:
+
+          - ``{"action": "block", "message": "..."}`` → block
+          - ``{"decision": "block", "reason": "..."}`` → block
+          - ``{"action": "approve" | "allow"}`` → pass
+          - any 2xx with empty / unrecognized body → pass
+          - non-2xx, timeout, network error → pass (fail-open + warn)
+    """
+
+    event: str = ""
+    url: str = ""
+    headers: tuple[tuple[str, str], ...] = ()
+    matcher: str | None = None
+    timeout_seconds: float = 5.0
+    max_response_bytes: int = 64 * 1024  # 64 KB
 
 
 @dataclass(frozen=True, slots=True)
@@ -1530,6 +1620,12 @@ class Config:
     #: (``type: agent``). Same YAML block as ``hooks`` and ``prompt_hooks``;
     #: the parser sniffs ``type:`` and routes accordingly.
     agent_hooks: tuple[HookAgentConfig, ...] = ()
+    #: CC §6 (2026-05-11) — HTTP hooks loaded from ``hooks:`` YAML block
+    #: (``type: http``). Same YAML block as the other handler types; the
+    #: parser sniffs ``type:`` and routes accordingly. Each entry POSTs
+    #: a serialized HookContext to a user URL. See
+    #: :class:`HookHttpConfig` for the per-entry options.
+    http_hooks: tuple[HookHttpConfig, ...] = ()
     #: 3.F — master enable/disable for autonomous full-system-control mode.
     #: Defaults to disabled (invisible). When enabled, the structured
     #: ``agent.log`` collector + optional menu-bar indicator activate.
@@ -1637,7 +1733,7 @@ def resolve_tzinfo(cfg: Config) -> Any:
     return zoneinfo.ZoneInfo(cfg.timezone)
 
 
-def now_in_tz(cfg: Config) -> "datetime":
+def now_in_tz(cfg: Config) -> datetime:
     """Current ``datetime`` in ``cfg.timezone`` (or naive when unset).
 
     Used by ``prompt_builder`` for system-prompt time injection. Returns
