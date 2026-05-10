@@ -2,6 +2,10 @@
 
 All notable changes to OpenComputer are listed here. Follows [Keep a Changelog](https://keepachangelog.com/) conventions. **Versioning: date-stamped (`YYYY.M.D`)** — ship-when-ready, no semver theatre. The `plugin_sdk/` contract is the only stability surface.
 
+## [v2026.5.10.post3] — 2026-05-10
+
+- fix(cron): dreaming_v2 tick leaks coroutine when invoked from running event loop (#591). Under `oc gateway` (cron co-tenant on the main asyncio loop), `asyncio.run()` rejected the coroutine before iterating it, orphaning it (`RuntimeWarning: coroutine 'run_dreaming_v2_async' was never awaited`) and silently no-op'ing the dream pass every tick. The fallback `loop.run_until_complete()` path also failed (same thread-local check). Fixed by detecting the running loop and dispatching the coroutine to a single-shot `ThreadPoolExecutor` worker that owns its own loop.
+
 ## [v2026.5.10.post2] — 2026-05-10
 
 - feat(browser): browser-harness + opencli-bridge auto-set `AGENT_BROWSER_ARGS=--no-sandbox,--headless=new` on display-less Linux (no `DISPLAY`/`WAYLAND_DISPLAY`). agent-browser only auto-adds `--no-sandbox` in containers/root, so KVM VPS deployments fall through every check; this fills the gap. Respects user override.
