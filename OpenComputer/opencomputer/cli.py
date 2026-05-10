@@ -9,7 +9,6 @@ import os
 import sys
 import uuid
 import warnings
-from dataclasses import is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -4088,6 +4087,16 @@ app.add_typer(plugin_app, name="plugin")
 from opencomputer.cli_channels import channels_app  # noqa: E402
 
 app.add_typer(channels_app, name="channels")
+
+# 2026-05-10 — `oc secrets` audit/resolve/list (OC-FROM-OPENCLAW item 3)
+from opencomputer.cli_secrets import secrets_app  # noqa: E402
+
+app.add_typer(secrets_app, name="secrets")
+
+# 2026-05-10 — `oc parity-doctor` upstream-parity self-check
+from opencomputer.cli_parity_doctor import parity_app  # noqa: E402
+
+app.add_typer(parity_app, name="parity-doctor")
 
 # Sub-project F1 — consent grant/revoke/history/verify-chain
 from opencomputer.cli_adapter import adapter_app  # noqa: E402

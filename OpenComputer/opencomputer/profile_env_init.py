@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 # ─── Hermes config v2 — secret-key heuristic + single-key writer ─────
 
 #: Conservative case-insensitive pattern matching common secret-name
