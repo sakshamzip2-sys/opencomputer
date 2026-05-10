@@ -111,7 +111,15 @@ export const App: React.FC<AppProps> = ({ client, resumeSpec = "" }) => {
     const offEv = client.onEvent((ev: WireEvent) => {
       const payload = (ev.payload ?? {}) as Record<string, unknown>;
       if (ev.event === "assistant.message" || ev.event === "turn.assistant") {
-        setStreamBuf((prev) => prev + String(payload.text ?? payload.content ?? ""));
+        // The wire server emits assistant.message with key `delta` (see
+        // opencomputer/gateway/wire_server.py:_handle_chat:_on_chunk). The
+        // legacy `text` / `content` keys are kept as fallbacks for any
+        // future server variant or hand-crafted client. Pre-2026-05-10 only
+        // text/content were checked, so every chat reply was silently
+        // dropped — the WS event arrived but reading the wrong key gave
+        // undefined → "" → nothing accumulated → turn.end fired with empty
+        // streamBuf → no assistant line shown.
+        setStreamBuf((prev) => prev + String(payload.delta ?? payload.text ?? payload.content ?? ""));
       } else if (ev.event === "turn.end") {
         setStreamBuf((prev) => {
           if (prev) setTurns((t) => [...t, { role: "assistant", text: prev }]);

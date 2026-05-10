@@ -329,6 +329,33 @@ async def test_hello_handshake_advertises_memory_status(tmp_path: Path) -> None:
             assert "memory.write" in msg["payload"]["events"]
 
 
+def test_assistant_message_payload_uses_delta_key_not_text() -> None:
+    """The wire server's _handle_chat emits assistant.message events with
+    payload key ``delta`` (see ``_on_chunk`` callback). The TS TUI's
+    streaming buffer reads this exact key — pre-2026-05-10 it read
+    ``text`` / ``content`` instead, dropping every assistant reply
+    silently while turn.end still fired and made it look like the agent
+    said nothing.
+
+    This test pins the wire-side contract by source-grepping the
+    handler. If ``delta`` ever changes here, the TUI app.tsx priority
+    chain (``payload.delta ?? payload.text ?? payload.content``) needs
+    to flip its first key to match — otherwise streaming silently
+    re-breaks.
+    """
+    from pathlib import Path as _Path
+
+    src = (_Path(__file__).resolve().parent.parent
+           / "opencomputer" / "gateway" / "wire_server.py").read_text()
+    # Pin the exact line shape so a refactor of the handler can't quietly
+    # rename the key. Both clauses must be present.
+    assert 'EVENT_ASSISTANT_MESSAGE' in src
+    assert '"delta": text' in src, (
+        "wire_server _on_chunk no longer emits payload key 'delta' — "
+        "TUI app.tsx assistant-message handler must be updated to match"
+    )
+
+
 @pytest.mark.asyncio
 async def test_request_without_type_field_is_rejected(tmp_path: Path) -> None:
     """Server MUST reject requests missing ``type: "req"`` so a wire-shape
