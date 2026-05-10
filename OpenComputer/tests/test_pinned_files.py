@@ -240,7 +240,8 @@ def test_oc_pin_list_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
     r = CliRunner().invoke(app, ["pin", "--list"])
     assert r.exit_code == 0, r.output
-    assert "no pinned files" in r.output
+    flat = " ".join(r.output.split())
+    assert "no pinned files" in flat, f"output:\n{r.output}"
 
 
 def test_oc_pin_add_then_list(
@@ -281,7 +282,10 @@ def test_oc_pin_rejects_missing_file(
 
     r = CliRunner().invoke(app, ["pin", str(tmp_path / "nope.py")])
     assert r.exit_code != 0
-    assert "no such file" in r.output.lower()
+    # Rich console wraps long error messages across lines on narrow CI
+    # terminals — flatten whitespace before the substring check.
+    flat_lower = " ".join(r.output.lower().split())
+    assert "no such file" in flat_lower, f"output:\n{r.output}"
 
 
 def test_oc_unpin_removes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -315,4 +319,5 @@ def test_oc_unpin_unknown_path_exits_nonzero(
 
     r = CliRunner().invoke(app, ["unpin", str(tmp_path / "wasnt-pinned.py")])
     assert r.exit_code != 0
-    assert "not pinned" in r.output.lower()
+    flat_lower = " ".join(r.output.lower().split())
+    assert "not pinned" in flat_lower, f"output:\n{r.output}"
