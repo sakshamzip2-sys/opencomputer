@@ -22,7 +22,6 @@ from opencomputer.cli_setup.env_writer import (
 from opencomputer.cli_setup.sections import SectionResult, WizardCtx
 from opencomputer.cli_ui.menu import Choice, checklist, radiolist
 
-
 _PLATFORM_ICONS = {
     "telegram": "📨",
     "discord": "🎮",

@@ -391,7 +391,6 @@ async def _test_provider(provider_id: str, env_key: str) -> bool:
         console.print(f"[yellow]skipped[/yellow] — {env_key} not set, can't test auth yet")
         return False
 
-    from opencomputer.agent.config import default_config
     from opencomputer.plugins.registry import registry as plugin_registry
     from plugin_sdk.core import Message
 

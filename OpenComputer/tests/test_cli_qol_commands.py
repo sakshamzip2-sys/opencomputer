@@ -118,7 +118,7 @@ def test_config_edit_prefers_visual_over_editor(
 def test_config_edit_refuses_when_config_missing(
     tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If config.yaml doesn't exist, suggest ``opencomputer setup``
+    """If config.yaml doesn't exist, suggest ``oc setup``
     instead of opening an empty file the user has to populate by hand."""
     from opencomputer import cli
 
@@ -128,7 +128,11 @@ def test_config_edit_refuses_when_config_missing(
     result = runner.invoke(cli.app, ["config", "edit"])
 
     assert result.exit_code != 0
-    assert "opencomputer setup" in result.stdout.lower()
+    # Wizard refresh (commit 4bd5e91a) renamed the suggested CLI from
+    # `opencomputer setup` to `oc setup`. Accept either form to stay
+    # robust if it changes back.
+    output_lower = result.stdout.lower()
+    assert "oc setup" in output_lower or "opencomputer setup" in output_lower
 
 
 # ── auth ───────────────────────────────────────────────────────────────

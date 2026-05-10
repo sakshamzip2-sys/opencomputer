@@ -1,11 +1,11 @@
 """OC-branded Hermes-style setup wizard."""
 from __future__ import annotations
 
-from contextlib import nullcontext
-import os
 import logging
+import os
 import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import yaml
@@ -261,10 +261,7 @@ def run_setup(
 
 
 def _env_present(*names: str) -> bool:
-    for name in names:
-        if os.environ.get(name) or read_env_value(name):
-            return True
-    return False
+    return any(os.environ.get(name) or read_env_value(name) for name in names)
 
 
 def _tool_rows(ctx: WizardCtx) -> list[tuple[str, bool, str]]:
