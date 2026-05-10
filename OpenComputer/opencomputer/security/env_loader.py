@@ -254,6 +254,14 @@ def load_for_profile(
     home_override = os.environ.get("OPENCOMPUTER_HOME")
     oc_home = Path(home_override) if home_override else Path.home() / ".opencomputer"
 
+    # When profile_name wasn't provided but OPENCOMPUTER_HOME already points
+    # at a leaf (set by _apply_profile_override for a -p flag or sticky profile),
+    # infer the name from the directory so leaf-override detection fires below.
+    # Without this, load_for_profile(None) treats the leaf as the root and
+    # looks for the global .env at <leaf>/.env instead of <root>/.env.
+    if profile_name is None and oc_home.parent.name == "profiles" and oc_home.name not in ("", "default"):
+        profile_name = oc_home.name
+
     # Detect the leaf-pointer shape (`<root>/profiles/<name>`). When
     # OPENCOMPUTER_HOME has that shape AND matches the active profile,
     # treat it as the profile-local dir and walk up two levels to

@@ -352,8 +352,14 @@ async def test_launch_openclaw_chrome_happy_path(tmp_path, monkeypatch):
     monkeypatch.setattr(launch_mod, "is_profile_decorated", lambda *a, **k: True)
     monkeypatch.setattr(launch_mod, "ensure_profile_clean_exit", lambda *a, **k: None)
 
+    _reachable_calls = 0
+
     async def fake_reachable(*args, **kwargs):
-        return True
+        nonlocal _reachable_calls
+        _reachable_calls += 1
+        # First call is the pre-spawn shortcut check — return False so Chrome
+        # is spawned normally. Subsequent calls (readiness poll) return True.
+        return _reachable_calls > 1
 
     monkeypatch.setattr(launch_mod, "is_chrome_reachable", fake_reachable)
 

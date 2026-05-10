@@ -403,6 +403,49 @@ def test_stop_subscriber_swallows_subscriber_stop_exception(monkeypatch) -> None
     assert st_plugin.get_active_subscriber() is None
 
 
+def test_stop_subscriber_detaches_bus_even_when_stop_raises(monkeypatch) -> None:
+    """Regression: ``stop_subscriber()`` must unsubscribe from the bus
+    even when the subscriber's ``stop()`` raises before reaching its
+    own ``unsubscribe()`` call.
+
+    A leaked bus subscription causes silent cross-test pollution: the
+    dangling subscriber receives later ``session_end`` events and
+    calls ``session_state.pop_session`` against foreign session_ids,
+    clobbering the bridge entries those tests expect. Reproduced
+    historically as ``test_end_to_end_no_match_no_injection`` failing
+    only in full-suite runs.
+    """
+    from opencomputer.ingestion.bus import default_bus
+
+    sub = st_plugin.wire_subscriber(
+        provider=_FakeProvider(), cost_guard=_FakeCostGuard()
+    )
+    # Capture the live subscription so we can verify it leaves the bus.
+    subscription = sub._subscription
+    assert subscription is not None, (
+        "wire_subscriber should have called subscribe() on the bus"
+    )
+    live_ids = {s.id for s in default_bus.subscribers("session_end")}
+    assert subscription.id in live_ids, (
+        "wire_subscriber's subscription must be live on the default bus"
+    )
+
+    def _raising_stop():
+        raise RuntimeError("simulated subscriber.stop() failure on shutdown")
+
+    monkeypatch.setattr(sub, "stop", _raising_stop)
+
+    st_plugin.stop_subscriber()  # must not raise
+
+    assert st_plugin.get_active_subscriber() is None
+    live_ids_after = {s.id for s in default_bus.subscribers("session_end")}
+    assert subscription.id not in live_ids_after, (
+        "bus subscription must be detached even when stop() raises — "
+        "otherwise later session_end events leak into a dead subscriber "
+        "and corrupt session_state"
+    )
+
+
 # ─── 5. Targeted coverage for _config_factory paths ─────────────────
 
 

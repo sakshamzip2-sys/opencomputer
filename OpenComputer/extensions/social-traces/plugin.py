@@ -209,6 +209,35 @@ def register(api) -> None:  # noqa: ANN001 — duck-typed PluginAPI
     )
 
 
+def _force_unsubscribe(sub: TraceEmissionSubscriber) -> None:
+    """Detach ``sub`` from the bus, regardless of what its ``stop()``
+    method does or whether it raises.
+
+    The load-bearing cleanup on shutdown is "the bus no longer holds a
+    reference to this subscriber's handler" — without that, a stale
+    subscriber keeps receiving ``session_end`` events from later
+    ``run_conversation`` calls and clobbers shared state (e.g.
+    ``session_state.pop_session`` runs against a foreign session_id).
+
+    Pulling the subscription off via the private attribute and
+    unsubscribing it directly means the bus is clean even if the
+    subscriber's own ``stop()`` is monkeypatched, subclassed, or
+    otherwise raises before reaching ``unsubscribe()``.
+    """
+    subscription = getattr(sub, "_subscription", None)
+    sub._subscription = None  # type: ignore[attr-defined]
+    if subscription is None:
+        return
+    try:
+        subscription.unsubscribe()
+    except Exception:  # noqa: BLE001 — bus cleanup is best-effort
+        _log.warning(
+            "social-traces: subscription.unsubscribe raised in "
+            "_force_unsubscribe (continuing)",
+            exc_info=True,
+        )
+
+
 def wire_subscriber(
     *,
     provider: Any,
@@ -225,13 +254,16 @@ def wire_subscriber(
     happen — the pre-task lookup path still works (file-I/O only),
     but no agent ever contributes back to the network.
 
-    Idempotent: a prior subscriber (if any) is ``stop()``-ed and
-    replaced with a freshly-wired one. Returns the new subscriber so
-    callers can hold a reference for shutdown.
+    Idempotent: a prior subscriber (if any) is detached from the bus
+    and ``stop()``-ed before a freshly-wired one takes its place. Bus
+    detachment runs first and unconditionally so a buggy ``stop()``
+    can't leave a dangling subscription. Returns the new subscriber
+    so callers can hold a reference for shutdown.
     """
     global _active_subscriber  # noqa: PLW0603 — module-level singleton by design
 
     if _active_subscriber is not None:
+        _force_unsubscribe(_active_subscriber)
         try:
             _active_subscriber.stop()
         except Exception:  # noqa: BLE001 — never let stop() errors block restart
@@ -267,19 +299,26 @@ def stop_subscriber() -> None:
 
     Called from :meth:`opencomputer.gateway.server.Gateway.stop` (and
     in tests that wire/unwire) so a daemon shutdown drains cleanly.
+
+    Bus detachment runs first via :func:`_force_unsubscribe` so that
+    even if ``stop()`` raises (or is monkeypatched in tests to raise),
+    the global ingestion bus has no dangling reference to the
+    subscriber's handler when this function returns.
     """
     global _active_subscriber  # noqa: PLW0603
 
-    if _active_subscriber is None:
+    sub = _active_subscriber
+    _active_subscriber = None
+    if sub is None:
         return
+    _force_unsubscribe(sub)
     try:
-        _active_subscriber.stop()
+        sub.stop()
     except Exception:  # noqa: BLE001
         _log.warning(
             "social-traces: subscriber.stop() raised on shutdown",
             exc_info=True,
         )
-    _active_subscriber = None
 
 
 def get_active_subscriber() -> TraceEmissionSubscriber | None:
