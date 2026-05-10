@@ -412,12 +412,20 @@ def _parse_required_credential_files(raw: object) -> tuple[RequiredCredentialFil
 # ─── bus helper (T3.2 PR-8) ───────────────────────────────────────────
 
 
-def _publish_memory_write_event(*, action: str, target: str, content_size: int) -> None:
+def _publish_memory_write_event(
+    *,
+    action: str,
+    target: str,
+    content_size: int,
+    compaction_delta: int = 0,
+    dropped_paragraphs: int = 0,
+) -> None:
     """Publish a MemoryWriteEvent to the default bus. Exception-isolated.
 
     Called after each successful declarative-memory write so MemoryBridge
     subscribers can trigger provider callbacks (audit pattern). Content
-    itself is NOT included — only action, target name, and size.
+    itself is NOT included — only action, target name, size, and the
+    compaction metadata (M2 of 2026-05-10 memory-observability design).
     """
     try:
         from opencomputer.ingestion.bus import default_bus
@@ -429,6 +437,8 @@ def _publish_memory_write_event(*, action: str, target: str, content_size: int) 
             action=action,
             target=target,
             content_size=content_size,
+            compaction_delta=compaction_delta,
+            dropped_paragraphs=dropped_paragraphs,
         ))
     except Exception:  # noqa: BLE001 — must never break a memory write path
         pass
@@ -608,6 +618,16 @@ class MemoryManager:
         self.skills_path.mkdir(parents=True, exist_ok=True)
         self.memory_char_limit = memory_char_limit
         self.user_char_limit = user_char_limit
+        # M2 of 2026-05-10 memory-observability design — side-channel that
+        # carries the most-recent write's compaction metadata so the
+        # MemoryTool can escalate its in-band warning. Never read in a
+        # multi-threaded context: writes are lock-protected per file and the
+        # tool reads it on the same call thread immediately after the
+        # MemoryManager method returns.
+        self._last_write_metadata: dict[str, int] = {
+            "compaction_delta": 0,
+            "dropped_paragraphs": 0,
+        }
         # Always include bundled skills shipped with core at the lowest priority
         if bundled_skills_paths is None:
             bundled = Path(__file__).resolve().parent.parent / "skills"
@@ -796,10 +816,13 @@ class MemoryManager:
     # ─── shared write helpers ──────────────────────────────────────
 
     def _append(self, path: Path, text: str, *, limit: int, kind: str) -> None:
+        compaction_delta = 0
+        dropped_paragraphs = 0
         with _file_lock(path):
             existing = path.read_text(encoding="utf-8") if path.exists() else ""
             separator = "\n\n" if existing and not existing.endswith("\n\n") else ""
-            new_text = existing + separator + text.strip() + "\n"
+            naive_text = existing + separator + text.strip() + "\n"
+            new_text = naive_text
             if len(new_text) > limit:
                 # v1.1 plan-3 M6.5 — graceful inline compaction.  Drop
                 # the oldest paragraph-delimited entries (front of the
@@ -812,21 +835,41 @@ class MemoryManager:
                     existing, text.strip() + "\n", limit
                 )
                 if compacted is None:
-                    raise MemoryTooLargeError(kind, len(new_text), limit)
+                    raise MemoryTooLargeError(kind, len(naive_text), limit)
                 new_text = compacted
+                # M2: recover the round's drop count by diffing the
+                # cumulative-drop counter embedded in the compaction header.
+                # `_compact_under_cap` returns prior_count + new_drops on
+                # the new header; existing.count is just prior_count.
+                prior = _extract_prior_compaction_count(existing)
+                after = _extract_prior_compaction_count(new_text)
+                dropped_paragraphs = max(0, after - prior)
+                compaction_delta = max(0, len(naive_text) - len(new_text))
             # Backup current state before mutating.
             if path.exists():
                 shutil.copy2(path, _backup_path(path))
             _write_atomic(path, new_text)
-        # T3.2 (PR-8): publish MemoryWriteEvent after the lock releases.
+        # M2 — record on the side-channel so the MemoryTool can escalate
+        # its in-band warning. Reset to zero on non-compacting writes.
+        self._last_write_metadata = {
+            "compaction_delta": compaction_delta,
+            "dropped_paragraphs": dropped_paragraphs,
+        }
+        # T3.2 (PR-8) + M2: publish MemoryWriteEvent after the lock releases.
         # Privacy: content_size only, NOT the content itself.
         _publish_memory_write_event(
-            action="append", target=path.name, content_size=len(new_text)
+            action="append",
+            target=path.name,
+            content_size=len(new_text),
+            compaction_delta=compaction_delta,
+            dropped_paragraphs=dropped_paragraphs,
         )
 
     def _replace(self, path: Path, old: str, new: str, *, limit: int, kind: str) -> bool:
         replaced = False
         candidate_size = 0
+        compaction_delta = 0
+        dropped_paragraphs = 0
         with _file_lock(path):
             if not path.exists():
                 return False
@@ -834,6 +877,7 @@ class MemoryManager:
             if old not in existing:
                 return False
             candidate = existing.replace(old, new)
+            naive_size = len(candidate)
             if len(candidate) > limit:
                 # M6.5 — try graceful compaction.  We treat the
                 # post-replace text as the candidate to fit; compaction
@@ -841,15 +885,28 @@ class MemoryManager:
                 compacted = _compact_replace_under_cap(candidate, limit)
                 if compacted is None:
                     raise MemoryTooLargeError(kind, len(candidate), limit)
+                # M2: drop count via header-diff (see _append above).
+                prior = _extract_prior_compaction_count(existing)
+                after = _extract_prior_compaction_count(compacted)
+                dropped_paragraphs = max(0, after - prior)
+                compaction_delta = max(0, naive_size - len(compacted))
                 candidate = compacted
             shutil.copy2(path, _backup_path(path))
             _write_atomic(path, candidate)
             replaced = True
             candidate_size = len(candidate)
         if replaced:
-            # T3.2 (PR-8): publish MemoryWriteEvent after lock releases.
+            self._last_write_metadata = {
+                "compaction_delta": compaction_delta,
+                "dropped_paragraphs": dropped_paragraphs,
+            }
+            # T3.2 (PR-8) + M2: publish MemoryWriteEvent after lock releases.
             _publish_memory_write_event(
-                action="replace", target=path.name, content_size=candidate_size
+                action="replace",
+                target=path.name,
+                content_size=candidate_size,
+                compaction_delta=compaction_delta,
+                dropped_paragraphs=dropped_paragraphs,
             )
         return replaced
 
@@ -872,7 +929,13 @@ class MemoryManager:
             removed = True
             candidate_size = len(final)
         if removed:
-            # T3.2 (PR-8): publish MemoryWriteEvent after lock releases.
+            # M2: remove never compacts — explicitly reset the side-channel
+            # so a stale compaction count from a prior write doesn't leak.
+            self._last_write_metadata = {
+                "compaction_delta": 0,
+                "dropped_paragraphs": 0,
+            }
+            # T3.2 (PR-8) + M2: publish MemoryWriteEvent after lock releases.
             _publish_memory_write_event(
                 action="remove", target=path.name, content_size=candidate_size
             )
