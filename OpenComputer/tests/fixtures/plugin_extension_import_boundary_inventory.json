@@ -98,7 +98,7 @@
     "opencomputer.inference.pricing",
     "opencomputer.tools.schema_sanitizer"
   ],
-  "extensions/opencli-bridge/dispatcher.py": [
+  "extensions/opencli-bridge/opencli_dispatcher.py": [
     "opencomputer.agent.config"
   ],
   "extensions/opencli-bridge/plugin.py": [
