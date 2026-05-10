@@ -14,6 +14,24 @@ export interface WireEvent { event: string; payload?: unknown; }
 type EventHandler = (ev: WireEvent) => void;
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void; };
 
+/**
+ * Build the JSON-serialised wire request the server expects.
+ *
+ * Extracted as a pure helper so vitest can pin the wire shape without
+ * spinning up a real WebSocket. The Python wire server requires
+ * `type: "req"` as a discriminator — see
+ * `opencomputer.gateway.wire_server._handle_client` which rejects any
+ * message missing this with `"expected type=req"`. Pre-2026-05-10 this
+ * was omitted, leaving every TUI RPC silently broken.
+ */
+export function buildWireRequest(
+  id: string,
+  method: string,
+  params: unknown,
+): string {
+  return JSON.stringify({ type: "req", id, method, params });
+}
+
 export interface SlashCommand {
   name: string;
   description: string;
@@ -84,7 +102,7 @@ export class OCWireClient {
       }
       const id = String(Math.random()).slice(2);
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      this.ws.send(JSON.stringify({ id, method, params }));
+      this.ws.send(buildWireRequest(id, method, params));
     });
   }
 

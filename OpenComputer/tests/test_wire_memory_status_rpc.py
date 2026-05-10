@@ -327,3 +327,32 @@ async def test_hello_handshake_advertises_memory_status(tmp_path: Path) -> None:
             assert msg["ok"] is True
             assert "memory.status" in msg["payload"]["methods"]
             assert "memory.write" in msg["payload"]["events"]
+
+
+@pytest.mark.asyncio
+async def test_request_without_type_field_is_rejected(tmp_path: Path) -> None:
+    """Server MUST reject requests missing ``type: "req"`` so a wire-shape
+    mismatch in any client (TS, Python, IDE bridge) fails loudly with a
+    diagnosable error rather than silently no-op-ing.
+
+    Pre-2026-05-10 the TS ``OCWireClient`` (gatewayClient.ts) omitted
+    this discriminator, leaving every TUI RPC silently broken — the WS
+    opened so the "connected" indicator lit up, but every subsequent
+    call errored. The fix added ``type: "req"`` to the TS send + this
+    test pins the server-side contract so a future relaxation of the
+    server check would surface in CI rather than in user-facing breakage.
+    """
+    import websockets
+
+    async with _wire_server_with_memory(tmp_path) as (_server, url, _mm):
+        async with websockets.connect(url) as client:
+            # Deliberately omit type=req — the bug shape from gatewayClient.ts
+            # before the 2026-05-10 fix.
+            bad_req = {"id": "bad-1", "method": "hello", "params": {}}
+            await client.send(json.dumps(bad_req))
+            raw = await asyncio.wait_for(client.recv(), timeout=2.0)
+            msg = json.loads(raw)
+
+            assert msg["type"] == "res"
+            assert msg["ok"] is False
+            assert "expected type=req" in (msg.get("error") or "")
