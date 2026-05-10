@@ -11,6 +11,12 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from opencomputer.agent.auxiliary_client import AuxiliaryConfig
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 def _home() -> Path:
@@ -372,6 +378,15 @@ class LoopConfig:
     """
 
     max_iterations: int = 100  # 2026-05-05: doubled 50 → 100
+    #: Hermes-v2 ``agent.disabled_toolsets`` — prefix-match deny list.
+    #: Tools whose ``schema.name`` matches a listed prefix (exact OR
+    #: ``<prefix>_*`` form) are skipped at registry build time.
+    #: Distinct from ``tools.deny`` which is exact-name match.
+    disabled_toolsets: tuple[str, ...] = ()
+    #: Hermes-v2 ``agent.api_max_retries`` — provider retry knob.
+    #: Default 2 (Hermes spec). Setting 0 = fail-fast to fallback chain
+    #: on first transient error. Plumbed into Anthropic SDK constructor.
+    api_max_retries: int = 2
     parallel_tools: bool = True
     inactivity_timeout_s: int = 600  # 2026-05-05: doubled 300 → 600 (10 min)
     iteration_timeout_s: int = 7200  # 2026-05-05: doubled 3600 → 7200 (2h)
@@ -428,6 +443,10 @@ class SessionConfig:
     auto_prune_days: int = 0
     auto_prune_untitled_days: int = 0
     auto_prune_min_messages: int = 3
+    #: Hermes-v2 ``sessions.vacuum_after_prune`` — run ``VACUUM`` after
+    #: auto-prune so SQLite reclaims disk space (without VACUUM, deleted
+    #: rows leave free pages behind). Default true (Hermes spec).
+    vacuum_after_prune: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -1398,6 +1417,32 @@ class PromptConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PrivacyConfig:
+    """Hermes config v2 — gateway-only privacy controls.
+
+    ``redact_pii`` hashes phone/user/chat IDs before they enter the LLM
+    context (deterministic — same ID always maps to same hash). Routing
+    and delivery still use the original values internally. Supported
+    adapters: WhatsApp, Signal, Telegram. Discord/Slack route IDs are
+    already opaque and not in scope.
+    """
+
+    redact_pii: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SecurityConfig:
+    """Hermes config v2 — security controls.
+
+    ``redact_secrets`` strips API-key patterns from tool output before
+    they enter conversation context AND before they land in logs. Off
+    by default to avoid false positives on legitimate file reads.
+    """
+
+    redact_secrets: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Root configuration — composed of small focused configs."""
 
@@ -1502,12 +1547,55 @@ class Config:
     #: populates with edges. Opt out via
     #: ``user_model.inference_engine_start_in_gateway: false``.
     user_model: UserModelConfig = field(default_factory=UserModelConfig)
+    #: Hermes config v2 (2026-05-08) — gateway-only PII hashing
+    #: (off by default). See :class:`PrivacyConfig`.
+    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
+    #: Hermes config v2 (2026-05-08) — strip API-key patterns from tool
+    #: output before they enter context AND logs (off by default).
+    security: SecurityConfig = field(default_factory=SecurityConfig)
+    #: Hermes config v2 (2026-05-08) — IANA timezone for system-prompt
+    #: time injection, log timestamps, and cron scheduling. Empty
+    #: string = server-local time (preserves existing behavior).
+    #: Validated at ``load_config`` — invalid names raise ``RuntimeError``.
+    timezone: str = ""
     home: Path = field(default_factory=_home)
 
 
 def default_config() -> Config:
     """Return the default configuration with filesystem-appropriate paths."""
     return Config()
+
+
+# ─── Hermes config v2 — timezone helpers ─────────────────────────
+
+
+def resolve_tzinfo(cfg: Config) -> Any:
+    """Return ``zoneinfo.ZoneInfo`` for ``cfg.timezone`` or ``None`` when unset.
+
+    Returns ``Any`` typed because importing ``ZoneInfo`` at module top
+    would tighten startup; deferred import. Result is a real
+    ``zoneinfo.ZoneInfo`` instance suitable for ``datetime`` ``tzinfo`` arg.
+    """
+    if not cfg.timezone:
+        return None
+    import zoneinfo
+
+    return zoneinfo.ZoneInfo(cfg.timezone)
+
+
+def now_in_tz(cfg: Config) -> "datetime":
+    """Current ``datetime`` in ``cfg.timezone`` (or naive when unset).
+
+    Used by ``prompt_builder`` for system-prompt time injection. Returns
+    naive ``datetime.now()`` when ``cfg.timezone`` is empty so callers
+    that ``.strftime()`` plain formatters keep working unchanged.
+    """
+    from datetime import datetime as _dt
+
+    tz = resolve_tzinfo(cfg)
+    if tz is None:
+        return _dt.now()
+    return _dt.now(tz)
 
 
 def load_config_for_profile(profile_home: Path) -> Config:

@@ -71,8 +71,35 @@ TaskKind = Literal["summary", "classify", "extract", "title"]
 
 
 @dataclass(frozen=True, slots=True)
+class AuxSlotConfig:
+    """Per-slot auxiliary model configuration (Hermes config v2 shape).
+
+    Hermes spec ``auxiliary.<slot>.{provider, model, base_url, api_key, timeout}``.
+    ``provider`` ``"auto"`` and ``"main"`` both inherit the active main
+    provider (caller decides what "main" is at resolution time). Setting
+    ``base_url`` takes precedence over ``provider`` — the slot uses an
+    OpenAI-compatible client pointed at the URL, with ``api_key`` (or
+    falls back to ``OPENAI_API_KEY``).
+
+    All fields default to "unset" sentinels (empty strings, default
+    timeout) — a partially-populated slot still parses cleanly.
+    """
+
+    provider: str = "auto"
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    timeout: float = 120.0
+
+
+@dataclass(frozen=True, slots=True)
 class AuxiliaryConfig:
-    """Per-task model overrides. ``None`` falls back to ``DEFAULT_MODEL_BY_TASK``."""
+    """Per-task model overrides. ``None`` falls back to ``DEFAULT_MODEL_BY_TASK``.
+
+    Hermes config v2 adds a nested ``compression`` slot (parallel to the
+    flat ``summary_model``). When the nested form has a non-empty
+    ``model``, it takes precedence — see :func:`effective_compression_model`.
+    """
 
     summary_model: str | None = None
     classify_model: str | None = None
@@ -82,6 +109,47 @@ class AuxiliaryConfig:
     #: are deterministic in spirit (summarize, classify) so we don't want
     #: stylistic drift.
     temperature: float = 0.3
+    #: Hermes-v2 nested compression slot. When ``None`` (default), the
+    #: legacy flat ``summary_model`` is consulted. When set with a
+    #: non-empty ``model`` field, it overrides the flat form.
+    compression: AuxSlotConfig | None = None
+
+
+def effective_compression_model(cfg: AuxiliaryConfig) -> str:
+    """Resolve the compression model.
+
+    Order: ``compression.model`` (if non-empty) → flat ``summary_model``
+    (if non-empty) → ``DEFAULT_MODEL_BY_TASK["summary"]``.
+    """
+    if cfg.compression is not None and cfg.compression.model:
+        return cfg.compression.model
+    if cfg.summary_model:
+        return cfg.summary_model
+    return DEFAULT_MODEL_BY_TASK["summary"]
+
+
+def resolve_compression_provider(
+    cfg: AuxiliaryConfig, main_provider: str
+) -> str:
+    """Resolve the compression-slot provider name.
+
+    ``auto``/``main``/empty → ``main_provider``. Otherwise return the
+    configured value verbatim. Caller is responsible for instantiating
+    the provider client.
+    """
+    if cfg.compression is None:
+        return main_provider
+    p = cfg.compression.provider
+    if p in ("", "auto", "main"):
+        return main_provider
+    return p
+
+
+def resolve_compression_endpoint(cfg: AuxiliaryConfig) -> str | None:
+    """Return ``base_url`` when set; ``None`` means "use provider default"."""
+    if cfg.compression is None or not cfg.compression.base_url:
+        return None
+    return cfg.compression.base_url
 
 
 class AuxiliaryClient:
@@ -106,10 +174,19 @@ class AuxiliaryClient:
         self.config = config or AuxiliaryConfig()
 
     def model_for(self, task: TaskKind) -> str:
-        """Resolve the model name for a task (config override → default)."""
+        """Resolve the model name for a task (config override → default).
+
+        Hermes-v2: for ``summary``, the nested ``compression`` slot takes
+        precedence over the flat ``summary_model`` when its model is set.
+        See :func:`effective_compression_model`.
+        """
         cfg = self.config
         override: str | None = None
         if task == "summary":
+            # Nested compression slot wins when present + model set; falls
+            # back to flat summary_model. Default resolves below if both empty.
+            if cfg.compression is not None and cfg.compression.model:
+                return cfg.compression.model
             override = cfg.summary_model
         elif task == "classify":
             override = cfg.classify_model
@@ -249,8 +326,12 @@ class AuxiliaryClient:
 
 
 __all__ = [
+    "AuxSlotConfig",
     "AuxiliaryClient",
     "AuxiliaryConfig",
     "DEFAULT_MODEL_BY_TASK",
     "TaskKind",
+    "effective_compression_model",
+    "resolve_compression_endpoint",
+    "resolve_compression_provider",
 ]

@@ -14,11 +14,84 @@ in :func:`opencomputer.cli_profile.env_init_cmd`.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+# ─── Hermes config v2 — secret-key heuristic + single-key writer ─────
+
+#: Conservative case-insensitive pattern matching common secret-name
+#: suffixes (api_key, token, secret, password, webhook_url). Tested at
+#: word-boundary or after ``.``/``_`` so ``memory.provider`` is rejected.
+_SECRET_PATTERN = re.compile(
+    r"(?i)(^|[._-])(api[_-]?key|token|secret|password|webhook[_-]?url)$"
+)
+
+
+def is_secret_key(key: str) -> bool:
+    """Return True iff ``key`` matches the Hermes-v2 secret-name heuristic.
+
+    Matches: ``OPENAI_API_KEY``, ``GITHUB_TOKEN``, ``CLIENT_SECRET``,
+    ``DB_PASSWORD``, ``SLACK_WEBHOOK_URL``, dotted ``custom.api_key``.
+    Rejects: ``memory.provider``, ``max_iterations``, ``language``.
+    """
+    return bool(_SECRET_PATTERN.search(key))
+
+
+def write_env_var(env_path: Path, key: str, value: str) -> None:
+    """Write ``KEY=VALUE`` to ``env_path`` atomically.
+
+    - If ``env_path`` exists, update existing line for ``key`` or append.
+    - File created with mode 0600 (owner-only).
+    - Comments and blank lines preserved.
+    - Multi-line writes go through :func:`atomic_write` (tempfile + rename).
+    """
+    existing = parse_env_file(env_path) if env_path.exists() else {}
+    # Preserve original ordering by reading raw lines and editing in place
+    # when the key already exists, else appending.
+    out_lines: list[str] = []
+    found = False
+    if env_path.exists():
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                out_lines.append(raw)
+                continue
+            if "=" not in stripped:
+                out_lines.append(raw)
+                continue
+            line_key = stripped.partition("=")[0].strip()
+            if line_key == key and not found:
+                out_lines.append(f"{key}={_quote_env_value(value)}")
+                found = True
+                continue
+            if line_key == key:
+                # Drop further duplicates of the same key.
+                continue
+            out_lines.append(raw)
+    if not found:
+        out_lines.append(f"{key}={_quote_env_value(value)}")
+
+    body = "\n".join(out_lines).rstrip() + "\n"
+    atomic_write(env_path, body, mode=0o600)
+    # ``existing`` retained in scope so test assertions on prior values
+    # remain meaningful — but we don't merge through render_env_file
+    # (which reorders + adds a header).
+    _ = existing
+
+
+def _quote_env_value(value: str) -> str:
+    """Quote a value for .env iff it contains whitespace, quotes, or =."""
+    if not value:
+        return '""'
+    if any(c in value for c in (" ", "\t", "\n", '"', "'", "=", "#", "$")):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return value
 
 
 @dataclass(frozen=True)
@@ -234,7 +307,9 @@ __all__ = [
     "InitResult",
     "atomic_write",
     "collect_env_var_specs",
+    "is_secret_key",
     "parse_env_file",
     "render_env_file",
     "run_init",
+    "write_env_var",
 ]

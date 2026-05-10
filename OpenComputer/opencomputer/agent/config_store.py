@@ -9,6 +9,8 @@ or if a given key isn't set.
 from __future__ import annotations
 
 import logging
+import os
+import re
 from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,44 @@ def config_file_path() -> Path:
     return _home() / "config.yaml"
 
 
+def env_file_path() -> Path:
+    """Hermes-v2 — return ``<home>/.env`` for the active profile."""
+    return _home() / ".env"
+
+
+# ─── ${VAR} env-var substitution (Hermes config v2) ──────────────
+
+#: Strict ASCII env-var name pattern. Matches Hermes contract: must start
+#: with letter/underscore, only letters/digits/underscore after.
+_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
+
+
+def _expand_env_vars(value: Any) -> Any:
+    """Recursively walk a dict/list, substituting ``${VAR}`` in string values.
+
+    Hermes config v2 contract:
+
+    - ``${VAR}`` syntax only — bare ``$VAR`` not expanded.
+    - Multiple references per value supported (``"${HOST}:${PORT}"``).
+    - Undefined vars kept verbatim (``${UNDEFINED}``).
+    - Single-pass: a substituted value containing ``${OTHER}`` is NOT
+      expanded recursively. This is intentional — recursive expansion
+      would let users build cycles or surprise themselves with implicit
+      indirection. Match Hermes's documented behavior.
+    """
+    if isinstance(value, str):
+
+        def _sub(m: re.Match[str]) -> str:
+            return os.environ.get(m.group(1), m.group(0))
+
+        return _ENV_VAR_PATTERN.sub(_sub, value)
+    if isinstance(value, dict):
+        return {k: _expand_env_vars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env_vars(item) for item in value]
+    return value
+
+
 # ─── load ────────────────────────────────────────────────────────
 
 
@@ -46,6 +86,22 @@ def _apply_overrides(base: Any, overrides: dict[str, Any]) -> Any:
             if is_dataclass(nested) and isinstance(new, dict):
                 # Nested dataclass (e.g. model, loop, mcp)
                 kwargs[name] = _apply_overrides(nested, new)
+            elif nested is None and isinstance(new, dict):
+                # Hermes-v2 — Optional[Dataclass] field with None default,
+                # YAML provides a dict. Resolve the field's annotated
+                # dataclass type and instantiate with the dict.
+                inner_cls = _extract_optional_dataclass_type(type(base), name)
+                if inner_cls is not None:
+                    try:
+                        default_instance = inner_cls()
+                    except TypeError:
+                        default_instance = None
+                    if default_instance is not None:
+                        kwargs[name] = _apply_overrides(default_instance, new)
+                    else:
+                        kwargs[name] = new
+                else:
+                    kwargs[name] = new
             elif isinstance(nested, tuple) and isinstance(new, list):
                 # Tuple-of-dataclasses field (e.g. mcp.servers = [MCPServerConfig, ...])
                 inner_type = _extract_tuple_inner_type(type(base), name, nested)
@@ -76,6 +132,38 @@ def _apply_overrides(base: Any, overrides: dict[str, Any]) -> Any:
         else:
             kwargs[name] = getattr(base, name)
     return type(base)(**kwargs)
+
+
+def _extract_optional_dataclass_type(
+    base_cls: type, field_name: str
+) -> type | None:
+    """Best-effort: resolve ``Optional[SomeDataclass]`` annotation to the dataclass.
+
+    Used by :func:`_apply_overrides` when the existing field value is
+    ``None`` (so we can't read the type off the instance) and the YAML
+    override provides a dict that should construct a fresh dataclass.
+
+    Returns the dataclass type when the annotation is exactly
+    ``X | None`` / ``Optional[X]`` for a dataclass ``X``. Otherwise None.
+    """
+    import typing
+
+    try:
+        hints = typing.get_type_hints(base_cls)
+    except Exception:
+        return None
+    annotation = hints.get(field_name)
+    if annotation is None:
+        return None
+    origin = typing.get_origin(annotation)
+    # ``X | None`` and ``Optional[X]`` both surface as Union with two args.
+    import types as _types
+
+    if origin is typing.Union or origin is _types.UnionType:
+        non_none = [a for a in typing.get_args(annotation) if a is not type(None)]
+        if len(non_none) == 1 and is_dataclass(non_none[0]):
+            return non_none[0]
+    return None
 
 
 def _extract_tuple_inner_type(
@@ -735,6 +823,11 @@ def load_config(path: Path | None = None) -> Config:
     if not raw:
         return base
 
+    # Hermes config v2 — ``${VAR}`` substitution. Applied BEFORE any further
+    # parsing so secrets in .env can be referenced from config.yaml without
+    # leaking into committed dotfiles. Single-pass; undefined vars verbatim.
+    raw = _expand_env_vars(raw)
+
     # Extract and parse the hooks block before applying regular overrides
     # (so the nested/list shape doesn't go through _apply_overrides, which
     # only knows about flat tuple-of-dataclasses).
@@ -763,6 +856,21 @@ def load_config(path: Path | None = None) -> Config:
             ]
 
     cfg = _apply_overrides(base, raw)
+
+    # Hermes config v2 (2026-05-08) — IANA timezone validation. Empty
+    # string = server-local (preserves existing behavior). An invalid
+    # zone name raises so the user gets immediate feedback at config-load
+    # rather than a silent fallback.
+    if cfg.timezone:
+        try:
+            import zoneinfo
+
+            zoneinfo.ZoneInfo(cfg.timezone)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Invalid timezone {cfg.timezone!r} in {cfg_path}: {exc}"
+            ) from exc
+
     if parsed_hooks or parsed_prompt_hooks or parsed_agent_hooks or parsed_routing:
         kwargs = {f.name: getattr(cfg, f.name) for f in fields(cfg)}
         if parsed_hooks:
@@ -807,6 +915,10 @@ def _to_yaml_dict(cfg: Config) -> dict[str, Any]:
         "deepening": _encode(cfg.deepening),
         "gateway": _encode(cfg.gateway),
         "system_control": _encode(cfg.system_control),
+        "auxiliary": _encode(cfg.auxiliary),
+        "privacy": _encode(cfg.privacy),
+        "security": _encode(cfg.security),
+        "timezone": cfg.timezone,
     }
     # 2026-05-10 — cron block is opt-in serialised when non-default so
     # existing configs stay tidy. The new ``start_in_gateway`` knob

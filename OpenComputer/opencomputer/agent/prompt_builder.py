@@ -344,6 +344,7 @@ class PromptBuilder:
         user_tone: str = "",
         persona_preferred_tone: str = "",
         pinned_files_block: str = "",
+        timezone: str = "",
     ) -> str:
         memory = _truncate_from_top(declarative_memory, memory_char_limit)
         profile = _truncate_from_top(user_profile, user_char_limit)
@@ -373,10 +374,23 @@ class PromptBuilder:
                 from opencomputer.agent.personality.builtins import BUILTINS
                 if requested in BUILTINS:
                     personality_body = BUILTINS[requested]
+        # Hermes-v2 — `cfg.timezone` (IANA) overrides server-local time
+        # for system-prompt time injection. Empty string = server-local
+        # (preserves prior behavior).
+        if timezone:
+            try:
+                import zoneinfo as _zi
+
+                _tz = _zi.ZoneInfo(timezone)
+                _now_str = datetime.datetime.now(_tz).strftime("%Y-%m-%d %H:%M:%S %Z")
+            except Exception:
+                _now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            _now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ctx = PromptContext(
             cwd=os.getcwd(),
             user_home=str(Path.home()),
-            now=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            now=_now_str,
             skills=skills or [],
             memory=memory,
             user_profile=profile,

@@ -9,7 +9,9 @@ import os
 import sys
 import uuid
 import warnings
+from dataclasses import is_dataclass
 from pathlib import Path
+from typing import Any
 
 
 def _install_dependency_warning_filters() -> None:
@@ -380,13 +382,17 @@ def _register_builtin_tools() -> None:
     """Register the core bundled tools. Only runs once per process."""
     if "Read" in registry.names():
         return
-    # Apply tools.deny from agent config (mirrors openclaw tools.deny).
-    # Idempotent — re-running set_denylist with the same list is fine.
+    # Apply tools.deny (exact match) and agent.disabled_toolsets (prefix
+    # match) from agent config. Idempotent — re-running with the same list
+    # is fine.
     try:
         from opencomputer.agent.config_store import load_config
 
         _cfg = load_config()
         registry.set_denylist(list(getattr(_cfg.tools, "deny", ()) or ()))
+        registry.set_deny_prefixes(
+            tuple(getattr(_cfg.loop, "disabled_toolsets", ()) or ())
+        )
     except Exception:  # noqa: BLE001
         # Best-effort — never let denylist wiring break tool registration.
         pass
@@ -4569,10 +4575,50 @@ def config_get(key: str = typer.Argument(..., help="Dotted key, e.g. model.provi
 def config_set(
     key: str = typer.Argument(..., help="Dotted key, e.g. model.provider"),
     value: str = typer.Argument(..., help="New value"),
+    secret: bool = typer.Option(
+        False, "--secret", help="Force write to .env (mode 0600)."
+    ),
+    public: bool = typer.Option(
+        False, "--public", help="Force write to config.yaml (overrides secret heuristic)."
+    ),
 ) -> None:
-    """Set a config value and persist to ~/.opencomputer/config.yaml."""
+    """Set a config value.
+
+    Hermes config v2 — secret-routing: keys matching the secret-name
+    heuristic (``API_KEY``/``TOKEN``/``SECRET``/``PASSWORD``/``WEBHOOK_URL``)
+    are written to ``~/.opencomputer/<profile>/.env`` (mode 0600). Other
+    keys go to ``config.yaml``. ``--secret``/``--public`` override the
+    heuristic.
+    """
+    if secret and public:
+        console.print(
+            "[bold red]error:[/bold red] --secret and --public are mutually exclusive"
+        )
+        raise typer.Exit(1)
+
+    from opencomputer.agent.config_store import env_file_path
+    from opencomputer.profile_env_init import is_secret_key, write_env_var
+
+    if secret:
+        target = "env"
+    elif public:
+        target = "yaml"
+    else:
+        target = "env" if is_secret_key(key) else "yaml"
+
+    if target == "env":
+        env_path = env_file_path()
+        write_env_var(env_path, key, value)
+        console.print(f"[green]✓[/green] wrote [bold]{key}[/bold] to [dim]{env_path}[/dim] (.env, mode 0600)")
+        if public:
+            console.print(
+                "[yellow]warning:[/yellow] --public was used to force a likely "
+                "secret into config.yaml — consider .env for secrets."
+            )
+        return
+
+    # YAML route — existing behavior, with secret warning if forced.
     cfg = load_config()
-    # Attempt to coerce numeric / bool / path values sensibly
     coerced: object = value
     if value.lower() in {"true", "false"}:
         coerced = value.lower() == "true"
@@ -4592,12 +4638,113 @@ def config_set(
     save_config(new_cfg)
     console.print(f"[green]✓[/green] {key} = {coerced!r}")
     console.print(f"[dim]saved to {config_file_path()}[/dim]")
+    if public and is_secret_key(key):
+        console.print(
+            f"[yellow]warning:[/yellow] {key} looks like a secret but was "
+            "written to config.yaml because --public was used. "
+            "Consider [bold].env[/bold] for secrets."
+        )
 
 
 @config_app.command("path")
 def config_path() -> None:
     """Print the path to the config file."""
     console.print(str(config_file_path()))
+
+
+@config_app.command("check")
+def config_check(
+    fix: bool = typer.Option(
+        False, "--fix", help="Add missing top-level blocks with their default values."
+    ),
+) -> None:
+    """Hermes config v2 — find config.yaml keys missing relative to defaults.
+
+    Walks the bundled :class:`Config` dataclass tree and reports nested
+    top-level blocks (``privacy``, ``security``, ``timezone``, etc.) that
+    aren't present in the user's ``config.yaml``. With ``--fix``, adds
+    them with their dataclass defaults — purely additive (never overwrites
+    user values).
+    """
+    import yaml as _yaml
+
+    cfg_path = config_file_path()
+    raw: dict[str, Any] = {}
+    if cfg_path.exists():
+        try:
+            loaded = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            if isinstance(loaded, dict):
+                raw = loaded
+        except _yaml.YAMLError as exc:
+            console.print(
+                f"[bold red]error:[/bold red] cannot parse {cfg_path}: {exc}"
+            )
+            raise typer.Exit(1) from None
+
+    # Hermes-v2 expected top-level blocks. Skip noisy/derived blocks
+    # (e.g. internal hook lists, plugin metadata).
+    expected_top_level = {
+        "memory",
+        "model",
+        "loop",
+        "session",
+        "mcp",
+        "tools",
+        "deepening",
+        "gateway",
+        "system_control",
+        "auxiliary",
+        "privacy",
+        "security",
+        "timezone",
+    }
+    present = set(raw.keys())
+    missing = sorted(expected_top_level - present)
+
+    if not missing:
+        console.print("[green]✓[/green] no missing top-level config blocks")
+        return
+
+    console.print(f"Missing top-level config blocks ({len(missing)}):")
+    for key in missing:
+        console.print(f"  [yellow]✗[/yellow] {key}")
+    console.print()
+
+    if not fix:
+        console.print(
+            "[dim]Run [bold]oc config check --fix[/bold] to add them with defaults.[/dim]"
+        )
+        return
+
+    # --fix path. For each missing block, write a minimal default.
+    # Reuse ``_to_yaml_dict`` so Path objects, tuples, and nested dataclasses
+    # are encoded the same way ``save_config`` would write them.
+    from opencomputer.agent.config_store import _to_yaml_dict
+
+    cfg = default_config()
+    full_yaml_dict = _to_yaml_dict(cfg)
+    additions: dict[str, Any] = {}
+    for key in missing:
+        if key == "timezone":
+            additions["timezone"] = ""
+        elif key == "privacy":
+            # Hermes v2 default: redact_pii off by default — preserves
+            # existing behavior. Users opt in.
+            additions["privacy"] = {"redact_pii": False}
+        elif key == "security":
+            additions["security"] = {"redact_secrets": False}
+        elif key in full_yaml_dict:
+            additions[key] = full_yaml_dict[key]
+
+    raw.update(additions)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(
+        _yaml.safe_dump(raw, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(
+        f"[green]✓[/green] added {len(missing)} block(s) to [dim]{cfg_path}[/dim]"
+    )
 
 
 @config_app.command("edit")
